@@ -1,0 +1,813 @@
+{
+ "category": "game-economy",
+ "domains": [
+  {
+   "id": "game-economy-gathering",
+   "name": "Progressive Gathering",
+   "category": "game-economy",
+   "promise": "Members work three tiered gathering tracks — /hunt, /dig, and /mine — pulling weighted-random loot on an owner-tuned cooldown, where bare hands earn common finds and progressively better tools unlock rarer, higher-value drops that either land in the fake-economy inventory or sell straight into the play-money wallet, with tool durability consumed per use to keep extraction honest. Every reward is play-money only: gathered loot and its sale value never touch real commerce, gathered items carry no real-money value, and a commerce-purchased role or tool grants no gathering income beyond what the game rules give any member.",
+   "controls": [
+    {
+     "id": "gathering-enabled",
+     "description": "Master switch for gathering (guild_config.economy_gathering_enabled); when off, /hunt, /dig, and /mine explain the feature is disabled and no loot tables are seeded.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "gathering-cooldown-seconds",
+     "description": "Seconds a member must wait between gathers of the same source (guild_config.economy_gathering_cooldown_seconds), enforced atomically per member and source via a Valkey SET PX NX lock.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 86400
+     }
+    },
+    {
+     "id": "loot-entry-weight",
+     "description": "Weighted odds of a single loot-table row being picked (economy_loot_tables.weight); higher weight means the item is drawn more often, so owners tune drop rarity per entry on the dashboard gathering page.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 10000
+     }
+    },
+    {
+     "id": "loot-entry-sell-value",
+     "description": "Play-money coins credited per unit when a coin-yielding loot row is gathered (economy_loot_tables.sell_value); this is fake-economy currency only and never a real price.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000000
+     }
+    },
+    {
+     "id": "loot-entry-tool-tier",
+     "description": "Minimum tool tier that unlocks a loot row (economy_loot_tables.tool_tier): 0 is bare hands, 1 basic, 2 improved, 3 master; a member's best matching tool tier gates which drops they can roll.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 10
+     }
+    },
+    {
+     "id": "loot-entry-max-quantity",
+     "description": "Upper bound of the per-gather quantity range for a loot row (economy_loot_tables.max_qty), paired with min_qty to define how large a single find can be.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 999
+     }
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "gathering-enabled",
+     "value": true,
+     "rationale": "Gathering is a flagship game-economy loop; per the great-defaults owner theme it ships on so the feature works out of the box, and default loot tables seed automatically on first use."
+    },
+    {
+     "controlId": "gathering-cooldown-seconds",
+     "value": 300,
+     "rationale": "A five-minute cooldown matches the shipped code default: frequent enough to feel rewarding, spaced enough to keep the play-money economy from inflating."
+    },
+    {
+     "controlId": "loot-entry-weight",
+     "value": 40,
+     "rationale": "Mirrors the seeded common-tier weight so the baseline everyday find dominates the roll while rarer entries stay scarce."
+    },
+    {
+     "controlId": "loot-entry-sell-value",
+     "value": 15,
+     "rationale": "Matches the seeded common drop's play-coin value: a small, steady early win that scales up with rarer, tool-gated finds."
+    },
+    {
+     "controlId": "loot-entry-tool-tier",
+     "value": 0,
+     "rationale": "Baseline drops start at tier 0 so a brand-new member with bare hands always gathers something; rarer rows raise the gate to reward tool investment."
+    },
+    {
+     "controlId": "loot-entry-max-quantity",
+     "value": 3,
+     "rationale": "A modest common-drop stack of up to three keeps early yields satisfying without runaway play-coin gains."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "use-gathering-commands",
+     "actor": "Any guild member",
+     "action": "Run /hunt, /dig, and /mine",
+     "defaultDecision": "allow",
+     "enforcement": "Gathering slash commands respond for every member; each gather resolves the invoking member's own tools, cooldown, wallet, and inventory by their own guild and user id and never another member's."
+    },
+    {
+     "id": "configure-gathering",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Edit gathering settings and loot-table entries on the dashboard economy gathering page",
+     "defaultDecision": "allow",
+     "enforcement": "The dashboard route requires the dashboard.manage_economy permission and Supabase RLS restricts guild_config and economy_loot_tables writes to authorized guild administrators."
+    },
+    {
+     "id": "credit-others-wallet",
+     "actor": "Any guild member",
+     "action": "Credit gathered coins or items into another member's wallet or inventory",
+     "defaultDecision": "deny",
+     "enforcement": "Every credit RPC (economy_add_balance, economy_upsert_inventory) is keyed to the invoking member's own guild and user id; no code path credits another member, and commerce-held roles earn no gathering income."
+    }
+   ],
+   "messages": [
+    {
+     "id": "gather-success",
+     "trigger": "A member gathers and receives loot or play coins",
+     "surface": "Channel embed replying to /hunt, /dig, or /mine",
+     "audience": "The invoking member and the channel",
+     "defaultTemplate": "You went {source-verb} and turned up {quantity}x {item-name} — {reward-line}",
+     "variables": [
+      "source-verb",
+      "quantity",
+      "item-name",
+      "reward-line"
+     ]
+    },
+    {
+     "id": "gather-on-cooldown",
+     "trigger": "A member gathers the same source again before its cooldown elapses",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "Easy there, {member-name} — you can go {source-verb} again in {cooldown-remaining}.",
+     "variables": [
+      "member-name",
+      "source-verb",
+      "cooldown-remaining"
+     ]
+    },
+    {
+     "id": "tool-tier-locked",
+     "trigger": "A member gathers but their current tool tier unlocks no loot for that source",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "Bare hands only get you so far, {member-name} — upgrade your {tool-name} to unearth rarer finds.",
+     "variables": [
+      "member-name",
+      "tool-name"
+     ]
+    },
+    {
+     "id": "gathering-disabled",
+     "trigger": "A member runs a gather command while gathering is disabled by configuration",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "Gathering isn't switched on here yet, {member-name} — ask an admin to enable it.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "gathering-unavailable",
+     "trigger": "The gathering backend is temporarily unreachable when a member runs a gather command",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The trail's washed out for a moment, {member-name} — try gathering again shortly.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "credit-failed-notice",
+     "trigger": "A gather roll resolved but crediting the play coins or the inventory item failed",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "That find slipped through the net, {member-name} — nothing was credited, so try gathering again in a moment.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "credit-failed-alert",
+     "trigger": "A gather payout keeps failing to credit after the roll resolves",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: a gather payout of {reward} to {member-name} failed after the roll and needs a look; nothing was credited or double-credited and everything is logged.",
+     "variables": [
+      "reward",
+      "member-name"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "idle",
+    "values": [
+     {
+      "id": "idle",
+      "description": "The member has no gather in flight and is off cooldown; /hunt, /dig, and /mine are ready to run."
+     },
+     {
+      "id": "resolving",
+      "description": "A gather roll is in flight: the cooldown lock is claimed, tool durability is being consumed, and the weighted loot roll is crediting atomically."
+     },
+     {
+      "id": "cooling-down",
+      "description": "The member just gathered and is inside the cooldown window; further gathers of that source are refused until it elapses."
+     },
+     {
+      "id": "degraded",
+      "description": "A gather roll failed to credit loot or coins; no reward was granted and the member can retry once the transient fault clears."
+     },
+     {
+      "id": "disabled",
+      "description": "Gathering disabled by configuration; gather commands explain the feature is off and no loot tables are seeded or rolled."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "start-gather",
+      "from": "idle",
+      "to": "resolving",
+      "trigger": "A member runs /hunt, /dig, or /mine while gathering is enabled and they are off cooldown",
+      "expectedEffect": "An atomic Valkey SET PX NX claims the cooldown exactly once and the tool-tier-filtered weighted loot roll begins."
+     },
+     {
+      "id": "reward-granted",
+      "from": "resolving",
+      "to": "cooling-down",
+      "trigger": "The roll credits play coins via economy_add_balance or an item via economy_upsert_inventory",
+      "expectedEffect": "Exactly one credit effect lands and exactly one economy_transactions row of type gather is recorded with the post-credit balance."
+     },
+     {
+      "id": "roll-failed",
+      "from": "resolving",
+      "to": "degraded",
+      "trigger": "A durability, wallet, or inventory RPC fails during the roll",
+      "expectedEffect": "The gather is cancelled fail-closed: no coins or items are credited, no gather transaction is written, and the member is told nothing was credited."
+     },
+     {
+      "id": "cooldown-elapses",
+      "from": "cooling-down",
+      "to": "idle",
+      "trigger": "The Valkey cooldown key TTL expires",
+      "expectedEffect": "The member becomes eligible to gather that source again with no residual state."
+     },
+     {
+      "id": "degrade-clears",
+      "from": "degraded",
+      "to": "idle",
+      "trigger": "The transient fault clears and any claimed cooldown elapses",
+      "expectedEffect": "The member can gather again and a fresh roll credits exactly once with no double effect from the failed attempt."
+     },
+     {
+      "id": "gathering-toggled-off",
+      "from": "idle",
+      "to": "disabled",
+      "trigger": "Owner turns economy_gathering_enabled off on the dashboard",
+      "expectedEffect": "Gather commands reply with the disabled explanation; loot tables, wallets, and inventories are preserved untouched."
+     },
+     {
+      "id": "gathering-toggled-on",
+      "from": "disabled",
+      "to": "idle",
+      "trigger": "Owner turns economy_gathering_enabled back on",
+      "expectedEffect": "Gathering resumes; the first gather per source seeds default loot if none exists and then resolves normally."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "durability-consume-failed",
+     "trigger": "economy_decrement_durability returns non-true while consuming the member's tool",
+     "expectedBehavior": "Gathering is cancelled fail-closed so no loot or coins are granted and no gather transaction is written, preventing infinite free extraction; the member is told to try again.",
+     "resultingState": "degraded",
+     "retry": "never",
+     "messageId": "credit-failed-notice",
+     "auditEvent": "gathering.durability_consume_failed",
+     "ownerNotification": false
+    },
+    {
+     "id": "wallet-credit-failed",
+     "trigger": "economy_add_balance returns an error after a coin-yielding gather roll",
+     "expectedBehavior": "No coins are credited and no economy_transactions row is written, the member sees the branded credit-failed notice, repeated failures raise exactly one owner alert, and a later retry credits exactly once with no double-credit.",
+     "resultingState": "degraded",
+     "retry": "never",
+     "messageId": "credit-failed-alert",
+     "auditEvent": "gathering.wallet_credit_failed",
+     "ownerNotification": true
+    },
+    {
+     "id": "inventory-upsert-failed",
+     "trigger": "economy_upsert_inventory returns an error after an item-yielding gather roll",
+     "expectedBehavior": "No inventory row is created or incremented and no gather transaction is written, the member is told nothing was added, and a later retry adds exactly one stack with no phantom or duplicated inventory.",
+     "resultingState": "degraded",
+     "retry": "never",
+     "messageId": "credit-failed-notice",
+     "auditEvent": "gathering.inventory_upsert_failed",
+     "ownerNotification": false
+    },
+    {
+     "id": "backend-unreachable",
+     "trigger": "Supabase is unreachable when a member runs a gather command",
+     "expectedBehavior": "The command fails safe with the branded gathering-unavailable message, no cooldown is claimed and no coins or items move, and the next gather after recovery resolves normally with exactly one effect.",
+     "resultingState": "idle",
+     "retry": "automatic",
+     "messageId": "gathering-unavailable",
+     "auditEvent": "gathering.backend_unreachable",
+     "ownerNotification": true
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "Gathering behavior contracted here is directly observed working in the live test guild: /hunt, /dig, and /mine roll tool-tier-appropriate loot, coin drops credit the play-money wallet, item drops land in inventory, the cooldown blocks a too-soon repeat, and a better tool unlocks rarer finds.",
+     "artifact": "evidence/game-economy-gathering/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_loot_tables, economy_wallets, economy_transactions, economy_inventory, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+     "artifact": "evidence/game-economy-gathering/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-gathering/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-gathering/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured embeds and messages for this domain match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-gathering/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over gather credits, inventory grants, and transaction rows",
+     "expectedObservation": "Replaying recorded gather triggers for this domain against the live stack leaves end state unchanged: no duplicate play-money credits, inventory grants, or gather transactions.",
+     "artifact": "evidence/game-economy-gathering/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-gathering/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-gathering-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box gathering is enabled with a 300-second cooldown, bare-hands members roll tier-0 loot, coin drops sell into the play-money wallet at the seeded values, and a second immediate gather of the same source is refused.",
+     "expectedOutcome": "run-member-a runs /mine bare-handed, receives a tier-0 drop that either credits play coins or lands in inventory, sees exactly one gather transaction recorded, and a second /mine within 300 seconds is refused with the branded cooldown message.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-a's /mine returns a branded results embed with a tier-0 item; a coin drop credits the play-money wallet by exactly its sell value with one economy_transactions row of type gather, and a second /mine within the cooldown returns the branded cooldown refusal — every reward is play-money only with no real-commerce touchpoint."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All gathering rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each gathering action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing gathering surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, inventory grants, or gather transactions; the atomic cooldown lock and persisted transaction rows show exactly one effect per logical gather."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test loot-table entries, wallet entries, gather transactions, inventory rows, and result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-gathering-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Dashboard configuration takes live effect: the owner lowers the gathering cooldown to 60 seconds and raises a common mine drop's sell value to 120 play coins.",
+     "expectedOutcome": "Without a bot restart, the next /mine that hits the retuned common drop credits exactly 120 play coins, and a repeat /mine is allowed after 60 rather than 300 seconds.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save, a /mine that rolls the retuned common drop credits exactly 120 play coins with no restart, and a repeat /mine is refused before 60 seconds and permitted after — proving the new cooldown and sell value are live."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All gathering rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each gathering action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing gathering surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, inventory grants, or gather transactions; the atomic cooldown lock and persisted transaction rows show exactly one effect per logical gather."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test loot-table entries, wallet entries, gather transactions, inventory rows, and result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-gathering-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "The owner can tune loot-table pieces independently: raising a rare drop's tool_tier gate and deactivating another entry restricts what bare-hands members roll while core gathering keeps working.",
+     "expectedOutcome": "After the owner raises a rare mine drop to tier 2 and sets one entry inactive, a bare-hands /mine only ever rolls the remaining tier-0 active drops, and a tier-2 member can still reach the gated rare drop.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A bare-hands /mine after the retune only returns active tier-0 drops and never the gated rare or the deactivated entry, while a member holding a tier-2 pickaxe can still roll the gated rare drop — core gathering is unaffected."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All gathering rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each gathering action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing gathering surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, inventory grants, or gather transactions; the atomic cooldown lock and persisted transaction rows show exactly one effect per logical gather."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test loot-table entries, wallet entries, gather transactions, inventory rows, and result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-gathering-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid gathering configuration is rejected atomically: a loot entry with min_qty greater than max_qty and a negative cooldown never persist.",
+     "expectedOutcome": "The dashboard gathering page surfaces a clear validation error, guild_config and economy_loot_tables keep their prior values byte-for-byte, and live bot behavior is unchanged on the very next gather.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A /mine run immediately after the rejected save still honors the previous valid cooldown and rolls the previous valid loot table, proving no partial write reached the bot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All gathering rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the rejected gathering configuration attempt with the validation reason; no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing gathering surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, inventory grants, or gather transactions; the atomic cooldown lock and persisted transaction rows show exactly one effect per logical gather."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test loot-table entries, wallet entries, gather transactions, inventory rows, and result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-gathering-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "Gathering is protected from unauthorized actors: a member cannot credit gathered rewards into another member's wallet or inventory, and a non-admin dashboard session cannot save gathering settings.",
+     "expectedOutcome": "run-member-b's gathers only ever credit run-member-b's own wallet and inventory, run-member-a's balances are byte-identical afterward, and the non-admin dashboard save is refused for lacking dashboard.manage_economy.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-b's /hunt, /dig, and /mine only credit run-member-b's own wallet and inventory, run-member-a's balances are identical before and after, and the non-admin dashboard save returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All gathering rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied gathering configuration attempt with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing gathering surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, inventory grants, or gather transactions; the atomic cooldown lock and persisted transaction rows show exactly one effect per logical gather."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test loot-table entries, wallet entries, gather transactions, inventory rows, and result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-gathering-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase dependency is unreachable, gathering fails safe: no crash, friendly branded degradation, no cooldown claimed, and no play-coin loss.",
+     "expectedOutcome": "With database access blocked, /hunt, /dig, and /mine reply with the branded gathering-unavailable message and no coins, items, or cooldown move; after restoring the connection a fresh gather resolves and credits exactly once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /mine and /hunt reply with the branded gathering-unavailable template in the owner's voice with no wallet or cooldown mutation; after restoration a fresh /mine resolves and credits exactly once."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All gathering rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each gathering action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed gather command."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing gathering surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, inventory grants, or gather transactions; the atomic cooldown lock and persisted transaction rows show exactly one effect per logical gather."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test loot-table entries, wallet entries, gather transactions, inventory rows, and result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-gathering-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A gather whose wallet credit fails converges safely: no coins are credited and no transaction is written, and a clean retry credits exactly once.",
+     "expectedOutcome": "With a fault injected on economy_add_balance, run-member-a's coin-yielding /mine credits nothing, records no gather transaction, and shows the branded credit-failed notice; the retried /mine then credits exactly once with one transaction.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the injected credit fault, run-member-a sees the branded credit-failed notice with an unchanged wallet and no gather transaction; the clean retry credits exactly the drop's sell value once with a single transaction row."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All gathering rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each gathering action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "Repeated credit failures raise exactly one reasoned owner alert naming the failed payout, and the happy-path retry raises none."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing gathering surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The failed credit leaves no ledger entry and the successful retry credits under its own effect, so the play-money ledger shows exactly one gather credit and never a double-credit."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test loot-table entries, wallet entries, gather transactions, inventory rows, and result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-gathering-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replays never double-credit: re-delivering a single gather interaction leaves one credit, one transaction row, and one claimed cooldown.",
+     "expectedOutcome": "After replaying the recorded /mine interaction, run-member-a's wallet shows exactly one gather credit and one economy_transactions row, byte-identical to the pre-replay state, with the cooldown claimed once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The channel shows exactly one gather results embed despite the replays, and run-member-a's wallet total and transaction history are unchanged from the pre-replay snapshot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All gathering rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each gathering action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing gathering surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The atomic cooldown lock absorbs the replayed delivery within the window and the persisted gather transaction shows one applied credit; replayed deliveries are recorded as deduplicated no-ops with no second credit."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test loot-table entries, wallet entries, gather transactions, inventory rows, and result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-gathering-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "Gathering state survives a full stack restart: wallet balances, inventory, loot tables, and the active cooldown all persist without a double-credit or a reset cooldown.",
+     "expectedOutcome": "After restarting bot and dashboard, run-member-a's wallet, inventory, and gather history match the pre-restart snapshot exactly, and a gather still within its window is refused rather than granting a second credit.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart /balance and inventory views match the pre-restart snapshot exactly, and a /mine issued inside the surviving cooldown window returns the branded cooldown refusal rather than a fresh credit."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All gathering rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each gathering action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing gathering surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, inventory grants, or gather transactions; the atomic cooldown lock and persisted transaction rows show exactly one effect per logical gather."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test loot-table entries, wallet entries, gather transactions, inventory rows, and result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-gathering-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent gathers are safe: two simultaneous /mine calls on the same source honor the atomic cooldown lock so exactly one gather resolves and one is refused, with tool durability consumed once.",
+     "expectedOutcome": "Two simultaneous /mine invocations yield exactly one applied gather credit and one cooldown refusal, and the tool's durability drops by exactly one.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Exactly one gather results embed and one cooldown refusal appear for the simultaneous /mine calls, and /balance plus the tool's durability reflect exactly one gather having resolved."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All gathering rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each gathering action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing gathering surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The Valkey SET PX NX lock guarantees only one of the concurrent gathers claims the cooldown and credits, so the ledger shows exactly one credit with no duplicate transaction."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test loot-table entries, wallet entries, gather transactions, inventory rows, and result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-gathering-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "Gathering is strictly per-guild: gathering in a second guild never touches the first guild's wallet, inventory, loot table, or gather history.",
+     "expectedOutcome": "run-member-a gathers in test guild B; guild A's wallet, inventory, and gather transactions are unchanged, and guild B's gather reflects only guild B's configured loot table and cooldown.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A's /balance and inventory are identical before and after the guild B activity, and guild B's gather credits guild B's wallet against guild B's own loot table and cooldown."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_wallets, economy_transactions, and economy_loot_tables rows and vice versa; service-role probes confirm each guild's gather state evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each gathering action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing gathering surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, inventory grants, or gather transactions; the atomic cooldown lock and persisted transaction rows show exactly one effect per logical gather."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test loot-table entries, wallet entries, gather transactions, inventory rows, and result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-gathering-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed gathering resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed loot-table entries, wallet entries, gather transactions, inventory rows, and result embeds are deleted; a final sweep finds zero run-prefixed gathering resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed gather results embeds or cooldown or disabled notices after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All gathering rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each gathering action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing gathering surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, inventory grants, or gather transactions; the atomic cooldown lock and persisted transaction rows show exactly one effect per logical gather."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed gathering resource created by this domain's scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

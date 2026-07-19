@@ -1,0 +1,851 @@
+{
+ "category": "game-economy",
+ "domains": [
+  {
+   "id": "game-economy-shop-market",
+   "name": "Server Shop & Player Market",
+   "category": "game-economy",
+   "promise": "Members spend and earn play-money coins across two owner-controlled trading surfaces: an owner-curated server shop (/shop, /buy, /sell) whose items, prices, and stock the owner defines, and an opt-in player-to-player market (/market list, browse, buy, my-listings, cancel) where members trade their own items under an atomic no-double-sell purchase RPC and a configurable market fee sink. Every coin and item here is fake game economy — and the anti-laundering wall is absolute: items granted by a real-money commerce purchase are never listable or sellable on the player market, and commerce-held roles earn no game income.",
+   "controls": [
+    {
+     "id": "shop-enabled",
+     "description": "Master economy switch (economy_enabled) that gates the server shop; when off, /shop, /buy, and /sell explain the economy is disabled.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "market-enabled",
+     "description": "Player-to-player market switch (economy_market_enabled); when off, /market subcommands reply that the market is disabled while the server shop keeps working.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "market-fee-pct",
+     "description": "Percentage market fee (economy_market_fee_pct) skimmed from each player-market sale as a play-money coin sink; the seller receives the remainder.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 100
+     }
+    },
+    {
+     "id": "market-listing-days",
+     "description": "How many days (economy_market_listing_days) a player-market listing stays active before it expires and stops accepting buys.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 90
+     }
+    },
+    {
+     "id": "market-max-listings",
+     "description": "Maximum simultaneously active listings (economy_market_max_listings) one member may hold on the player market.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 100
+     }
+    },
+    {
+     "id": "market-max-price-per-unit",
+     "description": "Hard ceiling on a listing's price per unit (the MAX_PRICE_PER_UNIT guard) that rejects absurd listings well below the safe-integer limit.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 1000000000
+     }
+    },
+    {
+     "id": "commerce-items-market-locked",
+     "description": "The anti-laundering wall: when on, any item whose origin is a real-money commerce purchase (a non-tradeable item) is permanently barred from the player market; this guardrail is locked on and cannot be disabled by the owner.",
+     "valueType": "boolean",
+     "constraints": {}
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "shop-enabled",
+     "value": true,
+     "rationale": "The server shop is the core coin sink of the game economy and ships on for the maximal out-of-box experience."
+    },
+    {
+     "controlId": "market-enabled",
+     "value": false,
+     "rationale": "Player-to-player trading is a coin-movement surface, so it ships off as a deliberate guardrail until the owner opts in and sets a fee."
+    },
+    {
+     "controlId": "market-fee-pct",
+     "value": 5,
+     "rationale": "A light 5 percent sink keeps the market liquid while gently draining coins out of circulation."
+    },
+    {
+     "controlId": "market-listing-days",
+     "value": 7,
+     "rationale": "A one-week listing window balances discoverability against stale listings clogging the board."
+    },
+    {
+     "controlId": "market-max-listings",
+     "value": 10,
+     "rationale": "Ten active listings per member is generous for casual sellers while preventing one member from flooding the market."
+    },
+    {
+     "controlId": "market-max-price-per-unit",
+     "value": 1000000000,
+     "rationale": "A one-billion-coin ceiling sits far above any realistic wallet yet safely inside the JS safe-integer range, blocking absurd or overflow listings."
+    },
+    {
+     "controlId": "commerce-items-market-locked",
+     "value": true,
+     "rationale": "Real-money items must never become a laundering path into the play-money market; the wall is locked on by design and cannot be turned off."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "use-shop-commands",
+     "actor": "Any guild member",
+     "action": "Run /shop, /buy, and /sell against the owner-curated server shop",
+     "defaultDecision": "allow",
+     "enforcement": "Shop slash commands respond for every member; /buy and /sell only ever debit or credit the invoking member's own wallet and inventory rows."
+    },
+    {
+     "id": "use-market-commands",
+     "actor": "Any guild member",
+     "action": "Run /market list, browse, buy, my-listings, and cancel on the player market",
+     "defaultDecision": "allow",
+     "enforcement": "Market commands respond for every member; list, buy, and cancel handlers key every mutation to the invoking member's own id and the listing's guild id."
+    },
+    {
+     "id": "configure-shop-market",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Create and edit shop items and market settings on the dashboard economy pages",
+     "defaultDecision": "allow",
+     "enforcement": "Dashboard session auth plus Supabase RLS restrict economy_items and guild_config writes to authorized guild administrators."
+    },
+    {
+     "id": "list-commerce-bound-item",
+     "actor": "Any guild member",
+     "action": "List or sell an item granted by a real-money commerce purchase on the player market",
+     "defaultDecision": "deny",
+     "enforcement": "The listing path must reject any non-tradeable, commerce-origin item before any inventory decrement so a real-money grant can never be converted into market income."
+    },
+    {
+     "id": "mutate-others-listing",
+     "actor": "Any guild member",
+     "action": "Cancel or force-settle another member's active market listing",
+     "defaultDecision": "deny",
+     "enforcement": "The atomic cancel RPC is keyed to the invoking member's seller id; no code path cancels or mutates another member's listing row."
+    }
+   ],
+   "messages": [
+    {
+     "id": "shop-purchase-confirmed",
+     "trigger": "A member buys an item from the server shop with play-money coins",
+     "surface": "Channel reply to /buy",
+     "audience": "The buying member and the channel",
+     "defaultTemplate": "You bought {quantity}x {item-name} for {total-cost} {currency-name}. Enjoy!",
+     "variables": [
+      "quantity",
+      "item-name",
+      "total-cost",
+      "currency-name"
+     ]
+    },
+    {
+     "id": "listing-created",
+     "trigger": "A member lists one of their own items on the player market",
+     "surface": "Channel embed replying to /market list",
+     "audience": "The listing member and the channel",
+     "defaultTemplate": "Listed {quantity}x {item-name} at {price-per-unit} coins each on the player market.",
+     "variables": [
+      "quantity",
+      "item-name",
+      "price-per-unit"
+     ]
+    },
+    {
+     "id": "listing-sale-completed",
+     "trigger": "A member buys from an active player-market listing",
+     "surface": "Channel embed replying to /market buy",
+     "audience": "The buying member and the channel",
+     "defaultTemplate": "Purchase complete: {quantity}x {item-name} for {total-cost} coins after a {fee}-coin market fee.",
+     "variables": [
+      "quantity",
+      "item-name",
+      "total-cost",
+      "fee"
+     ]
+    },
+    {
+     "id": "commerce-item-rejected",
+     "trigger": "A member tries to list a commerce-granted, non-tradeable item on the player market",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "{item-name} was granted through a real-money purchase and can never be listed on the player market.",
+     "variables": [
+      "item-name"
+     ]
+    },
+    {
+     "id": "purchase-refunded",
+     "trigger": "A market purchase debited the buyer but a downstream payout or delivery step failed",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "That purchase did not go through, {member-name} — your coins are already back in your wallet and nothing was lost.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "market-unavailable",
+     "trigger": "The shop or market backend is temporarily unreachable when a member runs a command",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The market stall is catching its breath, {member-name} — give it a moment and try again.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "listing-return-degraded",
+     "trigger": "A cancelled listing's item return to inventory keeps failing",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: returning {quantity}x {item-name} from a cancelled listing failed and is queued for automatic retry; nothing was duplicated and everything is logged.",
+     "variables": [
+      "quantity",
+      "item-name"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "market-disabled",
+    "values": [
+     {
+      "id": "market-disabled",
+      "description": "The player market is off by configuration; /market replies market-disabled while the server shop, /buy, and /sell keep working."
+     },
+     {
+      "id": "market-open",
+      "description": "The player market is enabled; members can list, browse, buy, and cancel listings under the configured fee and caps."
+     },
+     {
+      "id": "listing-active",
+      "description": "A member's listing is live with remaining above zero; the listed items are escrowed out of the seller's inventory."
+     },
+     {
+      "id": "listing-sold-out",
+      "description": "Atomic buys drove a listing's remaining to zero; it is marked sold and accepts no further purchases."
+     },
+     {
+      "id": "listing-cancelled",
+      "description": "The seller cancelled the listing and the escrowed items were returned to their inventory."
+     },
+     {
+      "id": "return-degraded",
+      "description": "A cancel flipped the listing to cancelled but the inventory return failed; the return is queued for automatic reconciliation with nothing lost or duplicated."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "enable-market",
+      "from": "market-disabled",
+      "to": "market-open",
+      "trigger": "Owner turns economy_market_enabled on from the dashboard",
+      "expectedEffect": "The player market opens live without a restart; /market list, browse, and buy begin responding under the configured fee and caps."
+     },
+     {
+      "id": "create-listing",
+      "from": "market-open",
+      "to": "listing-active",
+      "trigger": "A member runs /market list with a tradeable item they own",
+      "expectedEffect": "economy_market_atomic_create_listing decrements the seller's stack and inserts the listing in one locked transaction, escrowing the exact quantity with no oversell."
+     },
+     {
+      "id": "buy-out",
+      "from": "listing-active",
+      "to": "listing-sold-out",
+      "trigger": "Buyers purchase the last remaining units via /market buy",
+      "expectedEffect": "economy_market_buy atomically decrements remaining to zero, the buyer is debited once, and the seller is credited the total minus the market fee."
+     },
+     {
+      "id": "cancel-listing",
+      "from": "listing-active",
+      "to": "listing-cancelled",
+      "trigger": "The seller runs /market cancel on their own active listing",
+      "expectedEffect": "economy_market_atomic_cancel flips status to cancelled only if still active and the escrowed remaining is returned to the seller's inventory exactly once."
+     },
+     {
+      "id": "cancel-return-failed",
+      "from": "listing-active",
+      "to": "return-degraded",
+      "trigger": "The listing cancels but the inventory return upsert fails",
+      "expectedEffect": "A market_item_reconcile row is queued in bot_action_queue so the item return retries automatically; the member is told nothing was lost."
+     },
+     {
+      "id": "reconcile-return",
+      "from": "return-degraded",
+      "to": "listing-cancelled",
+      "trigger": "The queued market_item_reconcile action succeeds on retry",
+      "expectedEffect": "The escrowed items are returned to the seller's inventory exactly once and the reconciliation entry is marked done."
+     },
+     {
+      "id": "disable-market",
+      "from": "market-open",
+      "to": "market-disabled",
+      "trigger": "Owner turns economy_market_enabled off from the dashboard",
+      "expectedEffect": "/market subcommands reply market-disabled; existing listing rows and escrowed items are preserved untouched."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "seller-payout-failed",
+     "trigger": "economy_add_balance for the seller fails after the buyer was debited and the listing remaining was decremented",
+     "expectedBehavior": "The buyer is refunded exactly once through economy_add_balance and the listing remaining is restored via economy_market_buy_revert, so no coins are lost, the seller is never paid twice, and the listing returns to purchasable.",
+     "resultingState": "listing-active",
+     "retry": "never",
+     "messageId": "purchase-refunded",
+     "auditEvent": "market.buy_seller_payout_refunded",
+     "ownerNotification": false
+    },
+    {
+     "id": "inventory-delivery-failed",
+     "trigger": "economy_upsert_inventory for the buyer fails after the buyer was debited and the seller was paid",
+     "expectedBehavior": "The whole purchase unwinds exactly once — the buyer is refunded, the seller credit is clawed back, and the listing remaining is restored — leaving balances and stock byte-identical to before the attempt.",
+     "resultingState": "listing-active",
+     "retry": "never",
+     "messageId": "purchase-refunded",
+     "auditEvent": "market.buy_delivery_unwound",
+     "ownerNotification": false
+    },
+    {
+     "id": "cancel-return-failed",
+     "trigger": "economy_upsert_inventory fails when returning items from a cancelled listing",
+     "expectedBehavior": "The cancel stands, a market_item_reconcile job is queued in bot_action_queue for automatic retry, and the items are returned exactly once when it runs — never zero-returned-but-cancelled and never double-returned.",
+     "resultingState": "return-degraded",
+     "retry": "automatic",
+     "messageId": "listing-return-degraded",
+     "auditEvent": "market.cancel_return_queued",
+     "ownerNotification": true
+    },
+    {
+     "id": "commerce-item-list-blocked",
+     "trigger": "A member attempts /market list on a commerce-granted, non-tradeable item",
+     "expectedBehavior": "The listing path rejects the item before any inventory decrement, no listing row is created, the item stays in the member's inventory, and the branded rejection explains real-money items can never be listed.",
+     "resultingState": "market-open",
+     "retry": "never",
+     "messageId": "commerce-item-rejected",
+     "auditEvent": "market.commerce_item_list_blocked",
+     "ownerNotification": false
+    },
+    {
+     "id": "market-dependency-unreachable",
+     "trigger": "Supabase is unreachable when a member runs a shop or market command",
+     "expectedBehavior": "Commands reply with the branded market-unavailable message and no coins or items move; the outage raises a single degradation alert rather than one per failed command, and a later retry succeeds cleanly.",
+     "resultingState": "market-open",
+     "retry": "automatic",
+     "messageId": "market-unavailable",
+     "auditEvent": "market.dependency_degraded",
+     "ownerNotification": true
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "The shop and market behavior contracted here is directly observed working in the live test guild: /shop lists owner-curated items, /buy and /sell move coins and inventory, /market list escrows items, /market buy pays the seller net of fee, /market cancel returns items, and a commerce-granted item is refused on /market list.",
+     "artifact": "evidence/game-economy-shop-market/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_items, economy_market_listings, economy_inventory, economy wallet, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+     "artifact": "evidence/game-economy-shop-market/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every shop and market state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-shop-market/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-shop-market/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured shop and market embeds and messages match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-shop-market/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over messages, coin mutations, and item transfers",
+     "expectedObservation": "Replaying recorded triggers for this domain against the live stack leaves end state unchanged: no duplicate play-money debits, seller payouts, item deliveries, or listing mutations.",
+     "artifact": "evidence/game-economy-shop-market/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed shop items, listings, inventory, or wallet resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-shop-market/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-shop-market-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box the server shop is on and the player market is off: /shop lists owner-curated items, /buy debits the exact listed price and delivers the item, /sell returns the item's sell_price, and /market replies market-disabled until the owner opts in.",
+     "expectedOutcome": "run-member-a runs /shop and sees the seeded owner-curated items, buys one for exactly its listed price with the wallet reflecting the debit, sells one back for its sell_price, and every /market subcommand returns the branded market-disabled notice.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/shop shows the owner-curated items with prices, /buy debits exactly the listed price and adds the item (granting any linked role), /sell returns the item's sell_price to the wallet, and /market list, browse, and buy each reply with the branded market-disabled notice because the player market ships off by default."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All shop and market rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each shop and market action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing shop and market surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, item transfers, or listing mutations; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test shop items, market listings, inventory rows, wallet entries, and announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-shop-market-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Dashboard configuration takes live effect: the owner enables economy_market_enabled and sets market-fee-pct 10, market-listing-days 3, and market-max-listings 5.",
+     "expectedOutcome": "Without a bot restart the next /market list creates a listing that expires in 3 days, /market browse shows it, and a /market buy deducts exactly a 10 percent fee crediting the seller the remainder.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save with no restart, /market list creates a listing with the 3-day expiry, /market browse shows it, and a /market buy deducts exactly the 10 percent fee while crediting the seller the remaining coins."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All shop and market rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each shop and market action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing shop and market surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, item transfers, or listing mutations; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test shop items, market listings, inventory rows, wallet entries, and announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-shop-market-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "The owner can toggle the two surfaces independently: with the player market disabled the server shop keeps working, and with the shop's economy disabled the surfaces respond accordingly.",
+     "expectedOutcome": "With economy_market_enabled off, /market list, browse, and buy each return the branded market-disabled refusal while /shop, /buy, and /sell continue to function normally.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "With the player market disabled, /market list, browse, and buy each return the branded market-disabled refusal, while /shop still lists items and /buy and /sell continue to move coins and inventory correctly."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All shop and market rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each shop and market action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing shop and market surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, item transfers, or listing mutations; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test shop items, market listings, inventory rows, wallet entries, and announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-shop-market-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid input is rejected atomically and the anti-laundering wall holds: a member cannot list a commerce-granted item and a negative-fee configuration never persists.",
+     "expectedOutcome": "A /market list on a commerce-granted, non-tradeable item is refused with the item still in inventory and no listing row created, and a dashboard save with a negative market fee is rejected leaving guild_config byte-for-byte unchanged.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A /market list on a commerce-granted, non-tradeable item returns the branded commerce-item-rejected refusal with the item still in inventory and no listing created, and the next /market list of a normal tradeable item still works, proving the rejection was surgical."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All shop and market rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the blocked commerce-item listing attempt and one records the rejected market configuration with their reasons; no listing row and no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing shop and market surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, item transfers, or listing mutations; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test shop items, market listings, inventory rows, wallet entries, and announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-shop-market-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "Shop and market are protected from unauthorized actors: a member cannot cancel another member's listing, cannot convert a real-money grant into market income, and a non-admin dashboard session cannot save shop or market settings.",
+     "expectedOutcome": "run-member-b cannot cancel run-member-a's listing and run-member-a's listing is byte-identical afterward, a member holding a commerce-granted item is refused when listing it, and the non-admin dashboard save is refused.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-b's /market cancel against run-member-a's listing is refused and run-member-a's /market my-listings is identical before and after, a member's attempt to list a commerce-granted item returns the branded refusal, and the non-admin dashboard save returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All shop and market rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied cancel, the blocked commerce-item listing, and the denied configuration save, each with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing shop and market surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, item transfers, or listing mutations; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test shop items, market listings, inventory rows, wallet entries, and announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-shop-market-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase dependency is unreachable, shop and market fail safe: no crash, friendly branded degradation, and no coin or item loss.",
+     "expectedOutcome": "With database access blocked, /shop, /buy, and /market reply with the branded market-unavailable message and no coins or items move; after restoring the connection a fresh /buy debits exactly once and delivers the item.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /shop, /buy, and /market reply with the branded market-unavailable template in the owner's voice and no wallet or inventory mutation occurs; after restoration a fresh /buy debits exactly once and delivers the item."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All shop and market rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each shop and market action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed shop or market command."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing shop and market surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, item transfers, or listing mutations; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test shop items, market listings, inventory rows, wallet entries, and announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-shop-market-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A market purchase whose seller-payout or inventory-delivery step fails converges safely: the buyer is refunded exactly once, the listing remaining is restored, and a clean retry buys exactly once.",
+     "expectedOutcome": "With a fault injected on the seller payout, run-member-b sees the full refund and the listing shows its remaining restored; the retried /market buy then completes with exactly one buyer debit, one seller credit net of fee, and one item delivered.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the injected payout fault, run-member-b sees the branded refund confirmation and the listing's remaining is fully restored; the clean retry completes the purchase with exactly one buyer debit, one seller credit net of fee, and one delivered item."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All shop and market rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each shop and market action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing shop and market surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The refund and the subsequent successful purchase each apply under their own idempotency key, so the play-money ledger shows debit, refund, debit — never a double debit, double refund, or double seller payout."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test shop items, market listings, inventory rows, wallet entries, and announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-shop-market-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replays never double-charge or double-deliver: re-delivering a shop /buy and a /market buy leaves exactly one shop purchase and one market sale.",
+     "expectedOutcome": "After replaying the recorded shop /buy and /market buy interactions, wallet totals, inventory counts, and listing remaining are byte-identical to the pre-replay snapshot.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The channel shows exactly one shop purchase confirmation and one market sale embed despite the replays, and /shop, inventory, and wallet totals are unchanged from the pre-replay snapshot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All shop and market rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each shop and market action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing shop and market surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Idempotency keys on the buyer debit, the seller payout, the inventory upsert, and the listing decrement each show one applied effect; replayed deliveries are recorded as deduplicated no-ops."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test shop items, market listings, inventory rows, wallet entries, and announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-shop-market-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "Shop and market state survive a full stack restart: escrowed listing quantities, listing status, and inventory all persist without a double-settle or a double-expire.",
+     "expectedOutcome": "After restarting bot and dashboard, /market my-listings and /shop match the pre-restart snapshot exactly, escrowed listing quantities are intact, and no listing is settled or expired twice across the restart.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart /market my-listings and /shop match the pre-restart snapshot exactly, escrowed listing quantities are intact, and no listing settles, expires, or returns items twice across the restart."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All shop and market rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each shop and market action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing shop and market surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, item transfers, or listing mutations; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test shop items, market listings, inventory rows, wallet entries, and announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-shop-market-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent market actions are safe: simultaneous buys of a listing's last unit settle exactly once and simultaneous listings of the same stack cannot oversell.",
+     "expectedOutcome": "Two simultaneous /market buy calls for the final unit yield exactly one completed purchase and one sold-out refusal, and two simultaneous /market list calls of the same inventory stack escrow the stack exactly once with the second refused for insufficient inventory.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Exactly one purchase-complete embed and one sold-out refusal appear for the simultaneous buys, and exactly one listing-created embed appears for the simultaneous listings with the second refused for insufficient inventory."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All shop and market rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each shop and market action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing shop and market surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The atomic economy_market_buy and economy_market_atomic_create_listing RPCs serialize on their row locks so re-delivery and concurrency both leave exactly one effect per logical action with no oversell."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test shop items, market listings, inventory rows, wallet entries, and announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-shop-market-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "Shop and market are strictly per-guild: listing and buying in a second guild never touch the first guild's items, listings, inventory, or wallet.",
+     "expectedOutcome": "run-member-a lists and sells in test guild B; guild A's /shop, /market browse, inventory, and wallet are unchanged, and guild B's sale applies only guild B's configured fee.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A's /shop and /market browse and wallet are identical before and after the guild B activity, and guild B's sale debits guild B's wallet and applies only guild B's configured fee."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_market_listings or economy_items rows and vice versa; service-role probes confirm each guild's listings, inventory, and wallet rows evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each shop and market action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing shop and market surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, item transfers, or listing mutations; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test shop items, market listings, inventory rows, wallet entries, and announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-shop-market-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed shop and market resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed shop items, market listings, inventory rows, wallet entries, and announcement embeds are deleted; a final sweep finds zero run-prefixed shop or market resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed shop items, market listings, or purchase and sale embeds after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All shop and market rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each shop and market action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing shop and market surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, item transfers, or listing mutations; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed shop and market resource created by this domain's scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

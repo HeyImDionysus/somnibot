@@ -14,7 +14,8 @@
   "scripts": {
     "build": "node ../../scripts/clean.mjs dist && tsc",
     "type-check": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:catalog": "node scripts/build-catalog.mjs"
   },
   "dependencies": {
     "zod": "^3.24.0"

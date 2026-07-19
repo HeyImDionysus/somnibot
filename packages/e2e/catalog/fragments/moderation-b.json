@@ -1,0 +1,1685 @@
+{
+  "category": "moderation",
+  "domains": [
+    {
+      "id": "moderation-tickets-transcripts",
+      "name": "Tickets & Transcripts",
+      "category": "moderation",
+      "promise": "Members open support from an owner-branded panel by button or dropdown into a private ticket thread visible only to them, staff manager roles, and the bot; staff claim tickets atomically, manage participants, and close with a saved HTML transcript delivered to the transcript channel and optionally the creator; commerce refund and store support requests route through this same ticket system; inactive tickets are warned and then auto-closed.",
+      "controls": [
+        {
+          "id": "panel-input-mode",
+          "description": "How members pick a ticket type on the panel message: one button per type or a single dropdown select.",
+          "valueType": "enum",
+          "constraints": {
+            "values": [
+              "buttons",
+              "dropdown"
+            ]
+          }
+        },
+        {
+          "id": "ticket-types",
+          "description": "List of ticket type bindings, each with an id, label, button color, emoji, and optional per-type category, manager-role, intro, and intake-form overrides.",
+          "valueType": "json",
+          "constraints": {
+            "shape": "array of { id, label, color, emoji, description, category-override, manager-role-override, intro-message-override, intake-form }"
+          }
+        },
+        {
+          "id": "max-open-per-user",
+          "description": "Maximum simultaneously open or claimed tickets one member may hold on a panel before further opens are refused.",
+          "valueType": "integer",
+          "constraints": {
+            "min": 1,
+            "max": 25
+          }
+        },
+        {
+          "id": "manager-roles",
+          "description": "Role ids granted access to every ticket on the panel with claim, participant, and lifecycle powers.",
+          "valueType": "string-list",
+          "constraints": {}
+        },
+        {
+          "id": "open-category-id",
+          "description": "Category under which open ticket spaces are created; empty string means the panel channel's own category.",
+          "valueType": "string",
+          "constraints": {}
+        },
+        {
+          "id": "closed-category-id",
+          "description": "Category closed tickets are parked under; empty string leaves closed tickets in place.",
+          "valueType": "string",
+          "constraints": {}
+        },
+        {
+          "id": "introduction-message",
+          "description": "Owner-authored intro posted in every new ticket; empty string uses the branded built-in welcome.",
+          "valueType": "string",
+          "constraints": {
+            "maxLength": 2000
+          }
+        },
+        {
+          "id": "intake-form",
+          "description": "Panel-level modal fields shown before the ticket is created, each with label, placeholder, style, required flag, and length bounds; empty list skips the modal.",
+          "valueType": "json",
+          "constraints": {
+            "shape": "array of { label, placeholder, style, required, min-length, max-length }"
+          }
+        },
+        {
+          "id": "transcript-channel-id",
+          "description": "Staff channel where the HTML transcript file is posted on close; empty string disables the channel post while the database copy is still saved.",
+          "valueType": "string",
+          "constraints": {}
+        },
+        {
+          "id": "dm-transcript-to-creator",
+          "description": "Whether the closing transcript is also sent to the ticket creator as a DM attachment.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "inactivity-warn-hours",
+          "description": "Hours of silence in an open ticket before a warning embed is posted.",
+          "valueType": "integer",
+          "constraints": {
+            "min": 1,
+            "max": 720
+          }
+        },
+        {
+          "id": "inactivity-close-hours",
+          "description": "Hours of silence before an open ticket is auto-closed; must exceed the warning threshold.",
+          "valueType": "integer",
+          "constraints": {
+            "min": 2,
+            "max": 1440
+          }
+        },
+        {
+          "id": "feedback-prompt-enabled",
+          "description": "Whether a one-to-five star feedback prompt is posted for the creator when a ticket closes.",
+          "valueType": "boolean",
+          "constraints": {}
+        }
+      ],
+      "defaults": [
+        {
+          "controlId": "panel-input-mode",
+          "value": "buttons",
+          "rationale": "One labeled, colored button per ticket type is the most discoverable entry point for members."
+        },
+        {
+          "controlId": "ticket-types",
+          "value": [
+            {
+              "id": "support",
+              "label": "Support",
+              "color": "blue",
+              "emoji": "🎫"
+            },
+            {
+              "id": "billing",
+              "label": "Store & Billing",
+              "color": "green",
+              "emoji": "🧾"
+            }
+          ],
+          "rationale": "A general support type plus a dedicated store-and-billing type out of the box, so commerce refund and purchase help routes through the same ticket system from day one."
+        },
+        {
+          "controlId": "max-open-per-user",
+          "value": 1,
+          "rationale": "One open ticket per member keeps queues honest and prevents accidental duplicates; owners can raise it."
+        },
+        {
+          "controlId": "manager-roles",
+          "value": [],
+          "rationale": "No staff roles until the owner assigns them; until then ticket access is creator plus bot only."
+        },
+        {
+          "controlId": "open-category-id",
+          "value": "",
+          "rationale": "Tickets stay near the panel until the owner organizes them into a category."
+        },
+        {
+          "controlId": "closed-category-id",
+          "value": "",
+          "rationale": "Closed tickets stay in place until the owner designates an archive category."
+        },
+        {
+          "controlId": "introduction-message",
+          "value": "",
+          "rationale": "The branded built-in welcome greets the member until the owner writes their own."
+        },
+        {
+          "controlId": "intake-form",
+          "value": [],
+          "rationale": "Zero-friction opening by default; owners add intake questions when triage needs them."
+        },
+        {
+          "controlId": "transcript-channel-id",
+          "value": "",
+          "rationale": "Transcripts are always saved to the database; the staff channel post activates once the owner picks a channel."
+        },
+        {
+          "controlId": "dm-transcript-to-creator",
+          "value": true,
+          "rationale": "Members get their own copy of the conversation by default — member-respectful record keeping."
+        },
+        {
+          "controlId": "inactivity-warn-hours",
+          "value": 24,
+          "rationale": "A full day of silence earns a gentle nudge before anything closes."
+        },
+        {
+          "controlId": "inactivity-close-hours",
+          "value": 48,
+          "rationale": "Two silent days auto-closes the ticket, keeping staff queues clean without surprising members."
+        },
+        {
+          "controlId": "feedback-prompt-enabled",
+          "value": true,
+          "rationale": "Star-rating feedback on close gives owners a support quality signal by default."
+        }
+      ],
+      "permissions": [
+        {
+          "id": "open-ticket",
+          "actor": "Any guild member",
+          "action": "Open a ticket from the panel button or dropdown, completing the intake modal when configured",
+          "defaultDecision": "allow",
+          "enforcement": "The panel interaction handler creates the ticket for the clicking member, subject to the max-open-per-user cap, and grants view access only to the creator, the configured manager roles, and the bot."
+        },
+        {
+          "id": "manage-ticket-lifecycle",
+          "actor": "Guild member holding no configured manager role who is not the ticket creator",
+          "action": "Claim, reopen, or delete a ticket, or run /ticket add and /ticket remove to change participants",
+          "defaultDecision": "deny",
+          "enforcement": "Lifecycle button and /ticket subcommand handlers re-check manager-role membership (creators may close their own ticket), reply with an ephemeral branded denial, and write an audit row for the denied attempt."
+        },
+        {
+          "id": "configure-ticket-panels",
+          "actor": "Dashboard user with owner or admin access to the guild",
+          "action": "Create, edit, repost, or remove ticket panels and read stored transcripts on the dashboard tickets pages",
+          "defaultDecision": "allow",
+          "enforcement": "Dashboard session auth plus Supabase RLS restrict ticket_panels and ticket_transcripts access to authorized guild administrators."
+        }
+      ],
+      "messages": [
+        {
+          "id": "ticket-opened",
+          "trigger": "A member opens a ticket from the panel",
+          "surface": "Intro embed posted in the newly created private ticket thread with Close, Claim, and Transcript buttons",
+          "audience": "The ticket creator and staff holding a manager role",
+          "defaultTemplate": "Welcome {member-name}! This is ticket {ticket-number} — {ticket-type-label}. A staff member will be with you shortly. For store or billing questions, include your order number so we can help faster.",
+          "variables": [
+            "member-name",
+            "ticket-number",
+            "ticket-type-label"
+          ]
+        },
+        {
+          "id": "ticket-limit-reached",
+          "trigger": "A member at the max-open-per-user cap tries to open another ticket",
+          "surface": "Ephemeral reply to the panel interaction",
+          "audience": "The invoking member",
+          "defaultTemplate": "You already have {open-count} open ticket(s), {member-name} — let's wrap those up before starting another.",
+          "variables": [
+            "open-count",
+            "member-name"
+          ]
+        },
+        {
+          "id": "ticket-closed",
+          "trigger": "A ticket is closed via the Close button, /ticket close, or the inactivity auto-close",
+          "surface": "Close embed in the ticket thread carrying Reopen and Delete buttons",
+          "audience": "The ticket creator and staff",
+          "defaultTemplate": "Ticket {ticket-number} was closed by {closer-name}. This thread is now locked and a transcript has been saved. Thanks for reaching out!",
+          "variables": [
+            "ticket-number",
+            "closer-name"
+          ]
+        },
+        {
+          "id": "transcript-delivered",
+          "trigger": "A transcript is generated on close or via /ticket transcript",
+          "surface": "Transcript channel post with the HTML file attached and, when enabled, a DM to the creator",
+          "audience": "Staff in the transcript channel and the ticket creator",
+          "defaultTemplate": "Transcript for ticket {ticket-number} — {message-count} messages, saved for your records.",
+          "variables": [
+            "ticket-number",
+            "message-count"
+          ]
+        },
+        {
+          "id": "inactivity-warning",
+          "trigger": "An open ticket passes the inactivity warning threshold",
+          "surface": "Warning embed in the ticket thread",
+          "audience": "The ticket creator and staff",
+          "defaultTemplate": "This ticket has been quiet for {idle-hours} hours. It will close automatically if nothing more is needed.",
+          "variables": [
+            "idle-hours"
+          ]
+        },
+        {
+          "id": "ticket-create-failed",
+          "trigger": "Ticket creation fails after a panel interaction",
+          "surface": "Ephemeral reply to the member plus an owner alert channel post",
+          "audience": "The invoking member and the guild owner",
+          "defaultTemplate": "I couldn't open a ticket for {member-name}: {failure-reason}. Nothing was created and it's safe to try again.",
+          "variables": [
+            "member-name",
+            "failure-reason"
+          ]
+        },
+        {
+          "id": "transcript-failed",
+          "trigger": "Transcript generation or storage fails",
+          "surface": "Owner alert channel",
+          "audience": "Guild owner and administrators",
+          "defaultTemplate": "I couldn't save the transcript for ticket {ticket-number}: {failure-reason}. The ticket itself is intact — run /ticket transcript to retry.",
+          "variables": [
+            "ticket-number",
+            "failure-reason"
+          ]
+        }
+      ],
+      "state": {
+        "initial": "panel-ready",
+        "values": [
+          {
+            "id": "panel-ready",
+            "description": "The panel message is posted with per-type buttons or a dropdown and listens for open interactions."
+          },
+          {
+            "id": "open",
+            "description": "A private ticket thread exists, visible only to the creator, configured manager roles, and the bot, with a sequential ticket number and an open tickets row."
+          },
+          {
+            "id": "claimed",
+            "description": "A staff member holds the ticket via the atomic claim; the claim is recorded on the tickets row."
+          },
+          {
+            "id": "closing",
+            "description": "Close was requested; the transcript is being generated and stored before the status flips."
+          },
+          {
+            "id": "closed",
+            "description": "The ticket is locked: the creator cannot send, Reopen and Delete controls plus the feedback prompt are posted, and the thread is parked in the closed category when configured."
+          },
+          {
+            "id": "deleted",
+            "description": "The ticket is marked deleted and its thread removed; the stored transcript and the anonymizable audit trail remain."
+          }
+        ],
+        "transitions": [
+          {
+            "id": "open-ticket",
+            "from": "panel-ready",
+            "to": "open",
+            "trigger": "A member clicks a type button or picks a dropdown type, completing the intake modal when configured",
+            "expectedEffect": "Exactly one private ticket thread and one open tickets row are created with the next sequential ticket number, and the branded intro with Close, Claim, and Transcript buttons is posted."
+          },
+          {
+            "id": "claim",
+            "from": "open",
+            "to": "claimed",
+            "trigger": "A manager clicks the Claim button",
+            "expectedEffect": "The status flips from open to claimed atomically; a concurrent second claimer is told the ticket is already claimed and nothing double-applies."
+          },
+          {
+            "id": "close-open",
+            "from": "open",
+            "to": "closing",
+            "trigger": "Close button, /ticket close, or the inactivity auto-close threshold",
+            "expectedEffect": "Transcript generation starts before the status flips so the saved record captures the full conversation."
+          },
+          {
+            "id": "close-claimed",
+            "from": "claimed",
+            "to": "closing",
+            "trigger": "Close button or /ticket close on a claimed ticket",
+            "expectedEffect": "Same closing pipeline as an unclaimed ticket, with the claimer recorded on the row."
+          },
+          {
+            "id": "close-complete",
+            "from": "closing",
+            "to": "closed",
+            "trigger": "Transcript stored and close bookkeeping finished",
+            "expectedEffect": "The tickets row is closed with closer and reason, the creator's send permission is revoked, the close embed and feedback prompt post, the thread moves to the closed category when configured, and the transcript is posted to the transcript channel and DM'd per configuration."
+          },
+          {
+            "id": "reopen",
+            "from": "closed",
+            "to": "open",
+            "trigger": "A manager clicks the Reopen button",
+            "expectedEffect": "Status returns to open, the creator's send permission is restored, the thread moves back to the open category, and a reopen embed posts."
+          },
+          {
+            "id": "delete-ticket",
+            "from": "closed",
+            "to": "deleted",
+            "trigger": "A manager clicks the Delete button",
+            "expectedEffect": "The tickets row is marked deleted with a timestamp and the thread is removed while the stored transcript survives."
+          },
+          {
+            "id": "panel-reposted",
+            "from": "panel-ready",
+            "to": "panel-ready",
+            "trigger": "The owner edits and saves the panel on the dashboard tickets page",
+            "expectedEffect": "The existing panel message is edited in place when possible, otherwise reposted once, and the stored message id is updated — never two live panels."
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "thread-create-failed",
+          "trigger": "Discord rejects creating the private ticket thread because of missing permissions or limits",
+          "expectedBehavior": "No tickets row is written, the member receives the branded failure reply, the owner is alerted with the concrete reason, and a fresh attempt after the owner fixes permissions succeeds cleanly.",
+          "resultingState": "panel-ready",
+          "retry": "never",
+          "messageId": "ticket-create-failed",
+          "auditEvent": "tickets.create_failed",
+          "ownerNotification": true
+        },
+        {
+          "id": "db-save-failed",
+          "trigger": "The tickets insert fails after the private thread was already created",
+          "expectedBehavior": "The just-created thread is deleted as compensation so no orphan space remains, the member is told nothing was created and may retry, and thread and row never diverge.",
+          "resultingState": "panel-ready",
+          "retry": "never",
+          "messageId": "ticket-create-failed",
+          "auditEvent": "tickets.create_rolled_back",
+          "ownerNotification": true
+        },
+        {
+          "id": "transcript-store-failed",
+          "trigger": "Transcript generation or the ticket_transcripts insert fails during close",
+          "expectedBehavior": "The close itself still completes so the member is never trapped in a half-closed ticket, the owner is alerted with a retry hint, and /ticket transcript regenerates and stores exactly one transcript afterward.",
+          "resultingState": "closed",
+          "retry": "operator",
+          "messageId": "transcript-failed",
+          "auditEvent": "tickets.transcript_failed",
+          "ownerNotification": true
+        }
+      ],
+      "evidence": [
+        {
+          "assertionClass": "Discord",
+          "proofMode": "real-stack",
+          "observer": "Discord observer client joined to the primary test guild",
+          "expectedObservation": "The full ticket workflow contracted here is directly observed working in the live test guild: the branded panel accepts button and dropdown opens, a private ticket thread appears that a non-participant member cannot see, claim and participant changes apply, and closing locks the thread and delivers the HTML transcript.",
+          "artifact": "evidence/moderation-tickets-transcripts/discord"
+        },
+        {
+          "assertionClass": "database-RLS",
+          "proofMode": "real-stack",
+          "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+          "expectedObservation": "The ticket_panels, tickets, and ticket_transcripts rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+          "artifact": "evidence/moderation-tickets-transcripts/database-rls"
+        },
+        {
+          "assertionClass": "audit",
+          "proofMode": "real-stack",
+          "observer": "Audit-log table reader using the service role",
+          "expectedObservation": "Every ticket lifecycle change — open, claim, close, reopen, delete, transcript, and denied attempts — lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+          "artifact": "evidence/moderation-tickets-transcripts/audit"
+        },
+        {
+          "assertionClass": "owner-notification",
+          "proofMode": "real-stack",
+          "observer": "Owner alert channel observer in the primary test guild",
+          "expectedObservation": "Ticket failure branches — creation failures, rollback compensation, and transcript failures — raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+          "artifact": "evidence/moderation-tickets-transcripts/owner-notification"
+        },
+        {
+          "assertionClass": "branding",
+          "proofMode": "real-stack",
+          "observer": "Embed, message, and transcript-HTML snapshot inspector comparing captures against the configured brand kit",
+          "expectedObservation": "Captured panel embeds, intro and close embeds, feedback prompts, and transcript HTML headers and footers match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+          "artifact": "evidence/moderation-tickets-transcripts/branding"
+        },
+        {
+          "assertionClass": "replay-safety",
+          "proofMode": "real-stack",
+          "observer": "Interaction and event re-delivery harness with a duplicate detector over threads, status changes, and transcripts",
+          "expectedObservation": "Replaying recorded panel clicks, close interactions, and lifecycle events against the live stack leaves end state unchanged: no duplicate ticket threads, close transitions, transcripts, or feedback prompts.",
+          "artifact": "evidence/moderation-tickets-transcripts/replay-safety"
+        },
+        {
+          "assertionClass": "cleanup",
+          "proofMode": "real-stack",
+          "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+          "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed ticket panels, ticket threads, tickets rows, or transcript rows remaining anywhere.",
+          "artifact": "evidence/moderation-tickets-transcripts/cleanup"
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "moderation-tickets-transcripts-def",
+          "class": "DEF",
+          "disposition": "required",
+          "promise": "Out of the box, the posted panel shows Support and Store & Billing buttons; clicking one opens a private ticket thread visible only to the creator and the bot, the branded intro with Close, Claim, and Transcript buttons appears, and closing saves a transcript, locks the thread, and DMs the creator their copy.",
+          "expectedOutcome": "run-member-a opens a Store & Billing ticket, run-member-b confirms the thread is invisible to them, run-member-a closes it, the transcript row exists with the full conversation, and the DM copy arrives; the billing conversation never touches game currency or any wagerable balance.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The private ticket thread is created with the intro embed and control buttons, run-member-b receives an access error trying to view it, and after close the thread is locked with the close embed, feedback stars, and the creator's transcript DM."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All ticket, transcript, and panel rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture the open, close, and transcript actions with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing ticket surface in this scenario — panel embed, intro, close embed, feedback prompt, and transcript HTML — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's panel click and close interactions yields no duplicate ticket threads, status changes, transcripts, or feedback prompts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (ticket panels, ticket threads, tickets and ticket_transcripts rows, feedback prompts) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-tickets-transcripts-set-a",
+          "class": "SET-A",
+          "disposition": "required",
+          "promise": "Dashboard configuration takes live effect: the owner switches the panel to dropdown mode, raises max-open-per-user to 2, sets a custom intro and an intake form, and enables the transcript channel post alongside the creator DM.",
+          "expectedOutcome": "Without a bot restart the panel message shows the dropdown, opening a ticket presents the intake modal whose answers land in the intro, run-member-a can hold two open tickets but not three, and closing posts the HTML transcript file to the configured transcript channel and DMs the creator.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The edited panel message carries the dropdown, the intake modal collects the configured fields, a third open attempt returns the branded limit reply, and the close posts one transcript file to the transcript channel plus one DM."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All ticket, transcript, and panel rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture the panel configuration change and each ticket action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing ticket surface in this scenario — panel embed, intake modal, intro, close embed, and transcript HTML — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions and events yields no duplicate ticket threads, status changes, transcripts, or feedback prompts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (ticket panels, ticket threads, tickets and ticket_transcripts rows, feedback prompts) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-tickets-transcripts-set-b",
+          "class": "SET-B",
+          "disposition": "required",
+          "promise": "A second distinct configuration also takes effect: a per-type manager-role override, a closed-tickets category, fast inactivity timers, and the feedback prompt disabled.",
+          "expectedOutcome": "Only holders of the run override role can see the overridden type's tickets, a closed ticket moves under the closed category, an idle ticket receives the warning at the configured hour and auto-closes at the close threshold with a saved transcript, and no feedback prompt is posted.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "A manager without the override role cannot see the overridden ticket, the close moves the thread under the run closed category, the inactivity warning and auto-close embeds appear on schedule, and no star-rating prompt follows the close."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All ticket, transcript, and panel rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture the configuration change, the inactivity warning, and the auto-close with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing ticket surface in this scenario — panel embed, intro, warning embed, close embed, and transcript HTML — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions and events yields no duplicate ticket threads, status changes, transcripts, or feedback prompts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (ticket panels, ticket threads, tickets and ticket_transcripts rows, override roles, closed categories) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-tickets-transcripts-invalid",
+          "class": "INVALID",
+          "disposition": "required",
+          "promise": "Invalid panel configuration is rejected atomically: an inactivity close threshold at or below the warning threshold, a max-open-per-user of zero, and a nonexistent panel channel never persist.",
+          "expectedOutcome": "The dashboard tickets page surfaces a clear validation error for each bad save, ticket_panels keeps its prior values byte-for-byte, and the live panel keeps working under the previous valid settings on the very next open.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "A ticket opened immediately after the rejected saves behaves exactly per the prior valid configuration, proving no partial write reached the bot."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All ticket, transcript, and panel rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "One audit row records each rejected configuration attempt with the validation reason; no config-change audit row is written for the failed saves."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing ticket surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions and events yields no duplicate ticket threads, status changes, transcripts, or feedback prompts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (ticket panels, ticket threads, tickets and ticket_transcripts rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-tickets-transcripts-unauth",
+          "class": "UNAUTH",
+          "disposition": "required",
+          "promise": "Ticket power is denied to the unprivileged: a member with no manager role who is not the creator cannot claim, add or remove participants, reopen, or delete, and cannot see other members' tickets at all.",
+          "expectedOutcome": "run-member-b's Claim click and /ticket add attempt inside run-member-a's ticket yield only ephemeral branded denials, the ticket state and participant list are unchanged, the denials are audited, and the private thread stays invisible to run-member-b.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "run-member-b's lifecycle attempts produce only ephemeral denials; the ticket remains open and unclaimed with an unchanged participant list, and run-member-b cannot read the thread."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All ticket, transcript, and panel rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "An audit row records each denied lifecycle attempt with actor, ticket number, and reason permission-denied."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing ticket surface in this scenario, including the denial replies, shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions and events yields no duplicate ticket threads, status changes, transcripts, or feedback prompts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (ticket panels, ticket threads, tickets and ticket_transcripts rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-tickets-transcripts-depfail",
+          "class": "DEPFAIL",
+          "disposition": "required",
+          "promise": "When the Supabase dependency is unreachable, tickets fail safe: no crash, no orphan thread, a friendly branded failure for the member, and clean recovery.",
+          "expectedOutcome": "With database access blocked, a panel click yields the branded create-failed reply and leaves no thread or row behind; after restoring the connection the same member opens a ticket normally with the next sequential number.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "During the outage the panel click returns the ticket-create-failed template in the owner's voice and no ticket thread appears; after restoration one clean ticket opens on the first try."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All ticket, transcript, and panel rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture the failed attempt and the successful recovery open with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed interaction."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing ticket surface in this scenario, including the failure reply, shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions and events yields no duplicate ticket threads, status changes, transcripts, or feedback prompts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (ticket panels, ticket threads, tickets and ticket_transcripts rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-tickets-transcripts-retry",
+          "class": "RETRY",
+          "disposition": "required",
+          "promise": "Failures converge without duplication: a tickets insert that fails after thread creation is compensated by deleting the thread, and a failed transcript store is retried by the operator to exactly one stored transcript.",
+          "expectedOutcome": "With a transient fault injected on the tickets insert, the orphan thread is removed and the member's retry produces exactly one ticket; with a fault injected on the transcript insert during close, /ticket transcript afterward stores exactly one transcript row for the ticket.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "After the compensated failure the guild contains exactly one ticket thread for the member, and after the operator retry the transcript channel carries exactly one transcript post for the ticket."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All ticket, transcript, and panel rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Audit rows record the create rollback, the transcript failure, and the successful retry, each with the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives exactly one reasoned alert per exercised failure branch and none for the eventual successes."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing ticket surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "The retried insert and transcript store reuse their original idempotency keys, so the database shows one tickets row and one ticket_transcripts row, never two."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (ticket panels, ticket threads, tickets and ticket_transcripts rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-tickets-transcripts-replay",
+          "class": "REPLAY",
+          "disposition": "required",
+          "promise": "Replays never duplicate: re-delivering the panel-open interaction and the close event produces no second thread, no second close, and no second transcript.",
+          "expectedOutcome": "After replaying the recorded open and close interactions for a completed ticket, the guild still holds exactly one thread for that ticket number, one close embed, one feedback prompt, and one transcript row, all byte-identical to the pre-replay state.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The ticket thread, close embed, feedback prompt, and transcript channel post each appear exactly once despite the replayed interactions."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All ticket, transcript, and panel rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each ticket action in this scenario with actor id, guild id, and the run-prefixed correlation id; replayed deliveries add deduplication no-op records, not duplicate action rows."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing ticket surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Idempotency keys on the open and close actions show one applied effect each; the replayed deliveries are recorded as deduplicated no-ops."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (ticket panels, ticket threads, tickets and ticket_transcripts rows, feedback prompts) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-tickets-transcripts-restart",
+          "class": "RESTART",
+          "disposition": "required",
+          "promise": "Ticket state survives a full stack restart: open tickets stay open and controllable, inactivity clocks resume from persisted timestamps, and stored transcripts remain readable.",
+          "expectedOutcome": "After restarting bot and dashboard mid-lifecycle, the open ticket's Close, Claim, and Transcript buttons still work because their custom ids are stateless, the inactivity warning fires based on the persisted last-activity time rather than resetting, and the transcript of a pre-restart closed ticket is still served on the dashboard transcripts page.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "Post-restart the surviving ticket accepts a claim and a close exactly once, and the inactivity warning appears on the schedule implied by pre-restart activity."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All ticket, transcript, and panel rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each ticket action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing ticket surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Events redelivered across the restart boundary are deduplicated by their persisted idempotency keys, so no ticket action applies twice."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (ticket panels, ticket threads, tickets and ticket_transcripts rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-tickets-transcripts-race",
+          "class": "RACE",
+          "disposition": "required",
+          "promise": "Concurrency is safe: two simultaneous Claim clicks yield one claimer, a double-clicked panel button respects the open cap, and a concurrent Close button plus /ticket close produce one close and one transcript.",
+          "expectedOutcome": "Of two staff claiming simultaneously exactly one wins the atomic open-to-claimed update while the loser sees the already-claimed reply; the double-clicked open produces one ticket under the max-open cap; the concurrent closes settle into one closed status, one close embed, and one transcript row.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "One claimer holds the ticket, the loser's reply says it is already claimed, the guild shows one ticket thread for the double-click, and exactly one close embed and transcript post exist after the concurrent closes."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All ticket, transcript, and panel rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Audit rows show exactly one claim, one close, and one transcript action; the losing concurrent attempts are recorded as rejected, not applied."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing ticket surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions and events yields no duplicate ticket threads, status changes, transcripts, or feedback prompts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (ticket panels, ticket threads, tickets and ticket_transcripts rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-tickets-transcripts-xguild",
+          "class": "XGUILD",
+          "disposition": "required",
+          "promise": "Tickets are strictly per-guild: ticket numbering, open tickets, transcripts, and panel configuration in a second guild never touch the first guild's state.",
+          "expectedOutcome": "Tickets opened and closed in test guild B advance only guild B's numbering and rows; guild A's tickets, transcripts, and panel remain byte-identical, and each dashboard shows only its own guild's tickets and transcripts.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "Guild A's panel, open tickets, and transcript channel are identical before and after the guild B activity burst."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "A client scoped to guild B reads zero guild A tickets or ticket_transcripts rows and vice versa; service-role probes confirm the two guilds' ticket numbering advanced independently."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each ticket action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Each guild's member-facing ticket surfaces show that guild's own configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions and events yields no duplicate ticket threads, status changes, transcripts, or feedback prompts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created in both guilds (ticket panels, ticket threads, tickets and ticket_transcripts rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-tickets-transcripts-cleanup",
+          "class": "CLEANUP",
+          "disposition": "required",
+          "promise": "The suite leaves no trace: every run-prefixed ticket resource is removed and verified absent, while erasure requests against ticket history anonymize rather than delete.",
+          "expectedOutcome": "Run-prefixed panels, ticket threads, tickets rows, and transcript rows are deleted; a /forgetme issued by a run member before teardown leaves their transcripts and audit rows present with the creator identity anonymized; a final sweep finds zero run-prefixed ticket resources.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The test guilds contain no run-prefixed ticket panels, ticket threads, or transcript posts after cleanup."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All ticket, transcript, and panel rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Audit rows for the run and for the erased member remain present with identities anonymized; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing ticket surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions and events yields no duplicate ticket threads, status changes, transcripts, or feedback prompts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "The sweeper diff shows every run-prefixed ticket resource created by this domain's scenarios was removed, with transcripts and audit rows for the erased member retained in anonymized form."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "moderation-message-logging",
+      "name": "Message Logging",
+      "category": "moderation",
+      "promise": "Only after the owner deliberately enables it and picks a staff log channel, member message edits and deletes are captured as branded forensic embeds — before-and-after content, preserved attachments, author, channel, and jump link — under strictly per-guild configuration and per-guild caches; bot messages, embed-only updates, and the log channel itself are never logged, and member erasure requests anonymize retained forensic data rather than silently keeping it.",
+      "controls": [
+        {
+          "id": "message-log-enabled",
+          "description": "Master switch for forensic message logging; while off, no edit or delete is captured anywhere.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "message-log-channel-id",
+          "description": "Staff channel that receives edit and delete embeds; empty string means no valid destination and logging cannot activate.",
+          "valueType": "string",
+          "constraints": {}
+        },
+        {
+          "id": "log-edits-enabled",
+          "description": "Whether content edits are captured as before-and-after embeds when logging is on.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "log-deletes-enabled",
+          "description": "Whether deletions are captured with preserved content and attachment links when logging is on.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "ignored-channel-ids",
+          "description": "Channels excluded from capture for privacy; the log channel itself is always excluded regardless of this list.",
+          "valueType": "string-list",
+          "constraints": {}
+        },
+        {
+          "id": "config-cache-ttl-ms",
+          "description": "Lifetime of the per-guild message-log configuration cache; dashboard changes take effect within this window without a restart.",
+          "valueType": "duration-ms",
+          "constraints": {
+            "min": 0,
+            "max": 3600000
+          }
+        }
+      ],
+      "defaults": [
+        {
+          "controlId": "message-log-enabled",
+          "value": false,
+          "rationale": "Privacy-aware forensic logging is opt-in: nothing is captured until the owner deliberately turns it on and chooses where it goes."
+        },
+        {
+          "controlId": "message-log-channel-id",
+          "value": "",
+          "rationale": "No destination until the owner picks a staff channel; enabling requires an explicit channel choice."
+        },
+        {
+          "controlId": "log-edits-enabled",
+          "value": true,
+          "rationale": "Once the owner opts in, edits are part of the full forensic picture by default."
+        },
+        {
+          "controlId": "log-deletes-enabled",
+          "value": true,
+          "rationale": "Deleted-message capture is the core moderation value of the feature once opted in."
+        },
+        {
+          "controlId": "ignored-channel-ids",
+          "value": [],
+          "rationale": "No extra exclusions until the owner designates sensitive channels; the log channel is always excluded automatically."
+        },
+        {
+          "controlId": "config-cache-ttl-ms",
+          "value": 60000,
+          "rationale": "A one-minute per-guild cache keeps the hot message path cheap while dashboard changes still land fast."
+        }
+      ],
+      "permissions": [
+        {
+          "id": "configure-message-log",
+          "actor": "Dashboard user with owner or admin access to the guild",
+          "action": "Toggle message logging and select the log channel on the dashboard moderation page",
+          "defaultDecision": "allow",
+          "enforcement": "The guild settings API validates message_log_enabled and message_log_channel_id with a strict schema, and dashboard session auth plus Supabase RLS restrict guild_config writes to authorized guild administrators."
+        },
+        {
+          "id": "read-message-log",
+          "actor": "Ordinary guild member without a staff role",
+          "action": "Read the forensic message log channel",
+          "defaultDecision": "deny",
+          "enforcement": "The log channel is created with staff-only Discord permission overwrites; the suite verifies an unprivileged test member cannot view it."
+        },
+        {
+          "id": "erase-logged-identity",
+          "actor": "Any guild member",
+          "action": "Invoke /forgetme to have their identity anonymized in retained forensic and audit data",
+          "defaultDecision": "allow",
+          "enforcement": "The confirmed /forgetme purge deletes the member's operational data and anonymizes retained ticket, audit, and message-log records rather than deleting the forensic record."
+        }
+      ],
+      "messages": [
+        {
+          "id": "edit-logged",
+          "trigger": "A non-bot member edits a message's content in a watched channel",
+          "surface": "Embed in the configured log channel with before and after fields, channel, author, and a jump link",
+          "audience": "Staff with access to the log channel",
+          "defaultTemplate": "Message edited in {channel-name} by {author-tag} — before and after captured below.",
+          "variables": [
+            "channel-name",
+            "author-tag"
+          ]
+        },
+        {
+          "id": "delete-logged",
+          "trigger": "A non-bot member's message is deleted in a watched channel",
+          "surface": "Embed in the configured log channel with the preserved content and attachment links",
+          "audience": "Staff with access to the log channel",
+          "defaultTemplate": "Message deleted in {channel-name} — last written by {author-tag}; content and attachments preserved below for moderators.",
+          "variables": [
+            "channel-name",
+            "author-tag"
+          ]
+        },
+        {
+          "id": "uncached-delete-logged",
+          "trigger": "A message deleted before its content was ever cached by the bot",
+          "surface": "Embed in the configured log channel",
+          "audience": "Staff with access to the log channel",
+          "defaultTemplate": "A message was deleted in {channel-name} but its content predates my cache — only message id {message-id} is known.",
+          "variables": [
+            "channel-name",
+            "message-id"
+          ]
+        },
+        {
+          "id": "log-channel-missing",
+          "trigger": "Logging is enabled but the configured log channel is missing or unreadable",
+          "surface": "Owner alert channel",
+          "audience": "Guild owner and administrators",
+          "defaultTemplate": "Message logging is enabled but the log channel {channel-id} is missing or unreadable. Pick a new channel on the dashboard to resume coverage.",
+          "variables": [
+            "channel-id"
+          ]
+        },
+        {
+          "id": "log-delivery-degraded",
+          "trigger": "Log embed delivery keeps failing transiently",
+          "surface": "Owner alert channel",
+          "audience": "Guild owner and administrators",
+          "defaultTemplate": "I couldn't deliver {event-count} message-log embeds to {channel-name}. I'm retrying with backoff and no captured event will be double-posted.",
+          "variables": [
+            "event-count",
+            "channel-name"
+          ]
+        },
+        {
+          "id": "config-unavailable",
+          "trigger": "The guild configuration read fails while deciding whether to log an event",
+          "surface": "Owner alert channel",
+          "audience": "Guild owner and administrators",
+          "defaultTemplate": "Message logging paused briefly in {guild-name} while settings were unreachable — nothing was captured during the gap, by design.",
+          "variables": [
+            "guild-name"
+          ]
+        }
+      ],
+      "state": {
+        "initial": "disabled",
+        "values": [
+          {
+            "id": "disabled",
+            "description": "Logging is off — the shipped default; edits and deletes are not captured anywhere for this guild."
+          },
+          {
+            "id": "watching",
+            "description": "Logging is enabled with a valid channel; a per-guild cached configuration governs which events are captured."
+          },
+          {
+            "id": "degraded",
+            "description": "The log channel is missing or undeliverable; events are skipped without crashing while the owner is alerted."
+          },
+          {
+            "id": "anonymizing",
+            "description": "A confirmed erasure request is being applied to this guild's retained forensic entries for one member."
+          }
+        ],
+        "transitions": [
+          {
+            "id": "enable",
+            "from": "disabled",
+            "to": "watching",
+            "trigger": "The owner enables message logging and selects a log channel on the dashboard moderation page",
+            "expectedEffect": "Capture starts within the per-guild config cache TTL without a restart, for this guild only."
+          },
+          {
+            "id": "disable",
+            "from": "watching",
+            "to": "disabled",
+            "trigger": "The owner turns message logging off",
+            "expectedEffect": "Capture stops within the cache TTL; already-posted embeds remain governed by log-channel permissions and the erasure contract."
+          },
+          {
+            "id": "capture-edit",
+            "from": "watching",
+            "to": "watching",
+            "trigger": "A non-bot member edits a message's content in a watched channel",
+            "expectedEffect": "Exactly one before-and-after embed posts to the log channel; embed-only updates and bot messages produce nothing."
+          },
+          {
+            "id": "capture-delete",
+            "from": "watching",
+            "to": "watching",
+            "trigger": "A non-bot member's message is deleted in a watched channel",
+            "expectedEffect": "Exactly one embed with preserved content and attachment links posts, or the uncached fallback embed when the content was never cached; deletions inside the log channel itself are never logged."
+          },
+          {
+            "id": "channel-lost",
+            "from": "watching",
+            "to": "degraded",
+            "trigger": "The log channel is deleted or the bot loses access to it",
+            "expectedEffect": "Member-facing behavior is untouched, no crash occurs, and the owner receives one alert for the outage."
+          },
+          {
+            "id": "channel-restored",
+            "from": "degraded",
+            "to": "watching",
+            "trigger": "The owner selects a valid log channel again",
+            "expectedEffect": "Capture resumes within the cache TTL under the new channel."
+          },
+          {
+            "id": "erasure-start",
+            "from": "watching",
+            "to": "anonymizing",
+            "trigger": "A member confirms /forgetme",
+            "expectedEffect": "Retained forensic records referencing the member begin anonymization — identity redacted, record kept — following the anonymize-over-delete contract."
+          },
+          {
+            "id": "erasure-complete",
+            "from": "anonymizing",
+            "to": "watching",
+            "trigger": "The anonymization pass finishes",
+            "expectedEffect": "No retained forensic or audit record exposes the erased member's identity, the completion is audited, and normal capture continues for everyone else throughout."
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "log-channel-missing",
+          "trigger": "The configured log channel was deleted or the bot lost read or send access",
+          "expectedBehavior": "Edit and delete events are skipped without crashing or affecting members, exactly one owner alert is raised for the outage window rather than one per event, and capture resumes once the owner configures a valid channel.",
+          "resultingState": "degraded",
+          "retry": "operator",
+          "messageId": "log-channel-missing",
+          "auditEvent": "message_log.channel_missing",
+          "ownerNotification": true
+        },
+        {
+          "id": "delivery-transient-failure",
+          "trigger": "Discord returns a transient error while posting a log embed",
+          "expectedBehavior": "The post retries with backoff under a per-event dedupe key so each captured event yields at most one embed; the member-facing message flow is never affected.",
+          "resultingState": "watching",
+          "retry": "automatic",
+          "messageId": "log-delivery-degraded",
+          "auditEvent": "message_log.delivery_retried",
+          "ownerNotification": false
+        },
+        {
+          "id": "config-fetch-failed",
+          "trigger": "The guild_config read fails while deciding whether to log an event",
+          "expectedBehavior": "The feature fails closed: with configuration unknown nothing is captured — the privacy-preserving choice — the read retries, and normal capture resumes as soon as configuration loads again.",
+          "resultingState": "watching",
+          "retry": "automatic",
+          "messageId": "config-unavailable",
+          "auditEvent": "message_log.config_fetch_retried",
+          "ownerNotification": false
+        }
+      ],
+      "evidence": [
+        {
+          "assertionClass": "Discord",
+          "proofMode": "real-stack",
+          "observer": "Discord observer client joined to the primary test guild",
+          "expectedObservation": "The message-logging behavior contracted here is directly observed working in the live test guild: with logging off nothing is captured, and once the owner opts in, edits produce before-and-after embeds and deletes produce preserved-content embeds in the staff log channel with bot messages and the log channel itself excluded.",
+          "artifact": "evidence/moderation-message-logging/discord"
+        },
+        {
+          "assertionClass": "database-RLS",
+          "proofMode": "real-stack",
+          "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+          "expectedObservation": "The guild_config message-log columns and any retained forensic rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+          "artifact": "evidence/moderation-message-logging/database-rls"
+        },
+        {
+          "assertionClass": "audit",
+          "proofMode": "real-stack",
+          "observer": "Audit-log table reader using the service role",
+          "expectedObservation": "Every message-logging configuration change, degradation, and erasure pass lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+          "artifact": "evidence/moderation-message-logging/audit"
+        },
+        {
+          "assertionClass": "owner-notification",
+          "proofMode": "real-stack",
+          "observer": "Owner alert channel observer in the primary test guild",
+          "expectedObservation": "Message-logging failure branches — missing channel, delivery degradation, and unreachable configuration — raise exactly one owner alert per outage window carrying a human-readable reason and remediation hint; happy paths raise none.",
+          "artifact": "evidence/moderation-message-logging/owner-notification"
+        },
+        {
+          "assertionClass": "branding",
+          "proofMode": "real-stack",
+          "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+          "expectedObservation": "Captured log embeds and owner alerts match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+          "artifact": "evidence/moderation-message-logging/branding"
+        },
+        {
+          "assertionClass": "replay-safety",
+          "proofMode": "real-stack",
+          "observer": "Gateway event re-delivery harness with a duplicate detector over log-channel embeds",
+          "expectedObservation": "Replaying recorded messageUpdate and messageDelete events against the live stack leaves the log channel unchanged: exactly one embed per captured event and no repeated anonymization side effects.",
+          "artifact": "evidence/moderation-message-logging/replay-safety"
+        },
+        {
+          "assertionClass": "cleanup",
+          "proofMode": "real-stack",
+          "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+          "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed log channels, seeded messages, log embeds, or message-log configuration remaining anywhere.",
+          "artifact": "evidence/moderation-message-logging/cleanup"
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "moderation-message-logging-def",
+          "class": "DEF",
+          "disposition": "required",
+          "promise": "The shipped default is privacy first: with zero configuration, message edits and deletes produce no forensic capture anywhere — no embeds, no stored content.",
+          "expectedOutcome": "run-member-a edits and then deletes a message in the default-configured guild; no log embed appears in any channel, no forensic row is written, and the bot's behavior toward the member is completely unchanged.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "After the edit and delete burst, every channel in the test guild is free of log embeds and the member experienced no visible bot reaction."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "A service-role probe confirms no forensic message content was stored for the burst, and the guild_config row still shows message logging disabled with no channel set."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each message-logging action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every log embed and owner alert this scenario produces shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's gateway events yields no duplicate log embeds or anonymization passes; per-event dedupe keys show exactly one embed per captured edit or delete and none while logging is disabled."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (log channels, seeded messages, log embeds, configuration rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-message-logging-set-a",
+          "class": "SET-A",
+          "disposition": "required",
+          "promise": "Owner opt-in takes live effect: enabling logging with a run-prefixed staff log channel on the dashboard moderation page starts capture within the cache TTL, producing before-and-after edit embeds and preserved-content delete embeds with jump links and attachments.",
+          "expectedOutcome": "After the owner saves, run-member-a's edit yields exactly one embed showing both versions with author and jump link, a deleted message with an attachment yields one embed preserving the content and attachment link, and a bot-authored message edit produces nothing.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The run log channel contains exactly one edit embed with before and after fields and one delete embed with the preserved content and attachment link; no embed exists for the bot-authored message."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "The guild_config message-log columns for the test guild reflect the new settings; anon and second-guild clients read none of the scenario's configuration or forensic rows."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "One audit row records the configuration change with the acting administrator, guild id, and run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every log embed and owner alert this scenario produces shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's gateway events yields no duplicate log embeds or anonymization passes; per-event dedupe keys show exactly one embed per captured edit or delete."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (log channels, seeded messages, log embeds, configuration rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-message-logging-set-b",
+          "class": "SET-B",
+          "disposition": "required",
+          "promise": "A second distinct configuration also takes effect: edits switched off while deletes stay on, and a privacy-excluded channel added to ignored-channel-ids.",
+          "expectedOutcome": "An edit in a watched channel produces no embed, a delete in a watched channel produces exactly one embed, and both an edit and a delete inside the ignored channel — and inside the log channel itself — produce nothing.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The log channel gains exactly one delete embed and zero edit embeds, with no capture from the ignored channel or from deletions inside the log channel itself."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All message-log configuration and forensic rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture the configuration change with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every log embed and owner alert this scenario produces shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's gateway events yields no duplicate log embeds or anonymization passes; per-event dedupe keys show exactly one embed per captured edit or delete."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (log channels, seeded messages, log embeds, configuration rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-message-logging-invalid",
+          "class": "INVALID",
+          "disposition": "required",
+          "promise": "Invalid logging configuration is rejected atomically: enabling without a channel and pointing at a malformed or nonexistent channel id never persist.",
+          "expectedOutcome": "The dashboard moderation page surfaces a clear validation error for each bad save, guild_config keeps its prior message-log values byte-for-byte, and live capture behavior is unchanged on the very next edit and delete.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "An edit and delete performed immediately after the rejected saves behave exactly per the prior valid configuration, proving no partial write reached the bot."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All message-log configuration and forensic rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "One audit row records each rejected configuration attempt with the validation reason; no config-change audit row is written for the failed saves."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every log embed and owner alert this scenario produces shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's gateway events yields no duplicate log embeds or anonymization passes; per-event dedupe keys show exactly one embed per captured edit or delete."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (log channels, seeded messages, log embeds, configuration rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-message-logging-unauth",
+          "class": "UNAUTH",
+          "disposition": "required",
+          "promise": "Forensic data is staff-only and configuration is admin-only: an ordinary member can neither read the log channel nor flip the message-log settings through the API.",
+          "expectedOutcome": "run-member-b cannot view the staff log channel, and a dashboard session without admin access to the guild receives a denial from the settings API while guild_config stays unchanged and the denied attempt is audited.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "run-member-b's attempt to read the log channel is blocked by channel permissions while the staff observer reads it normally."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "The unauthorized session's write is refused at both the API and RLS layers, and the guild_config message-log columns are byte-identical before and after the attempt."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "An audit row records the denied configuration attempt with actor and reason permission-denied."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every log embed and owner alert this scenario produces shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's gateway events yields no duplicate log embeds or anonymization passes; per-event dedupe keys show exactly one embed per captured edit or delete."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (log channels, seeded messages, log embeds, configuration rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-message-logging-depfail",
+          "class": "DEPFAIL",
+          "disposition": "required",
+          "promise": "When the Supabase dependency is unreachable, logging fails closed and safe: unknown configuration means nothing is captured, the bot does not crash, and capture resumes on recovery.",
+          "expectedOutcome": "With database access blocked, edits and deletes flow normally for members while no log embed posts and no error reaches any member; after restoring the connection the next edit is captured normally and the owner received a single degradation alert for the window.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "During the outage members chat, edit, and delete without any visible bot errors and no embeds post; after restoration the next qualifying edit produces exactly one embed."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All message-log configuration and forensic rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture the degradation window and recovery with guild id and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per skipped event."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every log embed and owner alert this scenario produces shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's gateway events yields no duplicate log embeds or anonymization passes; per-event dedupe keys show exactly one embed per captured edit or delete."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (log channels, seeded messages, log embeds, configuration rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-message-logging-retry",
+          "class": "RETRY",
+          "disposition": "required",
+          "promise": "Transient delivery failures converge: a log embed post that fails on the first attempt is retried with backoff until exactly one embed lands for the event.",
+          "expectedOutcome": "With a transient Discord fault injected on the first embed post for a delete event, the retry succeeds and the log channel contains exactly one embed for that deletion, with the member-facing flow never disturbed.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The log channel holds exactly one delete embed for the faulted event after the retry, and the deleting member saw no error at any point."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All message-log configuration and forensic rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows record the retried delivery with the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every log embed and owner alert this scenario produces shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "The retried post reuses the original per-event dedupe key, so the log channel shows one embed for the event, not two."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (log channels, seeded messages, log embeds, configuration rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-message-logging-replay",
+          "class": "REPLAY",
+          "disposition": "required",
+          "promise": "Replays never double-log: re-delivering recorded messageUpdate and messageDelete gateway events produces no additional embeds.",
+          "expectedOutcome": "After replaying the recorded edit and delete events for already-captured messages, the log channel's embed count and content are byte-identical to the pre-replay state.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The log channel contains exactly one embed per originally captured event after the replay, with no new messages appended."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All message-log configuration and forensic rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each message-logging action in this scenario with actor id, guild id, and the run-prefixed correlation id; replayed deliveries add deduplication no-op records, not duplicate action rows."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every log embed and owner alert this scenario produces shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Per-event dedupe keys show one applied embed per original event; the replayed deliveries are recorded as deduplicated no-ops."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (log channels, seeded messages, log embeds, configuration rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-message-logging-restart",
+          "class": "RESTART",
+          "disposition": "required",
+          "promise": "Logging configuration survives a full stack restart: capture resumes under the persisted settings, uncached pre-restart messages degrade gracefully, and nothing double-posts.",
+          "expectedOutcome": "After restarting bot and dashboard, an edit is captured under the pre-restart configuration without re-saving anything, and deleting a message that predates the restart produces the uncached-fallback embed with the message id rather than an error or a crash.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "Post-restart the log channel gains exactly one edit embed for the new edit and one uncached-fallback embed for the pre-restart deletion, with no duplicates of pre-restart captures."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All message-log configuration and forensic rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each message-logging action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every log embed and owner alert this scenario produces shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Events redelivered across the restart boundary are deduplicated by their per-event keys, so no embed posts twice."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (log channels, seeded messages, log embeds, configuration rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-message-logging-race",
+          "class": "RACE",
+          "disposition": "required",
+          "promise": "Concurrency is safe: a burst of simultaneous edits and deletes yields exactly one embed per event, and a config toggle racing an event applies cleanly — the event is either captured under the old setting or skipped under the new one, never half-logged.",
+          "expectedOutcome": "Ten concurrent edit and delete events produce exactly ten embeds with correct per-event content, and an event fired concurrently with the owner disabling logging results in either one complete embed or none, with the config change fully applied within the cache TTL.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The log channel contains exactly one embed per concurrent event with matching content, and no partial or duplicated embed exists around the racing config toggle."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All message-log configuration and forensic rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Audit rows show exactly one configuration change for the toggle; the concurrent burst adds no duplicate or conflicting rows."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every log embed and owner alert this scenario produces shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's gateway events yields no duplicate log embeds or anonymization passes; per-event dedupe keys show exactly one embed per captured edit or delete."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (log channels, seeded messages, log embeds, configuration rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-message-logging-xguild",
+          "class": "XGUILD",
+          "disposition": "required",
+          "promise": "Logging configuration and caches are strictly per-guild: guild A logging enabled and guild B disabled coexist with zero bleed — guild B events are never captured anywhere and guild A's config changes never alter guild B's behavior.",
+          "expectedOutcome": "With logging on in guild A and off in guild B, simultaneous edits in both guilds produce exactly one embed in guild A's log channel and none anywhere for guild B; toggling guild A's setting leaves guild B's cached configuration and behavior untouched within the same TTL window.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "Guild A's log channel gains exactly one embed for its event while no channel in guild B gains any, including immediately after guild A's config toggle."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "A client scoped to guild B reads zero guild A message-log configuration or forensic rows and vice versa; service-role probes confirm each guild's config resolved independently."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each message-logging action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Each guild's log embeds and alerts show that guild's own configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's gateway events yields no duplicate log embeds or anonymization passes; per-event dedupe keys show exactly one embed per captured edit or delete."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created in both guilds (log channels, seeded messages, log embeds, configuration rows) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-message-logging-cleanup",
+          "class": "CLEANUP",
+          "disposition": "required",
+          "promise": "The suite leaves no trace and honors erasure: every run-prefixed logging resource is removed, and a member's /forgetme anonymizes their identity in retained forensic and audit records rather than deleting the record.",
+          "expectedOutcome": "Run-prefixed log channels, seeded messages, log embeds, and configuration are removed; after a run member's confirmed /forgetme, retained forensic and audit records for them carry an anonymized identity while the records themselves survive; a final sweep finds zero run-prefixed logging resources.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The test guilds contain no run-prefixed log channels or log embeds after cleanup."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All message-log configuration and forensic rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Audit rows for the run and for the erased member remain present with identities anonymized; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every log embed and owner alert this scenario produces shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's gateway events yields no duplicate log embeds or anonymization passes; per-event dedupe keys show exactly one embed per captured edit or delete."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "The sweeper diff shows every run-prefixed logging resource created by this domain's scenarios was removed, with forensic and audit records for the erased member retained in anonymized form."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

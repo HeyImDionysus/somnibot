@@ -1,0 +1,775 @@
+{
+ "category": "game-economy",
+ "domains": [
+  {
+   "id": "game-economy-adventures",
+   "name": "Branching Adventures",
+   "category": "game-economy",
+   "promise": "Members spend a play-money ticket on /adventure start to enter a branching narrative (dungeon, forest, ocean, space, or mountain), navigate a scene state machine one Discord button choice at a time, accumulate play-money coins and virtual loot along the way, and reach a success, partial, or death ending that pays out exactly what was earned — with a per-member daily limit and a single active run at a time, all inside the fake game economy and never touching real commerce.",
+   "controls": [
+    {
+     "id": "adventures-enabled",
+     "description": "Master switch for adventures, persisted as guild_config.economy_adventures_enabled; when off, /adventure start replies that the feature is disabled and no session is created.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "adventure-ticket-cost",
+     "description": "Play-money coin cost of one /adventure start, persisted as guild_config.economy_adventure_ticket_cost; debited atomically via economy_subtract_balance before the run begins.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000000
+     }
+    },
+    {
+     "id": "adventure-daily-limit",
+     "description": "How many adventures each member may start per UTC day, persisted as guild_config.economy_adventure_daily_limit; further starts are refused until the day rolls over.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 100
+     }
+    },
+    {
+     "id": "adventure-max-scenes",
+     "description": "Upper bound on scenes an adventure may traverse before it is forced to an ending, persisted as guild_config.economy_adventure_max_scenes.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 50
+     }
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "adventures-enabled",
+     "value": true,
+     "rationale": "Branching adventures are a flagship game-economy loop and ship on for the maximal out-of-box experience; owners can switch them off any time."
+    },
+    {
+     "controlId": "adventure-ticket-cost",
+     "value": 100,
+     "rationale": "A modest play-coin ticket makes each run feel like a real-but-recoverable stake without gatekeeping casual players."
+    },
+    {
+     "controlId": "adventure-daily-limit",
+     "value": 3,
+     "rationale": "Three runs a day give quick early wins while a conservative cap keeps the loop from being farmed to death."
+    },
+    {
+     "controlId": "adventure-max-scenes",
+     "value": 10,
+     "rationale": "Ten scenes is a satisfying story arc that still resolves inside a single sitting."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "use-adventure-commands",
+     "actor": "Any guild member",
+     "action": "Run /adventure start and make scene choices on their own run",
+     "defaultDecision": "allow",
+     "enforcement": "The /adventure command responds for every member; every scene button resolves the session by its id and mutates only the invoking member's own active session row."
+    },
+    {
+     "id": "configure-adventures",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Edit adventure settings on the dashboard economy adventures page",
+     "defaultDecision": "allow",
+     "enforcement": "Dashboard session auth plus Supabase RLS restrict guild_config writes to authorized guild administrators."
+    },
+    {
+     "id": "advance-others-adventure",
+     "actor": "Any guild member",
+     "action": "Press the scene buttons on another member's in-progress adventure",
+     "defaultDecision": "deny",
+     "enforcement": "The button handler compares the session's user_id to the interacting member and refuses with a not-your-adventure reply; no code path advances another member's session."
+    }
+   ],
+   "messages": [
+    {
+     "id": "adventure-started",
+     "trigger": "A member starts an adventure with a play-money ticket",
+     "surface": "Channel embed replying to /adventure start",
+     "audience": "The adventuring member and the channel",
+     "defaultTemplate": "Your {adventure-name} begins, {member-name} — {ticket-cost} play coins spent. Choose your path!",
+     "variables": [
+      "adventure-name",
+      "member-name",
+      "ticket-cost"
+     ]
+    },
+    {
+     "id": "adventure-succeeded",
+     "trigger": "An adventure reaches a success or partial ending",
+     "surface": "Channel embed updating the adventure message",
+     "audience": "The adventuring member and the channel",
+     "defaultTemplate": "You made it out, {member-name}! You banked {coin-total} play coins and {item-count} item(s).",
+     "variables": [
+      "member-name",
+      "coin-total",
+      "item-count"
+     ]
+    },
+    {
+     "id": "adventure-failed",
+     "trigger": "An adventure reaches a death ending",
+     "surface": "Channel embed updating the adventure message",
+     "audience": "The adventuring member and the channel",
+     "defaultTemplate": "The adventure claimed you, {member-name} — you escape empty-handed. A fresh ticket awaits when you're ready.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "ticket-refunded",
+     "trigger": "A ticket debit succeeded but the adventure session could not be created",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "That adventure never got off the ground, {member-name} — your {ticket-cost} play coins are already back in your wallet.",
+     "variables": [
+      "member-name",
+      "ticket-cost"
+     ]
+    },
+    {
+     "id": "adventures-unavailable",
+     "trigger": "The adventures backend is temporarily unreachable when a member runs an adventure command",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The story map is smudged right now, {member-name} — give it a moment and try again.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "payout-delayed",
+     "trigger": "An ending payout keeps failing after the run resolved",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: the {coin-total}-coin adventure payout to {member-name} failed and is queued for operator retry; nothing was double-paid and everything is logged.",
+     "variables": [
+      "coin-total",
+      "member-name"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "no-adventure",
+    "values": [
+     {
+      "id": "no-adventure",
+      "description": "The member has no active run in this guild; /adventure start begins one when under the daily limit."
+     },
+     {
+      "id": "in-progress",
+      "description": "An active session sits at a scene, its current_scene_id persisted, awaiting the member's next button choice."
+     },
+     {
+      "id": "completed",
+      "description": "The run reached a success or partial ending; collected play coins and loot were paid out exactly once."
+     },
+     {
+      "id": "failed",
+      "description": "The run reached a death ending; the session is closed and no reward is paid."
+     },
+     {
+      "id": "payout-degraded",
+      "description": "The run ended but the play-money payout failed; the session is marked payout_failed with the earned amount preserved for operator retry."
+     },
+     {
+      "id": "disabled",
+      "description": "Adventures disabled by configuration; /adventure start explains the feature is off and no session is created."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "begin-adventure",
+      "from": "no-adventure",
+      "to": "in-progress",
+      "trigger": "Member runs /adventure start with sufficient play-money balance and under the daily limit",
+      "expectedEffect": "Exactly one ticket debit occurs via economy_subtract_balance and one active session row is created at scene zero; the partial unique index blocks any second concurrent active session."
+     },
+     {
+      "id": "advance-scene",
+      "from": "in-progress",
+      "to": "in-progress",
+      "trigger": "The member presses a scene choice button",
+      "expectedEffect": "current_scene_id moves to the chosen next scene exactly once and accumulated loot and play-coin currency are recorded on the session; re-pressing a stale button is a no-op."
+     },
+     {
+      "id": "reach-success",
+      "from": "in-progress",
+      "to": "completed",
+      "trigger": "A choice leads to a success or partial ending scene",
+      "expectedEffect": "The session is marked completed and the earned play coins and loot items are paid out exactly once via economy_add_balance and economy_upsert_inventory."
+     },
+     {
+      "id": "reach-death",
+      "from": "in-progress",
+      "to": "failed",
+      "trigger": "A choice leads to a death ending scene",
+      "expectedEffect": "The session is marked failed, collected currency and loot are zeroed, and no play-money payout is made."
+     },
+     {
+      "id": "payout-fails",
+      "from": "in-progress",
+      "to": "payout-degraded",
+      "trigger": "economy_add_balance errors while paying out a resolved ending",
+      "expectedEffect": "The session is marked payout_failed with the earned amount preserved, the member is told the payout is delayed rather than shown false success, and the amount is queued for operator retry under one idempotency key."
+     },
+     {
+      "id": "payout-retried",
+      "from": "payout-degraded",
+      "to": "completed",
+      "trigger": "An operator retries the queued adventure payout after the transient fault clears",
+      "expectedEffect": "Exactly one payout lands for the recorded amount and the session flips to completed; the ticket is never re-charged."
+     },
+     {
+      "id": "adventures-toggled-off",
+      "from": "no-adventure",
+      "to": "disabled",
+      "trigger": "Owner turns adventures-enabled off on the dashboard",
+      "expectedEffect": "/adventure start replies with the disabled explanation; existing session and scene rows are preserved untouched."
+     },
+     {
+      "id": "adventures-toggled-on",
+      "from": "disabled",
+      "to": "no-adventure",
+      "trigger": "Owner turns adventures-enabled back on",
+      "expectedEffect": "Members can start adventures again with all prior adventure and scene definitions intact."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "session-insert-failed",
+     "trigger": "The play-money ticket debit succeeds but the economy_adventure_sessions insert fails or hits the active-session unique violation",
+     "expectedBehavior": "The ticket is refunded exactly once through economy_add_balance, the member sees the refund confirmation, and no orphan session row exists.",
+     "resultingState": "no-adventure",
+     "retry": "never",
+     "messageId": "ticket-refunded",
+     "auditEvent": "adventures.ticket_refunded",
+     "ownerNotification": false
+    },
+    {
+     "id": "ending-payout-failed",
+     "trigger": "economy_add_balance fails after the session was marked ended with earned play coins",
+     "expectedBehavior": "The session is marked payout_failed with the earned amount preserved, the completion embed plainly flags the delayed payout instead of pretending success, the payout is queued for operator retry under one idempotency key, and no loot or coins are double-granted.",
+     "resultingState": "payout-degraded",
+     "retry": "operator",
+     "messageId": "payout-delayed",
+     "auditEvent": "adventures.payout_failed",
+     "ownerNotification": true
+    },
+    {
+     "id": "adventures-backend-unreachable",
+     "trigger": "Supabase is unreachable when a member runs an adventure command",
+     "expectedBehavior": "The command replies with the branded adventures-unavailable message, no ticket is debited and no session is created; after the dependency recovers a fresh /adventure start debits exactly once and begins normally.",
+     "resultingState": "no-adventure",
+     "retry": "automatic",
+     "messageId": "adventures-unavailable",
+     "auditEvent": "adventures.backend_unavailable",
+     "ownerNotification": false
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "Adventure behavior contracted here is directly observed working in the live test guild: /adventure start debits a play-money ticket and posts scene zero, scene buttons advance the narrative one choice at a time, and success, partial, and death endings pay out exactly what was earned in play-money coins and loot.",
+     "artifact": "evidence/game-economy-adventures/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_adventures, economy_adventure_scenes, economy_adventure_sessions, economy_wallets, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+     "artifact": "evidence/game-economy-adventures/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-adventures/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-adventures/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured embeds and messages for this domain match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-adventures/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over messages, grants, and balance mutations",
+     "expectedObservation": "Replaying recorded triggers for this domain against the live stack leaves end state unchanged: no duplicate play-money ticket debits, no double scene advances, and no double ending payouts.",
+     "artifact": "evidence/game-economy-adventures/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-adventures/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-adventures-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box, /adventure start costs a 100 play-coin ticket, allows 3 runs per UTC day, posts scene zero with choice buttons, and a success ending pays the collected play coins and loot exactly once.",
+     "expectedOutcome": "run-member-a starts an adventure for exactly 100 play coins, advances through scenes by pressing choice buttons, and on a success ending banks the collected coins and loot with the wallet reflecting the net movement.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/adventure start debits exactly 100 play coins and posts scene zero with its choice buttons, each button advances to the next scene, and the success ending embed reports the exact collected coin total and item count that then appear in run-member-a's wallet and inventory."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All adventure rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each adventure action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing adventure surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money ticket debits, scene advances, or ending payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test session rows, seeded adventure and scene rows, wallet entries, inventory entries, and adventure embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-adventures-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Dashboard configuration takes live effect: the owner sets ticket cost 25 and daily limit 1.",
+     "expectedOutcome": "Without a bot restart, the next /adventure start debits exactly 25 play coins, and a second same-day start is refused with the branded daily-limit message.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save, /adventure start debits exactly 25 play coins with no restart, and the member's second start that same UTC day is refused with the branded daily-limit-reached reply."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All adventure rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each adventure action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing adventure surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money ticket debits, scene advances, or ending payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test session rows, seeded adventure and scene rows, wallet entries, inventory entries, and adventure embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-adventures-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "An alternate configuration is honored: the owner sets a free 0-coin ticket and a generous daily limit while keeping adventures enabled.",
+     "expectedOutcome": "/adventure start moves no coins at ticket cost 0, still creates exactly one active session, and several same-day runs succeed under the raised limit.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "With ticket cost 0, /adventure start creates a run with no wallet movement, and repeated same-day starts up to the raised daily limit each succeed while core scene navigation still works."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All adventure rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each adventure action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing adventure surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money ticket debits, scene advances, or ending payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test session rows, seeded adventure and scene rows, wallet entries, inventory entries, and adventure embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-adventures-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid adventure configuration is rejected atomically: a negative ticket cost and a zero daily limit never persist.",
+     "expectedOutcome": "The dashboard adventures page surfaces a clear validation error, guild_config keeps its prior values byte-for-byte, and live bot behavior is unchanged on the very next /adventure start.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "An /adventure start run immediately after the rejected save still debits the previous valid ticket cost and honors the previous daily limit, proving no partial write reached the bot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All adventure rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the rejected adventure configuration attempt with the validation reason; no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing adventure surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money ticket debits, scene advances, or ending payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test session rows, seeded adventure and scene rows, wallet entries, inventory entries, and adventure embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-adventures-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "Adventures are protected from unauthorized actors: a member cannot advance another member's run and a non-admin dashboard session cannot save adventure settings.",
+     "expectedOutcome": "run-member-b pressing the buttons on run-member-a's adventure is refused and leaves run-member-a's session byte-identical, and the non-admin dashboard save is refused.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-b's press on run-member-a's scene button returns the branded not-your-adventure refusal, run-member-a's session and current scene are unchanged, and the non-admin dashboard save returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All adventure rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied adventure configuration attempt with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing adventure surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money ticket debits, scene advances, or ending payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test session rows, seeded adventure and scene rows, wallet entries, inventory entries, and adventure embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-adventures-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase dependency is unreachable, adventures fail safe: no crash, friendly branded degradation, and no play-coin loss.",
+     "expectedOutcome": "With database access blocked, /adventure start replies with the branded adventures-unavailable message and no ticket is debited; after restoring the connection a fresh /adventure start debits exactly once and begins.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /adventure start replies with the branded adventures-unavailable template in the owner's voice and no wallet mutation occurs; after restoration a fresh /adventure start debits exactly once and posts scene zero."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All adventure rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each adventure action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed adventure command."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing adventure surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money ticket debits, scene advances, or ending payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test session rows, seeded adventure and scene rows, wallet entries, inventory entries, and adventure embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-adventures-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A start whose session-creation step fails converges safely: the ticket is refunded exactly once and a clean retry begins exactly one run.",
+     "expectedOutcome": "With a fault injected on the economy_adventure_sessions insert, run-member-a's wallet shows the full ticket refunded and no session exists; the retried /adventure start then succeeds with exactly one debit and one session row.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the injected insert fault, run-member-a sees the branded refund confirmation and no adventure begins; the clean retry starts exactly one run for exactly one debit."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All adventure rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each adventure action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing adventure surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The refund and the subsequent successful start each apply under their own idempotency key, so the play-money ledger shows debit, refund, debit — never a double debit or a double refund."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test session rows, seeded adventure and scene rows, wallet entries, inventory entries, and adventure embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-adventures-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replayed choices never double-reward: re-delivering a scene-choice button press advances the story only once and pays an ending only once.",
+     "expectedOutcome": "After replaying the recorded start and choice interactions, run-member-a's session sits at exactly one scene ahead per real choice and the ending payout appears exactly once, byte-identical to the pre-replay state.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The replayed choice button produces no second scene advance and no second ending embed, and run-member-a's wallet and inventory match the pre-replay snapshot exactly."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All adventure rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each adventure action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing adventure surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Idempotency keys on the ticket debit, the scene advance, and the ending payout each show one applied effect; the replayed choice is recorded as a deduplicated no-op because the session had already left that scene."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test session rows, seeded adventure and scene rows, wallet entries, inventory entries, and adventure embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-adventures-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "An in-progress adventure survives a full stack restart and resumes at its exact scene with no loss and no double-reward.",
+     "expectedOutcome": "After restarting bot and dashboard mid-run, run-member-a's next button press continues from the exact persisted scene, and the accumulated loot and currency match the pre-restart snapshot.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart, pressing the live scene button resumes the run at the exact scene the session was persisted at, and the accumulated loot and coin total match the pre-restart snapshot with no scene skipped or repeated."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All adventure rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each adventure action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing adventure surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money ticket debits, scene advances, or ending payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test session rows, seeded adventure and scene rows, wallet entries, inventory entries, and adventure embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-adventures-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent adventure actions are safe: two simultaneous /adventure start calls create exactly one active session, and two simultaneous presses on the same scene button advance the story exactly once.",
+     "expectedOutcome": "Two simultaneous starts yield exactly one active session and one ticket debit with the loser refused, and two simultaneous presses of the same choice apply exactly one scene advance.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "For the simultaneous starts exactly one adventure embed and one already-active refusal appear, and for the simultaneous choice presses the story advances a single scene with only one accumulation of that scene's loot and currency."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All adventure rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each adventure action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing adventure surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money ticket debits, scene advances, or ending payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test session rows, seeded adventure and scene rows, wallet entries, inventory entries, and adventure embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-adventures-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "Adventures are strictly per-guild: starting and playing a run in a second guild never touches the first guild's session, wallet, or configuration.",
+     "expectedOutcome": "run-member-a starts and plays a run in test guild B; guild A's session rows, wallet, and daily-limit count are unchanged, and guild B's run reflects only guild B's configured ticket cost.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A's adventure state is identical before and after the guild B activity, and guild B's start debits guild B's wallet at guild B's configured ticket cost."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_adventure_sessions rows and vice versa; service-role probes confirm each guild's session and wallet rows evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each adventure action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing adventure surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money ticket debits, scene advances, or ending payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test session rows, seeded adventure and scene rows, wallet entries, inventory entries, and adventure embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-adventures-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed adventure resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed session rows, seeded adventure and scene rows, wallet entries, inventory entries, and adventure embeds are deleted; a final sweep finds zero run-prefixed adventure resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed adventure embeds, scene messages, or ending announcements after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All adventure rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each adventure action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing adventure surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money ticket debits, scene advances, or ending payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed adventure resource created by this domain's scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

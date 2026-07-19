@@ -1,0 +1,823 @@
+{
+ "category": "game-economy",
+ "domains": [
+  {
+   "id": "game-economy-wallet-rewards",
+   "name": "Wallet & Daily Rewards",
+   "category": "game-economy",
+   "promise": "Every member carries one per-guild play-money wallet — a spendable wallet balance plus a bank — that is lazily created exactly once under a guild-and-member advisory lock, topped up by steady /daily, /weekly, and /monthly rewards whose streak bonus rewards consistency, moved safely with /deposit, /withdraw, and a per-interaction-idempotent /pay, and mirrored into the member's quality-weighted XP via the quests bridge; every coin here is fake game currency with zero connection to the real-money commerce store, and commerce-held roles earn no game income.",
+   "controls": [
+    {
+     "id": "economy-enabled",
+     "description": "Master switch mapped to the economy_enabled guild_config key; when off, wallet and reward commands reply that the economy is not enabled on this server.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "economy-starting-balance",
+     "description": "Play-money coins a brand-new wallet is seeded with, mapped to economy_starting_balance and applied when economy_get_or_create_wallet first creates the row.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000000
+     }
+    },
+    {
+     "id": "economy-daily-amount",
+     "description": "Base play-money coins granted by /daily, mapped to economy_daily_amount; /weekly and /monthly scale from their own keys.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000000
+     }
+    },
+    {
+     "id": "economy-streak-bonus-pct",
+     "description": "Percent bonus added per consecutive claim streak step, mapped to economy_streak_bonus_pct; rewards steady daily engagement without runaway payouts.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 100
+     }
+    },
+    {
+     "id": "economy-pay-tax-pct",
+     "description": "Percent tax skimmed from a /pay transfer before the receiver is credited, mapped to economy_pay_tax_pct; a conservative sink that defaults off.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 100
+     }
+    },
+    {
+     "id": "economy-max-wallet",
+     "description": "Conservative cap on spendable wallet coins, mapped to economy_max_wallet; zero means uncapped and a /withdraw is clamped so the wallet never exceeds a non-zero cap.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000000000
+     }
+    },
+    {
+     "id": "currency-name",
+     "description": "Display name of the play-money currency, mapped to currency_name and shown across every wallet surface.",
+     "valueType": "string",
+     "constraints": {}
+    },
+    {
+     "id": "currency-emoji",
+     "description": "Emoji prefix shown beside coin amounts, mapped to currency_emoji.",
+     "valueType": "string",
+     "constraints": {}
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "economy-enabled",
+     "value": true,
+     "rationale": "The wallet is the backbone of the whole game economy and ships on for the maximal out-of-box experience."
+    },
+    {
+     "controlId": "economy-starting-balance",
+     "value": 0,
+     "rationale": "A zero start keeps early wins meaningful: members earn their first coins from /daily and activity rather than being handed a balance."
+    },
+    {
+     "controlId": "economy-daily-amount",
+     "value": 500,
+     "rationale": "Five hundred coins is a satisfying quick early win that a casual member can claim in seconds every day."
+    },
+    {
+     "controlId": "economy-streak-bonus-pct",
+     "value": 5,
+     "rationale": "A gentle five percent per streak step rewards long-term consistency without letting streaks dwarf the base reward."
+    },
+    {
+     "controlId": "economy-pay-tax-pct",
+     "value": 0,
+     "rationale": "Transfers are free by default so members can share coins freely; owners can add a sink deliberately."
+    },
+    {
+     "controlId": "economy-max-wallet",
+     "value": 0,
+     "rationale": "Uncapped by default for a frictionless start; owners who want conservative stakes can set a real cap."
+    },
+    {
+     "controlId": "currency-name",
+     "value": "Coins",
+     "rationale": "A neutral, brandable default the owner can rename to match their white-label voice."
+    },
+    {
+     "controlId": "currency-emoji",
+     "value": "🪙",
+     "rationale": "A universally readable coin emoji that owners can swap for a custom brand emoji."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "use-wallet-commands",
+     "actor": "Any guild member",
+     "action": "Run /balance, /daily, /weekly, /monthly, /deposit, /withdraw, /pay, and /collect-income",
+     "defaultDecision": "allow",
+     "enforcement": "Wallet commands respond for every member; earning, banking, and reward handlers only ever mutate the invoking member's own economy_wallets row, and /pay only credits the explicitly named receiver."
+    },
+    {
+     "id": "configure-economy",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Edit wallet and reward settings on the dashboard economy page",
+     "defaultDecision": "allow",
+     "enforcement": "Dashboard session auth plus Supabase RLS restrict guild_config writes to authorized guild administrators."
+    },
+    {
+     "id": "mutate-others-wallet",
+     "actor": "Any guild member",
+     "action": "Directly credit or debit another member's wallet outside a consented /pay transfer",
+     "defaultDecision": "deny",
+     "enforcement": "No command path writes another member's economy_wallets row except the receiver credit inside a /pay the sender themselves initiated; role income via /collect-income excludes commerce-held roles so commerce never funds the game wallet."
+    }
+   ],
+   "messages": [
+    {
+     "id": "daily-claimed",
+     "trigger": "A member successfully claims a /daily, /weekly, or /monthly reward",
+     "surface": "Channel embed replying to the reward command",
+     "audience": "The claiming member and the channel",
+     "defaultTemplate": "Daily reward claimed, {member-name} — plus {amount} coins landed in your wallet and your streak is now {streak-count} days.",
+     "variables": [
+      "member-name",
+      "amount",
+      "streak-count"
+     ]
+    },
+    {
+     "id": "payment-sent",
+     "trigger": "A /pay transfer succeeds",
+     "surface": "Reply to /pay",
+     "audience": "The sender and the channel",
+     "defaultTemplate": "Sent {amount} coins to {receiver-name}, {sender-name} — delivered to their wallet exactly once.",
+     "variables": [
+      "amount",
+      "receiver-name",
+      "sender-name"
+     ]
+    },
+    {
+     "id": "insufficient-funds",
+     "trigger": "A member tries to pay, deposit, or withdraw more coins than they hold",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "Not enough coins, {member-name} — you have {balance} but that move needs {needed}.",
+     "variables": [
+      "member-name",
+      "balance",
+      "needed"
+     ]
+    },
+    {
+     "id": "payment-refunded",
+     "trigger": "A /pay debited the sender but the receiver credit failed",
+     "surface": "Ephemeral reply to the sender",
+     "audience": "The sender",
+     "defaultTemplate": "That transfer bounced, {member-name} — your {amount} coins are already back in your wallet and nothing was lost.",
+     "variables": [
+      "member-name",
+      "amount"
+     ]
+    },
+    {
+     "id": "wallet-unavailable",
+     "trigger": "The wallet backend is temporarily unreachable when a member runs a wallet command",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The vault is briefly jammed, {member-name} — give it a moment and try again.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "credit-retry-alert",
+     "trigger": "A reward credit keeps failing after the claim slot was taken",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: a {amount}-coin reward credit to {member-name} failed and is queued for automatic retry; nothing was double-credited and everything is logged.",
+     "variables": [
+      "amount",
+      "member-name"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "uninitialized",
+    "values": [
+     {
+      "id": "uninitialized",
+      "description": "The member has no economy_wallets row in this guild; the first wallet command lazily creates one under the guild-and-member advisory lock."
+     },
+     {
+      "id": "active",
+      "description": "The wallet row exists with a spendable wallet balance and a bank; earning, transfer, and banking commands all work."
+     },
+     {
+      "id": "reward-cooldown",
+      "description": "The member already claimed the current daily, weekly, or monthly slot; the atomic SET NX cooldown blocks a second claim until it expires."
+     },
+     {
+      "id": "transfer-degraded",
+      "description": "A /pay debited the sender but the receiver credit failed; the sender was refunded so no coins were created or destroyed."
+     },
+     {
+      "id": "disabled",
+      "description": "Economy disabled by configuration; wallet and reward commands explain the feature is off and no balances change."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "initialize-wallet",
+      "from": "uninitialized",
+      "to": "active",
+      "trigger": "The member runs their first wallet command",
+      "expectedEffect": "economy_get_or_create_wallet creates exactly one wallet row seeded with economy_starting_balance under the guild-and-member advisory lock, even under concurrent first-touch."
+     },
+     {
+      "id": "claim-reward",
+      "from": "active",
+      "to": "reward-cooldown",
+      "trigger": "The member runs /daily, /weekly, or /monthly with the cooldown clear",
+      "expectedEffect": "economy_add_balance atomically credits the base reward plus streak bonus exactly once and the SET NX cooldown slot is claimed so no second credit is possible this cycle."
+     },
+     {
+      "id": "cooldown-expires",
+      "from": "reward-cooldown",
+      "to": "active",
+      "trigger": "The reward interval elapses",
+      "expectedEffect": "The next claim is allowed again with the streak continued within its window or reset outside it; no catch-up double credit occurs."
+     },
+     {
+      "id": "transfer-coins",
+      "from": "active",
+      "to": "active",
+      "trigger": "The member runs /pay to another member with sufficient balance",
+      "expectedEffect": "The sender is debited and the receiver credited for one /pay interaction, applied exactly once even if the interaction is re-delivered."
+     },
+     {
+      "id": "transfer-bounces",
+      "from": "active",
+      "to": "transfer-degraded",
+      "trigger": "The receiver credit fails after the sender was debited",
+      "expectedEffect": "The sender is refunded the full amount so the play-money supply is unchanged and the member is told nothing was lost."
+     },
+     {
+      "id": "transfer-recovers",
+      "from": "transfer-degraded",
+      "to": "active",
+      "trigger": "The synchronous refund confirms",
+      "expectedEffect": "The sender's balance is restored exactly once; a retry of the transfer is the member's own next action, never an automatic double refund."
+     },
+     {
+      "id": "economy-toggled-off",
+      "from": "active",
+      "to": "disabled",
+      "trigger": "Owner turns economy_enabled off on the dashboard",
+      "expectedEffect": "Wallet and reward commands reply with the disabled explanation; all wallet, streak, and transaction rows are preserved untouched."
+     },
+     {
+      "id": "economy-toggled-on",
+      "from": "disabled",
+      "to": "active",
+      "trigger": "Owner turns economy_enabled back on",
+      "expectedEffect": "Balances, banks, and streaks resume exactly as they were with no coins gained or lost during the pause."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "pay-credit-failed",
+     "trigger": "economy_add_balance for the receiver fails after the sender was debited via economy_subtract_balance",
+     "expectedBehavior": "The sender is refunded the exact debited amount once through the same play-money ledger, sees the refund confirmation, and no coins are created or destroyed; the receiver is never credited for the failed attempt.",
+     "resultingState": "transfer-degraded",
+     "retry": "never",
+     "messageId": "payment-refunded",
+     "auditEvent": "economy.pay_refunded",
+     "ownerNotification": false
+    },
+    {
+     "id": "reward-credit-failed",
+     "trigger": "economy_add_balance fails while crediting a /daily, /weekly, or /monthly reward",
+     "expectedBehavior": "The reward credit retries automatically until it converges under the claim's idempotency, the member is never charged a full cooldown for an unpaid claim, and the reward is credited exactly once — never zero-paid-but-locked-out and never double-credited.",
+     "resultingState": "active",
+     "retry": "automatic",
+     "messageId": "credit-retry-alert",
+     "auditEvent": "economy.reward_credit_retried",
+     "ownerNotification": true
+    },
+    {
+     "id": "wallet-backend-unreachable",
+     "trigger": "Supabase is unreachable when a member runs a wallet command",
+     "expectedBehavior": "The command replies with the branded wallet-unavailable message, no coins move, and no half-created wallet row is left behind; after the dependency recovers a fresh command applies exactly once.",
+     "resultingState": "active",
+     "retry": "automatic",
+     "messageId": "wallet-unavailable",
+     "auditEvent": "economy.wallet_unavailable",
+     "ownerNotification": false
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "Wallet and reward behavior contracted here is directly observed working in the live test guild: /balance shows wallet and bank, /daily credits the configured reward with its streak bonus, /deposit and /withdraw move coins atomically, and /pay transfers exactly once.",
+     "artifact": "evidence/game-economy-wallet-rewards/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_wallets, economy_streaks, economy_transactions, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+     "artifact": "evidence/game-economy-wallet-rewards/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-wallet-rewards/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-wallet-rewards/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured embeds and messages for this domain match the owner's white-label brand kit, configured currency name, and voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-wallet-rewards/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over reward credits, transfers, and balance mutations",
+     "expectedObservation": "Replaying recorded triggers for this domain against the live stack leaves end state unchanged: no duplicate play-money credits, debits, or transfers.",
+     "artifact": "evidence/game-economy-wallet-rewards/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed wallet, streak, or transaction resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-wallet-rewards/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-wallet-rewards-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box, economy_enabled is on, a wallet starts at zero and is created lazily on first touch, /daily grants 500 play coins with a 5 percent per-step streak bonus, /pay transfers tax-free, and /deposit and /withdraw move coins between wallet and bank atomically.",
+     "expectedOutcome": "run-member-a's first /balance lazily creates exactly one wallet, /daily credits exactly 500 play coins, /deposit 200 then /withdraw 100 move coins with wallet and bank reflecting every step, and /pay 50 to run-member-b debits A and credits B exactly once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-a's first /balance lazily creates exactly one economy_wallets row via the advisory-locked economy_get_or_create_wallet, /daily credits exactly 500 play coins through economy_add_balance, /deposit 200 and /withdraw 100 move coins between wallet and bank atomically, and /pay 50 to run-member-b debits A and credits B exactly once with matching quality-weighted XP progress."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All wallet rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each wallet action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing wallet surface in this scenario shows the owner's configured brand name, currency name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, debits, or transfers; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, streak rows, transaction rows, reward embeds, and transfer confirmations) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-wallet-rewards-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Dashboard configuration takes live effect: the owner raises economy_daily_amount to 1000, economy_streak_bonus_pct to 10, and economy_pay_tax_pct to 5.",
+     "expectedOutcome": "Without a bot restart, the next /daily credits exactly 1000 play coins plus the 10 percent streak bonus and a /pay of 100 applies the 5 percent tax so the receiver gets exactly 95.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save with no restart, the next /daily credits exactly 1000 play coins plus the 10 percent streak bonus and /pay 100 applies the 5 percent tax so run-member-b receives exactly 95."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All wallet rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each wallet action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing wallet surface in this scenario shows the owner's configured brand name, currency name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, debits, or transfers; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, streak rows, transaction rows, reward embeds, and transfer confirmations) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-wallet-rewards-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "The owner can tighten stakes independently: a conservative economy_max_wallet cap and a raised economy_pay_tax_pct are saved while core wallet, reward, and banking commands keep working.",
+     "expectedOutcome": "/balance, /daily, and /deposit keep working normally, and a /withdraw that would push the wallet past the configured economy_max_wallet cap is clamped to the cap instead of overflowing.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "With a conservative economy_max_wallet cap and raised pay tax saved live, /balance, /daily, and /deposit keep working and a /withdraw that would exceed the cap is clamped to the cap rather than overflowing the wallet."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All wallet rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each wallet action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing wallet surface in this scenario shows the owner's configured brand name, currency name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, debits, or transfers; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, streak rows, transaction rows, reward embeds, and transfer confirmations) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-wallet-rewards-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid wallet configuration is rejected atomically: a negative economy_daily_amount and a pay tax over 100 percent never persist.",
+     "expectedOutcome": "The dashboard economy page surfaces a clear validation error, guild_config keeps its prior values byte-for-byte, and live bot behavior is unchanged on the very next reward command.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A /daily run immediately after the rejected save still credits the previous valid economy_daily_amount, proving no partial config write reached the bot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All wallet rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the rejected wallet configuration attempt with the validation reason; no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing wallet surface in this scenario shows the owner's configured brand name, currency name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, debits, or transfers; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, streak rows, transaction rows, reward embeds, and transfer confirmations) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-wallet-rewards-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "Wallets are protected from unauthorized actors: a member cannot mutate another member's wallet outside a consented /pay and a non-admin dashboard session cannot save economy settings.",
+     "expectedOutcome": "run-member-b's commands only ever move run-member-b's own coins, run-member-a's balance is unchanged apart from a single consented incoming /pay, and the non-admin dashboard save is refused.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-b's /pay, /deposit, and /withdraw only ever move run-member-b's own coins, run-member-a's /balance is identical before and after apart from a single consented incoming /pay, and the non-admin dashboard save returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All wallet rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied wallet configuration attempt with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing wallet surface in this scenario shows the owner's configured brand name, currency name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, debits, or transfers; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, streak rows, transaction rows, reward embeds, and transfer confirmations) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-wallet-rewards-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase dependency is unreachable, the wallet fails safe: no crash, friendly branded degradation, and no play-coin loss.",
+     "expectedOutcome": "With database access blocked, wallet commands reply with the branded wallet-unavailable message and no coins move; after restoring the connection a fresh /daily credits exactly once and applies.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /balance and /daily reply with the branded wallet-unavailable template in the owner's voice and no wallet mutation occurs; after restoration a fresh /daily credits exactly once."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All wallet rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each wallet action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed wallet command."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing wallet surface in this scenario shows the owner's configured brand name, currency name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, debits, or transfers; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, streak rows, transaction rows, reward embeds, and transfer confirmations) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-wallet-rewards-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A /pay whose receiver-credit step fails converges safely: the sender is refunded exactly once and a clean retry transfers exactly once.",
+     "expectedOutcome": "With a fault injected on the receiver credit, run-member-a's wallet shows the full amount refunded and run-member-b was never credited; the retried /pay then succeeds with exactly one debit and one credit.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the injected receiver-credit fault, run-member-a sees the branded refund confirmation and the wallet shows the full amount returned; the retried /pay then transfers exactly once with one debit and one credit."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All wallet rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each wallet action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing wallet surface in this scenario shows the owner's configured brand name, currency name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The debit, the refund, and the subsequent successful transfer each apply under their own idempotency key, so the play-money ledger shows debit, refund, then debit-plus-credit — never a double debit or a double refund."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, streak rows, transaction rows, reward embeds, and transfer confirmations) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-wallet-rewards-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replays never double-credit or double-transfer: re-delivering the /daily and /pay interactions leaves one reward credit and one transfer.",
+     "expectedOutcome": "After replaying the recorded /daily and /pay interactions, the reward was credited exactly once and the transfer applied exactly once, byte-identical to the pre-replay balances for both members.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The channel shows exactly one daily-reward embed and one payment confirmation despite the replays, and /balance totals for both members are unchanged from the pre-replay snapshot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All wallet rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each wallet action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing wallet surface in this scenario shows the owner's configured brand name, currency name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Idempotency keys on the daily credit, its SET NX cooldown slot, and the /pay interaction id each show one applied effect; replayed deliveries are recorded as deduplicated no-ops."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, streak rows, transaction rows, reward embeds, and transfer confirmations) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-wallet-rewards-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "Wallet state survives a full stack restart: wallet, bank, streak, and reward cooldowns all persist without a double-credit.",
+     "expectedOutcome": "After restarting bot and dashboard, /balance matches the pre-restart snapshot exactly, and a /daily whose cooldown spans the restart is still refused rather than paying a second time.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart /balance matches the pre-restart snapshot exactly for wallet, bank, and streak, and a /daily attempt whose cooldown spans the restart is still refused rather than paying a second time."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All wallet rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each wallet action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing wallet surface in this scenario shows the owner's configured brand name, currency name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, debits, or transfers; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, streak rows, transaction rows, reward embeds, and transfer confirmations) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-wallet-rewards-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent wallet actions are safe: simultaneous /daily claims credit exactly once, simultaneous first-touch commands create exactly one wallet, and a re-delivered /pay applies exactly once.",
+     "expectedOutcome": "Two simultaneous /daily invocations yield exactly one credit and one cooldown refusal, two simultaneous first-touch commands create exactly one wallet under the advisory lock, and two deliveries of one /pay interaction apply the transfer exactly once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Two simultaneous /daily invocations yield exactly one credit and one cooldown refusal, two simultaneous first-touch commands create exactly one wallet under the advisory lock, and two deliveries of one /pay interaction apply the transfer exactly once."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All wallet rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each wallet action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing wallet surface in this scenario shows the owner's configured brand name, currency name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, debits, or transfers; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, streak rows, transaction rows, reward embeds, and transfer confirmations) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-wallet-rewards-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "Wallets are strictly per-guild: earning and paying in a second guild never touches the first guild's wallet, streak, or transaction history.",
+     "expectedOutcome": "run-member-a earns and pays in test guild B; guild A's wallet row, streak, and /balance are unchanged, and guild B's wallet reflects only guild B's configured rewards.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A's /balance is identical before and after the guild B activity, and guild B's /daily credits guild B's wallet at guild B's configured amount."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_wallets, economy_streaks, or economy_transactions rows and vice versa; service-role probes confirm each guild's wallet and streak rows evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each wallet action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing wallet surface in this scenario shows the owner's configured brand name, currency name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, debits, or transfers; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, streak rows, transaction rows, reward embeds, and transfer confirmations) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-wallet-rewards-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed wallet resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed wallet rows, streak rows, transaction rows, reward embeds, and payment confirmations are deleted; a final sweep finds zero run-prefixed wallet resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed daily-reward embeds, payment confirmations, or balance replies after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All wallet rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each wallet action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing wallet surface in this scenario shows the owner's configured brand name, currency name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, debits, or transfers; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed wallet resource created by this domain's scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

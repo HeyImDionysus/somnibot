@@ -1,0 +1,743 @@
+{
+ "category": "game-economy",
+ "domains": [
+  {
+   "id": "game-economy-crafting",
+   "name": "Recipe Crafting",
+   "category": "game-economy",
+   "promise": "Members combine play-money-economy inventory materials into new virtual items with /craft against a seeded recipe book they browse with /recipes; ingredient consumption is strictly atomic so a craft either spends every listed material and produces its output exactly once or refunds every consumed material with no partial spend, an atomic per-member cooldown paces crafting, and the whole loop lives inside the fake game economy — crafted items are virtual, never real commerce goods.",
+   "controls": [
+    {
+     "id": "crafting-enabled",
+     "description": "Master switch mapped to the economy_crafting_enabled guild_config key; when off, /craft and /recipes explain crafting is not enabled and no inventory changes.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "crafting-cooldown-seconds",
+     "description": "Fallback crafting cooldown in seconds mapped to the economy_crafting_cooldown_seconds guild_config key; applies to recipes that do not carry their own per-recipe cooldown_seconds.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 86400
+     }
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "crafting-enabled",
+     "value": true,
+     "rationale": "Crafting is a flagship game-economy loop and ships on for the maximal out-of-box experience; owners can switch it off at any time from the dashboard."
+    },
+    {
+     "controlId": "crafting-cooldown-seconds",
+     "value": 60,
+     "rationale": "A conservative one-minute fallback cooldown paces crafting without punishing casual players; matches the economy_crafting_cooldown_seconds column default and is fully owner-tunable up to a day."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "use-crafting-commands",
+     "actor": "Any guild member",
+     "action": "Run /craft and /recipes",
+     "defaultDecision": "allow",
+     "enforcement": "Crafting slash commands respond for every member; /craft only ever reads and mutates the invoking member's own inventory rows keyed to their user id."
+    },
+    {
+     "id": "configure-crafting",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Edit crafting settings on the dashboard economy crafting page",
+     "defaultDecision": "allow",
+     "enforcement": "Dashboard session auth plus Supabase RLS restrict guild_config writes to authorized guild administrators."
+    },
+    {
+     "id": "consume-others-inventory",
+     "actor": "Any guild member",
+     "action": "Consume another member's inventory materials through a craft",
+     "defaultDecision": "deny",
+     "enforcement": "Every /craft handler resolves inventory and the atomic economy_decrement_inventory RPC by the invoking member's own user id; no code path decrements another member's inventory."
+    }
+   ],
+   "messages": [
+    {
+     "id": "item-crafted",
+     "trigger": "A member successfully crafts a recipe",
+     "surface": "Channel embed replying to /craft",
+     "audience": "The crafting member and the channel",
+     "defaultTemplate": "You crafted {output-qty}x {recipe-name}, {member-name}! Your materials were spent and the item is in your inventory.",
+     "variables": [
+      "output-qty",
+      "recipe-name",
+      "member-name"
+     ]
+    },
+    {
+     "id": "missing-materials",
+     "trigger": "A member runs /craft without enough ingredients",
+     "surface": "Channel embed replying to /craft",
+     "audience": "The invoking member",
+     "defaultTemplate": "You don't have enough materials to craft {recipe-name} yet, {member-name}: {missing-list}.",
+     "variables": [
+      "recipe-name",
+      "member-name",
+      "missing-list"
+     ]
+    },
+    {
+     "id": "craft-on-cooldown",
+     "trigger": "A member runs /craft while their crafting cooldown is still active",
+     "surface": "Channel embed replying to /craft",
+     "audience": "The invoking member",
+     "defaultTemplate": "Easy there, {member-name} — you can craft again in {wait-time}.",
+     "variables": [
+      "member-name",
+      "wait-time"
+     ]
+    },
+    {
+     "id": "materials-refunded",
+     "trigger": "A craft consumed ingredients but a later step failed, so every consumed ingredient was refunded",
+     "surface": "Channel embed replying to /craft",
+     "audience": "The invoking member",
+     "defaultTemplate": "That craft didn't complete, {member-name} — every material for {recipe-name} was refunded to your inventory. Try again.",
+     "variables": [
+      "member-name",
+      "recipe-name"
+     ]
+    },
+    {
+     "id": "crafting-unavailable",
+     "trigger": "The crafting backend is temporarily unreachable when a member runs a crafting command",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The workbench is catching its breath, {member-name} — give it a moment and try again.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "crafting-degraded",
+     "trigger": "Crafting output writes keep failing for the guild and members are being auto-refunded",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: crafting for {recipe-name} keeps failing to finalize and members are being auto-refunded; nothing was double-spent and everything is logged.",
+     "variables": [
+      "recipe-name"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "idle",
+    "values": [
+     {
+      "id": "idle",
+      "description": "The member has no craft in flight and no active cooldown; /craft and /recipes are ready."
+     },
+     {
+      "id": "crafting",
+      "description": "A /craft is executing: the atomic cooldown lock is held and ingredients are being decremented atomically before the output is written."
+     },
+     {
+      "id": "on-cooldown",
+      "description": "The member crafted recently; the atomic per-member cooldown lock is held and further /craft calls are refused until it expires."
+     },
+     {
+      "id": "refunded",
+      "description": "A craft failed mid-way; every already-consumed ingredient was refunded exactly once, no output was produced, and the member was notified."
+     },
+     {
+      "id": "disabled",
+      "description": "Crafting disabled by configuration; /craft and /recipes explain the feature is off and no inventory changes."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "begin-craft",
+      "from": "idle",
+      "to": "crafting",
+      "trigger": "Member runs /craft for a recipe they can afford with no active cooldown",
+      "expectedEffect": "An atomic SET PX NX cooldown lock is acquired and each listed ingredient is decremented atomically via economy_decrement_inventory."
+     },
+     {
+      "id": "craft-succeeds",
+      "from": "crafting",
+      "to": "on-cooldown",
+      "trigger": "Every ingredient decrement and the output economy_upsert_inventory succeed",
+      "expectedEffect": "The output item is added to the member's inventory exactly once, a craft transaction is recorded, quest progress is tracked, and the cooldown lock holds."
+     },
+     {
+      "id": "craft-refunds",
+      "from": "crafting",
+      "to": "refunded",
+      "trigger": "An ingredient decrement or the output upsert fails part-way through the craft",
+      "expectedEffect": "Every already-consumed ingredient is refunded exactly once via economy_upsert_inventory, no output is produced, and no partial spend persists."
+     },
+     {
+      "id": "craft-refused-cooldown",
+      "from": "on-cooldown",
+      "to": "on-cooldown",
+      "trigger": "Member runs /craft again before the cooldown lock expires",
+      "expectedEffect": "The branded cooldown message replies with the remaining wait, no ingredient is consumed, and no output is produced."
+     },
+     {
+      "id": "cooldown-clears-after-success",
+      "from": "on-cooldown",
+      "to": "idle",
+      "trigger": "The per-member cooldown window elapses after a successful craft",
+      "expectedEffect": "The cooldown lock expires and /craft is available again."
+     },
+     {
+      "id": "cooldown-clears-after-refund",
+      "from": "refunded",
+      "to": "idle",
+      "trigger": "The per-member cooldown window set at craft start elapses after a refunded craft",
+      "expectedEffect": "The cooldown lock expires and /craft is available again with the refunded materials intact."
+     },
+     {
+      "id": "crafting-toggled-off",
+      "from": "idle",
+      "to": "disabled",
+      "trigger": "Owner turns economy_crafting_enabled off on the dashboard",
+      "expectedEffect": "/craft and /recipes reply with the disabled explanation; recipe and inventory rows are preserved untouched."
+     },
+     {
+      "id": "crafting-toggled-on",
+      "from": "disabled",
+      "to": "idle",
+      "trigger": "Owner turns economy_crafting_enabled back on",
+      "expectedEffect": "Crafting resumes with the seeded recipe book and all prior inventory intact."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "ingredient-consume-failed",
+     "trigger": "A mid-consume economy_decrement_inventory call fails because another action spent the material first",
+     "expectedBehavior": "Every already-consumed ingredient is refunded exactly once via economy_upsert_inventory, no output is produced, the member is told to retry, and no partial spend is left behind.",
+     "resultingState": "refunded",
+     "retry": "never",
+     "messageId": "materials-refunded",
+     "auditEvent": "crafting.craft_refunded",
+     "ownerNotification": false
+    },
+    {
+     "id": "output-write-failed",
+     "trigger": "The economy_upsert_inventory call for the crafted output fails after ingredients were consumed",
+     "expectedBehavior": "All consumed ingredients are refunded exactly once, no output is added, the member sees the refund notice, and if these output writes keep failing the owner is alerted once.",
+     "resultingState": "refunded",
+     "retry": "operator",
+     "messageId": "crafting-degraded",
+     "auditEvent": "crafting.output_write_failed",
+     "ownerNotification": true
+    },
+    {
+     "id": "crafting-backend-unreachable",
+     "trigger": "Supabase is unreachable when a member runs /craft or /recipes",
+     "expectedBehavior": "The command replies with the branded crafting-unavailable message, no inventory or cooldown mutation occurs, the outage raises a single owner degradation alert, and a fresh craft after recovery consumes exactly once.",
+     "resultingState": "idle",
+     "retry": "automatic",
+     "messageId": "crafting-unavailable",
+     "auditEvent": "crafting.backend_unavailable",
+     "ownerNotification": true
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "Crafting behavior contracted here is directly observed working in the live test guild: /recipes lists the seeded recipe book, /craft consumes exactly the listed ingredients and adds the output to inventory, an insufficient craft is refused, a mid-craft failure refunds every material, and the per-member cooldown paces repeat crafts.",
+     "artifact": "evidence/game-economy-crafting/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_recipes, economy_inventory, economy_items, economy_transactions, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+     "artifact": "evidence/game-economy-crafting/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-crafting/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-crafting/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured embeds and messages for this domain match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-crafting/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over ingredient consumption, crafted output, and craft transactions",
+     "expectedObservation": "Replaying recorded craft triggers for this domain against the live stack leaves end state unchanged: the atomic per-member cooldown lock rejects the duplicate within its window so ingredients are consumed once and output produced once.",
+     "artifact": "evidence/game-economy-crafting/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-crafting/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-crafting-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box with crafting enabled, /recipes seeds and lists the default recipe book, /craft consumes exactly the listed ingredients and adds the output to inventory, and the fallback 60-second cooldown paces repeat crafts.",
+     "expectedOutcome": "run-member-a, granted four Iron Ore by the fixture, runs /recipes to see the seeded book, then /craft \"Iron Bar\" consumes exactly 4 Iron Ore and adds exactly 1 Iron Bar; an immediate second /craft is refused by the active cooldown.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/recipes shows the seeded recipe book grouped by category, /craft \"Iron Bar\" replies with the branded crafted embed while inventory drops by exactly 4 Iron Ore and gains exactly 1 Iron Bar, and an immediate repeat /craft returns the branded cooldown message with the remaining wait."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All crafting rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each crafting action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing crafting surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's craft events yields no duplicate ingredient consumption, crafted output, or craft transactions; the atomic per-member cooldown lock shows exactly one effect per logical craft."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (recipe rows, inventory rows, craft transactions, and craft embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-crafting-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Dashboard configuration takes live effect: the owner lowers economy_crafting_cooldown_seconds, the fallback cooldown for recipes without their own per-recipe cooldown.",
+     "expectedOutcome": "After the owner sets the fallback cooldown to 5 seconds and the short config cache window turns over, a fallback-cooldown recipe can be re-crafted after 5 seconds instead of 60, with no bot restart.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save and the brief config cache refresh, a /craft of a fallback-cooldown recipe succeeds again 5 seconds after the prior craft with no restart, while the same repeat inside 5 seconds still returns the branded cooldown message."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All crafting rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each crafting action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing crafting surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's craft events yields no duplicate ingredient consumption, crafted output, or craft transactions; the atomic per-member cooldown lock shows exactly one effect per logical craft."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (recipe rows, inventory rows, craft transactions, and craft embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-crafting-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "The owner can switch crafting off cleanly: with economy_crafting_enabled off, /craft and /recipes both explain the feature is disabled and no inventory changes.",
+     "expectedOutcome": "After the owner disables crafting, /craft and /recipes each return a branded disabled reply, no ingredient is consumed and no output produced, and the seeded recipe and inventory rows are preserved untouched.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/craft and /recipes each return the branded crafting-not-enabled reply, a /craft attempt leaves inventory byte-identical, and re-enabling crafting restores the full recipe book and prior inventory."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All crafting rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each crafting action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing crafting surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's craft events yields no duplicate ingredient consumption, crafted output, or craft transactions; the atomic per-member cooldown lock shows exactly one effect per logical craft."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (recipe rows, inventory rows, craft transactions, and craft embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-crafting-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid crafting configuration is rejected atomically: a negative fallback cooldown never persists to economy_crafting_cooldown_seconds.",
+     "expectedOutcome": "The dashboard crafting page surfaces a clear validation error or clamps the value, guild_config keeps its prior cooldown byte-for-byte, and live bot behavior is unchanged on the very next craft.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A /craft run immediately after the rejected save still paces on the previous valid cooldown, proving no partial write reached the bot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All crafting rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the rejected crafting configuration attempt with the validation reason; no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing crafting surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's craft events yields no duplicate ingredient consumption, crafted output, or craft transactions; the atomic per-member cooldown lock shows exactly one effect per logical craft."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (recipe rows, inventory rows, craft transactions, and craft embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-crafting-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "Crafting is protected from unauthorized actors: a member's craft only ever consumes their own inventory, and a non-admin dashboard session cannot save crafting settings.",
+     "expectedOutcome": "run-member-b's /craft only ever decrements run-member-b's own inventory, run-member-a's inventory is byte-identical afterward, and the non-admin dashboard save is refused.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-b's /craft consumes only run-member-b's own materials, run-member-a's inventory is identical before and after, and the non-admin dashboard save returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All crafting rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied crafting configuration attempt with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing crafting surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's craft events yields no duplicate ingredient consumption, crafted output, or craft transactions; the atomic per-member cooldown lock shows exactly one effect per logical craft."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (recipe rows, inventory rows, craft transactions, and craft embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-crafting-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase dependency is unreachable, crafting fails safe: no crash, friendly branded degradation, and no inventory loss.",
+     "expectedOutcome": "With database access blocked, /craft and /recipes reply with the branded crafting-unavailable message and no inventory mutation occurs; after restoring the connection a fresh /craft consumes exactly once and applies.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /craft and /recipes reply with the branded crafting-unavailable template in the owner's voice and no inventory mutation occurs; after restoration a fresh /craft consumes exactly once and adds its output."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All crafting rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each crafting action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed craft command."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing crafting surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's craft events yields no duplicate ingredient consumption, crafted output, or craft transactions; the atomic per-member cooldown lock shows exactly one effect per logical craft."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (recipe rows, inventory rows, craft transactions, and craft embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-crafting-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A craft whose output step fails converges safely: every consumed ingredient is refunded exactly once and a clean retry crafts exactly one output for exactly one consumption.",
+     "expectedOutcome": "With a fault injected on the output economy_upsert_inventory, run-member-a's consumed ingredients are all refunded and no output exists; the retried /craft then succeeds with exactly one ingredient consumption and one output.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the injected output fault, run-member-a sees the branded materials-refunded notice and inventory shows every ingredient back and no output; the clean retry crafts exactly one output for exactly one consumption."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All crafting rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each crafting action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing crafting surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The refund restores each consumed ingredient exactly once and the subsequent successful craft consumes exactly once, so inventory shows consume, refund, consume — never a double consume and never a double refund."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (recipe rows, inventory rows, craft transactions, and craft embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-crafting-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replays never double-consume or double-produce: re-delivering the same /craft interaction leaves exactly one ingredient consumption and one crafted output.",
+     "expectedOutcome": "After replaying the recorded /craft interaction, run-member-a's inventory shows exactly one ingredient consumption and one output, byte-identical to the pre-replay state, because the re-delivery re-enters the atomic cooldown lock and is rejected as a duplicate within the window.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The channel shows exactly one crafted embed despite the replay, and inventory totals are unchanged from the pre-replay snapshot — no ingredient is consumed twice and no output is produced twice."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All crafting rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each crafting action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing crafting surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The atomic SET PX NX cooldown lock on economy:craft:{guild}:{user} rejects the replayed delivery as a deduplicated no-op within the cooldown window, so the ingredient decrement and output upsert each show exactly one applied effect."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (recipe rows, inventory rows, craft transactions, and craft embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-crafting-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "Crafting state survives a full stack restart: the seeded recipe book, inventory, and the in-flight cooldown lock all persist without a double-consume.",
+     "expectedOutcome": "After restarting bot and dashboard, /recipes matches the pre-restart snapshot exactly, inventory is unchanged, and a craft whose cooldown window spans the restart is still refused rather than allowed to consume a second time.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart /recipes and inventory match the pre-restart snapshot exactly, and a /craft inside the still-active cooldown window returns the branded cooldown message instead of consuming a second time."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All crafting rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each crafting action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing crafting surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's craft events yields no duplicate ingredient consumption, crafted output, or craft transactions; the atomic per-member cooldown lock shows exactly one effect per logical craft."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (recipe rows, inventory rows, craft transactions, and craft embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-crafting-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent crafts are safe: two simultaneous /craft calls for the same recipe consume ingredients exactly once and produce output exactly once.",
+     "expectedOutcome": "Two simultaneous /craft invocations for one recipe yield exactly one crafted output and one cooldown refusal, and the atomic ingredient decrement guarantees the ingredients are consumed exactly once with no free craft.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Exactly one crafted embed and one cooldown refusal appear for the simultaneous crafts, and inventory shows one ingredient consumption and one output — never a double consume and never a double produce."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All crafting rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each crafting action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing crafting surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's craft events yields no duplicate ingredient consumption, crafted output, or craft transactions; the atomic per-member cooldown lock shows exactly one effect per logical craft."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (recipe rows, inventory rows, craft transactions, and craft embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-crafting-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "Crafting is strictly per-guild: crafting in a second guild never touches the first guild's recipe book, inventory, or transactions.",
+     "expectedOutcome": "run-member-a crafts in test guild B; guild A's recipe rows, inventory, and /recipes output are unchanged, and guild B's craft consumes only guild B's inventory under guild B's configured cooldown.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A's inventory and /recipes are identical before and after the guild B activity, and guild B's craft consumes guild B's inventory under guild B's configured cooldown."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_recipes and economy_inventory rows and vice versa; service-role probes confirm each guild's crafting rows evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each crafting action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing crafting surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's craft events yields no duplicate ingredient consumption, crafted output, or craft transactions; the atomic per-member cooldown lock shows exactly one effect per logical craft."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (recipe rows, inventory rows, craft transactions, and craft embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-crafting-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed crafting resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed recipe rows, inventory rows, craft transactions, and craft embeds are deleted; a final sweep finds zero run-prefixed crafting resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed craft embeds, recipe-book listings, or refund notices after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All crafting rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each crafting action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing crafting surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's craft events yields no duplicate ingredient consumption, crafted output, or craft transactions; the atomic per-member cooldown lock shows exactly one effect per logical craft."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed crafting resource created by this domain's scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

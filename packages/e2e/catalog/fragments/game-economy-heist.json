@@ -1,0 +1,863 @@
+{
+ "category": "game-economy",
+ "domains": [
+  {
+   "id": "game-economy-heist",
+   "name": "Strategic Crew Heist",
+   "category": "game-economy",
+   "promise": "A guild crew pulls off strategic play-money heists: any member spends play-money coins to /heist start a job against a randomly chosen target, teammates /heist join within the recruiting window — each freezing the exact entry fee they paid on their own economy_heist_participants row — and once the window closes the claimed crew shares one frozen outcome. A success pays every frozen crew member the frozen per-person payout_each exactly once, a failure forfeits their entry fees, and an under-crewed or cancelled job refunds each participant their own frozen entry_fee_paid; late joins that never made the frozen crew are reconciled and refunded rather than dragged into the outcome. Every coin is play-money inside the fake game economy — never real commerce, never a market-sellable asset, and a commerce-held role earns no heist income — and money plus heist state stay idempotent under replay, crash, and concurrent join or resolve.",
+   "controls": [
+    {
+     "id": "economy-heist-enabled",
+     "description": "Master switch for heists (config key economy_heist_enabled); when off, /heist commands explain the feature is disabled and no heist can start or resolve.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "economy-heist-entry-fee",
+     "description": "Play-money coin cost each member pays to /heist start or /heist join (config key economy_heist_entry_fee); frozen per participant as entry_fee_paid at join time.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000000
+     }
+    },
+    {
+     "id": "economy-heist-base-payout",
+     "description": "Base play-money coin payout (config key economy_heist_base_payout) scaled by the randomly chosen target's payout modifier and split among the crew on success.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 10000000
+     }
+    },
+    {
+     "id": "economy-heist-success-base-pct",
+     "description": "Single-member base success percentage (config key economy_heist_success_base_pct); the derived chance is base plus target difficulty modifier plus 7 per extra crew member, capped at 95.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 95
+     }
+    },
+    {
+     "id": "economy-heist-join-window-secs",
+     "description": "Seconds the recruiting window stays open for /heist join before the heist is claimed and resolved (config key economy_heist_join_window_secs).",
+     "valueType": "integer",
+     "constraints": {
+      "min": 10,
+      "max": 3600
+     }
+    },
+    {
+     "id": "economy-heist-cooldown-seconds",
+     "description": "Seconds a guild must wait after a heist resolves before another /heist start is allowed (config key economy_heist_cooldown_seconds).",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 86400
+     }
+    },
+    {
+     "id": "economy-heist-min-participants",
+     "description": "Minimum crew size required for a heist to attempt resolution (config key economy_heist_min_participants); below this the heist cancels and refunds every entry fee.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 50
+     }
+    },
+    {
+     "id": "economy-heist-max-participants",
+     "description": "Maximum crew size a single heist admits (config key economy_heist_max_participants); further /heist join attempts are refused as crew-full.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 50
+     }
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "economy-heist-enabled",
+     "value": true,
+     "rationale": "Crew heists are a flagship social game-economy loop and ship on for the maximal out-of-box experience; the stakes stay real-but-recoverable because every fee is refunded on any non-failure outcome."
+    },
+    {
+     "controlId": "economy-heist-entry-fee",
+     "value": 100,
+     "rationale": "A conservative, fully configurable wager that makes joining a deliberate choice without punishing casual players, and is frozen per member so a mid-window edit never changes what anyone already risked."
+    },
+    {
+     "controlId": "economy-heist-base-payout",
+     "value": 500,
+     "rationale": "A meaningful play-coin reward the target modifier scales from, giving a quick early win for a small crew and a long-term chase on the hardest targets."
+    },
+    {
+     "controlId": "economy-heist-success-base-pct",
+     "value": 40,
+     "rationale": "A balanced solo baseline: risky alone, clearly better with a bigger crew, so recruiting always feels worthwhile while staying a conservative bet."
+    },
+    {
+     "controlId": "economy-heist-join-window-secs",
+     "value": 60,
+     "rationale": "A minute is long enough for a guild to rally a crew and short enough to keep the tension of a live heist."
+    },
+    {
+     "controlId": "economy-heist-cooldown-seconds",
+     "value": 300,
+     "rationale": "A five-minute lull keeps heists a special event rather than a coin faucet, protecting the play-money economy from grind spam."
+    },
+    {
+     "controlId": "economy-heist-min-participants",
+     "value": 2,
+     "rationale": "A heist is a crew activity; requiring at least two keeps it cooperative, and anything short of the minimum refunds everyone rather than gambling a lone member."
+    },
+    {
+     "controlId": "economy-heist-max-participants",
+     "value": 8,
+     "rationale": "Eight is a lively crew ceiling that keeps per-person payouts meaningful; owners can widen or narrow it freely."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "use-heist-commands",
+     "actor": "Any guild member",
+     "action": "Run /heist start, /heist join, and /heist status",
+     "defaultDecision": "allow",
+     "enforcement": "Heist slash commands respond for every member; heist_start and heist_join debit and freeze the entry fee on the invoking member's own participant row, and no command lets a member act on another member's wallet or crew slot."
+    },
+    {
+     "id": "configure-heist",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Edit heist settings on the dashboard economy heist page",
+     "defaultDecision": "allow",
+     "enforcement": "Dashboard session auth plus Supabase RLS restrict guild_config writes to authorized guild administrators."
+    },
+    {
+     "id": "collect-others-share",
+     "actor": "Any guild member",
+     "action": "Redirect, double-claim, or collect another crew member's frozen payout or refund",
+     "defaultDecision": "deny",
+     "enforcement": "heist_credit_participant is keyed to each participant's own heist and user id under the paid_at guard, and every refund reads that row's own frozen entry_fee_paid; no code path pays one member's share to another wallet."
+    }
+   ],
+   "messages": [
+    {
+     "id": "heist-recruiting",
+     "trigger": "A member starts a heist with /heist start and pays the entry fee",
+     "surface": "Channel embed replying to /heist start",
+     "audience": "The initiator and the channel",
+     "defaultTemplate": "{initiator-name} is assembling a crew to hit {target-name} for up to {payout} play coins — join for {entry-fee}, base odds {base-chance}%. Use /heist join within {join-window} seconds!",
+     "variables": [
+      "initiator-name",
+      "target-name",
+      "payout",
+      "entry-fee",
+      "base-chance",
+      "join-window"
+     ]
+    },
+    {
+     "id": "heist-joined",
+     "trigger": "A member joins the recruiting crew with /heist join",
+     "surface": "Channel embed replying to /heist join",
+     "audience": "The joining member and the channel",
+     "defaultTemplate": "{member-name} joined the crew as the {role}! The crew is now {crew-size} strong with {success-chance}% success odds.",
+     "variables": [
+      "member-name",
+      "role",
+      "crew-size",
+      "success-chance"
+     ]
+    },
+    {
+     "id": "heist-success",
+     "trigger": "A heist resolves as a success",
+     "surface": "Channel embed announcing resolution",
+     "audience": "The crew and the channel",
+     "defaultTemplate": "Heist success at {target-name}! Each of the {crew-size} crew members pockets {payout-each} play coins.",
+     "variables": [
+      "target-name",
+      "crew-size",
+      "payout-each"
+     ]
+    },
+    {
+     "id": "heist-failed",
+     "trigger": "A heist resolves as a failure",
+     "surface": "Channel embed announcing resolution",
+     "audience": "The crew and the channel",
+     "defaultTemplate": "The heist on {target-name} fell apart — every crew member forfeits their {entry-fee} play-coin entry fee.",
+     "variables": [
+      "target-name",
+      "entry-fee"
+     ]
+    },
+    {
+     "id": "heist-cancelled",
+     "trigger": "The join window closes with fewer than the minimum crew members",
+     "surface": "Channel embed announcing cancellation",
+     "audience": "The crew and the channel",
+     "defaultTemplate": "Heist cancelled — only {crew-size} joined but {min-crew} were needed. Every entry fee has been refunded.",
+     "variables": [
+      "crew-size",
+      "min-crew"
+     ]
+    },
+    {
+     "id": "heist-start-refunded",
+     "trigger": "The entry fee was debited but the atomic heist_start insert failed",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "That heist never got off the ground, {member-name} — your {entry-fee} play coins are already back in your wallet.",
+     "variables": [
+      "member-name",
+      "entry-fee"
+     ]
+    },
+    {
+     "id": "heist-unavailable",
+     "trigger": "The heist backend is temporarily unreachable when a member runs a heist command",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The crew's comms are down, {member-name} — give it a moment and try /heist again.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "heist-payout-delayed",
+     "trigger": "One or more crew payouts or refunds keep failing after a heist is resolved",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: {failed-count} heist payout(s) on {target-name} failed and are queued for automatic retry; nothing was double-paid and every frozen amount is logged.",
+     "variables": [
+      "failed-count",
+      "target-name"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "idle",
+    "values": [
+     {
+      "id": "idle",
+      "description": "No active heist for this guild; /heist start can begin one once the cooldown has elapsed, and /heist status shows the last resolved heist."
+     },
+     {
+      "id": "recruiting",
+      "description": "A heist is open; members join with /heist join within the window, each atomically debited and freezing their own entry_fee_paid on a participant row."
+     },
+     {
+      "id": "resolving",
+      "description": "The window closed and heist_claim_for_resolution atomically flipped recruiting to in_progress, freezing the outcome and payout_each on the row; payouts and refunds settle idempotently."
+     },
+     {
+      "id": "succeeded",
+      "description": "The heist resolved as a success; every frozen crew member was credited their frozen payout_each exactly once and the row was finalized once."
+     },
+     {
+      "id": "failed",
+      "description": "The heist resolved as a failure; every crew member forfeited their entry fee, nothing was credited, and the row was finalized once."
+     },
+     {
+      "id": "cancelled",
+      "description": "The window closed below the minimum crew; every participant was refunded their own frozen entry_fee_paid exactly once before the row was finalized."
+     },
+     {
+      "id": "disabled",
+      "description": "Heists disabled by configuration; /heist commands explain the feature is off and no heist can start or resolve."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "start-heist",
+      "from": "idle",
+      "to": "recruiting",
+      "trigger": "A member runs /heist start with sufficient play-money balance and the cooldown elapsed",
+      "expectedEffect": "heist_start atomically debits exactly one entry fee and creates the heist plus the initiator participant row (freezing entry_fee_paid) in one transaction, then the recruiting embed posts."
+     },
+     {
+      "id": "join-crew",
+      "from": "recruiting",
+      "to": "recruiting",
+      "trigger": "A member runs /heist join inside the window",
+      "expectedEffect": "heist_join re-checks recruiting under the heist-row lock, debits and freezes the member's own entry_fee_paid, inserts one participant row, and derives the new success chance from the participant-row count — no fee is charged if the claim already won the lock."
+     },
+     {
+      "id": "claim-for-resolution",
+      "from": "recruiting",
+      "to": "resolving",
+      "trigger": "The join window expires and a single resolver claims the heist",
+      "expectedEffect": "heist_claim_for_resolution flips recruiting to in_progress under FOR UPDATE for exactly one caller, freezing the outcome and payout_each and stamping claimed_at on the crew set."
+     },
+     {
+      "id": "resolve-success",
+      "from": "resolving",
+      "to": "succeeded",
+      "trigger": "The frozen outcome is success and every credit settles",
+      "expectedEffect": "heist_credit_participant pays each frozen crew member payout_each idempotently under the paid_at guard, then heist_finalize_resolution performs the single terminal flip and the success embed announces once."
+     },
+     {
+      "id": "resolve-failed",
+      "from": "resolving",
+      "to": "failed",
+      "trigger": "The frozen outcome is failure",
+      "expectedEffect": "No credits are made, heist_finalize_resolution performs the single terminal flip, and the failure embed announces the forfeited entry fees once."
+     },
+     {
+      "id": "resolve-cancelled",
+      "from": "resolving",
+      "to": "cancelled",
+      "trigger": "The claimed crew is below economy_heist_min_participants",
+      "expectedEffect": "Each frozen participant is refunded their own entry_fee_paid idempotently under the paid_at guard, then heist_finalize_resolution flips the row terminal once and the cancellation embed announces the refunds."
+     },
+     {
+      "id": "heist-toggled-off",
+      "from": "idle",
+      "to": "disabled",
+      "trigger": "Owner turns economy_heist_enabled off on the dashboard",
+      "expectedEffect": "New /heist commands reply with the disabled explanation; existing heist and participant rows are preserved untouched."
+     },
+     {
+      "id": "heist-toggled-on",
+      "from": "disabled",
+      "to": "idle",
+      "trigger": "Owner turns economy_heist_enabled back on",
+      "expectedEffect": "Heists can start again on the configured cooldown with all prior heist history intact."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "heist-start-insert-failed",
+     "trigger": "The entry fee debit succeeds but the atomic heist_start insert fails or a concurrent start already holds the active-heist slot",
+     "expectedBehavior": "The debited entry fee is refunded exactly once through economy_add_balance, the initiator sees the refund confirmation, and no orphan heist or participant row exists.",
+     "resultingState": "idle",
+     "retry": "never",
+     "messageId": "heist-start-refunded",
+     "auditEvent": "heist.start_refunded",
+     "ownerNotification": false
+    },
+    {
+     "id": "crew-settlement-failed",
+     "trigger": "One or more heist_credit_participant calls fail while paying a success or refunding a cancellation",
+     "expectedBehavior": "The heist stays in_progress with its frozen decision and payout_each; unpaid rows keep paid_at NULL and are flagged payout_failed, a bounded in-process retry (then resumePendingHeists on restart) settles only the still-unpaid members, already-paid crew are never double-credited, and the resolution is not announced until every credit lands.",
+     "resultingState": "resolving",
+     "retry": "automatic",
+     "messageId": "heist-payout-delayed",
+     "auditEvent": "heist.settlement_retry_scheduled",
+     "ownerNotification": true
+    },
+    {
+     "id": "resolve-claim-failed",
+     "trigger": "heist_claim_for_resolution hits a transient error at the join-window expiry",
+     "expectedBehavior": "No outcome is ever guessed; the row is left recruiting-and-expired and a bounded in-process retry re-enters resolution so the guild is not blocked, and the heist is still claimed exactly once when the retry succeeds.",
+     "resultingState": "recruiting",
+     "retry": "automatic",
+     "messageId": "heist-unavailable",
+     "auditEvent": "heist.resolve_retry_scheduled",
+     "ownerNotification": false
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "Crew heist behavior contracted here is directly observed working in the live test guild: /heist start opens a recruiting crew for play coins, /heist join freezes each member's entry fee, /heist status shows derived crew size and odds, and after the window the heist resolves to exactly one success, failure, or cancellation announcement with the correct play-money movements.",
+     "artifact": "evidence/game-economy-heist/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_heists, economy_heist_participants, economy_wallets, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+     "artifact": "evidence/game-economy-heist/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-heist/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-heist/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured embeds and messages for this domain match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-heist/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over messages, debits, and payouts",
+     "expectedObservation": "Replaying recorded triggers for this domain against the live stack leaves end state unchanged: no duplicate play-money debits, crew payouts, or refunds, proven by the entry_fee_paid, claimed_at, and paid_at guards.",
+     "artifact": "evidence/game-economy-heist/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-heist/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-heist-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box, /heist start costs 100 play coins against a random target scaled from base payout 500, base odds are 40% plus 7% per extra crew member, the join window is 60 seconds, the cooldown is 300 seconds, and the crew must be at least 2 and at most 8.",
+     "expectedOutcome": "run-member-a starts a heist paying exactly 100 play coins, run-member-b joins for exactly 100 with the crew showing 2 members and odds anchored on 40% plus 7%, and after the 60-second window the heist resolves to exactly one branded announcement that credits each frozen crew member their frozen payout_each on success.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-a's /heist start debits exactly 100 play coins and posts the recruiting embed, run-member-b's /heist join debits exactly 100 with /heist status showing a 2-member crew at the derived odds, and the resolution posts exactly one success, failure, or cancellation embed matching the frozen outcome and its play-money effects."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All heist rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_heists and economy_heist_participants rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each heist action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing heist surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, crew payouts, or refunds; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (heist rows, participant rows, wallet entries, and channel announcements) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-heist-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Dashboard configuration takes live effect: the owner sets entry fee 250, base payout 1000, success base 55, and minimum participants 3.",
+     "expectedOutcome": "Without a bot restart, the next /heist start debits exactly 250 play coins, advertises a payout scaled from 1000 with 55% base odds, and a crew of only 2 resolves to a branded cancellation that refunds each member their own frozen 250.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save with no restart, /heist start debits exactly 250 play coins and the recruiting embed shows the 1000-scaled payout and 55% base odds; a 2-member crew then resolves to a branded cancellation refunding each member exactly their frozen 250."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All heist rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_heists and economy_heist_participants rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each heist action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing heist surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, crew payouts, or refunds; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (heist rows, participant rows, wallet entries, and channel announcements) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-heist-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "The owner can retune pacing pieces independently: cooldown 0 seconds, join window 120 seconds, and maximum participants 3.",
+     "expectedOutcome": "With cooldown at 0 a second /heist start runs immediately after the first resolves, the recruiting window lasts the configured 120 seconds, and a fourth /heist join is refused as crew-full while the first three are admitted.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "With cooldown 0 a second /heist start succeeds right after the first heist resolves, the recruiting window stays open the configured 120 seconds, and a fourth /heist join returns a branded crew-full refusal debiting nothing while the first three joins are admitted."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All heist rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_heists and economy_heist_participants rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each heist action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing heist surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, crew payouts, or refunds; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (heist rows, participant rows, wallet entries, and channel announcements) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-heist-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid heist configuration is rejected atomically: a negative entry fee and a minimum-participants value above the maximum never persist.",
+     "expectedOutcome": "The dashboard heist page surfaces a clear validation error, guild_config keeps its prior values byte-for-byte, and live bot behavior is unchanged on the very next heist command.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A /heist start run immediately after the rejected save still debits the previous valid entry fee and advertises the previous odds, proving no partial write reached the bot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All heist rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_heists and economy_heist_participants rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the rejected heist configuration attempt with the validation reason; no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing heist surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, crew payouts, or refunds; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (heist rows, participant rows, wallet entries, and channel announcements) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-heist-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "Heists are protected from unauthorized actors: no member can collect another crew member's frozen share and a non-admin dashboard session cannot save heist settings.",
+     "expectedOutcome": "run-member-b cannot redirect or double-claim run-member-a's frozen payout or refund, run-member-a's wallet and participant row reflect only their own legitimate frozen amounts, and the non-admin dashboard save is refused.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "No /heist interaction lets run-member-b collect run-member-a's frozen crew share or refund — every credit is keyed to the participant's own row under the paid_at guard — and a non-admin dashboard save of heist settings returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All heist rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_heists and economy_heist_participants rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied heist configuration attempt with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing heist surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, crew payouts, or refunds; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (heist rows, participant rows, wallet entries, and channel announcements) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-heist-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase dependency is unreachable, heists fail safe: no crash, friendly branded degradation, and no play-coin loss.",
+     "expectedOutcome": "With database access blocked, /heist commands reply with the branded heist-unavailable message and no coins move; after restoring the connection a fresh /heist start debits exactly once and opens a heist.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /heist start, join, and status reply with the branded heist-unavailable template in the owner's voice and no wallet mutation occurs; after restoration a fresh /heist start debits the entry fee exactly once."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All heist rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_heists and economy_heist_participants rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each heist action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed heist command."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing heist surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, crew payouts, or refunds; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (heist rows, participant rows, wallet entries, and channel announcements) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-heist-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A heist whose atomic start step fails converges safely, and a payout fault on resolution retries until every frozen crew member is paid exactly once.",
+     "expectedOutcome": "With a fault injected on the heist_start insert, run-member-a's entry fee is refunded exactly once and no heist exists; the retried /heist start opens exactly one heist for exactly one debit, and an injected payout fault on resolution retries until each frozen crew member is credited their payout_each exactly once with no double credit.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the injected start fault, run-member-a sees the branded refund confirmation and no heist is recruiting; the clean retry opens exactly one heist for exactly one debit, and the payout-fault resolution eventually announces exactly once with every crew member credited exactly once."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All heist rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_heists and economy_heist_participants rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each heist action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives exactly one reasoned settlement-retry alert while the injected payout fault persists and none once every crew member is paid."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing heist surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The refund and the subsequent successful start each apply under their own idempotency key, and each crew credit is guarded by paid_at, so the ledger shows debit, refund, debit and every payout lands exactly once, never doubled."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (heist rows, participant rows, wallet entries, and channel announcements) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-heist-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replays never double-charge or double-pay: re-delivering the start, join, and resolution interactions leaves one heist, one entry-fee debit per member, and one payout per crew member.",
+     "expectedOutcome": "After replaying the recorded start, join, and resolution interactions, there is still exactly one heist row, each member shows exactly one entry-fee debit, each frozen crew member shows exactly one payout, and every wallet total is byte-identical to the pre-replay snapshot.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The channel shows exactly one recruiting embed, one join embed per member, and one resolution announcement despite the replays, and /heist status plus the wallet totals are unchanged from the pre-replay snapshot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All heist rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_heists and economy_heist_participants rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each heist action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing heist surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Idempotency keys on the entry-fee debit (the participant row and its frozen entry_fee_paid), the claim (claimed_at), and each credit (paid_at) each show exactly one applied effect; replayed deliveries are recorded as deduplicated no-ops, proving the paid_at guard blocks any double payout."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (heist rows, participant rows, wallet entries, and channel announcements) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-heist-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "Heist state survives a full stack restart: a recruiting heist resumes to its original expiry and an already-claimed in_progress heist settles its frozen outcome without a double payout or double announcement.",
+     "expectedOutcome": "After restarting bot and dashboard mid-heist, resumePendingHeists resumes the heist: a still-recruiting heist resolves at its original expiry and an already-claimed in_progress heist settles its frozen outcome, each producing exactly one announcement and crediting each frozen crew member exactly once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart the resumed heist produces exactly one resolution announcement matching its frozen outcome, and each frozen crew member's wallet reflects exactly one payout or refund with no catch-up double."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All heist rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_heists and economy_heist_participants rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each heist action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing heist surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The resumed heist credits each frozen crew member under the paid_at guard and finalizes under the single-shot heist_finalize_resolution, so neither a payout nor an announcement is duplicated across the restart."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (heist rows, participant rows, wallet entries, and channel announcements) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-heist-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent join and resolve are safe: a /heist join racing the window expiry is either fully admitted or charged nothing, and the settled crew is exactly the frozen claimed_at set with exactly one resolution.",
+     "expectedOutcome": "Two /heist join calls racing heist_claim_for_resolution resolve deterministically: any join that loses the lock is charged nothing (heist_join returns not_recruiting having debited nothing) or, if its row committed, is reconciled and refunded its own frozen entry_fee_paid; the paid crew is exactly the frozen claimed set and exactly one resolution announcement posts.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "For the join-versus-resolve race, any losing /heist join shows a branded no-charge refusal (or a silent stranded-join refund of its own frozen entry_fee_paid), the resolution announces exactly once, and only the frozen claimed crew appear in the payout or cancellation crew list."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All heist rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_heists and economy_heist_participants rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each heist action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing heist surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The heist-row lock and the claimed_at freeze mean a stranded late-join is reconciled and refunded exactly once and never paid a success share; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (heist rows, participant rows, wallet entries, and channel announcements) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-heist-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "Heists are strictly per-guild: starting and resolving a heist in a second guild never touches the first guild's heists, wallets, or participant rows.",
+     "expectedOutcome": "run-member-a starts and resolves a heist in test guild B; guild A's active and last heist, wallet totals, and /heist status are unchanged, and guild B's heist debits guild B's wallets at guild B's configured entry fee.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A's /heist status is identical before and after the guild B activity, and guild B's heist debits guild B's wallets at guild B's configured entry fee and resolves independently."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_heists and economy_heist_participants rows and vice versa; service-role probes confirm each guild's heist and wallet rows evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each heist action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing heist surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, crew payouts, or refunds; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (heist rows, participant rows, wallet entries, and channel announcements) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-heist-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed heist resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed heist rows, participant rows, wallet entries, and channel announcements are deleted; a final sweep finds zero run-prefixed heist resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed heist recruiting embeds, join embeds, or resolution announcements after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All heist rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_heists and economy_heist_participants rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each heist action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing heist surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, crew payouts, or refunds; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed heist resource created by this domain's scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

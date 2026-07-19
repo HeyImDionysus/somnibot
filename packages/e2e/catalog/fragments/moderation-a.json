@@ -1,0 +1,2509 @@
+{
+  "category": "moderation",
+  "domains": [
+    {
+      "id": "moderation-automod",
+      "name": "Auto-Moderation",
+      "category": "moderation",
+      "promise": "Every guild message is scanned against owner-configured automod rules (word, link, invite, spam, duplicate, caps, mention-spam, and newline filters) under hard per-regex and per-message time budgets that always fail toward no-match; automod ships in observe-only mode that logs would-be violations without touching members or messages, and owner-enabled enforcement explains every action to the member in the owner's voice and remains fully reversible via pardon.",
+      "controls": [
+        {
+          "id": "automod-enabled",
+          "description": "Master switch for the automod scanning pipeline; when off no rules are evaluated and configuration is preserved.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "automod-mode",
+          "description": "Global posture: observe logs each rule match to the mod log without acting on the member or message; enforce executes each rule’s configured action.",
+          "valueType": "enum",
+          "constraints": {
+            "values": [
+              "observe",
+              "enforce"
+            ]
+          }
+        },
+        {
+          "id": "automod-rules",
+          "description": "Prioritized rule list; each rule carries a type (word_filter, link_filter, invite_filter, spam_filter, duplicate_filter, caps_filter, mention_spam, newline_spam), a type-specific config, an action (delete, warn, mute, kick, ban), exempt roles and channels, and a mod-log flag. Higher priority evaluates first.",
+          "valueType": "json",
+          "constraints": {
+            "shape": "array of { type, config, action, priority, exempt-roles, exempt-channels, log-to-mod-channel }"
+          }
+        },
+        {
+          "id": "regex-eval-budget-ms",
+          "description": "Hard sandboxed-VM timeout for a single owner-authored regex evaluation; a timed-out pattern is skipped and treated as no match so a slow rule can never punish a member.",
+          "valueType": "duration-ms",
+          "constraints": {
+            "min": 50,
+            "max": 250
+          }
+        },
+        {
+          "id": "message-rule-budget-ms",
+          "description": "Aggregate wall-clock budget for evaluating all rules — and all words within a rule — against one message; on exhaustion the remaining rules are skipped with a warning and the message is treated as clean.",
+          "valueType": "duration-ms",
+          "constraints": {
+            "min": 100,
+            "max": 2000
+          }
+        },
+        {
+          "id": "mod-log-channel-id",
+          "description": "Channel receiving automod detections and enforcement entries; empty string disables mod-log posts.",
+          "valueType": "string",
+          "constraints": {}
+        }
+      ],
+      "defaults": [
+        {
+          "controlId": "automod-enabled",
+          "value": true,
+          "rationale": "Scanning on from day one gives owners visibility at zero member risk because the shipped mode is observe-only."
+        },
+        {
+          "controlId": "automod-mode",
+          "value": "observe",
+          "rationale": "Lenient locked default: owners watch exactly what automod would do before any member is ever touched, then opt into enforcement deliberately."
+        },
+        {
+          "controlId": "automod-rules",
+          "value": [
+            {
+              "type": "spam_filter",
+              "config": {
+                "max-messages": 5,
+                "interval-seconds": 5
+              },
+              "action": "warn",
+              "priority": 40,
+              "exempt-roles": [],
+              "exempt-channels": [],
+              "log-to-mod-channel": true
+            },
+            {
+              "type": "mention_spam",
+              "config": {
+                "max-mentions": 8
+              },
+              "action": "warn",
+              "priority": 30,
+              "exempt-roles": [],
+              "exempt-channels": [],
+              "log-to-mod-channel": true
+            },
+            {
+              "type": "invite_filter",
+              "config": {
+                "allow-own-server": true
+              },
+              "action": "delete",
+              "priority": 20,
+              "exempt-roles": [],
+              "exempt-channels": [],
+              "log-to-mod-channel": true
+            },
+            {
+              "type": "duplicate_filter",
+              "config": {
+                "threshold": 4,
+                "interval-seconds": 30
+              },
+              "action": "warn",
+              "priority": 10,
+              "exempt-roles": [],
+              "exempt-channels": [],
+              "log-to-mod-channel": true
+            }
+          ],
+          "rationale": "Gentle starter set covering the highest-signal abuse shapes; under the observe default it only reports, never acts, and own-server invites stay welcome."
+        },
+        {
+          "controlId": "regex-eval-budget-ms",
+          "value": 250,
+          "rationale": "Calibrated bound: firm enough to stop catastrophic backtracking from blocking the event loop, generous enough that legitimate rules never misclassify as timeouts on a loaded host."
+        },
+        {
+          "controlId": "message-rule-budget-ms",
+          "value": 500,
+          "rationale": "Aggregate cap so many rules — or many words inside one owner-editable rule — can never stall message handling; a budget bail always fails toward no match."
+        },
+        {
+          "controlId": "mod-log-channel-id",
+          "value": "",
+          "rationale": "No mod-log channel until the owner picks one; the setup flow nudges owners to set it so observe mode has somewhere to report."
+        }
+      ],
+      "permissions": [
+        {
+          "id": "configure-automod",
+          "actor": "Dashboard user with owner or admin access to the guild",
+          "action": "Create, edit, enable, or delete automod rules and switch between observe and enforce on the dashboard moderation rules page",
+          "defaultDecision": "allow",
+          "enforcement": "Dashboard session auth plus Supabase RLS restrict automod_rules writes to authorized guild administrators; every change invalidates the per-guild Valkey rules cache so it takes live effect within the 60-second cache cycle."
+        },
+        {
+          "id": "moderator-exemption",
+          "actor": "Member holding Manage Messages or Administrator",
+          "action": "Post messages without automod evaluation",
+          "defaultDecision": "allow",
+          "enforcement": "The engine exempts moderators and administrators from every rule before evaluation, alongside per-rule exempt roles and exempt channels."
+        },
+        {
+          "id": "member-configure",
+          "actor": "Guild member without dashboard admin access",
+          "action": "Read or modify automod rules through the dashboard or its API routes",
+          "defaultDecision": "deny",
+          "enforcement": "Dashboard routes reject the session, Supabase RLS returns zero automod_rules rows to the member client, and the denied attempt is audited."
+        }
+      ],
+      "messages": [
+        {
+          "id": "observe-detection",
+          "trigger": "A rule matches a message while automod-mode is observe",
+          "surface": "Mod log channel embed",
+          "audience": "Guild moderators",
+          "defaultTemplate": "Observe mode: rule {rule-name} matched a message from {member-name} in {channel-name} — no action was taken. Switch automod to enforce once you are happy with what it catches.",
+          "variables": [
+            "rule-name",
+            "member-name",
+            "channel-name"
+          ]
+        },
+        {
+          "id": "enforcement-notice",
+          "trigger": "An enforced rule takes action on a member’s message",
+          "surface": "DM to the member, falling back to a brief auto-deleting channel notice",
+          "audience": "The affected member",
+          "defaultTemplate": "Hey {member-name} — your message in {guild-name} tripped the {rule-name} filter, so I had to {action-taken}. If you think this was a mistake, appeal from the server or the member portal: every automod action can be reviewed and reversed.",
+          "variables": [
+            "member-name",
+            "guild-name",
+            "rule-name",
+            "action-taken"
+          ]
+        },
+        {
+          "id": "budget-exceeded-alert",
+          "trigger": "Rule evaluation exhausts the per-regex or per-message time budget",
+          "surface": "Owner alert channel",
+          "audience": "Guild owner and administrators",
+          "defaultTemplate": "Automod could not finish checking a message within {budget-ms} ms, so the remaining rules were skipped and nobody was punished. Rule {rule-name} looks expensive — consider simplifying it.",
+          "variables": [
+            "budget-ms",
+            "rule-name"
+          ]
+        },
+        {
+          "id": "rules-degraded-alert",
+          "trigger": "Automod rules cannot be loaded from the database and no cached copy exists",
+          "surface": "Owner alert channel",
+          "audience": "Guild owner and administrators",
+          "defaultTemplate": "I could not load your automod rules just now, so scanning paused safely — no member was actioned on a guess. I will keep retrying and everything is logged.",
+          "variables": []
+        },
+        {
+          "id": "action-failed-alert",
+          "trigger": "Discord rejects an enforcement action after a rule violation",
+          "surface": "Owner alert channel",
+          "audience": "Guild owner and administrators",
+          "defaultTemplate": "I detected a {rule-name} violation by {member-name} but Discord rejected the {action-taken} action. The detection is logged — check my role position and permissions.",
+          "variables": [
+            "rule-name",
+            "member-name",
+            "action-taken"
+          ]
+        }
+      ],
+      "state": {
+        "initial": "observing",
+        "values": [
+          {
+            "id": "observing",
+            "description": "Automod enabled in the shipped observe mode; matches are logged to the mod log and audited while no member or message is touched."
+          },
+          {
+            "id": "enforcing",
+            "description": "Owner-enabled enforcement; each rule match executes its configured action with a member-facing explanation of what, why, and how to appeal."
+          },
+          {
+            "id": "actioning",
+            "description": "A violation is mid-action: message deletion, infraction write, member DM, mod-log post, and audit row are being applied exactly once."
+          },
+          {
+            "id": "budget-degraded",
+            "description": "A regex or the aggregate rule budget was exhausted for a message; remaining checks were skipped and the engine failed toward no match."
+          },
+          {
+            "id": "disabled",
+            "description": "Automod switched off; no rules are evaluated and rules plus history are preserved untouched."
+          }
+        ],
+        "transitions": [
+          {
+            "id": "log-detection",
+            "from": "observing",
+            "to": "observing",
+            "trigger": "A rule matches a message while in observe mode",
+            "expectedEffect": "One observe-mode mod-log entry and one audit row are written; the message stays up and the member is untouched."
+          },
+          {
+            "id": "enable-enforcement",
+            "from": "observing",
+            "to": "enforcing",
+            "trigger": "Owner switches automod-mode to enforce on the dashboard",
+            "expectedEffect": "The per-guild Valkey rules cache is invalidated and the next matching message executes its rule’s action without a bot restart."
+          },
+          {
+            "id": "violation-enforced",
+            "from": "enforcing",
+            "to": "actioning",
+            "trigger": "A rule matches a message while in enforce mode",
+            "expectedEffect": "The rule’s configured action begins executing exactly once, with the member told what happened, why, and how to appeal."
+          },
+          {
+            "id": "action-complete",
+            "from": "actioning",
+            "to": "enforcing",
+            "trigger": "Deletion, infraction, DM, mod-log, and audit effects are all applied",
+            "expectedEffect": "The engine returns to scanning; any escalation implied by the new infraction is handed to the infractions domain exactly once."
+          },
+          {
+            "id": "budget-exhausted",
+            "from": "enforcing",
+            "to": "budget-degraded",
+            "trigger": "Cumulative evaluation exceeds message-rule-budget-ms or one regex hits regex-eval-budget-ms",
+            "expectedEffect": "Remaining checks are skipped with a warning, the message is treated as clean, and the owner is alerted about the expensive rule."
+          },
+          {
+            "id": "budget-cleared",
+            "from": "budget-degraded",
+            "to": "enforcing",
+            "trigger": "The next message evaluates within budget",
+            "expectedEffect": "Normal enforcement resumes; the degradation was scoped to the single over-budget message."
+          },
+          {
+            "id": "revert-to-observe",
+            "from": "enforcing",
+            "to": "observing",
+            "trigger": "Owner switches automod-mode back to observe",
+            "expectedEffect": "Actions stop immediately while detections keep flowing to the mod log."
+          },
+          {
+            "id": "switch-off",
+            "from": "observing",
+            "to": "disabled",
+            "trigger": "Owner turns automod-enabled off",
+            "expectedEffect": "Rule evaluation stops in the running bot; rules and infraction history are preserved."
+          },
+          {
+            "id": "switch-on",
+            "from": "disabled",
+            "to": "observing",
+            "trigger": "Owner turns automod-enabled back on",
+            "expectedEffect": "Scanning resumes in observe or the last saved mode with all prior rules intact."
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "rules-load-failed",
+          "trigger": "The Supabase automod_rules query fails and no cached copy exists",
+          "expectedBehavior": "The engine treats the message as having zero rules — it never punishes on a guess — keeps retrying with the 60-second cache cycle, and alerts the owner once per outage window rather than per message.",
+          "resultingState": "observing",
+          "retry": "automatic",
+          "messageId": "rules-degraded-alert",
+          "auditEvent": "automod.rules_load_failed",
+          "ownerNotification": true
+        },
+        {
+          "id": "regex-budget-timeout",
+          "trigger": "An owner-authored regex hits the sandboxed 250 ms evaluation timeout or the 500 ms per-message budget is exhausted",
+          "expectedBehavior": "The pattern and any remaining rules are skipped and treated as no match so a slow rule can never punish a member; the skip is logged with the rule identity and the owner is told which rule is expensive.",
+          "resultingState": "budget-degraded",
+          "retry": "never",
+          "messageId": "budget-exceeded-alert",
+          "auditEvent": "automod.budget_exceeded",
+          "ownerNotification": true
+        },
+        {
+          "id": "enforcement-action-failed",
+          "trigger": "Discord rejects the configured delete, timeout, kick, or ban for a detected violation",
+          "expectedBehavior": "The detection and failure reason are still mod-logged and audited with the correlation id, no retry storm hammers Discord, and the owner receives a permissions remediation hint.",
+          "resultingState": "enforcing",
+          "retry": "operator",
+          "messageId": "action-failed-alert",
+          "auditEvent": "automod.action_failed",
+          "ownerNotification": true
+        }
+      ],
+      "evidence": [
+        {
+          "assertionClass": "Discord",
+          "proofMode": "real-stack",
+          "observer": "Discord observer client joined to the primary test guild",
+          "expectedObservation": "Automod behavior contracted here is directly observed working in the live test guild: observe mode logs detections without touching messages, enforce mode deletes or times out per rule configuration, affected members receive branded explanations with an appeal path, and moderators stay exempt.",
+          "artifact": "evidence/moderation-automod/discord"
+        },
+        {
+          "assertionClass": "database-RLS",
+          "proofMode": "real-stack",
+          "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+          "expectedObservation": "The automod_rules, infractions, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+          "artifact": "evidence/moderation-automod/database-rls"
+        },
+        {
+          "assertionClass": "audit",
+          "proofMode": "real-stack",
+          "observer": "Audit-log table reader using the service role",
+          "expectedObservation": "Every automod detection, enforcement, denial, and failure lands exactly one append-only audit row with actor, guild, rule, and correlation id; anonymization, never deletion, is the only mutation observed.",
+          "artifact": "evidence/moderation-automod/audit"
+        },
+        {
+          "assertionClass": "owner-notification",
+          "proofMode": "real-stack",
+          "observer": "Owner alert channel observer in the primary test guild",
+          "expectedObservation": "Automod failure branches — rules load failure, budget exhaustion, rejected enforcement — raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+          "artifact": "evidence/moderation-automod/owner-notification"
+        },
+        {
+          "assertionClass": "branding",
+          "proofMode": "real-stack",
+          "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+          "expectedObservation": "Captured automod mod-log embeds and member DMs match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+          "artifact": "evidence/moderation-automod/branding"
+        },
+        {
+          "assertionClass": "replay-safety",
+          "proofMode": "real-stack",
+          "observer": "Event re-delivery harness with a duplicate detector over messages, infractions, and member state",
+          "expectedObservation": "Replaying recorded message events against the live stack leaves end state unchanged: no duplicate deletions, infractions, member DMs, or mod-log posts.",
+          "artifact": "evidence/moderation-automod/replay-safety"
+        },
+        {
+          "assertionClass": "cleanup",
+          "proofMode": "real-stack",
+          "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+          "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed automod rules, infractions, or messages remaining anywhere.",
+          "artifact": "evidence/moderation-automod/cleanup"
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "moderation-automod-def",
+          "class": "DEF",
+          "disposition": "required",
+          "promise": "Out of the box automod scans with the gentle starter rule set in observe-only mode: a spam burst and an external invite link are detected and reported to the mod log, and no member is deleted, muted, warned, or otherwise touched.",
+          "expectedOutcome": "run-member-a posts six rapid messages and an external invite link; the mod log receives observe-mode entries naming the matched rules while every message stays visible, no infraction row is created, and run-member-a keeps full channel access.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The mod log shows observe-mode entries for the spam and invite detections while run-member-a’s messages remain undeleted and the member carries no timeout."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All automod rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows record each observe-mode detection with rule name, actor id, guild id, and the run-prefixed correlation id; no enforcement audit event exists anywhere in the run."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing automod surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering message events yields no duplicate deletions, infractions, member DMs, or mod-log posts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (automod rules, infraction rows, mod-log and DM messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-automod-set-a",
+          "class": "SET-A",
+          "disposition": "required",
+          "promise": "Owner-enabled enforcement is explainable and reversible: after switching to enforce and adding a word filter with a delete-plus-warn action, the next violation is deleted, the member is told what, why, and how to appeal, and a pardon reverses the infraction.",
+          "expectedOutcome": "After saving on the dashboard moderation rules page, run-member-a’s message containing the run-prefixed banned word is deleted without a restart, a DM explains the rule and appeal path, one warn infraction is recorded, and /pardon deactivates it leaving zero active infractions.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The violating message disappears, run-member-a receives the branded enforcement DM naming the rule and appeal path, and after /pardon the /infractions view shows the warning as pardoned."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All automod rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each automod action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing automod surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering message events yields no duplicate deletions, infractions, member DMs, or mod-log posts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (automod rules, infraction rows, mod-log and DM messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-automod-set-b",
+          "class": "SET-B",
+          "disposition": "required",
+          "promise": "Exemptions and scoping take effect as a second distinct configuration: an exempt role and an exempt channel are added to the caps filter, and moderators are always exempt everywhere.",
+          "expectedOutcome": "run-member-b holding the run-prefixed exempt role and any member posting in the exempt channel trip nothing; the same all-caps message from run-member-a in a non-exempt channel is detected; a moderator posting it anywhere produces no detection.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "Only run-member-a’s non-exempt all-caps message produces a mod-log detection; the exempt-role, exempt-channel, and moderator messages produce none."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All automod rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each automod action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing automod surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering message events yields no duplicate deletions, infractions, member DMs, or mod-log posts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (automod rules, infraction rows, mod-log and DM messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-automod-invalid",
+          "class": "INVALID",
+          "disposition": "required",
+          "promise": "Unsafe or malformed rules are rejected atomically: a regex with a catastrophic-backtracking shape and a word filter with an empty word list never persist.",
+          "expectedOutcome": "The dashboard rules editor surfaces a clear validation error, automod_rules keeps its prior rows byte-for-byte, and the engine independently refuses known-catastrophic regex shapes at evaluation time so a stored pathological pattern can never run.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "A message sent immediately after the rejected save is evaluated under the previous rule set only, and the known-catastrophic pattern never matches or delays any message."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All automod rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "One audit row records the rejected rule submission with the validation reason; no rule-change audit row is written."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing automod surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering message events yields no duplicate deletions, infractions, member DMs, or mod-log posts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (automod rules, infraction rows, mod-log and DM messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-automod-unauth",
+          "class": "UNAUTH",
+          "disposition": "required",
+          "promise": "Rule administration is denied to unprivileged users: a member session hitting the automod rules dashboard or API can neither read nor write rules.",
+          "expectedOutcome": "run-member-b’s dashboard session receives a permission error, automod_rules is unchanged, RLS returns zero rows to the member client, and the denied attempt is audited.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "Automod behavior in the guild is byte-identical before and after the denied attempt; no rule change takes effect."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All automod rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "An audit row records the denied rules access with actor id, route, and reason permission-denied."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing automod surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering message events yields no duplicate deletions, infractions, member DMs, or mod-log posts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (automod rules, infraction rows, mod-log and DM messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-automod-depfail",
+          "class": "DEPFAIL",
+          "disposition": "required",
+          "promise": "When Valkey is unreachable automod fails safe: rule loading falls back to the database, and the spam and duplicate counters that live in Valkey degrade to inert rather than misfiring.",
+          "expectedOutcome": "With Valkey blocked, word and caps rules keep evaluating from DB-loaded rules, spam and duplicate rules take no action on a guess, the bot does not crash, and after restoring Valkey the counters resume tracking.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "During the outage a banned-word message is still detected while a rapid burst triggers no false spam punishment; after restoration a fresh burst is detected normally."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All automod rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each automod action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per message."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing automod surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering message events yields no duplicate deletions, infractions, member DMs, or mod-log posts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (automod rules, infraction rows, mod-log and DM messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-automod-retry",
+          "class": "RETRY",
+          "disposition": "required",
+          "promise": "Transient persistence failures converge: an infraction write that fails on first attempt is retried until exactly one warn row lands, and the follow-on notification fires exactly once.",
+          "expectedOutcome": "With a transient fault injected on the first infractions insert for an enforced warn, the retry lands exactly one infraction row, one member DM, and one mod-log entry.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "run-member-a receives exactly one enforcement DM and the mod log carries exactly one warn entry for the violation."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All automod rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each automod action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing automod surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "The retried infraction write reuses the original correlation key, so the infractions table shows one row for the violation, not two."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (automod rules, infraction rows, mod-log and DM messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-automod-replay",
+          "class": "REPLAY",
+          "disposition": "required",
+          "promise": "Replays never double-punish: re-delivering the recorded message-create event yields no second deletion, infraction, DM, or escalation hand-off.",
+          "expectedOutcome": "After replaying the gateway event for an enforced violation, the infraction count, mod-log message count, and member timeout state are byte-identical to the pre-replay snapshot.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The mod log contains exactly one entry for the violation and the member holds exactly one infraction after the replay."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All automod rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each automod action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing automod surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Idempotency keys on the message event show one applied enforcement; the replayed delivery is recorded as a deduplicated no-op."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (automod rules, infraction rows, mod-log and DM messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-automod-restart",
+          "class": "RESTART",
+          "disposition": "required",
+          "promise": "Automod configuration and posture survive a full stack restart: mode, rules, and budgets apply identically after bot and dashboard restart.",
+          "expectedOutcome": "After restarting, an observe-mode guild still only logs, an enforce-mode guild still acts, the Valkey rules cache rebuilds within its 60-second TTL, and no in-flight violation is double-actioned.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The first post-restart violation behaves exactly per the persisted mode and rules, with a single mod-log entry and no duplicate action."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All automod rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each automod action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing automod surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering message events yields no duplicate deletions, infractions, member DMs, or mod-log posts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (automod rules, infraction rows, mod-log and DM messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-automod-race",
+          "class": "RACE",
+          "disposition": "required",
+          "promise": "Concurrent triggers act once: a rapid burst tripping the spam rule punishes the member exactly once per window, and a simultaneous rule save never leaves a message evaluated under a half-written rule set.",
+          "expectedOutcome": "Ten near-simultaneous messages produce exactly one enforced action and one infraction; a concurrent dashboard rule save is either fully visible or fully invisible to each message’s evaluation, never partially.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The member receives exactly one enforcement action and one DM despite the concurrent burst."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All automod rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each automod action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing automod surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering message events yields no duplicate deletions, infractions, member DMs, or mod-log posts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (automod rules, infraction rows, mod-log and DM messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-automod-xguild",
+          "class": "XGUILD",
+          "disposition": "required",
+          "promise": "Automod is strictly per-guild: guild A’s rules never evaluate guild B’s messages, and the invite filter’s allow-own-server logic resolves against the message’s own guild.",
+          "expectedOutcome": "A message that violates guild A’s enforce-mode word filter posts untouched in guild B; guild B’s own-server invite passes while the same external link is deleted in guild A under its invite rule.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The identical message is actioned in guild A and untouched in guild B, each strictly per its own rules."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "A client scoped to guild B reads zero guild A automod_rules or infractions rows and vice versa; service-role probes confirm the rule sets diverged independently."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each automod action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing automod surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering message events yields no duplicate deletions, infractions, member DMs, or mod-log posts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (automod rules, infraction rows, mod-log and DM messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-automod-cleanup",
+          "class": "CLEANUP",
+          "disposition": "required",
+          "promise": "The suite leaves no trace: every run-prefixed automod rule, infraction, mod-log message, and configuration change is removed and verified absent.",
+          "expectedOutcome": "Run-prefixed rules and infractions are deleted, mod-log and DM test messages are removed where deletable, configuration reverts, and a final sweep finds zero run-prefixed automod resources while audit history remains, anonymized where member data applied.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The test guild contains no run-prefixed automod rules and no leftover automod mod-log messages after cleanup."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All automod rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each automod action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing automod surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering message events yields no duplicate deletions, infractions, member DMs, or mod-log posts; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "The sweeper diff shows every run-prefixed automod resource created by this domain’s scenarios was removed, with audit rows retained in anonymized form."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "moderation-infractions-appeals",
+      "name": "Infractions & Appeals",
+      "category": "moderation",
+      "promise": "Moderation is warn-before-punish: /warn, /mute, /kick, /ban, /pardon, and /infractions record every action as an expiring infraction, escalation follows an owner-tunable chain that always issues pure warnings before the first punishment, every affected member is told what happened, why, and how to appeal in a respectful DM, and appeals filed from Discord or the member portal are reviewed by a human and can reverse any action.",
+      "controls": [
+        {
+          "id": "escalation-chain",
+          "description": "Ordered escalation steps mapping an active-infraction threshold to an action (warn, mute with duration, kick, ban) and a DM flag; evaluated against the member’s active, unpardoned infraction count.",
+          "valueType": "json",
+          "constraints": {
+            "shape": "array of { threshold, action, duration-minutes?, dm-member }"
+          }
+        },
+        {
+          "id": "infraction-expiry-days",
+          "description": "Days until an active infraction expires, stops counting toward escalation, and is deactivated by the periodic expiry sweep.",
+          "valueType": "integer",
+          "constraints": {
+            "min": 1,
+            "max": 365
+          }
+        },
+        {
+          "id": "mod-log-channel-id",
+          "description": "Channel receiving moderation action entries with active counts and the next escalation step; empty string disables mod-log posts.",
+          "valueType": "string",
+          "constraints": {}
+        },
+        {
+          "id": "dm-on-action",
+          "description": "Whether members receive a DM explaining each moderation action; kick and ban DMs are sent before the action so they can still be delivered.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "appeals-enabled",
+          "description": "Whether members can appeal infractions via the Discord appeal entry point and the member portal.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "appeal-review-channel-id",
+          "description": "Channel where filed appeals are posted for moderator review; empty string falls back to the mod log channel.",
+          "valueType": "string",
+          "constraints": {}
+        },
+        {
+          "id": "appeal-cooldown-hours",
+          "description": "Minimum wait before the same infraction can be appealed again after a denial.",
+          "valueType": "integer",
+          "constraints": {
+            "min": 1,
+            "max": 168
+          }
+        }
+      ],
+      "defaults": [
+        {
+          "controlId": "escalation-chain",
+          "value": [
+            {
+              "threshold": 1,
+              "action": "warn",
+              "dm-member": true
+            },
+            {
+              "threshold": 2,
+              "action": "warn",
+              "dm-member": true
+            },
+            {
+              "threshold": 3,
+              "action": "mute",
+              "duration-minutes": 60,
+              "dm-member": true
+            },
+            {
+              "threshold": 4,
+              "action": "mute",
+              "duration-minutes": 1440,
+              "dm-member": true
+            },
+            {
+              "threshold": 5,
+              "action": "kick",
+              "dm-member": true
+            },
+            {
+              "threshold": 6,
+              "action": "ban",
+              "dm-member": true
+            }
+          ],
+          "rationale": "Warn-before-punish locked default: two pure warnings before the first mute, graduated durations before removal, and every step DMs the member."
+        },
+        {
+          "controlId": "infraction-expiry-days",
+          "value": 30,
+          "rationale": "Forgiving 30-day memory: old mistakes fall off instead of haunting members toward escalation forever."
+        },
+        {
+          "controlId": "mod-log-channel-id",
+          "value": "",
+          "rationale": "No mod-log channel until the owner picks one; the setup flow nudges owners to set it so escalation context is visible."
+        },
+        {
+          "controlId": "dm-on-action",
+          "value": true,
+          "rationale": "Member-respectful default: nobody is punished silently — every action explains itself."
+        },
+        {
+          "controlId": "appeals-enabled",
+          "value": true,
+          "rationale": "Locked decision: every punishment carries an appeal path by default, reachable from both Discord and the member portal."
+        },
+        {
+          "controlId": "appeal-review-channel-id",
+          "value": "",
+          "rationale": "Appeals land in the mod log until the owner dedicates a review channel, so no appeal is ever invisible."
+        },
+        {
+          "controlId": "appeal-cooldown-hours",
+          "value": 24,
+          "rationale": "Guardrail against appeal spam while keeping the path genuinely open — one respectful retry per day per infraction."
+        }
+      ],
+      "permissions": [
+        {
+          "id": "moderate",
+          "actor": "Guild moderator holding Moderate Members",
+          "action": "Run /warn, /mute, /pardon, and /infractions",
+          "defaultDecision": "allow",
+          "enforcement": "Commands register with a Moderate Members default member permission and handlers re-check hierarchy: the bot refuses to act on bots, the invoker themselves, the server owner, or anyone at or above the invoker’s highest role."
+        },
+        {
+          "id": "remove-members",
+          "actor": "Guild moderator holding Kick Members or Ban Members respectively",
+          "action": "Run /kick and /ban",
+          "defaultDecision": "allow",
+          "enforcement": "Kick and ban register with their matching Discord default member permissions and refuse targets the bot cannot act on, replying with a clear role-hierarchy hint instead of leaking API errors."
+        },
+        {
+          "id": "appeal-own-infraction",
+          "actor": "Any member with an active infraction",
+          "action": "File one appeal per infraction via the Discord appeal entry point or the member portal",
+          "defaultDecision": "allow",
+          "enforcement": "The appeal surface only ever files against the requesting member’s own infractions, enforces the per-infraction appeal cooldown, and never exposes another member’s history."
+        },
+        {
+          "id": "unprivileged-moderation",
+          "actor": "Guild member without Moderate Members",
+          "action": "Run /warn, /mute, /pardon, or /infractions, or resolve appeals",
+          "defaultDecision": "deny",
+          "enforcement": "Discord hides the commands by default, the handler re-checks and replies with an ephemeral denial, appeal resolution requires a moderator session, and every denied attempt writes an audit row."
+        }
+      ],
+      "messages": [
+        {
+          "id": "warn-dm",
+          "trigger": "A member receives a warning",
+          "surface": "DM to the member",
+          "audience": "The warned member",
+          "defaultTemplate": "Hi {member-name} — you have received warning number {warning-number} in {guild-name}. What happened: {reason}. Nothing else changes yet, but warnings add up. If you believe this is a mistake you can appeal right away from the server or the member portal.",
+          "variables": [
+            "member-name",
+            "warning-number",
+            "guild-name",
+            "reason"
+          ]
+        },
+        {
+          "id": "punishment-dm",
+          "trigger": "A mute, kick, or ban is applied to a member",
+          "surface": "DM to the member, sent before kick or ban so it can still be delivered",
+          "audience": "The punished member",
+          "defaultTemplate": "Hi {member-name} — a {action-name} was applied to you in {guild-name}. Why: {reason}. How to appeal: open the member portal or use the server appeal entry — a human moderator reviews every appeal and any action can be reversed.",
+          "variables": [
+            "member-name",
+            "action-name",
+            "guild-name",
+            "reason"
+          ]
+        },
+        {
+          "id": "appeal-received",
+          "trigger": "A member files an appeal from Discord or the portal",
+          "surface": "Ephemeral confirmation and portal banner, mirrored to the appeal review channel",
+          "audience": "The appealing member and reviewing moderators",
+          "defaultTemplate": "Thanks {member-name} — your appeal for infraction {infraction-id} is filed. A moderator will review it and you will hear the outcome either way.",
+          "variables": [
+            "member-name",
+            "infraction-id"
+          ]
+        },
+        {
+          "id": "appeal-decided",
+          "trigger": "A moderator resolves an appeal",
+          "surface": "DM to the member and portal status update",
+          "audience": "The appealing member",
+          "defaultTemplate": "Your appeal for infraction {infraction-id} in {guild-name} was {decision}. {decision-note}",
+          "variables": [
+            "infraction-id",
+            "guild-name",
+            "decision",
+            "decision-note"
+          ]
+        },
+        {
+          "id": "dm-undeliverable-log",
+          "trigger": "A moderation DM cannot be delivered",
+          "surface": "Mod log channel",
+          "audience": "Guild moderators",
+          "defaultTemplate": "Heads up: {member-name} could not be DMed about this {action-name} — their DMs are closed. The infraction record and the portal appeal path remain available to them.",
+          "variables": [
+            "member-name",
+            "action-name"
+          ]
+        },
+        {
+          "id": "escalation-failed-alert",
+          "trigger": "An escalation action is rejected by Discord",
+          "surface": "Owner alert channel",
+          "audience": "Guild owner and administrators",
+          "defaultTemplate": "Escalation tried to apply {action-name} to {member-name} but Discord refused. The infractions are recorded and nothing is lost — check my role position and permissions, then re-run the action.",
+          "variables": [
+            "action-name",
+            "member-name"
+          ]
+        },
+        {
+          "id": "action-not-recorded",
+          "trigger": "An infraction record cannot be written when a moderation action is issued",
+          "surface": "Ephemeral reply to the invoking moderator",
+          "audience": "The invoking moderator",
+          "defaultTemplate": "That did not go through — I could not record the infraction, so no action was applied. Please try again in a moment.",
+          "variables": []
+        }
+      ],
+      "state": {
+        "initial": "clear",
+        "values": [
+          {
+            "id": "clear",
+            "description": "The member has no active infractions; escalation starts from a clean slate."
+          },
+          {
+            "id": "warned",
+            "description": "One or more active warnings exist; no punishment is in effect — warn-before-punish holds through the pure-warning thresholds."
+          },
+          {
+            "id": "escalated",
+            "description": "The escalation chain applied a mute, kick, or ban after warnings accumulated; the action, reason, and appeal path were communicated to the member."
+          },
+          {
+            "id": "appeal-pending",
+            "description": "The member filed an appeal from Discord or the portal; a human review is outstanding and the appeal is visible in the review channel."
+          },
+          {
+            "id": "resolved",
+            "description": "The infraction was pardoned, overturned on appeal, or expired; it no longer counts toward escalation while full history is retained."
+          }
+        ],
+        "transitions": [
+          {
+            "id": "warn",
+            "from": "clear",
+            "to": "warned",
+            "trigger": "/warn or an automod warn creates the member’s first active infraction",
+            "expectedEffect": "One infraction row with an expiry date is written, the member is DMed what, why, and how to appeal, and the mod log names the next escalation step."
+          },
+          {
+            "id": "escalate",
+            "from": "warned",
+            "to": "escalated",
+            "trigger": "A new infraction pushes the active count to a chain threshold whose action exceeds warn",
+            "expectedEffect": "Exactly one chain action — mute with its configured duration, kick, or ban — executes, with DM-before-punish where deliverable, plus mod-log and audit rows."
+          },
+          {
+            "id": "file-appeal",
+            "from": "escalated",
+            "to": "appeal-pending",
+            "trigger": "The member files an appeal via the Discord entry point or the member portal",
+            "expectedEffect": "One appeal per infraction is accepted, acknowledged to the member, and posted once to the appeal review channel."
+          },
+          {
+            "id": "appeal-upheld",
+            "from": "appeal-pending",
+            "to": "resolved",
+            "trigger": "A moderator upholds the appeal",
+            "expectedEffect": "The infraction is pardoned, any live timeout or ban is lifted, and the member is told the outcome respectfully."
+          },
+          {
+            "id": "appeal-denied",
+            "from": "appeal-pending",
+            "to": "escalated",
+            "trigger": "A moderator denies the appeal with a note",
+            "expectedEffect": "The action stands, the member receives a respectful explanation with the note, and the per-infraction appeal cooldown starts."
+          },
+          {
+            "id": "pardon",
+            "from": "warned",
+            "to": "resolved",
+            "trigger": "A moderator runs /pardon on an active infraction",
+            "expectedEffect": "The infraction stops counting toward escalation immediately and the mod log records who pardoned it and why."
+          },
+          {
+            "id": "expire",
+            "from": "warned",
+            "to": "clear",
+            "trigger": "infraction-expiry-days elapse for the member’s only active infraction",
+            "expectedEffect": "The periodic expiry sweep deactivates it; escalation restarts from a clean slate while history remains queryable."
+          },
+          {
+            "id": "history-settled",
+            "from": "resolved",
+            "to": "clear",
+            "trigger": "No active infractions remain for the member",
+            "expectedEffect": "The member is in good standing while full history stays visible via /infractions and the portal."
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "dm-undeliverable",
+          "trigger": "The member’s DMs are closed when a moderation DM is sent",
+          "expectedBehavior": "The action itself proceeds, the mod log records that the member could not be notified so moderators know, and the portal still shows the infraction with its full reason and appeal path.",
+          "resultingState": "warned",
+          "retry": "never",
+          "messageId": "dm-undeliverable-log",
+          "auditEvent": "moderation.dm_undeliverable",
+          "ownerNotification": false
+        },
+        {
+          "id": "escalation-action-rejected",
+          "trigger": "Discord rejects the timeout, kick, or ban during escalation",
+          "expectedBehavior": "No phantom punishment is recorded as applied; the failure is audited with success false and the real error kept server-side, the owner is alerted with a remediation hint, and a moderator can re-run the action once permissions are fixed.",
+          "resultingState": "warned",
+          "retry": "operator",
+          "messageId": "escalation-failed-alert",
+          "auditEvent": "escalation.action_failed",
+          "ownerNotification": true
+        },
+        {
+          "id": "infraction-write-failed",
+          "trigger": "The infractions insert fails when a moderation action is issued",
+          "expectedBehavior": "The command reports failure to the moderator and no side effect stands without its record: no DM, no escalation, and any already-applied Discord timeout is rolled back so a punishment never exists without an auditable infraction row.",
+          "resultingState": "clear",
+          "retry": "operator",
+          "messageId": "action-not-recorded",
+          "auditEvent": "moderation.infraction_write_failed",
+          "ownerNotification": true
+        }
+      ],
+      "evidence": [
+        {
+          "assertionClass": "Discord",
+          "proofMode": "real-stack",
+          "observer": "Discord observer client joined to the primary test guild",
+          "expectedObservation": "Infraction behavior contracted here is directly observed working in the live test guild: /warn DMs what, why, and how to appeal, escalation mutes only at the third active infraction, /infractions lists history, /pardon reverses actions, and appeals round-trip from filing to decision on both surfaces.",
+          "artifact": "evidence/moderation-infractions-appeals/discord"
+        },
+        {
+          "assertionClass": "database-RLS",
+          "proofMode": "real-stack",
+          "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+          "expectedObservation": "The infractions, appeal, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none, and a member client sees only their own infractions and appeals.",
+          "artifact": "evidence/moderation-infractions-appeals/database-rls"
+        },
+        {
+          "assertionClass": "audit",
+          "proofMode": "real-stack",
+          "observer": "Audit-log table reader using the service role",
+          "expectedObservation": "Every infraction, escalation, pardon, appeal, denial, and failure lands exactly one append-only audit row with actor, target, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+          "artifact": "evidence/moderation-infractions-appeals/audit"
+        },
+        {
+          "assertionClass": "owner-notification",
+          "proofMode": "real-stack",
+          "observer": "Owner alert channel observer in the primary test guild",
+          "expectedObservation": "Moderation failure branches — rejected escalations and unrecordable infractions — raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+          "artifact": "evidence/moderation-infractions-appeals/owner-notification"
+        },
+        {
+          "assertionClass": "branding",
+          "proofMode": "real-stack",
+          "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+          "expectedObservation": "Captured moderation DMs, mod-log embeds, and portal appeal views match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+          "artifact": "evidence/moderation-infractions-appeals/branding"
+        },
+        {
+          "assertionClass": "replay-safety",
+          "proofMode": "real-stack",
+          "observer": "Event re-delivery harness with a duplicate detector over infractions, punishments, DMs, and appeals",
+          "expectedObservation": "Replaying recorded moderation interactions against the live stack leaves end state unchanged: no duplicate infractions, timeouts, kicks, bans, DMs, or appeal filings.",
+          "artifact": "evidence/moderation-infractions-appeals/replay-safety"
+        },
+        {
+          "assertionClass": "cleanup",
+          "proofMode": "real-stack",
+          "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+          "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed infractions, appeals, review channels, or messages remaining anywhere.",
+          "artifact": "evidence/moderation-infractions-appeals/cleanup"
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "moderation-infractions-appeals-def",
+          "class": "DEF",
+          "disposition": "required",
+          "promise": "Out of the box moderation warns before punishing: the first two warnings only DM and record, the third active infraction escalates to a 60-minute mute, and every DM names the reason and the appeal path.",
+          "expectedOutcome": "run-member-a warned twice receives two DMs and no timeout; the third warning applies exactly one 60-minute timeout, a punishment DM stating what, why, and how to appeal, and mod-log entries naming each next escalation step.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "After two warnings run-member-a has no timeout and two branded warning DMs; the third warning yields exactly one 60-minute timeout and a DM containing what happened, why, and how to appeal."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All infraction and appeal rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each moderation and appeal action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing moderation surface in this scenario — DMs, appeal confirmations, and portal views — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions yields no duplicate infractions, punishments, member DMs, or appeal filings; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (infraction rows, appeal rows, review-channel and mod-log messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-infractions-appeals-set-a",
+          "class": "SET-A",
+          "disposition": "required",
+          "promise": "The owner tunes the chain live: a gentler chain with four pure warnings before a 10-minute mute plus a 7-day expiry take effect without a restart.",
+          "expectedOutcome": "After saving on the dashboard moderation page, run-member-a’s third warning no longer mutes, the fifth active infraction applies a single 10-minute timeout, and an infraction older than the new 7-day expiry stops counting after the expiry sweep runs.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The third warning produces only a DM under the new chain, while the fifth applies a single 10-minute timeout with its explanation DM."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All infraction and appeal rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each moderation and appeal action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing moderation surface in this scenario — DMs, appeal confirmations, and portal views — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions yields no duplicate infractions, punishments, member DMs, or appeal filings; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (infraction rows, appeal rows, review-channel and mod-log messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-infractions-appeals-set-b",
+          "class": "SET-B",
+          "disposition": "required",
+          "promise": "A second configuration routes appeals: a dedicated run-prefixed appeal review channel and a 48-hour appeal cooldown apply identically to the Discord and portal entry points.",
+          "expectedOutcome": "run-member-a’s appeal lands exactly once in the new review channel whether filed from Discord or the portal, a second appeal for the same infraction inside 48 hours is politely refused, and after a denial the cooldown timestamp is enforced on both surfaces.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The filed appeal appears exactly once in the run-prefixed review channel and the premature second appeal receives a respectful cooldown notice."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All infraction and appeal rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each moderation and appeal action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing moderation surface in this scenario — DMs, appeal confirmations, and portal views — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions yields no duplicate infractions, punishments, member DMs, or appeal filings; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (infraction rows, appeal rows, review-channel and mod-log messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-infractions-appeals-invalid",
+          "class": "INVALID",
+          "disposition": "required",
+          "promise": "Invalid moderation configuration is rejected atomically: a chain whose punishments precede any warning, a negative mute duration, and a zero expiry never persist.",
+          "expectedOutcome": "The dashboard surfaces a clear validation error, guild_config keeps its prior chain byte-for-byte, and the very next warning still follows the previous valid chain.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "A warning issued immediately after the rejected save escalates per the previous valid chain, proving no partial write reached the bot."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All infraction and appeal rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "One audit row records the rejected configuration attempt with the validation reason; no config-change audit row is written."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing moderation surface in this scenario — DMs, appeal confirmations, and portal views — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions yields no duplicate infractions, punishments, member DMs, or appeal filings; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (infraction rows, appeal rows, review-channel and mod-log messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-infractions-appeals-unauth",
+          "class": "UNAUTH",
+          "disposition": "required",
+          "promise": "Moderation power is gated: /warn from a member without Moderate Members is refused, and a member portal session can neither pardon infractions nor decide appeals — including their own.",
+          "expectedOutcome": "run-member-b’s /warn attempt yields only an ephemeral denial with no infraction created, and the same member’s portal session receives a permission error when attempting to resolve their own appeal.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "run-member-b’s /warn attempt produces only an ephemeral denial; the target’s /infractions history is identical before and after."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All infraction and appeal rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Audit rows record the denied /warn and the denied appeal-resolution attempt with actor, target, and reason permission-denied."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing moderation surface in this scenario — DMs, appeal confirmations, and portal views — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions yields no duplicate infractions, punishments, member DMs, or appeal filings; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (infraction rows, appeal rows, review-channel and mod-log messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-infractions-appeals-depfail",
+          "class": "DEPFAIL",
+          "disposition": "required",
+          "promise": "When Supabase is unreachable moderation fails safe: commands report the problem in the owner’s voice, and no punishment is left standing without its infraction record.",
+          "expectedOutcome": "With database access blocked, /warn and /mute reply with a branded failure, no timeout is left applied without a record, and after restoring the connection the same commands succeed with consistent counts.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "During the outage /mute leaves the target without a lingering timeout and the moderator sees a clear failure reply; after restoration the mute applies and records normally."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All infraction and appeal rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each moderation and appeal action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed command."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing moderation surface in this scenario — DMs, appeal confirmations, and portal views — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions yields no duplicate infractions, punishments, member DMs, or appeal filings; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (infraction rows, appeal rows, review-channel and mod-log messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-infractions-appeals-retry",
+          "class": "RETRY",
+          "disposition": "required",
+          "promise": "Transient infraction writes converge: an insert that fails once retries to exactly one row, and escalation evaluates against the converged count exactly once.",
+          "expectedOutcome": "With a transient fault injected on the first insert for a third warning, the retry lands one infraction row, one 60-minute timeout, and one punishment DM.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The member receives exactly one 60-minute timeout and one punishment DM for the retried warning."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All infraction and appeal rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each moderation and appeal action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing moderation surface in this scenario — DMs, appeal confirmations, and portal views — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "The retried insert reuses the original correlation key, so the infractions table shows one row for the warning, not two, and escalation fires once."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (infraction rows, appeal rows, review-channel and mod-log messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-infractions-appeals-replay",
+          "class": "REPLAY",
+          "disposition": "required",
+          "promise": "Replays never double-punish or double-file: re-delivering the /warn interaction and the appeal submission yields no duplicate infraction, timeout, DM, or appeal.",
+          "expectedOutcome": "After replaying the recorded interaction events, the infraction count, timeout state, DM count, and the single appeal row are byte-identical to the pre-replay snapshot.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The member holds exactly one new infraction and exactly one appeal acknowledgement after the replay."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All infraction and appeal rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each moderation and appeal action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing moderation surface in this scenario — DMs, appeal confirmations, and portal views — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Idempotency keys on the warn interaction and the appeal submission show one applied effect each; replayed deliveries are recorded as deduplicated no-ops."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (infraction rows, appeal rows, review-channel and mod-log messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-infractions-appeals-restart",
+          "class": "RESTART",
+          "disposition": "required",
+          "promise": "Moderation state survives a full stack restart: active infractions, running timeouts, expiry timers, and pending appeals all persist.",
+          "expectedOutcome": "After restarting bot and dashboard, /infractions matches the pre-restart snapshot, the live timeout continues to its original end time, the expiry sweep resumes on schedule, and the pending appeal is still reviewable and decidable.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "Post-restart /infractions output matches the pre-restart snapshot exactly and the timeout ends at its originally scheduled time."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All infraction and appeal rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each moderation and appeal action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing moderation surface in this scenario — DMs, appeal confirmations, and portal views — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions yields no duplicate infractions, punishments, member DMs, or appeal filings; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (infraction rows, appeal rows, review-channel and mod-log messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-infractions-appeals-race",
+          "class": "RACE",
+          "disposition": "required",
+          "promise": "Concurrent moderation is safe: two moderators warning the same member simultaneously record both warnings but the threshold escalation executes exactly once, and a racing pardon and appeal decision resolve to one final state.",
+          "expectedOutcome": "Both concurrent warnings persist, exactly one 60-minute timeout is applied at the threshold, and the racing pardon and appeal decision leave the infraction resolved exactly once with a single member notification.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The member receives exactly one timeout and one resolution DM despite the concurrent actions."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All infraction and appeal rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each moderation and appeal action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing moderation surface in this scenario — DMs, appeal confirmations, and portal views — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions yields no duplicate infractions, punishments, member DMs, or appeal filings; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (infraction rows, appeal rows, review-channel and mod-log messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-infractions-appeals-xguild",
+          "class": "XGUILD",
+          "disposition": "required",
+          "promise": "Infractions and appeals are strictly per-guild: warnings in guild A never advance guild B’s escalation, and appeals are only visible and decidable in their own guild.",
+          "expectedOutcome": "run-member-a warned three times in guild A is untouched in guild B where /infractions shows nothing; the appeal filed in guild A is invisible to guild B’s review surfaces.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "Guild B’s /infractions for run-member-a is empty and the member holds no timeout there while guild A shows three infractions."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "A client scoped to guild B reads zero guild A infraction or appeal rows and vice versa; service-role probes confirm the counts diverged independently."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each moderation and appeal action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing moderation surface in this scenario — DMs, appeal confirmations, and portal views — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions yields no duplicate infractions, punishments, member DMs, or appeal filings; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (infraction rows, appeal rows, review-channel and mod-log messages, configuration changes) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-infractions-appeals-cleanup",
+          "class": "CLEANUP",
+          "disposition": "required",
+          "promise": "The suite leaves no trace: every run-prefixed infraction, appeal, review-channel message, and configuration change is removed and verified absent.",
+          "expectedOutcome": "Run-prefixed infractions and appeals are deleted, review-channel and DM test messages are removed where deletable, configuration reverts to the shipped defaults, and a final sweep finds zero run-prefixed moderation resources while audit history remains, anonymized where member data applied.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The test guild contains no run-prefixed appeal review channels and no leftover moderation mod-log messages after cleanup."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All infraction and appeal rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each moderation and appeal action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing moderation surface in this scenario — DMs, appeal confirmations, and portal views — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's triggering interactions yields no duplicate infractions, punishments, member DMs, or appeal filings; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "The sweeper diff shows every run-prefixed infraction and appeal resource created by this domain’s scenarios was removed, with audit rows retained in anonymized form."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "moderation-anti-raid",
+      "name": "Anti-Raid Protection",
+      "category": "moderation",
+      "promise": "Anti-raid ships disabled so calm servers feel zero friction; when the owner enables it, an account-age gate politely defers too-new accounts, a per-guild sliding join window detects floods, and containment is graduated — turning raid-window joiners away first and only escalating to lockdown (verification raised to Very High plus invites paused) if the flood persists — with every measure auto-reversing after the calm cooldown: verification restored, invites recreated, and raid bans automatically lifted.",
+      "controls": [
+        {
+          "id": "anti-raid-enabled",
+          "description": "Master switch for anti-raid protection; when off every join flows completely untouched.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "join-threshold",
+          "description": "Number of joins inside the sliding window that activates raid mode.",
+          "valueType": "integer",
+          "constraints": {
+            "min": 2,
+            "max": 500
+          }
+        },
+        {
+          "id": "join-window-seconds",
+          "description": "Length in seconds of the sliding join window used for flood detection.",
+          "valueType": "integer",
+          "constraints": {
+            "min": 5,
+            "max": 300
+          }
+        },
+        {
+          "id": "min-account-age-days",
+          "description": "Minimum account age while anti-raid is enabled; younger accounts are politely turned away with a DM. Zero disables the gate.",
+          "valueType": "integer",
+          "constraints": {
+            "min": 0,
+            "max": 90
+          }
+        },
+        {
+          "id": "containment-ladder",
+          "description": "Graduated containment stages: stage 1 turns raid-window joiners away (kick or ban with optional message-history delete seconds), stage 2 locks down — verification raised to Very High and invites paused with settings snapshotted — if the flood persists through a stage.",
+          "valueType": "json",
+          "constraints": {
+            "shape": "array of { stage, action, ban-delete-seconds? }"
+          }
+        },
+        {
+          "id": "auto-unban",
+          "description": "Automatically unban members who were banned during raid mode once the raid cools down.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "raid-cooldown-minutes",
+          "description": "Calm minutes without threshold pressure before raid mode deactivates and every containment measure auto-reverses.",
+          "valueType": "integer",
+          "constraints": {
+            "min": 1,
+            "max": 60
+          }
+        },
+        {
+          "id": "raid-log-channel-id",
+          "description": "Channel for raid detection, containment, and all-clear posts; empty string falls back to the mod log channel.",
+          "valueType": "string",
+          "constraints": {}
+        }
+      ],
+      "defaults": [
+        {
+          "controlId": "anti-raid-enabled",
+          "value": false,
+          "rationale": "Lenient locked default: no join is ever gated, deferred, or tracked until the owner deliberately opts in."
+        },
+        {
+          "controlId": "join-threshold",
+          "value": 10,
+          "rationale": "Ten joins in the window is far above organic traffic for most servers, so false raid activations stay rare."
+        },
+        {
+          "controlId": "join-window-seconds",
+          "value": 10,
+          "rationale": "A tight ten-second window matches real raid tooling cadence without penalizing a popular invite moment."
+        },
+        {
+          "controlId": "min-account-age-days",
+          "value": 7,
+          "rationale": "One week filters throwaway raid accounts while barely touching genuine newcomers, who get a warm try-again-soon DM."
+        },
+        {
+          "controlId": "containment-ladder",
+          "value": [
+            {
+              "stage": 1,
+              "action": "kick"
+            },
+            {
+              "stage": 2,
+              "action": "lockdown"
+            }
+          ],
+          "rationale": "Graduated locked default: start with the gentlest effective measure — reversible kicks with a respectful DM — and only lock the doors if the raid keeps coming."
+        },
+        {
+          "controlId": "auto-unban",
+          "value": true,
+          "rationale": "Member-respectful default: raid bans are containment, not permanent judgments, so they lift automatically with the all-clear."
+        },
+        {
+          "controlId": "raid-cooldown-minutes",
+          "value": 5,
+          "rationale": "Five calm minutes reliably outlasts raid bursts while keeping lockdown friction short for genuine members."
+        },
+        {
+          "controlId": "raid-log-channel-id",
+          "value": "",
+          "rationale": "Raid events fall back to the mod log until the owner dedicates a channel, so no raid is ever invisible."
+        }
+      ],
+      "permissions": [
+        {
+          "id": "configure-anti-raid",
+          "actor": "Dashboard user with owner or admin access to the guild",
+          "action": "Edit anti-raid settings including the containment ladder on the dashboard",
+          "defaultDecision": "allow",
+          "enforcement": "Dashboard session auth plus Supabase RLS restrict the guild_config anti-raid columns to authorized guild administrators; changes reach the running bot within the 60-second config cache cycle."
+        },
+        {
+          "id": "lockdown-authority",
+          "actor": "SomniBot itself",
+          "action": "Raise the verification level and pause invites during lockdown",
+          "defaultDecision": "allow",
+          "enforcement": "The bot verifies its own Manage Server permission before acting; when the permission is missing it posts a clear remediation alert naming the fallback instead of failing silently."
+        },
+        {
+          "id": "member-tamper",
+          "actor": "Guild member or portal user without admin access",
+          "action": "Read or modify anti-raid settings",
+          "defaultDecision": "deny",
+          "enforcement": "Dashboard routes reject the session, Supabase RLS returns zero configuration rows to the member client, and the denied attempt is audited."
+        }
+      ],
+      "messages": [
+        {
+          "id": "young-account-dm",
+          "trigger": "A too-new account joins while anti-raid is enabled",
+          "surface": "DM to the joining user, sent before the removal",
+          "audience": "The deferred joiner",
+          "defaultTemplate": "Hi {member-name} — {guild-name} asks that accounts be at least {min-age-days} days old before joining. Nothing is held against you: you are welcome back once your account is a little older.",
+          "variables": [
+            "member-name",
+            "guild-name",
+            "min-age-days"
+          ]
+        },
+        {
+          "id": "raid-join-dm",
+          "trigger": "A joiner is turned away during active raid containment",
+          "surface": "DM to the joining user, sent before the kick or ban",
+          "audience": "The turned-away joiner",
+          "defaultTemplate": "Hi — {guild-name} is weathering a join flood right now, so your join was temporarily turned away. Nothing personal: please try again in a little while.",
+          "variables": [
+            "guild-name"
+          ]
+        },
+        {
+          "id": "raid-detected-alert",
+          "trigger": "The join window crosses the configured threshold",
+          "surface": "Raid log channel, falling back to the mod log channel",
+          "audience": "Guild owner and moderators",
+          "defaultTemplate": "Raid detected: {join-count} joins in {window-seconds}s (threshold {threshold}). Containment stage {stage} engaged — everything auto-reverses after {cooldown-minutes} calm minutes.",
+          "variables": [
+            "join-count",
+            "window-seconds",
+            "threshold",
+            "stage",
+            "cooldown-minutes"
+          ]
+        },
+        {
+          "id": "lockdown-permission-alert",
+          "trigger": "Lockdown cannot engage because the bot lacks Manage Server",
+          "surface": "Owner alert channel",
+          "audience": "Guild owner and administrators",
+          "defaultTemplate": "I need the Manage Server permission to run lockdown for {guild-name}. Grant it, or set the containment ladder to kick or ban only — meanwhile stage-one containment is still protecting you.",
+          "variables": [
+            "guild-name"
+          ]
+        },
+        {
+          "id": "all-clear-summary",
+          "trigger": "Raid mode expires after the calm cooldown",
+          "surface": "Raid log channel, falling back to the mod log channel",
+          "audience": "Guild owner and moderators",
+          "defaultTemplate": "All clear: raid mode ended. Verification restored, {restored-invites} invite(s) recreated with fresh codes, and {unbanned-count} raid ban(s) automatically lifted.",
+          "variables": [
+            "restored-invites",
+            "unbanned-count"
+          ]
+        },
+        {
+          "id": "degraded-tracking-alert",
+          "trigger": "Valkey is unreachable and join tracking falls back to in-memory state",
+          "surface": "Owner alert channel",
+          "audience": "Guild owner and administrators",
+          "defaultTemplate": "Anti-raid briefly fell back to in-memory tracking because its fast store was unreachable. Protection stayed active the whole time and everything is logged.",
+          "variables": []
+        }
+      ],
+      "state": {
+        "initial": "dormant",
+        "values": [
+          {
+            "id": "dormant",
+            "description": "Anti-raid disabled — the shipped default; joins flow completely untouched and nothing is tracked."
+          },
+          {
+            "id": "watching",
+            "description": "Anti-raid enabled and calm; every join passes the account-age gate and feeds the per-guild sliding window."
+          },
+          {
+            "id": "stage-one",
+            "description": "Raid mode active at the first ladder stage; raid-window joiners are respectfully turned away (kicked or banned per the ladder) after a DM."
+          },
+          {
+            "id": "lockdown",
+            "description": "The flood persisted; verification is raised to Very High and invites are paused with their settings snapshotted for restore."
+          },
+          {
+            "id": "restoring",
+            "description": "The calm cooldown was reached; verification, invites, and raid bans are being auto-reversed exactly once."
+          }
+        ],
+        "transitions": [
+          {
+            "id": "enable",
+            "from": "dormant",
+            "to": "watching",
+            "trigger": "Owner turns anti-raid-enabled on via the dashboard",
+            "expectedEffect": "The next join is age-gated and window-tracked without a bot restart; calm servers notice nothing else."
+          },
+          {
+            "id": "flood-detected",
+            "from": "watching",
+            "to": "stage-one",
+            "trigger": "join-threshold joins land within join-window-seconds",
+            "expectedEffect": "Raid mode activates with exactly one raid-detected alert; stage-one containment applies to raid-window joiners after their DM."
+          },
+          {
+            "id": "flood-persists",
+            "from": "stage-one",
+            "to": "lockdown",
+            "trigger": "The join flood keeps breaching the threshold through stage one",
+            "expectedEffect": "The pre-lockdown verification level and invite settings are stored durably, verification rises to Very High, and invites are paused."
+          },
+          {
+            "id": "calm-from-stage-one",
+            "from": "stage-one",
+            "to": "restoring",
+            "trigger": "raid-cooldown-minutes pass without further threshold pressure",
+            "expectedEffect": "Auto-unban runs for any raid bans and normal joining resumes."
+          },
+          {
+            "id": "calm-from-lockdown",
+            "from": "lockdown",
+            "to": "restoring",
+            "trigger": "raid-cooldown-minutes pass without further threshold pressure",
+            "expectedEffect": "Verification is restored to its stored level, paused invites are recreated with their original settings and fresh codes, and raid bans are lifted."
+          },
+          {
+            "id": "restored",
+            "from": "restoring",
+            "to": "watching",
+            "trigger": "Every reversal completes",
+            "expectedEffect": "An all-clear summary reports exactly what was restored and lifted; the sliding window keeps tracking."
+          },
+          {
+            "id": "disable",
+            "from": "watching",
+            "to": "dormant",
+            "trigger": "Owner turns anti-raid-enabled off",
+            "expectedEffect": "All gating and tracking stop immediately; configuration is preserved for re-enabling."
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "valkey-unavailable",
+          "trigger": "Valkey is unreachable for the join window, raid-mode flag, or ban tracking",
+          "expectedBehavior": "Tracking falls back to capped in-memory state so detection and containment continue on this shard; the fallback is logged, the owner is told once per outage window, and state re-syncs to Valkey on recovery.",
+          "resultingState": "watching",
+          "retry": "automatic",
+          "messageId": "degraded-tracking-alert",
+          "auditEvent": "antiraid.tracking_degraded",
+          "ownerNotification": true
+        },
+        {
+          "id": "lockdown-permission-missing",
+          "trigger": "The bot lacks Manage Server when the ladder escalates to lockdown",
+          "expectedBehavior": "Lockdown is skipped with a clear owner alert naming the missing permission and the ladder fallback; stage-one containment keeps running and nothing fails silently.",
+          "resultingState": "stage-one",
+          "retry": "operator",
+          "messageId": "lockdown-permission-alert",
+          "auditEvent": "antiraid.lockdown_permission_missing",
+          "ownerNotification": true
+        },
+        {
+          "id": "restore-incomplete",
+          "trigger": "An invite channel was deleted or an unban is rejected during auto-restore",
+          "expectedBehavior": "Restore is best-effort per item and never blocks the remaining items: the all-clear summary reports the exact restored and lifted counts so owners can reconcile, and every skipped item is audited with its reason.",
+          "resultingState": "watching",
+          "retry": "never",
+          "messageId": "all-clear-summary",
+          "auditEvent": "antiraid.restore_incomplete",
+          "ownerNotification": true
+        }
+      ],
+      "evidence": [
+        {
+          "assertionClass": "Discord",
+          "proofMode": "real-stack",
+          "observer": "Discord observer client joined to the primary test guild with a scripted joiner fleet",
+          "expectedObservation": "Anti-raid behavior contracted here is directly observed working in the live test guild: the disabled default leaves joins untouched, enabling adds the polite age gate, a scripted join flood trips graduated containment, and after the calm cooldown verification, invites, and raid bans are all restored.",
+          "artifact": "evidence/moderation-anti-raid/discord"
+        },
+        {
+          "assertionClass": "database-RLS",
+          "proofMode": "real-stack",
+          "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+          "expectedObservation": "The guild_config anti-raid columns and related audit rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+          "artifact": "evidence/moderation-anti-raid/database-rls"
+        },
+        {
+          "assertionClass": "audit",
+          "proofMode": "real-stack",
+          "observer": "Audit-log table reader using the service role",
+          "expectedObservation": "Every raid detection, deferral, containment action, lockdown, and restoration lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+          "artifact": "evidence/moderation-anti-raid/audit"
+        },
+        {
+          "assertionClass": "owner-notification",
+          "proofMode": "real-stack",
+          "observer": "Owner alert channel observer in the primary test guild",
+          "expectedObservation": "Anti-raid failure branches — degraded tracking, missing lockdown permission, incomplete restore — raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+          "artifact": "evidence/moderation-anti-raid/owner-notification"
+        },
+        {
+          "assertionClass": "branding",
+          "proofMode": "real-stack",
+          "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+          "expectedObservation": "Captured deferral DMs and raid-log embeds match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+          "artifact": "evidence/moderation-anti-raid/branding"
+        },
+        {
+          "assertionClass": "replay-safety",
+          "proofMode": "real-stack",
+          "observer": "Event re-delivery harness with a duplicate detector over joins, member states, bans, and guild settings",
+          "expectedObservation": "Replaying recorded join events against the live stack leaves end state unchanged: no double-counted window entries, duplicate kicks or bans, or repeated lockdown or restore passes.",
+          "artifact": "evidence/moderation-anti-raid/replay-safety"
+        },
+        {
+          "assertionClass": "cleanup",
+          "proofMode": "real-stack",
+          "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+          "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed anti-raid resources, no lingering scripted-joiner bans, and no leftover verification or invite changes anywhere.",
+          "artifact": "evidence/moderation-anti-raid/cleanup"
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "moderation-anti-raid-def",
+          "class": "DEF",
+          "disposition": "required",
+          "promise": "Out of the box anti-raid is off and stays out of the way: a burst of joins, including a brand-new account, is welcomed untouched.",
+          "expectedOutcome": "Fifteen scripted joins inside ten seconds, one from a day-old account, all remain members; no DM, kick, ban, or verification change occurs and no raid alert posts anywhere.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "Every scripted joiner remains in the guild, no raid alert appears in any log channel, and the verification level is unchanged."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All anti-raid configuration and audit rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each anti-raid detection, containment action, and restoration in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing anti-raid surface in this scenario — deferral DMs and raid-log embeds — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's recorded join events yields no double-counted window entries, duplicate kicks or bans, or repeated lockdown or restore passes; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (configuration changes, raid-log and alert messages, scripted-joiner bans, recreated invites) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-anti-raid-set-a",
+          "class": "SET-A",
+          "disposition": "required",
+          "promise": "Enabling with defaults is respectful and graduated: the age gate politely defers a too-new account, and a join flood engages stage-one containment that turns raid-window joiners away and auto-reverses after five calm minutes.",
+          "expectedOutcome": "After enabling on the dashboard, a three-day-old account is DMed the age explanation and removed without a ban; a twelve-joins-in-ten-seconds flood raises exactly one raid alert, raid-window joiners are DMed then kicked, and after five calm minutes a fresh join flows through untouched.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The young account receives the branded age DM and is removed without a ban-list entry; during the flood raid-window joiners are kicked after their DM, and a post-cooldown join succeeds untouched."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All anti-raid configuration and audit rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each anti-raid detection, containment action, and restoration in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing anti-raid surface in this scenario — deferral DMs and raid-log embeds — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's recorded join events yields no double-counted window entries, duplicate kicks or bans, or repeated lockdown or restore passes; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (configuration changes, raid-log and alert messages, scripted-joiner bans, recreated invites) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-anti-raid-set-b",
+          "class": "SET-B",
+          "disposition": "required",
+          "promise": "A tightened second configuration escalates to lockdown: a lower threshold plus a persisting flood raises verification to Very High and pauses invites, then restores both when calm returns.",
+          "expectedOutcome": "With threshold five and a persisting scripted flood, verification rises to Very High, existing run-prefixed invites are deleted with their settings snapshotted, and after the cooldown verification returns to its prior level, invites are recreated with fresh codes, and the all-clear summary reports the exact counts.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The guild’s verification level is observed at Very High during lockdown and back at its prior level afterward, with recreated invites present and a single all-clear summary posted."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All anti-raid configuration and audit rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each anti-raid detection, containment action, and restoration in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing anti-raid surface in this scenario — deferral DMs and raid-log embeds — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's recorded join events yields no double-counted window entries, duplicate kicks or bans, or repeated lockdown or restore passes; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (configuration changes, raid-log and alert messages, scripted-joiner bans, recreated invites) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-anti-raid-invalid",
+          "class": "INVALID",
+          "disposition": "required",
+          "promise": "Invalid anti-raid configuration is rejected atomically: a join threshold below two, a negative window, and a malformed containment ladder never persist.",
+          "expectedOutcome": "The dashboard surfaces a clear validation error, guild_config keeps its prior anti-raid columns byte-for-byte, and the next join is processed under the previous valid settings.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "A join immediately after the rejected save is handled exactly per the previous valid settings, proving no partial write reached the bot."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All anti-raid configuration and audit rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "One audit row records the rejected configuration attempt with the validation reason; no config-change audit row is written."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing anti-raid surface in this scenario — deferral DMs and raid-log embeds — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's recorded join events yields no double-counted window entries, duplicate kicks or bans, or repeated lockdown or restore passes; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (configuration changes, raid-log and alert messages, scripted-joiner bans, recreated invites) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-anti-raid-unauth",
+          "class": "UNAUTH",
+          "disposition": "required",
+          "promise": "Anti-raid settings are admin-only: a member dashboard session can neither read nor loosen the raid configuration.",
+          "expectedOutcome": "run-member-b’s session receives a permission error, RLS returns zero anti-raid configuration rows to the member client, the configuration is unchanged, and the denied attempt is audited.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "Anti-raid behavior on the next join is byte-identical before and after the denied attempt."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All anti-raid configuration and audit rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "An audit row records the denied settings access with actor id, route, and reason permission-denied."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing anti-raid surface in this scenario — deferral DMs and raid-log embeds — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's recorded join events yields no double-counted window entries, duplicate kicks or bans, or repeated lockdown or restore passes; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (configuration changes, raid-log and alert messages, scripted-joiner bans, recreated invites) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-anti-raid-depfail",
+          "class": "DEPFAIL",
+          "disposition": "required",
+          "promise": "When Valkey is down protection continues: join tracking falls back to capped in-memory state, floods are still detected, and recovery re-syncs cleanly.",
+          "expectedOutcome": "With Valkey blocked, a scripted flood still trips stage-one containment from the in-memory window, the owner receives one degradation alert, and after Valkey returns tracking resumes there without double-counting.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The flood is contained during the outage exactly as it would be with Valkey healthy, and joins after recovery are tracked normally."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All anti-raid configuration and audit rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each anti-raid detection, containment action, and restoration in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner receives a single tracking-degradation alert for the outage window rather than one alert per join."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing anti-raid surface in this scenario — deferral DMs and raid-log embeds — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's recorded join events yields no double-counted window entries, duplicate kicks or bans, or repeated lockdown or restore passes; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (configuration changes, raid-log and alert messages, scripted-joiner bans, recreated invites) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-anti-raid-retry",
+          "class": "RETRY",
+          "disposition": "required",
+          "promise": "Transient Discord failures converge: a containment kick or raid-log post that fails once is retried to exactly one effect per joiner and one alert per raid.",
+          "expectedOutcome": "With a transient fault injected on the first raid-log post and on one containment kick, the retries land exactly one raid alert and the affected joiner is removed exactly once.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "Exactly one raid-detected alert exists and the affected joiner appears removed exactly once in the raid log."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All anti-raid configuration and audit rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each anti-raid detection, containment action, and restoration in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing anti-raid surface in this scenario — deferral DMs and raid-log embeds — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "The retried post and kick reuse their original correlation keys, so the raid log carries one alert and the joiner one removal, not two."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (configuration changes, raid-log and alert messages, scripted-joiner bans, recreated invites) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-anti-raid-replay",
+          "class": "REPLAY",
+          "disposition": "required",
+          "promise": "Replayed join events never distort detection or containment: re-delivering recorded joins neither double-counts the window nor re-kicks, re-bans, or re-triggers lockdown.",
+          "expectedOutcome": "After replaying the flood’s gateway events, the join-window count, member states, raid-mode state, and alert count are byte-identical to the pre-replay snapshot.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "Exactly one raid alert exists and no member was actioned twice after the replay."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All anti-raid configuration and audit rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each anti-raid detection, containment action, and restoration in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing anti-raid surface in this scenario — deferral DMs and raid-log embeds — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Idempotency keys on join processing show one applied containment per joiner; replayed deliveries are recorded as deduplicated no-ops and the sliding window counts each real join exactly once."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (configuration changes, raid-log and alert messages, scripted-joiner bans, recreated invites) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-anti-raid-restart",
+          "class": "RESTART",
+          "disposition": "required",
+          "promise": "Raid state survives a restart mid-incident: raid mode, the pre-lockdown verification level, paused-invite snapshots, and the raid-ban list persist so auto-restore still happens.",
+          "expectedOutcome": "Restarting the bot during an active lockdown leaves raid mode active on boot, and when the cooldown expires the original verification level is restored, invites are recreated, and raid bans are lifted exactly once.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "After the restart and cooldown, verification is back at its pre-raid level and the recreated invites are present, with a single all-clear summary."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All anti-raid configuration and audit rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each anti-raid detection, containment action, and restoration in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing anti-raid surface in this scenario — deferral DMs and raid-log embeds — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's recorded join events yields no double-counted window entries, duplicate kicks or bans, or repeated lockdown or restore passes; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (configuration changes, raid-log and alert messages, scripted-joiner bans, recreated invites) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-anti-raid-race",
+          "class": "RACE",
+          "disposition": "required",
+          "promise": "A simultaneous join burst is counted atomically: concurrent joins each count once, containment engages exactly once, and only one raid alert posts.",
+          "expectedOutcome": "Twenty near-simultaneous joins produce a window count of twenty, one raid-mode activation, one raid alert, and exactly one containment action per raid-window joiner.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "Exactly one raid-detected alert appears and no joiner is kicked or banned more than once."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All anti-raid configuration and audit rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each anti-raid detection, containment action, and restoration in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing anti-raid surface in this scenario — deferral DMs and raid-log embeds — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's recorded join events yields no double-counted window entries, duplicate kicks or bans, or repeated lockdown or restore passes; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (configuration changes, raid-log and alert messages, scripted-joiner bans, recreated invites) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-anti-raid-xguild",
+          "class": "XGUILD",
+          "disposition": "required",
+          "promise": "Raid handling is strictly per-guild: a flood in guild A never gates joins, raises verification, or pauses invites in guild B.",
+          "expectedOutcome": "During guild A’s raid mode, joins to guild B flow untouched, guild B’s verification level and invites are unchanged, and each guild’s window keys and configuration resolve independently.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "A join to guild B during guild A’s raid succeeds untouched while the same joiner is turned away from guild A."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "A client scoped to guild B reads zero guild A anti-raid configuration or audit rows and vice versa; service-role probes confirm the settings diverged independently."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each anti-raid detection, containment action, and restoration in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing anti-raid surface in this scenario — deferral DMs and raid-log embeds — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's recorded join events yields no double-counted window entries, duplicate kicks or bans, or repeated lockdown or restore passes; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "Every run-prefixed resource this scenario created (configuration changes, raid-log and alert messages, scripted-joiner bans, recreated invites) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+            }
+          ]
+        },
+        {
+          "id": "moderation-anti-raid-cleanup",
+          "class": "CLEANUP",
+          "disposition": "required",
+          "promise": "The suite leaves no trace: raid configuration reverts, run-prefixed invites and log messages are removed, and every scripted raid ban is lifted.",
+          "expectedOutcome": "Anti-raid settings return to the shipped defaults, run-prefixed invites and raid-log messages are deleted, no scripted joiner remains banned, verification is at its original level, and a final sweep finds zero run-prefixed anti-raid resources while audit history remains, anonymized where member data applied.",
+          "assertions": [
+            {
+              "assertionClass": "Discord",
+              "expectedObservation": "The test guild ban list contains no scripted raid joiners and no run-prefixed raid-log messages remain after cleanup."
+            },
+            {
+              "assertionClass": "database-RLS",
+              "expectedObservation": "All anti-raid configuration and audit rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+            },
+            {
+              "assertionClass": "audit",
+              "expectedObservation": "Append-only audit rows capture each anti-raid detection, containment action, and restoration in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+            },
+            {
+              "assertionClass": "owner-notification",
+              "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+            },
+            {
+              "assertionClass": "branding",
+              "expectedObservation": "Every member-facing anti-raid surface in this scenario — deferral DMs and raid-log embeds — shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+            },
+            {
+              "assertionClass": "replay-safety",
+              "expectedObservation": "Re-delivering this scenario's recorded join events yields no double-counted window entries, duplicate kicks or bans, or repeated lockdown or restore passes; persisted idempotency keys show exactly one effect per logical action."
+            },
+            {
+              "assertionClass": "cleanup",
+              "expectedObservation": "The sweeper diff shows every run-prefixed anti-raid resource created by this domain’s scenarios was removed — including lifted bans and restored guild settings — with audit rows retained in anonymized form."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

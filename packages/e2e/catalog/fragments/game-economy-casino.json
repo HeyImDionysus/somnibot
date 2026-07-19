@@ -1,0 +1,811 @@
+{
+ "category": "game-economy",
+ "domains": [
+  {
+   "id": "game-economy-casino",
+   "name": "Casino Games of Chance",
+   "category": "game-economy",
+   "promise": "Members wager play-money coins across the full advertised casino floor — coinflip, slots, roulette, blackjack, dice, rock-paper-scissors, scratch cards, guess-the-number, and the free high-low — with every outcome drawn from the project CSPRNG for uniform, tamper-resistant fairness. Owner-configurable per-game wager caps and a per-member daily loss cap keep stakes real but recoverable, a per-user lock makes concurrent bets safe, and losses are tracked in a restart-durable daily counter. It is all the fake game economy forever: no bet, payout, or jackpot ever touches real money, casino winnings are never convertible to the real paid store, and commerce-held roles earn no casino income.",
+   "controls": [
+    {
+     "id": "casino-enabled",
+     "description": "Master switch for the casino, backed by the economy_games_enabled config key; when off, every casino command replies that mini-games are disabled and no wager is accepted.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "coinflip-max-bet",
+     "description": "Maximum play-money coins wagerable per bet on economy_coinflip_max_bet-governed games (coinflip, roulette, dice, rock-paper-scissors, scratch, and guess all share this cap in code).",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 100000000
+     }
+    },
+    {
+     "id": "slots-max-bet",
+     "description": "Maximum play-money coins wagerable per /slots spin, backed by the economy_slots_max_bet config key.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 100000000
+     }
+    },
+    {
+     "id": "blackjack-max-bet",
+     "description": "Maximum play-money coins wagerable per /blackjack hand, backed by the economy_blackjack_max_bet config key (a double-down can stake up to twice this at resolution).",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 100000000
+     }
+    },
+    {
+     "id": "daily-loss-cap",
+     "description": "Maximum net play-money coins a single member may lose per UTC day across all casino games, backed by the economy_daily_loss_limit config key; zero disables the cap. Enforced against the restart-durable economy_daily_losses counter.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 100000000
+     }
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "casino-enabled",
+     "value": true,
+     "rationale": "The casino floor is a flagship game-economy draw and ships on for the maximal out-of-box experience; owners can switch it off in one click."
+    },
+    {
+     "controlId": "coinflip-max-bet",
+     "value": 500,
+     "rationale": "A conservative default table limit keeps early wagers small and losses recoverable; owners raise it freely as their economy matures."
+    },
+    {
+     "controlId": "slots-max-bet",
+     "value": 500,
+     "rationale": "Slots swing hard on a jackpot symbol, so the default cap matches the conservative coinflip limit to keep variance friendly for casual players."
+    },
+    {
+     "controlId": "blackjack-max-bet",
+     "value": 1000,
+     "rationale": "Blackjack rewards skill and can double down, so it ships with a modestly higher default cap than the pure-chance games while staying conservative."
+    },
+    {
+     "controlId": "daily-loss-cap",
+     "value": 5000,
+     "rationale": "A sane non-zero daily loss ceiling protects members from grinding their whole wallet away in one session while leaving plenty of room for a fun run; owners can raise, lower, or disable it."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "play-casino-games",
+     "actor": "Any guild member",
+     "action": "Run /coinflip, /slots, /roulette, /blackjack, /dice, /rps, /scratch, /guess, and the free /highlow",
+     "defaultDecision": "allow",
+     "enforcement": "Casino slash commands respond for every member; each bet only ever mutates the invoking member's own economy_wallets row, and a per-user Valkey lock (SET NX PX, fail-closed) permits at most one in-flight bet per member."
+    },
+    {
+     "id": "configure-casino",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Edit casino settings (enable flag, per-game wager caps, daily loss cap) on the dashboard economy games page",
+     "defaultDecision": "allow",
+     "enforcement": "Dashboard session auth plus Supabase RLS restrict guild_config writes to authorized guild administrators; the API validates each economy_* key before persisting."
+    },
+    {
+     "id": "bet-from-others-wallet",
+     "actor": "Any guild member",
+     "action": "Wager from or receive a payout into another member's play-money wallet",
+     "defaultDecision": "deny",
+     "enforcement": "Every economy_add_balance and economy_subtract_balance call is keyed to the invoking member's own guild and user id; no code path debits or credits another member's wallet from a casino command."
+    },
+    {
+     "id": "convert-winnings-to-real-money",
+     "actor": "Any actor",
+     "action": "Convert casino play-money winnings into real-store credit, commerce entitlements, or any real-money value",
+     "defaultDecision": "deny",
+     "enforcement": "The casino reads and writes only economy_wallets and economy_daily_losses; there is no code path from a casino payout to the commerce or billing tables, and commerce-held roles grant no casino income."
+    }
+   ],
+   "messages": [
+    {
+     "id": "bet-won",
+     "trigger": "A casino bet resolves in the member's favor and the play-money payout lands",
+     "surface": "Channel embed replying to the casino command",
+     "audience": "The betting member and the channel",
+     "defaultTemplate": "{member-name} wins {payout} play coins on {game-name}! It's all house play money — good luck on the next one.",
+     "variables": [
+      "member-name",
+      "payout",
+      "game-name"
+     ]
+    },
+    {
+     "id": "bet-lost",
+     "trigger": "A casino bet resolves against the member and the play-money stake is deducted",
+     "surface": "Channel embed replying to the casino command",
+     "audience": "The betting member and the channel",
+     "defaultTemplate": "{member-name} lost {stake} play coins on {game-name}. It's pretend money — the wallet refills, the fun stays.",
+     "variables": [
+      "member-name",
+      "stake",
+      "game-name"
+     ]
+    },
+    {
+     "id": "over-max-bet",
+     "trigger": "A member wagers more than the configured per-game maximum bet",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "That's over the table limit — the most you can wager here is {max-bet} play coins.",
+     "variables": [
+      "max-bet"
+     ]
+    },
+    {
+     "id": "daily-cap-reached",
+     "trigger": "A member's play-money losses for the UTC day would exceed the daily loss cap",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "You've reached today's play-coin loss limit, {member-name} — come back after the daily reset.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "game-in-progress",
+     "trigger": "A member starts a second casino bet while one is still resolving",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "You already have a game in progress, {member-name} — finish it first.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "transaction-failed",
+     "trigger": "The play-money debit on a losing bet fails so the balance is left unchanged",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "Something hiccuped and your bet didn't go through, {member-name} — your play-coin balance is untouched.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "casino-unavailable",
+     "trigger": "The casino backend (Supabase or the Valkey lock) is temporarily unreachable when a member runs a casino command",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The casino floor is briefly closed, {member-name} — give it a moment and try again. No coins moved.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "casino-degraded",
+     "trigger": "A winning play-money payout keeps failing after the outcome resolved",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: the {game-name} payout to {member-name} failed and is queued for operator retry; no play coins were double-paid and everything is logged.",
+     "variables": [
+      "game-name",
+      "member-name"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "idle",
+    "values": [
+     {
+      "id": "idle",
+      "description": "The member has no in-flight bet; casino commands are ready within the configured wager and daily-loss caps."
+     },
+     {
+      "id": "in-play",
+      "description": "A bet passed validation and holds the member's per-user Valkey lock while the CSPRNG outcome resolves (including an interactive blackjack collector)."
+     },
+     {
+      "id": "daily-capped",
+      "description": "The member's play-money losses reached the daily-loss cap; further wagers are refused until the UTC day rolls over."
+     },
+     {
+      "id": "degraded",
+      "description": "A wallet RPC failed after a winning outcome; the member's balance is unchanged, the payout is queued for operator retry, and the member was told nothing was lost."
+     },
+     {
+      "id": "disabled",
+      "description": "The casino is disabled by configuration; every casino command explains mini-games are off and no wager is accepted."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "place-bet",
+      "from": "idle",
+      "to": "in-play",
+      "trigger": "A member runs a casino command with a wager within the per-game max bet and their balance",
+      "expectedEffect": "The per-user Valkey lock is acquired and the bet is validated exactly once against the enable flag, the max bet, the balance, and the daily-loss cap before any coins move."
+     },
+     {
+      "id": "resolve-outcome",
+      "from": "in-play",
+      "to": "idle",
+      "trigger": "The CSPRNG outcome resolves and the play-money wallet is adjusted",
+      "expectedEffect": "Exactly one wallet mutation applies (credit on a win, debit on a loss), the daily-loss counter increments only on a real net loss, and the per-user lock is released in the finally block."
+     },
+     {
+      "id": "hit-daily-cap",
+      "from": "idle",
+      "to": "daily-capped",
+      "trigger": "A member attempts a bet whose potential loss would push their UTC-day losses past the daily-loss cap",
+      "expectedEffect": "The bet is refused before any coins move, the lock is released, and the member is told they hit today's loss limit."
+     },
+     {
+      "id": "daily-cap-resets",
+      "from": "daily-capped",
+      "to": "idle",
+      "trigger": "The UTC day rolls over so a fresh economy_daily_losses counter starts at zero",
+      "expectedEffect": "Wagering resumes under the same caps with the prior day's losses no longer counting against the member."
+     },
+     {
+      "id": "bet-degraded",
+      "from": "in-play",
+      "to": "degraded",
+      "trigger": "The winning-payout economy_add_balance RPC fails while resolving a bet",
+      "expectedEffect": "The balance is left unchanged, no daily-loss increment is recorded for a win, the member is told nothing was lost, and the lock is released."
+     },
+     {
+      "id": "payout-recovered",
+      "from": "degraded",
+      "to": "idle",
+      "trigger": "The queued payout is retried by the operator after the transient fault clears",
+      "expectedEffect": "The owed winnings are credited exactly once under a single idempotency key; the member is never double-paid and never zero-paid."
+     },
+     {
+      "id": "casino-toggled-off",
+      "from": "idle",
+      "to": "disabled",
+      "trigger": "Owner turns casino-enabled (economy_games_enabled) off on the dashboard",
+      "expectedEffect": "Casino commands reply with the disabled explanation and accept no wagers; every wallet and daily-loss row is preserved untouched."
+     },
+     {
+      "id": "casino-toggled-on",
+      "from": "disabled",
+      "to": "idle",
+      "trigger": "Owner turns casino-enabled back on",
+      "expectedEffect": "Casino play resumes under the configured caps with all balances and daily-loss counters intact."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "win-payout-failed",
+     "trigger": "economy_add_balance fails after a casino outcome resolved in the member's favor",
+     "expectedBehavior": "The member's balance is left unchanged rather than falsely credited, the result surface plainly flags the delayed payout instead of pretending success, no daily-loss increment is recorded for the win, and the payout is queued for operator retry under one idempotency key so a retry credits exactly once.",
+     "resultingState": "degraded",
+     "retry": "operator",
+     "messageId": "casino-degraded",
+     "auditEvent": "casino.win_payout_failed",
+     "ownerNotification": true
+    },
+    {
+     "id": "loss-debit-failed",
+     "trigger": "economy_subtract_balance fails while deducting the stake on a losing bet",
+     "expectedBehavior": "The wallet is left byte-identical, no daily-loss increment is recorded (the counter advances only after a successful debit), the member is told the bet did not go through, and the per-user lock is released so play can continue.",
+     "resultingState": "idle",
+     "retry": "never",
+     "messageId": "transaction-failed",
+     "auditEvent": "casino.loss_debit_failed",
+     "ownerNotification": false
+    },
+    {
+     "id": "casino-dependency-unreachable",
+     "trigger": "Supabase or the Valkey lock is unreachable when a member runs a casino command",
+     "expectedBehavior": "The command fails safe with the branded casino-unavailable reply and no coins move; the per-user lock fails closed rather than double-granting, and the next healthy command resolves normally with exactly one wallet mutation.",
+     "resultingState": "idle",
+     "retry": "automatic",
+     "messageId": "casino-unavailable",
+     "auditEvent": "casino.dependency_degraded",
+     "ownerNotification": false
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "Casino behavior contracted here is directly observed working in the live test guild: coinflip, slots, roulette, blackjack, dice, rps, scratch, and guess accept play-money wagers within the configured caps, adjust the wallet by exactly the stake in the outcome direction, refuse over-cap and over-daily-loss bets, and never touch real money.",
+     "artifact": "evidence/game-economy-casino/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_wallets, economy_daily_losses, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none, and no commerce or billing table is ever read or written by a casino action.",
+     "artifact": "evidence/game-economy-casino/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every casino state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-casino/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-casino/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured casino embeds and messages for this domain match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-casino/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over wallet mutations and daily-loss increments",
+     "expectedObservation": "Replaying recorded casino triggers against the live stack leaves end state unchanged: no duplicate play-money debits, credits, or daily-loss increments.",
+     "artifact": "evidence/game-economy-casino/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed casino resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-casino/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-casino-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box the casino is on with conservative caps: coinflip and slots max bet 500, blackjack max bet 1000, and a 5000 play-coin daily loss cap; every wager moves only play money.",
+     "expectedOutcome": "run-member-a's within-cap coinflip and slots wagers adjust the wallet by exactly the staked coins in the harness-seeded outcome direction, a 600-coin coinflip is refused over the 500 default, and accumulated losses count toward the 5000 daily cap.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A seeded /coinflip 200 and /slots 200 each move run-member-a's wallet by exactly 200 in the resolved direction, a /coinflip 600 is refused with the over-max-bet reply, and a losing streak's deductions accumulate toward the 5000 daily loss cap with no real-money surface anywhere."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All casino rows touched by this scenario (economy_wallets, economy_daily_losses) carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them, and no commerce table is touched."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each casino action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing casino surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, credits, or daily-loss increments; persisted idempotency keys show exactly one effect per logical bet."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, daily-loss counters, and game result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-casino-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Conservative configuration set A takes live effect: the owner sets coinflip max bet 100, blackjack max bet 200, and daily loss cap 1000.",
+     "expectedOutcome": "Without a bot restart, a /coinflip 90 is accepted while /coinflip 150 is refused over the 100 cap, /blackjack 200 is accepted while 201 is refused, and losses stop being accepted once 1000 coins are lost that day.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save with no restart, /coinflip 90 resolves normally, /coinflip 150 and /blackjack 201 return the over-max-bet reply at the set-A caps, and a wager that would push the day past 1000 lost coins is refused with the daily-cap-reached reply."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All casino rows touched by this scenario (economy_wallets, economy_daily_losses) carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them, and no commerce table is touched."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each casino action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing casino surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, credits, or daily-loss increments; persisted idempotency keys show exactly one effect per logical bet."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, daily-loss counters, and game result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-casino-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "A distinct configuration set B proves the same controls carry different values: coinflip max bet 2000, blackjack max bet 5000, and daily loss cap 20000.",
+     "expectedOutcome": "Without a bot restart, a /coinflip 1500 that set A refused is now accepted, /blackjack 5000 is accepted, and losses up to 20000 coins in a day are permitted before the cap engages.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the set-B save with no restart, /coinflip 1500 and /blackjack 5000 resolve normally at the raised caps, /coinflip 2001 is refused, and losses are accepted up to the 20000 daily cap — proving the same controls took values distinct from set A."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All casino rows touched by this scenario (economy_wallets, economy_daily_losses) carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them, and no commerce table is touched."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each casino action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing casino surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, credits, or daily-loss increments; persisted idempotency keys show exactly one effect per logical bet."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, daily-loss counters, and game result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-casino-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid casino configuration is rejected atomically: a negative wager cap and an out-of-range daily loss cap never persist.",
+     "expectedOutcome": "The dashboard economy games page surfaces a clear validation error, guild_config keeps its prior values byte-for-byte, and live bot behavior is unchanged on the very next casino command.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A /coinflip run immediately after the rejected save still enforces the previous valid cap, proving no partial write reached the bot's cached config."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All casino rows touched by this scenario (economy_wallets, economy_daily_losses) carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them, and no commerce table is touched."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the rejected casino configuration attempt with the validation reason; no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing casino surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, credits, or daily-loss increments; persisted idempotency keys show exactly one effect per logical bet."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, daily-loss counters, and game result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-casino-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "The casino is protected from unauthorized actors: a member cannot bet from another member's wallet and a non-admin dashboard session cannot save casino settings.",
+     "expectedOutcome": "run-member-b's wagers only ever touch run-member-b's own wallet, run-member-a's wallet is byte-identical afterward, and the non-admin dashboard save of casino settings is refused.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-b's casino bets only debit and credit run-member-b's own wallet, run-member-a's balance is identical before and after, and the non-admin dashboard save returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All casino rows touched by this scenario (economy_wallets, economy_daily_losses) carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them, and no commerce table is touched."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied casino configuration attempt with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing casino surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, credits, or daily-loss increments; persisted idempotency keys show exactly one effect per logical bet."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, daily-loss counters, and game result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-casino-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase or Valkey dependency is unreachable, the casino fails safe: no crash, a friendly branded degradation, the per-user lock fails closed, and no play coins move.",
+     "expectedOutcome": "With database access blocked, casino commands reply with the branded casino-unavailable message and no coins move; after restoring the connection a fresh bet resolves with exactly one wallet mutation.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /coinflip and /slots reply with the branded casino-unavailable template in the owner's voice and no wallet mutation occurs; after restoration a fresh bet debits or credits exactly once."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All casino rows touched by this scenario (economy_wallets, economy_daily_losses) carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them, and no commerce table is touched."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each casino action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed casino command."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing casino surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, credits, or daily-loss increments; persisted idempotency keys show exactly one effect per logical bet."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, daily-loss counters, and game result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-casino-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A winning bet whose payout step fails converges safely: the member is never falsely credited and an operator retry pays the winnings exactly once.",
+     "expectedOutcome": "With a fault injected on the winning economy_add_balance, run-member-a's balance is unchanged, the result surface flags the delayed payout, an owner alert fires, and the operator retry credits the winnings exactly once with no daily-loss increment for the win.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the injected payout fault, run-member-a sees the delayed-payout notice rather than a false win, the balance is unchanged, and the operator retry credits the winnings exactly once."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All casino rows touched by this scenario (economy_wallets, economy_daily_losses) carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them, and no commerce table is touched."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each casino action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "Exactly one owner alert fires for the failed payout carrying the game name, member, and remediation hint; the successful retry raises none."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing casino surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The failed payout and its retry apply under one idempotency key, so the play-money ledger shows the winnings credited exactly once — never a double credit and never a phantom credit before the retry."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, daily-loss counters, and game result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-casino-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replays never double-charge or double-pay: re-delivering a resolved bet leaves one wallet mutation and one daily-loss increment.",
+     "expectedOutcome": "After replaying the recorded bet interactions, run-member-a's wallet and daily-loss counter are byte-identical to the pre-replay state, with exactly one debit or credit and at most one loss increment per bet.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The channel shows exactly one result embed per bet despite the replays, and /balance and the daily-loss standing are unchanged from the pre-replay snapshot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All casino rows touched by this scenario (economy_wallets, economy_daily_losses) carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them, and no commerce table is touched."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each casino action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing casino surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Idempotency keys on the wallet mutation and the daily-loss increment each show one applied effect; replayed deliveries are recorded as deduplicated no-ops."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, daily-loss counters, and game result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-casino-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "Daily loss standing survives a full stack restart: a member near their daily cap before the restart is still capped afterward, proving the counter is DB-backed, not in-memory.",
+     "expectedOutcome": "After restarting bot and dashboard, run-member-a's accumulated daily losses in economy_daily_losses match the pre-restart snapshot exactly and the next over-cap wager is still refused; the per-user lock TTL self-heals with no stuck lock.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart, a wager that would exceed the still-standing daily loss cap is refused with the daily-cap-reached reply, and a within-cap wager resolves normally with no leftover game-in-progress lock."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All casino rows touched by this scenario (economy_wallets, economy_daily_losses) carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them, and no commerce table is touched."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each casino action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing casino surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, credits, or daily-loss increments; persisted idempotency keys show exactly one effect per logical bet."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, daily-loss counters, and game result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-casino-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent casino commands from one member are safe: the per-user Valkey lock grants exactly one in-flight bet and the daily-loss cap cannot be bypassed by racing two bets.",
+     "expectedOutcome": "Two simultaneous casino commands from run-member-a yield exactly one accepted bet and one game-in-progress refusal, and the daily-loss counter reflects only the single accepted bet.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "For the two simultaneous commands exactly one resolves to a result embed and the other returns the game-in-progress reply; the wallet and daily-loss counter reflect only the single accepted bet."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All casino rows touched by this scenario (economy_wallets, economy_daily_losses) carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them, and no commerce table is touched."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each casino action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing casino surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, credits, or daily-loss increments; persisted idempotency keys show exactly one effect per logical bet."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, daily-loss counters, and game result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-casino-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "The casino is strictly per-guild: wager caps, wallets, and daily-loss counters in a second guild never touch the first guild's state.",
+     "expectedOutcome": "run-member-a plays in test guild B at guild B's configured caps; guild A's wallet, daily-loss counter, and casino config are unchanged, and guild B's bets debit only guild B's wallet.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A's /balance is identical before and after the guild B activity, and guild B's bets enforce guild B's caps and debit guild B's wallet only."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_wallets or economy_daily_losses rows and vice versa; service-role probes confirm each guild's casino rows evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each casino action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing casino surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, credits, or daily-loss increments; persisted idempotency keys show exactly one effect per logical bet."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test wallet rows, daily-loss counters, and game result embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-casino-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed casino resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed wallet rows, daily-loss counters, and game result embeds are deleted; a final sweep finds zero run-prefixed casino resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed casino result embeds or announcements after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All casino rows touched by this scenario (economy_wallets, economy_daily_losses) carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them, and no commerce table is touched."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each casino action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing casino surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, credits, or daily-loss increments; persisted idempotency keys show exactly one effect per logical bet."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed casino resource created by this domain's scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

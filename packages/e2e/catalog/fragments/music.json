@@ -1,0 +1,1075 @@
+{
+  "category": "music",
+  "domains": [
+    {
+      "id": "music-player-fairness",
+      "name": "Player fairness",
+      "category": "music",
+      "promise": "Any member can queue tracks with /play; a requester can always instantly skip their own currently playing track; skipping anyone else's track requires a listener-majority vote among the humans in the voice channel; an optional dashboard-configured DJ role adds arbitration powers (force-skip, stop, volume, filters, remove); a requester can reposition their own queued tracks; and queue priority can be raised by member votes. All fairness rules are enforced per guild with owner-branded messaging.",
+      "controls": [
+        {
+          "id": "dj-role-id",
+          "description": "Discord role id granting DJ arbitration powers (force-skip, /stop, /volume, /loop, /shuffle, /seek, /remove, /pause, /filter). Empty string means no DJ role is configured and arbitration falls back to the guild owner only. Set via the dashboard Music page (guild_config.dj_role_id).",
+          "valueType": "string",
+          "constraints": { "format": "discord-role-snowflake-or-empty" }
+        },
+        {
+          "id": "vote-skip-threshold-percent",
+          "description": "Percentage of non-bot listeners in the voice channel whose votes are required for a vote-skip of another member's track to pass. Votes needed = ceil(listeners * threshold / 100).",
+          "valueType": "integer",
+          "constraints": { "min": 1, "max": 100 }
+        },
+        {
+          "id": "self-skip-enabled",
+          "description": "When true, the requester of the currently playing track can skip it instantly with /skip, without a vote and without the DJ role.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "requester-move-enabled",
+          "description": "When true, a member can reposition their own queued (not yet played) tracks within the queue; moving or removing another member's track still requires the DJ role.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "priority-voting-enabled",
+          "description": "When true, members can cast priority votes on upcoming queue entries; entries with more priority votes are promoted ahead of same-requester entries with fewer votes, never displacing the currently playing track.",
+          "valueType": "boolean",
+          "constraints": {}
+        }
+      ],
+      "defaults": [
+        {
+          "controlId": "dj-role-id",
+          "value": "",
+          "rationale": "Owner decision: the DJ role is optional arbitration, not a prerequisite. Out of the box no DJ role exists and fairness is governed by self-skip plus listener-majority voting."
+        },
+        {
+          "controlId": "vote-skip-threshold-percent",
+          "value": 50,
+          "rationale": "Owner decision: listener-majority vote-skip. 50 percent with ceiling rounding reproduces ceil(listeners / 2), a simple majority of humans in the voice channel."
+        },
+        {
+          "controlId": "self-skip-enabled",
+          "value": true,
+          "rationale": "Owner decision: you can always skip your own track. This is the member-respectful default and stays on unless the owner deliberately disables it."
+        },
+        {
+          "controlId": "requester-move-enabled",
+          "value": true,
+          "rationale": "Owner decision: requesters manage their own queued tracks. Members keep agency over their own picks without needing DJ powers."
+        },
+        {
+          "controlId": "priority-voting-enabled",
+          "value": true,
+          "rationale": "Owner decision: voting-based priority is part of the fairness model and is on by default so popular picks rise without DJ intervention."
+        }
+      ],
+      "permissions": [
+        {
+          "id": "queue-track",
+          "actor": "Any guild member connected to a voice channel",
+          "action": "Add a track or playlist to the shared queue with /play",
+          "defaultDecision": "allow",
+          "enforcement": "The /play handler only requires voice-channel presence and a text channel; no role gate is applied before queueing."
+        },
+        {
+          "id": "self-skip",
+          "actor": "The member who requested the currently playing track",
+          "action": "Instantly skip their own currently playing track with /skip",
+          "defaultDecision": "allow",
+          "enforcement": "The /skip handler compares the invoking user id to the current entry's requestedBy and bypasses both the vote and the DJ check on match while self-skip-enabled is true."
+        },
+        {
+          "id": "force-skip-other",
+          "actor": "A member without the DJ role who did not request the current track",
+          "action": "Force-skip another member's currently playing track without a vote",
+          "defaultDecision": "deny",
+          "enforcement": "The /skip handler routes non-requester non-DJ invocations into the vote-skip tally; no immediate skip occurs until the listener-majority threshold is met."
+        },
+        {
+          "id": "dj-arbitration",
+          "actor": "A member holding the configured DJ role, or the guild owner",
+          "action": "Force-skip, /stop, /volume, /loop, /shuffle, /seek, /remove, /pause, and /filter as arbitration powers",
+          "defaultDecision": "allow",
+          "enforcement": "isDJ resolves true for the guild owner and holders of guild_config.dj_role_id; arbitration handlers check isDJ before acting."
+        },
+        {
+          "id": "move-own-track",
+          "actor": "The member who requested a queued, not-yet-played track",
+          "action": "Reposition their own entry within the upcoming queue",
+          "defaultDecision": "allow",
+          "enforcement": "The queue move surface verifies the target entry's requestedBy matches the invoker before calling the queue manager's moveEntry, while requester-move-enabled is true."
+        },
+        {
+          "id": "move-other-track",
+          "actor": "A member without the DJ role",
+          "action": "Move or remove another member's queued track",
+          "defaultDecision": "deny",
+          "enforcement": "Move and /remove requests against entries requested by someone else are rejected with the fairness-denied message unless the invoker passes the isDJ check."
+        }
+      ],
+      "messages": [
+        {
+          "id": "track-queued",
+          "trigger": "A member successfully adds a track with /play",
+          "surface": "Discord embed reply in the invoking text channel",
+          "audience": "All members of the text channel",
+          "defaultTemplate": "{track-title} is queued at spot {queue-position} — nice pick, {requester}!",
+          "variables": ["track-title", "queue-position", "requester"]
+        },
+        {
+          "id": "self-skip-confirm",
+          "trigger": "The requester skips their own currently playing track",
+          "surface": "Discord embed reply in the invoking text channel",
+          "audience": "All members of the text channel",
+          "defaultTemplate": "{requester} skipped their own pick {track-title} — on to the next one!",
+          "variables": ["requester", "track-title"]
+        },
+        {
+          "id": "vote-progress",
+          "trigger": "A non-requester casts a vote-skip that does not yet reach the threshold",
+          "surface": "Discord embed reply in the invoking text channel",
+          "audience": "All members of the text channel",
+          "defaultTemplate": "Vote to move past {track-title}: {votes} of {votes-needed} listeners agree.",
+          "variables": ["track-title", "votes", "votes-needed"]
+        },
+        {
+          "id": "vote-skip-complete",
+          "trigger": "The vote-skip tally reaches the listener-majority threshold",
+          "surface": "Discord embed reply in the invoking text channel",
+          "audience": "All members of the text channel",
+          "defaultTemplate": "The listeners have spoken — {track-title} steps aside for {next-title}.",
+          "variables": ["track-title", "next-title"]
+        },
+        {
+          "id": "fairness-denied",
+          "trigger": "A member attempts a direct action on another member's track without DJ powers",
+          "surface": "Ephemeral Discord embed reply to the invoker",
+          "audience": "The invoking member only",
+          "defaultTemplate": "Only {requester} or a DJ can control {track-title} directly — cast a vote instead.",
+          "variables": ["requester", "track-title"]
+        },
+        {
+          "id": "vote-error",
+          "trigger": "The vote store cannot record a skip or priority vote",
+          "surface": "Ephemeral Discord embed reply to the invoker",
+          "audience": "The invoking member only",
+          "defaultTemplate": "Your vote on {track-title} did not go through — please try again in a moment.",
+          "variables": ["track-title"]
+        },
+        {
+          "id": "playback-error",
+          "trigger": "The audio backend fails while a track is playing",
+          "surface": "Discord embed in the queue's bound text channel",
+          "audience": "All members of the text channel",
+          "defaultTemplate": "The player hit a snag on {track-title}: {reason}. Hold tight while we recover.",
+          "variables": ["track-title", "reason"]
+        },
+        {
+          "id": "priority-updated",
+          "trigger": "Priority votes promote a queued entry to an earlier spot",
+          "surface": "Discord embed in the queue's bound text channel",
+          "audience": "All members of the text channel",
+          "defaultTemplate": "{track-title} moved up to spot {queue-position} with {vote-count} priority votes.",
+          "variables": ["track-title", "queue-position", "vote-count"]
+        }
+      ],
+      "state": {
+        "initial": "idle",
+        "values": [
+          {
+            "id": "idle",
+            "description": "No active playback session in the guild; the bot is not in voice and no fairness rules are engaged."
+          },
+          {
+            "id": "playing",
+            "description": "A track is playing; the requester, DJ arbitration, and vote thresholds for the current track are known and enforced."
+          },
+          {
+            "id": "vote-open",
+            "description": "At least one vote-skip has been cast against the current track and the tally is below the listener-majority threshold."
+          },
+          {
+            "id": "degraded",
+            "description": "The audio backend is unavailable; playback is halted but the queue, requester attribution, and vote state remain persisted for recovery."
+          }
+        ],
+        "transitions": [
+          {
+            "id": "start-playback",
+            "from": "idle",
+            "to": "playing",
+            "trigger": "A member in a voice channel runs /play with a resolvable query",
+            "expectedEffect": "The bot joins the voice channel, the queue is created, the track plays, and the entry records the requester's user id."
+          },
+          {
+            "id": "open-vote",
+            "from": "playing",
+            "to": "vote-open",
+            "trigger": "A listener who is not the requester and not a DJ runs /skip",
+            "expectedEffect": "One vote is recorded for that user, the vote-progress message shows votes versus votes-needed computed from current non-bot listeners."
+          },
+          {
+            "id": "vote-passes",
+            "from": "vote-open",
+            "to": "playing",
+            "trigger": "The recorded votes from current listeners reach ceil(listeners * threshold / 100)",
+            "expectedEffect": "The current track is skipped exactly once, the vote tally is cleared, and the next track starts with its own fresh vote state."
+          },
+          {
+            "id": "vote-clears",
+            "from": "vote-open",
+            "to": "playing",
+            "trigger": "The current track ends naturally, is self-skipped by its requester, or is force-skipped by a DJ",
+            "expectedEffect": "The pending vote tally is discarded so no votes carry over to the next track."
+          },
+          {
+            "id": "self-skip",
+            "from": "playing",
+            "to": "playing",
+            "trigger": "The requester of the current track runs /skip while self-skip-enabled is true",
+            "expectedEffect": "The track is skipped immediately without any vote, the self-skip-confirm message posts, and playback advances to the next entry."
+          },
+          {
+            "id": "backend-lost",
+            "from": "playing",
+            "to": "degraded",
+            "trigger": "The Lavalink audio node disconnects or errors mid-track",
+            "expectedEffect": "Playback halts, the playback-error message posts, the persisted queue and vote state are untouched, and automatic reconnection begins."
+          },
+          {
+            "id": "backend-recovered",
+            "from": "degraded",
+            "to": "playing",
+            "trigger": "The audio node reconnects",
+            "expectedEffect": "Playback resumes with the persisted current entry and requester attribution intact; no duplicate track entries are created."
+          },
+          {
+            "id": "session-ends",
+            "from": "playing",
+            "to": "idle",
+            "trigger": "The queue ends, a DJ runs /stop, or the auto-leave timer for an empty voice channel elapses",
+            "expectedEffect": "The bot leaves voice, the vote tally is cleared, and the session closes with an audit record."
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "audio-backend-down",
+          "trigger": "The Lavalink node is unreachable while a track is playing or a /play resolution is requested",
+          "expectedBehavior": "Playback halts without corrupting the persisted queue; the channel receives the playback-error message; reconnection retries automatically; no track entries or votes are lost or duplicated.",
+          "resultingState": "degraded",
+          "retry": "automatic",
+          "messageId": "playback-error",
+          "auditEvent": "music.playback_backend_failed",
+          "ownerNotification": true
+        },
+        {
+          "id": "vote-store-unavailable",
+          "trigger": "The Valkey vote set cannot be read or written when a member casts a vote",
+          "expectedBehavior": "The vote is treated as not recorded, the invoker receives the vote-error message, and no skip fires from an indeterminate tally; the tally is re-evaluated on the next successful vote.",
+          "resultingState": "vote-open",
+          "retry": "automatic",
+          "messageId": "vote-error",
+          "auditEvent": "music.vote_store_failed",
+          "ownerNotification": false
+        },
+        {
+          "id": "unauthorized-control-attempt",
+          "trigger": "A member without DJ powers attempts to force-skip, remove, or move another member's track",
+          "expectedBehavior": "The action is denied with the ephemeral fairness-denied message pointing to the vote path; playback and queue state are unchanged; the denial is audited.",
+          "resultingState": "playing",
+          "retry": "never",
+          "messageId": "fairness-denied",
+          "auditEvent": "music.fairness_denied",
+          "ownerNotification": false
+        }
+      ],
+      "evidence": [
+        {
+          "assertionClass": "Discord",
+          "proofMode": "real-stack",
+          "observer": "Harness Discord client joined to the run-prefixed test guild's voice and text channels",
+          "expectedObservation": "Fairness embeds (track-queued, self-skip-confirm, vote-progress, vote-skip-complete, fairness-denied) appear in the bound text channel with correct requester attribution and the bot audibly starts, skips, and stops tracks in voice.",
+          "artifact": "evidence/music-player-fairness/discord"
+        },
+        {
+          "assertionClass": "database-RLS",
+          "proofMode": "real-stack",
+          "observer": "Supabase client using an anon key scoped to a non-member user versus the service role",
+          "expectedObservation": "guild_config rows carrying dj_role_id and fairness settings are readable and writable only through owner-scoped paths; the anon probe against another guild's row returns zero rows.",
+          "artifact": "evidence/music-player-fairness/database-rls"
+        },
+        {
+          "assertionClass": "audit",
+          "proofMode": "real-stack",
+          "observer": "Audit log reader querying music.* events for the run-prefixed guild",
+          "expectedObservation": "Skip, vote-skip pass, fairness denial, and backend failure events each produce exactly one immutable audit row; no audit rows are deleted during or after the run.",
+          "artifact": "evidence/music-player-fairness/audit"
+        },
+        {
+          "assertionClass": "owner-notification",
+          "proofMode": "real-stack",
+          "observer": "Harness inbox for the owner notification channel (owner DM or configured notification route)",
+          "expectedObservation": "The owner is notified exactly once per audio-backend outage episode with guild, track, and reason context; routine skips and denials produce no owner noise.",
+          "artifact": "evidence/music-player-fairness/owner-notification"
+        },
+        {
+          "assertionClass": "branding",
+          "proofMode": "real-stack",
+          "observer": "Embed inspector over every fairness message captured in the run",
+          "expectedObservation": "All player-fairness embeds use the guild's configured brand name, colors, and tone preset, and carry the subtle powered-by-SomniBot attribution in the footer.",
+          "artifact": "evidence/music-player-fairness/branding"
+        },
+        {
+          "assertionClass": "replay-safety",
+          "proofMode": "real-stack",
+          "observer": "Interaction replayer re-delivering recorded /skip and vote interactions plus queue-state differ",
+          "expectedObservation": "Replaying a delivered /skip or vote interaction advances the queue zero additional times and records zero additional votes; one user never counts twice in a tally.",
+          "artifact": "evidence/music-player-fairness/replay-safety"
+        },
+        {
+          "assertionClass": "cleanup",
+          "proofMode": "real-stack",
+          "observer": "Post-run sweeper listing run-prefixed Valkey keys, guild_config rows, and Discord channels/messages",
+          "expectedObservation": "All run-prefixed queues, vote sets, config rows, and test messages created by fairness scenarios are removed; audit rows remain by design.",
+          "artifact": "evidence/music-player-fairness/cleanup"
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "music-player-fairness-def",
+          "class": "DEF",
+          "disposition": "required",
+          "promise": "Out of the box, with no DJ role configured, any member can queue; a requester self-skips instantly; a non-requester's /skip opens a listener-majority vote instead of force-skipping.",
+          "expectedOutcome": "Member A queues two tracks and self-skips the first instantly; member B's /skip on A's second track records one vote and posts vote-progress showing 1 of 2 with two humans listening; the track keeps playing until the majority is reached.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "track-queued, self-skip-confirm, and vote-progress embeds appear in order; B's lone /skip does not stop the audible track." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The run guild's guild_config row shows dj_role_id null and is unreadable via the anon probe from a non-member context." },
+            { "assertionClass": "audit", "expectedObservation": "One music.self_skip audit row for A and one music.vote_cast row for B exist; no music.force_skip row exists for B." },
+            { "assertionClass": "owner-notification", "expectedObservation": "No owner notification is sent for routine default-path playback and voting." },
+            { "assertionClass": "branding", "expectedObservation": "All embeds in the flow use the default playful tone preset with the guild brand name and powered-by-SomniBot footer." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Re-delivering B's vote interaction leaves the tally at exactly one vote." },
+            { "assertionClass": "cleanup", "expectedObservation": "Run-prefixed queue, vote keys, and test messages from this scenario are removed by the sweeper." }
+          ]
+        },
+        {
+          "id": "music-player-fairness-set-a",
+          "class": "SET-A",
+          "disposition": "required",
+          "promise": "Configuring a DJ role on the dashboard grants arbitration: the DJ force-skips another member's track instantly, no vote required.",
+          "expectedOutcome": "The owner sets dj_role_id to the run's DJ role via PUT /api/music; a DJ-role holder runs /skip on member A's playing track and it skips immediately with the vote tally untouched, while /stop, /volume, and /remove also succeed for the DJ.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The DJ's /skip yields an immediate skip embed naming the next track; no vote-progress embed appears." },
+            { "assertionClass": "database-RLS", "expectedObservation": "guild_config.dj_role_id equals the run DJ role id after the owner-scoped PUT; the write path rejected any non-owner session." },
+            { "assertionClass": "audit", "expectedObservation": "A music.force_skip audit row records the DJ actor, the skipped track, and the arbitration basis dj-role." },
+            { "assertionClass": "owner-notification", "expectedObservation": "No owner notification fires for authorized DJ arbitration." },
+            { "assertionClass": "branding", "expectedObservation": "DJ arbitration embeds keep the guild brand voice and attribution footer identical to member-facing embeds." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Replaying the DJ's /skip interaction advances the queue no further than the single original skip." },
+            { "assertionClass": "cleanup", "expectedObservation": "The run DJ role assignment and config change are reverted and run-prefixed artifacts removed." }
+          ]
+        },
+        {
+          "id": "music-player-fairness-set-b",
+          "class": "SET-B",
+          "disposition": "required",
+          "promise": "Raising vote-skip-threshold-percent to 100 makes vote-skip unanimous, proving the threshold control takes effect distinctly from SET-A.",
+          "expectedOutcome": "With threshold 100 and three human listeners, two votes leave member A's track playing with vote-progress showing 2 of 3; the third listener's vote passes the tally and the track skips exactly once.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "vote-progress embeds show 1 of 3 then 2 of 3; vote-skip-complete posts only after the third distinct listener votes." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The threshold setting persisted for this guild only via the owner-scoped write path and reads back as 100." },
+            { "assertionClass": "audit", "expectedObservation": "Three music.vote_cast rows and exactly one music.vote_skip_passed row exist for the track." },
+            { "assertionClass": "owner-notification", "expectedObservation": "No owner notification fires for a completed vote-skip." },
+            { "assertionClass": "branding", "expectedObservation": "The vote-skip-complete embed uses the configured brand tone and attribution footer." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Re-delivering the third voter's interaction does not skip a second track or restart the tally." },
+            { "assertionClass": "cleanup", "expectedObservation": "Vote sets and the threshold override are removed after the run." }
+          ]
+        },
+        {
+          "id": "music-player-fairness-invalid",
+          "class": "INVALID",
+          "disposition": "required",
+          "promise": "Invalid fairness configuration is rejected atomically: a malformed DJ role id or an out-of-range vote threshold persists nothing.",
+          "expectedOutcome": "PUT /api/music with dj_role_id not-a-snowflake and a vote threshold of 0 returns a validation error; the stored config re-reads unchanged and live fairness behavior in Discord is unaffected.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Fairness behavior in the guild (self-skip and majority voting) is identical before and after the rejected write." },
+            { "assertionClass": "database-RLS", "expectedObservation": "guild_config re-reads byte-identical for the fairness columns; no partial field of the invalid payload was persisted." },
+            { "assertionClass": "audit", "expectedObservation": "A config.rejected audit row records the invalid payload attempt without storing the invalid values as applied state." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The dashboard session sees the inline validation error; no out-of-band owner alert is needed for the owner's own rejected input." },
+            { "assertionClass": "branding", "expectedObservation": "The dashboard validation error renders in the owner-branded dashboard shell." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Replaying the invalid PUT produces the same rejection and still persists nothing." },
+            { "assertionClass": "cleanup", "expectedObservation": "No residual invalid values exist anywhere; run-prefixed session artifacts are removed." }
+          ]
+        },
+        {
+          "id": "music-player-fairness-unauth",
+          "class": "UNAUTH",
+          "disposition": "required",
+          "promise": "Non-DJ members cannot exercise arbitration and non-owners cannot change fairness settings.",
+          "expectedOutcome": "A non-DJ member's /stop, /remove on another member's track, and /volume are each denied ephemerally with fairness guidance; a logged-in non-owner's PUT /api/music returns a permission error and changes nothing.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Each denied command yields an ephemeral fairness-denied or DJ-required embed; playback continues uninterrupted." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The non-owner PUT is blocked by requireGuildOwner and direct table access under the non-owner's JWT is denied by RLS." },
+            { "assertionClass": "audit", "expectedObservation": "music.fairness_denied audit rows record each denied attempt with actor and attempted action." },
+            { "assertionClass": "owner-notification", "expectedObservation": "No owner notification is sent for routine permission denials." },
+            { "assertionClass": "branding", "expectedObservation": "Denial embeds keep the playful-but-clear brand tone and attribution footer rather than raw error text." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Replaying a denied interaction produces the same denial and no state change." },
+            { "assertionClass": "cleanup", "expectedObservation": "No artifacts beyond audit rows persist from denied attempts; run-prefixed test users and messages are removed." }
+          ]
+        },
+        {
+          "id": "music-player-fairness-depfail",
+          "class": "DEPFAIL",
+          "disposition": "required",
+          "promise": "When the audio backend dies mid-track, fairness state fails safe: playback halts, the queue and votes are preserved, and members get a branded explanation.",
+          "expectedOutcome": "Stopping the Lavalink container mid-track posts the playback-error message, the session enters degraded, the persisted queue including requester attribution and the open vote tally are intact, and no track is skipped or duplicated.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The playback-error embed posts once in the bound text channel with the track title and reason." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Persisted queue and config rows for the guild are unchanged by the outage and remain guild-scoped." },
+            { "assertionClass": "audit", "expectedObservation": "Exactly one music.playback_backend_failed audit row exists for the outage episode." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The owner receives one notification identifying the guild and the backend outage." },
+            { "assertionClass": "branding", "expectedObservation": "The failure message uses the owner-branded reassuring voice, not a stack trace." },
+            { "assertionClass": "replay-safety", "expectedObservation": "The outage grants no skips: the vote tally and current index re-read identical before and after the failure." },
+            { "assertionClass": "cleanup", "expectedObservation": "After the run the restored backend and run-prefixed state are torn down cleanly." }
+          ]
+        },
+        {
+          "id": "music-player-fairness-retry",
+          "class": "RETRY",
+          "disposition": "required",
+          "promise": "After a transient audio-backend outage, automatic retry converges: playback resumes the same current entry with fairness state intact.",
+          "expectedOutcome": "Restarting the Lavalink container leads the bot to reconnect automatically and resume the persisted current track; the requester can still self-skip and the pre-outage vote tally still counts toward the same track's threshold.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Audible playback resumes for the same track without a duplicate track-queued embed; a subsequent self-skip works normally." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The queue record shows the same entries and currentIndex after recovery as before the outage." },
+            { "assertionClass": "audit", "expectedObservation": "One recovery audit row follows the failure row; retries do not multiply audit entries per attempt loop." },
+            { "assertionClass": "owner-notification", "expectedObservation": "At most one recovery notice follows the outage notification; retry attempts do not spam the owner." },
+            { "assertionClass": "branding", "expectedObservation": "Any recovery message uses the brand voice and attribution footer." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Reconnect attempts never double-start the track: exactly one live player exists for the guild after convergence." },
+            { "assertionClass": "cleanup", "expectedObservation": "Retry timers and run-prefixed state are fully cleared after the run." }
+          ]
+        },
+        {
+          "id": "music-player-fairness-replay",
+          "class": "REPLAY",
+          "disposition": "required",
+          "promise": "Duplicate delivery of skip and vote interactions never yields duplicate skips or double-counted votes.",
+          "expectedOutcome": "Re-delivering a recorded self-skip interaction advances the queue zero additional positions, and re-delivering a vote interaction leaves the voter's contribution at exactly one; the same user invoking /skip twice on the same track is told they already voted.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The second identical vote attempt yields an already-voted ephemeral reply and no tally increase in any subsequent vote-progress embed." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The vote set for the track contains the user id exactly once and the queue currentIndex advanced exactly once for the self-skip." },
+            { "assertionClass": "audit", "expectedObservation": "One audit row exists per unique logical action; replayed deliveries add no rows." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Replays generate zero owner notifications." },
+            { "assertionClass": "branding", "expectedObservation": "The already-voted reply keeps the brand tone and attribution footer." },
+            { "assertionClass": "replay-safety", "expectedObservation": "End-state queue and vote structures are byte-identical between single delivery and duplicate delivery runs." },
+            { "assertionClass": "cleanup", "expectedObservation": "Replay fixtures and run-prefixed state are removed post-run." }
+          ]
+        },
+        {
+          "id": "music-player-fairness-restart",
+          "class": "RESTART",
+          "disposition": "required",
+          "promise": "Fairness state survives a full stack restart: requester attribution and the open vote tally persist so no one gains or loses skip rights.",
+          "expectedOutcome": "With a vote at 1 of 2 on member A's track, the bot process is killed and restarted; after recovery A can still self-skip, the surviving tally still counts, and one additional listener vote completes the majority for the same track.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "After restart, one more vote triggers vote-skip-complete for the same track; A's self-skip rights are honored identically pre- and post-restart." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The persisted queue in Valkey and config in Supabase re-read unchanged across the restart with requestedBy intact." },
+            { "assertionClass": "audit", "expectedObservation": "Audit rows from before the restart remain and post-restart rows continue the same episode without duplication." },
+            { "assertionClass": "owner-notification", "expectedObservation": "A planned harness restart produces no spurious outage notification once recovery completes within the grace window." },
+            { "assertionClass": "branding", "expectedObservation": "Post-restart messages carry identical branding config with no default-brand flash." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Restart-time recovery does not re-fire completed skips: the queue advances only from post-restart actions." },
+            { "assertionClass": "cleanup", "expectedObservation": "Restart artifacts and run-prefixed keys are removed after the run." }
+          ]
+        },
+        {
+          "id": "music-player-fairness-race",
+          "class": "RACE",
+          "disposition": "required",
+          "promise": "Concurrent final votes and a simultaneous self-skip resolve to exactly one queue advance.",
+          "expectedOutcome": "Two listeners cast the threshold-completing votes concurrently while the requester issues a self-skip in the same window; the queue advances exactly one position, exactly one skip message posts, and the vote tally is cleared once.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Exactly one skip-completion embed posts for the contested track; later actors receive follow-up state rather than a second skip." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The queue currentIndex advanced by exactly one and the vote set for the old track is deleted exactly once." },
+            { "assertionClass": "audit", "expectedObservation": "One skip audit row exists for the track regardless of how many concurrent actors raced." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The race produces no owner notification." },
+            { "assertionClass": "branding", "expectedObservation": "All replies in the race window remain branded and coherent with the single-skip outcome." },
+            { "assertionClass": "replay-safety", "expectedObservation": "The concurrent losers' interactions are absorbed idempotently with no double advance." },
+            { "assertionClass": "cleanup", "expectedObservation": "Race fixtures and run-prefixed state are removed post-run." }
+          ]
+        },
+        {
+          "id": "music-player-fairness-xguild",
+          "class": "XGUILD",
+          "disposition": "required",
+          "promise": "Fairness state is strictly guild-scoped: votes, DJ roles, and thresholds in one guild never affect another.",
+          "expectedOutcome": "With sessions running in guilds A and B, votes cast in A never appear in B's tally, A's DJ role grants nothing in B, and changing A's threshold leaves B's voting math unchanged.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Guild B's vote-progress numbers are unaffected by activity in guild A, and A's DJ is denied arbitration in B." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Vote keys and config rows are keyed per guild; the anon probe from B's context cannot read A's config row." },
+            { "assertionClass": "audit", "expectedObservation": "Audit rows carry the correct guild id and no cross-guild rows appear." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Notifications route to each guild's own owner only." },
+            { "assertionClass": "branding", "expectedObservation": "Each guild's embeds use that guild's own brand config simultaneously." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Replaying guild A interactions changes nothing in guild B." },
+            { "assertionClass": "cleanup", "expectedObservation": "Both guilds' run-prefixed artifacts are independently and completely removed." }
+          ]
+        },
+        {
+          "id": "music-player-fairness-cleanup",
+          "class": "CLEANUP",
+          "disposition": "required",
+          "promise": "Every fairness scenario's run-prefixed resources are enumerable and fully removed, leaving only immutable audit rows.",
+          "expectedOutcome": "After the fairness suite, a sweep finds zero run-prefixed Valkey queue or vote keys, zero run-prefixed config overrides, zero leftover test messages or roles, and the audit trail intact.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Run-created channels, roles, and messages are deleted from the test guilds." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Run-prefixed config rows are removed or reverted; remaining rows contain no run identifiers." },
+            { "assertionClass": "audit", "expectedObservation": "Audit rows from the run remain present and unmodified, honoring never-delete." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Cleanup completes without sending owner notifications." },
+            { "assertionClass": "branding", "expectedObservation": "Brand configuration is restored to its pre-run values." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Running the sweeper twice is idempotent and reports zero remaining resources both times." },
+            { "assertionClass": "cleanup", "expectedObservation": "The final inventory of run-prefixed resources across Discord, Valkey, and Supabase is empty." }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "music-collaborative-queue",
+      "name": "Collaborative queue",
+      "category": "music",
+      "promise": "The guild's shared music queue is a persistent, collaborative object: every mutation is durably stored so the queue and playback position survive bot and stack restarts; capacity guardrails keep it fair; and the owner configures enablement, default volume, DJ role, idle timeouts, and capacity from the dashboard Music page with changes applied live.",
+      "controls": [
+        {
+          "id": "music-enabled",
+          "description": "Master switch for the music feature in the guild (guild_config.music_enabled). When false, music commands decline politely with an owner-branded notice.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "default-volume",
+          "description": "Volume applied when a new queue session starts (guild_config.music_default_volume), matching the /volume command range.",
+          "valueType": "integer",
+          "constraints": { "min": 0, "max": 150 }
+        },
+        {
+          "id": "auto-leave-minutes",
+          "description": "Minutes the bot waits alone in an empty voice channel before leaving (guild_config.music_auto_leave_minutes).",
+          "valueType": "integer",
+          "constraints": { "min": 1, "max": 60 }
+        },
+        {
+          "id": "auto-destroy-minutes",
+          "description": "Minutes of paused or inactive playback before the session is destroyed and the queue cleared (guild_config.music_auto_destroy_minutes).",
+          "valueType": "integer",
+          "constraints": { "min": 1, "max": 120 }
+        },
+        {
+          "id": "max-queue-length",
+          "description": "Maximum total entries allowed in the guild queue; additions beyond the cap are declined with the queue-full message rather than silently trimmed.",
+          "valueType": "integer",
+          "constraints": { "min": 1, "max": 5000 }
+        },
+        {
+          "id": "per-user-queue-cap",
+          "description": "Maximum queued entries a single member may hold at once (not counting the playing track), preventing queue monopolization.",
+          "valueType": "integer",
+          "constraints": { "min": 1, "max": 500 }
+        },
+        {
+          "id": "allow-duplicates",
+          "description": "Whether the same track URI may appear in the queue more than once. When false, duplicate additions are declined with a friendly notice.",
+          "valueType": "boolean",
+          "constraints": {}
+        }
+      ],
+      "defaults": [
+        {
+          "controlId": "music-enabled",
+          "value": true,
+          "rationale": "Owner theme: every feature works perfectly out of the box; music is live the moment the bot joins."
+        },
+        {
+          "controlId": "default-volume",
+          "value": 50,
+          "rationale": "Matches the shipped dashboard and bot default of 50, a comfortable mid-level that respects listeners on first use."
+        },
+        {
+          "controlId": "auto-leave-minutes",
+          "value": 5,
+          "rationale": "Matches the shipped default: five minutes alone in voice before leaving balances persistence with not squatting in channels."
+        },
+        {
+          "controlId": "auto-destroy-minutes",
+          "value": 30,
+          "rationale": "Matches the shipped default: thirty minutes of inactivity before the session and queue are cleaned up."
+        },
+        {
+          "controlId": "max-queue-length",
+          "value": 5000,
+          "rationale": "Matches the enforced storage guardrail of five thousand entries, well within the serialized-state budget."
+        },
+        {
+          "controlId": "per-user-queue-cap",
+          "value": 50,
+          "rationale": "Matches the enforced per-user guardrail of fifty entries so no single member monopolizes the collaborative queue."
+        },
+        {
+          "controlId": "allow-duplicates",
+          "value": true,
+          "rationale": "Member-respectful default: repeat requests are a normal part of shared listening; owners who dislike repeats can turn it off."
+        }
+      ],
+      "permissions": [
+        {
+          "id": "add-track",
+          "actor": "Any guild member connected to a voice channel",
+          "action": "Append tracks or playlists to the shared queue with /play, subject to capacity guardrails",
+          "defaultDecision": "allow",
+          "enforcement": "The /play handler requires only voice presence; the queue manager enforces max-queue-length and per-user-queue-cap on insert."
+        },
+        {
+          "id": "view-queue",
+          "actor": "Any guild member",
+          "action": "View the queue and now-playing state with /queue and /np",
+          "defaultDecision": "allow",
+          "enforcement": "Read-only queue commands have no role gate and render pages from the persisted queue."
+        },
+        {
+          "id": "clear-queue-regular",
+          "actor": "A member without the DJ role",
+          "action": "Stop the session or clear the entire shared queue",
+          "defaultDecision": "deny",
+          "enforcement": "The /stop handler requires isDJ; non-DJ attempts receive an ephemeral DJ-required denial and the queue is untouched."
+        },
+        {
+          "id": "configure-owner",
+          "actor": "The guild owner authenticated on the dashboard",
+          "action": "Read and update music settings via the dashboard Music page and PUT /api/music",
+          "defaultDecision": "allow",
+          "enforcement": "requireGuildOwner gates the API route; saved changes upsert guild_config and notify the bot to hot-reload."
+        },
+        {
+          "id": "configure-non-owner",
+          "actor": "Any authenticated dashboard user who does not own the guild",
+          "action": "Update music settings for the guild",
+          "defaultDecision": "deny",
+          "enforcement": "requireGuildOwner rejects the session before any write; Supabase RLS denies direct guild_config writes under the non-owner JWT."
+        }
+      ],
+      "messages": [
+        {
+          "id": "track-added",
+          "trigger": "A track is durably appended to the shared queue",
+          "surface": "Discord embed reply in the invoking text channel",
+          "audience": "All members of the text channel",
+          "defaultTemplate": "{track-title} joins the queue at spot {queue-position} — {queue-length} tracks lined up!",
+          "variables": ["track-title", "queue-position", "queue-length"]
+        },
+        {
+          "id": "queue-full",
+          "trigger": "An addition would exceed max-queue-length",
+          "surface": "Ephemeral Discord embed reply to the requester",
+          "audience": "The requesting member only",
+          "defaultTemplate": "The queue is at its {max-entries}-track limit — let a few play out first.",
+          "variables": ["max-entries"]
+        },
+        {
+          "id": "user-cap-reached",
+          "trigger": "An addition would exceed the requester's per-user-queue-cap",
+          "surface": "Ephemeral Discord embed reply to the requester",
+          "audience": "The requesting member only",
+          "defaultTemplate": "{requester}, you already have {user-cap} tracks queued — share the aux for a bit!",
+          "variables": ["requester", "user-cap"]
+        },
+        {
+          "id": "queue-restored",
+          "trigger": "The bot recovers a persisted queue after a restart",
+          "surface": "Discord embed in the queue's bound text channel",
+          "audience": "All members of the text channel",
+          "defaultTemplate": "Back online — {queue-length} tracks restored, resuming with {track-title}.",
+          "variables": ["queue-length", "track-title"]
+        },
+        {
+          "id": "settings-saved",
+          "trigger": "The owner saves music settings on the dashboard",
+          "surface": "Dashboard toast on the Music settings page",
+          "audience": "The guild owner",
+          "defaultTemplate": "Music settings for {guild-name} saved — changes are live in the server.",
+          "variables": ["guild-name"]
+        },
+        {
+          "id": "queue-store-error",
+          "trigger": "The queue store is unreachable during a queue mutation",
+          "surface": "Ephemeral Discord embed reply to the requester",
+          "audience": "The requesting member only",
+          "defaultTemplate": "The queue store is unreachable — {track-title} was not added. Please try again shortly.",
+          "variables": ["track-title"]
+        },
+        {
+          "id": "config-fallback",
+          "trigger": "Music settings cannot be loaded from the database at startup or reload",
+          "surface": "Owner notification channel",
+          "audience": "The guild owner",
+          "defaultTemplate": "Music settings for {guild-name} could not be loaded — running on safe defaults until they are back.",
+          "variables": ["guild-name"]
+        },
+        {
+          "id": "music-disabled",
+          "trigger": "A member uses a music command while music-enabled is false",
+          "surface": "Ephemeral Discord embed reply to the invoker",
+          "audience": "The invoking member only",
+          "defaultTemplate": "Music is currently switched off in {guild-name} — an admin can flip it back on from the dashboard.",
+          "variables": ["guild-name"]
+        }
+      ],
+      "state": {
+        "initial": "empty",
+        "values": [
+          {
+            "id": "empty",
+            "description": "No queue object exists for the guild in the store; the bot is not in voice for music."
+          },
+          {
+            "id": "active",
+            "description": "A persisted queue exists with entries, current index, loop mode, volume, and pause flag; every mutation is saved to the store before being acknowledged."
+          },
+          {
+            "id": "idle-countdown",
+            "description": "The queue exists but the voice channel is empty or playback is paused; the configured auto-leave or auto-destroy timer is running."
+          },
+          {
+            "id": "suspended",
+            "description": "The bot process is down or the queue store is unreachable; the last durably saved queue state is authoritative for recovery."
+          }
+        ],
+        "transitions": [
+          {
+            "id": "create-queue",
+            "from": "empty",
+            "to": "active",
+            "trigger": "The first successful /play in the guild",
+            "expectedEffect": "A queue object is created and persisted with the session's voice and text channels, the configured default volume, and the first entries."
+          },
+          {
+            "id": "persist-mutation",
+            "from": "active",
+            "to": "active",
+            "trigger": "Any queue mutation: add, remove, move, shuffle, loop change, volume change, pause toggle, or track advance",
+            "expectedEffect": "The full queue state is atomically saved to the store so a crash at any point loses at most the in-flight mutation, never the queue."
+          },
+          {
+            "id": "begin-countdown",
+            "from": "active",
+            "to": "idle-countdown",
+            "trigger": "All human listeners leave the voice channel, or playback is paused with no resume",
+            "expectedEffect": "The auto-leave (empty channel) or auto-destroy (inactivity) timer starts using the configured minutes."
+          },
+          {
+            "id": "resume-session",
+            "from": "idle-countdown",
+            "to": "active",
+            "trigger": "A human listener rejoins or playback resumes before the timer elapses",
+            "expectedEffect": "The pending timer is cancelled and the session continues with the same persisted queue."
+          },
+          {
+            "id": "auto-destroy",
+            "from": "idle-countdown",
+            "to": "empty",
+            "trigger": "The auto-leave or auto-destroy timer elapses",
+            "expectedEffect": "The bot leaves voice, the queue and vote keys are deleted from the store, and the teardown is audited."
+          },
+          {
+            "id": "stack-stop",
+            "from": "active",
+            "to": "suspended",
+            "trigger": "The bot process stops or the queue store becomes unreachable",
+            "expectedEffect": "No destructive action occurs; the last saved queue state remains in the store as the recovery source."
+          },
+          {
+            "id": "recover-on-boot",
+            "from": "suspended",
+            "to": "active",
+            "trigger": "The bot restarts and finds a persisted queue for the guild",
+            "expectedEffect": "The queue, current index, volume, loop mode, and pause flag are reloaded; playback resumes and the queue-restored message posts; if the voice channel is empty the auto-leave timer starts immediately."
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "queue-store-unavailable",
+          "trigger": "Valkey is unreachable when a member attempts a queue mutation",
+          "expectedBehavior": "The mutation is declined atomically with the queue-store-error message; no partial queue state is written; the current track keeps playing from the live player; the bot retries store connectivity automatically.",
+          "resultingState": "suspended",
+          "retry": "automatic",
+          "messageId": "queue-store-error",
+          "auditEvent": "music.queue_store_unavailable",
+          "ownerNotification": true
+        },
+        {
+          "id": "config-load-failed",
+          "trigger": "guild_config cannot be read at startup or on a dashboard-triggered reload",
+          "expectedBehavior": "The session runs on the documented safe defaults (enabled, volume 50, 5 and 30 minute timers, caps 5000 and 50), the owner is notified via config-fallback, and the load retries automatically until the stored settings apply.",
+          "resultingState": "active",
+          "retry": "automatic",
+          "messageId": "config-fallback",
+          "auditEvent": "music.config_load_failed",
+          "ownerNotification": true
+        },
+        {
+          "id": "queue-capacity-reached",
+          "trigger": "An addition would exceed max-queue-length or the requester's per-user cap",
+          "expectedBehavior": "The addition is declined with the queue-full or user-cap-reached message; nothing is silently trimmed; existing entries and playback are untouched.",
+          "resultingState": "active",
+          "retry": "never",
+          "messageId": "queue-full",
+          "auditEvent": "music.queue_capacity_reached",
+          "ownerNotification": false
+        }
+      ],
+      "evidence": [
+        {
+          "assertionClass": "Discord",
+          "proofMode": "real-stack",
+          "observer": "Harness Discord client in the run-prefixed test guild's voice and text channels",
+          "expectedObservation": "track-added, /queue pagination, queue-restored, and capacity-decline embeds render with correct positions, lengths, and requester attribution, and audible playback matches the persisted queue order.",
+          "artifact": "evidence/music-collaborative-queue/discord"
+        },
+        {
+          "assertionClass": "database-RLS",
+          "proofMode": "real-stack",
+          "observer": "Supabase clients under owner, non-owner, and anon contexts plus a direct Valkey key inspector",
+          "expectedObservation": "guild_config music columns are writable only through the owner-scoped route, unreadable cross-guild under anon, and queue state lives under guild-scoped keys only.",
+          "artifact": "evidence/music-collaborative-queue/database-rls"
+        },
+        {
+          "assertionClass": "audit",
+          "proofMode": "real-stack",
+          "observer": "Audit log reader querying music.* configuration and lifecycle events",
+          "expectedObservation": "Config saves, session teardown, store outages, and capacity hits each produce exactly one immutable audit row; no audit rows are deleted.",
+          "artifact": "evidence/music-collaborative-queue/audit"
+        },
+        {
+          "assertionClass": "owner-notification",
+          "proofMode": "real-stack",
+          "observer": "Harness inbox for the owner notification channel",
+          "expectedObservation": "The owner is notified once per store outage or config-load failure episode with guild context; routine queue activity produces no owner noise.",
+          "artifact": "evidence/music-collaborative-queue/owner-notification"
+        },
+        {
+          "assertionClass": "branding",
+          "proofMode": "real-stack",
+          "observer": "Embed and dashboard-shell inspector over all queue surfaces captured in the run",
+          "expectedObservation": "Queue embeds and the dashboard Music page use the guild's brand name, colors, and tone with the subtle powered-by-SomniBot attribution.",
+          "artifact": "evidence/music-collaborative-queue/branding"
+        },
+        {
+          "assertionClass": "replay-safety",
+          "proofMode": "real-stack",
+          "observer": "Interaction replayer plus queue-state differ across duplicate deliveries and crash-resume cycles",
+          "expectedObservation": "Duplicate /play deliveries and crash-replayed mutations yield exactly one persisted entry per logical request and one confirmation embed.",
+          "artifact": "evidence/music-collaborative-queue/replay-safety"
+        },
+        {
+          "assertionClass": "cleanup",
+          "proofMode": "real-stack",
+          "observer": "Post-run sweeper listing run-prefixed Valkey keys, guild_config rows, and Discord artifacts",
+          "expectedObservation": "All run-prefixed queues, now-playing keys, config overrides, and test messages are removed; audit rows remain by design.",
+          "artifact": "evidence/music-collaborative-queue/cleanup"
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "music-collaborative-queue-def",
+          "class": "DEF",
+          "disposition": "required",
+          "promise": "Out of the box, /play creates a persistent shared queue at volume 50, /queue shows every member's entries with attribution, and the queue object is durably stored per guild.",
+          "expectedOutcome": "Two members each queue tracks; /queue lists all entries in order with each requester named; the store holds one guild-scoped queue object whose entries, currentIndex, and volume 50 match what Discord displays.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "track-added embeds show correct positions and the /queue embed lists both members' tracks with requester attribution at default volume 50." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Exactly one queue object exists under the run guild's key and no music config row was needed for defaults to work." },
+            { "assertionClass": "audit", "expectedObservation": "Session-start and track-add events are audited once each with the correct guild id." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Routine queue creation sends no owner notification." },
+            { "assertionClass": "branding", "expectedObservation": "Queue embeds use the default playful tone with guild brand name and powered-by-SomniBot footer." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Re-delivering one member's /play interaction leaves the queue length unchanged." },
+            { "assertionClass": "cleanup", "expectedObservation": "The run-prefixed queue and messages are removed by the sweeper." }
+          ]
+        },
+        {
+          "id": "music-collaborative-queue-set-a",
+          "class": "SET-A",
+          "disposition": "required",
+          "promise": "Dashboard configuration takes effect live: lowering default volume and shortening auto-leave changes real session behavior without a bot restart.",
+          "expectedOutcome": "The owner saves default-volume 25 and auto-leave-minutes 1 on the dashboard Music page; the settings-saved toast appears, the bot hot-reloads config, a new session starts at volume 25, and after all humans leave the voice channel the bot departs in about one minute.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The new session's now-playing state reports volume 25 and the bot leaves the emptied voice channel within the one-minute window plus grace." },
+            { "assertionClass": "database-RLS", "expectedObservation": "guild_config reads back music_default_volume 25 and music_auto_leave_minutes 1, written only via the owner-scoped PUT." },
+            { "assertionClass": "audit", "expectedObservation": "One config-save audit row records the owner, the changed fields, and prior values." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The owner sees the dashboard settings-saved toast; no additional out-of-band notification fires." },
+            { "assertionClass": "branding", "expectedObservation": "The dashboard Music page and toast render in the owner-branded shell." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Replaying the PUT is idempotent: the same values persist once with no duplicate audit spam per replayed request body." },
+            { "assertionClass": "cleanup", "expectedObservation": "Config values are restored to pre-run defaults and run artifacts removed." }
+          ]
+        },
+        {
+          "id": "music-collaborative-queue-set-b",
+          "class": "SET-B",
+          "disposition": "required",
+          "promise": "A second distinct configuration proves independent effect: disabling music turns the feature off politely, and re-enabling restores it without data loss.",
+          "expectedOutcome": "The owner sets music-enabled false; /play and /queue decline with the music-disabled notice while the persisted queue object is retained; re-enabling makes the same queue usable again with its entries intact.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "While disabled, music commands reply ephemerally with the branded music-disabled notice; after re-enable, /queue shows the identical pre-disable entries." },
+            { "assertionClass": "database-RLS", "expectedObservation": "guild_config.music_enabled toggles false then true via the owner route; the stored queue object is never deleted by the toggle." },
+            { "assertionClass": "audit", "expectedObservation": "Both toggle saves are audited with actor and prior value; no queue-destruction event appears." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Feature toggling by the owner produces no failure notifications." },
+            { "assertionClass": "branding", "expectedObservation": "The music-disabled notice names the guild brand, not SomniBot, as the voice of the server." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Replaying the disable PUT does not double-toggle or destroy the queue." },
+            { "assertionClass": "cleanup", "expectedObservation": "music_enabled is restored and run-prefixed artifacts removed." }
+          ]
+        },
+        {
+          "id": "music-collaborative-queue-invalid",
+          "class": "INVALID",
+          "disposition": "required",
+          "promise": "Out-of-range music settings are rejected with a clear validation error and nothing is persisted — no silent clamping.",
+          "expectedOutcome": "PUT /api/music with default-volume 300, auto-leave-minutes 0, and auto-destroy-minutes 999 returns a validation error naming the offending fields; guild_config re-reads unchanged and live sessions keep their prior settings.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "A session started after the rejected write still uses the previously stored volume and timers." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The music columns of guild_config are byte-identical before and after the rejected request; no clamped values were written." },
+            { "assertionClass": "audit", "expectedObservation": "A config.rejected audit row records the invalid attempt without recording the invalid values as applied." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The owner sees the inline dashboard validation error; no out-of-band alert fires for their own rejected input." },
+            { "assertionClass": "branding", "expectedObservation": "The validation error message is rendered in the branded dashboard shell with actionable field-level text." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Replaying the invalid PUT is rejected identically and persists nothing." },
+            { "assertionClass": "cleanup", "expectedObservation": "No residue of the invalid payload exists in any store after the run." }
+          ]
+        },
+        {
+          "id": "music-collaborative-queue-unauth",
+          "class": "UNAUTH",
+          "disposition": "required",
+          "promise": "Only the guild owner configures the queue: non-owner dashboard sessions and direct database writes are denied, and non-DJ members cannot clear the shared queue.",
+          "expectedOutcome": "A non-owner's GET and PUT against /api/music return a permission error; a direct guild_config write under the non-owner JWT is denied by RLS; a non-DJ member's /stop is refused ephemerally and the queue survives.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The non-DJ /stop attempt yields an ephemeral DJ-required denial while playback and the queue continue." },
+            { "assertionClass": "database-RLS", "expectedObservation": "requireGuildOwner blocks the API call and the RLS policy denies the direct table write; guild_config is unchanged." },
+            { "assertionClass": "audit", "expectedObservation": "Denied configuration and denied /stop attempts are each audited with actor identity." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Isolated denials produce no owner alert." },
+            { "assertionClass": "branding", "expectedObservation": "Denial responses use branded, respectful copy rather than raw authorization errors." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Replaying denied requests yields identical denials and zero state change." },
+            { "assertionClass": "cleanup", "expectedObservation": "Non-owner test sessions and run artifacts are removed post-run." }
+          ]
+        },
+        {
+          "id": "music-collaborative-queue-depfail",
+          "class": "DEPFAIL",
+          "disposition": "required",
+          "promise": "When the queue store goes down, mutations fail safe: members get a clear branded error, nothing is partially written, and the last saved state remains authoritative.",
+          "expectedOutcome": "With Valkey stopped, a member's /play returns the queue-store-error message and no entry is recorded anywhere; the currently playing track finishes from the live player; the owner is notified once; when Valkey returns the queue re-reads exactly as last saved.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The requester receives the queue-store-error embed and no phantom track-added embed ever appears." },
+            { "assertionClass": "database-RLS", "expectedObservation": "After the store returns, the queue object is byte-identical to the last pre-outage save with no partial entry." },
+            { "assertionClass": "audit", "expectedObservation": "Exactly one music.queue_store_unavailable audit row exists for the outage episode." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The owner receives one outage notification naming the guild and the store dependency." },
+            { "assertionClass": "branding", "expectedObservation": "The failure copy is calm, branded, and instructs retry rather than exposing infrastructure detail." },
+            { "assertionClass": "replay-safety", "expectedObservation": "The failed mutation grants nothing: retrying after recovery adds the track exactly once." },
+            { "assertionClass": "cleanup", "expectedObservation": "Outage fixtures are torn down and run-prefixed keys removed post-run." }
+          ]
+        },
+        {
+          "id": "music-collaborative-queue-retry",
+          "class": "RETRY",
+          "disposition": "required",
+          "promise": "Transient store failures converge under automatic retry: once connectivity returns, the same logical mutation lands exactly once.",
+          "expectedOutcome": "During a brief Valkey blip, the member retries /play after the branded error; post-recovery the queue contains exactly one copy of the track, config hot-reload retries also converge, and no duplicate confirmation embeds exist.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Exactly one track-added embed for the track exists across the blip-and-retry sequence." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The persisted queue contains the track exactly once with a single requestedBy attribution." },
+            { "assertionClass": "audit", "expectedObservation": "The audit trail shows failure then success for the same logical request without per-attempt row multiplication." },
+            { "assertionClass": "owner-notification", "expectedObservation": "At most one outage-and-recovery notification pair reaches the owner for the blip." },
+            { "assertionClass": "branding", "expectedObservation": "Retry-facing copy stays branded and consistent across attempts." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Automatic retries internal to the bot never insert the entry twice." },
+            { "assertionClass": "cleanup", "expectedObservation": "Blip fixtures and run-prefixed state are removed post-run." }
+          ]
+        },
+        {
+          "id": "music-collaborative-queue-replay",
+          "class": "REPLAY",
+          "disposition": "required",
+          "promise": "Duplicate delivery of queue mutations never duplicates entries, confirmations, or config writes.",
+          "expectedOutcome": "Re-delivering a recorded /play interaction, a /remove interaction, and a dashboard PUT each produce zero additional queue entries, zero additional removals, and zero additional config changes beyond the originals.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "No second track-added or removal embed appears for any replayed interaction." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Queue length, entry order, and guild_config values are identical between single-delivery and duplicate-delivery runs." },
+            { "assertionClass": "audit", "expectedObservation": "One audit row per unique logical mutation; replays add none." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Replays generate zero owner notifications." },
+            { "assertionClass": "branding", "expectedObservation": "Any replay-rejection surface remains branded and non-alarming." },
+            { "assertionClass": "replay-safety", "expectedObservation": "The end-state store diff between original and replayed runs is empty." },
+            { "assertionClass": "cleanup", "expectedObservation": "Replay fixtures and run-prefixed keys are removed post-run." }
+          ]
+        },
+        {
+          "id": "music-collaborative-queue-restart",
+          "class": "RESTART",
+          "disposition": "required",
+          "promise": "The collaborative queue survives a full stack restart: entries, order, current position, volume, loop mode, and pause flag all recover and playback resumes.",
+          "expectedOutcome": "With a five-track queue playing track two at volume 80 with loop mode queue, the bot process is killed and restarted; the queue-restored message posts, playback resumes track two, /queue shows the identical five entries and settings, and an empty voice channel would start the auto-leave timer immediately.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The queue-restored embed names the restored track and count, audible playback resumes, and /queue output matches the pre-restart snapshot exactly." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The persisted queue object re-reads with identical entries, currentIndex, volume 80, and loopMode queue across the restart." },
+            { "assertionClass": "audit", "expectedObservation": "A recovery audit row links the restored session to the pre-restart session without duplicating track-add history." },
+            { "assertionClass": "owner-notification", "expectedObservation": "A clean recovery within the grace window produces no outage alert." },
+            { "assertionClass": "branding", "expectedObservation": "The restoration message uses the guild brand voice and attribution footer." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Recovery does not re-append entries or re-fire confirmations; queue length is unchanged." },
+            { "assertionClass": "cleanup", "expectedObservation": "Restart fixtures and run-prefixed state are removed post-run." }
+          ]
+        },
+        {
+          "id": "music-collaborative-queue-race",
+          "class": "RACE",
+          "disposition": "required",
+          "promise": "Concurrent mutations by multiple members keep the queue consistent: no lost entries, no duplicate entries, caps enforced under contention.",
+          "expectedOutcome": "Two members fire /play simultaneously while a third removes an entry and a fourth sits at their per-user cap; the final queue contains both new entries exactly once, the removal applied once, the capped member's addition is declined, and currentIndex remains valid.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Each successful actor gets exactly one confirmation, the capped member gets the user-cap-reached decline, and /queue reflects a consistent final order." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The persisted queue holds each surviving entry exactly once with a valid currentIndex and correct per-user counts." },
+            { "assertionClass": "audit", "expectedObservation": "One audit row per applied mutation and one for the capacity decline; no phantom rows." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The contention window produces no owner notification." },
+            { "assertionClass": "branding", "expectedObservation": "All concurrent replies remain branded and mutually consistent with the final queue state." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Racing writers never double-append: total entries equal successful logical additions exactly." },
+            { "assertionClass": "cleanup", "expectedObservation": "Race fixtures and run-prefixed state are removed post-run." }
+          ]
+        },
+        {
+          "id": "music-collaborative-queue-xguild",
+          "class": "XGUILD",
+          "disposition": "required",
+          "promise": "Queues and music settings are strictly guild-isolated: activity or configuration in one guild never leaks into another.",
+          "expectedOutcome": "Simultaneous sessions in guilds A and B maintain independent queues under separate keys; disabling music in A leaves B playing; B's /queue never shows A's tracks; and A's owner cannot read or write B's music settings.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Both guilds play their own queues concurrently and A's disable toggle produces no behavioral change in B." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Queue keys and config rows are keyed by guild id; A's owner context is denied access to B's guild_config row." },
+            { "assertionClass": "audit", "expectedObservation": "Every audit row carries the correct guild id with zero cross-guild rows." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Each guild's notifications route only to its own owner." },
+            { "assertionClass": "branding", "expectedObservation": "Each guild's surfaces render that guild's own brand simultaneously." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Replaying guild A mutations leaves guild B's queue untouched." },
+            { "assertionClass": "cleanup", "expectedObservation": "Both guilds' run-prefixed resources are independently and completely removed." }
+          ]
+        },
+        {
+          "id": "music-collaborative-queue-cleanup",
+          "class": "CLEANUP",
+          "disposition": "required",
+          "promise": "All run-prefixed collaborative-queue resources are enumerable and fully removed after the suite, leaving only immutable audit rows.",
+          "expectedOutcome": "After the queue suite, a sweep finds zero run-prefixed queue or now-playing keys in Valkey, zero run-prefixed config overrides in guild_config, zero leftover test messages or channels in Discord, and the audit trail intact.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Run-created channels and messages are deleted and the bot has left all test voice channels." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Config rows are reverted to pre-run values and no run identifiers remain in stored music settings." },
+            { "assertionClass": "audit", "expectedObservation": "Audit rows from the run remain present and unmodified, honoring never-delete." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Cleanup completes silently with no owner notifications." },
+            { "assertionClass": "branding", "expectedObservation": "Brand configuration is restored to its pre-run state." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Running the sweeper twice is idempotent, reporting zero remaining resources both times." },
+            { "assertionClass": "cleanup", "expectedObservation": "The final inventory of run-prefixed resources across Discord, Valkey, and Supabase is empty." }
+          ]
+        }
+      ]
+    }
+  ]
+}

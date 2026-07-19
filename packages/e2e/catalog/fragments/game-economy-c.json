@@ -1,0 +1,3204 @@
+{
+ "category": "game-economy",
+ "domains": [
+  {
+   "id": "game-economy-pets",
+   "name": "Companion Pets",
+   "category": "game-economy",
+   "promise": "Members adopt one companion pet per guild with play-money coins, keep it thriving through feed, play, and train care loops against an always-on stat decay cycle, earn type-specific gameplay perks (hunting, guard, foraging, lucky), battle other members’ pets for play-money rewards, and prestige a max-level pet for permanent stat bonuses — all inside the fake game economy, never touching real commerce.",
+   "controls": [
+    {
+     "id": "pets-enabled",
+     "description": "Master switch for companion pets; when off, decay stops and pet commands explain the feature is disabled.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "pet-feed-cost",
+     "description": "Play-money coin cost of one /pet feed.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000000
+     }
+    },
+    {
+     "id": "pet-train-cost",
+     "description": "Play-money coin cost of one /pet train session.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000000
+     }
+    },
+    {
+     "id": "pet-decay-rate",
+     "description": "Hunger points removed from every pet each decay cycle (happiness decays at 80 percent of this rate while energy slowly recovers).",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 100
+     }
+    },
+    {
+     "id": "pet-decay-interval-hours",
+     "description": "Hours between decay cycles for the guild’s pets.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 168
+     }
+    },
+    {
+     "id": "pet-low-stat-threshold",
+     "description": "When hunger or happiness falls to or below this value the pet turns sad; at zero it turns sick and cannot battle.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 100
+     }
+    },
+    {
+     "id": "pet-notify-member",
+     "description": "Whether the pet’s member owner receives a DM nudge when decay turns their pet sad or sick.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "pet-battles-enabled",
+     "description": "Whether /pet battle is available; battles award play-money coins to the winner and pet XP to both sides.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "pet-prestige-enabled",
+     "description": "Whether /pet prestige is available; prestiging a level-50 pet resets it to level 1 with permanent stat bonuses.",
+     "valueType": "boolean",
+     "constraints": {}
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "pets-enabled",
+     "value": true,
+     "rationale": "Companion pets are a flagship game-economy loop and ship on for the maximal out-of-box experience."
+    },
+    {
+     "controlId": "pet-feed-cost",
+     "value": 50,
+     "rationale": "A light recurring coin sink that keeps care meaningful without punishing casual players."
+    },
+    {
+     "controlId": "pet-train-cost",
+     "value": 100,
+     "rationale": "Training doubles the feed cost so levelling stays a deliberate investment."
+    },
+    {
+     "controlId": "pet-decay-rate",
+     "value": 5,
+     "rationale": "Gentle hourly decay: an unattended pet takes days, not hours, to become sad."
+    },
+    {
+     "controlId": "pet-decay-interval-hours",
+     "value": 1,
+     "rationale": "Hourly cycles keep stats moving smoothly instead of in big scary jumps."
+    },
+    {
+     "controlId": "pet-low-stat-threshold",
+     "value": 20,
+     "rationale": "A 20-point floor gives members a clear warning band before the pet turns sick at zero."
+    },
+    {
+     "controlId": "pet-notify-member",
+     "value": true,
+     "rationale": "A single caring DM nudge is member-respectful and protects the investment members made in their pet."
+    },
+    {
+     "controlId": "pet-battles-enabled",
+     "value": true,
+     "rationale": "Battles are a headline social feature and ship on; owners can switch the piece off independently."
+    },
+    {
+     "controlId": "pet-prestige-enabled",
+     "value": true,
+     "rationale": "Prestige gives max-level pets a long tail of progression and ships on by default."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "use-pet-commands",
+     "actor": "Any guild member",
+     "action": "Run /pet view, buy, feed, play, train, rename, battle, and prestige",
+     "defaultDecision": "allow",
+     "enforcement": "Pet slash commands respond for every member; care and prestige subcommands only ever mutate the invoking member’s own pet row."
+    },
+    {
+     "id": "configure-pets",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Edit pets settings on the dashboard economy pets page",
+     "defaultDecision": "allow",
+     "enforcement": "Dashboard session auth plus Supabase RLS restrict guild_config writes to authorized guild administrators."
+    },
+    {
+     "id": "mutate-others-pet",
+     "actor": "Any guild member",
+     "action": "Feed, play with, train, rename, or prestige another member’s pet",
+     "defaultDecision": "deny",
+     "enforcement": "Every /pet care handler resolves the pet by the invoking member’s own id; no code path mutates another member’s pet row."
+    }
+   ],
+   "messages": [
+    {
+     "id": "pet-adopted",
+     "trigger": "A member buys a pet with play-money coins",
+     "surface": "Channel embed replying to /pet buy",
+     "audience": "The adopting member and the channel",
+     "defaultTemplate": "Say hello to your new {pet-type} companion, {member-name}! That’s {price} play coins well spent — use /pet rename to name it.",
+     "variables": [
+      "pet-type",
+      "member-name",
+      "price"
+     ]
+    },
+    {
+     "id": "pet-needs-attention",
+     "trigger": "A decay cycle drops a pet from happy to sad or sick",
+     "surface": "Direct message to the pet’s member owner",
+     "audience": "The pet’s member owner",
+     "defaultTemplate": "{pet-name} is feeling {pet-status}! A quick /pet feed and /pet play will turn things around.",
+     "variables": [
+      "pet-name",
+      "pet-status"
+     ]
+    },
+    {
+     "id": "battle-result",
+     "trigger": "A pet battle resolves",
+     "surface": "Channel embed replying to /pet battle",
+     "audience": "Both battlers and the channel",
+     "defaultTemplate": "{winner-pet} defeats {loser-pet}! {reward} play coins go to the winner’s wallet.",
+     "variables": [
+      "winner-pet",
+      "loser-pet",
+      "reward"
+     ]
+    },
+    {
+     "id": "purchase-refunded",
+     "trigger": "A pet purchase debit succeeded but pet creation failed",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "That adoption fell through, {member-name} — your {price} play coins are already back in your wallet.",
+     "variables": [
+      "member-name",
+      "price"
+     ]
+    },
+    {
+     "id": "pets-unavailable",
+     "trigger": "The pets backend is temporarily unreachable when a member runs a pet command",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The kennel door is stuck, {member-name} — give it a moment and try again.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "battle-payout-delayed",
+     "trigger": "A battle winner payout keeps failing",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: the {reward}-coin battle payout to {member-name} failed and is queued for operator retry; nothing was double-paid and everything is logged.",
+     "variables": [
+      "reward",
+      "member-name"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "unadopted",
+    "values": [
+     {
+      "id": "unadopted",
+      "description": "The member has no pet in this guild; care commands prompt /pet buy."
+     },
+     {
+      "id": "thriving",
+      "description": "Hunger and happiness sit above the low-stat threshold; care, battles, and prestige are all available."
+     },
+     {
+      "id": "needs-care",
+      "description": "Decay pushed hunger or happiness to or below the threshold; the pet is sad and cannot battle."
+     },
+     {
+      "id": "sick",
+      "description": "Hunger or happiness hit zero; the pet is sick, battles stay blocked, and the member owner has been nudged."
+     },
+     {
+      "id": "disabled",
+      "description": "Pets disabled by configuration; no decay runs and pet commands explain the feature is off."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "adopt",
+      "from": "unadopted",
+      "to": "thriving",
+      "trigger": "Member runs /pet buy with sufficient play-money balance",
+      "expectedEffect": "Exactly one wallet debit and one pet row are created and the branded adoption embed posts."
+     },
+     {
+      "id": "decay-to-sad",
+      "from": "thriving",
+      "to": "needs-care",
+      "trigger": "A decay cycle drops hunger or happiness to or below pet-low-stat-threshold",
+      "expectedEffect": "The pet’s status becomes sad and, when pet-notify-member is on, exactly one DM nudges the member owner."
+     },
+     {
+      "id": "decay-to-sick",
+      "from": "needs-care",
+      "to": "sick",
+      "trigger": "Continued decay drives hunger or happiness to zero",
+      "expectedEffect": "The status becomes sick, battles stay blocked, and one DM nudges the member owner."
+     },
+     {
+      "id": "care-restores",
+      "from": "needs-care",
+      "to": "thriving",
+      "trigger": "The member feeds and plays the stats back above the threshold",
+      "expectedEffect": "Atomic feed and play RPCs raise the stats and the status returns to happy."
+     },
+     {
+      "id": "nursed-back",
+      "from": "sick",
+      "to": "thriving",
+      "trigger": "The member feeds and plays a sick pet’s stats back above the threshold",
+      "expectedEffect": "The pet recovers to happy with battles available again; no stat update is lost to the concurrent decay timer."
+     },
+     {
+      "id": "pets-toggled-off",
+      "from": "thriving",
+      "to": "disabled",
+      "trigger": "Owner turns pets-enabled off on the dashboard",
+      "expectedEffect": "Decay stops and pet commands reply with the disabled explanation; pet rows are preserved untouched."
+     },
+     {
+      "id": "pets-toggled-on",
+      "from": "disabled",
+      "to": "thriving",
+      "trigger": "Owner turns pets-enabled back on",
+      "expectedEffect": "Decay resumes on the configured interval with all prior pet state intact."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "purchase-insert-failed",
+     "trigger": "The play-money debit succeeds but the economy_pets insert fails",
+     "expectedBehavior": "The debited coins are refunded exactly once through the same play-money ledger, the member sees the refund confirmation, and no orphan pet row exists.",
+     "resultingState": "unadopted",
+     "retry": "never",
+     "messageId": "purchase-refunded",
+     "auditEvent": "pets.purchase_refunded",
+     "ownerNotification": false
+    },
+    {
+     "id": "battle-payout-failed",
+     "trigger": "The winner payout RPC fails after a battle resolves",
+     "expectedBehavior": "The battle record persists, the result embed plainly flags the delayed payout instead of pretending success, the payout is queued for operator retry under one idempotency key, and the loser is never charged.",
+     "resultingState": "thriving",
+     "retry": "operator",
+     "messageId": "battle-payout-delayed",
+     "auditEvent": "pets.battle_payout_failed",
+     "ownerNotification": true
+    },
+    {
+     "id": "decay-cycle-failed",
+     "trigger": "A scheduled decay cycle hits a transient database error",
+     "expectedBehavior": "The cycle logs and skips without crashing the bot; the next interval retries; no pet is decayed twice for one interval and no phantom sick DMs are sent.",
+     "resultingState": "thriving",
+     "retry": "automatic",
+     "messageId": "pets-unavailable",
+     "auditEvent": "pets.decay_cycle_retried",
+     "ownerNotification": false
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "Companion pet behavior contracted here is directly observed working in the live test guild: /pet buy adopts for play coins, care commands move the stats, decay turns an unattended pet sad with a DM nudge, battles pay the winner, and prestige rebirths a max-level pet.",
+     "artifact": "evidence/game-economy-pets/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_pets, economy_pet_battles, economy_wallets, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+     "artifact": "evidence/game-economy-pets/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-pets/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-pets/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured embeds and messages for this domain match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-pets/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over messages, grants, and balance mutations",
+     "expectedObservation": "Replaying recorded triggers for this domain against the live stack leaves end state unchanged: no duplicate play-money debits, pet mutations, or battle payouts.",
+     "artifact": "evidence/game-economy-pets/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-pets/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-pets-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box, /pet buy adopts a 5000-play-coin companion (7500 for lucky), /pet feed costs 50 and /pet train costs 100 play coins, hourly decay at rate 5 pushes an unattended pet toward sad at threshold 20 with a DM nudge, and battles and prestige are available.",
+     "expectedOutcome": "run-member-a adopts a hunting pet for exactly 5000 play coins, feeds for 50 and trains for 100 with the wallet reflecting every debit, and an accelerated decay window drops the pet to sad with exactly one branded DM nudge.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/pet view shows the adopted hunting pet with its stats and type perk, the wallet reflects the exact 5000, 50, and 100 play-coin debits, and run-member-a receives exactly one branded needs-attention DM after the decay window."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All pets rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each pets action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing pets surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, pet mutations, or battle payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test pet rows, wallet entries, battle records, announcement embeds, and nudge DMs) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-pets-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Dashboard configuration takes live effect: the owner sets feed cost 10, train cost 25, decay rate 40, and low-stat threshold 60.",
+     "expectedOutcome": "Without a bot restart, the next /pet feed debits exactly 10 and /pet train exactly 25 play coins, and the next decay cycle applies rate 40 so the pet crosses the raised threshold 60 into sad.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save, /pet feed debits exactly 10 and /pet train exactly 25 play coins with no restart, and the next decay cycle drops the pet below the raised threshold into sad with its single DM nudge."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All pets rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each pets action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing pets surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, pet mutations, or battle payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test pet rows, wallet entries, battle records, announcement embeds, and nudge DMs) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-pets-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "The owner can switch pieces off independently: battles, prestige, and the member DM nudge are disabled while core pet care keeps working.",
+     "expectedOutcome": "/pet battle and /pet prestige each return a branded refusal, a decay drop past the threshold produces no DM, and feed, play, and train continue to work normally.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/pet battle and /pet prestige each return a branded piece-disabled refusal, no DM arrives when the pet turns sad, and /pet view still shows accurate care state after a normal feed."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All pets rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each pets action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing pets surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, pet mutations, or battle payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test pet rows, wallet entries, battle records, announcement embeds, and nudge DMs) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-pets-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid pets configuration is rejected atomically: a negative feed cost and a zero decay interval never persist.",
+     "expectedOutcome": "The dashboard pets page surfaces a clear validation error, guild_config keeps its prior values byte-for-byte, and live bot behavior is unchanged on the very next pet command.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A /pet feed run immediately after the rejected save still debits the previous valid cost, proving no partial write reached the bot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All pets rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the rejected pets configuration attempt with the validation reason; no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing pets surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, pet mutations, or battle payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test pet rows, wallet entries, battle records, announcement embeds, and nudge DMs) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-pets-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "Pets are protected from unauthorized actors: a member cannot mutate another member’s pet and a non-admin dashboard session cannot save pets settings.",
+     "expectedOutcome": "run-member-b’s care commands only ever touch run-member-b’s own pet, run-member-a’s pet row is byte-identical afterward, and the non-admin dashboard save is refused.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-b’s /pet feed, play, train, and rename only affect run-member-b’s own pet, run-member-a’s /pet view is identical before and after, and the non-admin dashboard save returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All pets rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied pets configuration attempt with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing pets surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, pet mutations, or battle payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test pet rows, wallet entries, battle records, announcement embeds, and nudge DMs) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-pets-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase dependency is unreachable, pets fail safe: no crash, friendly branded degradation, and no play-coin loss.",
+     "expectedOutcome": "With database access blocked, pet commands reply with the branded pets-unavailable message and no coins move; after restoring the connection a fresh /pet feed debits exactly once and applies.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /pet view and /pet feed reply with the branded pets-unavailable template in the owner’s voice and no wallet mutation occurs; after restoration a fresh /pet feed debits exactly once."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All pets rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each pets action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed pet command."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing pets surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, pet mutations, or battle payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test pet rows, wallet entries, battle records, announcement embeds, and nudge DMs) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-pets-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A purchase whose pet-creation step fails converges safely: the debit is refunded exactly once and a clean retry adopts exactly one pet.",
+     "expectedOutcome": "With a fault injected on the economy_pets insert, run-member-a’s wallet shows the full purchase price refunded and no pet exists; the retried /pet buy then succeeds with exactly one debit and one pet row.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the injected insert fault, run-member-a sees the branded refund confirmation and /pet view shows no pet; the clean retry adopts exactly one pet for exactly one debit."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All pets rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each pets action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing pets surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The refund and the subsequent successful purchase each apply under their own idempotency key, so the play-money ledger shows debit, refund, debit — never a double debit or a double refund."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test pet rows, wallet entries, battle records, announcement embeds, and nudge DMs) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-pets-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replays never double-charge or double-create: re-delivering the buy and feed interactions leaves one pet, one purchase debit, and one feed debit.",
+     "expectedOutcome": "After replaying the recorded buy and feed interactions, run-member-a still owns exactly one pet and the wallet shows exactly one purchase debit and one feed debit, byte-identical to the pre-replay state.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The channel shows exactly one adoption embed and one feed confirmation despite the replays, and /pet view and the wallet totals are unchanged from the pre-replay snapshot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All pets rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each pets action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing pets surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Idempotency keys on the purchase debit, the pet insert, and the feed mutation each show one applied effect; replayed deliveries are recorded as deduplicated no-ops."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test pet rows, wallet entries, battle records, announcement embeds, and nudge DMs) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-pets-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "Pet state survives a full stack restart: stats, level, prestige, and the decay cadence all persist without a double-decay.",
+     "expectedOutcome": "After restarting bot and dashboard, /pet view matches the pre-restart snapshot exactly, the decay timer resumes on its configured interval, and the interval spanning the restart decays the pet at most once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart /pet view matches the pre-restart snapshot exactly and the next decay cycle applies a single decay step, not a catch-up double."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All pets rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each pets action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing pets surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, pet mutations, or battle payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test pet rows, wallet entries, battle records, announcement embeds, and nudge DMs) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-pets-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent pet actions are safe: simultaneous /pet play calls honor the atomic cooldown and simultaneous /pet prestige calls apply exactly once.",
+     "expectedOutcome": "Two simultaneous /pet play invocations yield exactly one applied happiness gain and one cooldown refusal, and two simultaneous /pet prestige calls on a max-level pet yield exactly one prestige with one refusal.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Exactly one playtime embed and one cooldown refusal appear for the simultaneous plays, and exactly one prestige embed appears for the simultaneous prestige attempts with the pet showing a single prestige star increment."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All pets rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each pets action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing pets surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, pet mutations, or battle payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test pet rows, wallet entries, battle records, announcement embeds, and nudge DMs) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-pets-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "Pets are strictly per-guild: adopting and training in a second guild never touches the first guild’s pet, wallet, or battle history.",
+     "expectedOutcome": "run-member-a adopts and trains a pet in test guild B; guild A’s pet row, wallet, and /pet view are unchanged, and guild B’s pet reflects only guild B’s configured costs.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A’s /pet view is identical before and after the guild B activity, and guild B’s adoption debits guild B’s wallet at guild B’s configured price."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_pets rows and vice versa; service-role probes confirm each guild’s pet and wallet rows evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each pets action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing pets surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, pet mutations, or battle payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test pet rows, wallet entries, battle records, announcement embeds, and nudge DMs) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-pets-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed pets resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed pet rows, battle records, wallet entries, announcement embeds, and nudge DM artifacts are deleted; a final sweep finds zero run-prefixed pets resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed pet adoption embeds, battle announcements, or care confirmations after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All pets rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each pets action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing pets surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, pet mutations, or battle payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed pets resource created by this domain’s scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "game-economy-quests",
+   "name": "Daily & Weekly Quests",
+   "category": "game-economy",
+   "promise": "Every member always carries a personalized slate of daily and weekly quests that auto-refreshes on an always-on cadence — dailies each UTC day, weeklies each UTC Monday — with progress tracked passively from real game-economy activity and rewards claimed as play-money coins and XP via /quests claim; the owner can resize or disable each cadence piece without losing anyone’s progress.",
+   "controls": [
+    {
+     "id": "quests-enabled",
+     "description": "Master switch for quests; when off, the cadence stops and quest commands explain the feature is disabled.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "daily-quest-count",
+     "description": "How many personalized daily quests each member receives per UTC day; zero disables the daily piece while weeklies continue.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 10
+     }
+    },
+    {
+     "id": "weekly-quest-count",
+     "description": "How many personalized weekly quests each member receives per ISO week; zero disables the weekly piece while dailies continue.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 10
+     }
+    },
+    {
+     "id": "quest-reward-base",
+     "description": "Base play-money coin reward that quest templates scale from.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000000
+     }
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "quests-enabled",
+     "value": true,
+     "rationale": "An always-on quest loop gives every member a reason to return daily; core to the maximal experience."
+    },
+    {
+     "controlId": "daily-quest-count",
+     "value": 3,
+     "rationale": "Three dailies fit a single play session without feeling like a chore list."
+    },
+    {
+     "controlId": "weekly-quest-count",
+     "value": 5,
+     "rationale": "Five weeklies give steady mid-term goals across a whole week of varied activity."
+    },
+    {
+     "controlId": "quest-reward-base",
+     "value": 100,
+     "rationale": "A meaningful play-coin baseline that quest templates scale by difficulty; fully owner-tunable."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "view-and-claim-quests",
+     "actor": "Any guild member",
+     "action": "Run /quests view and /quests claim",
+     "defaultDecision": "allow",
+     "enforcement": "/quests responds for every member; the atomic claim RPC only ever pays the invoking member’s own completed quests."
+    },
+    {
+     "id": "configure-quests",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Edit quest settings on the dashboard economy quests page",
+     "defaultDecision": "allow",
+     "enforcement": "Dashboard session auth plus Supabase RLS restrict guild_config writes to authorized guild administrators."
+    },
+    {
+     "id": "claim-others-quests",
+     "actor": "Any guild member",
+     "action": "Claim another member’s completed quest rewards",
+     "defaultDecision": "deny",
+     "enforcement": "The economy_quest_atomic_claim RPC is keyed to the invoking member’s guild and user id; no code path claims another member’s quest rows."
+    }
+   ],
+   "messages": [
+    {
+     "id": "slate-refreshed",
+     "trigger": "The always-on cadence assigns a fresh daily or weekly slate",
+     "surface": "Branded note atop the member’s next /quests view",
+     "audience": "The quest-holding member",
+     "defaultTemplate": "Fresh quests just dropped, {member-name}: {daily-count} daily and {weekly-count} weekly. Go get them!",
+     "variables": [
+      "member-name",
+      "daily-count",
+      "weekly-count"
+     ]
+    },
+    {
+     "id": "rewards-claimed",
+     "trigger": "A member claims completed quests",
+     "surface": "Channel embed replying to /quests claim",
+     "audience": "The claiming member and the channel",
+     "defaultTemplate": "{member-name} claimed {quest-count} quest(s) for {coin-total} play coins and {xp-total} XP. Nicely done!",
+     "variables": [
+      "member-name",
+      "quest-count",
+      "coin-total",
+      "xp-total"
+     ]
+    },
+    {
+     "id": "nothing-to-claim",
+     "trigger": "A member runs /quests claim with no completed unclaimed quests",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "Nothing to claim yet, {member-name} — check /quests view for what’s still in progress.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "claim-payout-failed",
+     "trigger": "The play-money payout fails after quests were atomically marked claimed",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "That payout hiccuped, {member-name} — your quests are back to claimable and nothing was lost. Try again in a moment.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "quests-unavailable",
+     "trigger": "The quests backend is temporarily unreachable when a member runs a quest command",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The quest board is being restocked, {member-name} — give it a moment and try again.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "cadence-degraded",
+     "trigger": "A scheduled slate refresh keeps failing",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: the {cadence} quest refresh failed and will retry automatically; member progress is untouched and everything is logged.",
+     "variables": [
+      "cadence"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "awaiting-slate",
+    "values": [
+     {
+      "id": "awaiting-slate",
+      "description": "The member has no current-cycle quests; the next cadence tick assigns a personalized slate."
+     },
+     {
+      "id": "in-progress",
+      "description": "A daily and weekly slate is assigned; passive activity tracking increments matching quest progress."
+     },
+     {
+      "id": "claimable",
+      "description": "At least one quest reached its target and awaits /quests claim."
+     },
+     {
+      "id": "claim-degraded",
+      "description": "Quests were atomically marked claimed but the payout failed; the claim was reverted so the member can retry with nothing lost."
+     },
+     {
+      "id": "disabled",
+      "description": "Quests disabled by configuration; no cadence runs and quest commands explain the feature is off."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "slate-assigned",
+      "from": "awaiting-slate",
+      "to": "in-progress",
+      "trigger": "The daily or weekly cadence tick assigns the member’s personalized slate",
+      "expectedEffect": "Exactly daily-quest-count daily and weekly-quest-count weekly quests exist for the member this cycle, deduplicated by the unique per-cycle assignment key."
+     },
+     {
+      "id": "target-reached",
+      "from": "in-progress",
+      "to": "claimable",
+      "trigger": "Real activity (messages, trivia wins, pet care, and other tracked actions) completes a quest target",
+      "expectedEffect": "The atomic increment RPC advances progress exactly once per action and flips completion at the target."
+     },
+     {
+      "id": "rewards-paid",
+      "from": "claimable",
+      "to": "in-progress",
+      "trigger": "The member runs /quests claim",
+      "expectedEffect": "The atomic claim RPC flips only unclaimed completed rows and one payout covers exactly those rows in play coins and XP."
+     },
+     {
+      "id": "payout-reverted",
+      "from": "claimable",
+      "to": "claim-degraded",
+      "trigger": "The play-money payout errors after the atomic claim flipped rows",
+      "expectedEffect": "Claimed flags are reverted so rewards remain claimable; nothing is paid and nothing is lost."
+     },
+     {
+      "id": "claim-retried",
+      "from": "claim-degraded",
+      "to": "in-progress",
+      "trigger": "The member retries /quests claim after the transient fault clears",
+      "expectedEffect": "Exactly one payout lands for the affected quests."
+     },
+     {
+      "id": "cycle-rolls",
+      "from": "in-progress",
+      "to": "awaiting-slate",
+      "trigger": "The UTC day or ISO week rolls over",
+      "expectedEffect": "Expired slates retire and the always-on cadence assigns the next personalized slate."
+     },
+     {
+      "id": "quests-toggled-off",
+      "from": "in-progress",
+      "to": "disabled",
+      "trigger": "Owner turns quests-enabled off on the dashboard",
+      "expectedEffect": "The cadence stops; progress rows are preserved untouched."
+     },
+     {
+      "id": "quests-toggled-on",
+      "from": "disabled",
+      "to": "awaiting-slate",
+      "trigger": "Owner turns quests-enabled back on",
+      "expectedEffect": "The next cadence tick assigns fresh slates with historical progress intact."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "claim-payout-failed",
+     "trigger": "economy_add_balance fails after economy_quest_atomic_claim flipped rows to claimed",
+     "expectedBehavior": "The claimed flags are reverted so the quests return to claimable, the member is told nothing was lost, and a retry pays exactly once — never zero-paid-but-marked-claimed and never double-paid.",
+     "resultingState": "claim-degraded",
+     "retry": "operator",
+     "messageId": "claim-payout-failed",
+     "auditEvent": "quests.claim_payout_reverted",
+     "ownerNotification": true
+    },
+    {
+     "id": "slate-refresh-failed",
+     "trigger": "A cadence tick hits a transient database error while assigning slates",
+     "expectedBehavior": "The refresh retries automatically on the next tick; the unique per-cycle assignment key keeps eventual assignment exactly-once per member, template, and cycle; existing progress is untouched.",
+     "resultingState": "awaiting-slate",
+     "retry": "automatic",
+     "messageId": "cadence-degraded",
+     "auditEvent": "quests.slate_refresh_retried",
+     "ownerNotification": true
+    },
+    {
+     "id": "progress-increment-failed",
+     "trigger": "The atomic progress increment RPC fails transiently for one tracked action",
+     "expectedBehavior": "The increment retries under the same action idempotency key until it converges; one action never adds more than one increment and tracked progress is never silently lost.",
+     "resultingState": "in-progress",
+     "retry": "automatic",
+     "messageId": "quests-unavailable",
+     "auditEvent": "quests.progress_increment_retried",
+     "ownerNotification": false
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "Quest behavior contracted here is directly observed working in the live test guild: slates auto-refresh on the daily and weekly cadence, /quests view shows personalized progress, real activity moves the counters, and /quests claim pays play coins and XP.",
+     "artifact": "evidence/game-economy-quests/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_quest_progress, economy_quest_templates, economy_wallets, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+     "artifact": "evidence/game-economy-quests/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-quests/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-quests/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured embeds and messages for this domain match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-quests/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over messages, grants, and balance mutations",
+     "expectedObservation": "Replaying recorded triggers for this domain against the live stack leaves end state unchanged: no duplicate quest assignments, progress increments, or reward payouts.",
+     "artifact": "evidence/game-economy-quests/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-quests/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-quests-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box with zero configuration, every member’s slate auto-fills with 3 personalized daily and 5 weekly quests, real activity advances progress passively, and /quests claim pays play-money coins and XP for completed quests.",
+     "expectedOutcome": "run-member-a receives exactly 3 daily and 5 weekly quests for the current cycle, a tracked action reaching its target flips a quest to claimable, and /quests claim pays the template totals exactly once into the play-money wallet.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/quests view lists exactly 3 daily and 5 weekly personalized quests with live progress counters, and /quests claim posts one branded embed whose coin and XP totals match the claimed templates exactly."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All quests rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each quests action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing quests surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate quest assignments, progress increments, or reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test quest slates, progress rows, claim embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-quests-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Dashboard configuration takes live effect: the owner resizes the slate to 1 daily and 2 weekly quests and raises the base reward.",
+     "expectedOutcome": "Without a bot restart, the next cycle’s slate contains exactly 1 daily and 2 weekly quests, and a claim pays amounts scaled from the raised base.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save and cycle rollover, /quests view shows exactly 1 daily and 2 weekly quests, and the next claim embed shows totals scaled from the raised reward base."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All quests rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each quests action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing quests surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate quest assignments, progress increments, or reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test quest slates, progress rows, claim embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-quests-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "The owner can disable a cadence piece independently: daily-quest-count 0 stops dailies while the weekly cadence keeps running.",
+     "expectedOutcome": "After the rollover, run-member-a’s slate holds zero daily quests and exactly 5 weekly quests, and previously completed quests remain claimable with nothing lost.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/quests view lists zero daily quests and exactly 5 weekly quests after the rollover, and a claim of a previously completed quest still pays normally."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All quests rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each quests action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing quests surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate quest assignments, progress increments, or reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test quest slates, progress rows, claim embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-quests-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid quest configuration is rejected atomically: a slate count above the bound and a negative reward base never persist.",
+     "expectedOutcome": "The dashboard quests page surfaces a clear validation error, guild_config keeps its prior values byte-for-byte, and the next cadence tick assigns slates under the previous valid settings.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/quests view immediately after the rejected save still shows the previous valid slate sizes, proving no partial write reached the bot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All quests rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the rejected quests configuration attempt with the validation reason; no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing quests surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate quest assignments, progress increments, or reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test quest slates, progress rows, claim embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-quests-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "Quests are protected from unauthorized actors: a member can only claim their own quests and a non-admin dashboard session cannot save quest settings.",
+     "expectedOutcome": "run-member-b’s /quests claim pays only run-member-b’s own completed quests, run-member-a’s claimable rows are untouched, and the non-admin dashboard save is refused.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-b’s claim embed lists only run-member-b’s quests, run-member-a’s /quests view is identical before and after, and the non-admin dashboard save returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All quests rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied quests configuration attempt with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing quests surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate quest assignments, progress increments, or reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test quest slates, progress rows, claim embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-quests-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase dependency is unreachable, quests fail safe: no crash, friendly branded degradation, and no lost progress.",
+     "expectedOutcome": "With database access blocked, /quests view replies with the branded quests-unavailable message; after restoring the connection the same slate reappears with progress intact and tracking resumes.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /quests view replies with the branded quests-unavailable template in the owner’s voice; after restoration the identical slate and progress counters reappear."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All quests rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each quests action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed quest command."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing quests surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate quest assignments, progress increments, or reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test quest slates, progress rows, claim embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-quests-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A claim whose payout fails converges safely: the claim reverts so nothing is lost and the retried claim pays exactly once.",
+     "expectedOutcome": "With a fault injected on the payout, the first /quests claim reports the friendly failure and the quests return to claimable; the retried claim pays the exact totals once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The first claim under the injected fault shows the branded payout-failed reply, /quests view shows the quests claimable again, and the retried claim posts one embed with the exact totals."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All quests rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each quests action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing quests surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The reverted claim and the successful retry resolve to exactly one payout in the play-money ledger; idempotency keys show no path to a double payment."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test quest slates, progress rows, claim embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-quests-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replays never double-count or double-pay: re-delivered activity events and a replayed claim leave progress and the wallet unchanged.",
+     "expectedOutcome": "After replaying the recorded activity events and the claim interaction, progress counters and the wallet total are byte-identical to the pre-replay state with no second claim embed.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The channel shows exactly one claim embed despite the replayed interaction, and /quests view and the wallet totals match the pre-replay snapshot exactly."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All quests rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each quests action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing quests surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivered activity events deduplicate against their action idempotency keys and the atomic claim RPC returns zero rows on the replayed claim, so no progress or payout doubles."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test quest slates, progress rows, claim embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-quests-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "Quest state survives a full stack restart: slates, progress, and the always-on cadence all persist with exactly-once assignment.",
+     "expectedOutcome": "After restarting bot and dashboard, /quests view shows the identical slate and progress, and the cadence tick spanning the restart assigns the next cycle’s slate exactly once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart /quests view matches the pre-restart snapshot exactly, and the next cycle’s slate appears once with no duplicate quest rows."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All quests rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each quests action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing quests surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate quest assignments, progress increments, or reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test quest slates, progress rows, claim embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-quests-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent quest actions are safe: simultaneous claims pay once and simultaneous first-of-cycle assignments produce one slate.",
+     "expectedOutcome": "Two simultaneous /quests claim invocations produce exactly one paying embed and one nothing-to-claim reply, and two simultaneous first-of-cycle triggers yield exactly one slate with no duplicate rows.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Exactly one claim embed and one branded nothing-to-claim reply appear for the simultaneous claims, and /quests view shows a single deduplicated slate."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All quests rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each quests action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing quests surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate quest assignments, progress increments, or reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test quest slates, progress rows, claim embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-quests-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "Quests are strictly per-guild: completing and claiming quests in a second guild never touches the first guild’s slate, progress, or wallet.",
+     "expectedOutcome": "run-member-a completes and claims quests in test guild B; guild A’s slate, progress rows, and wallet are unchanged, and guild B’s slate follows guild B’s configured counts.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A’s /quests view and wallet totals are identical before and after the guild B activity, and guild B’s slate sizes match guild B’s own configuration."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_quest_progress rows and vice versa; service-role probes confirm each guild’s slates and wallets evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each quests action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing quests surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate quest assignments, progress increments, or reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test quest slates, progress rows, claim embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-quests-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed quests resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed quest templates, progress rows, claim embeds, and wallet entries are deleted; a final sweep finds zero run-prefixed quests resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed quest claim embeds or slate-refresh notes after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All quests rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each quests action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing quests surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate quest assignments, progress increments, or reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed quests resource created by this domain’s scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "game-economy-achievements-prestige",
+   "name": "Achievements & Prestige",
+   "category": "game-economy",
+   "promise": "Milestone badges unlock passively and exactly once from real activity — including hidden achievements that stay masked in /badges until earned — and members who reach the owner-set level and play-money net-worth thresholds can /prestige: wallet and bank reset in exchange for a permanent earning multiplier that grows by a fixed step per prestige and is bounded by an owner-set cap. Every reward and reset lives entirely in the fake game economy.",
+   "controls": [
+    {
+     "id": "achievements-enabled",
+     "description": "Master switch for passive badge unlocks; when off, no milestone checks run and /badges explains the feature is disabled.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "prestige-enabled",
+     "description": "Whether /prestige is available as an independent piece; badges keep unlocking when only prestige is off.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "prestige-min-level",
+     "description": "Minimum member level required to prestige.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 1000
+     }
+    },
+    {
+     "id": "prestige-min-net-worth",
+     "description": "Minimum combined play-money wallet plus bank balance required to prestige.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000000000
+     }
+    },
+    {
+     "id": "prestige-multiplier-step-pct",
+     "description": "Permanent earning-multiplier percentage added per prestige.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 100
+     }
+    },
+    {
+     "id": "prestige-max-level",
+     "description": "Hard cap on prestige level; members at the cap keep their multiplier but cannot prestige again.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 100
+     }
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "achievements-enabled",
+     "value": true,
+     "rationale": "Passive badges celebrate genuine activity out of the box with zero owner setup."
+    },
+    {
+     "controlId": "prestige-enabled",
+     "value": true,
+     "rationale": "Prestige gives long-term players an endgame loop and ships on; owners can switch the piece off independently."
+    },
+    {
+     "controlId": "prestige-min-level",
+     "value": 50,
+     "rationale": "Level 50 marks a genuinely invested member; prestige should feel earned."
+    },
+    {
+     "controlId": "prestige-min-net-worth",
+     "value": 1000000,
+     "rationale": "A million play coins makes the reset a real sacrifice that the permanent multiplier meaningfully repays."
+    },
+    {
+     "controlId": "prestige-multiplier-step-pct",
+     "value": 10,
+     "rationale": "A 10 percent step per prestige compounds into real progression without instantly distorting the game economy."
+    },
+    {
+     "controlId": "prestige-max-level",
+     "value": 10,
+     "rationale": "Capping at prestige 10 (a +100 percent ceiling) keeps multipliers bounded so the play-money economy stays balanced forever."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "view-badges-and-prestige",
+     "actor": "Any guild member",
+     "action": "Run /badges and /prestige",
+     "defaultDecision": "allow",
+     "enforcement": "/badges and /prestige respond for every member; prestige only ever resets the invoking member’s own play-money balances."
+    },
+    {
+     "id": "configure-achievements-prestige",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Edit achievement definitions and prestige thresholds on the dashboard economy achievements page",
+     "defaultDecision": "allow",
+     "enforcement": "Dashboard session auth plus Supabase RLS restrict guild_config and economy_achievement_defs writes to authorized guild administrators."
+    },
+    {
+     "id": "self-grant-badges",
+     "actor": "Any guild member",
+     "action": "Unlock a badge directly rather than through tracked milestones",
+     "defaultDecision": "deny",
+     "enforcement": "Badges unlock only through the passive milestone-check pipeline; no command or member-facing surface inserts economy_user_achievements rows."
+    }
+   ],
+   "messages": [
+    {
+     "id": "badge-unlocked",
+     "trigger": "A tracked milestone crosses an achievement’s condition value",
+     "surface": "Channel embed where the qualifying activity happened",
+     "audience": "The unlocking member and the channel",
+     "defaultTemplate": "{member-name} just unlocked {badge-name}! {reward} bonus play coins land in their wallet.",
+     "variables": [
+      "member-name",
+      "badge-name",
+      "reward"
+     ]
+    },
+    {
+     "id": "prestige-complete",
+     "trigger": "A qualifying member below the cap runs /prestige",
+     "surface": "Channel embed replying to /prestige",
+     "audience": "The prestiging member and the channel",
+     "defaultTemplate": "{member-name} ascends to prestige {prestige-level}! Wallet and bank reset — permanent earning bonus now {multiplier-pct} percent.",
+     "variables": [
+      "member-name",
+      "prestige-level",
+      "multiplier-pct"
+     ]
+    },
+    {
+     "id": "prestige-refused",
+     "trigger": "A member runs /prestige below the level or net-worth threshold",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "Not yet, {member-name} — prestige needs level {min-level} and {min-net-worth} play-coin net worth.",
+     "variables": [
+      "member-name",
+      "min-level",
+      "min-net-worth"
+     ]
+    },
+    {
+     "id": "prestige-capped",
+     "trigger": "A member already at the prestige cap runs /prestige",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "You’ve reached the summit, {member-name}: prestige {max-prestige} is the cap on this server. Wear it proudly.",
+     "variables": [
+      "member-name",
+      "max-prestige"
+     ]
+    },
+    {
+     "id": "achievements-unavailable",
+     "trigger": "The achievements backend is temporarily unreachable when a member runs /badges or /prestige",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The trophy cabinet is locked for a moment, {member-name} — try again shortly.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "badge-reward-delayed",
+     "trigger": "A badge’s play-money reward payout keeps failing",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: the {reward}-coin reward for {badge-name} failed to pay {member-name} and is queued for operator retry; the badge itself is safely recorded.",
+     "variables": [
+      "reward",
+      "badge-name",
+      "member-name"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "tracking",
+    "values": [
+     {
+      "id": "tracking",
+      "description": "Achievements enabled; milestone checks run passively after each tracked action."
+     },
+     {
+      "id": "unlocking",
+      "description": "A milestone crossed a condition value; the badge row and its play-money reward are being applied exactly once."
+     },
+     {
+      "id": "reward-degraded",
+      "description": "A badge unlocked but its play-money reward payout failed; the badge stands while the payout awaits retry."
+     },
+     {
+      "id": "prestige-eligible",
+      "description": "The member meets the level and net-worth thresholds and sits below the cap; /prestige will apply an atomic reset."
+     },
+     {
+      "id": "prestige-capped",
+      "description": "The member sits at prestige-max-level; further /prestige attempts refuse with the capped message while the earned multiplier stays."
+     },
+     {
+      "id": "disabled",
+      "description": "Achievements disabled by configuration; no unlock checks run and /badges explains the feature is off."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "milestone-crossed",
+      "from": "tracking",
+      "to": "unlocking",
+      "trigger": "A tracked action pushes a member past a definition’s condition value",
+      "expectedEffect": "Exactly one badge row is inserted and one play-money reward payout is queued."
+     },
+     {
+      "id": "unlock-complete",
+      "from": "unlocking",
+      "to": "tracking",
+      "trigger": "Badge row and reward committed",
+      "expectedEffect": "The unlock embed posts once and /badges flips the definition to unlocked, unmasking it if it was hidden."
+     },
+     {
+      "id": "reward-failed",
+      "from": "unlocking",
+      "to": "reward-degraded",
+      "trigger": "The play-money reward payout errors",
+      "expectedEffect": "The badge row stands, the payout queues for operator retry, and the owner is alerted."
+     },
+     {
+      "id": "reward-recovered",
+      "from": "reward-degraded",
+      "to": "tracking",
+      "trigger": "A retry pays the reward",
+      "expectedEffect": "Exactly one payout lands and the degradation clears."
+     },
+     {
+      "id": "thresholds-met",
+      "from": "tracking",
+      "to": "prestige-eligible",
+      "trigger": "The member reaches prestige-min-level and prestige-min-net-worth below the cap",
+      "expectedEffect": "/prestige will now succeed for this member."
+     },
+     {
+      "id": "prestige-applied",
+      "from": "prestige-eligible",
+      "to": "tracking",
+      "trigger": "The member runs /prestige below the cap",
+      "expectedEffect": "Atomically: wallet and bank reset to zero, prestige level increments by one, the multiplier grows by prestige-multiplier-step-pct, and inventory, pets, achievements, and streaks are preserved."
+     },
+     {
+      "id": "cap-reached",
+      "from": "prestige-eligible",
+      "to": "prestige-capped",
+      "trigger": "A prestige lands the member on prestige-max-level",
+      "expectedEffect": "Further attempts refuse with the capped message; the earned multiplier stays permanently."
+     },
+     {
+      "id": "achievements-toggled-off",
+      "from": "tracking",
+      "to": "disabled",
+      "trigger": "Owner turns achievements-enabled off on the dashboard",
+      "expectedEffect": "Unlock checks stop; existing badges and prestige records are preserved untouched."
+     },
+     {
+      "id": "achievements-toggled-on",
+      "from": "disabled",
+      "to": "tracking",
+      "trigger": "Owner turns achievements-enabled back on",
+      "expectedEffect": "Passive checks resume against preserved history without re-firing past unlocks."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "badge-reward-payout-failed",
+     "trigger": "economy_add_balance fails while paying a badge’s reward currency",
+     "expectedBehavior": "The badge row stands and is never rolled back, the payout retries under one idempotency key until it lands exactly once, and the owner is alerted with badge and member context.",
+     "resultingState": "reward-degraded",
+     "retry": "operator",
+     "messageId": "badge-reward-delayed",
+     "auditEvent": "achievements.badge_reward_payout_failed",
+     "ownerNotification": true
+    },
+    {
+     "id": "prestige-partial-write",
+     "trigger": "The prestige reset commits the wallet zeroing but the prestige-record write fails",
+     "expectedBehavior": "The prestige applies atomically or not at all: either the member keeps their balances with an explicit retryable error, or level, multiplier, and reset all land together — a member can never lose their play-money balance without receiving the prestige level.",
+     "resultingState": "prestige-eligible",
+     "retry": "operator",
+     "messageId": "achievements-unavailable",
+     "auditEvent": "achievements.prestige_write_failed",
+     "ownerNotification": true
+    },
+    {
+     "id": "unlock-check-failed",
+     "trigger": "A passive milestone check hits a transient database error",
+     "expectedBehavior": "The check retries on the next tracked action; a deferred unlock still fires exactly once when the milestone is re-evaluated, and no duplicate badge rows ever appear.",
+     "resultingState": "tracking",
+     "retry": "automatic",
+     "messageId": "achievements-unavailable",
+     "auditEvent": "achievements.unlock_check_retried",
+     "ownerNotification": false
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "Achievements-and-prestige behavior contracted here is directly observed working in the live test guild: passive milestones unlock badges exactly once, hidden achievements stay masked until earned, /badges shows accurate progress, and /prestige atomically trades play-money balances for a bounded permanent multiplier.",
+     "artifact": "evidence/game-economy-achievements-prestige/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_achievement_defs, economy_user_achievements, economy_prestige, economy_wallets, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+     "artifact": "evidence/game-economy-achievements-prestige/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-achievements-prestige/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-achievements-prestige/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured embeds and messages for this domain match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-achievements-prestige/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over messages, grants, and balance mutations",
+     "expectedObservation": "Replaying recorded triggers for this domain against the live stack leaves end state unchanged: no duplicate badge unlocks, reward payouts, or prestige resets.",
+     "artifact": "evidence/game-economy-achievements-prestige/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-achievements-prestige/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-achievements-prestige-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box, passive milestones unlock badges exactly once with hidden achievements masked in /badges, and a member at level 50 with 1,000,000 play-coin net worth can prestige for a +10 percent earning multiplier while keeping inventory, pets, achievements, and streaks.",
+     "expectedOutcome": "run-member-a’s tracked milestone inserts exactly one badge row and pays its reward once, /badges masks an unearned hidden achievement, and a prestige at the default thresholds zeroes wallet and bank while the multiplier becomes exactly 10 percent.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/badges lists every definition with the hidden one masked as unknown, the earned milestone posts exactly one unlock embed, and the /prestige embed shows prestige 1 with a +10 percent multiplier while /badges still shows the earned badges."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All achievements-and-prestige rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each achievements-and-prestige action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing achievements-and-prestige surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate badge unlocks, reward payouts, or prestige resets; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test achievement definitions, badge rows, prestige records, wallet entries, and unlock embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-achievements-prestige-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Dashboard configuration takes live effect: the owner lowers the thresholds to level 2 and 1,000 net worth and raises the multiplier step to 25 percent.",
+     "expectedOutcome": "Without a bot restart, run-member-a prestiges at level 2 with 1,000 play-coin net worth, and the prestige record shows exactly one level with a 25 percent multiplier.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save, /prestige succeeds at the lowered thresholds with no restart and the embed shows the 25 percent step applied."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All achievements-and-prestige rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each achievements-and-prestige action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing achievements-and-prestige surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate badge unlocks, reward payouts, or prestige resets; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test achievement definitions, badge rows, prestige records, wallet entries, and unlock embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-achievements-prestige-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "The owner can disable the prestige piece independently: /prestige refuses while badges keep unlocking and paying rewards.",
+     "expectedOutcome": "With prestige-enabled off, /prestige returns a branded refusal, and a fresh milestone still unlocks its badge and pays its play-money reward, proving the pieces toggle independently.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/prestige returns the branded piece-disabled refusal while a fresh milestone still posts one unlock embed and /badges shows the new badge."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All achievements-and-prestige rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each achievements-and-prestige action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing achievements-and-prestige surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate badge unlocks, reward payouts, or prestige resets; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test achievement definitions, badge rows, prestige records, wallet entries, and unlock embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-achievements-prestige-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid configuration is rejected atomically: a zero minimum level, a negative net-worth threshold, and an out-of-range multiplier step never persist.",
+     "expectedOutcome": "The dashboard achievements page surfaces a clear validation error, guild_config keeps its prior thresholds byte-for-byte, and the next /prestige is still judged against the previous valid values.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A below-threshold /prestige immediately after the rejected save is still refused against the previous valid thresholds, proving no partial write reached the bot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All achievements-and-prestige rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the rejected achievements-prestige configuration attempt with the validation reason; no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing achievements-and-prestige surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate badge unlocks, reward payouts, or prestige resets; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test achievement definitions, badge rows, prestige records, wallet entries, and unlock embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-achievements-prestige-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "Achievements are protected from unauthorized actors: members cannot self-grant badges and a non-admin dashboard session cannot alter definitions or thresholds.",
+     "expectedOutcome": "run-member-b holds zero new badge rows after exhausting every member-facing surface, and the non-admin dashboard save of definitions and thresholds is refused.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-b’s /badges output is identical before and after the self-grant attempts, and the non-admin dashboard save returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All achievements-and-prestige rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied achievements configuration attempt with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing achievements-and-prestige surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate badge unlocks, reward payouts, or prestige resets; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test achievement definitions, badge rows, prestige records, wallet entries, and unlock embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-achievements-prestige-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase dependency is unreachable, achievements fail safe: no crash, friendly branded degradation, and no lost unlocks.",
+     "expectedOutcome": "With database access blocked, /badges and /prestige reply with the branded unavailable message; after restoration the same badge inventory renders and a deferred milestone unlocks exactly once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /badges replies with the branded achievements-unavailable template in the owner’s voice; after restoration the identical badge inventory renders and the deferred milestone posts one unlock embed."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All achievements-and-prestige rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each achievements-and-prestige action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed command."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing achievements-and-prestige surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate badge unlocks, reward payouts, or prestige resets; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test achievement definitions, badge rows, prestige records, wallet entries, and unlock embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-achievements-prestige-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A badge whose reward payout fails converges safely: the badge stands and the retried payout lands exactly once.",
+     "expectedOutcome": "With a fault injected on the reward payout, the badge row persists immediately, and the retry pays the exact reward once with the wallet showing a single credit.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/badges shows the badge unlocked despite the injected payout fault, and after the retry the wallet shows exactly one reward credit."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All achievements-and-prestige rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each achievements-and-prestige action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing achievements-and-prestige surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The failed payout attempt and its retry resolve under one idempotency key to exactly one play-money credit; the badge row is never duplicated or rolled back."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test achievement definitions, badge rows, prestige records, wallet entries, and unlock embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-achievements-prestige-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replays never double-award: re-delivered milestone events leave one badge row, one reward payment, and one unlock embed.",
+     "expectedOutcome": "After replaying the recorded milestone activity, /badges shows the badge unlocked exactly once and the wallet shows exactly one reward payment, byte-identical to the pre-replay state.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The channel contains exactly one unlock embed for the badge despite the replays, and /badges and the wallet match the pre-replay snapshot exactly."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All achievements-and-prestige rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each achievements-and-prestige action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing achievements-and-prestige surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Idempotency keys on the badge insert and reward payout each show one applied effect; replayed milestone deliveries are recorded as deduplicated no-ops."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test achievement definitions, badge rows, prestige records, wallet entries, and unlock embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-achievements-prestige-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "Achievement state survives a full stack restart: badges, prestige level, and the earning multiplier all persist exactly.",
+     "expectedOutcome": "After restarting bot and dashboard, /badges shows the identical unlock set, the prestige record keeps its level and multiplier, and an in-flight milestone completes exactly once post-restart.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart /badges matches the pre-restart snapshot exactly and the prestige embed history shows no duplicate or lost prestige."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All achievements-and-prestige rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each achievements-and-prestige action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing achievements-and-prestige surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate badge unlocks, reward payouts, or prestige resets; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test achievement definitions, badge rows, prestige records, wallet entries, and unlock embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-achievements-prestige-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent actions are safe: simultaneous /prestige confirmations apply exactly one level and simultaneous milestone crossings produce a single badge row.",
+     "expectedOutcome": "Two simultaneous /prestige calls at the thresholds yield exactly one prestige increment and one refusal, and two simultaneous crossing actions yield exactly one badge row and one reward payment.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Exactly one prestige embed and one refusal appear for the simultaneous prestige attempts, the prestige record shows a single level and multiplier step, and exactly one unlock embed appears for the concurrent milestone."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All achievements-and-prestige rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each achievements-and-prestige action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing achievements-and-prestige surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate badge unlocks, reward payouts, or prestige resets; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test achievement definitions, badge rows, prestige records, wallet entries, and unlock embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-achievements-prestige-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "Badges and prestige are strictly per-guild: unlocks and prestiges in a second guild never touch the first guild’s badges, prestige level, or multiplier.",
+     "expectedOutcome": "run-member-a unlocks a badge and prestiges in test guild B; guild A’s /badges output, prestige record, and wallet are unchanged, and guild B’s records follow guild B’s own thresholds.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A’s /badges output and prestige multiplier are identical before and after the guild B activity."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_user_achievements or economy_prestige rows and vice versa; service-role probes confirm each guild’s records evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each achievements-and-prestige action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing achievements-and-prestige surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate badge unlocks, reward payouts, or prestige resets; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test achievement definitions, badge rows, prestige records, wallet entries, and unlock embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-achievements-prestige-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed achievements-and-prestige resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed achievement definitions, badge rows, prestige records, wallet entries, and unlock embeds are deleted; a final sweep finds zero run-prefixed resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed unlock or prestige embeds after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All achievements-and-prestige rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each achievements-and-prestige action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing achievements-and-prestige surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate badge unlocks, reward payouts, or prestige resets; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed achievements-and-prestige resource created by this domain’s scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "game-economy-trivia",
+   "name": "Trivia",
+   "category": "game-economy",
+   "promise": "SomniBot hosts branded multiple-choice trivia — on command via /trivia start with optional category and difficulty, and automatically on an owner-scheduled cadence in a chosen channel — with one-answer-per-member button locking over a 20-second window, play-money payouts scaled by difficulty and per-member win streaks, and owner-curated custom question packs blended into the built-in pool.",
+   "controls": [
+    {
+     "id": "trivia-enabled",
+     "description": "Master switch for trivia; when off, command and scheduled starts are refused with the disabled explanation.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "trivia-base-payout",
+     "description": "Base play-money coin payout for a correct answer before difficulty and streak scaling.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000000
+     }
+    },
+    {
+     "id": "trivia-streak-multiplier-pct",
+     "description": "Percentage bonus added to the payout per consecutive win in a member’s streak; streaks expire after 24 hours of inactivity.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000
+     }
+    },
+    {
+     "id": "trivia-hard-multiplier",
+     "description": "Payout multiplier applied to hard-difficulty questions.",
+     "valueType": "number",
+     "constraints": {
+      "min": 1,
+      "max": 10
+     }
+    },
+    {
+     "id": "trivia-cooldown-seconds",
+     "description": "Per-channel cooldown between rounds so trivia stays fun rather than farmable.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 3600
+     }
+    },
+    {
+     "id": "scheduled-trivia-enabled",
+     "description": "Whether the hosted cadence runs; inert until a schedule channel is chosen, and disabling it leaves on-command trivia untouched.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "scheduled-trivia-channel-id",
+     "description": "Channel where the hosted cadence posts rounds; empty string leaves scheduling inert.",
+     "valueType": "string",
+     "constraints": {}
+    },
+    {
+     "id": "scheduled-trivia-interval-hours",
+     "description": "Hours between hosted rounds when the scheduled cadence is active.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 168
+     }
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "trivia-enabled",
+     "value": true,
+     "rationale": "Trivia is instant social fun and ships on for the maximal out-of-box experience."
+    },
+    {
+     "controlId": "trivia-base-payout",
+     "value": 50,
+     "rationale": "A light play-coin payout that rewards knowledge without distorting the game economy."
+    },
+    {
+     "controlId": "trivia-streak-multiplier-pct",
+     "value": 10,
+     "rationale": "A 10 percent-per-win streak bonus rewards regulars while staying bounded by the daily streak expiry."
+    },
+    {
+     "controlId": "trivia-hard-multiplier",
+     "value": 2,
+     "rationale": "Doubling hard questions makes difficulty a meaningful choice."
+    },
+    {
+     "controlId": "trivia-cooldown-seconds",
+     "value": 30,
+     "rationale": "A short per-channel breather prevents payout farming without killing momentum."
+    },
+    {
+     "controlId": "scheduled-trivia-enabled",
+     "value": true,
+     "rationale": "The hosted cadence is armed by default so picking a channel is the only setup step; it stays inert until then."
+    },
+    {
+     "controlId": "scheduled-trivia-channel-id",
+     "value": "",
+     "rationale": "No channel is presumed; the owner explicitly chooses where hosted rounds appear."
+    },
+    {
+     "controlId": "scheduled-trivia-interval-hours",
+     "value": 24,
+     "rationale": "One hosted round a day is a reliable community ritual without becoming noise."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "start-and-answer-trivia",
+     "actor": "Any guild member",
+     "action": "Run /trivia start and press answer buttons",
+     "defaultDecision": "allow",
+     "enforcement": "/trivia start and the answer buttons respond for every member; each member locks exactly one answer per round."
+    },
+    {
+     "id": "configure-trivia",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Edit trivia settings and custom question packs on the dashboard economy trivia page",
+     "defaultDecision": "allow",
+     "enforcement": "Dashboard session auth plus Supabase RLS restrict guild_config and economy_trivia_questions writes to authorized guild administrators."
+    },
+    {
+     "id": "edit-question-packs",
+     "actor": "Guild member without dashboard owner or admin access",
+     "action": "Add, edit, or remove custom trivia questions",
+     "defaultDecision": "deny",
+     "enforcement": "The dashboard trivia API authorizes economy_trivia_questions writes through session auth and RLS; members have no surface that alters the question pool."
+    }
+   ],
+   "messages": [
+    {
+     "id": "question-posted",
+     "trigger": "A round starts by command or by the scheduled cadence",
+     "surface": "Channel embed with four answer buttons",
+     "audience": "Everyone in the channel",
+     "defaultTemplate": "Trivia time! {question} You have {seconds} seconds — lock in your answer below.",
+     "variables": [
+      "question",
+      "seconds"
+     ]
+    },
+    {
+     "id": "answer-locked",
+     "trigger": "A member presses an answer button for the first time in a round",
+     "surface": "Ephemeral reply to the answering member",
+     "audience": "The answering member",
+     "defaultTemplate": "Answer locked in, {member-name}: {answer}. Fingers crossed!",
+     "variables": [
+      "member-name",
+      "answer"
+     ]
+    },
+    {
+     "id": "results-posted",
+     "trigger": "The answer window closes",
+     "surface": "The round embed edited into results",
+     "audience": "Everyone in the channel",
+     "defaultTemplate": "Correct answer: {correct-answer}. {winner-count} of {player-count} players got it — payouts are in your play-money wallets!",
+     "variables": [
+      "correct-answer",
+      "winner-count",
+      "player-count"
+     ]
+    },
+    {
+     "id": "round-already-active",
+     "trigger": "A member starts trivia while a round is open in the channel",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "One brain-buster at a time, {member-name} — this channel’s round is still open.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "trivia-unavailable",
+     "trigger": "The trivia backend is temporarily unreachable when a member starts a round",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The question vault is jammed, {member-name} — try again in a moment.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "payout-delayed",
+     "trigger": "A winner payout keeps failing after the round resolves",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: the trivia payout of {payout} play coins to {member-name} failed and is queued for operator retry; the results embed flagged it honestly.",
+     "variables": [
+      "payout",
+      "member-name"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "idle",
+    "values": [
+     {
+      "id": "idle",
+      "description": "Trivia enabled; no round is open in the channel, and both /trivia start and the scheduled cadence may open one."
+     },
+     {
+      "id": "round-open",
+      "description": "A question embed with answer buttons is live; each member may lock exactly one answer until the window closes."
+     },
+     {
+      "id": "resolving",
+      "description": "The window closed; streaks update and winner payouts apply exactly once before the results post."
+     },
+     {
+      "id": "payout-degraded",
+      "description": "A winner’s play-money payout failed; the results embed flags it honestly and the payout awaits operator retry."
+     },
+     {
+      "id": "disabled",
+      "description": "Trivia disabled by configuration; starts by command or cadence are refused with the disabled explanation."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "round-started",
+      "from": "idle",
+      "to": "round-open",
+      "trigger": "A member runs /trivia start or the scheduled cadence fires in the configured channel",
+      "expectedEffect": "Exactly one question posts with shuffled answers and the 20-second timer arms."
+     },
+     {
+      "id": "window-closed",
+      "from": "round-open",
+      "to": "resolving",
+      "trigger": "The 20-second answer window elapses",
+      "expectedEffect": "Buttons stop accepting answers; each participant holds at most one locked answer."
+     },
+     {
+      "id": "results-published",
+      "from": "resolving",
+      "to": "idle",
+      "trigger": "Streaks and payouts commit",
+      "expectedEffect": "Each winner is paid base times difficulty times streak bonus exactly once, streaks increment for winners and reset for losers, and the results embed replaces the question."
+     },
+     {
+      "id": "payout-failed",
+      "from": "resolving",
+      "to": "payout-degraded",
+      "trigger": "A winner’s payout RPC errors",
+      "expectedEffect": "The results embed lists the winner under a payout-failed notice instead of silently marking them paid; the payout queues for operator retry."
+     },
+     {
+      "id": "payout-recovered",
+      "from": "payout-degraded",
+      "to": "idle",
+      "trigger": "An operator retry pays the flagged winner",
+      "expectedEffect": "Exactly one payout lands and the degradation clears."
+     },
+     {
+      "id": "trivia-toggled-off",
+      "from": "idle",
+      "to": "disabled",
+      "trigger": "Owner turns trivia-enabled off on the dashboard",
+      "expectedEffect": "Command and scheduled starts refuse with the branded disabled explanation; streaks and history are preserved."
+     },
+     {
+      "id": "trivia-toggled-on",
+      "from": "disabled",
+      "to": "idle",
+      "trigger": "Owner turns trivia-enabled back on",
+      "expectedEffect": "Rounds may start again with prior streaks intact."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "winner-payout-failed",
+     "trigger": "economy_add_balance fails for a correct answerer at round end",
+     "expectedBehavior": "The results embed honestly lists the member under a payout-failed notice instead of showing them as paid, the payout queues for operator retry under one idempotency key, and the member’s streak increment is preserved.",
+     "resultingState": "payout-degraded",
+     "retry": "operator",
+     "messageId": "payout-delayed",
+     "auditEvent": "trivia.winner_payout_failed",
+     "ownerNotification": true
+    },
+    {
+     "id": "question-pack-load-failed",
+     "trigger": "Loading the guild’s custom question pack hits a transient database error",
+     "expectedBehavior": "The round still starts from the built-in question pool rather than failing; the custom pack loads again on the next round; no round is ever left half-posted.",
+     "resultingState": "round-open",
+     "retry": "automatic",
+     "messageId": "trivia-unavailable",
+     "auditEvent": "trivia.custom_pack_load_retried",
+     "ownerNotification": false
+    },
+    {
+     "id": "results-edit-failed",
+     "trigger": "Editing the question embed into results fails because the interaction expired",
+     "expectedBehavior": "Payouts and streaks remain fully committed; the results post as a fresh branded message in the channel instead of being lost; nothing is paid twice.",
+     "resultingState": "idle",
+     "retry": "never",
+     "messageId": "results-posted",
+     "auditEvent": "trivia.results_edit_fallback",
+     "ownerNotification": false
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "Trivia behavior contracted here is directly observed working in the live test guild: /trivia start posts a branded question with four buttons, answers lock ephemerally, results pay play coins scaled by difficulty and streak, and the scheduled cadence hosts rounds in the configured channel without any member invocation.",
+     "artifact": "evidence/game-economy-trivia/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_trivia_questions, economy_trivia_sessions, economy_wallets, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+     "artifact": "evidence/game-economy-trivia/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-trivia/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-trivia/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured embeds and messages for this domain match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-trivia/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over messages, grants, and balance mutations",
+     "expectedObservation": "Replaying recorded triggers for this domain against the live stack leaves end state unchanged: no duplicate locked answers, streak updates, or winner payouts.",
+     "artifact": "evidence/game-economy-trivia/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-trivia/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-trivia-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box, /trivia start posts a built-in question with four shuffled buttons and a 20-second window, a first-win winner is paid exactly 55 play coins (50 base times the 1.1 first-win streak bonus), and hard questions pay double.",
+     "expectedOutcome": "run-member-a answers correctly within the window and receives exactly 55 play coins with streak 1 recorded; run-member-b answers wrong, receives nothing, and has their streak reset to zero.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The question embed posts with four shuffled buttons, each answering member gets one ephemeral lock-in confirmation, and the results embed lists run-member-a as the winner with the wallet showing exactly 55 play coins credited."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All trivia rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each trivia action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing trivia surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate locked answers, streak updates, or winner payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test trivia rounds, custom question rows, streak keys, results embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-trivia-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Dashboard configuration takes live effect: base payout 200, streak bonus 50 percent, hard multiplier 3, and a custom question pack added on the dashboard trivia page.",
+     "expectedOutcome": "Without a bot restart, the next rounds draw the run-prefixed custom questions and a hard-question first win pays exactly 900 play coins (200 base times 3 hard times 1.5 streak bonus).",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save, a round serves the run-prefixed custom question, and the hard-difficulty results embed pays the winner exactly 900 play coins under the new math."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All trivia rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each trivia action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing trivia surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate locked answers, streak updates, or winner payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test trivia rounds, custom question rows, streak keys, results embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-trivia-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "The hosted cadence works and toggles independently: with a schedule channel configured, rounds post automatically on the interval, and disabling the scheduled piece leaves on-command trivia untouched.",
+     "expectedOutcome": "With the run channel and a shortened interval configured, the cadence posts a hosted round with no member invocation and it resolves and pays normally; after the owner disables the scheduled piece, no further hosted rounds appear while /trivia start still works.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A hosted round appears in the configured channel with no member invocation and resolves with normal payouts; after the scheduled piece is disabled, the channel receives no further hosted rounds while /trivia start still opens one."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All trivia rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each trivia action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing trivia surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate locked answers, streak updates, or winner payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test trivia rounds, custom question rows, streak keys, results embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-trivia-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid trivia configuration is rejected atomically: a negative base payout and a hard multiplier below one never persist.",
+     "expectedOutcome": "The dashboard trivia page surfaces a clear validation error, guild_config keeps its prior values byte-for-byte, and the next round pays under the previous valid math.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A round run immediately after the rejected save still pays winners under the previous valid payout math, proving no partial write reached the bot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All trivia rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the rejected trivia configuration attempt with the validation reason; no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing trivia surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate locked answers, streak updates, or winner payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test trivia rounds, custom question rows, streak keys, results embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-trivia-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "Trivia is protected from unauthorized actors: a non-admin session cannot change payouts or inject questions into the pool.",
+     "expectedOutcome": "run-member-b’s non-admin dashboard attempts to change trivia settings and add questions are refused, and the next round still draws from the prior pool with the prior payout math.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The next round after the refused attempts serves a question from the unmodified pool and pays under the unmodified math, and the non-admin dashboard save returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All trivia rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied trivia configuration attempt with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing trivia surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate locked answers, streak updates, or winner payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test trivia rounds, custom question rows, streak keys, results embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-trivia-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase or Valkey dependency is unreachable, trivia fails safe: no crash, friendly branded degradation, and no corrupted streaks or payouts.",
+     "expectedOutcome": "With the dependency blocked, /trivia start replies with the branded trivia-unavailable message and no round posts; after restoration a round runs end-to-end with streaks intact.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /trivia start replies with the branded trivia-unavailable template in the owner’s voice and no question embed posts; after restoration a full round resolves and pays with the pre-outage streak values honored."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All trivia rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each trivia action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed round start."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing trivia surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate locked answers, streak updates, or winner payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test trivia rounds, custom question rows, streak keys, results embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-trivia-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A winner payout that fails transiently converges safely: the results embed flags it honestly and the operator retry pays exactly once.",
+     "expectedOutcome": "With a fault injected on the payout, the results embed lists run-member-a under the payout-failed notice rather than as paid, and the operator retry credits exactly the computed payout once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The results embed honestly separates paid winners from the flagged payout, and after the operator retry the wallet shows exactly one credit of the computed amount."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All trivia rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each trivia action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing trivia surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The flagged payout and its operator retry resolve under one idempotency key to exactly one play-money credit; the streak increment is applied once."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test trivia rounds, custom question rows, streak keys, results embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-trivia-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replays never double-lock or double-pay: repeated button presses and re-delivered round events leave one locked answer, one payout, and one results embed.",
+     "expectedOutcome": "run-member-a’s repeated button presses lock exactly one answer, and replaying the recorded round events leaves the wallet, streak, and results embed byte-identical to the pre-replay state.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The second and later button presses return only the already-answered ephemeral notice, and the channel contains exactly one question embed and one results embed for the round."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All trivia rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each trivia action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing trivia surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Idempotency keys on the answer lock, streak update, and winner payout each show one applied effect; replayed deliveries are recorded as deduplicated no-ops."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test trivia rounds, custom question rows, streak keys, results embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-trivia-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "Trivia state survives a full stack restart: persisted streaks continue and an interrupted round never strands the channel or double-pays.",
+     "expectedOutcome": "After restarting bot and dashboard mid-round, the channel accepts a fresh round with no stuck round-already-active refusal, no post-restart double payout occurs for the interrupted round, and the winner’s next streak bonus continues from its persisted pre-restart value.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart /trivia start opens a fresh round without an already-active refusal, and the next win’s payout reflects the streak value persisted before the restart."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All trivia rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each trivia action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing trivia surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate locked answers, streak updates, or winner payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test trivia rounds, custom question rows, streak keys, results embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-trivia-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent trivia actions are safe: two simultaneous starts in one channel open exactly one round and simultaneous answers each count exactly once.",
+     "expectedOutcome": "Two simultaneous /trivia start invocations produce exactly one question embed and one already-active refusal, and simultaneous answers from several members each lock exactly once with every correct answerer paid exactly once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Exactly one question embed and one branded already-active refusal appear for the simultaneous starts, and the results embed counts each participant exactly once with one payout per winner."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All trivia rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each trivia action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing trivia surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate locked answers, streak updates, or winner payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test trivia rounds, custom question rows, streak keys, results embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-trivia-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "Trivia is strictly per-guild: streaks, custom question packs, and payouts in a second guild never touch the first guild’s state.",
+     "expectedOutcome": "run-member-a wins trivia rounds in test guild B; guild A’s streak value, wallet, and question pool are unchanged, and guild B’s rounds draw only guild B’s packs under guild B’s payout math.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A’s next round pays run-member-a under guild A’s unchanged streak value, and guild B’s round served only guild B’s question pack."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_trivia_questions or wallet rows and vice versa; service-role probes confirm each guild’s streak keys and payouts evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each trivia action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing trivia surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate locked answers, streak updates, or winner payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test trivia rounds, custom question rows, streak keys, results embeds, and wallet entries) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-trivia-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed trivia resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed custom questions, round embeds, results embeds, streak keys, and wallet entries are deleted; a final sweep finds zero run-prefixed trivia resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed trivia question or results embeds after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All trivia rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each trivia action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing trivia surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate locked answers, streak updates, or winner payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed trivia resource created by this domain’s scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

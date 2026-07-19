@@ -1,0 +1,795 @@
+{
+ "category": "game-economy",
+ "domains": [
+  {
+   "id": "game-economy-fishing",
+   "name": "Fishing & Collections",
+   "category": "game-economy",
+   "promise": "Members cast a play-money Fishing Rod with /fish cast to reel in weighted, rarity-tiered species from the guild catch table, auto-selling each catch for play-money coins while heavier catches and rarer bait pay more; every discovered species fills a per-member collection that pays a one-time completion bonus, and an atomic per-user cooldown paces the loop. Every rod, bait, catch value, junk sale, treasure haul, and collection bonus is play-money only inside the fake game economy — a commerce-granted item or a commerce-held role earns no fishing income, and no catch is ever sellable on the real paid store.",
+   "controls": [
+    {
+     "id": "fishing-enabled",
+     "description": "Master switch for fishing, backed by the economy_fishing_enabled guild_config key; when off, /fish subcommands explain the feature is disabled and no catch is recorded.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "fishing-cooldown-seconds",
+     "description": "Seconds a member must wait between successful casts, backed by economy_fishing_cooldown_seconds and enforced by an atomic Valkey SET NX claim keyed to guild and user.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 3600
+     }
+    },
+    {
+     "id": "fishing-junk-chance-pct",
+     "description": "Percent chance a cast pulls up junk (old boot, seaweed, tin can) instead of a fish, backed by economy_fishing_junk_chance_pct; junk plus treasure must not exceed 100.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 100
+     }
+    },
+    {
+     "id": "fishing-treasure-chance-pct",
+     "description": "Percent chance a cast surfaces a treasure chest (ancient coin, pearl, golden ring) paying bonus play coins, backed by economy_fishing_treasure_chance_pct; junk plus treasure must not exceed 100.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 100
+     }
+    },
+    {
+     "id": "fishing-collection-reward-enabled",
+     "description": "Whether completing the full per-member species collection pays a one-time play-money bonus; when off, collections still fill and display but the completion bonus is not paid.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "fishing-collection-reward-coins",
+     "description": "Play-money coin bonus paid exactly once when a member discovers every active species in the guild catch table.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000000
+     }
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "fishing-enabled",
+     "value": true,
+     "rationale": "Fishing is a flagship casual game-economy loop and ships on for the maximal out-of-box experience."
+    },
+    {
+     "controlId": "fishing-cooldown-seconds",
+     "value": 30,
+     "rationale": "A gentle 30-second pace keeps casting rewarding and grindy without letting a member farm coins in a tight loop."
+    },
+    {
+     "controlId": "fishing-junk-chance-pct",
+     "value": 15,
+     "rationale": "A modest 15 percent junk rate adds variety and quick early wins without souring the catch feel."
+    },
+    {
+     "controlId": "fishing-treasure-chance-pct",
+     "value": 5,
+     "rationale": "A rare 5 percent treasure chance gives an occasional exciting payout while keeping the sum well under 100."
+    },
+    {
+     "controlId": "fishing-collection-reward-enabled",
+     "value": true,
+     "rationale": "The completion bonus rewards long-term mastery and ships on; owners can switch the piece off independently."
+    },
+    {
+     "controlId": "fishing-collection-reward-coins",
+     "value": 5000,
+     "rationale": "A meaningful but recoverable play-coin bonus that honors the grind of discovering every species; fully owner-tunable."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "use-fishing-commands",
+     "actor": "Any guild member",
+     "action": "Run /fish cast, /fish sell, /fish collection, and /fish leaderboard",
+     "defaultDecision": "allow",
+     "enforcement": "Fishing slash commands respond for every member; cast, sell, and collection only ever read or mutate the invoking member's own catches, inventory, and wallet rows."
+    },
+    {
+     "id": "configure-fishing",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Edit fishing settings on the dashboard economy fishing page",
+     "defaultDecision": "allow",
+     "enforcement": "Dashboard session auth plus Supabase RLS restrict guild_config writes to authorized guild administrators."
+    },
+    {
+     "id": "fish-for-others",
+     "actor": "Any guild member",
+     "action": "Cast, sell, or claim a collection bonus on behalf of another member",
+     "defaultDecision": "deny",
+     "enforcement": "Every fishing handler resolves catches, cooldown keys, and wallet credits by the invoking member's own id; no code path awards a catch or credit to another member."
+    },
+    {
+     "id": "commerce-crossover",
+     "actor": "A member holding only a commerce-granted role or a commerce-purchased item",
+     "action": "Earn fishing play-coin income from that role or sell a fishing catch on the real paid store",
+     "defaultDecision": "deny",
+     "enforcement": "Fishing rewards flow solely through the play-money economy_add_balance ledger; commerce roles and commerce-granted items confer no catch, no wallet credit, and no real-store sell path."
+    }
+   ],
+   "messages": [
+    {
+     "id": "fish-caught",
+     "trigger": "A member's /fish cast lands a fish and auto-sells it for play coins",
+     "surface": "Channel embed replying to /fish cast",
+     "audience": "The casting member and the channel",
+     "defaultTemplate": "Nice cast — you landed a {species-name} weighing {weight} and sold it for {value} play coins!",
+     "variables": [
+      "species-name",
+      "weight",
+      "value"
+     ]
+    },
+    {
+     "id": "collection-completed",
+     "trigger": "A member discovers the final missing species and the collection is complete",
+     "surface": "Channel embed replying to /fish cast or /fish collection",
+     "audience": "The completing member and the channel",
+     "defaultTemplate": "Incredible, {member-name} — you've discovered every fish in the collection and earned a {reward} play-coin completion bonus!",
+     "variables": [
+      "member-name",
+      "reward"
+     ]
+    },
+    {
+     "id": "cooldown-active",
+     "trigger": "A member runs /fish cast while their per-user cooldown is still active",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "Easy there {member-name}, your line needs a rest — you can cast again {retry-time}.",
+     "variables": [
+      "member-name",
+      "retry-time"
+     ]
+    },
+    {
+     "id": "catch-payout-failed",
+     "trigger": "The play-money wallet credit fails after a catch was recorded",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "Your catch was logged, {member-name}, but the play-coin credit hiccuped — nothing was lost and it will be paid on retry.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "fishing-unavailable",
+     "trigger": "The fishing backend is temporarily unreachable when a member runs a fishing command",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The waters are choppy right now, {member-name} — give it a moment and cast again.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "payout-degraded",
+     "trigger": "A fishing play-money payout keeps failing",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: a {value}-coin fishing payout to {member-name} failed and is queued for operator retry; nothing was double-paid and everything is logged.",
+     "variables": [
+      "value",
+      "member-name"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "ready",
+    "values": [
+     {
+      "id": "ready",
+      "description": "Fishing is enabled and the member's per-user cooldown is clear; /fish cast will attempt a catch."
+     },
+     {
+      "id": "on-cooldown",
+      "description": "A recent successful cast holds the atomic Valkey cooldown claim; further casts are refused until it expires."
+     },
+     {
+      "id": "no-rod",
+      "description": "The member owns no Fishing Rod; /fish cast is refused with a prompt to buy one from the play-money /shop, and no cooldown or bait is consumed."
+     },
+     {
+      "id": "collection-complete",
+      "description": "The member has discovered every active species and, when enabled, the one-time collection completion bonus has been paid exactly once."
+     },
+     {
+      "id": "disabled",
+      "description": "Fishing disabled by configuration; /fish subcommands explain the feature is off and no catch is recorded."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "cast-catches",
+      "from": "ready",
+      "to": "on-cooldown",
+      "trigger": "A member with a Fishing Rod runs /fish cast",
+      "expectedEffect": "Exactly one fish, junk, or treasure catch resolves, at most one bait is atomically consumed, the wallet is credited exactly once, and the cooldown is claimed atomically via SET NX."
+     },
+     {
+      "id": "cast-without-rod",
+      "from": "ready",
+      "to": "no-rod",
+      "trigger": "A member without a Fishing Rod runs /fish cast",
+      "expectedEffect": "The cast is refused with the branded /shop prompt; no catch is recorded, no bait is consumed, and no cooldown is claimed."
+     },
+     {
+      "id": "rod-acquired",
+      "from": "no-rod",
+      "to": "ready",
+      "trigger": "The member buys a Fishing Rod from the play-money /shop",
+      "expectedEffect": "The next /fish cast passes the rod check and proceeds to a catch."
+     },
+     {
+      "id": "cooldown-clears",
+      "from": "on-cooldown",
+      "to": "ready",
+      "trigger": "The per-user cooldown TTL elapses",
+      "expectedEffect": "The Valkey cooldown key expires and the member may cast again with no leftover state."
+     },
+     {
+      "id": "collection-finished",
+      "from": "on-cooldown",
+      "to": "collection-complete",
+      "trigger": "The catch that discovers the final missing species completes the collection while fishing-collection-reward-enabled is on",
+      "expectedEffect": "The one-time completion bonus of fishing-collection-reward-coins is credited exactly once under an idempotency key and the completion embed posts."
+     },
+     {
+      "id": "fishing-toggled-off",
+      "from": "ready",
+      "to": "disabled",
+      "trigger": "Owner turns fishing-enabled off on the dashboard",
+      "expectedEffect": "/fish subcommands reply with the disabled explanation; catch history, collections, and wallets are preserved untouched."
+     },
+     {
+      "id": "fishing-toggled-on",
+      "from": "disabled",
+      "to": "ready",
+      "trigger": "Owner turns fishing-enabled back on",
+      "expectedEffect": "Casting resumes with all prior catch history and collection progress intact."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "catch-payout-failed",
+     "trigger": "economy_add_balance fails after the economy_fish_catches row was inserted",
+     "expectedBehavior": "The catch record flags the credit as unpaid, the result embed plainly states the wallet credit failed instead of pretending success, the payout is queued for operator retry under one idempotency key, and no catch is ever double-credited.",
+     "resultingState": "on-cooldown",
+     "retry": "operator",
+     "messageId": "catch-payout-failed",
+     "auditEvent": "fishing.catch_payout_failed",
+     "ownerNotification": true
+    },
+    {
+     "id": "collection-reward-failed",
+     "trigger": "The play-money economy_add_balance credit for the collection completion bonus fails after the final species is discovered",
+     "expectedBehavior": "The completion is not marked paid, the bonus stays owed and is retried under one idempotency key so the member is paid exactly once, and the member is never double-rewarded.",
+     "resultingState": "on-cooldown",
+     "retry": "operator",
+     "messageId": "payout-degraded",
+     "auditEvent": "fishing.collection_reward_retried",
+     "ownerNotification": true
+    },
+    {
+     "id": "fishing-backend-unavailable",
+     "trigger": "A fishing command hits a transient Supabase or Valkey error",
+     "expectedBehavior": "The command replies with the branded unavailable message without crashing the bot, no wallet moves and no bait is consumed, no cooldown is wrongly persisted, and a clean retry after recovery casts and credits exactly once.",
+     "resultingState": "ready",
+     "retry": "automatic",
+     "messageId": "fishing-unavailable",
+     "auditEvent": "fishing.backend_unavailable_retried",
+     "ownerNotification": false
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "Fishing behavior contracted here is directly observed working in the live test guild: /fish cast lands weighted rarity-tiered catches that auto-sell for play coins, the per-user cooldown paces casts, /fish collection tracks discovered species and pays the completion bonus, and /fish leaderboard ranks the heaviest catches.",
+     "artifact": "evidence/game-economy-fishing/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_fish_species, economy_fish_catches, economy_inventory, economy_wallets, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+     "artifact": "evidence/game-economy-fishing/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-fishing/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-fishing/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured embeds and messages for this domain match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-fishing/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over catches, credits, and collection-reward payouts",
+     "expectedObservation": "Replaying recorded triggers for this domain against the live stack leaves end state unchanged: no duplicate catch rows, play-money credits, or collection-reward payouts.",
+     "artifact": "evidence/game-economy-fishing/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-fishing/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-fishing-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box, /fish cast with a Fishing Rod lands a weighted rarity-tiered catch that auto-sells for play coins, a 30-second cooldown paces casts, junk resolves at 15 percent and treasure at 5 percent, and completing the collection pays a 5000-coin bonus.",
+     "expectedOutcome": "run-member-a casts with a rod, the catch is recorded in economy_fish_catches and the wallet is credited exactly once, an immediate second /fish cast is refused by the 30-second cooldown, and /fish collection shows the newly discovered species.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/fish cast posts a branded catch embed, the wallet reflects exactly the one auto-sell credit, a second immediate cast returns the branded cooldown refusal, and /fish collection lists the discovered species with its rarity."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All fishing rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each fishing action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing fishing surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, catch rows, or collection-reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (seeded fish species, catch rows, wallet entries, result embeds, and cooldown keys) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-fishing-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Dashboard configuration takes live effect: the owner sets fishing-cooldown-seconds to 5, fishing-junk-chance-pct to 40, and fishing-treasure-chance-pct to 10.",
+     "expectedOutcome": "Without a bot restart, the next cast honors the 5-second cooldown and the catch-type roll reflects the raised junk and treasure odds, confirming the cache was invalidated and the new guild_config applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save with no restart, a cast followed by a cast 5 seconds later both succeed under the shortened cooldown, and repeated casts surface junk and treasure outcomes consistent with the raised percentages."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All fishing rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each fishing action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing fishing surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, catch rows, or collection-reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (seeded fish species, catch rows, wallet entries, result embeds, and cooldown keys) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-fishing-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "The owner can switch pieces off independently: the collection completion bonus is disabled and treasure chance set to 0 while core casting, auto-sell, and collection tracking keep working.",
+     "expectedOutcome": "Completing the collection pays no bonus and no treasure ever resolves, yet /fish cast still lands fish and junk that auto-sell and /fish collection still fills as species are discovered.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Discovering the final species posts the completion embed with no bonus credited, casts never yield treasure, and normal fish and junk catches still auto-sell and appear in /fish collection."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All fishing rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each fishing action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing fishing surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, catch rows, or collection-reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (seeded fish species, catch rows, wallet entries, result embeds, and cooldown keys) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-fishing-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid fishing configuration is rejected atomically: a negative cooldown and a junk-plus-treasure sum above 100 never persist.",
+     "expectedOutcome": "The dashboard fishing page surfaces a clear validation error, guild_config keeps its prior values byte-for-byte, and live bot behavior is unchanged on the very next /fish cast.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A /fish cast run immediately after the rejected save still honors the previous valid cooldown and catch-type odds, proving no partial write reached the bot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All fishing rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the rejected fishing configuration attempt with the validation reason; no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing fishing surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, catch rows, or collection-reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (seeded fish species, catch rows, wallet entries, result embeds, and cooldown keys) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-fishing-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "Fishing is protected from unauthorized actors: a member cannot cast or claim on behalf of another, and a non-admin dashboard session cannot save fishing settings.",
+     "expectedOutcome": "run-member-b's casts only ever credit run-member-b's own wallet and collection, run-member-a's catch history and wallet are byte-identical afterward, and the non-admin dashboard save is refused.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-b's /fish cast, sell, and collection only affect run-member-b's own rows, run-member-a's /fish collection is identical before and after, and the non-admin dashboard save returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All fishing rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied fishing configuration attempt with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing fishing surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, catch rows, or collection-reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (seeded fish species, catch rows, wallet entries, result embeds, and cooldown keys) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-fishing-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase or Valkey dependency is unreachable, fishing fails safe: no crash, friendly branded degradation, and no play-coin loss.",
+     "expectedOutcome": "With backend access blocked, /fish cast replies with the branded fishing-unavailable message and no coins move and no cooldown is wrongly persisted; after restoring the connection a fresh cast credits exactly once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /fish cast and /fish collection reply with the branded fishing-unavailable template in the owner's voice and no wallet mutation occurs; after restoration a fresh cast credits exactly once."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All fishing rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each fishing action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed fishing command."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing fishing surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, catch rows, or collection-reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (seeded fish species, catch rows, wallet entries, result embeds, and cooldown keys) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-fishing-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A catch whose wallet credit fails converges safely: the credit is retried exactly once and the member is never double-paid.",
+     "expectedOutcome": "With a fault injected on economy_add_balance after the economy_fish_catches insert, run-member-a sees the branded credit-failed notice and the catch is flagged unpaid; the operator retry then credits the catch exactly once with no duplicate.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the injected credit fault, run-member-a sees the branded catch-payout-failed notice rather than a false success; the operator retry credits the exact catch value once and the wallet reflects a single credit."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All fishing rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each fishing action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives exactly one reasoned catch-payout-failed alert for the injected fault with a remediation hint."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing fishing surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The failed credit and its retry apply under one idempotency key, so the play-money ledger shows exactly one credit for the catch — never zero-paid-but-recorded and never a double credit."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (seeded fish species, catch rows, wallet entries, result embeds, and cooldown keys) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-fishing-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replays never double-catch or double-pay: re-delivering the /fish cast interaction leaves exactly one catch row and one wallet credit.",
+     "expectedOutcome": "After replaying the recorded /fish cast interaction, run-member-a still has exactly one new catch row and the wallet shows exactly one auto-sell credit, byte-identical to the pre-replay state.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The channel shows exactly one catch embed despite the replays, and /fish collection and the wallet totals are unchanged from the pre-replay snapshot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All fishing rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each fishing action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing fishing surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Idempotency keys on the catch insert and the auto-sell credit each show one applied effect; replayed deliveries are recorded as deduplicated no-ops."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (seeded fish species, catch rows, wallet entries, result embeds, and cooldown keys) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-fishing-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "Fishing state survives a full stack restart: catch history, collection progress, and the active cooldown all persist without a double-catch.",
+     "expectedOutcome": "After restarting bot and dashboard, /fish collection matches the pre-restart snapshot exactly, an in-flight cooldown still blocks an immediate cast, and no catch is duplicated across the restart.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart /fish collection matches the pre-restart snapshot exactly and a cast attempted while the prior cooldown is still live is refused, proving no double-catch and no lost cooldown."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All fishing rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each fishing action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing fishing surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, catch rows, or collection-reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (seeded fish species, catch rows, wallet entries, result embeds, and cooldown keys) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-fishing-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent casts are safe: two simultaneous /fish cast calls honor the atomic SET NX cooldown and the atomic bait decrement, yielding exactly one catch from one bait.",
+     "expectedOutcome": "Two simultaneous /fish cast invocations from run-member-a yield exactly one recorded catch and one cooldown refusal, consuming at most one bait, and a race to discover the final species pays the collection bonus exactly once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Exactly one catch embed and one cooldown refusal appear for the simultaneous casts, the inventory shows at most one bait consumed, and a simultaneous final-species discovery posts a single completion embed with one bonus credit."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All fishing rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each fishing action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing fishing surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, catch rows, or collection-reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (seeded fish species, catch rows, wallet entries, result embeds, and cooldown keys) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-fishing-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "Fishing is strictly per-guild: casting and completing a collection in a second guild never touches the first guild's catches, wallet, or collection progress.",
+     "expectedOutcome": "run-member-a fishes and fills a collection in test guild B; guild A's catch rows, wallet, and /fish collection are unchanged, and guild B's catches reflect only guild B's configured species table and costs.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A's /fish collection is identical before and after the guild B activity, and guild B's casts credit guild B's wallet against guild B's own species table."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_fish_catches rows and vice versa; service-role probes confirm each guild's catch and wallet rows evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each fishing action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing fishing surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, catch rows, or collection-reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (seeded fish species, catch rows, wallet entries, result embeds, and cooldown keys) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-fishing-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed fishing resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed seeded species, catch rows, wallet entries, result embeds, and cooldown keys are deleted; a final sweep finds zero run-prefixed fishing resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed catch embeds, collection displays, or leaderboard entries after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All fishing rows touched by this scenario carry the test guild id; a service-role probe sees the expected rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each fishing action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing fishing surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, catch rows, or collection-reward payouts; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed fishing resource created by this domain's scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
