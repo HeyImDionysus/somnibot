@@ -98,6 +98,15 @@ export interface BootstrapLiveOptions {
   /** Seeded currency display fields (asserted in the reply embed). */
   currencyEmoji?: string;
   currencyName?: string;
+  /**
+   * Extra `guild_config` columns merged into (and overriding) the seed this
+   * runner writes before running the REAL `initGuildFeatures`. The bidirectional
+   * validator (PR5) uses this to flip EVERY command-gating feature flag ON so it
+   * can capture the full exposed slash set. Values here win over the runner's
+   * own defaults (including the gateway-less `music/giveaways/... = false` seeds),
+   * so a caller can deliberately opt into a feature the default keeps off.
+   */
+  guildConfigOverrides?: Record<string, unknown>;
 }
 
 /** The seeded economy config, echoed back so tests assert against known values. */
@@ -105,6 +114,21 @@ export interface SeededEconomy {
   readonly startingBalance: number;
   readonly currencyEmoji: string;
   readonly currencyName: string;
+}
+
+/**
+ * A single application-command JSON body as returned by the REAL
+ * `initGuildFeatures` (the authoritative EXPOSED set the caller would register
+ * to Discord). Only the two fields the bidirectional validator reads are
+ * modeled: the top-level command `name` (what the dispatcher matches — for a
+ * subcommand-group command this is the parent name, its subcommands living in
+ * nested `options`) and the `type` discriminator (ChatInput slash = 1 or
+ * undefined; User/Message context menus = 2/3). The real bodies carry many more
+ * fields; this is a structural subset the runtime objects satisfy.
+ */
+export interface ExposedCommand {
+  readonly name: string;
+  readonly type?: number;
 }
 
 export interface LiveClientHandle {
@@ -118,6 +142,15 @@ export interface LiveClientHandle {
   readonly economyEnabled: boolean;
   /** The economy config this boot seeded into `guild_config`. */
   readonly economy: SeededEconomy;
+  /**
+   * The command bodies the REAL `initGuildFeatures` returned for this guild —
+   * the authoritative EXPOSED set (exactly what index.ts would bulk-PUT to
+   * Discord, minus the registration step this harness omits). Captured straight
+   * from the production function's return value, so a drift between what the bot
+   * registers and what its dispatcher handles surfaces here. Empty only if init
+   * pushed nothing (which never happens: several commands are unconditional).
+   */
+  readonly commands: readonly ExposedCommand[];
   /** Dispose all resources: real per-guild teardown, router timers, Realtime
    *  channel, discord.js client, Valkey socket. */
   cleanup(): Promise<void>;
@@ -262,11 +295,14 @@ export async function bootstrapLiveClient(
         economy_starting_balance: economy.startingBalance,
         currency_emoji: economy.currencyEmoji,
         currency_name: economy.currencyName,
-        // Keep the gateway-less harness to the economy path only.
+        // Keep the gateway-less harness to the economy path only — UNLESS a
+        // caller (e.g. the bidirectional validator) opts back in via
+        // guildConfigOverrides, which is spread last and therefore wins.
         music_enabled: false,
         scheduled_messages_enabled: false,
         giveaways_enabled: false,
         sync_enabled: false,
+        ...(options.guildConfigOverrides ?? {}),
       },
       { onConflict: 'guild_id' },
     );
@@ -284,13 +320,18 @@ export async function bootstrapLiveClient(
   //    which needs a gateway). initGuildFeatures reads guild_config, honours the
   //    economy_enabled gate, and — when enabled — constructs + registers the
   //    EconomyManager and stores it under `ctx.setManager('economy', …)`.
+  // Capture the commands the REAL initGuildFeatures returns (the exposed set).
+  // The init callback normally discards the return value the way index.ts hands
+  // it to registerGuildCommands; we keep it so the bidirectional validator can
+  // compare it against the dispatch manifest without re-implementing anything.
+  let capturedCommands: readonly ExposedCommand[] = [];
   const router = new GuildRouter(
     client,
     client.supabase,
     client.valkey,
     client.eventBus,
     async (ctx: GuildContext) => {
-      await initGuildFeatures(ctx, client);
+      capturedCommands = (await initGuildFeatures(ctx, client)) as readonly ExposedCommand[];
     },
   );
   client.router = router;
@@ -314,6 +355,7 @@ export async function bootstrapLiveClient(
     supabase: client.supabase,
     economyEnabled,
     economy,
+    commands: capturedCommands,
     async cleanup(): Promise<void> {
       if (cleaned) return;
       cleaned = true;

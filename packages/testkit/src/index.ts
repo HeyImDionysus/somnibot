@@ -68,4 +68,5 @@ export {
   type BootstrapLiveOptions,
   type LiveClientHandle,
   type SeededEconomy,
+  type ExposedCommand,
 } from './live-runner.js';
