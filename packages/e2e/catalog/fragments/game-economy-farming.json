@@ -1,0 +1,785 @@
+{
+ "category": "game-economy",
+ "domains": [
+  {
+   "id": "game-economy-farming",
+   "name": "Persistent Farm Plots",
+   "category": "game-economy",
+   "promise": "Members grow crops on a persistent, per-guild farm grid: /farm plant seeds an empty plot, /farm water starts its growth timer, fertilizer cuts that timer, and /farm harvest sells matured crops for play-money coins while returning seeds — with crops spoiling if left past their harvest window when wilt is enabled. Every plot's crop, growth timer, fertilizer flag, and spoilage state survives a full stack restart. Every seed, crop, coin, and fertilizer here is play-money game inventory inside the fake economy: nothing is bought with real money, farmed goods are never real-money market-sellable, and commerce-granted roles earn no farm income.",
+   "controls": [
+    {
+     "id": "economy-farming-enabled",
+     "description": "Master switch for farming (guild_config.economy_farming_enabled); when off, growth and harvest stop resolving and /farm commands explain the feature is disabled.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "economy-farm-grid-size",
+     "description": "Number of farm plots per member (guild_config.economy_farm_grid_size); the bot renders a square-ceiling grid and refuses new plants once every plot is occupied.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 100
+     }
+    },
+    {
+     "id": "economy-farming-wilt-enabled",
+     "description": "Whether unharvested crops spoil (guild_config.economy_farming_wilt_enabled); when on, a crop left past its harvest window wilts to nothing and the plot becomes reclaimable.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "economy-fertilizer-time-reduction-pct",
+     "description": "Percentage the grow timer is cut when a plot is fertilized (guild_config.economy_fertilizer_time_reduction_pct); applied once per fertilized plot.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 100
+     }
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "economy-farming-enabled",
+     "value": true,
+     "rationale": "Farming is a flagship idle game-economy loop and ships on for the maximal out-of-box experience; owners can switch it off at any time."
+    },
+    {
+     "controlId": "economy-farm-grid-size",
+     "value": 9,
+     "rationale": "A nine-plot (3x3) grid gives quick early wins with room to grow into a long-term farm without overwhelming casual members."
+    },
+    {
+     "controlId": "economy-farming-wilt-enabled",
+     "value": true,
+     "rationale": "Real-but-recoverable stakes: unharvested crops can spoil so harvest windows carry weight, but a wilted plot is simply reclaimable — never a play-coin loss."
+    },
+    {
+     "controlId": "economy-fertilizer-time-reduction-pct",
+     "value": 50,
+     "rationale": "Fertilizer halving grow time is a satisfying, deep-config lever owners can tune anywhere from 0 to 100 percent."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "use-farm-commands",
+     "actor": "Any guild member",
+     "action": "Run /farm view, plant, water, harvest, and fertilize",
+     "defaultDecision": "allow",
+     "enforcement": "Farm slash commands respond for every member; each handler resolves plots by the invoking member's own guild and user id, so a command only ever mutates that member's economy_farm_plots rows."
+    },
+    {
+     "id": "configure-farming",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Edit farming settings on the dashboard economy farming page",
+     "defaultDecision": "allow",
+     "enforcement": "Dashboard session auth plus Supabase RLS restrict guild_config writes to authorized guild administrators."
+    },
+    {
+     "id": "farm-others-plot",
+     "actor": "Any guild member",
+     "action": "Plant, water, harvest, or fertilize another member's farm plots",
+     "defaultDecision": "deny",
+     "enforcement": "Every /farm handler keys plot lookups to the invoking member's guild and user id; no code path mutates another member's economy_farm_plots row."
+    }
+   ],
+   "messages": [
+    {
+     "id": "crop-planted",
+     "trigger": "A member plants a crop on an empty plot with /farm plant",
+     "surface": "Channel embed replying to /farm plant",
+     "audience": "The planting member and the channel",
+     "defaultTemplate": "Planted {crop-name} in plot {plot-number}, {member-name} — water it with /farm water and it'll be ready in about {grow-time}.",
+     "variables": [
+      "crop-name",
+      "plot-number",
+      "member-name",
+      "grow-time"
+     ]
+    },
+    {
+     "id": "harvest-complete",
+     "trigger": "A member harvests one or more matured crops with /farm harvest",
+     "surface": "Channel embed replying to /farm harvest",
+     "audience": "The harvesting member and the channel",
+     "defaultTemplate": "Great harvest, {member-name}! You sold {crop-count} crop(s) for {coin-total} play coins.",
+     "variables": [
+      "member-name",
+      "crop-count",
+      "coin-total"
+     ]
+    },
+    {
+     "id": "crop-spoiled",
+     "trigger": "A crop wilts past its harvest window while wilt is enabled",
+     "surface": "Branded note atop the member's next /farm view",
+     "audience": "The plot-owning member",
+     "defaultTemplate": "Your {crop-name} in plot {plot-number} wilted before harvest, {member-name} — the plot is free to replant.",
+     "variables": [
+      "crop-name",
+      "plot-number",
+      "member-name"
+     ]
+    },
+    {
+     "id": "harvest-payout-failed",
+     "trigger": "The play-money payout fails after /farm harvest marked ready plots harvested",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "That payout hiccuped, {member-name} — your crops are restored and nothing was lost, so try /farm harvest again in a moment.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "seed-return-warning",
+     "trigger": "Returning harvested seeds to a member's bag fails while the coin payout still succeeded",
+     "surface": "Warning line on the /farm harvest embed",
+     "audience": "The invoking member",
+     "defaultTemplate": "Heads up {member-name}: {seed-count} {crop-name} seed(s) did not make it back to your bag, though your coins landed fine — please contact an admin.",
+     "variables": [
+      "member-name",
+      "seed-count",
+      "crop-name"
+     ]
+    },
+    {
+     "id": "farming-unavailable",
+     "trigger": "The farming backend is temporarily unreachable when a member runs a farm command",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The fields are resting, {member-name} — give it a moment and try /farm again.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "harvest-degraded-alert",
+     "trigger": "A farm harvest payout keeps failing or the farming backend stays degraded",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: farm harvest payouts to {member-name} keep failing and are queued for operator retry; nothing was double-paid and everything is logged.",
+     "variables": [
+      "member-name"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "fallow",
+    "values": [
+     {
+      "id": "fallow",
+      "description": "The member has at least one empty plot; /farm plant begins a crop on the lowest empty plot index."
+     },
+     {
+      "id": "seeded",
+      "description": "A crop is planted but unwatered; its growth timer is paused until /farm water runs."
+     },
+     {
+      "id": "growing",
+      "description": "The crop is watered and maturing against its grow timer, reduced by the fertilizer percentage when the plot is fertilized."
+     },
+     {
+      "id": "ready",
+      "description": "The crop matured and sits within its harvest window; /farm harvest pays the play-money sell price and returns seeds."
+     },
+     {
+      "id": "spoiled",
+      "description": "With wilt enabled, the harvest window elapsed and the crop wilted to nothing; the plot pays out no coins and is reclaimable by the next plant."
+     },
+     {
+      "id": "disabled",
+      "description": "Farming disabled by configuration; no growth or harvest resolves and /farm commands explain the feature is off, while plot rows are preserved untouched."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "plant-crop",
+      "from": "fallow",
+      "to": "seeded",
+      "trigger": "Member runs /farm plant with a valid crop and an empty plot available",
+      "expectedEffect": "Exactly one economy_farm_plots row is upserted at the lowest empty plot index with planted_at set and watered_at null; the branded planted embed posts."
+     },
+     {
+      "id": "water-crop",
+      "from": "seeded",
+      "to": "growing",
+      "trigger": "Member runs /farm water",
+      "expectedEffect": "watered_at is stamped on every unwatered plot and the grow timer begins counting; growth does not advance while the crop is unwatered."
+     },
+     {
+      "id": "crop-matures",
+      "from": "growing",
+      "to": "ready",
+      "trigger": "The grow timer elapses, shortened by the fertilizer reduction when the plot is fertilized",
+      "expectedEffect": "The plot reports ready and its harvest window opens; no coins move until the member harvests."
+     },
+     {
+      "id": "harvest-crop",
+      "from": "ready",
+      "to": "fallow",
+      "trigger": "Member runs /farm harvest",
+      "expectedEffect": "The crop is credited to the wallet once via economy_add_balance, seeds return to inventory, one economy_transactions farm_harvest row is written, and the plot frees for replanting."
+     },
+     {
+      "id": "crop-spoils",
+      "from": "ready",
+      "to": "spoiled",
+      "trigger": "The harvest window (wilt_seconds) elapses with economy_farming_wilt_enabled on",
+      "expectedEffect": "The crop wilts to nothing with no payout and the plot becomes reclaimable; the member sees the spoiled note on their next /farm view."
+     },
+     {
+      "id": "reclaim-plot",
+      "from": "spoiled",
+      "to": "seeded",
+      "trigger": "Member runs /farm plant, reusing the wilted plot",
+      "expectedEffect": "The wilted plot is overwritten with a fresh unwatered crop; no phantom crop or double plot row remains."
+     },
+     {
+      "id": "farming-toggled-off",
+      "from": "growing",
+      "to": "disabled",
+      "trigger": "Owner turns economy_farming_enabled off on the dashboard",
+      "expectedEffect": "Growth and harvest stop resolving and /farm commands reply with the disabled explanation; plot rows and their timestamps are preserved untouched."
+     },
+     {
+      "id": "farming-toggled-on",
+      "from": "disabled",
+      "to": "growing",
+      "trigger": "Owner turns economy_farming_enabled back on",
+      "expectedEffect": "Timers resume from the persisted planted_at and watered_at with all prior plot state intact; no crop matures twice for the paused span."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "harvest-payout-reverted",
+     "trigger": "economy_add_balance fails after /farm harvest marked the ready plots harvested",
+     "expectedBehavior": "The harvested flags are reverted so the crops return to ready, the member is told nothing was lost, and a retry credits the sell total exactly once — never consumed-but-unpaid and never double-paid.",
+     "resultingState": "ready",
+     "retry": "operator",
+     "messageId": "harvest-payout-failed",
+     "auditEvent": "farming.harvest_payout_reverted",
+     "ownerNotification": true
+    },
+    {
+     "id": "seed-return-failed",
+     "trigger": "economy_upsert_inventory fails while returning harvested seeds to a member's bag",
+     "expectedBehavior": "The coin payout still lands and the harvest completes; the member is warned exactly which seeds failed to return and asked to contact an admin; no coins are lost and no plot is harvested twice.",
+     "resultingState": "fallow",
+     "retry": "operator",
+     "messageId": "seed-return-warning",
+     "auditEvent": "farming.seed_return_failed",
+     "ownerNotification": false
+    },
+    {
+     "id": "dependency-unreachable",
+     "trigger": "The farming backend (Supabase) is temporarily unreachable during a /farm command",
+     "expectedBehavior": "The command fails safe with no crash: a branded farming-unavailable reply, no plot mutation, and no play-coins moved; once the dependency recovers a fresh /farm harvest resolves exactly once.",
+     "resultingState": "growing",
+     "retry": "automatic",
+     "messageId": "farming-unavailable",
+     "auditEvent": "farming.dependency_degraded",
+     "ownerNotification": true
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "Farming behavior contracted here is directly observed working in the live test guild: /farm plant seeds a plot, /farm water starts the timer, fertilizer cuts grow time, /farm harvest pays the crop's play-money sell price and returns seeds, and an unharvested crop spoils when wilt is enabled.",
+     "artifact": "evidence/game-economy-farming/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_farm_plots, economy_crops, economy_wallets, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+     "artifact": "evidence/game-economy-farming/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-farming/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-farming/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured farm embeds and messages for this domain match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-farming/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over messages, credits, and plot mutations",
+     "expectedObservation": "Replaying recorded triggers for this domain against the live stack leaves end state unchanged: no duplicate play-money credits, plot mutations, or seed returns.",
+     "artifact": "evidence/game-economy-farming/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-farming/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-farming-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box farming is on with a nine-plot grid, wilt enabled, and fertilizer cutting grow time by 50 percent; /farm plant seeds the default crop catalog on first use, /farm water starts the timer, and /farm harvest pays the crop's play-money sell price and returns seeds.",
+     "expectedOutcome": "run-member-a plants a Potato in the first empty plot, waters it, and after an accelerated growth window /farm harvest credits exactly 30 play coins to the wallet, returns the seed to inventory, and frees the plot — with /farm view reflecting each state.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/farm view shows the plot move from planted to growing to ready to empty, /farm water starts growth, and /farm harvest credits exactly the Potato's 30-coin play-money sell price with the seed returned to inventory; the wallet reflects the single credit and no commerce surface is touched."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All farm rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_farm_plots, economy_crops, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each farming action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing farm surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, plot mutations, or seed returns; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test plot rows, seeded crop catalog rows, wallet entries, harvest transactions, and farm embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-farming-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Dashboard configuration takes live effect: the owner shrinks the grid to 4 plots and raises the fertilizer reduction to 80 percent.",
+     "expectedOutcome": "Without a bot restart, the next /farm view renders a four-plot grid and a freshly fertilized crop matures after only 20 percent of its base grow time.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save with no restart, /farm view renders a four-plot grid and a freshly fertilized crop matures after only 20 percent of its base grow time, proving the new grid size and fertilizer reduction took effect live."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All farm rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_farm_plots, economy_crops, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each farming action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing farm surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, plot mutations, or seed returns; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test plot rows, seeded crop catalog rows, wallet entries, harvest transactions, and farm embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-farming-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "The owner can switch pieces off independently: wilt is disabled so crops never spoil while planting, watering, and harvest keep working.",
+     "expectedOutcome": "With economy_farming_wilt_enabled off, a crop left long past its harvest window still shows ready and harvests for full value, and /farm plant, water, and harvest all keep working normally.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "With wilt disabled, a crop left long past its harvest window still shows ready and harvests for its full play-money value, while /farm plant, water, and harvest continue to work normally."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All farm rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_farm_plots, economy_crops, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each farming action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing farm surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, plot mutations, or seed returns; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test plot rows, seeded crop catalog rows, wallet entries, harvest transactions, and farm embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-farming-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid farming configuration is rejected atomically: a zero grid size and a negative fertilizer reduction never persist.",
+     "expectedOutcome": "The dashboard farming page surfaces a clear validation error, guild_config keeps its prior values byte-for-byte, and live bot behavior is unchanged on the very next /farm command.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A /farm view run immediately after the rejected save still renders the previous valid grid size and fertilizer reduction, proving no partial write reached the bot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All farm rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_farm_plots, economy_crops, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the rejected farming configuration attempt with the validation reason; no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing farm surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, plot mutations, or seed returns; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test plot rows, seeded crop catalog rows, wallet entries, harvest transactions, and farm embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-farming-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "Farms are protected from unauthorized actors: a member cannot mutate another member's plots and a non-admin dashboard session cannot save farming settings.",
+     "expectedOutcome": "run-member-b's farm commands only ever touch run-member-b's own plots, run-member-a's plot rows are byte-identical afterward, and the non-admin dashboard save is refused.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-b's /farm plant, water, harvest, and fertilize only affect run-member-b's own plots, run-member-a's /farm view is identical before and after, and the non-admin dashboard save returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All farm rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_farm_plots, economy_crops, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied farming configuration attempt with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing farm surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, plot mutations, or seed returns; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test plot rows, seeded crop catalog rows, wallet entries, harvest transactions, and farm embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-farming-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase dependency is unreachable, farming fails safe: no crash, friendly branded degradation, and no play-coin loss.",
+     "expectedOutcome": "With database access blocked, /farm commands reply with the branded farming-unavailable message and no coins move; after restoring the connection a fresh /farm harvest credits exactly once and applies.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /farm view and /farm harvest reply with the branded farming-unavailable template in the owner's voice and no wallet mutation occurs; after restoration a fresh /farm harvest credits exactly once."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All farm rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_farm_plots, economy_crops, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each farming action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed farm command."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing farm surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, plot mutations, or seed returns; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test plot rows, seeded crop catalog rows, wallet entries, harvest transactions, and farm embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-farming-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A harvest whose play-money payout fails converges safely: the crops are restored to ready and a clean retry harvests them exactly once for one credit.",
+     "expectedOutcome": "With a fault injected on the economy_add_balance harvest payout, run-member-a's plots are restored to ready with no coins created and no crop lost; the retried /farm harvest then credits the sell total once and frees the plots.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the injected payout fault, run-member-a sees the branded restore message and /farm view shows the crops still ready; the clean retry harvests them for exactly one wallet credit."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All farm rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_farm_plots, economy_crops, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each farming action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing farm surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The reverted harvest and the subsequent successful harvest each apply under their own idempotency key, so the play-money ledger shows no credit for the failed attempt and exactly one credit for the retry — never a double credit."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test plot rows, seeded crop catalog rows, wallet entries, harvest transactions, and farm embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-farming-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replays never double-plant or double-pay: re-delivering the plant and harvest interactions leaves one crop per plot and exactly one harvest credit.",
+     "expectedOutcome": "After replaying the recorded plant and harvest interactions, run-member-a's farm holds exactly one crop per plot and the wallet shows exactly one harvest credit, byte-identical to the pre-replay state.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The channel shows exactly one planted embed and one harvest embed despite the replays, and /farm view and the wallet totals are unchanged from the pre-replay snapshot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All farm rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_farm_plots, economy_crops, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each farming action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing farm surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Idempotency keys on the plot upsert and the harvest payout each show one applied effect; replayed deliveries are recorded as deduplicated no-ops."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test plot rows, seeded crop catalog rows, wallet entries, harvest transactions, and farm embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-farming-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "Farm state survives a full stack restart: every plot's crop, planted and watered timestamps, fertilizer flag, and remaining grow time persist so no crop matures twice or loses progress.",
+     "expectedOutcome": "After restarting bot and dashboard, /farm view matches the pre-restart snapshot exactly, an in-progress crop's remaining grow time continues from where it left off, and a crop that matured across the restart harvests exactly once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart /farm view matches the pre-restart snapshot exactly, the growing crop's timer resumes from its persisted planted_at and watered_at without resetting or catching up, and a crop that became ready during the downtime harvests for exactly one credit."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All farm rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_farm_plots, economy_crops, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each farming action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing farm surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, plot mutations, or seed returns; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test plot rows, seeded crop catalog rows, wallet entries, harvest transactions, and farm embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-farming-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent farm actions are safe: two simultaneous /farm harvest calls pay the ready crops exactly once, and two simultaneous /farm plant calls racing for the last empty plot plant exactly one crop.",
+     "expectedOutcome": "Two simultaneous /farm harvest invocations yield exactly one payout credit with the second seeing nothing to harvest, and two simultaneous /farm plant calls for the final plot create exactly one plot row with one refusal.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Exactly one harvest embed with a credit and one 'nothing to harvest' reply appear for the simultaneous harvests, and exactly one planted embed and one 'plots occupied' reply appear for the simultaneous plants on the last plot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All farm rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_farm_plots, economy_crops, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each farming action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing farm surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, plot mutations, or seed returns; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test plot rows, seeded crop catalog rows, wallet entries, harvest transactions, and farm embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-farming-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "Farms are strictly per-guild: planting and harvesting in a second guild never touches the first guild's plots, crops, wallet, or harvest history.",
+     "expectedOutcome": "run-member-a plants and harvests in test guild B; guild A's plot rows, wallet, and /farm view are unchanged, and guild B's harvest credits guild B's wallet at guild B's crop prices.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A's /farm view is identical before and after the guild B activity, and guild B's harvest credits guild B's wallet at guild B's configured crop sell price."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_farm_plots or economy_crops rows and vice versa; service-role probes confirm each guild's plots and wallet evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each farming action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing farm surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, plot mutations, or seed returns; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test plot rows, seeded crop catalog rows, wallet entries, harvest transactions, and farm embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-farming-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed farming resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed plot rows, seeded crop catalog rows, wallet entries, harvest transactions, and farm embeds are deleted; a final sweep finds zero run-prefixed farming resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed farm plant, harvest, or view embeds after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All farm rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_farm_plots, economy_crops, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each farming action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing farm surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money credits, plot mutations, or seed returns; persisted idempotency keys show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed farming resource created by this domain's scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

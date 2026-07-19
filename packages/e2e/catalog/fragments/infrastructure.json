@@ -1,0 +1,1166 @@
+{
+  "category": "infrastructure",
+  "domains": [
+    {
+      "id": "infrastructure-launcher",
+      "name": "Launcher desktop control center",
+      "category": "infrastructure",
+      "promise": "The Electron launcher installs, onboards, runs, updates, and cleanly uninstalls the full SomniBot stack (bot, dashboard, migrations, and optional Lavalink/Valkey sidecars) on Windows and Linux, stores credentials encrypted via the OS keychain, prompts the operator before any update download, updates cleanly from the N-1 release to v1, and deploys to a new VPS only after showing the literal commands and receiving explicit operator approval, targeting dedicated somnibot-prefixed destinations and never touching existing Somni or Hermes installs.",
+      "controls": [
+        {
+          "id": "update-prompt-before-download",
+          "description": "Updates are announced but never downloaded until the operator explicitly clicks Install now (electron-updater autoDownload=false, download starts only via the updater:download IPC call).",
+          "valueType": "boolean",
+          "constraints": { "locked": true, "reason": "Owner decision: updates always prompt before download; silent downloads are never permitted." }
+        },
+        {
+          "id": "auto-install-on-quit",
+          "description": "When an update has been downloaded and staged, install it automatically on next app quit/relaunch (electron-updater autoInstallOnAppQuit).",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "runtime-mode",
+          "description": "Where the stack runs: regular-local keeps bot and dashboard on this machine (public callbacks optionally via Tailscale Funnel); vps switches to the guided VPS deployment path with an HTTPS domain.",
+          "valueType": "enum",
+          "constraints": { "values": ["regular-local", "vps"] }
+        },
+        {
+          "id": "lavalink-enabled",
+          "description": "Whether the launcher manages a bundled Lavalink music sidecar process alongside bot and dashboard.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "vps-deploy-path",
+          "description": "Absolute remote directory the VPS deployment operates in. Must be a dedicated somnibot-prefixed destination (final path segment starts with somnibot-); paths pointing at existing Somni or Hermes installations are rejected outright.",
+          "valueType": "string",
+          "constraints": { "absolute": true, "final-segment-prefix": "somnibot-", "rejected-destinations": ["Somni", "Hermes"], "safe-characters-only": true, "no-traversal": true }
+        },
+        {
+          "id": "keychain-required",
+          "description": "Require OS keychain (DPAPI/libsecret) encryption for sensitive credentials at rest. When the keychain is unavailable, the launcher must warn prominently and obtain explicit operator acknowledgment before storing anything in plaintext.",
+          "valueType": "boolean",
+          "constraints": { "sensitive-keys": ["discordToken", "discordClientSecret", "supabaseSecretKey", "supabaseDbPassword", "supabaseAccessToken", "paypalClientSecret", "paypalWebhookId", "tailscaleAuthKey"] }
+        },
+        {
+          "id": "paypal-sandbox",
+          "description": "Route store payments through the PayPal sandbox environment instead of live PayPal.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "owner-brand-name",
+          "description": "The owner-facing brand name shown on launcher surfaces (window title, update prompts, log pane). White-label: the owner's brand leads everywhere, with only a subtle powered-by-SomniBot attribution line.",
+          "valueType": "string",
+          "constraints": { "max-length": 64 }
+        }
+      ],
+      "defaults": [
+        {
+          "controlId": "update-prompt-before-download",
+          "value": true,
+          "rationale": "Owner decision: the operator always approves before any bytes download; matches autoDownload=false in updater.ts."
+        },
+        {
+          "controlId": "auto-install-on-quit",
+          "value": true,
+          "rationale": "A staged update the operator already approved should complete on next launch without re-asking; matches autoInstallOnAppQuit=true."
+        },
+        {
+          "controlId": "runtime-mode",
+          "value": "regular-local",
+          "rationale": "Out of the box the stack runs entirely on the operator's machine; VPS mode is an explicit opt-in guided flow (config-store DEFAULTS.runtimeMode)."
+        },
+        {
+          "controlId": "lavalink-enabled",
+          "value": false,
+          "rationale": "Music sidecar is opt-in so first run stays light; matches DEFAULTS.lavalinkEnabled=false."
+        },
+        {
+          "controlId": "vps-deploy-path",
+          "value": "",
+          "rationale": "No remote destination exists until the operator supplies one; an empty path blocks the deployment plan rather than guessing a directory."
+        },
+        {
+          "controlId": "keychain-required",
+          "value": true,
+          "rationale": "Owner decision: secure credential storage is the default; plaintext at rest only ever happens after a loud warning and explicit operator acknowledgment."
+        },
+        {
+          "controlId": "paypal-sandbox",
+          "value": true,
+          "rationale": "Guardrail: fresh installs must not accidentally take live money; matches DEFAULTS.paypalSandbox=true."
+        },
+        {
+          "controlId": "owner-brand-name",
+          "value": "SomniBot",
+          "rationale": "Ships with the product name until the owner sets their own brand during guided onboarding; every surface then re-renders under the owner's brand."
+        }
+      ],
+      "permissions": [
+        {
+          "id": "operator-run-stack",
+          "actor": "Desktop operator (the local user who installed the launcher)",
+          "action": "Start and stop the bundled bot, dashboard, migrations, and sidecar processes",
+          "defaultDecision": "allow",
+          "enforcement": "Only the launcher's own renderer can invoke main-process actions through the contextBridge preload IPC allowlist; no remote surface can drive the stack."
+        },
+        {
+          "id": "updater-silent-download",
+          "actor": "Auto-updater subsystem",
+          "action": "Download an update without an explicit operator prompt",
+          "defaultDecision": "deny",
+          "enforcement": "autoDownload=false in the main process; downloads begin only when the renderer sends updater:download after the operator accepts the prompt."
+        },
+        {
+          "id": "vps-unapproved-mutation",
+          "actor": "Launcher automation (deployment executor)",
+          "action": "Execute a remote-changing VPS command without the main-process approval dialog",
+          "defaultDecision": "deny",
+          "enforcement": "confirmVpsDeploymentApproval gates every command flagged changesRemote/approvalRequired behind a native warning dialog listing the literal redacted commands; cancel means zero remote commands run."
+        },
+        {
+          "id": "renderer-secret-read",
+          "actor": "Dashboard renderer and spawned child processes",
+          "action": "Read raw credential store contents or decrypted secrets outside the injected environment",
+          "defaultDecision": "deny",
+          "enforcement": "Sensitive fields are safeStorage-encrypted at rest; only the main process decrypts and injects them into child process environments, and VPS plan output shows secrets as redacted markers only."
+        }
+      ],
+      "messages": [
+        {
+          "id": "update-available-prompt",
+          "trigger": "electron-updater reports update-available after a launch or manual check",
+          "surface": "Launcher window updater banner",
+          "audience": "Desktop operator",
+          "defaultTemplate": "A fresh {brand-name} update ({version}) is ready when you are. Nothing downloads until you hit Install now.",
+          "variables": ["brand-name", "version"]
+        },
+        {
+          "id": "update-downloaded",
+          "trigger": "Update download completed and staged for install",
+          "surface": "Launcher window updater banner",
+          "audience": "Desktop operator",
+          "defaultTemplate": "Update {version} is staged. Restart {brand-name} whenever it suits you and the new version takes over from there.",
+          "variables": ["brand-name", "version"]
+        },
+        {
+          "id": "update-error",
+          "trigger": "Update check or download failed",
+          "surface": "Launcher window updater banner",
+          "audience": "Desktop operator",
+          "defaultTemplate": "The update check hit a snag: {error-message}. Your current install keeps running; try again from the launcher menu whenever you like.",
+          "variables": ["error-message"]
+        },
+        {
+          "id": "smartscreen-guidance",
+          "trigger": "First run of an unsigned build on Windows",
+          "surface": "Launcher first-run guidance panel and download page",
+          "audience": "Desktop operator",
+          "defaultTemplate": "Windows SmartScreen may warn because this build is unsigned. Verify the SHA-256 checksum {checksum} against the download page, then choose More info and Run anyway.",
+          "variables": ["checksum"]
+        },
+        {
+          "id": "keychain-unavailable",
+          "trigger": "OS keychain (safeStorage) is unavailable when saving credentials",
+          "surface": "Launcher credentials form",
+          "audience": "Desktop operator",
+          "defaultTemplate": "No OS keychain was found, so {brand-name} cannot encrypt your credentials at rest. Install a keyring (gnome-keyring, kwallet, or KeePassXC) and try again, or explicitly acknowledge plaintext storage.",
+          "variables": ["brand-name"]
+        },
+        {
+          "id": "vps-approval-request",
+          "trigger": "Operator requests a VPS deployment and the plan is ready",
+          "surface": "Launcher main-process native warning dialog",
+          "audience": "Desktop operator",
+          "defaultTemplate": "Review the exact commands below before anything touches {ssh-target}. Only the dedicated somnibot-scoped path {deploy-path} will be modified, and nothing runs until you approve.",
+          "variables": ["deploy-path", "ssh-target"]
+        },
+        {
+          "id": "vps-path-rejected",
+          "trigger": "Deployment path fails safety or destination checks",
+          "surface": "Launcher VPS setup panel",
+          "audience": "Desktop operator",
+          "defaultTemplate": "That deploy path was rejected: {reason}. The launcher only deploys into dedicated somnibot-prefixed directories and never touches existing Somni or Hermes installs.",
+          "variables": ["reason"]
+        },
+        {
+          "id": "vps-command-failed",
+          "trigger": "An approved remote command exited non-zero or a health probe failed",
+          "surface": "Launcher VPS deployment log pane",
+          "audience": "Desktop operator",
+          "defaultTemplate": "Deployment stopped at {command-label}: {error-message}. Nothing after it ran; review the log and the rollback plan before retrying.",
+          "variables": ["command-label", "error-message"]
+        },
+        {
+          "id": "stack-process-down",
+          "trigger": "A managed child process (bot, dashboard, Lavalink, Valkey) exited unexpectedly",
+          "surface": "Launcher status panel and log pane",
+          "audience": "Desktop operator",
+          "defaultTemplate": "The {process-name} process stopped unexpectedly. {brand-name} is bringing it back; full details are in the launcher console.",
+          "variables": ["brand-name", "process-name"]
+        }
+      ],
+      "state": {
+        "initial": "installed",
+        "values": [
+          { "id": "installed", "description": "Launcher installed; guided first-run onboarding not yet complete, normal stack access blocked until it is (firstRunComplete=false)." },
+          { "id": "configured", "description": "Credentials validated and saved encrypted; onboarding complete; stack not currently running." },
+          { "id": "running", "description": "Bot, dashboard, and enabled sidecars are running as launcher-managed child processes; migrations applied." },
+          { "id": "update-staged", "description": "An operator-approved update has downloaded and is staged (updateReady=true) awaiting restart." },
+          { "id": "vps-plan-pending-approval", "description": "A VPS deployment plan is rendered with the literal command list and redacted env file, awaiting the operator's approval dialog decision." },
+          { "id": "vps-deployed", "description": "Approved commands completed against the somnibot-scoped deploy path and public health probes verified the stack." },
+          { "id": "degraded", "description": "A child process crashed or a remote deployment step failed; the launcher surfaces the failure and offers recovery." },
+          { "id": "uninstalled", "description": "OS uninstaller removed the app cleanly; reinstall yields a working launcher again." }
+        ],
+        "transitions": [
+          {
+            "id": "complete-onboarding",
+            "from": "installed",
+            "to": "configured",
+            "trigger": "Operator finishes the guided first-run setup and credentials validate",
+            "expectedEffect": "firstRunComplete flips true; sensitive fields are keychain-encrypted into the config store; owner brand name applied to launcher surfaces."
+          },
+          {
+            "id": "start-stack",
+            "from": "configured",
+            "to": "running",
+            "trigger": "Operator clicks Start",
+            "expectedEffect": "Main process runs pending database migrations, then spawns bot and dashboard (plus Lavalink/Valkey when enabled) with env built from the encrypted store; PIDs recorded in lastPids."
+          },
+          {
+            "id": "stop-stack",
+            "from": "running",
+            "to": "configured",
+            "trigger": "Operator clicks Stop or quits the launcher",
+            "expectedEffect": "All managed child processes terminate; lastPids cleared so no orphans remain."
+          },
+          {
+            "id": "stage-update",
+            "from": "running",
+            "to": "update-staged",
+            "trigger": "Operator accepts the update prompt and the download completes",
+            "expectedEffect": "updateReady=true, updater:downloaded broadcast; the running stack is untouched until restart."
+          },
+          {
+            "id": "install-update",
+            "from": "update-staged",
+            "to": "running",
+            "trigger": "Operator clicks Restart (updater:install)",
+            "expectedEffect": "quitAndInstall relaunches on the new version with credentials, guild list, and runtime settings intact; N-1 to v1 upgrades preserve all state."
+          },
+          {
+            "id": "plan-vps-deploy",
+            "from": "configured",
+            "to": "vps-plan-pending-approval",
+            "trigger": "Operator requests VPS deployment with vps runtime mode and valid networking config",
+            "expectedEffect": "buildVpsDeploymentPlan renders the literal command list, redacted env file, service layout, approval gates, and rollback plan; secrets shown only as redacted markers."
+          },
+          {
+            "id": "approve-vps-deploy",
+            "from": "vps-plan-pending-approval",
+            "to": "vps-deployed",
+            "trigger": "Operator approves the main-process confirmation dialog",
+            "expectedEffect": "Approved commands run in declared order against the somnibot-prefixed deploy path only; env file chmod 0600; health probes must return healthy before deployment is declared complete."
+          },
+          {
+            "id": "reject-vps-deploy",
+            "from": "vps-plan-pending-approval",
+            "to": "configured",
+            "trigger": "Operator cancels the confirmation dialog",
+            "expectedEffect": "Zero remote commands execute; the plan is discarded with no side effects on the VPS."
+          },
+          {
+            "id": "stack-failure",
+            "from": "running",
+            "to": "degraded",
+            "trigger": "A managed child process exits unexpectedly or a dependency check fails",
+            "expectedEffect": "Failure logged and surfaced in the status panel; automatic respawn attempted; credentials never appear in logs."
+          },
+          {
+            "id": "recover",
+            "from": "degraded",
+            "to": "running",
+            "trigger": "Automatic respawn succeeds or the operator restarts the failed component",
+            "expectedEffect": "Stack returns to healthy with no duplicate processes and no lost configuration."
+          },
+          {
+            "id": "uninstall",
+            "from": "configured",
+            "to": "uninstalled",
+            "trigger": "Operator runs the OS uninstaller",
+            "expectedEffect": "App binaries and shortcuts are removed cleanly; a subsequent reinstall produces a working launcher that can re-read or freshly re-create configuration."
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "update-feed-unreachable",
+          "trigger": "GitHub releases feed is unreachable or the update download is interrupted",
+          "expectedBehavior": "The current version keeps running untouched; updater:error is broadcast to the banner; no partially-applied update exists on disk; startup is never blocked by a failed background check.",
+          "resultingState": "running",
+          "retry": "operator",
+          "messageId": "update-error",
+          "auditEvent": "launcher.update_failed",
+          "ownerNotification": false
+        },
+        {
+          "id": "keychain-missing",
+          "trigger": "safeStorage reports encryption unavailable (e.g. Linux without a keyring daemon) while saving credentials",
+          "expectedBehavior": "The launcher warns prominently on the credentials surface and refuses silent plaintext persistence; secrets are stored unencrypted only after explicit operator acknowledgment, and the warning names the keyring packages that fix it.",
+          "resultingState": "installed",
+          "retry": "operator",
+          "messageId": "keychain-unavailable",
+          "auditEvent": "launcher.keychain_unavailable",
+          "ownerNotification": true
+        },
+        {
+          "id": "vps-unsafe-path",
+          "trigger": "Deploy path is relative, contains traversal or unsafe characters, lacks the somnibot- destination prefix, or points at an existing Somni or Hermes installation",
+          "expectedBehavior": "The plan is returned blocked with explicit human-readable reasons; canApprove=false; no SSH command of any kind executes, including read-only preflight.",
+          "resultingState": "configured",
+          "retry": "operator",
+          "messageId": "vps-path-rejected",
+          "auditEvent": "launcher.vps_plan_blocked",
+          "ownerNotification": false
+        },
+        {
+          "id": "vps-remote-command-failure",
+          "trigger": "An approved remote command exits non-zero, times out (45-minute build ceiling), or a health probe does not return healthy",
+          "expectedBehavior": "Execution halts at the failed step; no subsequent commands run; the failure with its redacted command line is logged; the rollback plan (fetch, checkout known-good, rebuild, health verify) is offered but never auto-executed.",
+          "resultingState": "degraded",
+          "retry": "operator",
+          "messageId": "vps-command-failed",
+          "auditEvent": "launcher.vps_command_failed",
+          "ownerNotification": true
+        },
+        {
+          "id": "child-process-crash",
+          "trigger": "Bot, dashboard, Lavalink, or Valkey child process exits unexpectedly while the stack is running",
+          "expectedBehavior": "Crash is logged with the process name, an automatic respawn is attempted with backoff, the status panel shows degraded health, and no secret material is emitted to logs.",
+          "resultingState": "degraded",
+          "retry": "automatic",
+          "messageId": "stack-process-down",
+          "auditEvent": "launcher.process_crashed",
+          "ownerNotification": true
+        }
+      ],
+      "evidence": [
+        {
+          "assertionClass": "Discord",
+          "proofMode": "real-stack",
+          "observer": "E2E Discord client in the run-prefixed test guild watching the bot launched by the launcher",
+          "expectedObservation": "After launcher Start, the bot comes online in the test guild and answers a smoke slash command; after Stop it goes offline with no zombie presence.",
+          "artifact": "evidence/infrastructure-launcher/discord"
+        },
+        {
+          "assertionClass": "database-RLS",
+          "proofMode": "real-stack",
+          "observer": "Supabase probes using service-role and anon clients against tables touched by launcher-run migrations",
+          "expectedObservation": "Migrations applied by the launcher leave RLS enabled on guild-scoped tables; the anon client cannot read another guild's configuration rows created during the run.",
+          "artifact": "evidence/infrastructure-launcher/database-rls"
+        },
+        {
+          "assertionClass": "audit",
+          "proofMode": "real-stack",
+          "observer": "Audit-log query over launcher lifecycle events",
+          "expectedObservation": "Update staged/installed, VPS plan blocked/approved/executed, and crash events each produce durable audit rows that are never deleted, only anonymized under retention.",
+          "artifact": "evidence/infrastructure-launcher/audit"
+        },
+        {
+          "assertionClass": "owner-notification",
+          "proofMode": "real-stack",
+          "observer": "Owner notification sink (launcher status surface plus configured owner channel)",
+          "expectedObservation": "Keychain-unavailable, VPS command failure, and child-process crash each raise an owner-visible notice; routine successes do not spam the owner.",
+          "artifact": "evidence/infrastructure-launcher/owner-notification"
+        },
+        {
+          "assertionClass": "branding",
+          "proofMode": "real-stack",
+          "observer": "Launcher UI text capture across window title, updater banner, and VPS dialogs",
+          "expectedObservation": "All operator-facing copy leads with the configured owner brand name and carries only a subtle powered-by-SomniBot attribution.",
+          "artifact": "evidence/infrastructure-launcher/branding"
+        },
+        {
+          "assertionClass": "replay-safety",
+          "proofMode": "real-stack",
+          "observer": "Harness replaying updater:install IPC and re-running the approved VPS command list",
+          "expectedObservation": "Replayed install requests and re-executed idempotent deployment steps (chmod, compose up) produce no duplicate installs, duplicate containers, or repeated side effects.",
+          "artifact": "evidence/infrastructure-launcher/replay-safety"
+        },
+        {
+          "assertionClass": "cleanup",
+          "proofMode": "real-stack",
+          "observer": "Post-run sweep of run-prefixed launcher artifacts",
+          "expectedObservation": "Temp session-token directories, run-prefixed test deploy directories, and staged test update artifacts are removed; only durable audit rows remain.",
+          "artifact": "evidence/infrastructure-launcher/cleanup"
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "infrastructure-launcher-def",
+          "class": "DEF",
+          "disposition": "required",
+          "promise": "A fresh install walks the operator through guided onboarding before any normal access, then starts the full bundled stack (migrations, bot, dashboard) with safe defaults: regular-local mode, PayPal sandbox, Lavalink off, prompt-before-download updates, keychain-encrypted credentials.",
+          "expectedOutcome": "Onboarding gates access until credentials validate; Start applies migrations then brings bot and dashboard up; the updater checks but downloads nothing without a prompt; config file on disk holds only encrypted secret values.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The launcher-spawned bot appears online in the run-prefixed test guild and answers a smoke slash command." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Launcher-applied migrations complete and RLS still denies anon reads of guild-scoped rows." },
+            { "assertionClass": "audit", "expectedObservation": "Onboarding completion and first stack start are recorded as audit events." },
+            { "assertionClass": "owner-notification", "expectedObservation": "No failure notifications fire during a clean default run." },
+            { "assertionClass": "branding", "expectedObservation": "First-run surfaces show the default brand with subtle powered-by-SomniBot attribution, ready for owner rebrand." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Clicking Start twice in the default flow yields exactly one stack instance." },
+            { "assertionClass": "cleanup", "expectedObservation": "The run's temp token directory and test config artifacts are removed after teardown." }
+          ]
+        },
+        {
+          "id": "infrastructure-launcher-set-a",
+          "class": "SET-A",
+          "disposition": "required",
+          "promise": "Configuring lavalink-enabled=true and runtime-mode=vps with a valid somnibot-prefixed deploy path takes effect: the Lavalink sidecar is managed and the VPS plan renders the literal command list for review.",
+          "expectedOutcome": "Lavalink starts and stops under launcher management; the deployment plan reaches status ready with the exact redacted command lines, 0600 env-file requirement, approval gates, and rollback plan visible before anything runs.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "With Lavalink managed, a music smoke command in the test guild reports the audio node reachable." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Runtime-mode and sidecar settings persist in the operator's scope only; anon clients cannot read them." },
+            { "assertionClass": "audit", "expectedObservation": "The config change and plan-ready events are audited with the redacted target." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Plan readiness is surfaced to the operator; no failure notice fires." },
+            { "assertionClass": "branding", "expectedObservation": "The VPS approval dialog copy carries the owner brand voice." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Requesting the plan twice renders identical commands without executing anything remotely." },
+            { "assertionClass": "cleanup", "expectedObservation": "Run-prefixed plan artifacts are deleted after the run." }
+          ]
+        },
+        {
+          "id": "infrastructure-launcher-set-b",
+          "class": "SET-B",
+          "disposition": "required",
+          "promise": "A different configuration also takes effect: a custom owner-brand-name re-renders launcher surfaces, and with the operator declining the update prompt nothing downloads while auto-install-on-quit=false keeps a previously staged update from applying on quit.",
+          "expectedOutcome": "All updater and status copy shows the custom brand; declining the prompt results in zero download traffic; quitting does not install the staged test update when auto-install is disabled.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Bot-side surfaces driven by launcher config show the custom brand in the test guild." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The brand setting is readable only within the owner's scope under RLS." },
+            { "assertionClass": "audit", "expectedObservation": "The declined update prompt is audited as operator-declined, not as an error." },
+            { "assertionClass": "owner-notification", "expectedObservation": "No notification fires for a declined optional update." },
+            { "assertionClass": "branding", "expectedObservation": "Updater banner and window title render the custom brand with subtle attribution intact." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Re-sending the decline produces no download and no duplicate prompt records." },
+            { "assertionClass": "cleanup", "expectedObservation": "The staged test update artifact is removed during teardown." }
+          ]
+        },
+        {
+          "id": "infrastructure-launcher-invalid",
+          "class": "INVALID",
+          "disposition": "required",
+          "promise": "Invalid configuration is rejected atomically: a relative or traversal-laden deploy path, a VPS domain carrying an explicit port, or a non-somnibot destination each block the plan with explicit reasons and persist nothing as deploy-ready.",
+          "expectedOutcome": "buildVpsDeploymentPlan returns status blocked with human-readable blockedReasons, canApprove=false, empty command list; the previous valid configuration remains untouched and no SSH connection is attempted.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The running bot in the test guild is unaffected by the rejected configuration attempt." },
+            { "assertionClass": "database-RLS", "expectedObservation": "No partially-saved deploy configuration row exists after rejection." },
+            { "assertionClass": "audit", "expectedObservation": "The blocked plan is audited as launcher.vps_plan_blocked with the reason category." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The rejection is shown inline to the operator; no escalation notice fires." },
+            { "assertionClass": "branding", "expectedObservation": "The rejection copy uses the owner-branded voice and names the somnibot-prefix rule plainly." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Submitting the same invalid path repeatedly produces the same rejection with no state drift." },
+            { "assertionClass": "cleanup", "expectedObservation": "No leftover blocked-plan artifacts persist after the run." }
+          ]
+        },
+        {
+          "id": "infrastructure-launcher-unauth",
+          "class": "UNAUTH",
+          "disposition": "required",
+          "promise": "Nothing bypasses the operator: a renderer-forged request to execute VPS deployment without the main-process approval dialog is denied, and child processes cannot read raw credential store contents.",
+          "expectedOutcome": "The deployment executor refuses to run any changesRemote command without an operatorApproved decision from the native dialog; the config file on disk yields only ciphertext for sensitive keys; the preload bridge exposes no raw-secret channel.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "No deployment side effects are observable from the test guild after the denied attempt." },
+            { "assertionClass": "database-RLS", "expectedObservation": "No deployment or credential rows were written by the unauthorized path." },
+            { "assertionClass": "audit", "expectedObservation": "The denied unapproved execution attempt is recorded in the audit trail." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The operator is notified that an unapproved execution attempt was blocked." },
+            { "assertionClass": "branding", "expectedObservation": "The denial message is rendered in the owner-branded voice." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Repeated forged requests are each denied with no cumulative effect." },
+            { "assertionClass": "cleanup", "expectedObservation": "No artifacts from the denied attempt persist beyond audit rows." }
+          ]
+        },
+        {
+          "id": "infrastructure-launcher-depfail",
+          "class": "DEPFAIL",
+          "disposition": "required",
+          "promise": "Dependency failures fail safe: an unreachable update feed never blocks startup or corrupts the install, and a missing OS keychain never silently downgrades credential storage to plaintext.",
+          "expectedOutcome": "With the feed unreachable the launcher starts normally, shows the branded update-error banner, and the current version keeps running; with safeStorage unavailable the credentials form warns loudly and requires explicit acknowledgment before any plaintext write.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The bot still starts and serves the test guild while the update feed is down." },
+            { "assertionClass": "database-RLS", "expectedObservation": "No credential material lands in the database during the keychain-failure path." },
+            { "assertionClass": "audit", "expectedObservation": "launcher.update_failed and launcher.keychain_unavailable events are both recorded." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The keychain warning reaches the operator prominently; the feed failure stays a quiet banner." },
+            { "assertionClass": "branding", "expectedObservation": "Both failure messages use the owner-branded templates with actionable next steps." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Repeated failed checks do not stack banners or partially-downloaded update files." },
+            { "assertionClass": "cleanup", "expectedObservation": "No partial download artifacts remain after the failed update attempts." }
+          ]
+        },
+        {
+          "id": "infrastructure-launcher-retry",
+          "class": "RETRY",
+          "disposition": "required",
+          "promise": "Transient failures converge on retry: a temporarily failing SSH preflight or interrupted update download succeeds on the next attempt without duplicated side effects.",
+          "expectedOutcome": "The read-only preflight retried after a transient network fault reports ready exactly once; a resumed update download stages a single valid update; no remote mutation occurred during any failed attempt.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The test-guild bot remains stable across the retry cycle." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Retry attempts add no duplicate configuration or deployment rows." },
+            { "assertionClass": "audit", "expectedObservation": "Each attempt is audited distinctly, showing failure then converged success." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Only a persistent failure would notify; a converged retry stays quiet." },
+            { "assertionClass": "branding", "expectedObservation": "Interim retry messaging keeps the branded, reassuring tone." },
+            { "assertionClass": "replay-safety", "expectedObservation": "The converged state equals a single successful attempt, byte for byte on the staged update." },
+            { "assertionClass": "cleanup", "expectedObservation": "Failed-attempt temp files are cleaned up alongside run artifacts." }
+          ]
+        },
+        {
+          "id": "infrastructure-launcher-replay",
+          "class": "REPLAY",
+          "disposition": "required",
+          "promise": "Replay is harmless: re-sending updater:install after installation, and re-running the approved idempotent deployment command list, cause no double-install, duplicate containers, or repeated remote mutations.",
+          "expectedOutcome": "A second updater:install with no staged update is a no-op; re-executing chmod 0600 and docker compose up -d against the same somnibot-scoped path converges to the identical healthy stack with no new side effects.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Exactly one bot presence exists in the test guild after replayed operations." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Replayed operations write no duplicate rows." },
+            { "assertionClass": "audit", "expectedObservation": "Replays are audited as no-op or converged events, preserving the original record." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Replays trigger no duplicate notifications." },
+            { "assertionClass": "branding", "expectedObservation": "Any replay-facing message stays branded and calm rather than alarming." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Container list, env file mode, and installed version are identical before and after the replay." },
+            { "assertionClass": "cleanup", "expectedObservation": "Replay testing leaves no extra artifacts beyond the original run set." }
+          ]
+        },
+        {
+          "id": "infrastructure-launcher-restart",
+          "class": "RESTART",
+          "disposition": "required",
+          "promise": "State survives restart: after killing and relaunching the launcher (including the N-1 to v1 upgrade path), credentials decrypt, guild entries persist, a staged update still applies, and stale PIDs are reconciled without orphan processes.",
+          "expectedOutcome": "Relaunch restores the configured state from the encrypted store; lastPids from the previous run are detected and cleaned; the staged update installs on the restart path; a launcher updated from the previous release keeps every setting.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "After restart the bot reconnects to the test guild with the same configuration." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Persisted Supabase state from before the restart is intact and still RLS-protected." },
+            { "assertionClass": "audit", "expectedObservation": "Restart, stale-PID cleanup, and update-applied events appear in order in the audit trail." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The operator sees a clean-restart status rather than failure noise." },
+            { "assertionClass": "branding", "expectedObservation": "The owner's brand settings survive the restart and upgrade unchanged." },
+            { "assertionClass": "replay-safety", "expectedObservation": "The relaunch spawns exactly one instance of each managed process." },
+            { "assertionClass": "cleanup", "expectedObservation": "Orphan processes from the killed run are terminated and their temp files removed." }
+          ]
+        },
+        {
+          "id": "infrastructure-launcher-race",
+          "class": "RACE",
+          "disposition": "required",
+          "promise": "Concurrent actions are safe: double-clicking Start, or racing two VPS approval dialogs, results in exactly one stack instance and at most one deployment execution.",
+          "expectedOutcome": "Process-manager guards collapse simultaneous start requests into one spawn per service; the second approval attempt while a deployment is executing is refused; no interleaved remote command streams occur.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "A single bot session serves the test guild despite the racing start requests." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Concurrent operations produce no duplicate or conflicting configuration rows." },
+            { "assertionClass": "audit", "expectedObservation": "The audit trail shows one accepted action and one explicitly-refused concurrent action." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The refused concurrent deployment attempt is surfaced to the operator." },
+            { "assertionClass": "branding", "expectedObservation": "The busy-state refusal message keeps the branded voice." },
+            { "assertionClass": "replay-safety", "expectedObservation": "The end state is identical to a single serial execution of the winning action." },
+            { "assertionClass": "cleanup", "expectedObservation": "The losing racer leaves no half-started processes or files behind." }
+          ]
+        },
+        {
+          "id": "infrastructure-launcher-xguild",
+          "class": "XGUILD",
+          "disposition": "required",
+          "promise": "Multi-guild entries are isolated: disabling the second run-prefixed guild in the launcher guild list changes only that guild; the bot receives the enabled-guild set and guild A behavior is untouched.",
+          "expectedOutcome": "With two guild entries, toggling guild B's enabled flag removes only guild B from the DISCORD_GUILD_ID set passed to the bot; guild A commands, config, and data remain fully functional and invisible to guild B.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Guild A still answers commands while guild B stops receiving service after being disabled." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Guild-scoped rows for A and B remain mutually unreadable across guild contexts." },
+            { "assertionClass": "audit", "expectedObservation": "The guild-entry toggle is audited with the specific guild id affected." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The operator sees which guild was disabled; guild A raises no alerts." },
+            { "assertionClass": "branding", "expectedObservation": "Each guild's surfaces keep their own branding configuration independently." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Re-applying the same toggle is a no-op with no cross-guild bleed." },
+            { "assertionClass": "cleanup", "expectedObservation": "Both run-prefixed test guild entries and their artifacts are removed at teardown." }
+          ]
+        },
+        {
+          "id": "infrastructure-launcher-cleanup",
+          "class": "CLEANUP",
+          "disposition": "required",
+          "promise": "Every run-prefixed launcher resource is cleaned: temp session-token directories, test deploy directories under the somnibot- prefix, staged test updates, and test guild entries are removed while audit history stays durable.",
+          "expectedOutcome": "A post-run sweep finds zero run-prefixed files, directories, processes, or remote test paths; audit rows describing the run remain readable and are never deleted.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "No run-prefixed channels, messages, or bot artifacts remain in the test guild." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Run-prefixed database rows are removed or anonymized; RLS posture is unchanged." },
+            { "assertionClass": "audit", "expectedObservation": "Audit rows for the run persist after cleanup, satisfying anonymize-over-delete." },
+            { "assertionClass": "owner-notification", "expectedObservation": "A cleanup summary is available to the operator without alert noise." },
+            { "assertionClass": "branding", "expectedObservation": "Cleanup does not disturb the owner's branding configuration." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Running cleanup twice is safe and finds nothing on the second pass." },
+            { "assertionClass": "cleanup", "expectedObservation": "The sweep report lists every created resource matched to a deletion or anonymization." }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "infrastructure-license-sdk",
+      "name": "License SDK and validation API",
+      "category": "infrastructure",
+      "promise": "The @somnibot/license-sdk and the dashboard license API validate license keys for real-store products against hashed key storage, enforce per-product device limits through atomic session registration, keep sessions honest with heartbeats, honor a bounded offline grace window on a monotonic clock without ever extending a lapsed payment-grace deadline, and give the owner and the customer working recovery resets that free device slots — all strictly guild-scoped and replay-safe. License access is account-bound commerce state and never touches the play-money game economy.",
+      "controls": [
+        {
+          "id": "license-mode",
+          "description": "Per-product license delivery mode string (dashboard PUT /api/license/config/[productId], max 32 chars); portal_only is the canonical shipped mode where keys are surfaced through the customer portal.",
+          "valueType": "string",
+          "constraints": { "max-length": 32, "canonical-modes": ["portal_only"] }
+        },
+        {
+          "id": "max-devices",
+          "description": "Maximum concurrent active device sessions per license key; enforced atomically by the license_validate_device RPC at validation time.",
+          "valueType": "integer",
+          "constraints": { "min": 1, "max": 100 }
+        },
+        {
+          "id": "heartbeat-interval-seconds",
+          "description": "Server-directed heartbeat cadence returned to the SDK on validation; the SDK clamps any interval below 30 seconds up to 30 to protect the API.",
+          "valueType": "integer",
+          "constraints": { "min": 0, "max": 86400, "sdk-clamp-floor": 30 }
+        },
+        {
+          "id": "offline-grace-period-seconds",
+          "description": "How long a device may keep operating on its cached validation while the license server is unreachable, measured on a server-time-anchored monotonic clock.",
+          "valueType": "integer",
+          "constraints": { "min": 0, "max": 604800 }
+        },
+        {
+          "id": "require-discord-guild-membership",
+          "description": "Whether validation requires the bound customer to still be a member of the product's Discord guild.",
+          "valueType": "boolean",
+          "constraints": {}
+        },
+        {
+          "id": "feature-flags",
+          "description": "Per-product feature flag strings delivered to the SDK on successful validation for in-app gating.",
+          "valueType": "string-list",
+          "constraints": {}
+        },
+        {
+          "id": "sdk-cache-ttl-ms",
+          "description": "How long the SDK serves a cached valid response before revalidating; always capped at a payment-grace deadline when one is in force.",
+          "valueType": "duration-ms",
+          "constraints": { "grace-deadline-cap": true }
+        }
+      ],
+      "defaults": [
+        {
+          "controlId": "license-mode",
+          "value": "portal_only",
+          "rationale": "Keys are account-bound and reached through the branded customer portal by default; matches the route-level default in /api/license/config."
+        },
+        {
+          "controlId": "max-devices",
+          "value": 3,
+          "rationale": "Three devices covers a customer's desktop, laptop, and spare without inviting key sharing; matches the API default."
+        },
+        {
+          "controlId": "heartbeat-interval-seconds",
+          "value": 300,
+          "rationale": "Five-minute heartbeats keep session truth fresh without meaningful API load; matches the API default."
+        },
+        {
+          "controlId": "offline-grace-period-seconds",
+          "value": 86400,
+          "rationale": "A 24-hour offline window is member-respectful for flaky connections while the server-side heartbeat system remains the authoritative enforcement."
+        },
+        {
+          "controlId": "require-discord-guild-membership",
+          "value": true,
+          "rationale": "Products are community goods; leaving the guild ends entitlement checks by default, and owners can relax this per product."
+        },
+        {
+          "controlId": "feature-flags",
+          "value": [],
+          "rationale": "No flags until the owner defines them; the SDK receives an empty list rather than an absent field."
+        },
+        {
+          "controlId": "sdk-cache-ttl-ms",
+          "value": 60000,
+          "rationale": "One minute of client caching absorbs bursts while keeping revocations fast; matches the SDK constructor default."
+        }
+      ],
+      "permissions": [
+        {
+          "id": "public-validate",
+          "actor": "Any external app presenting a license key",
+          "action": "POST /api/license/validate, /api/license/heartbeat, and /api/license/deactivate",
+          "defaultDecision": "allow",
+          "enforcement": "Public endpoints protected by per-IP and per-key-hash rate limits; keys are stored and compared only as SHA-256 hashes; every attempt is logged to license_validations."
+        },
+        {
+          "id": "owner-session-revoke",
+          "actor": "Guild owner in the dashboard",
+          "action": "List device sessions (GET /api/license/sessions) and revoke one (DELETE /api/license/sessions/[id]) as a recovery reset",
+          "defaultDecision": "allow",
+          "enforcement": "requireGuildOwner plus a parent license_keys.guild_id ownership check on every session operation; revocation marks the session inactive with reason admin_revoked."
+        },
+        {
+          "id": "cross-guild-key-access",
+          "actor": "Owner of an unrelated guild",
+          "action": "Read, enumerate, or revoke another guild's license keys, sessions, or customer PII",
+          "defaultDecision": "deny",
+          "enforcement": "All admin lookups are constrained to the caller's guild_id (V47-C2); cross-guild UUID or hash guesses return not-found, never data."
+        },
+        {
+          "id": "customer-portal-access",
+          "actor": "Customer holding a valid portal token",
+          "action": "View their own license keys and device sessions, and free a device slot from the portal",
+          "defaultDecision": "allow",
+          "enforcement": "x-portal-token is hash-matched against unexpired, unrevoked portal_sessions and rate limited; data is filtered to the token's customer_id only."
+        }
+      ],
+      "messages": [
+        {
+          "id": "validation-success",
+          "trigger": "License validates successfully for a device",
+          "surface": "Customer app via SDK response and portal license card",
+          "audience": "Customer",
+          "defaultTemplate": "Welcome back, {customer-name}! Your {product-name} license is active on this device.",
+          "variables": ["customer-name", "product-name"]
+        },
+        {
+          "id": "device-limit-reached",
+          "trigger": "Validation from a new device fingerprint would exceed max-devices",
+          "surface": "Customer app via SDK response",
+          "audience": "Customer",
+          "defaultTemplate": "This key is already active on {active-devices} of {max-devices} allowed devices. Free a slot from your portal, or ask {owner-brand} support for a reset.",
+          "variables": ["active-devices", "max-devices", "owner-brand"]
+        },
+        {
+          "id": "grace-period-warning",
+          "trigger": "Validation or heartbeat reports status grace_period after a payment failure",
+          "surface": "Customer app via SDK response and portal banner",
+          "audience": "Customer",
+          "defaultTemplate": "Your payment for {product-name} needs attention. Access continues until {grace-ends-at}; update your payment method to keep everything running.",
+          "variables": ["grace-ends-at", "product-name"]
+        },
+        {
+          "id": "license-revoked",
+          "trigger": "Key is revoked, expired, or its payment grace lapsed",
+          "surface": "Customer app via SDK response",
+          "audience": "Customer",
+          "defaultTemplate": "This license for {product-name} is no longer valid. If that seems wrong, contact {owner-brand} support with your order id.",
+          "variables": ["owner-brand", "product-name"]
+        },
+        {
+          "id": "offline-grace-notice",
+          "trigger": "License server unreachable while a cached validation is still within the offline window",
+          "surface": "Customer app via SDK response",
+          "audience": "Customer",
+          "defaultTemplate": "We cannot reach the license server right now, so you are covered by the offline window until {offline-until}. The app revalidates automatically once you are back online.",
+          "variables": ["offline-until"]
+        },
+        {
+          "id": "session-reset-confirmation",
+          "trigger": "A device session is revoked by the owner or freed by the customer as a recovery reset",
+          "surface": "Dashboard licenses page and customer portal",
+          "audience": "Guild owner and customer",
+          "defaultTemplate": "Device {device-name} was signed out of your {product-name} license. That slot is free again.",
+          "variables": ["device-name", "product-name"]
+        },
+        {
+          "id": "server-unreachable",
+          "trigger": "First-time validation fails with no cached result, or the composite lookup RPC errors",
+          "surface": "Customer app via SDK response",
+          "audience": "Customer",
+          "defaultTemplate": "The license server for {product-name} is unreachable and this device has no prior validation to fall back on. Check your connection and try again.",
+          "variables": ["product-name"]
+        },
+        {
+          "id": "rate-limited",
+          "trigger": "Per-IP or per-key rate limit trips on the validation API",
+          "surface": "Customer app via SDK response",
+          "audience": "Customer",
+          "defaultTemplate": "Too many license checks in a short burst. The server asked us to wait {retry-after-seconds} seconds before trying again.",
+          "variables": ["retry-after-seconds"]
+        }
+      ],
+      "state": {
+        "initial": "unvalidated",
+        "values": [
+          { "id": "unvalidated", "description": "Device holds a key but no accepted validation or active session." },
+          { "id": "active-session", "description": "Server accepted the validation; a device session row is active and heartbeats run at the directed interval." },
+          { "id": "offline-grace", "description": "Server unreachable; the SDK serves the cached validation within the offline window on the anchored monotonic clock." },
+          { "id": "payment-grace", "description": "Payment failed; the license stays valid until grace_period_ends_at, with the SDK cache hard-capped at that deadline." },
+          { "id": "revoked", "description": "Key rejected: revoked, expired, grace lapsed, or offline window exhausted; heartbeats stopped and cache cleared." },
+          { "id": "deactivated", "description": "This device's session was ended (SDK deactivate or recovery reset); the device slot is free for reuse." }
+        ],
+        "transitions": [
+          {
+            "id": "validate-success",
+            "from": "unvalidated",
+            "to": "active-session",
+            "trigger": "POST /api/license/validate with a valid key, product, and registrable device fingerprint",
+            "expectedEffect": "Atomic device registration within max-devices; session id issued; features, tier, and heartbeat interval returned; SDK auto-starts heartbeats."
+          },
+          {
+            "id": "heartbeat-keepalive",
+            "from": "active-session",
+            "to": "active-session",
+            "trigger": "Periodic POST /api/license/heartbeat with the session id",
+            "expectedEffect": "last_seen_at refreshed and the next interval returned; the server time anchor is re-established on the SDK."
+          },
+          {
+            "id": "go-offline",
+            "from": "active-session",
+            "to": "offline-grace",
+            "trigger": "Network failure on a validate or heartbeat call within the offline window",
+            "expectedEffect": "SDK serves the cached result with status offline_grace, timed on the monotonic clock so wall-clock manipulation cannot stretch the window."
+          },
+          {
+            "id": "come-online",
+            "from": "offline-grace",
+            "to": "active-session",
+            "trigger": "Connectivity restored and revalidation succeeds",
+            "expectedEffect": "Fresh server response replaces the cache and re-anchors server time; the session continues without a new device slot."
+          },
+          {
+            "id": "offline-grace-expired",
+            "from": "offline-grace",
+            "to": "revoked",
+            "trigger": "Offline elapsed time exceeds offline-grace-period-seconds",
+            "expectedEffect": "Cache cleared, heartbeats stopped, SDK reports offline_grace_expired; no zombie session is asserted."
+          },
+          {
+            "id": "enter-payment-grace",
+            "from": "active-session",
+            "to": "payment-grace",
+            "trigger": "Validation or heartbeat reports status grace_period with grace_period_ends_at",
+            "expectedEffect": "SDK caps its cache at the anchored deadline, records the offline hard stop, and surfaces the branded payment warning."
+          },
+          {
+            "id": "payment-recovered",
+            "from": "payment-grace",
+            "to": "active-session",
+            "trigger": "A later heartbeat reports a healthy non-grace status after payment recovery",
+            "expectedEffect": "Cached payload is reconciled back to active and the stale grace deadline is dropped so the customer is immediately unrestricted."
+          },
+          {
+            "id": "grace-lapsed",
+            "from": "payment-grace",
+            "to": "revoked",
+            "trigger": "grace_period_ends_at passes, whether the device is online or offline",
+            "expectedEffect": "The server rejects the key and the SDK hard-stops at the deadline even mid-offline-window; heartbeats cease."
+          },
+          {
+            "id": "deactivate-device",
+            "from": "active-session",
+            "to": "deactivated",
+            "trigger": "SDK deactivate() on uninstall, or an owner/customer recovery reset revokes the session",
+            "expectedEffect": "Session marked inactive with its deactivation reason; the device slot is freed and the reset confirmation is surfaced."
+          },
+          {
+            "id": "revalidate-after-reset",
+            "from": "deactivated",
+            "to": "active-session",
+            "trigger": "A fresh validation from the same or a replacement device",
+            "expectedEffect": "The freed slot is occupied by exactly one new session; recovery is complete without owner-side key regeneration."
+          },
+          {
+            "id": "admin-revoke",
+            "from": "active-session",
+            "to": "revoked",
+            "trigger": "Guild owner revokes the key or session from the dashboard",
+            "expectedEffect": "The very next validation or heartbeat for that device is rejected; the customer sees the branded revocation message with the support path."
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "network-error-no-cache",
+          "trigger": "License server unreachable on a device with no cached successful validation",
+          "expectedBehavior": "SDK returns valid:false with status network_error and asserts no entitlement; no offline grace applies because there is nothing trustworthy to fall back on.",
+          "resultingState": "unvalidated",
+          "retry": "automatic",
+          "messageId": "server-unreachable",
+          "auditEvent": "license.validation_network_error",
+          "ownerNotification": false
+        },
+        {
+          "id": "device-limit-exceeded",
+          "trigger": "Validation from a new fingerprint when max-devices sessions are already active",
+          "expectedBehavior": "Validation is rejected without creating a session; the attempt is logged to license_validations; the customer is pointed at the portal reset path rather than silently evicting another device.",
+          "resultingState": "unvalidated",
+          "retry": "operator",
+          "messageId": "device-limit-reached",
+          "auditEvent": "license.device_limit_rejected",
+          "ownerNotification": false
+        },
+        {
+          "id": "payment-grace-lapsed-offline",
+          "trigger": "The cached payment-grace deadline passes while the device is offline inside its offline window",
+          "expectedBehavior": "The SDK hard-stops at the anchored deadline instead of riding out the longer offline window; cache is cleared and heartbeats stop, so going offline cannot keep a lapsed payment valid.",
+          "resultingState": "revoked",
+          "retry": "never",
+          "messageId": "license-revoked",
+          "auditEvent": "license.grace_lapsed",
+          "ownerNotification": true
+        },
+        {
+          "id": "rate-limit-tripped",
+          "trigger": "Per-IP or per-key rate limit exceeded on the validation API",
+          "expectedBehavior": "429 with a Retry-After header; key status and sessions are unchanged; the SDK backs off and retries after the stated delay without hammering.",
+          "resultingState": "unvalidated",
+          "retry": "automatic",
+          "messageId": "rate-limited",
+          "auditEvent": "license.rate_limited",
+          "ownerNotification": false
+        },
+        {
+          "id": "lookup-rpc-failure",
+          "trigger": "The composite license_validate_lookup RPC errors server-side",
+          "expectedBehavior": "The API fails closed with a 500 and valid:false, writes no partial session state, and logs the internal error without leaking key material or internals to the caller.",
+          "resultingState": "unvalidated",
+          "retry": "automatic",
+          "messageId": "server-unreachable",
+          "auditEvent": "license.lookup_failed",
+          "ownerNotification": true
+        }
+      ],
+      "evidence": [
+        {
+          "assertionClass": "Discord",
+          "proofMode": "real-stack",
+          "observer": "E2E Discord client observing the run-prefixed test guild during license lifecycle runs",
+          "expectedObservation": "Guild-membership-gated validations reflect real membership changes in the test guild, and license activity never mints game currency or any game-economy artifact in Discord.",
+          "artifact": "evidence/infrastructure-license-sdk/discord"
+        },
+        {
+          "assertionClass": "database-RLS",
+          "proofMode": "real-stack",
+          "observer": "Supabase probes as anon, cross-guild owner, and service-role against license_keys, license_sessions, and license_validations",
+          "expectedObservation": "Keys exist only as SHA-256 hashes; anon and cross-guild clients cannot read keys, sessions, or customer PII; service paths stay guild-scoped.",
+          "artifact": "evidence/infrastructure-license-sdk/database-rls"
+        },
+        {
+          "assertionClass": "audit",
+          "proofMode": "real-stack",
+          "observer": "Query over license_validations and audit rows for the run's keys",
+          "expectedObservation": "Every validation attempt (success, invalid key, device-limit rejection, rate limit) leaves a durable log row with IP and result; rows are never deleted, only anonymized under retention.",
+          "artifact": "evidence/infrastructure-license-sdk/audit"
+        },
+        {
+          "assertionClass": "owner-notification",
+          "proofMode": "real-stack",
+          "observer": "Owner notification sink for license health events",
+          "expectedObservation": "Grace lapses and server-side lookup failures notify the owner; routine validations and customer-side rate limits do not.",
+          "artifact": "evidence/infrastructure-license-sdk/owner-notification"
+        },
+        {
+          "assertionClass": "branding",
+          "proofMode": "real-stack",
+          "observer": "Capture of SDK-surfaced message templates and portal license pages",
+          "expectedObservation": "Customer-facing license copy leads with the owner's brand and support path, with only subtle powered-by-SomniBot attribution on portal surfaces.",
+          "artifact": "evidence/infrastructure-license-sdk/branding"
+        },
+        {
+          "assertionClass": "replay-safety",
+          "proofMode": "real-stack",
+          "observer": "Harness replaying identical validate, heartbeat, and deactivate requests",
+          "expectedObservation": "Replays create no duplicate sessions, consume no extra device slots, flip no key status twice, and grant nothing beyond the single original entitlement.",
+          "artifact": "evidence/infrastructure-license-sdk/replay-safety"
+        },
+        {
+          "assertionClass": "cleanup",
+          "proofMode": "real-stack",
+          "observer": "Post-run sweep of run-prefixed customers, products, keys, and sessions",
+          "expectedObservation": "All run-prefixed license fixtures are removed or anonymized; validation-log audit rows persist per anonymize-over-delete.",
+          "artifact": "evidence/infrastructure-license-sdk/cleanup"
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "infrastructure-license-sdk-def",
+          "class": "DEF",
+          "disposition": "required",
+          "promise": "Out of the box (portal_only, 3 devices, 300s heartbeat, 24h offline grace, guild membership required), a customer's app validates its key, receives features and a session, heartbeats on schedule, and deactivates cleanly on uninstall.",
+          "expectedOutcome": "validate() returns valid with session id, tier, and features; heartbeats at the directed 300s cadence keep the session fresh; deactivate() frees the device slot; all attempts appear in license_validations.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The bound customer's test-guild membership satisfies the default membership requirement." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The created session row is reachable only through guild-scoped owner queries, never anonymously." },
+            { "assertionClass": "audit", "expectedObservation": "The validation and deactivation both leave durable log rows with results and IP." },
+            { "assertionClass": "owner-notification", "expectedObservation": "A healthy default lifecycle raises no owner alerts." },
+            { "assertionClass": "branding", "expectedObservation": "The success message greets the customer under the owner's brand." },
+            { "assertionClass": "replay-safety", "expectedObservation": "The same device validating twice reuses one session and one device slot." },
+            { "assertionClass": "cleanup", "expectedObservation": "The run-prefixed key, customer, and session are swept after the run." }
+          ]
+        },
+        {
+          "id": "infrastructure-license-sdk-set-a",
+          "class": "SET-A",
+          "disposition": "required",
+          "promise": "Dashboard config takes effect: setting max_devices=1 and heartbeat_interval_seconds=60 for the product means a second device is rejected at the limit and the SDK heartbeats at the new 60-second cadence.",
+          "expectedOutcome": "PUT /api/license/config/[productId] persists; device one validates, device two is refused with the device-limit message; observed heartbeat spacing follows the 60s server-directed interval.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The rejected second device causes no change to the customer's guild roles or access." },
+            { "assertionClass": "database-RLS", "expectedObservation": "The product config row is writable only by the owning guild's owner." },
+            { "assertionClass": "audit", "expectedObservation": "The config change and the device_limit rejection are both logged." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The owner can see the limit rejection in the dashboard without alert spam." },
+            { "assertionClass": "branding", "expectedObservation": "The limit message names the owner brand and the portal reset path." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Re-submitting the identical config PUT is an idempotent upsert." },
+            { "assertionClass": "cleanup", "expectedObservation": "The tightened test config is removed with its run-prefixed product." }
+          ]
+        },
+        {
+          "id": "infrastructure-license-sdk-set-b",
+          "class": "SET-B",
+          "disposition": "required",
+          "promise": "A second distinct configuration also takes effect: max_devices=5, offline_grace_period_seconds=3600, feature_flags and tier set — five devices coexist, the offline window shortens to one hour, and the SDK receives the flags and tier.",
+          "expectedOutcome": "Five fingerprints hold concurrent sessions; a sixth is refused; a device offline past one hour reports offline_grace_expired instead of the default 24h; getFeatures() and getTier() return the configured values.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Feature-flagged behavior in the test guild follows the configured flags for entitled customers." },
+            { "assertionClass": "database-RLS", "expectedObservation": "All five session rows stay scoped to the owning guild and customer." },
+            { "assertionClass": "audit", "expectedObservation": "The five activations and the sixth rejection are individually logged." },
+            { "assertionClass": "owner-notification", "expectedObservation": "No alert fires for expected limit enforcement." },
+            { "assertionClass": "branding", "expectedObservation": "Portal license cards show the configured tier under the owner's brand." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Re-validating each of the five devices adds no sixth session." },
+            { "assertionClass": "cleanup", "expectedObservation": "All five run-prefixed sessions are swept at teardown." }
+          ]
+        },
+        {
+          "id": "infrastructure-license-sdk-invalid",
+          "class": "INVALID",
+          "disposition": "required",
+          "promise": "Invalid product license config is rejected and rolled back: max_devices=0, a negative heartbeat interval, an offline grace beyond seven days, or an over-length mode string are all refused by validation with the stored config unchanged.",
+          "expectedOutcome": "Each invalid PUT returns a 4xx validation error naming the offending field; a follow-up GET shows the prior config intact; running SDK sessions are unaffected.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Entitled customers in the test guild see no interruption during the rejected config attempts." },
+            { "assertionClass": "database-RLS", "expectedObservation": "No partial or invalid config row is persisted." },
+            { "assertionClass": "audit", "expectedObservation": "The rejected attempts are recorded with their validation failure reasons." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The owner sees the inline validation error, not an escalation." },
+            { "assertionClass": "branding", "expectedObservation": "Validation errors are phrased in the branded, actionable voice." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Repeating the invalid PUT produces the same rejection with zero state drift." },
+            { "assertionClass": "cleanup", "expectedObservation": "No rejected-config residue survives the run." }
+          ]
+        },
+        {
+          "id": "infrastructure-license-sdk-unauth",
+          "class": "UNAUTH",
+          "disposition": "required",
+          "promise": "Permission boundaries hold: an unrelated guild's owner cannot read or revoke this guild's keys or sessions (not-found, never data), and portal requests without a valid token get 401 with nothing leaked.",
+          "expectedOutcome": "Cross-guild GET /api/license-keys/[key], GET /api/license/sessions, and DELETE /api/license/sessions/[id] all return not-found despite valid UUIDs; /api/portal/licenses without x-portal-token returns 401; no customer PII crosses the boundary.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The foreign owner's attempts cause no visible effect in either test guild." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Direct table probes as the foreign owner return zero rows for this guild's license data." },
+            { "assertionClass": "audit", "expectedObservation": "The denied cross-guild attempts are recorded in the audit trail." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The legitimate owner is not disrupted; repeated probing is surfaceable as suspicious activity." },
+            { "assertionClass": "branding", "expectedObservation": "Denial responses are generic and unbranded-internally, leaking no key or customer detail." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Repeated denied attempts accumulate no partial state." },
+            { "assertionClass": "cleanup", "expectedObservation": "Both run-prefixed guilds' license fixtures are swept independently." }
+          ]
+        },
+        {
+          "id": "infrastructure-license-sdk-depfail",
+          "class": "DEPFAIL",
+          "disposition": "required",
+          "promise": "Dependency failure fails safe on both sides: with the license server down, an already-validated device rides the bounded offline window while a never-validated device is refused; a server-side lookup RPC failure returns a fail-closed 500 with no partial session writes.",
+          "expectedOutcome": "The cached device reports offline_grace until the window ends, then offline_grace_expired; the fresh device gets network_error with no entitlement; the RPC-failure response is valid:false with a generic error and no session row.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Guild access tied to entitlement does not expand during the outage." },
+            { "assertionClass": "database-RLS", "expectedObservation": "No session or validation rows are written during the failed-RPC path beyond the error log." },
+            { "assertionClass": "audit", "expectedObservation": "The outage window shows logged network errors and the lookup failure event." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The owner is notified of the server-side lookup failure." },
+            { "assertionClass": "branding", "expectedObservation": "Offline and unreachable messages stay calm, branded, and actionable." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Repeated failing calls during the outage do not corrupt the cache or duplicate sessions on recovery." },
+            { "assertionClass": "cleanup", "expectedObservation": "Outage-simulation fixtures are fully removed after the run." }
+          ]
+        },
+        {
+          "id": "infrastructure-license-sdk-retry",
+          "class": "RETRY",
+          "disposition": "required",
+          "promise": "Transient failures converge: a validation that fails with a transient network fault or a 429 succeeds on retry, ending with exactly one active session for the device and correct honoring of Retry-After.",
+          "expectedOutcome": "After backoff the retried validate() returns valid with the same single session for that fingerprint; the rate-limited call retried too early is refused again, and after the window it succeeds; no duplicate sessions exist.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "The customer's guild standing is unchanged throughout the retry cycle." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Exactly one active session row exists for the fingerprint after convergence." },
+            { "assertionClass": "audit", "expectedObservation": "Failed, rate-limited, and successful attempts are each logged distinctly." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Converged retries raise no owner alert." },
+            { "assertionClass": "branding", "expectedObservation": "The rate-limit message states the wait plainly in the branded voice." },
+            { "assertionClass": "replay-safety", "expectedObservation": "The converged end state equals a single clean validation." },
+            { "assertionClass": "cleanup", "expectedObservation": "Retry-test fixtures are swept with the run." }
+          ]
+        },
+        {
+          "id": "infrastructure-license-sdk-replay",
+          "class": "REPLAY",
+          "disposition": "required",
+          "promise": "Replay grants nothing twice: identical validate, heartbeat, and deactivate requests replayed against the API create no duplicate sessions, consume no extra device slots, double no entitlements, and never mint anything in the play-money game economy.",
+          "expectedOutcome": "Replayed validate reuses the existing session; replayed heartbeat only refreshes last_seen; replayed deactivate on an inactive session is a harmless no-op; slot accounting and key status are byte-identical to the single-execution baseline, and no game-economy row changed.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "No duplicate role grants or game-currency effects appear in the test guild from replays." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Session and slot counts match the no-replay baseline exactly." },
+            { "assertionClass": "audit", "expectedObservation": "Replayed requests are logged without inflating grant or status-change history." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Replays produce no duplicate notifications." },
+            { "assertionClass": "branding", "expectedObservation": "Replay responses reuse the standard branded templates without duplication artifacts." },
+            { "assertionClass": "replay-safety", "expectedObservation": "The end state is provably identical to single execution across keys, sessions, and validations." },
+            { "assertionClass": "cleanup", "expectedObservation": "Replay fixtures are removed; the validation log of the replays persists as audit." }
+          ]
+        },
+        {
+          "id": "infrastructure-license-sdk-restart",
+          "class": "RESTART",
+          "disposition": "required",
+          "promise": "State survives a full stack restart: keys, sessions, and product config persist in Supabase; a customer app restarting mid-session revalidates into its existing session rather than consuming a fresh device slot.",
+          "expectedOutcome": "After dashboard restart, admin session listings and portal views match pre-restart state; the restarted SDK's validate() reoccupies the same fingerprint's session; heartbeat cadence resumes at the configured interval.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Entitlement-driven guild behavior is continuous across the restart." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Persisted license rows retain their guild scoping and protections after restart." },
+            { "assertionClass": "audit", "expectedObservation": "Pre-restart validation history remains intact and ordered." },
+            { "assertionClass": "owner-notification", "expectedObservation": "A clean restart raises no false license alerts." },
+            { "assertionClass": "branding", "expectedObservation": "Branded license surfaces render identically after restart." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Restart-triggered revalidation does not double-occupy device slots." },
+            { "assertionClass": "cleanup", "expectedObservation": "Restart-test fixtures are swept normally after the run." }
+          ]
+        },
+        {
+          "id": "infrastructure-license-sdk-race",
+          "class": "RACE",
+          "disposition": "required",
+          "promise": "Concurrency is safe at the limit: two new devices validating simultaneously for the last free slot resolve atomically — exactly one wins the slot and the other receives the device-limit rejection, with no over-allocation.",
+          "expectedOutcome": "The FOR-UPDATE device registration RPC serializes the race; active session count never exceeds max-devices at any instant; the loser gets the branded limit message pointing at the reset path.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "Only the winning device's app reports activation to the customer." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Session rows never exceed the configured device cap, even transiently." },
+            { "assertionClass": "audit", "expectedObservation": "Both racing attempts are logged: one success, one device_limit rejection." },
+            { "assertionClass": "owner-notification", "expectedObservation": "The routine race outcome raises no owner alert." },
+            { "assertionClass": "branding", "expectedObservation": "The losing device's message is the standard branded limit template." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Re-running the race yields the same single-winner invariant every time." },
+            { "assertionClass": "cleanup", "expectedObservation": "Both racers' fixtures are swept after the run." }
+          ]
+        },
+        {
+          "id": "infrastructure-license-sdk-xguild",
+          "class": "XGUILD",
+          "disposition": "required",
+          "promise": "Guild isolation is total: an identical product and key setup in a second run-prefixed guild shares nothing — validations, sessions, configs, and admin views for guild A never surface guild B data and vice versa.",
+          "expectedOutcome": "Each guild's keys validate only against its own products; owner A's key lookups, session lists, and revocations cannot touch guild B rows; per-guild rate-limit and log records stay separate.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "License-gated behavior in each test guild reflects only that guild's entitlements." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Cross-guild queries return zero rows in both directions." },
+            { "assertionClass": "audit", "expectedObservation": "Validation logs carry the correct guild-scoped product for every attempt." },
+            { "assertionClass": "owner-notification", "expectedObservation": "Each owner receives only their own guild's license notices." },
+            { "assertionClass": "branding", "expectedObservation": "Each guild's license messages use that guild's own brand configuration." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Replays in guild A cause no observable change in guild B." },
+            { "assertionClass": "cleanup", "expectedObservation": "Both guilds' run-prefixed license fixtures are swept independently and completely." }
+          ]
+        },
+        {
+          "id": "infrastructure-license-sdk-cleanup",
+          "class": "CLEANUP",
+          "disposition": "required",
+          "promise": "Run-prefixed license resources are fully cleaned: test customers, products, keys, sessions, and portal tokens created by the run are removed or anonymized, while validation-log audit rows persist under anonymize-over-delete.",
+          "expectedOutcome": "A post-run sweep finds zero run-prefixed license rows or active test sessions; the validation log retains anonymized rows documenting the run; a second sweep pass finds nothing.",
+          "assertions": [
+            { "assertionClass": "Discord", "expectedObservation": "No run-prefixed license artifacts remain visible in either test guild." },
+            { "assertionClass": "database-RLS", "expectedObservation": "Swept tables contain no run-prefixed rows; RLS policies are unchanged by cleanup." },
+            { "assertionClass": "audit", "expectedObservation": "Anonymized validation-log rows for the run persist and remain queryable." },
+            { "assertionClass": "owner-notification", "expectedObservation": "A cleanup summary is available without alert noise." },
+            { "assertionClass": "branding", "expectedObservation": "Cleanup leaves owner branding configuration untouched." },
+            { "assertionClass": "replay-safety", "expectedObservation": "Running the sweep twice is safe and idempotent." },
+            { "assertionClass": "cleanup", "expectedObservation": "Every created license resource is matched to a deletion or anonymization in the sweep report." }
+          ]
+        }
+      ]
+    }
+  ]
+}

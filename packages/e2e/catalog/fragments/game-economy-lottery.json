@@ -1,0 +1,793 @@
+{
+ "category": "game-economy",
+ "domains": [
+  {
+   "id": "game-economy-lottery",
+   "name": "Transparent Lottery",
+   "category": "game-economy",
+   "promise": "Members buy play-money lottery tickets per guild with /lottery buy, each ticket grows one shared jackpot, and an always-on schedule draws a single stable winner who is paid the whole play-money pot exactly once — a draw that fires with no tickets cancels and resets the pot with no coins ever trapped, ticket buys are atomic and fully refunded on failure, and every reward and cost stays inside the fake game economy and never touches real commerce.",
+   "controls": [
+    {
+     "id": "lottery-enabled",
+     "description": "Master switch for the lottery; when off, the draw schedule stops and /lottery commands explain the feature is disabled.",
+     "valueType": "boolean",
+     "constraints": {}
+    },
+    {
+     "id": "lottery-ticket-price",
+     "description": "Play-money coin cost of one lottery ticket, read from economy_lottery_ticket_price.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 0,
+      "max": 1000000
+     }
+    },
+    {
+     "id": "lottery-max-tickets",
+     "description": "Conservative per-member wager cap: the maximum tickets one member may hold in a single drawing, read from economy_lottery_max_tickets.",
+     "valueType": "integer",
+     "constraints": {
+      "min": 1,
+      "max": 100
+     }
+    },
+    {
+     "id": "lottery-schedule",
+     "description": "How often the always-on scheduler draws a winner, read from economy_lottery_schedule.",
+     "valueType": "enum",
+     "constraints": {
+      "values": [
+       "6h",
+       "12h",
+       "daily",
+       "weekly",
+       "biweekly",
+       "monthly"
+      ]
+     }
+    }
+   ],
+   "defaults": [
+    {
+     "controlId": "lottery-enabled",
+     "value": true,
+     "rationale": "A transparent jackpot is a flagship game-economy loop and ships on for the maximal out-of-box experience."
+    },
+    {
+     "controlId": "lottery-ticket-price",
+     "value": 100,
+     "rationale": "A light, approachable play-coin entry price that keeps a jackpot meaningful without pricing out casual members."
+    },
+    {
+     "controlId": "lottery-max-tickets",
+     "value": 10,
+     "rationale": "A conservative default wager cap so no single member can run away with the odds; fully owner-tunable."
+    },
+    {
+     "controlId": "lottery-schedule",
+     "value": "weekly",
+     "rationale": "A weekly cadence gives the pot time to build into an exciting prize while guaranteeing a regular payout."
+    }
+   ],
+   "permissions": [
+    {
+     "id": "use-lottery-commands",
+     "actor": "Any guild member",
+     "action": "Run /lottery buy and /lottery view",
+     "defaultDecision": "allow",
+     "enforcement": "Lottery slash commands respond for every member; /lottery buy only ever debits the invoking member's own wallet and adds tickets under the invoking member's own id."
+    },
+    {
+     "id": "configure-lottery",
+     "actor": "Dashboard user with owner or admin access to the guild",
+     "action": "Edit lottery settings on the dashboard economy lottery page",
+     "defaultDecision": "allow",
+     "enforcement": "Dashboard session auth plus Supabase RLS restrict guild_config writes to authorized guild administrators."
+    },
+    {
+     "id": "force-lottery-draw",
+     "actor": "Any guild member",
+     "action": "Trigger a lottery draw, pick the winner, or reassign the jackpot",
+     "defaultDecision": "deny",
+     "enforcement": "There is no member-facing draw command; draws run only on the always-on scheduler, and the winner is selected and stored atomically by lottery_claim_drawing with no code path letting a member influence it."
+    }
+   ],
+   "messages": [
+    {
+     "id": "tickets-purchased",
+     "trigger": "A member buys lottery tickets with play-money coins",
+     "surface": "Channel embed replying to /lottery buy",
+     "audience": "The buying member and the channel",
+     "defaultTemplate": "You're in, {member-name}! {ticket-count} ticket(s) bought for {total-cost} play coins — the jackpot is now {jackpot} play coins.",
+     "variables": [
+      "member-name",
+      "ticket-count",
+      "total-cost",
+      "jackpot"
+     ]
+    },
+    {
+     "id": "winner-drawn",
+     "trigger": "A scheduled draw resolves with at least one ticket sold",
+     "surface": "Announcement embed in the configured lottery log channel",
+     "audience": "The winner and the whole guild",
+     "defaultTemplate": "The draw is in! {winner-mention} wins the {jackpot}-play-coin jackpot on ticket #{winning-number}. A fresh lottery is open — grab tickets with /lottery buy.",
+     "variables": [
+      "winner-mention",
+      "jackpot",
+      "winning-number"
+     ]
+    },
+    {
+     "id": "drawing-reset",
+     "trigger": "A scheduled draw fires with no tickets sold",
+     "surface": "Announcement embed in the configured lottery log channel",
+     "audience": "The whole guild",
+     "defaultTemplate": "No tickets this time — the lottery pot has been reset. Buy tickets with /lottery buy to kick off the next one!",
+     "variables": []
+    },
+    {
+     "id": "purchase-refunded",
+     "trigger": "The atomic ticket-buy RPC fails after the wallet debit, or the drawing closed for its draw between checkout and the row lock",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "That ticket purchase didn't go through, {member-name} — your {total-cost} play coins are already back in your wallet.",
+     "variables": [
+      "member-name",
+      "total-cost"
+     ]
+    },
+    {
+     "id": "lottery-unavailable",
+     "trigger": "The lottery backend is temporarily unreachable when a member runs a lottery command",
+     "surface": "Ephemeral reply to the invoking member",
+     "audience": "The invoking member",
+     "defaultTemplate": "The lottery booth is catching its breath, {member-name} — give it a moment and try /lottery again.",
+     "variables": [
+      "member-name"
+     ]
+    },
+    {
+     "id": "draw-degraded",
+     "trigger": "A scheduled draw's payout keeps failing or a stuck drawing had to be recovered",
+     "surface": "Owner alert channel",
+     "audience": "Guild owner and administrators",
+     "defaultTemplate": "Heads up: a lottery draw needs a hand — the {jackpot}-play-coin drawing hit a snag and is queued for automatic retry. Nothing was double-paid and everything is logged.",
+     "variables": [
+      "jackpot"
+     ]
+    }
+   ],
+   "state": {
+    "initial": "no-active-drawing",
+    "values": [
+     {
+      "id": "no-active-drawing",
+      "description": "No active drawing exists in this guild; /lottery view invites the first buy, which opens a fresh drawing."
+     },
+     {
+      "id": "accepting-tickets",
+      "description": "An active drawing exists; members buy tickets, each atomic buy grows the shared jackpot, and the scheduler will draw when the interval elapses."
+     },
+     {
+      "id": "drawing-claimed",
+      "description": "The scheduler claimed the drawing and stored its single stable winner; the jackpot payout is pending and retried until it lands exactly once."
+     },
+     {
+      "id": "drawn",
+      "description": "The stored winner has been paid the whole jackpot exactly once and the drawing is finalised as drawn."
+     },
+     {
+      "id": "cancelled-empty",
+      "description": "A draw fired with no tickets; the drawing was cancelled under its row lock and the pot reset, with no coins trapped."
+     },
+     {
+      "id": "disabled",
+      "description": "Lottery disabled by configuration; no draw schedule runs and /lottery commands explain the feature is off."
+     }
+    ],
+    "transitions": [
+     {
+      "id": "open-drawing",
+      "from": "no-active-drawing",
+      "to": "accepting-tickets",
+      "trigger": "A member runs /lottery buy and ensureActiveDrawing creates the guild's active drawing",
+      "expectedEffect": "Exactly one active economy_lottery_drawings row is created and the first atomic ticket buy debits the member and seeds the jackpot."
+     },
+     {
+      "id": "buy-tickets",
+      "from": "accepting-tickets",
+      "to": "accepting-tickets",
+      "trigger": "A member runs /lottery buy with sufficient play-money balance",
+      "expectedEffect": "lottery_buy_tickets locks the drawing, enforces the per-member max, inserts the tickets, and increments the jackpot in one transaction; a failed buy is fully refunded."
+     },
+     {
+      "id": "claim-winner",
+      "from": "accepting-tickets",
+      "to": "drawing-claimed",
+      "trigger": "The scheduled interval elapses with tickets sold and lottery_claim_drawing claims the row",
+      "expectedEffect": "The drawing flips active to drawing while atomically picking and persisting the single winning ticket, so the winner is stable across retries."
+     },
+     {
+      "id": "pay-winner",
+      "from": "drawing-claimed",
+      "to": "drawn",
+      "trigger": "lottery_award_jackpot credits the stored winner and finalises the drawing",
+      "expectedEffect": "The whole jackpot lands in the stored winner's wallet exactly once, the row becomes drawn, and the branded win announcement posts."
+     },
+     {
+      "id": "recover-legacy-draw",
+      "from": "drawing-claimed",
+      "to": "accepting-tickets",
+      "trigger": "The scheduler finds a legacy drawing stuck in drawing with a NULL winner from a mid-claim crash",
+      "expectedEffect": "The guarded single-statement update reverts the row to active so it re-enters the normal pipeline; because a NULL winner proves no payout ever happened, this is double-pay-safe."
+     },
+     {
+      "id": "cancel-empty-draw",
+      "from": "accepting-tickets",
+      "to": "cancelled-empty",
+      "trigger": "The scheduled interval elapses with no tickets sold",
+      "expectedEffect": "lottery_cancel_drawing_if_empty re-checks emptiness under the row lock and cancels in the same transaction; any buy that raced the cancel is fully refunded, so no coins are trapped."
+     },
+     {
+      "id": "reopen-after-draw",
+      "from": "drawn",
+      "to": "no-active-drawing",
+      "trigger": "The finalised drawing is retired",
+      "expectedEffect": "No active drawing remains; the next /lottery buy opens a fresh one with the jackpot reset to zero."
+     },
+     {
+      "id": "reopen-after-reset",
+      "from": "cancelled-empty",
+      "to": "no-active-drawing",
+      "trigger": "The cancelled empty drawing is retired",
+      "expectedEffect": "No active drawing remains; the next /lottery buy opens a fresh one with the jackpot reset to zero."
+     },
+     {
+      "id": "lottery-toggled-off",
+      "from": "accepting-tickets",
+      "to": "disabled",
+      "trigger": "Owner turns lottery-enabled off on the dashboard",
+      "expectedEffect": "The draw schedule stops and /lottery commands reply with the disabled explanation; the drawing and ticket rows are preserved untouched."
+     },
+     {
+      "id": "lottery-toggled-on",
+      "from": "disabled",
+      "to": "no-active-drawing",
+      "trigger": "Owner turns lottery-enabled back on",
+      "expectedEffect": "The scheduler resumes on the configured interval and the next /lottery buy opens a fresh drawing with all prior history intact."
+     }
+    ]
+   },
+   "failures": [
+    {
+     "id": "ticket-buy-failed",
+     "trigger": "lottery_buy_tickets fails after economy_subtract_balance debited, or the drawing was claimed or cancelled between checkout and the RPC's row lock",
+     "expectedBehavior": "The entire buy transaction rolls back so no tickets are inserted and the jackpot is unchanged, the debited coins are refunded exactly once through economy_add_balance, and the member is told plainly their coins are back — never charged for unwinnable or unrecorded tickets.",
+     "resultingState": "accepting-tickets",
+     "retry": "never",
+     "messageId": "purchase-refunded",
+     "auditEvent": "lottery.ticket_buy_refunded",
+     "ownerNotification": false
+    },
+    {
+     "id": "jackpot-payout-failed",
+     "trigger": "lottery_award_jackpot fails after lottery_claim_drawing stored the winning ticket",
+     "expectedBehavior": "The drawing stays in drawing with its single stored winner recorded, the next scheduler tick retries the SAME winner, and the jackpot is paid exactly once — never re-rolled to a different winner and never double-paid.",
+     "resultingState": "drawing-claimed",
+     "retry": "automatic",
+     "messageId": "draw-degraded",
+     "auditEvent": "lottery.jackpot_payout_retry_pending",
+     "ownerNotification": true
+    },
+    {
+     "id": "lottery-backend-unreachable",
+     "trigger": "The Supabase dependency is unreachable when a member runs /lottery buy or view, or when a scheduled draw tick runs",
+     "expectedBehavior": "Commands reply with the branded lottery-unavailable message and no coins move, the draw tick logs and skips without crashing the bot, and the next tick retries; no ticket, jackpot, or payout is applied twice.",
+     "resultingState": "accepting-tickets",
+     "retry": "automatic",
+     "messageId": "lottery-unavailable",
+     "auditEvent": "lottery.command_degraded",
+     "ownerNotification": false
+    }
+   ],
+   "evidence": [
+    {
+     "assertionClass": "Discord",
+     "proofMode": "real-stack",
+     "observer": "Discord observer client joined to the primary test guild",
+     "expectedObservation": "Lottery behavior contracted here is directly observed working in the live test guild: /lottery buy debits play coins and grows the jackpot, /lottery view reports the pot, tickets, and schedule, a scheduled draw pays exactly one stable winner the whole pot, and an empty draw resets the pot.",
+     "artifact": "evidence/game-economy-lottery/discord"
+    },
+    {
+     "assertionClass": "database-RLS",
+     "proofMode": "real-stack",
+     "observer": "Supabase service-role SQL probe paired with anon and second-guild RLS probe clients",
+     "expectedObservation": "The economy_lottery_drawings, economy_lottery_tickets, economy_wallets, and guild_config rows enforce guild-scoped row-level security: the service role sees scenario rows while anon and cross-guild clients see none.",
+     "artifact": "evidence/game-economy-lottery/database-rls"
+    },
+    {
+     "assertionClass": "audit",
+     "proofMode": "real-stack",
+     "observer": "Audit-log table reader using the service role",
+     "expectedObservation": "Every state change in this domain lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation observed.",
+     "artifact": "evidence/game-economy-lottery/audit"
+    },
+    {
+     "assertionClass": "owner-notification",
+     "proofMode": "real-stack",
+     "observer": "Owner alert channel observer in the primary test guild",
+     "expectedObservation": "This domain's failure branches raise exactly one owner alert carrying a human-readable reason and remediation hint; happy paths raise none.",
+     "artifact": "evidence/game-economy-lottery/owner-notification"
+    },
+    {
+     "assertionClass": "branding",
+     "proofMode": "real-stack",
+     "observer": "Embed and message snapshot inspector comparing captures against the configured brand kit",
+     "expectedObservation": "Captured embeds and messages for this domain match the owner's white-label brand kit and configured voice preset, including the subtle powered-by-SomniBot attribution.",
+     "artifact": "evidence/game-economy-lottery/branding"
+    },
+    {
+     "assertionClass": "replay-safety",
+     "proofMode": "real-stack",
+     "observer": "Event re-delivery harness with a duplicate detector over ticket buys, draws, and jackpot payouts",
+     "expectedObservation": "Replaying recorded triggers for this domain against the live stack leaves end state unchanged: no duplicate play-money debits, ticket inserts, or jackpot payouts, and the stored winner never changes.",
+     "artifact": "evidence/game-economy-lottery/replay-safety"
+    },
+    {
+     "assertionClass": "cleanup",
+     "proofMode": "real-stack",
+     "observer": "Post-run resource sweeper diffing run-prefixed inventory before and after the suite",
+     "expectedObservation": "After the suite a sweep of the test guilds and database finds no run-prefixed resources from this domain remaining anywhere.",
+     "artifact": "evidence/game-economy-lottery/cleanup"
+    }
+   ],
+   "scenarios": [
+    {
+     "id": "game-economy-lottery-def",
+     "class": "DEF",
+     "disposition": "required",
+     "promise": "Out of the box, /lottery buy costs 100 play coins per ticket with a 10-ticket per-member cap, each buy grows one shared jackpot, and the weekly scheduled draw pays a single stable winner the whole pot.",
+     "expectedOutcome": "run-member-a buys 3 tickets for exactly 300 play coins and run-member-b buys 2 for 200 so the jackpot reads 500; an accelerated draw window fires the scheduled draw, pays exactly one winner the full 500-coin pot, and posts the winning ticket number.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "/lottery view shows the 500-coin jackpot with 5 tickets and 2 players, the two wallets reflect the exact 300 and 200 play-coin debits, and after the draw window exactly one winner's wallet gains the full 500 coins with one branded win announcement naming the winning ticket."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All lottery rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_lottery_drawings, economy_lottery_tickets, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each lottery action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing lottery surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, ticket inserts, or jackpot payouts; persisted idempotency keys and the stable stored winner show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test drawing rows, ticket rows, wallet entries, and winner announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-lottery-set-a",
+     "class": "SET-A",
+     "disposition": "required",
+     "promise": "Dashboard configuration takes live effect: the owner sets ticket price 250, per-member max 5, and schedule 6h.",
+     "expectedOutcome": "Without a bot restart, the next /lottery buy debits exactly 250 play coins per ticket, a sixth ticket for one member is refused, and the scheduler draws on the tightened 6h cadence.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the dashboard save, /lottery buy debits exactly 250 play coins per ticket with no restart, a member's attempt to exceed 5 tickets is refused with a branded cap message, and /lottery view reports the 6h schedule."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All lottery rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_lottery_drawings, economy_lottery_tickets, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each lottery action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing lottery surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, ticket inserts, or jackpot payouts; persisted idempotency keys and the stable stored winner show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test drawing rows, ticket rows, wallet entries, and winner announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-lottery-set-b",
+     "class": "SET-B",
+     "disposition": "required",
+     "promise": "The owner can tighten the wager cap independently: setting the per-member max to 1 makes the lottery strictly one ticket per member while price, schedule, and draws keep working.",
+     "expectedOutcome": "With the per-member max at 1, a member's first ticket is accepted and a second is refused with a branded cap message, and the scheduled draw still pays a single stable winner.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A member's first /lottery buy succeeds, a second buy in the same drawing returns a branded maximum-tickets refusal, and the next scheduled draw still pays exactly one winner the full pot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All lottery rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_lottery_drawings, economy_lottery_tickets, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each lottery action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing lottery surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, ticket inserts, or jackpot payouts; persisted idempotency keys and the stable stored winner show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test drawing rows, ticket rows, wallet entries, and winner announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-lottery-invalid",
+     "class": "INVALID",
+     "disposition": "required",
+     "promise": "Invalid lottery configuration is rejected atomically: a negative ticket price and a zero per-member max never persist.",
+     "expectedOutcome": "The dashboard lottery page surfaces a clear validation error, guild_config keeps its prior values byte-for-byte, and live bot behavior is unchanged on the very next /lottery buy.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "A /lottery buy run immediately after the rejected save still debits the previous valid ticket price and honors the previous valid per-member cap, proving no partial write reached the bot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All lottery rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_lottery_drawings, economy_lottery_tickets, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "One audit row records the rejected lottery configuration attempt with the validation reason; no config-change audit row is written."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing lottery surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, ticket inserts, or jackpot payouts; persisted idempotency keys and the stable stored winner show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test drawing rows, ticket rows, wallet entries, and winner announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-lottery-unauth",
+     "class": "UNAUTH",
+     "disposition": "required",
+     "promise": "The lottery is protected from unauthorized actors: no member can force a draw or reassign the jackpot, a buy only ever spends the buyer's own wallet, and a non-admin dashboard session cannot save lottery settings.",
+     "expectedOutcome": "run-member-b's /lottery buy only debits run-member-b's own wallet, no member command can trigger a draw or change the winner, and the non-admin dashboard save is refused.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "run-member-b's /lottery buy debits only run-member-b's wallet and adds tickets under run-member-b's id, no member-facing path can draw or reassign the jackpot, and the non-admin dashboard save returns an authorization error."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All lottery rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_lottery_drawings, economy_lottery_tickets, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "An audit row records the denied lottery configuration attempt with actor and reason permission-denied."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing lottery surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, ticket inserts, or jackpot payouts; persisted idempotency keys and the stable stored winner show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test drawing rows, ticket rows, wallet entries, and winner announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-lottery-depfail",
+     "class": "DEPFAIL",
+     "disposition": "required",
+     "promise": "When the Supabase dependency is unreachable, the lottery fails safe: no crash, friendly branded degradation, and no play-coin loss.",
+     "expectedOutcome": "With database access blocked, /lottery buy and view reply with the branded lottery-unavailable message and no coins move, and a draw tick during the outage logs and skips without crashing; after restoring the connection a fresh /lottery buy debits exactly once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "During the outage /lottery view and /lottery buy reply with the branded lottery-unavailable template in the owner's voice and no wallet mutation occurs; after restoration a fresh /lottery buy debits exactly once and records the tickets."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All lottery rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_lottery_drawings, economy_lottery_tickets, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each lottery action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed lottery command."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing lottery surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, ticket inserts, or jackpot payouts; persisted idempotency keys and the stable stored winner show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test drawing rows, ticket rows, wallet entries, and winner announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-lottery-retry",
+     "class": "RETRY",
+     "disposition": "required",
+     "promise": "A draw whose jackpot payout fails converges safely: the single stored winner is retried on the next tick and paid exactly once, never re-rolled and never double-paid.",
+     "expectedOutcome": "With a fault injected on lottery_award_jackpot after lottery_claim_drawing stored the winner, the drawing stays in the drawing state with its winner recorded and the owner is alerted; the next tick retries the SAME winner and pays the full jackpot exactly once.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "After the injected payout fault no win announcement is posted and no wallet changes; on the next tick exactly one win announcement names the same stored winner and that winner's wallet gains the full jackpot exactly once."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All lottery rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_lottery_drawings, economy_lottery_tickets, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each lottery action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives exactly one reasoned draw-degraded alert for the failed payout, carrying the jackpot amount and the note that nothing was double-paid."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing lottery surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The stored winner and the winning ticket number are identical before and after the retry, and the jackpot payout applies under one idempotency effect so the ledger shows a single credit — never a re-rolled winner or a double payout."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test drawing rows, ticket rows, wallet entries, and winner announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-lottery-replay",
+     "class": "REPLAY",
+     "disposition": "required",
+     "promise": "Replays never double-charge or double-pay: re-delivering the buy and the scheduled draw leaves one set of tickets, one jackpot payout, and one unchanged winner.",
+     "expectedOutcome": "After replaying the recorded buy and draw events, the buyer still holds exactly the tickets they bought, the stored winner is unchanged, and the winner's wallet shows exactly one jackpot credit, byte-identical to the pre-replay state.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The channel shows exactly one ticket-purchase confirmation and one win announcement despite the replays, and /lottery view and the wallet totals are unchanged from the pre-replay snapshot."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All lottery rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_lottery_drawings, economy_lottery_tickets, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each lottery action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing lottery surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "lottery_award_jackpot returns rows only for the call that performed the payout, so replayed draws are recorded as deduplicated no-ops; the ticket inserts and the jackpot credit each show exactly one applied effect and the stored winner never changes."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test drawing rows, ticket rows, wallet entries, and winner announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-lottery-restart",
+     "class": "RESTART",
+     "disposition": "required",
+     "promise": "Lottery state survives a full stack restart: the active drawing, its tickets, and the jackpot persist, and a claimed-but-unpaid drawing resumes and pays its stored winner exactly once without a double draw.",
+     "expectedOutcome": "After restarting bot and dashboard, /lottery view matches the pre-restart snapshot exactly, the draw schedule resumes on its configured interval, and a drawing left in the drawing state with a stored winner is paid exactly once by the first post-restart tick.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Post-restart /lottery view matches the pre-restart jackpot, ticket count, and schedule exactly, and a drawing that was mid-payout before the restart pays its stored winner exactly once with a single win announcement — never a second draw."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All lottery rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_lottery_drawings, economy_lottery_tickets, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each lottery action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing lottery surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The stored winner persists across the restart and lottery_award_jackpot pays it under a single effect, so the restart-spanning interval yields exactly one payout and never re-rolls the winner."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test drawing rows, ticket rows, wallet entries, and winner announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-lottery-race",
+     "class": "RACE",
+     "disposition": "required",
+     "promise": "Concurrent lottery actions serialize safely: a /lottery buy landing exactly as the scheduler draws either commits into the pool or is fully refunded, and simultaneous draw ticks claim the drawing exactly once.",
+     "expectedOutcome": "A buy racing the draw either wins its row lock before the claim and is counted, or fails the post-lock status guard and is refunded in full, and two simultaneous draw ticks yield exactly one claimed winner and one payout.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The buy that raced the draw either shows a normal ticket confirmation or a branded refund message with the coins returned, never unwinnable tickets, and the simultaneous draw ticks produce exactly one win announcement naming one stable winner."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All lottery rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_lottery_drawings, economy_lottery_tickets, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each lottery action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing lottery surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "The lottery_buy_tickets row lock serializes against lottery_claim_drawing and lottery_cancel_drawing_if_empty, so the ledger shows exactly one effect per action: a counted buy, a refunded buy, or a single claim — never a double debit or a lost refund."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test drawing rows, ticket rows, wallet entries, and winner announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-lottery-xguild",
+     "class": "XGUILD",
+     "disposition": "required",
+     "promise": "The lottery is strictly per-guild: buying and drawing in a second guild never touches the first guild's drawing, tickets, wallet, or jackpot.",
+     "expectedOutcome": "run-member-a buys tickets and triggers a draw in test guild B; guild A's drawing, tickets, wallet, and /lottery view are unchanged, and guild B's drawing reflects only guild B's configured ticket price.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "Guild A's /lottery view is identical before and after the guild B activity, and guild B's ticket buy debits guild B's wallet at guild B's configured price with guild B's own jackpot and winner."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "A client scoped to guild B reads zero guild A economy_lottery_drawings and economy_lottery_tickets rows and vice versa; service-role probes confirm each guild's drawing, ticket, and wallet rows evolved independently."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each lottery action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing lottery surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, ticket inserts, or jackpot payouts; persisted idempotency keys and the stable stored winner show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "Every run-prefixed resource this scenario created (test drawing rows, ticket rows, wallet entries, and winner announcement embeds) is removed by the cleanup pass; operational rows are deleted while audit history is anonymized rather than deleted, and a final sweep finds zero leftovers."
+      }
+     ]
+    },
+    {
+     "id": "game-economy-lottery-cleanup",
+     "class": "CLEANUP",
+     "disposition": "required",
+     "promise": "The suite leaves no trace: every run-prefixed lottery resource is removed and verified absent.",
+     "expectedOutcome": "Run-prefixed drawing rows, ticket rows, wallet entries, and winner announcement embeds are deleted; a final sweep finds zero run-prefixed lottery resources while audit history remains, anonymized where member data applied.",
+     "assertions": [
+      {
+       "assertionClass": "Discord",
+       "expectedObservation": "The test guilds contain no run-prefixed lottery ticket confirmations, win announcements, or reset notices after cleanup."
+      },
+      {
+       "assertionClass": "database-RLS",
+       "expectedObservation": "All lottery rows touched by this scenario carry the test guild id; a service-role probe sees the expected economy_lottery_drawings, economy_lottery_tickets, and economy_wallets rows while anon and second-guild clients read zero of them."
+      },
+      {
+       "assertionClass": "audit",
+       "expectedObservation": "Append-only audit rows capture each lottery action in this scenario with actor id, guild id, and the run-prefixed correlation id; no audit row is ever deleted."
+      },
+      {
+       "assertionClass": "owner-notification",
+       "expectedObservation": "The owner alert channel receives no alert on this scenario's happy path and exactly one reasoned alert whenever the scenario exercises a failure branch."
+      },
+      {
+       "assertionClass": "branding",
+       "expectedObservation": "Every member-facing lottery surface in this scenario shows the owner's configured brand name, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording."
+      },
+      {
+       "assertionClass": "replay-safety",
+       "expectedObservation": "Re-delivering this scenario's triggering events yields no duplicate play-money debits, ticket inserts, or jackpot payouts; persisted idempotency keys and the stable stored winner show exactly one effect per logical action."
+      },
+      {
+       "assertionClass": "cleanup",
+       "expectedObservation": "The sweeper diff shows every run-prefixed lottery resource created by this domain's scenarios was removed, with audit rows retained in anonymized form."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
