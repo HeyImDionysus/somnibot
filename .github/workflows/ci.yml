@@ -12,6 +12,7 @@
 #   test-shared         → shared package unit tests (V5 Audit §13.6)
 #   test-launcher       → launcher unit tests (V5 Audit §13.7)
 #   test-integration    → integration tests against local Supabase
+#   test-live           → live-stack E2E: REAL bot JS + initGuildFeatures vs local Supabase
 #   migration-lint      → migration naming, ordering, dangerous ops
 #   db-security-audit   → SECURITY DEFINER search_path + RLS policy audit
 #   type-drift          → REQUIRED: fails if the committed DB-type snapshot is stale
@@ -433,6 +434,102 @@ jobs:
         run: cd packages && supabase stop 2>/dev/null || true
 
   # ──────────────────────────────────────────────────────────────────────────
+  # 7b. Live-Stack E2E Lane — the ONLY job that loads the REAL compiled bot JS
+  #     and drives the REAL production initGuildFeatures against a local
+  #     Supabase (with Realtime — the action-queue listener subscribes). This is
+  #     what catches signature/behaviour drift in the ambient-declared bot
+  #     surface (bot-live-stack.d.ts) that a pure type-check cannot: the live
+  #     runner imports @somnibot/bot/dist/*.js, so a real init regression, a
+  #     dropped economy_enabled gate, or a renamed export fails HERE.
+  #     No real DISCORD_TOKEN is set — Discord-side readback stays gated/pending;
+  #     this proves the DB-observable effect through the real wiring only.
+  # ──────────────────────────────────────────────────────────────────────────
+  test-live:
+    name: 🛰️ Live-Stack E2E
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Install Supabase CLI
+        run: |
+          curl -fsSL -o /tmp/supabase.tar.gz \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin
+          supabase --version
+      - name: Start Supabase local (with Realtime)
+        run: |
+          cd packages
+          for attempt in 1 2 3; do
+            if supabase start; then
+              exit 0
+            else
+              status=$?
+            fi
+
+            if [ "$attempt" -eq 3 ]; then
+              echo "supabase start failed after ${attempt} attempts (exit ${status})"
+              exit "$status"
+            fi
+
+            delay_seconds=$((attempt * 30))
+            echo "supabase start failed (attempt ${attempt}/3, exit ${status}); cleaning up and retrying in ${delay_seconds}s..."
+            supabase stop 2>/dev/null || true
+            sleep "$delay_seconds"
+          done
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Wait for Supabase REST API
+        run: |
+          echo "Waiting for Supabase REST API..."
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:54321/rest/v1/ \
+              -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"; then
+              echo "✅ Supabase REST API ready (attempt $i)"
+              exit 0
+            fi
+            echo "  attempt $i/30 — waiting..."
+            sleep 2
+          done
+          echo "❌ Supabase REST API did not respond within 60s"
+          exit 1
+      # The live runner loads the REAL compiled bot dispatcher/init, so shared +
+      # bot must be built first; testkit is built to prove it compiles.
+      - name: Build shared + bot + testkit
+        run: |
+          pnpm --filter @somnibot/shared build
+          pnpm --filter @somnibot/bot build
+          pnpm --filter @somnibot/testkit build
+      - name: Run live-stack E2E (real initGuildFeatures)
+        run: pnpm --filter @somnibot/testkit test:live -- --reporter=verbose
+        env:
+          # Guard env for the loopback lane. live-setup.ts also force-pins the
+          # safety-critical vars, but setting them here documents the contract
+          # and keeps the guard satisfied even if setup ordering changes.
+          # NB: NO DISCORD_TOKEN — Discord-side readback stays gated/pending.
+          NODE_ENV: test
+          SUPABASE_URL: http://127.0.0.1:54321
+          SUPABASE_SECRET_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
+          DISCORD_GUILD_ID: e2e-live-disposable-guild
+          SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: e2e-live-disposable-guild
+          SOMNIBOT_LOOPBACK_E2E_CONFIRMATION: I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE
+          PAYPAL_ENV: sandbox
+      - name: Stop Supabase
+        if: always()
+        run: cd packages && supabase stop 2>/dev/null || true
+
+  # ──────────────────────────────────────────────────────────────────────────
   # 8. Migration Lint
   # ──────────────────────────────────────────────────────────────────────────
   migration-lint:
@@ -838,6 +935,7 @@ jobs:
       - test-e2e-contract
       - test-testkit
       - test-integration
+      - test-live
       - migration-lint
       - db-security-audit
       - type-drift
@@ -857,6 +955,7 @@ jobs:
           echo "  test-e2e-contract: ${{ needs.test-e2e-contract.result }}"
           echo "  test-testkit:      ${{ needs.test-testkit.result }}"
           echo "  test-integration:  ${{ needs.test-integration.result }}"
+          echo "  test-live:         ${{ needs.test-live.result }}"
           echo "  migration-lint:    ${{ needs.migration-lint.result }}"
           echo "  db-security-audit: ${{ needs.db-security-audit.result }}"
           echo "  type-drift:        ${{ needs.type-drift.result }}"
@@ -877,6 +976,7 @@ jobs:
             "${{ needs.test-e2e-contract.result }}" \
             "${{ needs.test-testkit.result }}" \
             "${{ needs.test-integration.result }}" \
+            "${{ needs.test-live.result }}" \
             "${{ needs.migration-lint.result }}" \
             "${{ needs.db-security-audit.result }}" \
             "${{ needs.type-drift.result }}" \
