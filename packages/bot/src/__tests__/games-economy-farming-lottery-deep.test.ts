@@ -366,7 +366,7 @@ describe('EconomyManager deeper', () => {
     supa.from.mockReturnValue(mockSupabaseChain(walletData(500)));
     supa.rpc.mockResolvedValue({ data: null, error: null });
     const mgr = makeEconMgr(supa);
-    const result = await mgr.pay('u1', 'u2', 100);
+    const result = await mgr.pay('u1', 'u2', 100, 'req-pay-1');
     expect(result).toBeDefined();
   });
 });

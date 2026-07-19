@@ -404,7 +404,9 @@ async function handlePay(interaction: ChatInputCommandInteraction, mgr: EconomyM
     return;
   }
 
-  const result = await mgr.pay(interaction.user.id, target.id, amount);
+  // interaction.id is the idempotency key: a redelivered /pay returns the first
+  // result and never debits the sender twice.
+  const result = await mgr.pay(interaction.user.id, target.id, amount, interaction.id);
   await interaction.reply({ content: result.message, ephemeral: !result.success });
 }
 

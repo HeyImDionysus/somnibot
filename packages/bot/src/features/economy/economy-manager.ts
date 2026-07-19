@@ -751,10 +751,20 @@ export class EconomyManager {
 
   // ── Pay / Transfer ──────────────────────────────────────
 
+  /**
+   * Transfer wallet currency between two members.
+   *
+   * The debit, the receiver credit, and both ledger rows commit as one
+   * serializable database call (economy_pay), keyed on the interaction id so a
+   * redelivered interaction returns the first outcome and never debits twice.
+   * `requestId` MUST be a stable per-invocation id (the Discord interaction id);
+   * without it exactly-once cannot be guaranteed, so the transfer is refused.
+   */
   async pay(
     senderId: string,
     receiverId: string,
     amount: number,
+    requestId: string,
   ): Promise<TransactionResult> {
     const cfg = await this.loadConfig();
 
@@ -762,49 +772,79 @@ export class EconomyManager {
       const wallet = await this.getOrCreateWallet(senderId);
       return { success: false, amount: 0, balance: wallet, message: "You can't pay yourself." };
     }
-    if (amount <= 0) {
+    if (!Number.isFinite(amount) || amount <= 0) {
       const wallet = await this.getOrCreateWallet(senderId);
       return { success: false, amount: 0, balance: wallet, message: 'Amount must be positive.' };
     }
-
-    const senderWallet = await this.getOrCreateWallet(senderId);
-    if (senderWallet.wallet < amount) {
-      return { success: false, amount: 0, balance: senderWallet, message: "You don't have enough in your wallet." };
+    if (!requestId) {
+      log.error('pay() called without an idempotency request id — refusing to transfer');
+      const wallet = await this.getOrCreateWallet(senderId);
+      return { success: false, amount: 0, balance: wallet, message: '❌ Payment could not be processed. Please try again.' };
     }
 
-    // Calculate tax
-    const tax = cfg.economy_pay_tax_pct > 0
-      ? Math.floor(amount * (cfg.economy_pay_tax_pct / 100))
-      : 0;
-    const received = amount - tax;
+    const payArgs = {
+      p_guild_id: this.guild.id,
+      p_sender_id: senderId,
+      p_receiver_id: receiverId,
+      // Pass amount as a string so the client sends it as a JSON string →
+      // Postgres BIGINT, matching debitWallet/creditWallet and avoiding
+      // precision loss beyond Number.MAX_SAFE_INTEGER.
+      p_amount: String(amount),
+      p_tax_pct: cfg.economy_pay_tax_pct ?? 0,
+      p_request_id: requestId,
+    };
 
-    // Debit sender
-    const updatedSender = await this.debitWallet(senderId, amount);
-    if (!updatedSender) {
-      return { success: false, amount: 0, balance: senderWallet, message: "You don't have enough in your wallet." };
+    // economy_pay is idempotent on p_request_id, so an ambiguous transport
+    // failure (e.g. the transfer committed but the HTTP response was lost) is
+    // safe to retry: the retry replays the committed outcome instead of
+    // debiting a second time. Without this, a lost response would surface as a
+    // "failed" message and a user re-run — which mints a NEW interaction id —
+    // would double-debit. Retrying the SAME request id closes that window.
+    let data: unknown = null;
+    let error: { message?: string } | null = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const res = await this.supabase.rpc('economy_pay', payArgs);
+      data = res.data;
+      error = res.error;
+      if (!error) break;
+      log.warn('pay() economy_pay attempt failed; retrying idempotently', {
+        attempt,
+        detail: error.message,
+      });
     }
 
-    // V50-C3: Credit receiver — if this fails, refund the sender so
-    // coins are not destroyed. Previously the creditWallet result was
-    // unchecked and a DB error would silently eat the sender's coins.
-    const receiverWallet = await this.creditWallet(receiverId, received);
-    if (!receiverWallet) {
-      log.error(`pay() creditWallet failed for receiver ${receiverId} — refunding sender ${senderId}`);
-      await this.creditWallet(senderId, amount);
-      return { success: false, amount: 0, balance: await this.getOrCreateWallet(senderId), message: '❌ Payment failed — your coins have been refunded.' };
+    if (error || !data || typeof data !== 'object') {
+      log.error('pay() economy_pay RPC failed after retries', { detail: error?.message });
+      const wallet = await this.getOrCreateWallet(senderId);
+      return { success: false, amount: 0, balance: wallet, message: '❌ Payment failed. Please try again.' };
     }
 
-    await this.recordTransaction(senderId, 'pay_send', -amount, updatedSender.wallet, `Paid <@${receiverId}>`);
-    await this.recordTransaction(receiverId, 'pay_receive', received, receiverWallet.wallet, `Received from <@${senderId}>`);
-    await this.logEconomyEvent(senderId, `paid ${receiverId}`, amount);
+    const result = data as { status?: string; amount?: number | string; tax?: number | string; received?: number | string };
+    // Re-read the sender wallet for the reported balance; the RPC has committed
+    // by now, so this reflects the post-transfer state (or the unchanged wallet
+    // on the insufficient-funds path).
+    const balance = await this.getOrCreateWallet(senderId);
 
-    let msg = `${cfg.currency_emoji} Sent **${amount.toLocaleString()} ${cfg.currency_name}** to <@${receiverId}>.`;
+    if (result.status === 'insufficient_funds') {
+      return { success: false, amount: 0, balance, message: "You don't have enough in your wallet." };
+    }
+    if (result.status !== 'sent') {
+      return { success: false, amount: 0, balance, message: '❌ Payment failed. Please try again.' };
+    }
+
+    const paidAmount = Number(result.amount);
+    const tax = Number(result.tax);
+    const received = Number(result.received);
+
+    await this.logEconomyEvent(senderId, `paid ${receiverId}`, paidAmount);
+
+    let msg = `${cfg.currency_emoji} Sent **${paidAmount.toLocaleString()} ${cfg.currency_name}** to <@${receiverId}>.`;
     if (tax > 0) {
       msg += `\n💸 Tax: **${tax.toLocaleString()}** (${cfg.economy_pay_tax_pct}%)`;
       msg += `\n📬 They received: **${received.toLocaleString()} ${cfg.currency_name}**`;
     }
 
-    return { success: true, amount, balance: updatedSender, message: msg };
+    return { success: true, amount: paidAmount, balance, message: msg };
   }
 
   // ── Rob ─────────────────────────────────────────────────

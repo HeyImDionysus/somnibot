@@ -175,7 +175,7 @@ describe('EconomyManager deep', () => {
   });
 
   it('pay transfers coins to another user', async () => {
-    const result = await mgr.pay('user-1', 'user-2', 100);
+    const result = await mgr.pay('user-1', 'user-2', 100, 'req-pay-1');
     expect(result).toBeDefined();
   });
 

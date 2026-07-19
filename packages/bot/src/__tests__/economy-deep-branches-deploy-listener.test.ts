@@ -240,7 +240,7 @@ describe('EconomyManager deep branches', () => {
     const mgr = new EconomyManager(makeGuild(), supa, makeValkey());
     (mgr as any).configCache = { guild_id: 'g1', currency_name: 'coins', currency_emoji: '💰' };
     (mgr as any).configCacheTime = Date.now();
-    const result = await mgr.pay('u1', 'u2', 100);
+    const result = await mgr.pay('u1', 'u2', 100, 'req-pay-1');
     expect(result).toBeDefined();
   });
 
