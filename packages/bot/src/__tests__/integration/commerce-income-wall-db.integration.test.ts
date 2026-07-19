@@ -5299,6 +5299,153 @@ describe('commerce income wall database invariant', () => {
     ]);
   });
 
+  it('raises the intent-less cleanup alert when a provider-completed refund revokes legacy granted roles', async () => {
+    const fixture = await createPaidRefundFixture({ withAccess: true });
+    const prepared = await supa.rpc('commerce_prepare_admin_refund', {
+      p_order_id: fixture.orderId,
+      p_guild_id: GUILD_A,
+      p_actor_id: nextSnowflake(),
+      p_reason: 'legacy provider refund without delivery intents',
+    });
+    expect(prepared.error).toBeNull();
+    const attemptId = String((prepared.data as Record<string, unknown>).attempt_id);
+
+    const refundId = nextName('legacy-provider-refund');
+    const completed = await supa.rpc('commerce_record_admin_refund_outcome', {
+      p_attempt_id: attemptId,
+      p_guild_id: GUILD_A,
+      p_provider_status: 'COMPLETED',
+      p_paypal_refund_id: refundId,
+      p_refund_amount_cents: 1_000,
+      p_currency: 'USD',
+    });
+    expect(completed.error).toBeNull();
+
+    const finalized = await supa.rpc('commerce_finalize_admin_refund', {
+      p_attempt_id: attemptId,
+      p_guild_id: GUILD_A,
+    });
+    expect(finalized.error).toBeNull();
+    expect(finalized.data).toMatchObject({
+      status: 'completed',
+      order_status: 'refunded',
+      entitlements_changed: 1,
+      paypal_refund_id: refundId,
+    });
+
+    const readCleanupAlerts = async () => {
+      const { data, error } = await supa
+        .from('alerts')
+        .select('alert_type,severity,resolved,metadata')
+        .eq('guild_id', GUILD_A)
+        .eq('alert_type', 'commerce_role_cleanup_unproven')
+        .contains('metadata', { entitlement_id: fixture.entitlementId });
+      expect(error).toBeNull();
+      return data ?? [];
+    };
+    expect(await readCleanupAlerts()).toEqual([
+      {
+        alert_type: 'commerce_role_cleanup_unproven',
+        severity: 'critical',
+        resolved: false,
+        metadata: {
+          entitlement_id: fixture.entitlementId,
+          customer_id: fixture.customerId,
+          order_id: fixture.orderId,
+          product_id: fixture.productId,
+          next_step: 'inspect_member_baseline_and_resolve_manually',
+        },
+      },
+    ]);
+
+    const replayed = await supa.rpc('commerce_finalize_admin_refund', {
+      p_attempt_id: attemptId,
+      p_guild_id: GUILD_A,
+    });
+    expect(replayed.error).toBeNull();
+    expect(await readCleanupAlerts()).toHaveLength(1);
+  });
+
+  it('raises the intent-less cleanup alert when a webhook full refund finalizes legacy granted roles', async () => {
+    const fixture = await createPaidRefundFixture({ withAccess: true });
+    const refundId = nextName('webhook-full-refund-legacy');
+    const recorded = await supa.rpc('commerce_record_paypal_refund_event', {
+      p_payment_id: fixture.paymentId,
+      p_order_id: fixture.orderId,
+      p_guild_id: GUILD_A,
+      p_customer_id: fixture.customerId,
+      p_paypal_payment_id: fixture.captureId,
+      p_resource_type: 'capture',
+      p_paypal_refund_id: refundId,
+      p_event_type: 'PAYMENT.CAPTURE.REFUNDED',
+      p_refund_amount_cents: 1_000,
+      p_currency: 'USD',
+      p_audit_details: { fixture: 'legacy webhook full refund' },
+    });
+    expect(recorded.error).toBeNull();
+    expect(recorded.data).toMatchObject({
+      full_refund: true,
+      terminal_witness: true,
+    });
+
+    // The webhook handler expires access before committing the terminal
+    // marker; the marker RPC is the last durable write of the revocation.
+    const expired = await supa
+      .from('entitlements')
+      .update({ status: 'expired', cancelled_at: new Date().toISOString() })
+      .eq('id', fixture.entitlementId);
+    expect(expired.error).toBeNull();
+
+    const finalizeArgs = {
+      p_payment_id: fixture.paymentId,
+      p_order_id: fixture.orderId,
+      p_guild_id: GUILD_A,
+      p_customer_id: fixture.customerId,
+      p_paypal_payment_id: fixture.captureId,
+      p_resource_type: 'capture',
+      p_payment_status: 'refunded',
+      p_paypal_refund_id: refundId,
+      p_event_type: 'PAYMENT.CAPTURE.REFUNDED',
+      p_audit_details: { source: 'paypal_webhook' },
+    };
+    const finalized = await supa.rpc('commerce_finalize_paypal_refund_status', finalizeArgs);
+    expect(finalized.error).toBeNull();
+    expect(finalized.data).toMatchObject({
+      order_status: 'refunded',
+      payment_status: 'refunded',
+    });
+
+    const readCleanupAlerts = async () => {
+      const { data, error } = await supa
+        .from('alerts')
+        .select('alert_type,severity,resolved,metadata')
+        .eq('guild_id', GUILD_A)
+        .eq('alert_type', 'commerce_role_cleanup_unproven')
+        .contains('metadata', { entitlement_id: fixture.entitlementId });
+      expect(error).toBeNull();
+      return data ?? [];
+    };
+    expect(await readCleanupAlerts()).toEqual([
+      {
+        alert_type: 'commerce_role_cleanup_unproven',
+        severity: 'critical',
+        resolved: false,
+        metadata: {
+          entitlement_id: fixture.entitlementId,
+          customer_id: fixture.customerId,
+          order_id: fixture.orderId,
+          product_id: fixture.productId,
+          next_step: 'inspect_member_baseline_and_resolve_manually',
+        },
+      },
+    ]);
+
+    const replayed = await supa.rpc('commerce_finalize_paypal_refund_status', finalizeArgs);
+    expect(replayed.error).toBeNull();
+    expect(replayed.data).toMatchObject({ already_terminal: true });
+    expect(await readCleanupAlerts()).toHaveLength(1);
+  });
+
   it('rejects subscription, unproven payment, and wrong-resource ledger refund paths', async () => {
     const productId = await createProduct({ type: 'subscription' });
     const planId = await createPlan(productId);

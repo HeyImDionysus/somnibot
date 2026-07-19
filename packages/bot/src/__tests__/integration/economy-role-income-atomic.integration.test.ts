@@ -43,6 +43,11 @@ const ROLE_TRIGGER = 'role-income-trigger';
 const ROLE_STALE_QUEUE = 'role-income-stale-queue';
 const ROLE_PURGE = 'role-income-purge';
 const ROLE_STARTING_BALANCE = 'role-income-starting-balance';
+// Delivery-intent role vectors must be canonical Discord snowflakes.
+const ROLE_INTENT_CLEANUP = '210000000000000101';
+const ROLE_INTENT_OPEN_TERMINAL = '210000000000000102';
+const ROLE_INTENT_SETTLED = '210000000000000103';
+const ROLE_INTENT_NONCOMMERCE = '210000000000000104';
 
 let inactiveProductId: string;
 let paidCustomerId: string;
@@ -287,6 +292,10 @@ beforeAll(async () => {
     { guild_id: GUILD_ID, role_id: ROLE_TRIGGER, amount: 65, interval_minutes: 60 },
     { guild_id: GUILD_ID, role_id: ROLE_STALE_QUEUE, amount: 70, interval_minutes: 60 },
     { guild_id: GUILD_ID, role_id: ROLE_PURGE, amount: 75, interval_minutes: 60 },
+    { guild_id: GUILD_ID, role_id: ROLE_INTENT_CLEANUP, amount: 80, interval_minutes: 60 },
+    { guild_id: GUILD_ID, role_id: ROLE_INTENT_OPEN_TERMINAL, amount: 85, interval_minutes: 60 },
+    { guild_id: GUILD_ID, role_id: ROLE_INTENT_SETTLED, amount: 90, interval_minutes: 60 },
+    { guild_id: GUILD_ID, role_id: ROLE_INTENT_NONCOMMERCE, amount: 95, interval_minutes: 60 },
     { guild_id: OTHER_GUILD_ID, role_id: ROLE_OTHER_GUILD, amount: 60, interval_minutes: 60 },
     {
       guild_id: STARTING_BALANCE_GUILD_ID,
@@ -299,6 +308,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // service_role holds SELECT only on the intents ledger; fixtures are
+  // removed through the privileged test connection.
+  await sql`
+    DELETE FROM public.commerce_role_delivery_intents
+     WHERE guild_id IN ${sql(TEST_GUILD_IDS)}
+  `;
   await supa.from('audit_logs').delete().in('guild_id', TEST_GUILD_IDS);
   await supa.from('action_queue_dlq').delete().in('guild_id', TEST_GUILD_IDS);
   await supa.from('bot_action_queue').delete().in('guild_id', TEST_GUILD_IDS);
@@ -848,6 +863,175 @@ describe('economy_collect_role_income', () => {
     expect(result.data).toMatchObject({
       status: 'no_eligible_roles',
       blocked_role_ids: [ROLE_REVOKE],
+    });
+  });
+
+  it('blocks a role an unsettled cleanup-required delivery intent still accounts for', async () => {
+    const userId = `${USER_PREFIX}-intent-cleanup`;
+    // The current protocol's cleanup carriers hold no role vector, so only the
+    // intent itself can prove this paid role's removal is still outstanding.
+    await sql`
+      INSERT INTO public.commerce_role_delivery_intents (
+        id, action_id, origin_claim_token, delivery_claim_token,
+        guild_id, entitlement_id, customer_id, discord_id,
+        order_id, product_id, entitlement_type,
+        permanent_role_ids, completed_role_ids, owned_role_ids, state
+      ) VALUES (
+        ${randomUUID()}, ${randomUUID()}, ${randomUUID()}, ${randomUUID()},
+        ${GUILD_ID}, ${randomUUID()}, ${randomUUID()}, ${userId},
+        ${randomUUID()}, ${randomUUID()}, 'one_time',
+        ARRAY[${ROLE_INTENT_CLEANUP}]::TEXT[],
+        ARRAY[${ROLE_INTENT_CLEANUP}]::TEXT[],
+        ARRAY[${ROLE_INTENT_CLEANUP}]::TEXT[],
+        'cleanup_required'
+      )
+    `;
+
+    const result = await collect(
+      GUILD_ID,
+      userId,
+      [ROLE_INTENT_CLEANUP],
+      'interaction-intent-cleanup',
+    );
+    expect(result.error).toBeNull();
+    expect(result.data).toMatchObject({
+      status: 'no_eligible_roles',
+      amount_cents: 0,
+      blocked_role_ids: [ROLE_INTENT_CLEANUP],
+    });
+  });
+
+  it('blocks a role on an open delivery intent whose parent entitlement went terminal', async () => {
+    const userId = `${USER_PREFIX}-intent-open-terminal`;
+    const { data: customer, error: customerError } = await supa
+      .from('customers')
+      .insert({
+        guild_id: GUILD_ID,
+        discord_id: userId,
+        discord_username: 'intent-open-terminal',
+      })
+      .select('id')
+      .single();
+    expect(customerError).toBeNull();
+    const { data: entitlement, error: entitlementError } = await supa
+      .from('entitlements')
+      .insert({
+        customer_id: customer!.id,
+        guild_id: GUILD_ID,
+        product_id: inactiveProductId,
+        type: 'one_time',
+        status: 'expired',
+        source: 'purchase',
+        granted_role_ids: [ROLE_INTENT_OPEN_TERMINAL],
+        granted_channel_ids: [],
+      })
+      .select('id')
+      .single();
+    expect(entitlementError).toBeNull();
+
+    // Pre-deploy shape: the intent never received a terminal signal, so it is
+    // still 'open' while the paid contract behind it is already dead.
+    await sql`
+      INSERT INTO public.commerce_role_delivery_intents (
+        id, action_id, origin_claim_token, delivery_claim_token,
+        guild_id, entitlement_id, customer_id, discord_id,
+        order_id, product_id, entitlement_type,
+        permanent_role_ids, completed_role_ids, owned_role_ids, state
+      ) VALUES (
+        ${randomUUID()}, ${randomUUID()}, ${randomUUID()}, ${randomUUID()},
+        ${GUILD_ID}, ${entitlement!.id}, ${customer!.id}, ${userId},
+        ${randomUUID()}, ${inactiveProductId}, 'one_time',
+        ARRAY[${ROLE_INTENT_OPEN_TERMINAL}]::TEXT[],
+        ARRAY[${ROLE_INTENT_OPEN_TERMINAL}]::TEXT[],
+        ARRAY[${ROLE_INTENT_OPEN_TERMINAL}]::TEXT[],
+        'open'
+      )
+    `;
+
+    const result = await collect(
+      GUILD_ID,
+      userId,
+      [ROLE_INTENT_OPEN_TERMINAL],
+      'interaction-intent-open-terminal',
+    );
+    expect(result.error).toBeNull();
+    expect(result.data).toMatchObject({
+      status: 'no_eligible_roles',
+      amount_cents: 0,
+      blocked_role_ids: [ROLE_INTENT_OPEN_TERMINAL],
+    });
+  });
+
+  it('does not treat a settled delivery intent as outstanding removal evidence', async () => {
+    const userId = `${USER_PREFIX}-intent-settled`;
+    // Settlement proves removal (or a safe handoff): reserved/owned vectors
+    // are empty and no cleanup mutation can be active. Only the historical
+    // completed vector remains.
+    await sql`
+      INSERT INTO public.commerce_role_delivery_intents (
+        id, action_id, origin_claim_token, delivery_claim_token,
+        guild_id, entitlement_id, customer_id, discord_id,
+        order_id, product_id, entitlement_type,
+        permanent_role_ids, completed_role_ids, state, settled_at
+      ) VALUES (
+        ${randomUUID()}, ${randomUUID()}, ${randomUUID()}, ${randomUUID()},
+        ${GUILD_ID}, ${randomUUID()}, ${randomUUID()}, ${userId},
+        ${randomUUID()}, ${randomUUID()}, 'one_time',
+        ARRAY[${ROLE_INTENT_SETTLED}]::TEXT[],
+        ARRAY[${ROLE_INTENT_SETTLED}]::TEXT[],
+        'settled', pg_catalog.clock_timestamp()
+      )
+    `;
+
+    const result = await collect(
+      GUILD_ID,
+      userId,
+      [ROLE_INTENT_SETTLED],
+      'interaction-intent-settled',
+    );
+    expect(result.error).toBeNull();
+    expect(result.data).toMatchObject({
+      status: 'credited',
+      amount_cents: 90,
+      blocked_role_ids: [],
+    });
+  });
+
+  it('does not treat a non-commerce delivery carrier as real-money provenance', async () => {
+    const userId = `${USER_PREFIX}-intent-noncommerce`;
+    // Manual/giveaway/automation carriers police free grants of store
+    // metadata; like non-purchase entitlements they never gate the game
+    // economy, even while their cleanup is outstanding.
+    await sql`
+      INSERT INTO public.commerce_role_delivery_intents (
+        id, contract_kind, entitlement_source, activation_generation,
+        action_id, origin_claim_token, delivery_claim_token,
+        guild_id, entitlement_id, customer_id, discord_id,
+        order_id, product_id, entitlement_type,
+        permanent_role_ids, completed_role_ids, owned_role_ids, state
+      ) VALUES (
+        ${randomUUID()}, 'noncommerce', 'giveaway', ${randomUUID()},
+        ${randomUUID()}, ${randomUUID()}, ${randomUUID()},
+        ${GUILD_ID}, ${randomUUID()}, ${randomUUID()}, ${userId},
+        ${randomUUID()}, ${randomUUID()}, 'one_time',
+        ARRAY[${ROLE_INTENT_NONCOMMERCE}]::TEXT[],
+        ARRAY[${ROLE_INTENT_NONCOMMERCE}]::TEXT[],
+        ARRAY[${ROLE_INTENT_NONCOMMERCE}]::TEXT[],
+        'cleanup_required'
+      )
+    `;
+
+    const result = await collect(
+      GUILD_ID,
+      userId,
+      [ROLE_INTENT_NONCOMMERCE],
+      'interaction-intent-noncommerce',
+    );
+    expect(result.error).toBeNull();
+    expect(result.data).toMatchObject({
+      status: 'credited',
+      amount_cents: 95,
+      blocked_role_ids: [],
     });
   });
 

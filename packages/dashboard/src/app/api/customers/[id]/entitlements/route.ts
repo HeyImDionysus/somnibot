@@ -71,6 +71,22 @@ export async function POST(
 
   const { id: customerId } = await params;
   const supabase = createAdminSupabase();
+
+  // The grant schema defaults omitted Discord ID lists to [], but the atomic
+  // grant RPC requires the request sets to exactly equal the product's
+  // canonical sets — so a defaulted [] would reject every role-bearing
+  // product. An omitted list means "grant the product's canonical access"
+  // (resolved from the product row below, mirroring the bot's giveaway
+  // fulfillment); an explicit list is forwarded verbatim so the RPC's
+  // authority check stays the judge. Distinguish the two on the raw body
+  // before Zod applies its defaults.
+  const rawBody: unknown = await req.clone().json().catch(() => null);
+  const rawBodyKeys = rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody)
+    ? Object.keys(rawBody as Record<string, unknown>)
+    : [];
+  const roleIdsProvided = rawBodyKeys.includes('granted_role_ids');
+  const channelIdsProvided = rawBodyKeys.includes('granted_channel_ids');
+
   const parsed = await parseBody(req, schemas.entitlement.grant);
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
@@ -105,7 +121,7 @@ export async function POST(
 
   const { data: product } = await supabase
     .from('products')
-    .select('id')
+    .select('id, granted_role_ids, granted_channel_ids')
     .eq('id', product_id)
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -113,6 +129,13 @@ export async function POST(
   if (!product) {
     return NextResponse.json({ success: false, error: 'Product not found' }, { status: 404 });
   }
+
+  const grantedRoleIds = roleIdsProvided
+    ? granted_role_ids
+    : (product.granted_role_ids ?? []);
+  const grantedChannelIds = channelIdsProvided
+    ? granted_channel_ids
+    : (product.granted_channel_ids ?? []);
 
   if (type === 'subscription') {
     const { data: plan, error: planError } = await supabase
@@ -147,7 +170,10 @@ export async function POST(
   const rpc = supabase.rpc as unknown as (
     name: string,
     params: Record<string, unknown>,
-  ) => Promise<{ data: unknown; error: { message: string } | null }>;
+  ) => Promise<{
+    data: unknown;
+    error: { message: string; code?: string } | null;
+  }>;
   const { data: grantRows, error } = await rpc(
     'commerce_create_noncommerce_entitlement',
     {
@@ -159,12 +185,26 @@ export async function POST(
       p_type: type,
       p_plan_id: plan_id ?? null,
       p_expires_at: expires_at ?? null,
-      p_granted_role_ids: granted_role_ids,
-      p_granted_channel_ids: granted_channel_ids,
+      p_granted_role_ids: grantedRoleIds,
+      p_granted_channel_ids: grantedChannelIds,
     },
   );
 
   if (error) {
+    // The RPC raises 23514 when the requested grant contradicts the
+    // authoritative catalog contract (role/channel sets that differ from the
+    // product's canonical sets, type/plan shape, or guild/customer/product
+    // identity). That is a caller conflict, not an internal failure — same
+    // mapping as the PUT lifecycle handler below.
+    if (error.code === '23514') {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "This grant conflicts with the product's canonical access contract",
+        },
+        { status: 409 },
+      );
+    }
     return dbError(error, 'customers/entitlements');
   }
 

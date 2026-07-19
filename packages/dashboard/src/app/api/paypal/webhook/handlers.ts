@@ -2425,6 +2425,45 @@ function resolveRefundAmounts(
   };
 }
 
+/**
+ * Exact subscription evidence for the legacy USD-mislabel tolerance. A row
+ * already adopted as 'sale' was proven by a signed provider event. A legacy
+ * null resource type predates adoption entirely, so it qualifies only when
+ * its order carries the exact subscription shape the sale ledger RPC
+ * enforces (plan + provider subscription identity) — the only path that
+ * ever wrote the mislabeled rows was the subscription-payment handler, and
+ * that handler always bound its payment to such an order.
+ */
+async function isLegacySubscriptionSalePayment(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  payment: {
+    order_id: string;
+    guild_id: string;
+    customer_id: string;
+    paypal_resource_type: string | null;
+  },
+): Promise<boolean> {
+  if (payment.paypal_resource_type === 'sale') return true;
+  if (payment.paypal_resource_type !== null) return false;
+  const { data: order, error: orderError } = await supabase
+    .from('orders')
+    .select('id, guild_id, customer_id, plan_id, paypal_subscription_id')
+    .eq('id', payment.order_id)
+    .maybeSingle();
+  requireSupabaseSuccess(
+    orderError,
+    'Failed to load order for legacy refund currency evidence',
+  );
+  return Boolean(
+    order
+    && order.id === payment.order_id
+    && order.guild_id === payment.guild_id
+    && order.customer_id === payment.customer_id
+    && isNonEmptyString(order.plan_id)
+    && isNonEmptyString(order.paypal_subscription_id),
+  );
+}
+
 type RefundScope =
   | { kind: 'full'; reason: 'reversal' | 'cumulative_total' }
   | { kind: 'partial' };
@@ -2514,6 +2553,44 @@ async function handleExternalPaymentRefunded(
   if (!refundId) {
     throw new Error(`${eventType} for ${identifierName} ${paymentId} has no canonical refund id`);
   }
+
+  // Legacy tolerance (W2 codex round 2, restored): the pre-deploy
+  // handleSubscriptionPayment persisted a hardcoded 'USD' currency label
+  // while amount_cents was parsed from the sale payload in the plan's actual
+  // currency — the recorded CENTS are right, only the label is wrong. PayPal
+  // always issues refunds in the parent sale's currency, so when a
+  // PAYMENT.SALE.REFUNDED against a USD-labeled sale payment carries a
+  // signature-verified payload whose cumulative refunded total is stated in
+  // the refund's own currency, the payload — not our label — is
+  // authoritative and the exact-cents comparison stays valid. Without this,
+  // such a refund throws identically on every PayPal retry forever: never
+  // recorded, access retained, no operator alert. Every other mismatch stays
+  // a hard failure — post-deploy sale rows persist the sale's real currency
+  // and capture rows always persisted the checkout currency, so for them a
+  // differing refund currency is evidence of a wrong parent, not a label bug.
+  // REVERSED events against the same legacy rows get the identical tolerance
+  // when their payload self-states amounts: a reversal that omits amounts
+  // never mismatches (the RPC computes the remaining balance), and a reversal
+  // stating an amount without the confirming cumulative total stays
+  // fail-closed — the payload then lacks its own proof of the sale's real
+  // currency.
+  const legacyUsdMislabelTolerated = resourceType === 'sale'
+    && paymentCurrency === 'USD'
+    && resolvedAmounts.refundAmountCents != null
+    && resolvedAmounts.refundAmountCents > 0
+    && typeof resolvedAmounts.refundCurrency === 'string'
+    && /^[A-Z]{3}$/.test(resolvedAmounts.refundCurrency)
+    && resolvedAmounts.refundCurrency !== paymentCurrency
+    && resolvedAmounts.paypalTotalRefundedCurrency != null
+    && resolvedAmounts.paypalTotalRefundedCurrency.toUpperCase()
+      === resolvedAmounts.refundCurrency
+    && await isLegacySubscriptionSalePayment(supabase, {
+      order_id: orderId,
+      guild_id: payment.guild_id,
+      customer_id: payment.customer_id,
+      paypal_resource_type: payment.paypal_resource_type,
+    });
+
   if (
     !isReversal
     && (
@@ -2521,7 +2598,10 @@ async function handleExternalPaymentRefunded(
       || resolvedAmounts.refundAmountCents <= 0
       || typeof resolvedAmounts.refundCurrency !== 'string'
       || !/^[A-Z]{3}$/.test(resolvedAmounts.refundCurrency)
-      || resolvedAmounts.refundCurrency !== paymentCurrency
+      || (
+        resolvedAmounts.refundCurrency !== paymentCurrency
+        && !legacyUsdMislabelTolerated
+      )
     )
   ) {
     throw new Error(
@@ -2539,7 +2619,10 @@ async function handleExternalPaymentRefunded(
           || resolvedAmounts.refundAmountCents <= 0
           || typeof resolvedAmounts.refundCurrency !== 'string'
           || !/^[A-Z]{3}$/.test(resolvedAmounts.refundCurrency)
-          || resolvedAmounts.refundCurrency !== paymentCurrency
+          || (
+            resolvedAmounts.refundCurrency !== paymentCurrency
+            && !legacyUsdMislabelTolerated
+          )
         )
       )
     )
@@ -2551,8 +2634,22 @@ async function handleExternalPaymentRefunded(
 
   const reversalCurrency = typeof resolvedAmounts.refundCurrency === 'string'
     && /^[A-Z]{3}$/.test(resolvedAmounts.refundCurrency)
-    ? resolvedAmounts.refundCurrency
+    ? (legacyUsdMislabelTolerated ? paymentCurrency : resolvedAmounts.refundCurrency)
     : null;
+  // Under the legacy tolerance the ledger row must keep the stored label:
+  // the record RPC and its ledger sanity scan require every payment_refunds
+  // row to match payments.currency exactly. The payload's real currency is
+  // preserved in the audit details so the mislabel stays operator-visible.
+  const refundLedgerCurrency = legacyUsdMislabelTolerated
+    ? paymentCurrency
+    : resolvedAmounts.refundCurrency;
+  const legacyMislabelAuditDetails = legacyUsdMislabelTolerated
+    ? {
+        legacy_usd_currency_mislabel: true,
+        stored_payment_currency: paymentCurrency,
+        provider_refund_currency: resolvedAmounts.refundCurrency,
+      }
+    : {};
   const { data: recordedValue, error: recordError } = await supabase.rpc(
     'commerce_record_paypal_refund_event',
     {
@@ -2565,11 +2662,12 @@ async function handleExternalPaymentRefunded(
       p_paypal_refund_id: refundId,
       p_event_type: eventType,
       p_refund_amount_cents: resolvedAmounts.refundAmountCents,
-      p_currency: isReversal ? reversalCurrency : resolvedAmounts.refundCurrency,
+      p_currency: isReversal ? reversalCurrency : refundLedgerCurrency,
       p_audit_details: {
         source: 'paypal_webhook',
         provider_total_refunded_cents: resolvedAmounts.paypalTotalRefundedCents,
         provider_total_refunded_currency: resolvedAmounts.paypalTotalRefundedCurrency,
+        ...legacyMislabelAuditDetails,
       },
     },
   );
@@ -2879,6 +2977,7 @@ async function handleExternalPaymentRefunded(
     entitlement_ids: (activeEntitlements ?? []).map((ent) => ent.id),
     license_key_ids: licenseKeyIds,
     role_revocation_source: 'entitlement_status_trigger',
+    ...legacyMislabelAuditDetails,
   });
 
   console.log(

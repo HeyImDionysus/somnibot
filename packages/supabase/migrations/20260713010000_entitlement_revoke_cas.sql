@@ -120,13 +120,6 @@ BEGIN
       MESSAGE = 'commerce_revoke_entitlement_exact: product identity mismatch';
   END IF;
 
-  PERFORM pg_catalog.pg_advisory_xact_lock(
-    pg_catalog.hashtextextended(
-      'noncommerce-entitlement-customer:' || v_observed.customer_id::TEXT,
-      0
-    )
-  );
-
   SELECT entitlement.* INTO v_entitlement
     FROM public.entitlements AS entitlement
    WHERE entitlement.id = p_entitlement_id
@@ -153,6 +146,21 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = '40001',
       MESSAGE = 'commerce_revoke_entitlement_exact: parent identity changed';
   END IF;
+
+  -- Customer-level carrier serialization comes only after the entitlement row
+  -- lock.  The status triggers on this table acquire the same advisory key
+  -- while their firing UPDATE already holds the row lock, so an advisory-first
+  -- acquisition here is a two-transaction lock-order inversion against every
+  -- trigger-bearing lifecycle write (row -> advisory vs advisory -> row).  The
+  -- customer FOR SHARE above pins discord_id against relinks for this whole
+  -- transaction, and the CAS evidence lives on the row locked above, so no
+  -- write can slip between the row lock and this acquisition.
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(
+      'noncommerce-entitlement-customer:' || v_entitlement.customer_id::TEXT,
+      0
+    )
+  );
 
   -- Every already-terminal row is a completed operational no-op.  In
   -- particular, a late expiry may not overwrite a cancellation (or vice

@@ -9919,6 +9919,49 @@ BEGIN
      AND alert.metadata ->> 'payment_id' = v_payment.id::TEXT;
   GET DIAGNOSTICS v_partial_alerts_resolved = ROW_COUNT;
 
+  -- The webhook expires this order's entitlements before it commits this
+  -- terminal marker, and the delivery protocol terminal-signals any exact
+  -- role-delivery intents through that status change. As in
+  -- commerce_finalize_admin_refund, a legacy entitlement that granted roles
+  -- but has no intent leaves Discord cleanup unproven: the provider refund
+  -- proves money moved, not that Somnibot owns the Discord role, and only an
+  -- operator can resolve the member's baseline. Replays converge on the one
+  -- unresolved alert per entitlement.
+  INSERT INTO public.alerts (
+    guild_id, alert_type, severity, title, message, metadata, resolved
+  )
+  SELECT entitlement.guild_id,
+         'commerce_role_cleanup_unproven',
+         'critical',
+         'Role cleanup ownership is unproven',
+         'A refund revoked this access, but no exact role-delivery intent proves which Discord roles Somnibot owns.',
+         pg_catalog.jsonb_build_object(
+           'entitlement_id', entitlement.id,
+           'customer_id', entitlement.customer_id,
+           'order_id', entitlement.order_id,
+           'product_id', entitlement.product_id,
+           'next_step', 'inspect_member_baseline_and_resolve_manually'
+         ),
+         false
+    FROM public.entitlements AS entitlement
+   WHERE entitlement.order_id = v_order.id
+     AND pg_catalog.cardinality(
+           COALESCE(entitlement.granted_role_ids, '{}'::TEXT[])
+         ) > 0
+     AND NOT EXISTS (
+       SELECT 1
+         FROM public.commerce_role_delivery_intents AS intent
+        WHERE intent.entitlement_id = entitlement.id
+     )
+     AND NOT EXISTS (
+       SELECT 1
+         FROM public.alerts AS alert
+        WHERE alert.guild_id = entitlement.guild_id
+          AND alert.alert_type = 'commerce_role_cleanup_unproven'
+          AND alert.resolved = false
+          AND alert.metadata ->> 'entitlement_id' = entitlement.id::TEXT
+     );
+
   v_audit_action := CASE v_target_status
     WHEN 'reversed' THEN 'order.reversed'
     ELSE 'order.refunded_external'
@@ -16537,8 +16580,10 @@ BEGIN
   -- a role which did not predate the entitlement. Exact role-delivery intents
   -- created by the delivery protocol were terminal-signalled by the status
   -- update above. A historical/manual entitlement without such an intent must
-  -- remain an operator-visible exception; manufacturing a broad revoke_roles
-  -- row here could strip a member's independent baseline role.
+  -- remain an operator-visible exception on every refund path: a completed
+  -- provider refund proves money moved, not that Somnibot owns the Discord
+  -- role. Manufacturing a broad revoke_roles row here could strip a member's
+  -- independent baseline role.
   INSERT INTO public.alerts (
     guild_id, alert_type, severity, title, message, metadata, resolved
   )
@@ -16546,7 +16591,7 @@ BEGIN
          'commerce_role_cleanup_unproven',
          'critical',
          'Role cleanup ownership is unproven',
-         'A local access reversal was recorded, but no exact role-delivery intent proves which Discord roles Somnibot owns.',
+         'A refund revoked this access, but no exact role-delivery intent proves which Discord roles Somnibot owns.',
          pg_catalog.jsonb_build_object(
            'entitlement_id', entitlement.id,
            'customer_id', entitlement.customer_id,
@@ -16556,8 +16601,7 @@ BEGIN
          ),
          false
     FROM public.entitlements AS entitlement
-   WHERE NOT v_attempt.provider_required
-     AND entitlement.id = ANY(v_entitlement_ids)
+   WHERE entitlement.id = ANY(v_entitlement_ids)
      AND pg_catalog.cardinality(
            COALESCE(entitlement.granted_role_ids, '{}'::TEXT[])
          ) > 0
@@ -17972,7 +18016,12 @@ BEGIN
       'product_id', v_giveaway.prize_product_id,
       'delivery_kind', CASE WHEN v_giveaway.prize_product_id IS NULL
         THEN 'manual' ELSE 'product' END,
-      'prize_snapshot', v_giveaway.prize
+      -- The queue ABI requires a trimmed, bounded snapshot. Canonicalize at
+      -- snapshot time so the durable payload and every replay's exact-match
+      -- proof compare normalized to normalized, whatever the stored prize is.
+      'prize_snapshot', pg_catalog.btrim(
+        pg_catalog.left(pg_catalog.btrim(v_giveaway.prize), 1000)
+      )
     );
     v_key := 'giveaway:notify-winner:' || v_giveaway.guild_id || ':'
       || v_giveaway.id::TEXT || ':' || v_winner_id || ':v1';
@@ -18129,7 +18178,12 @@ BEGIN
       'product_id', v_giveaway.prize_product_id,
       'delivery_kind', CASE WHEN v_giveaway.prize_product_id IS NULL
         THEN 'manual' ELSE 'product' END,
-      'prize_snapshot', v_giveaway.prize
+      -- The queue ABI requires a trimmed, bounded snapshot. Canonicalize at
+      -- snapshot time so the durable payload and every replay's exact-match
+      -- proof compare normalized to normalized, whatever the stored prize is.
+      'prize_snapshot', pg_catalog.btrim(
+        pg_catalog.left(pg_catalog.btrim(v_giveaway.prize), 1000)
+      )
     );
     v_key := 'giveaway:notify-winner:' || v_giveaway.guild_id || ':'
       || v_giveaway.id::TEXT || ':' || v_winner_id || ':v1';

@@ -314,6 +314,100 @@ describe('commerce_revoke_entitlement_exact', () => {
     expect(retried.status).toBe('expired');
   });
 
+  it('waits on the row lock without holding the customer advisory (trigger lock order)', async () => {
+    // Admin cancel acquires the entitlement row lock first and only then the
+    // 'noncommerce-entitlement-customer' advisory key (its AFTER-UPDATE
+    // trigger chain cannot do otherwise). The revoke RPC must follow the same
+    // row -> advisory order; advisory-first is a two-transaction deadlock.
+    const observed = await createActiveEntitlement();
+    const advisoryKey = `noncommerce-entitlement-customer:${observed.customer_id}`;
+    let revokePromise!: Promise<RevokeEvidence[]>;
+
+    await sqlA.begin(async (admin) => {
+      const locked = await admin`
+        SELECT id FROM public.entitlements
+         WHERE id = ${observed.id}::uuid
+         FOR UPDATE
+      `;
+      expect(locked).toHaveLength(1);
+
+      revokePromise = sqlB<RevokeEvidence[]>`
+        SELECT disposition, transition_id, entitlement_id, guild_id,
+               status, updated_at
+          FROM public.commerce_revoke_entitlement_exact(
+            ${observed.id}::uuid,
+            ${GUILD_ID}::text,
+            ${observed.status}::text,
+            ${observed.updated_at}::timestamptz,
+            'cancelled'::text
+          )
+      `.execute();
+      await waitForSqlBLock();
+
+      // The parked revoke must hold no advisory lock while it waits on the
+      // row; holding the customer key here is the deadlock inversion.
+      const [advisory] = await sqlObserver<{ held: number }[]>`
+        SELECT pg_catalog.count(*)::int AS held
+          FROM pg_catalog.pg_locks
+         WHERE pid = ${sqlBBackendPid}
+           AND locktype = 'advisory'
+           AND granted
+      `;
+      expect(advisory?.held).toBe(0);
+
+      // The row-lock holder can therefore still take the same advisory key,
+      // exactly as the status triggers do mid-UPDATE, and finish the cancel.
+      await admin`
+        SELECT pg_catalog.pg_advisory_xact_lock(
+          pg_catalog.hashtextextended(${advisoryKey}::text, 0)
+        )
+      `;
+      const adminCancel = await admin`
+        SELECT status
+          FROM public.commerce_update_entitlement_status_admin(
+            ${observed.id}::uuid,
+            ${observed.customer_id}::uuid,
+            ${GUILD_ID}::text,
+            'cancelled'::text,
+            NULL::timestamptz
+          )
+      `;
+      expect(adminCancel[0]?.status).toBe('cancelled');
+    });
+
+    // The admin cancel won the row; the exact revoke observes the terminal
+    // state as a completed no-op and manufactures no second audit or carrier.
+    const revokeRows = await revokePromise;
+    expect(revokeRows).toHaveLength(1);
+    expect(revokeRows[0]).toMatchObject({ disposition: 'noop', transition_id: null });
+
+    const { data: entitlement, error: entitlementError } = await supa
+      .from('entitlements')
+      .select('status')
+      .eq('id', observed.id)
+      .single();
+    expect(entitlementError).toBeNull();
+    expect(entitlement?.status).toBe('cancelled');
+
+    const { count: auditCount, error: auditError } = await supa
+      .from('audit_logs')
+      .select('id', { count: 'exact', head: true })
+      .eq('guild_id', GUILD_ID)
+      .eq('action', 'entitlement.revoked')
+      .eq('target_id', observed.id);
+    expect(auditError).toBeNull();
+    expect(auditCount).toBe(0);
+
+    const { data: cleanup, error: cleanupError } = await supa
+      .from('bot_action_queue')
+      .select('id')
+      .eq('guild_id', GUILD_ID)
+      .eq('action', 'revoke_roles')
+      .eq('payload->>source', 'noncommerce_entitlement_status_trigger');
+    expect(cleanupError).toBeNull();
+    expect(cleanup).toHaveLength(1);
+  });
+
   it('is not executable through the anonymous browser role', async () => {
     const observed = await createActiveEntitlement();
     const anon = getAnonTestClient();

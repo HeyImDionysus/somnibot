@@ -2710,18 +2710,18 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
     }
   });
 
-  it('legacy sale-currency mismatch fails before poisoning the exact refund ledger', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const { inserts, updates, rpcCalls } = useWebhookRows({
-      // Legacy row: amount_cents parsed from the EUR sale payload, but the
-      // currency label was persisted as hardcoded 'USD'.
+  it('legacy USD-mislabeled sale payment accepts a self-confirmed foreign-currency partial refund under the stored label', async () => {
+    // Legacy row: amount_cents parsed from the EUR sale payload, but the
+    // currency label was persisted as hardcoded 'USD'. The payload's own
+    // cumulative refunded total states the sale's real currency, so the
+    // exact-cents comparison stays valid; without the tolerance this refund
+    // throws identically on every PayPal retry forever.
+    const { updates, rpcCalls } = useWebhookRows({
       payments: { data: baseSalePayment, error: null },
-      payment_refunds: [
-        { data: null, error: null },
-        { data: [{ amount_cents: 250 }], error: null },
-      ],
       alerts: { data: null, error: null },
       audit_logs: { data: null, error: null },
+    }, {
+      record: { refund_amount_cents: 250, cumulative_refunded_cents: 250 },
     });
 
     const req = makeReplay({
@@ -2729,17 +2729,267 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
       resource: {
         id: 'REFUND-SALE-EUR-PARTIAL',
         sale_id: 'SALE-1',
-        amount: { total: '2.50', currency: 'EUR' },
+        amount: { total: '-2.50', currency: 'EUR' },
         total_refunded_amount: { value: '2.50', currency: 'EUR' },
       },
       id: 'EVT-SALE-REFUND-EUR-PARTIAL',
     });
 
     const res = await POST(req as never);
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
+    // Recorded under the STORED label — the ledger stays internally
+    // consistent — while the audit details keep the mislabel visible.
+    expectAtomicRefundRecord(rpcCalls, {
+      refundId: 'REFUND-SALE-EUR-PARTIAL',
+      eventType: 'PAYMENT.SALE.REFUNDED',
+      amountCents: 250,
+      currency: 'USD',
+      providerPaymentId: 'SALE-1',
+      resourceType: 'sale',
+    });
+    expect(rpcCalls).toContainEqual({
+      name: 'commerce_record_paypal_refund_event',
+      args: expect.objectContaining({
+        p_audit_details: expect.objectContaining({
+          legacy_usd_currency_mislabel: true,
+          stored_payment_currency: 'USD',
+          provider_refund_currency: 'EUR',
+        }),
+      }),
+    });
+    // Partial → access retained.
     expect(updates.filter((u) => u.table !== 'webhook_events')).toEqual([]);
-    expect(inserts).toEqual([]);
+  });
+
+  it('legacy null-resource sale payment is refundable only via exact subscription order evidence', async () => {
+    const { rpcCalls } = useWebhookRows({
+      // Pre-resource-typing row: paypal_resource_type never adopted.
+      payments: [
+        { data: { ...baseSalePayment, paypal_resource_type: null }, error: null },
+        { data: null, error: null },
+      ],
+      orders: {
+        data: {
+          id: 'order-1',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          plan_id: 'plan-1',
+          paypal_subscription_id: 'SUB-LEGACY-1',
+        },
+        error: null,
+      },
+      entitlements: [
+        { data: [], error: null },
+        { data: null, error: null },
+      ],
+      license_keys: [{ data: [], error: null }, { data: null, error: null }],
+      audit_logs: { data: null, error: null },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.SALE.REFUNDED',
+      resource: {
+        id: 'REFUND-SALE-EUR-LEGACY-NULL',
+        sale_id: 'SALE-1',
+        amount: { total: '-10.00', currency: 'EUR' },
+        total_refunded_amount: { value: '10.00', currency: 'EUR' },
+      },
+      id: 'EVT-SALE-REFUND-EUR-LEGACY-NULL',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expectAtomicRefundRecord(rpcCalls, {
+      refundId: 'REFUND-SALE-EUR-LEGACY-NULL',
+      eventType: 'PAYMENT.SALE.REFUNDED',
+      amountCents: 1000,
+      currency: 'USD',
+      providerPaymentId: 'SALE-1',
+      resourceType: 'sale',
+    });
+    // Full refund proceeds to the terminal marker with the mislabel audited.
+    expect(rpcCalls).toContainEqual({
+      name: 'commerce_finalize_paypal_refund_status',
+      args: expect.objectContaining({
+        p_payment_status: 'refunded',
+        p_audit_details: expect.objectContaining({
+          legacy_usd_currency_mislabel: true,
+          provider_refund_currency: 'EUR',
+        }),
+      }),
+    });
+  });
+
+  it('legacy null-resource sale refund without subscription order evidence still fails closed', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { inserts, rpcCalls } = useWebhookRows({
+      payments: { data: { ...baseSalePayment, paypal_resource_type: null }, error: null },
+      // A one-time order shape is not subscription evidence: the mislabeled
+      // rows were only ever written by the subscription-payment handler.
+      orders: {
+        data: {
+          id: 'order-1',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          plan_id: null,
+          paypal_subscription_id: null,
+        },
+        error: null,
+      },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.SALE.REFUNDED',
+      resource: {
+        id: 'REFUND-SALE-EUR-NO-EVIDENCE',
+        sale_id: 'SALE-1',
+        amount: { total: '-2.50', currency: 'EUR' },
+        total_refunded_amount: { value: '2.50', currency: 'EUR' },
+      },
+      id: 'EVT-SALE-REFUND-EUR-NO-EVIDENCE',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(500);
     expect(rpcCalls).toEqual([]);
+    expect(inserts).toEqual([]);
+    errorSpy.mockRestore();
+  });
+
+  it('sale refund currency mismatch against a non-USD stored label still fails closed', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { inserts, rpcCalls } = useWebhookRows({
+      // Post-deploy row: the sale's real currency was persisted, so a
+      // differing refund currency is evidence of a wrong parent, not the
+      // legacy label bug.
+      payments: { data: { ...baseSalePayment, currency: 'EUR' }, error: null },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.SALE.REFUNDED',
+      resource: {
+        id: 'REFUND-SALE-USD-POSTDEPLOY',
+        sale_id: 'SALE-1',
+        amount: { total: '-2.50', currency: 'USD' },
+        total_refunded_amount: { value: '2.50', currency: 'USD' },
+      },
+      id: 'EVT-SALE-REFUND-USD-POSTDEPLOY',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(500);
+    expect(rpcCalls).toEqual([]);
+    expect(inserts).toEqual([]);
+    errorSpy.mockRestore();
+  });
+
+  it('legacy tolerance never repairs a mismatch whose payload total states a THIRD currency', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { inserts, rpcCalls } = useWebhookRows({
+      payments: { data: baseSalePayment, error: null },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.SALE.REFUNDED',
+      resource: {
+        id: 'REFUND-SALE-EUR-THIRD-CCY',
+        sale_id: 'SALE-1',
+        amount: { total: '-2.50', currency: 'EUR' },
+        // The payload does NOT self-confirm the refund currency as the
+        // sale's currency, so the label bug is not proven — fail closed.
+        total_refunded_amount: { value: '2.50', currency: 'GBP' },
+      },
+      id: 'EVT-SALE-REFUND-EUR-THIRD-CCY',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(500);
+    expect(rpcCalls).toEqual([]);
+    expect(inserts).toEqual([]);
+    errorSpy.mockRestore();
+  });
+
+  it('legacy USD-mislabeled sale payment accepts a self-confirmed foreign-currency reversal under the stored label', async () => {
+    // Same label bug, terminal event: a REVERSED payload that self-states its
+    // amounts in the sale's real currency gets the identical tolerance —
+    // otherwise the reversal throws on every retry forever with money
+    // returned at PayPal and access retained locally.
+    const { rpcCalls } = useWebhookRows({
+      payments: [{ data: baseSalePayment, error: null }, { data: null, error: null }],
+      orders: { data: null, error: null },
+      entitlements: [
+        { data: [], error: null },
+        { data: null, error: null },
+      ],
+      license_keys: [{ data: [], error: null }, { data: null, error: null }],
+      audit_logs: { data: null, error: null },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.SALE.REVERSED',
+      resource: {
+        id: 'SALE-REVERSED-EUR-1',
+        sale_id: 'SALE-1',
+        amount: { total: '-10.00', currency: 'EUR' },
+        total_refunded_amount: { value: '10.00', currency: 'EUR' },
+      },
+      id: 'EVT-SALE-REVERSED-EUR-1',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expectAtomicRefundRecord(rpcCalls, {
+      refundId: 'SALE-REVERSED-EUR-1',
+      eventType: 'PAYMENT.SALE.REVERSED',
+      amountCents: 1000,
+      currency: 'USD',
+      providerPaymentId: 'SALE-1',
+      resourceType: 'sale',
+    });
+    expect(rpcCalls).toContainEqual({
+      name: 'commerce_record_paypal_refund_event',
+      args: expect.objectContaining({
+        p_audit_details: expect.objectContaining({
+          legacy_usd_currency_mislabel: true,
+          stored_payment_currency: 'USD',
+          provider_refund_currency: 'EUR',
+        }),
+      }),
+    });
+    expect(rpcCalls).toContainEqual({
+      name: 'commerce_finalize_paypal_refund_status',
+      args: expect.objectContaining({
+        p_payment_status: 'reversed',
+        p_audit_details: expect.objectContaining({
+          legacy_usd_currency_mislabel: true,
+          provider_refund_currency: 'EUR',
+        }),
+      }),
+    });
+  });
+
+  it('a legacy reversal stating an amount without the confirming total stays fail-closed', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { inserts, rpcCalls } = useWebhookRows({
+      payments: { data: baseSalePayment, error: null },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.SALE.REVERSED',
+      resource: {
+        id: 'SALE-REVERSED-EUR-NOCONF',
+        sale_id: 'SALE-1',
+        // Amount stated in a differing currency with no cumulative total:
+        // the payload carries no proof of the sale's real currency.
+        amount: { total: '-10.00', currency: 'EUR' },
+      },
+      id: 'EVT-SALE-REVERSED-EUR-NOCONF',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(500);
+    expect(rpcCalls).toEqual([]);
+    expect(inserts).toEqual([]);
     errorSpy.mockRestore();
   });
 
