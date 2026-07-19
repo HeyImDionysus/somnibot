@@ -1,0 +1,17 @@
+{
+  // Test-scoped type-check. The package tsconfig excludes src/__tests__ (those
+  // files are never emitted to dist), which means the test sources — including
+  // the routing-parity assertions — were never type-checked. This config INCLUDES
+  // them so `type-check:test` fails loudly on a test-side type error. Emit is off;
+  // this is a pure check.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

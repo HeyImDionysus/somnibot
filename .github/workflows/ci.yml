@@ -345,8 +345,16 @@ jobs:
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Assert testkit production isolation
         run: node scripts/check-testkit-isolation.mjs
-      - name: Type-check testkit
-        run: pnpm --filter @somnibot/testkit type-check
+      # The routing-parity test drives the REAL compiled dispatcher, so bot
+      # (and its shared dep) must be built before testkit type-check/tests.
+      - name: Build shared + bot (dispatcher under test)
+        run: |
+          pnpm --filter @somnibot/shared build
+          pnpm --filter @somnibot/bot build
+      - name: Type-check testkit (source + tests)
+        run: |
+          pnpm --filter @somnibot/testkit type-check
+          pnpm --filter @somnibot/testkit run type-check:test
       - name: Run testkit tests
         run: pnpm --filter @somnibot/testkit test -- --reporter=verbose
 
