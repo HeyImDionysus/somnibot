@@ -61,3 +61,11 @@ export {
   type CreateInjectorOptions,
   type InjectOptions,
 } from './inject.js';
+
+export {
+  bootstrapLiveClient,
+  LiveRunnerError,
+  type BootstrapLiveOptions,
+  type LiveClientHandle,
+  type SeededEconomy,
+} from './live-runner.js';
