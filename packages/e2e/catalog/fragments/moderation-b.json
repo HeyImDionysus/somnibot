@@ -909,7 +909,7 @@
       "id": "moderation-message-logging",
       "name": "Message Logging",
       "category": "moderation",
-      "promise": "Only after the owner deliberately enables it and picks a staff log channel, member message edits and deletes are captured as branded forensic embeds — before-and-after content, preserved attachments, author, channel, and jump link — under strictly per-guild configuration and per-guild caches; bot messages, embed-only updates, and the log channel itself are never logged, and member erasure requests anonymize retained forensic data rather than silently keeping it.",
+      "promise": "Only after the owner deliberately enables it and picks a staff log channel, member message edits and deletes are captured as branded forensic embeds — before-and-after content, preserved attachments, author, channel, and jump link — under strictly per-guild configuration and per-guild caches; bot messages, embed-only updates, and the log channel itself are never logged; every member holds the full data-rights trio over their own stored records — a self-service readable view and a portable JSON export via the member-facing surface plus /forgetme deletion — each scoped strictly to their own data in their own guild, and member erasure requests anonymize retained forensic data rather than silently keeping it.",
       "controls": [
         {
           "id": "message-log-enabled",
@@ -949,6 +949,12 @@
             "min": 0,
             "max": 3600000
           }
+        },
+        {
+          "id": "data-export-enabled",
+          "description": "Whether members may self-service the view-and-export half of their data rights — reading their own stored message-log records and downloading a portable JSON copy via the member-facing surface; the /forgetme delete half stays available regardless of this switch.",
+          "valueType": "boolean",
+          "constraints": {}
         }
       ],
       "defaults": [
@@ -981,6 +987,11 @@
           "controlId": "config-cache-ttl-ms",
           "value": 60000,
           "rationale": "A one-minute per-guild cache keeps the hot message path cheap while dashboard changes still land fast."
+        },
+        {
+          "controlId": "data-export-enabled",
+          "value": true,
+          "rationale": "The locked privacy decision grants members the full view-export-delete data-rights trio, so member self-service view and portable JSON export ship on out of the box alongside /forgetme delete."
         }
       ],
       "permissions": [
@@ -1004,6 +1015,13 @@
           "action": "Invoke /forgetme to have their identity anonymized in retained forensic and audit data",
           "defaultDecision": "allow",
           "enforcement": "The confirmed /forgetme purge deletes the member's operational data and anonymizes retained ticket, audit, and message-log records rather than deleting the forensic record."
+        },
+        {
+          "id": "exercise-member-data-rights",
+          "actor": "Any guild member",
+          "action": "Invoke the member-facing surface to view their own stored message-log data and download a portable JSON export of it",
+          "defaultDecision": "allow",
+          "enforcement": "The data-rights handler resolves records by the invoking member's own user id within the current guild only and is gated by data-export-enabled; no code path lets a member view or export another member's data or another guild's data, and the response is delivered privately to the requester."
         }
       ],
       "messages": [
@@ -1068,6 +1086,18 @@
           "audience": "Guild owner and administrators",
           "defaultTemplate": "Message logging paused briefly in {guild-name} while settings were unreachable — nothing was captured during the gap, by design.",
           "variables": [
+            "guild-name"
+          ]
+        },
+        {
+          "id": "data-export-delivered",
+          "trigger": "A member requests the view-and-export half of their data rights over their own stored message-log data",
+          "surface": "Private member-facing surface — a direct message or authenticated portal download — carrying a readable view and a portable JSON attachment",
+          "audience": "The requesting member only",
+          "defaultTemplate": "Here is your data, {member-name}: a readable view plus a portable JSON export of {record-count} records, scoped to only your own data in {guild-name}.",
+          "variables": [
+            "member-name",
+            "record-count",
             "guild-name"
           ]
         }
@@ -1148,6 +1178,13 @@
             "to": "watching",
             "trigger": "The anonymization pass finishes",
             "expectedEffect": "No retained forensic or audit record exposes the erased member's identity, the completion is audited, and normal capture continues for everyone else throughout."
+          },
+          {
+            "id": "member-data-export",
+            "from": "watching",
+            "to": "watching",
+            "trigger": "A member exercises the view-and-export half of their data rights over their own stored data",
+            "expectedEffect": "The member privately receives a readable view and a portable JSON export scoped strictly to their own records in this guild; no other member's or guild's data is included and capture for everyone else is unaffected."
           }
         ]
       },
@@ -1188,7 +1225,7 @@
           "assertionClass": "Discord",
           "proofMode": "real-stack",
           "observer": "Discord observer client joined to the primary test guild",
-          "expectedObservation": "The message-logging behavior contracted here is directly observed working in the live test guild: with logging off nothing is captured, and once the owner opts in, edits produce before-and-after embeds and deletes produce preserved-content embeds in the staff log channel with bot messages and the log channel itself excluded.",
+          "expectedObservation": "The message-logging behavior contracted here is directly observed working in the live test guild: with logging off nothing is captured, and once the owner opts in, edits produce before-and-after embeds and deletes produce preserved-content embeds in the staff log channel with bot messages and the log channel itself excluded; a member exercising their data rights privately receives a readable view and a portable JSON export of only their own stored records.",
           "artifact": "evidence/moderation-message-logging/discord"
         },
         {
@@ -1276,16 +1313,16 @@
           "id": "moderation-message-logging-set-a",
           "class": "SET-A",
           "disposition": "required",
-          "promise": "Owner opt-in takes live effect: enabling logging with a run-prefixed staff log channel on the dashboard moderation page starts capture within the cache TTL, producing before-and-after edit embeds and preserved-content delete embeds with jump links and attachments.",
-          "expectedOutcome": "After the owner saves, run-member-a's edit yields exactly one embed showing both versions with author and jump link, a deleted message with an attachment yields one embed preserving the content and attachment link, and a bot-authored message edit produces nothing.",
+          "promise": "Owner opt-in takes live effect: enabling logging with a run-prefixed staff log channel on the dashboard moderation page starts capture within the cache TTL, producing before-and-after edit embeds and preserved-content delete embeds with jump links and attachments, and the member data-rights view-and-export surface returns each member their own stored records.",
+          "expectedOutcome": "After the owner saves, run-member-a's edit yields exactly one embed showing both versions with author and jump link, a deleted message with an attachment yields one embed preserving the content and attachment link, and a bot-authored message edit produces nothing; run-member-a then exercises their data rights and privately receives a readable view plus a portable JSON export containing exactly their own captured records and no one else's.",
           "assertions": [
             {
               "assertionClass": "Discord",
-              "expectedObservation": "The run log channel contains exactly one edit embed with before and after fields and one delete embed with the preserved content and attachment link; no embed exists for the bot-authored message."
+              "expectedObservation": "The run log channel contains exactly one edit embed with before and after fields and one delete embed with the preserved content and attachment link; no embed exists for the bot-authored message; run-member-a's data-rights request privately returns a readable view and a portable JSON export whose records are exactly run-member-a's own captured entries."
             },
             {
               "assertionClass": "database-RLS",
-              "expectedObservation": "The guild_config message-log columns for the test guild reflect the new settings; anon and second-guild clients read none of the scenario's configuration or forensic rows."
+              "expectedObservation": "The guild_config message-log columns for the test guild reflect the new settings; anon and second-guild clients read none of the scenario's configuration or forensic rows; the member data-rights export query is scoped to the requesting member's own user id and guild so it returns only their rows."
             },
             {
               "assertionClass": "audit",
@@ -1387,16 +1424,16 @@
           "id": "moderation-message-logging-unauth",
           "class": "UNAUTH",
           "disposition": "required",
-          "promise": "Forensic data is staff-only and configuration is admin-only: an ordinary member can neither read the log channel nor flip the message-log settings through the API.",
-          "expectedOutcome": "run-member-b cannot view the staff log channel, and a dashboard session without admin access to the guild receives a denial from the settings API while guild_config stays unchanged and the denied attempt is audited.",
+          "promise": "Forensic data is staff-only and configuration is admin-only, and member data rights are self-scoped: an ordinary member can neither read the log channel, flip the message-log settings through the API, nor view or export another member's stored data.",
+          "expectedOutcome": "run-member-b cannot view the staff log channel, a dashboard session without admin access to the guild receives a denial from the settings API while guild_config stays unchanged and the denied attempt is audited, and run-member-b's own data-rights view-and-export returns only run-member-b's records — never run-member-a's.",
           "assertions": [
             {
               "assertionClass": "Discord",
-              "expectedObservation": "run-member-b's attempt to read the log channel is blocked by channel permissions while the staff observer reads it normally."
+              "expectedObservation": "run-member-b's attempt to read the log channel is blocked by channel permissions while the staff observer reads it normally, and run-member-b's data-rights view and export contain only run-member-b's own records with none of run-member-a's data disclosed."
             },
             {
               "assertionClass": "database-RLS",
-              "expectedObservation": "The unauthorized session's write is refused at both the API and RLS layers, and the guild_config message-log columns are byte-identical before and after the attempt."
+              "expectedObservation": "The unauthorized session's write is refused at both the API and RLS layers, the guild_config message-log columns are byte-identical before and after the attempt, and the member data-rights export query filtered by run-member-b's user id returns zero of run-member-a's rows."
             },
             {
               "assertionClass": "audit",
@@ -1618,7 +1655,7 @@
             },
             {
               "assertionClass": "database-RLS",
-              "expectedObservation": "A client scoped to guild B reads zero guild A message-log configuration or forensic rows and vice versa; service-role probes confirm each guild's config resolved independently."
+              "expectedObservation": "A client scoped to guild B reads zero guild A message-log configuration or forensic rows and vice versa; a member's data-rights view-and-export in one guild returns only that guild's own records for them and never the other guild's data; service-role probes confirm each guild's config resolved independently."
             },
             {
               "assertionClass": "audit",

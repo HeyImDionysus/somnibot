@@ -1818,36 +1818,36 @@
           "id": "administration-automations-set-b",
           "class": "SET-B",
           "disposition": "required",
-          "promise": "Scope filters route the same trigger differently.",
-          "expectedOutcome": "With a message.sent rule whose scope excludes channel X, a qualifying message in channel X fires nothing while the same message in channel Y fires the action, proving the second configuration takes distinct effect from SET-A.",
+          "promise": "A second, distinct configuration takes effect and the hard chain-depth loop cut engages: a scope-filtered rule whose action re-emits a matching event chains into itself, and at max-chain-depth the engine drops the event before it runs and reports the loop to the owner.",
+          "expectedOutcome": "With a run-prefixed message.sent rule scoped to channel Y whose action posts a message that itself re-triggers the same rule, the qualifying message in channel X still fires nothing while channel Y starts the chain; the hops below max-chain-depth (default 3) execute, but the side-effect event that arrives at the chain-depth ceiling is dropped before any further action runs, the owner receives exactly one loop-guard notice, and one automation.loop_blocked audit row records the cut — proving this configuration behaves distinctly from SET-A while the loop guardrail positively holds.",
           "assertions": [
             {
               "assertionClass": "Discord",
-              "expectedObservation": "The action appears only for the channel Y message."
+              "expectedObservation": "The chained action posts only for hops below max-chain-depth; the depth-exceeding hop lands no message and the channel-X scope exclusion fires nothing."
             },
             {
               "assertionClass": "database-RLS",
-              "expectedObservation": "Exactly one execution row exists, referencing the channel Y occurrence."
+              "expectedObservation": "Execution rows exist only for the sub-depth hops, all scoped to the run guild, and the dropped depth-exceeding occurrence writes no execution row."
             },
             {
               "assertionClass": "audit",
-              "expectedObservation": "The single execution is audited; the excluded channel produced no artifacts."
+              "expectedObservation": "Exactly one automation.loop_blocked audit row records the dropped event with its source automation and depth, while the sub-depth hops carry their automation.executed rows."
             },
             {
               "assertionClass": "owner-notification",
-              "expectedObservation": "No alerts fire for a scope-filtered non-match."
+              "expectedObservation": "The owner receives exactly one loop-guard-notice for the cut chain and no alert for the scope-filtered non-match."
             },
             {
               "assertionClass": "branding",
-              "expectedObservation": "The fired action's output is branded per template."
+              "expectedObservation": "Both the fired action output and the loop-guard notice render in the owner voice per template."
             },
             {
               "assertionClass": "replay-safety",
-              "expectedObservation": "Repeating the excluded-channel message still fires nothing."
+              "expectedObservation": "Re-running the chain trigger cuts at the same depth every time and never lets the loop exceed max-chain-depth."
             },
             {
               "assertionClass": "cleanup",
-              "expectedObservation": "Rule and artifacts are removed at teardown."
+              "expectedObservation": "The rule, its sub-depth execution rows, and posted messages are removed at teardown."
             }
           ]
         },
@@ -2077,36 +2077,36 @@
           "id": "administration-automations-race",
           "class": "RACE",
           "disposition": "required",
-          "promise": "Burst triggers respect the atomic per-user fire limit.",
-          "expectedOutcome": "Six qualifying triggers from one member within a minute yield at most five executions with the default limit; the Valkey counter is atomic under concurrency so the limit is never exceeded even when triggers land simultaneously.",
+          "promise": "Both runaway guardrails hold under load: burst triggers respect the atomic per-user fire limit, and a single occurrence that would affect more members than the mass-action threshold halts in held before any member past the guardrail is touched.",
+          "expectedOutcome": "Six qualifying triggers from one member within a minute yield at most five executions with the default limit under an atomic Valkey counter that never exceeds the budget even when triggers land simultaneously; and a run-prefixed rule whose one occurrence resolves to more affected members than the mass-action-threshold (default 25) halts in the held state before any member past the threshold is touched, emitting exactly one owner approval card and one automation.mass_action_held audit row, with nothing further executing until the owner releases it.",
           "assertions": [
             {
               "assertionClass": "Discord",
-              "expectedObservation": "At most five actions land for the burst."
+              "expectedObservation": "At most five actions land for the burst, and the mass-action occurrence touches no member past the threshold — members beyond the guardrail receive no role or message until an owner release."
             },
             {
               "assertionClass": "database-RLS",
-              "expectedObservation": "Execution rows never exceed the configured limit for the window."
+              "expectedObservation": "Burst execution rows never exceed the configured per-user limit, and the held occurrence is recorded in the held state with no completed action rows past the threshold, all scoped to the run guild."
             },
             {
               "assertionClass": "audit",
-              "expectedObservation": "Executed occurrences are audited; the suppressed sixth leaves no execution row."
+              "expectedObservation": "Executed occurrences are audited and the suppressed sixth fire leaves no execution row, while exactly one automation.mass_action_held row records the held occurrence with its member-count and threshold."
             },
             {
               "assertionClass": "owner-notification",
-              "expectedObservation": "No alert fires for normal rate limiting."
+              "expectedObservation": "No alert fires for normal rate limiting, and exactly one mass-action approval card is delivered to the owner for the held occurrence — never one per affected member."
             },
             {
               "assertionClass": "branding",
-              "expectedObservation": "Delivered outputs remain branded and orderly."
+              "expectedObservation": "Delivered outputs and the held-occurrence approval card render branded per template."
             },
             {
               "assertionClass": "replay-safety",
-              "expectedObservation": "Concurrent INCR never lets two fires share one budget slot."
+              "expectedObservation": "Concurrent INCR never lets two fires share one budget slot, and redelivering the mass-action trigger keeps the occurrence held exactly once rather than executing or re-holding it twice."
             },
             {
               "assertionClass": "cleanup",
-              "expectedObservation": "Burst artifacts are removed at teardown."
+              "expectedObservation": "Burst artifacts and the held occurrence are removed at teardown."
             }
           ]
         },

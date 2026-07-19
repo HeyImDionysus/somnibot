@@ -134,6 +134,13 @@
      "action": "Directly credit or debit another member's wallet outside a consented /pay transfer",
      "defaultDecision": "deny",
      "enforcement": "No command path writes another member's economy_wallets row except the receiver credit inside a /pay the sender themselves initiated; role income via /collect-income excludes commerce-held roles so commerce never funds the game wallet."
+    },
+    {
+     "id": "earn-commerce-role-income",
+     "actor": "Any guild member whose income-eligible role was granted by a real-money commerce entitlement",
+     "action": "Earn game role-income from /collect-income for a role held through an active commerce entitlement",
+     "defaultDecision": "deny",
+     "enforcement": "Two-economies wall: economy_collect_role_income sums income only from roles NOT sourced by an active commerce entitlement, so a commerce-held role credits exactly zero game coins; that role's income resumes only after the entitlement is removed and the removal is proven via delivery intents, keeping the real-money store and the fake game wallet strictly separate."
     }
    ],
    "messages": [
@@ -200,6 +207,17 @@
      "surface": "Owner alert channel",
      "audience": "Guild owner and administrators",
      "defaultTemplate": "Heads up: a {amount}-coin reward credit to {member-name} failed and is queued for automatic retry; nothing was double-credited and everything is logged.",
+     "variables": [
+      "amount",
+      "member-name"
+     ]
+    },
+    {
+     "id": "income-collected",
+     "trigger": "A member runs /collect-income and eligible non-commerce roles pay out",
+     "surface": "Channel embed replying to /collect-income",
+     "audience": "The collecting member and the channel",
+     "defaultTemplate": "Collected {amount} coins of role income, {member-name} — only your game-earned roles paid out and commerce-held roles added nothing.",
      "variables": [
       "amount",
       "member-name"
@@ -319,6 +337,16 @@
      "messageId": "wallet-unavailable",
      "auditEvent": "economy.wallet_unavailable",
      "ownerNotification": false
+    },
+    {
+     "id": "commerce-role-income-excluded",
+     "trigger": "A member runs /collect-income while holding an income-eligible role sourced by an active real-money commerce entitlement",
+     "expectedBehavior": "The commerce-held role is excluded before any credit so it contributes exactly zero game coins; only non-commerce roles pay out, the wallet gains nothing from the commerce role, and that role's income resumes only after the entitlement is removed and the removal is proven via delivery intents — the real-money store never funds the fake economy.",
+     "resultingState": "active",
+     "retry": "never",
+     "messageId": "income-collected",
+     "auditEvent": "economy.commerce_role_income_excluded",
+     "ownerNotification": false
     }
    ],
    "evidence": [
@@ -326,7 +354,7 @@
      "assertionClass": "Discord",
      "proofMode": "real-stack",
      "observer": "Discord observer client joined to the primary test guild",
-     "expectedObservation": "Wallet and reward behavior contracted here is directly observed working in the live test guild: /balance shows wallet and bank, /daily credits the configured reward with its streak bonus, /deposit and /withdraw move coins atomically, and /pay transfers exactly once.",
+     "expectedObservation": "Wallet and reward behavior contracted here is directly observed working in the live test guild: /balance shows wallet and bank, /daily, /weekly, and /monthly each credit their configured reward with its streak bonus on their own cooldown slot, /collect-income pays game-earned role income while commerce-held roles credit zero, /deposit and /withdraw move coins atomically, and /pay transfers exactly once.",
      "artifact": "evidence/game-economy-wallet-rewards/discord"
     },
     {
@@ -377,12 +405,12 @@
      "id": "game-economy-wallet-rewards-def",
      "class": "DEF",
      "disposition": "required",
-     "promise": "Out of the box, economy_enabled is on, a wallet starts at zero and is created lazily on first touch, /daily grants 500 play coins with a 5 percent per-step streak bonus, /pay transfers tax-free, and /deposit and /withdraw move coins between wallet and bank atomically.",
-     "expectedOutcome": "run-member-a's first /balance lazily creates exactly one wallet, /daily credits exactly 500 play coins, /deposit 200 then /withdraw 100 move coins with wallet and bank reflecting every step, and /pay 50 to run-member-b debits A and credits B exactly once.",
+     "promise": "Out of the box, economy_enabled is on, a wallet starts at zero and is created lazily on first touch, the full reward surface pays play coins — /daily grants 500 with a 5 percent per-step streak bonus while /weekly and /monthly grant their own larger cadence rewards on their own cooldown slots — /collect-income pays out game-earned role income (commerce-held roles pay nothing), /pay transfers tax-free, and /deposit and /withdraw move coins between wallet and bank atomically.",
+     "expectedOutcome": "run-member-a's first /balance lazily creates exactly one wallet, /daily credits exactly 500 play coins, /weekly and /monthly each credit their own cadence reward exactly once on their own cooldown slot, /collect-income pays out the eligible game-earned role income once, /deposit 200 then /withdraw 100 move coins with wallet and bank reflecting every step, and /pay 50 to run-member-b debits A and credits B exactly once.",
      "assertions": [
       {
        "assertionClass": "Discord",
-       "expectedObservation": "run-member-a's first /balance lazily creates exactly one economy_wallets row via the advisory-locked economy_get_or_create_wallet, /daily credits exactly 500 play coins through economy_add_balance, /deposit 200 and /withdraw 100 move coins between wallet and bank atomically, and /pay 50 to run-member-b debits A and credits B exactly once with matching quality-weighted XP progress."
+       "expectedObservation": "run-member-a's first /balance lazily creates exactly one economy_wallets row via the advisory-locked economy_get_or_create_wallet, /daily credits exactly 500 play coins through economy_add_balance, /weekly and /monthly each credit their own larger cadence reward exactly once on their own SET NX cooldown slot, /collect-income pays the eligible game-earned role income exactly once with the branded income-collected embed, /deposit 200 and /withdraw 100 move coins between wallet and bank atomically, and /pay 50 to run-member-b debits A and credits B exactly once with matching quality-weighted XP progress."
       },
       {
        "assertionClass": "database-RLS",
@@ -525,12 +553,12 @@
      "id": "game-economy-wallet-rewards-unauth",
      "class": "UNAUTH",
      "disposition": "required",
-     "promise": "Wallets are protected from unauthorized actors: a member cannot mutate another member's wallet outside a consented /pay and a non-admin dashboard session cannot save economy settings.",
-     "expectedOutcome": "run-member-b's commands only ever move run-member-b's own coins, run-member-a's balance is unchanged apart from a single consented incoming /pay, and the non-admin dashboard save is refused.",
+     "promise": "Wallets are protected from unauthorized actors and from the real-money store: a member cannot mutate another member's wallet outside a consented /pay, a non-admin dashboard session cannot save economy settings, and the two-economies wall holds — a role held through an active commerce entitlement earns ZERO game role-income from /collect-income while a normal game-earned role does earn, and the commerce role's income resumes only after its entitlement removal is proven via delivery intents.",
+     "expectedOutcome": "run-member-b's commands only ever move run-member-b's own coins, run-member-a's balance is unchanged apart from a single consented incoming /pay, the non-admin dashboard save is refused, and when run-member-a runs /collect-income while holding one commerce-entitlement role and one normal game-earned role the wallet gains only the normal role's income and exactly zero from the commerce-held role.",
      "assertions": [
       {
        "assertionClass": "Discord",
-       "expectedObservation": "run-member-b's /pay, /deposit, and /withdraw only ever move run-member-b's own coins, run-member-a's /balance is identical before and after apart from a single consented incoming /pay, and the non-admin dashboard save returns an authorization error."
+       "expectedObservation": "run-member-b's /pay, /deposit, and /withdraw only ever move run-member-b's own coins, run-member-a's /balance is identical before and after apart from a single consented incoming /pay, the non-admin dashboard save returns an authorization error, and run-member-a's /collect-income credits only the game-earned role's income with the commerce-held role adding exactly zero coins — the branded income-collected embed reflects the reduced total and income from the commerce role would resume only after the entitlement removal is proven via delivery intents."
       },
       {
        "assertionClass": "database-RLS",
@@ -538,7 +566,7 @@
       },
       {
        "assertionClass": "audit",
-       "expectedObservation": "An audit row records the denied wallet configuration attempt with actor and reason permission-denied."
+       "expectedObservation": "An audit row records the denied wallet configuration attempt with actor and reason permission-denied, and a second append-only row records the excluded commerce-held role income with reason commerce-role-excluded; neither the denied save nor the excluded role ever credits the wallet."
       },
       {
        "assertionClass": "owner-notification",

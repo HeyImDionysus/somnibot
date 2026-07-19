@@ -353,3 +353,6 @@ Each item is where the catalog (the owner's LOCKED intent) diverges from current
 
 ## welcome
 - **[DEFAULT]** welcome-onboarding: safe-fallback behavior when DMs/native onboarding unavailable not specified — defaulted to fallback-mode grant-after-timeout with a 10-minute timeout and one owner alert (member-respectful theme)
+
+## privacy (added post-review)
+- **[GAP]** member-data-rights: the catalog now contracts member view+export+delete (moderation-message-logging), but the member-facing view/export SURFACE (DM/portal /mydata-style export) does not exist in code yet — /forgetme delete exists, view+export must be built. Intended v1 per locked privacy decision.
