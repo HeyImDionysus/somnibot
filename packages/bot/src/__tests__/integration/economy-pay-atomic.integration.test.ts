@@ -91,11 +91,19 @@ beforeAll(async () => {
     owner_discord_id: '100000000000000010',
   });
   if (error) throw new Error(`Guild seed failed: ${error.message}`);
+  // A non-zero starting balance makes the "failed transfer must not provision
+  // the receiver" assertion observable (get_or_create would otherwise mint it).
+  const { error: cfgErr } = await supa.from('guild_config').insert({
+    guild_id: GUILD_ID,
+    economy_starting_balance: 100,
+  });
+  if (cfgErr) throw new Error(`Guild config seed failed: ${cfgErr.message}`);
 });
 
 afterAll(async () => {
   await supa.from('economy_transactions').delete().in('guild_id', TEST_GUILD_IDS);
   await supa.from('economy_wallets').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('guild_config').delete().in('guild_id', TEST_GUILD_IDS);
   // Guild rows are pinned by immutable audit_logs elsewhere; ids are unique per
   // run so a leftover guild row never affects reruns. Remove it best-effort.
   await supa.from('guild').delete().in('id', TEST_GUILD_IDS);
@@ -244,6 +252,45 @@ describe('economy_pay', () => {
     expect((await walletOf(a)).wallet).toBe(50);
     expect((await walletOf(b)).wallet).toBe(0);
     expect(await paySendRowsFor('interaction-insufficient')).toBe(0);
+  });
+
+  it('does not provision the receiver on a failed (insufficient) transfer', async () => {
+    const a = `${USER}-noprov-a`;
+    const b = `${USER}-noprov-b`; // deliberately never seeded — a brand-new user
+    await seedWallet(a, 50);
+
+    const { data, error } = await pay(a, b, 500, 0, 'interaction-noprov');
+    expect(error).toBeNull();
+    expect(data).toMatchObject({ status: 'insufficient_funds' });
+
+    // The guild has economy_starting_balance=100, so if get_or_create ran for
+    // the receiver on this failed path it would mint a wallet + a 'Starting
+    // balance' ledger row. It must not: a failed /pay never touches the receiver.
+    const { count: walletCount } = await supa
+      .from('economy_wallets')
+      .select('*', { count: 'exact', head: true })
+      .eq('guild_id', GUILD_ID)
+      .eq('user_id', b);
+    const { count: txCount } = await supa
+      .from('economy_transactions')
+      .select('*', { count: 'exact', head: true })
+      .eq('guild_id', GUILD_ID)
+      .eq('user_id', b);
+    expect(walletCount).toBe(0);
+    expect(txCount).toBe(0);
+  });
+
+  it('provisions a brand-new receiver (starting balance + payment) only on success', async () => {
+    const a = `${USER}-newrcv-a`;
+    const b = `${USER}-newrcv-b`; // unseeded — created by the successful transfer
+    await seedWallet(a, 1000);
+
+    const { data, error } = await pay(a, b, 100, 0, 'interaction-newrcv');
+    expect(error).toBeNull();
+    expect(data).toMatchObject({ status: 'sent' });
+
+    // starting_balance (100, minted on first provision) + received (100).
+    expect((await walletOf(b)).wallet).toBe(200);
   });
 
   it('sinks the tax: sender loses the full amount, receiver gains the remainder', async () => {

@@ -121,10 +121,13 @@ BEGIN
   v_tax := CASE WHEN p_tax_pct > 0 THEN pg_catalog.floor(p_amount * p_tax_pct / 100.0)::BIGINT ELSE 0 END;
   v_received := p_amount - v_tax;
 
-  -- Both member locks are already held, so the initializer's own advisory lock
-  -- acquisition is a no-op within this transaction.
+  -- Provision + lock the SENDER wallet only. The receiver is deliberately NOT
+  -- touched yet: a failed/insufficient transfer must not create a
+  -- non-participant's wallet or mint its starting balance (that would diverge
+  -- from the pre-atomic behavior, where a failed /pay never touched the
+  -- receiver). The member lock is already held, so this initializer takes no
+  -- new lock.
   PERFORM public.economy_get_or_create_wallet(p_guild_id, p_sender_id);
-  PERFORM public.economy_get_or_create_wallet(p_guild_id, p_receiver_id);
 
   SELECT w.wallet
     INTO v_sender_balance
@@ -148,6 +151,10 @@ BEGIN
      SET wallet = wallet - p_amount, updated_at = v_now
    WHERE guild_id = p_guild_id AND user_id = p_sender_id
   RETURNING wallet INTO v_sender_balance;
+
+  -- Only now that the transfer is committing do we provision the receiver
+  -- wallet (its lock is already held, so no new lock is taken).
+  PERFORM public.economy_get_or_create_wallet(p_guild_id, p_receiver_id);
 
   -- Credit receiver (mirror economy_add_balance: wallet + total_earned).
   UPDATE public.economy_wallets

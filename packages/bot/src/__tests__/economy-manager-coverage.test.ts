@@ -726,6 +726,24 @@ describe('EconomyManager', () => {
       expect(result.amount).toBe(200);
       expect(result.message).toContain('Sent');
     });
+
+    it('retries the idempotent RPC on a transport error and then succeeds', async () => {
+      let calls = 0;
+      supabase.rpc.mockImplementation(async (name: string, params: unknown) => {
+        if (name === 'economy_pay') {
+          calls += 1;
+          // First attempt fails at the transport layer; because economy_pay is
+          // idempotent on the request id, the retry is safe and succeeds.
+          if (calls === 1) return { data: null, error: { message: 'connection reset' } };
+          const amount = Number((params as { p_amount?: unknown }).p_amount);
+          return { data: { status: 'sent', replayed: false, amount, tax: 0, received: amount }, error: null };
+        }
+        return { data: makeWallet(), error: null };
+      });
+      const result = await em.pay('u1', 'u2', 200, 'req-retry');
+      expect(result.success).toBe(true);
+      expect(calls).toBeGreaterThanOrEqual(2); // errored once, retried, then succeeded
+    });
   });
 
   // ── Rob ─────────────────────────────────────────────────

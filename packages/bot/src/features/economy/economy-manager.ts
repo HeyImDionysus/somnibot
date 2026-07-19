@@ -782,7 +782,7 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: wallet, message: '❌ Payment could not be processed. Please try again.' };
     }
 
-    const { data, error } = await this.supabase.rpc('economy_pay', {
+    const payArgs = {
       p_guild_id: this.guild.id,
       p_sender_id: senderId,
       p_receiver_id: receiverId,
@@ -792,10 +792,29 @@ export class EconomyManager {
       p_amount: String(amount),
       p_tax_pct: cfg.economy_pay_tax_pct ?? 0,
       p_request_id: requestId,
-    });
+    };
+
+    // economy_pay is idempotent on p_request_id, so an ambiguous transport
+    // failure (e.g. the transfer committed but the HTTP response was lost) is
+    // safe to retry: the retry replays the committed outcome instead of
+    // debiting a second time. Without this, a lost response would surface as a
+    // "failed" message and a user re-run — which mints a NEW interaction id —
+    // would double-debit. Retrying the SAME request id closes that window.
+    let data: unknown = null;
+    let error: { message?: string } | null = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const res = await this.supabase.rpc('economy_pay', payArgs);
+      data = res.data;
+      error = res.error;
+      if (!error) break;
+      log.warn('pay() economy_pay attempt failed; retrying idempotently', {
+        attempt,
+        detail: error.message,
+      });
+    }
 
     if (error || !data || typeof data !== 'object') {
-      log.error('pay() economy_pay RPC failed', { detail: error?.message });
+      log.error('pay() economy_pay RPC failed after retries', { detail: error?.message });
       const wallet = await this.getOrCreateWallet(senderId);
       return { success: false, amount: 0, balance: wallet, message: '❌ Payment failed. Please try again.' };
     }
