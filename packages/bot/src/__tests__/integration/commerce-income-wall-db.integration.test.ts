@@ -332,11 +332,12 @@ async function createSaleRefundFixture(options: {
     price_cents: 500,
   });
   const planId = await createPlan(productId, { price_cents: 500 });
+  const saleDiscordId = nextSnowflake();
   const { data: customer, error: customerError } = await supa
     .from('customers')
     .insert({
       guild_id: GUILD_A,
-      discord_id: nextSnowflake(),
+      discord_id: saleDiscordId,
       discord_username: nextName('sale-refund-customer'),
     })
     .select('id')
@@ -404,6 +405,7 @@ async function createSaleRefundFixture(options: {
         key_hash: nextName('sale-refund-key-hash'),
         key_prefix: 'SALE',
         key_suffix: nextName('sale-refund-key-suffix'),
+        bound_discord_id: saleDiscordId,
         status: 'active',
       })
       .select('id')
@@ -484,11 +486,29 @@ async function cleanFixtures(): Promise<void> {
   // to a per-test unique target/order id, so retained rows cannot leak
   // between tests, and the per-run guild ids keep reruns isolated.
 
-  const queueDelete = await supa
-    .from('bot_action_queue')
-    .delete()
-    .in('guild_id', TEST_GUILDS);
-  expect(queueDelete.error).toBeNull();
+  // Noncommerce cleanup carriers are deliberately undeletable through
+  // production clients before resolution (commerce_queue_guard_noncommerce_
+  // cleanup_delete raises 23503), and their activation-head fences pin the
+  // carrier rows with an ON DELETE RESTRICT FK. Fixture teardown removes
+  // them as replica-mode surgery on the integration owner connection,
+  // exactly like the other legacy-state fixtures in this file.
+  await sqlA.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`
+      DELETE FROM public.commerce_noncommerce_activation_heads
+       WHERE guild_id = ${GUILD_A} OR guild_id = ${GUILD_B}
+    `;
+    await tx`
+      DELETE FROM public.commerce_noncommerce_action_outcomes AS outcome
+       USING public.bot_action_queue AS queue
+       WHERE outcome.action_id = queue.id
+         AND (queue.guild_id = ${GUILD_A} OR queue.guild_id = ${GUILD_B})
+    `;
+    await tx`
+      DELETE FROM public.bot_action_queue
+       WHERE guild_id = ${GUILD_A} OR guild_id = ${GUILD_B}
+    `;
+  });
 
   const deadLetterDelete = await supa
     .from('action_queue_dlq')
@@ -1634,7 +1654,13 @@ describe('commerce income wall database invariant', () => {
       p_expected_remove_on_expiry: false,
     });
     expect(retiredReplay.error).toBeNull();
-    expect(retiredReplay.data).toEqual(retired.data);
+    // A replay against the retained tombstone is state-idempotent but reports
+    // itself distinctly: the first retirement transitions the row
+    // ('retired'), the replay observes the tombstone ('already_retired').
+    expect(retiredReplay.data).toEqual({
+      ...(retired.data as Record<string, unknown>),
+      disposition: 'already_retired',
+    });
 
     const pendingRetired = await supa.rpc('commerce_retire_temp_role_grant', {
       p_grant_id: pendingGrantId,
@@ -3375,7 +3401,10 @@ describe('commerce income wall database invariant', () => {
       p_guild_id: GUILD_A,
     });
     expect(completed.error).toBeNull();
-    expect(completed.data).toMatchObject({ status: 'completed', already_refunded: true });
+    // already_refunded flags a replay of an already-completed ATTEMPT. This is
+    // the first finalize of this attempt (provider_completed -> completed), so
+    // it reports false even though the money moved through the webhook path.
+    expect(completed.data).toMatchObject({ status: 'completed', already_refunded: false });
 
     const splitFixture = await createPaidRefundFixture();
     const splitPrepared = await supa.rpc('commerce_prepare_admin_refund', {
@@ -3571,8 +3600,11 @@ describe('commerce income wall database invariant', () => {
       p_currency: null,
     });
     expect(lossyCancellation.error).toMatchObject({ code: '23514' });
+    // The PENDING observation already bound this attempt to secondRefundId, so
+    // a cancellation that lost the provider identity fails the identity gate
+    // before the pending-specific terminal-result check can even run.
     expect(lossyCancellation.error?.message).toContain(
-      'pending attempt terminal result mismatch',
+      'provider identity mismatch',
     );
     const cancelled = await supa.rpc('commerce_record_admin_refund_outcome', {
       p_attempt_id: secondAttempt,
@@ -3988,8 +4020,11 @@ describe('commerce income wall database invariant', () => {
       },
     );
     expect(externalTerminalCannotBecomeAdmin.error).toMatchObject({ code: '23514' });
+    // A reversed payment leaves no refundable capture candidate at all, so
+    // prepare fails closed at the capture-set gate (operator remediation)
+    // before any attempt-history reasoning applies.
     expect(externalTerminalCannotBecomeAdmin.error?.message).toContain(
-      'prior terminal refund lacks a completed admin attempt',
+      'payment capture set requires operator remediation',
     );
 
     const zeroFixture = await createPaidRefundFixture();
@@ -5021,6 +5056,10 @@ describe('commerce income wall database invariant', () => {
     const partialStarted = makeGate();
     const releasePartial = makeGate();
     let partialError: unknown;
+    // The audit payloads below are inline JSONB literals: postgres.js
+    // re-serializes a pre-stringified JSON string parameter once the described
+    // parameter type is jsonb, which double-encodes it into a JSONB string and
+    // trips the RPC's fail-closed object-shape check.
     const partialTransaction = sqlA.begin(async (tx) => {
       await tx`
         SELECT public.commerce_record_paypal_refund_event(
@@ -5034,7 +5073,7 @@ describe('commerce income wall database invariant', () => {
           'PAYMENT.CAPTURE.REFUNDED',
           250,
           'USD',
-          ${JSON.stringify({ test_case: 'interleaved partial' })}::JSONB
+          '{"test_case":"interleaved partial"}'::JSONB
         )
       `;
       partialStarted.open();
@@ -5059,7 +5098,7 @@ describe('commerce income wall database invariant', () => {
         'PAYMENT.CAPTURE.REFUNDED',
         750,
         'USD',
-        ${JSON.stringify({ test_case: 'interleaved full' })}::JSONB
+        '{"test_case":"interleaved full"}'::JSONB
       ) AS result
     `.then(
       (rows) => ({ rows, error: null as unknown }),
@@ -5330,7 +5369,29 @@ describe('commerce income wall database invariant', () => {
       .eq('action', 'revoke_roles')
       .contains('payload', { entitlement_id: entitlement!.id });
     expect(revokeError).toBeNull();
-    expect(revokeRows).toEqual([]);
+    // The noncommerce lifecycle protocol records durable carriers for the
+    // manual-source entitlement: one activation carrier bound at insert and
+    // one terminal carrier when the refund expired the entitlement. Both are
+    // scoped to the exact entitlement and its activation-proven role. The
+    // commerce refund path must not add any broader revoke_roles authority.
+    const revokePayloads = (revokeRows ?? [])
+      .map((row) => row.payload as Record<string, unknown>)
+      .sort((a, b) => String(a.reason).localeCompare(String(b.reason)));
+    expect(revokePayloads).toHaveLength(2);
+    expect(revokePayloads[0]).toMatchObject({
+      source: 'noncommerce_entitlement_activation_trigger',
+      reason: 'entitlement_activated',
+      entitlement_id: entitlement!.id,
+      role_ids: [roleId],
+      temporary_role_grant_ids: [],
+    });
+    expect(revokePayloads[1]).toMatchObject({
+      source: 'noncommerce_entitlement_status_trigger',
+      reason: 'entitlement_expired',
+      entitlement_id: entitlement!.id,
+      role_ids: [roleId],
+      temporary_role_grant_ids: [],
+    });
 
     const { data: cleanupAlerts, error: cleanupAlertError } = await supa
       .from('alerts')

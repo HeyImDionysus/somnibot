@@ -34,7 +34,12 @@ const USER_PREFIX = `role-income-user-${Date.now()}`;
 const ROLE_REPLAY = 'role-income-replay';
 const ROLE_CONCURRENT = 'role-income-concurrent';
 const ROLE_PAID = 'role-income-paid';
-const ROLE_MANUAL = 'role-income-manual';
+// Live manual/giveaway/automation entitlements now go through the shipped
+// noncommerce activation protocol, whose trigger requires a canonical
+// snowflake role snapshot and a snowflake customer discord_id. Purchase
+// entitlements have no such gate, so ROLE_PAID may stay a plain label.
+const ROLE_MANUAL = '210000000000000105';
+const MANUAL_USER = '210000000000000205';
 const ROLE_TEMP = 'role-income-temp';
 const ROLE_REVOKE = 'role-income-revoke';
 const ROLE_OTHER_GUILD = 'role-income-other-guild';
@@ -199,7 +204,7 @@ beforeAll(async () => {
   if (configError) throw new Error(`Guild config seed failed: ${configError.message}`);
 
   const paidUser = `${USER_PREFIX}-paid`;
-  const manualUser = `${USER_PREFIX}-manual`;
+  const manualUser = MANUAL_USER;
   const { data: customers, error: customerError } = await supa
     .from('customers')
     .insert([
@@ -280,6 +285,28 @@ beforeAll(async () => {
   ]);
   if (entitlementError) throw new Error(`Entitlement seed failed: ${entitlementError.message}`);
 
+  // Inserting the live manual entitlement enqueues one pending noncommerce
+  // activation carrier (action 'revoke_roles', reason 'entitlement_activated')
+  // through the shipped protocol. Retire it to its steady worker-completed
+  // state so the wall tests below observe entitlement provenance, not the
+  // transient ensure carrier. Status transitions are protocol-owner-only, so
+  // this must run on the privileged direct connection.
+  const settledCarriers = await sql`
+    UPDATE public.bot_action_queue
+       SET status = 'completed',
+           completed_at = pg_catalog.clock_timestamp()
+     WHERE guild_id = ${GUILD_ID}
+       AND action = 'revoke_roles'
+       AND payload ->> 'source' = 'noncommerce_entitlement_activation_trigger'
+       AND payload ->> 'discord_id' = ${MANUAL_USER}
+       AND status = 'pending'
+  `;
+  if (settledCarriers.count !== 1) {
+    throw new Error(
+      `Manual activation carrier seed failed: expected 1 pending carrier, settled ${settledCarriers.count}`,
+    );
+  }
+
   const { error: incomeError } = await supa.from('economy_role_income').insert([
     { guild_id: GUILD_ID, role_id: ROLE_REPLAY, amount: 25, interval_minutes: 60 },
     { guild_id: GUILD_ID, role_id: ROLE_CONCURRENT, amount: 30, interval_minutes: 60 },
@@ -312,6 +339,13 @@ afterAll(async () => {
   // removed through the privileged test connection.
   await sql`
     DELETE FROM public.commerce_role_delivery_intents
+     WHERE guild_id IN ${sql(TEST_GUILD_IDS)}
+  `;
+  // The manual entitlement's activation head pins its queue carrier through
+  // an ON DELETE RESTRICT FK, so it must go before the bot_action_queue
+  // sweep. service_role holds SELECT only; use the privileged connection.
+  await sql`
+    DELETE FROM public.commerce_noncommerce_activation_heads
      WHERE guild_id IN ${sql(TEST_GUILD_IDS)}
   `;
   // audit_logs rows are immutable by design (delete-protection trigger) and
@@ -770,7 +804,7 @@ describe('economy_collect_role_income', () => {
   it('does not treat a non-purchase entitlement as real-money provenance', async () => {
     const result = await collect(
       GUILD_ID,
-      `${USER_PREFIX}-manual`,
+      MANUAL_USER,
       [ROLE_MANUAL],
       'interaction-manual-entitlement',
     );

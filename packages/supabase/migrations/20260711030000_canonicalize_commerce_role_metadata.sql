@@ -6634,8 +6634,11 @@ BEGIN
     RETURN;
   END IF;
 
-  v_is_origin := v_intent.action_id = v_action.id;
-  v_is_cleanup := v_intent.cleanup_action_id = v_action.id;
+  -- NULL-safe: cleanup_action_id is NULL for pure origin carriers; plain
+  -- equality made v_is_cleanup NULL, so three-valued logic skipped every
+  -- branch below and collapsed bound origin recovery into operator_held.
+  v_is_origin := v_intent.action_id IS NOT DISTINCT FROM v_action.id;
+  v_is_cleanup := v_intent.cleanup_action_id IS NOT DISTINCT FROM v_action.id;
   IF pg_catalog.cardinality(v_intent.reserved_role_ids) > 0
      OR pg_catalog.cardinality(v_intent.reserved_temp_role_grant_ids) > 0
      OR v_intent.mutation_token IS NOT NULL
@@ -12783,11 +12786,16 @@ BEGIN
      WHERE queue.id = v_head.action_id;
     IF (
          v_destination_intent.id IS NOT NULL
+         AND v_destination_intent.discord_id
+           IS NOT DISTINCT FROM v_customer.discord_id
          AND v_destination_intent.state IN (
            'cleanup_required', 'operator_required'
          )
        )
-       OR v_destination_action.status = 'failed' THEN
+       OR (
+         v_head.discord_id IS NOT DISTINCT FROM v_customer.discord_id
+         AND v_destination_action.status = 'failed'
+       ) THEN
       IF v_destination_intent.id IS NOT NULL THEN
         PERFORM public.commerce_signal_role_delivery_intent(
           v_destination_intent.id,
@@ -14888,7 +14896,22 @@ BEGIN
   DELETE FROM public.admin_changes WHERE guild_id = p_guild_id;
   DELETE FROM public.incidents WHERE guild_id = p_guild_id;
   DELETE FROM public.alerts WHERE guild_id = p_guild_id;
-  DELETE FROM public.audit_logs WHERE guild_id = p_guild_id;
+  -- Audit rows are never deleted (owner decision, 2026-07-18): tenant
+  -- deletion scrubs identity — actor/target ids, payload snapshots, error
+  -- text, correlation — and detaches the skeleton from the erased guild so
+  -- the guild row below can be removed. What survives carries no link to
+  -- the tenant or its members; what mattered for security forensics
+  -- (action, actor type, time, outcome) survives forever.
+  UPDATE public.audit_logs
+     SET guild_id = NULL,
+         actor_id = 'anonymized',
+         target_id = CASE WHEN target_id IS NULL THEN NULL ELSE 'anonymized' END,
+         details = pg_catalog.jsonb_build_object('anonymized', true),
+         before_state = NULL,
+         after_state = NULL,
+         error_message = NULL,
+         correlation_id = NULL
+   WHERE guild_id = p_guild_id;
   DELETE FROM public.message_reports WHERE guild_id = p_guild_id;
   DELETE FROM public.starboard_entries WHERE guild_id = p_guild_id;
   DELETE FROM public.member_feature_unlocks WHERE guild_id = p_guild_id;
@@ -17812,8 +17835,21 @@ BEGIN
   GET DIAGNOSTICS cnt = ROW_COUNT;
   result := result || jsonb_build_object('expired_mutes', cnt);
 
-  DELETE FROM public.audit_logs
-   WHERE guild_id = p_guild_id AND timestamp < now() - interval '90 days';
+  -- Retention scrubs, never deletes (owner decision, 2026-07-18): identity
+  -- and payloads leave at the retention boundary, the forensic skeleton
+  -- stays. The actor_id guard keeps repeat prune runs from recounting
+  -- already-scrubbed rows.
+  UPDATE public.audit_logs
+     SET actor_id = 'anonymized',
+         target_id = CASE WHEN target_id IS NULL THEN NULL ELSE 'anonymized' END,
+         details = pg_catalog.jsonb_build_object('anonymized', true),
+         before_state = NULL,
+         after_state = NULL,
+         error_message = NULL,
+         correlation_id = NULL
+   WHERE guild_id = p_guild_id
+     AND timestamp < now() - interval '90 days'
+     AND actor_id IS DISTINCT FROM 'anonymized';
   GET DIAGNOSTICS cnt = ROW_COUNT;
   result := result || jsonb_build_object('old_audit_logs', cnt);
 
@@ -17942,7 +17978,7 @@ BEGIN
   IF v_giveaway.winner_count IS NULL
      OR v_giveaway.winner_count < 1
      OR pg_catalog.cardinality(v_winners) IS DISTINCT FROM
-       pg_catalog.least(v_giveaway.winner_count, v_entry_count)
+       LEAST(v_giveaway.winner_count, v_entry_count)
      OR EXISTS (
        SELECT 1
          FROM pg_catalog.unnest(v_winners) AS winner(value)

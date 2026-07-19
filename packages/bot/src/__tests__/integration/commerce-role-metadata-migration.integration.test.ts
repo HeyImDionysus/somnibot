@@ -214,31 +214,52 @@ const PRE_MIGRATION_SCHEMA_SQL = `
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
+  -- Faithful pre-030 production shape: 20260517600000 (created_at et al.),
+  -- 20260518000001 (action_type/attempts/max_attempts/error/processed_at/
+  -- next_retry_at), 20260524000000 (retry_count), 20260710020000 (lane).
+  -- The migration's claim-token normalization reads queue.created_at at
+  -- deploy time, so this column is load-bearing, not cosmetic.
   CREATE TABLE ${FIXTURE_SCHEMA}.bot_action_queue (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     guild_id TEXT NOT NULL REFERENCES ${FIXTURE_SCHEMA}.guild(id),
     action TEXT NOT NULL,
     payload JSONB NOT NULL DEFAULT '{}'::JSONB,
-    status TEXT NOT NULL,
+    status TEXT NOT NULL
+      CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
     result JSONB,
     error_message TEXT,
-    retry_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
-    next_retry_at TIMESTAMPTZ
+    action_type TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    error TEXT,
+    processed_at TIMESTAMPTZ,
+    next_retry_at TIMESTAMPTZ,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    lane TEXT NOT NULL DEFAULT 'game' CHECK (lane IN ('commerce', 'game'))
   );
 
+  -- Faithful pre-030 production shape: 20260601000000 plus the lane column
+  -- from 20260710020000. The migration's DLQ generation dedup orders by
+  -- failed_at/created_at, and the quarantine sweep rewrites retried rows.
   CREATE TABLE ${FIXTURE_SCHEMA}.action_queue_dlq (
     id UUID PRIMARY KEY,
     guild_id TEXT NOT NULL REFERENCES ${FIXTURE_SCHEMA}.guild(id),
     action TEXT NOT NULL,
     payload JSONB NOT NULL DEFAULT '{}'::JSONB,
-    original_id TEXT,
     error_message TEXT,
+    retry_count INTEGER DEFAULT 0,
+    max_retries INTEGER DEFAULT 5,
+    original_id TEXT,
+    failed_at TIMESTAMPTZ,
+    acknowledged BOOLEAN DEFAULT false,
+    acknowledged_at TIMESTAMPTZ,
     retried BOOLEAN NOT NULL DEFAULT false,
     retried_at TIMESTAMPTZ,
-    failed_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lane TEXT NOT NULL DEFAULT 'game' CHECK (lane IN ('commerce', 'game'))
   );
 
   CREATE TABLE ${FIXTURE_SCHEMA}.alerts (

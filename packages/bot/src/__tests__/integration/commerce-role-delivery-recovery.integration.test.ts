@@ -272,25 +272,33 @@ async function createPaidFixture(options: {
   if (!order?.id) throw new Error('order fixture returned no id');
   const orderId = order.id as string;
 
-  const freeze = await supa.rpc('commerce_freeze_order_grant_snapshot', {
-    p_order_id: orderId,
-    p_guild_id: GUILD_ID,
-    p_customer_id: customerId,
-    p_product_id: productId,
-  });
-  expect(freeze.error).toBeNull();
+  // The freeze/capture pair below models a one-time PayPal checkout. The
+  // shipped freeze RPC fail-closes on subscription products unless the order
+  // carries the exact plan + paypal_subscription_id checkout contract
+  // ("subscription id is required"), which the subscription-product tests in
+  // this suite never exercise: they only need the product, plan, and customer
+  // identities to drive zero-dollar noncommerce grants.
+  if ((options.productType ?? 'one_time') === 'one_time') {
+    const freeze = await supa.rpc('commerce_freeze_order_grant_snapshot', {
+      p_order_id: orderId,
+      p_guild_id: GUILD_ID,
+      p_customer_id: customerId,
+      p_product_id: productId,
+    });
+    expect(freeze.error).toBeNull();
 
-  const capture = await supa.rpc('commerce_finalize_paypal_capture', {
-    p_order_id: orderId,
-    p_guild_id: GUILD_ID,
-    p_customer_id: customerId,
-    p_product_id: productId,
-    p_paypal_order_id: paypalOrderId,
-    p_paypal_capture_id: nextName('capture'),
-    p_amount_cents: 1_000,
-    p_currency: 'USD',
-  });
-  expect(capture.error).toBeNull();
+    const capture = await supa.rpc('commerce_finalize_paypal_capture', {
+      p_order_id: orderId,
+      p_guild_id: GUILD_ID,
+      p_customer_id: customerId,
+      p_product_id: productId,
+      p_paypal_order_id: paypalOrderId,
+      p_paypal_capture_id: nextName('capture'),
+      p_amount_cents: 1_000,
+      p_currency: 'USD',
+    });
+    expect(capture.error).toBeNull();
+  }
 
   const { data: entitlement, error: entitlementError } = await supa
     .from('entitlements')
@@ -997,7 +1005,7 @@ describe('exact bound carrier recovery', () => {
     });
   });
 
-  it('makes a worker claim wait for recovery commit, then begins on the reopened generation', async () => {
+  it('serializes a worker claim against recovery commit, then begins on the reopened generation', async () => {
     const fixture = await createPaidFixture({ permanentRoleId: nextSnowflake() });
     const failed = await failDelivery(fixture, { promotePermanent: true });
     const recoveryEntered = makeGate();
@@ -1016,31 +1024,32 @@ describe('exact bound carrier recovery', () => {
     // instead of hanging the gate forever.
     await Promise.race([recoveryEntered.promise, recovery]);
 
-    // postgres.js queries are lazy; .execute() dispatches immediately so the
-    // claim can actually reach the row lock we are about to observe.
-    const claim = sqlB<QueueClaim[]>`
-      SELECT * FROM public.bot_action_queue_claim(${failed.actionId}::UUID, 2)
-    `.execute();
     try {
-      await waitForDatabaseLock(
-        sqlBBackendPid,
-        'worker claim behind exact-carrier recovery',
-      );
-    } catch (error) {
-      // Never leak the held sqlA transaction: open the gate and settle both
-      // in-flight promises before failing, or every later beforeEach hangs
+      // bot_action_queue_claim is a strict conditional UPDATE gated on the
+      // committed 'pending' status. While the recovery transaction holds the
+      // reopened-but-uncommitted carrier, a concurrent worker claim must see
+      // the committed 'failed' row, claim nothing, and never block on or
+      // observe half-recovered state. (It cannot reach a row-lock wait: the
+      // snapshot-visible tuple already fails the status qualifier.)
+      const midRecoveryClaim = await sqlB<QueueClaim[]>`
+        SELECT * FROM public.bot_action_queue_claim(${failed.actionId}::UUID, 2)
+      `;
+      expect(midRecoveryClaim).toHaveLength(0);
+    } finally {
+      // Never leak the held sqlA transaction, or every later beforeEach hangs
       // behind the single reserved sqlA connection.
       releaseRecovery.open();
-      await Promise.allSettled([recovery, claim]);
-      throw error;
     }
-    releaseRecovery.open();
-    const [recoveryRows, claimRows] = await Promise.all([recovery, claim]);
+    const recoveryRows = await recovery;
     expect(recoveryRows).toEqual([{
       action_id: failed.actionId,
       action_status: 'pending',
       disposition: 'reopened',
     }]);
+
+    const claimRows = await sqlB<QueueClaim[]>`
+      SELECT * FROM public.bot_action_queue_claim(${failed.actionId}::UUID, 2)
+    `;
     expect(claimRows).toHaveLength(1);
     expect(claimRows[0]).toMatchObject({ id: failed.actionId, status: 'processing' });
 
@@ -3699,12 +3708,28 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
                  )
            WHERE guild_id = ${guildId}
         `;
+        // Activation heads and intents hold FKs into bot_action_queue; they
+        // must be removed first or this cleanup masks the real test failure
+        // with a foreign-key violation (mirrors cleanFixtures ordering).
+        await sqlA`
+          DELETE FROM public.commerce_noncommerce_activation_heads
+           WHERE guild_id = ${guildId}
+        `;
+        await sqlA`
+          DELETE FROM public.commerce_role_delivery_intents
+           WHERE guild_id = ${guildId}
+        `;
+        await sqlA`DELETE FROM public.alerts WHERE guild_id = ${guildId}`;
         await sqlA`DELETE FROM public.action_queue_dlq WHERE guild_id = ${guildId}`;
         await sqlA`DELETE FROM public.bot_action_queue WHERE guild_id = ${guildId}`;
         await sqlA`DELETE FROM public.entitlements WHERE guild_id = ${guildId}`;
         await sqlA`DELETE FROM public.customers WHERE guild_id = ${guildId}`;
         await sqlA`DELETE FROM public.products WHERE guild_id = ${guildId}`;
-        await sqlA`DELETE FROM public.guild WHERE id = ${guildId}`;
+        // Immutable audit_logs rows may pin the guild via FK when an audited
+        // RPC ran before the failure; guildId is run-unique, so retaining the
+        // row is rerun-safe and must not mask the original test failure.
+        await sqlA`DELETE FROM public.guild WHERE id = ${guildId}`
+          .catch(() => undefined);
       }
     }
   });
@@ -3775,6 +3800,9 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
     `;
     expect(legacyNullBackfill?.action_id).toBeNull();
 
+    // The shipped activation guard fail-closes malformed role snapshots at
+    // write time, so a poisoned authority vector can never exist durably;
+    // there is no later terminalization to reject because the row is refused.
     const { data: malformed, error: malformedError } = await supa
       .from('entitlements')
       .insert({
@@ -3790,12 +3818,15 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
       })
       .select('id')
       .single();
-    expect(malformedError).toBeNull();
-    const malformedTerminal = await supa
+    expect(malformed).toBeNull();
+    expect(malformedError).toMatchObject({ code: '23514' });
+    const { count: malformedCount, error: malformedCountError } = await supa
       .from('entitlements')
-      .update({ status: 'expired' })
-      .eq('id', malformed!.id);
-    expect(malformedTerminal.error).toMatchObject({ code: '23514' });
+      .select('id', { count: 'exact', head: true })
+      .eq('guild_id', GUILD_ID)
+      .contains('granted_role_ids', ['malformed-role']);
+    expect(malformedCountError).toBeNull();
+    expect(malformedCount).toBe(0);
 
     const stableSourceRole = nextSnowflake();
     const { data: sourceTarget, error: sourceTargetError } = await supa
@@ -3910,15 +3941,15 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
     const { data: unchanged, error: unchangedError } = await supa
       .from('entitlements')
       .select('status')
-      .in('id', [malformed!.id, sourceTarget!.id])
-      .order('id');
+      .eq('id', sourceTarget!.id)
+      .single();
     expect(unchangedError).toBeNull();
-    expect(unchanged?.map((row) => row.status)).toEqual(['active', 'active']);
+    expect(unchanged?.status).toBe('active');
   });
 });
 
 describe('temporary owner classification and atomic retirement', () => {
-  it('classifies operator-held live authority as pending, lets independent ownership dominate, and ignores terminal cleanup peers', async () => {
+  it('classifies operator-held live authority as pending, never fabricates confirmed ownership from desired metadata, and ignores terminal cleanup peers', async () => {
     const sharedRole = nextSnowflake();
     const first = await createPaidFixture({ permanentRoleId: sharedRole });
     const firstAction = await insertCarrier(first);
@@ -3957,7 +3988,10 @@ describe('temporary owner classification and atomic retirement', () => {
       .select('id')
       .single();
     expect(manualError).toBeNull();
-    expect(await classifyRoleOwner(first, sharedRole, [])).toBe('confirmed');
+    // A desired manual entitlement is metadata, not delivery proof: the
+    // classifier never fabricates confirmed ownership from it, so the two
+    // reserved provisional intents keep the role at exactly 'pending'.
+    expect(await classifyRoleOwner(first, sharedRole, [])).toBe('pending');
 
     const manualTerminal = await supa
       .from('entitlements')
