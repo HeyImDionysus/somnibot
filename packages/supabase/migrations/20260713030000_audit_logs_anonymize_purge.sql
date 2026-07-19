@@ -83,8 +83,10 @@ SELECT cron.schedule(
 );
 
 -- ────────────────────────────────────────────────────────────────────────────
--- The generic cleaner may never target audit_logs again. Same body as
--- 20260613200000 with audit_logs removed from the allowlist and an explicit
+-- The generic cleaner may never target audit_logs again. Body taken from the
+-- LIVE definition (20260615100000 — public.%I qualification is what lets the
+-- dynamic SQL survive SET search_path = '', and the 5×10k batch loop bounds
+-- lock time) with audit_logs removed from the allowlist and an explicit
 -- pointer at the sanctioned scrub.
 -- ────────────────────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION cleanup_old_records(
@@ -102,19 +104,27 @@ DECLARE
     'license_validations',
     'webhook_events'
   ];
+  -- Per-table minimum retention (days) — prevents accidental deletion
   min_retention INT;
   ts_column TEXT;
   cutoff TIMESTAMPTZ;
-  deleted_count BIGINT;
+  v_batch BIGINT;
+  v_total BIGINT := 0;
+  v_max_batches CONSTANT INT := 5;
+  v_batch_num INT := 0;
+  v_batch_size CONSTANT INT := 10000;
 BEGIN
   IF target_table = 'audit_logs' THEN
     RAISE EXCEPTION
       'audit_logs rows are never deleted; retention runs through scrub_expired_audit_logs()';
   END IF;
+
+  -- Only allow cleanup on approved tables (prevent SQL injection)
   IF NOT (target_table = ANY(allowed_tables)) THEN
     RAISE EXCEPTION 'Table "%" is not eligible for automated cleanup', target_table;
   END IF;
 
+  -- Per-table minimum retention
   min_retention := CASE target_table
     WHEN 'economy_transactions' THEN 90
     WHEN 'license_validations'  THEN 60
@@ -127,6 +137,7 @@ BEGIN
       target_table, min_retention, retention_days;
   END IF;
 
+  -- Map each table to its timestamp column
   ts_column := CASE target_table
     WHEN 'webhook_events' THEN 'processed_at'
     ELSE 'created_at'
@@ -134,19 +145,29 @@ BEGIN
 
   cutoff := NOW() - (retention_days || ' days')::INTERVAL;
 
-  -- Delete in batches to avoid long locks
-  EXECUTE format(
-    'WITH to_delete AS (
-       SELECT ctid FROM %I
-       WHERE %I < $1
-       LIMIT 10000
-     )
-     DELETE FROM %I WHERE ctid IN (SELECT ctid FROM to_delete)',
-    target_table, ts_column, target_table
-  ) USING cutoff;
+  -- Batch looping (up to 5 × 10k rows per invocation)
+  LOOP
+    v_batch_num := v_batch_num + 1;
+    EXIT WHEN v_batch_num > v_max_batches;
 
-  GET DIAGNOSTICS deleted_count = ROW_COUNT;
-  RETURN deleted_count;
+    EXECUTE format(
+      'WITH to_delete AS (
+         SELECT ctid FROM public.%I
+         WHERE %I < $1
+         LIMIT %s
+       )
+       DELETE FROM public.%I WHERE ctid IN (SELECT ctid FROM to_delete)',
+      target_table, ts_column, v_batch_size, target_table
+    ) USING cutoff;
+
+    GET DIAGNOSTICS v_batch = ROW_COUNT;
+    v_total := v_total + v_batch;
+
+    -- Exit early if this batch was smaller than the limit (no more rows)
+    EXIT WHEN v_batch < v_batch_size;
+  END LOOP;
+
+  RETURN v_total;
 END;
 $$;
 

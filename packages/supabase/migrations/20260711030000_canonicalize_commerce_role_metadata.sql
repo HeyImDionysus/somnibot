@@ -4939,6 +4939,22 @@ BEGIN
       MESSAGE = 'commerce_finish_role_delivery_cleanup: intent is unavailable';
   END IF;
 
+  -- The settlement tail synchronously calls
+  -- commerce_ensure_live_role_delivery_action, whose canonical order is
+  -- ensure-advisory FIRST, then intent rows. Take the key up front (from the
+  -- non-locking observation above) so this transaction is ordered
+  -- advisory -> rows against a concurrent standalone ensure (reconciliation
+  -- sweep or ensure_live_request carrier), which holds the key while locking
+  -- the latest intent — the reverse interleaving is a two-party deadlock.
+  -- Advisory xact locks are reentrant, so the settlement-tail PERFORM
+  -- re-acquires harmlessly.
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(
+      'commerce-role-delivery-ensure:' || v_observed.entitlement_id::TEXT,
+      0
+    )
+  );
+
   PERFORM 1 FROM public.orders AS paid_order
    WHERE paid_order.id = v_observed.order_id FOR SHARE;
   PERFORM 1 FROM public.customers AS customer
@@ -12527,8 +12543,13 @@ $$;
 
 -- Customer relink triggers cannot synchronously call the activation helper:
 -- they already own the customer row, while the canonical lifecycle order is
--- entitlement -> advisory -> customer. The claimed historical relink carrier
--- asks for B after commit. Its immutable previous-generation snapshot makes
+-- entitlement -> advisory -> customer. Every acquirer of the
+-- 'noncommerce-entitlement-customer' key follows that order: the status
+-- triggers (entitlement row held by the firing UPDATE), this worker RPC
+-- (queue -> entitlement FOR SHARE -> advisory -> customer FOR SHARE),
+-- commerce_revoke_entitlement_exact, and purge_member_data (candidate
+-- entitlements first, customers last with NOWAIT). The claimed historical
+-- relink carrier asks for B after commit. Its immutable previous-generation snapshot makes
 -- the enqueue a CAS, and expected_discord_id prevents an old A -> B request
 -- from being silently retargeted after B -> C or A -> B -> A.
 CREATE OR REPLACE FUNCTION public.commerce_request_noncommerce_relink_activation(
@@ -13094,7 +13115,12 @@ BEGIN
       MESSAGE = 'commerce_begin_noncommerce_role_delivery_attempt: role vector is empty';
   END IF;
 
-  -- Match the paid lock order before the shared per-role advisory locks.
+  -- Match the paid lock order before the shared per-role advisory locks:
+  -- orders -> customers -> role-owner advisory -> entitlements. The advisory
+  -- keys derive purely from parameters, and every other role-owner acquirer
+  -- (permanent and temp delivery families) takes the advisory BEFORE the
+  -- entitlements share lock — a share-then-advisory order here is the
+  -- three-party inversion round 2 eliminated from the permanent functions.
   SELECT paid_order.* INTO v_order
     FROM public.orders AS paid_order
    WHERE paid_order.id = p_order_id
@@ -13103,6 +13129,15 @@ BEGIN
     FROM public.customers AS customer
    WHERE customer.id = p_customer_id
    FOR SHARE;
+  FOREACH v_role_id IN ARRAY v_roles LOOP
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+      pg_catalog.hashtextextended(
+        'commerce-role-owner:' || p_guild_id || ':' || p_discord_id || ':'
+          || v_role_id,
+        0
+      )
+    );
+  END LOOP;
   SELECT entitlement.* INTO v_entitlement
     FROM public.entitlements AS entitlement
    WHERE entitlement.id = p_entitlement_id
@@ -13149,16 +13184,6 @@ BEGIN
       SELECT 1 FROM public.payments AS payment
        WHERE payment.order_id = v_order.id
     );
-
-  FOREACH v_role_id IN ARRAY v_roles LOOP
-    PERFORM pg_catalog.pg_advisory_xact_lock(
-      pg_catalog.hashtextextended(
-        'commerce-role-owner:' || p_guild_id || ':' || p_discord_id || ':'
-          || v_role_id,
-        0
-      )
-    );
-  END LOOP;
 
   -- Canonical lock order is parents -> role-owner advisory keys -> activation
   -- head -> queue action -> intent. Enqueue uses the same head-before-action
@@ -14184,12 +14209,15 @@ AS $$
 DECLARE
   v_deleted JSONB;
   v_customer_ids UUID[] := '{}'::UUID[];
+  v_recheck_customer_ids UUID[] := '{}'::UUID[];
+  v_entitlement_ids UUID[] := '{}'::UUID[];
   v_action_ids UUID[] := '{}'::UUID[];
   v_unresolved_intents INTEGER := 0;
   v_active_temp_grants INTEGER := 0;
   v_active_queue_actions INTEGER := 0;
   v_active_dlq_actions INTEGER := 0;
   v_pending INTEGER := 0;
+  v_revoked_count INTEGER := 0;
   v_count INTEGER := 0;
 BEGIN
   IF p_guild_id IS NULL
@@ -14205,10 +14233,31 @@ BEGIN
       MESSAGE = 'purge_member_data: canonical p_user_id is required';
   END IF;
 
+  -- Canonical member-purge lock order (round-3 canon):
+  --   ADV('economy-role-income')
+  --     -> candidate entitlement rows FOR UPDATE (sorted)
+  --     -> entitlement terminal UPDATEs (their AFTER triggers then acquire
+  --        ADV('noncommerce-entitlement-customer') with the row lock held)
+  --     -> customers FOR UPDATE (sorted, NOWAIT -> 40001)
+  --     -> base implementation and tombstone processing.
+  --
+  -- The economy advisory stays first (round-2 fix):
+  -- commerce_prepare_temp_role_grant and the wallet RPCs take it before any
+  -- customer/wallet row work, and its key derives from p_guild_id/p_user_id
+  -- only, so it needs nothing from any row lock.
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(
+      'economy-role-income:' || p_guild_id || ':' || p_user_id,
+      0
+    )
+  );
+
   -- A two-phase retry must retain the customer captured by phase one even if
   -- that row was relinked from A to B while Discord cleanup was pending.
   -- Reconstruct the exact identity set from current rows plus immutable paid
-  -- intents and authenticated non-commerce carriers, then lock those rows.
+  -- intents and authenticated non-commerce carriers. The captured set is
+  -- re-validated after the customers locks below; any concurrent drift
+  -- aborts with 40001 instead of erasing a stale subset.
   SELECT COALESCE(
            pg_catalog.array_agg(candidate.customer_id ORDER BY candidate.customer_id),
            '{}'::UUID[]
@@ -14240,52 +14289,133 @@ BEGIN
            queue.payload
          ) IS NOT NULL
     ) AS candidate;
-  -- Canonical order: economy-role-income advisory BEFORE any customers row
-  -- lock. commerce_prepare_temp_role_grant and economy_collect_role_income
-  -- take this advisory first and then FOR SHARE the customer row — taking
-  -- the row lock first here is a two-party AB-BA deadlock with a concurrent
-  -- temp-role fulfillment for the same member. The key derives from
-  -- p_guild_id/p_user_id only, so it needs nothing from the row lock.
-  PERFORM pg_catalog.pg_advisory_xact_lock(
-    pg_catalog.hashtextextended(
-      'economy-role-income:' || p_guild_id || ':' || p_user_id,
-      0
-    )
-  );
 
-  PERFORM customer.id
-    FROM public.customers AS customer
-   WHERE customer.id = ANY(v_customer_ids)
-     AND customer.guild_id = p_guild_id
-   ORDER BY customer.id
-   FOR UPDATE;
+  -- Lock every still-live entitlement of the captured identity set BEFORE any
+  -- customers lock (round-3 fix). The AFTER-UPDATE status triggers acquire
+  -- ADV('noncommerce-entitlement-customer:<customer>') while their firing
+  -- UPDATE already holds the entitlement row lock, and the relink activation
+  -- worker holds that advisory while it key-shares the customer row — so an
+  -- exclusive customers lock taken before this entitlement work was a
+  -- two-party AB-BA deadlock with either of them (relink-then-forgetme).
+  -- Sorted acquisition keeps concurrent purges of members sharing customer
+  -- identities pairwise consistent.
+  SELECT COALESCE(pg_catalog.array_agg(locked.id), '{}'::UUID[])
+    INTO v_entitlement_ids
+    FROM (
+      SELECT entitlement.id
+        FROM public.entitlements AS entitlement
+       WHERE entitlement.customer_id = ANY(v_customer_ids)
+         AND entitlement.guild_id = p_guild_id
+         AND entitlement.status IN (
+           'active', 'pending', 'grace_period', 'suspended'
+         )
+       ORDER BY entitlement.customer_id, entitlement.id
+       FOR UPDATE
+    ) AS locked(id);
 
-  v_deleted := public.commerce_purge_member_data_base(
-    p_guild_id,
-    p_user_id
-  );
-
-  -- The customer may have committed A -> B after the identity candidates were
-  -- captured (or before this retry, with A retained only by an authenticated
-  -- carrier). The base implementation scopes revocation through the current
-  -- Discord id and would therefore miss that now-locked customer. Revoke every
-  -- still-live entitlement in the captured identity set while its customer row
-  -- is locked; terminal triggers snapshot the current B identity atomically.
+  -- Revoke the captured identity set's live entitlements while only their
+  -- row locks are held. The base implementation below scopes revocation
+  -- through the current Discord id and would miss a customer that committed
+  -- A -> B after capture; this captured-set UPDATE cannot. Terminal triggers
+  -- snapshot the committed current identity; an uncommitted relink still
+  -- holds the customer row exclusively and is surfaced by the NOWAIT
+  -- customers lock below as a 40001 retry.
   UPDATE public.entitlements AS entitlement
      SET status = 'cancelled',
          cancelled_at = COALESCE(
            entitlement.cancelled_at,
            pg_catalog.clock_timestamp()
          )
-   WHERE entitlement.customer_id = ANY(v_customer_ids)
-     AND entitlement.guild_id = p_guild_id
+   WHERE entitlement.id = ANY(v_entitlement_ids)
      AND entitlement.status IN (
        'active', 'pending', 'grace_period', 'suspended'
      );
-  GET DIAGNOSTICS v_count = ROW_COUNT;
+  GET DIAGNOSTICS v_revoked_count = ROW_COUNT;
+
+  -- Customers are locked only after all entitlement work, and never with a
+  -- blocking wait: several commerce writers legitimately hold a customer
+  -- share lock before locking entitlement rows (noncommerce create replay,
+  -- paid grant replay, admin refund finalization), so waiting here while
+  -- holding entitlement row locks would re-create the inverted cycle with
+  -- them. A busy identity row is an immediate serialization abort (40001),
+  -- never a lock wait: the transaction rolls back atomically and the privacy
+  -- flow is retried by re-running the purge, which recaptures the identity
+  -- set from durable evidence.
+  BEGIN
+    PERFORM customer.id
+      FROM public.customers AS customer
+     WHERE customer.id = ANY(v_customer_ids)
+       AND customer.guild_id = p_guild_id
+     ORDER BY customer.id
+     FOR UPDATE NOWAIT;
+  EXCEPTION
+    WHEN lock_not_available THEN
+      RAISE EXCEPTION USING ERRCODE = '40001',
+        MESSAGE = 'purge_member_data: commerce identity rows are contended; retry';
+  END;
+
+  -- Erasure contract: the captured set is authoritative, and nothing may
+  -- survive because a relink raced the purge. With the customers rows now
+  -- exclusively held, recompute the candidate set; any drift (a relink that
+  -- committed between capture and these locks, in either direction) aborts
+  -- for retry. A relinked-away identity stays reachable on retry through its
+  -- immutable relink carrier old_discord_id payload; a relinked-in one joins
+  -- the recomputed set. Likewise a live entitlement that appeared for the
+  -- captured set after the lock pass above (its creator held only a customer
+  -- share lock) forces a retry that will lock it first.
+  SELECT COALESCE(
+           pg_catalog.array_agg(candidate.customer_id ORDER BY candidate.customer_id),
+           '{}'::UUID[]
+         )
+    INTO v_recheck_customer_ids
+    FROM (
+      SELECT customer.id AS customer_id
+        FROM public.customers AS customer
+       WHERE customer.guild_id = p_guild_id
+         AND customer.discord_id = p_user_id
+      UNION
+      SELECT intent.customer_id
+        FROM public.commerce_role_delivery_intents AS intent
+       WHERE intent.guild_id = p_guild_id
+         AND intent.discord_id = p_user_id
+      UNION
+      SELECT (queue.payload ->> 'customer_id')::UUID
+        FROM public.bot_action_queue AS queue
+       WHERE queue.guild_id = p_guild_id
+         AND (
+           queue.payload ->> 'discord_id' = p_user_id
+           OR queue.payload ->> 'old_discord_id' = p_user_id
+         )
+         AND public.commerce_noncommerce_cleanup_carrier_kind(
+           queue.guild_id,
+           queue.action,
+           queue.lane,
+           queue.idempotency_key,
+           queue.payload
+         ) IS NOT NULL
+    ) AS candidate;
+  IF v_recheck_customer_ids IS DISTINCT FROM v_customer_ids
+     OR EXISTS (
+       SELECT 1
+         FROM public.entitlements AS entitlement
+        WHERE entitlement.customer_id = ANY(v_customer_ids)
+          AND entitlement.guild_id = p_guild_id
+          AND entitlement.status IN (
+            'active', 'pending', 'grace_period', 'suspended'
+          )
+     ) THEN
+    RAISE EXCEPTION USING ERRCODE = '40001',
+      MESSAGE = 'purge_member_data: captured commerce identity set changed concurrently';
+  END IF;
+
+  v_deleted := public.commerce_purge_member_data_base(
+    p_guild_id,
+    p_user_id
+  );
   v_deleted := v_deleted || pg_catalog.jsonb_build_object(
     'entitlements_revoked',
-    COALESCE((v_deleted ->> 'entitlements_revoked')::INTEGER, 0) + v_count
+    COALESCE((v_deleted ->> 'entitlements_revoked')::INTEGER, 0)
+      + v_revoked_count
   );
 
   UPDATE public.alerts AS alert
@@ -14638,6 +14768,12 @@ BEGIN
   -- Make every future delivery classifier terminal before touching retained
   -- protocol evidence. Order first preserves the global parent -> entitlement
   -- lock order; both status triggers signal the same exact intents idempotently.
+  -- Lock-canon note: the entitlement cancellation below X-locks its rows
+  -- before its AFTER triggers acquire ADV('noncommerce-entitlement-customer')
+  -- and read the customer, and the deletion phase later removes entitlements
+  -- before customers — both consistent with the canonical
+  -- entitlement -> advisory -> customer order used by every per-customer
+  -- acquirer (revoke, relink worker, enqueue triggers, member purge).
   UPDATE public.orders AS paid_order
      SET status = 'cancelled',
          updated_at = pg_catalog.clock_timestamp()

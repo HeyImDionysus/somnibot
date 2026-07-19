@@ -128,11 +128,23 @@ export async function handleForgetMeCommand(
       components: [],
     });
 
-    // Call the purge RPC
-    const { data: result, error } = await supabase.rpc('purge_member_data', {
-      p_guild_id: guildId,
-      p_user_id: userId,
-    });
+    // Call the purge RPC. 40001 is an EXPECTED transient outcome: the purge
+    // takes its customer locks NOWAIT and aborts atomically instead of
+    // waiting (deadlock-free by design), and it also serialization-fails
+    // when a relink commits mid-purge — both resolve on a fresh attempt.
+    let result: unknown = null;
+    let error: { code?: string; message: string } | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      ({ data: result, error } = await supabase.rpc('purge_member_data', {
+        p_guild_id: guildId,
+        p_user_id: userId,
+      }));
+      if (!error || error.code !== '40001') break;
+      log.warn(
+        `purge_member_data serialization retry ${attempt}/3 for ${userId}`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+    }
 
     if (error) {
       log.error(`purge_member_data failed for ${userId}:`, error.message);

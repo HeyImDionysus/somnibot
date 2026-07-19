@@ -32,6 +32,7 @@ type RevokeEvidence = {
   transition_id: string | null;
   entitlement_id: string | null;
   guild_id: string | null;
+  discord_id?: string | null;
   status: string | null;
   updated_at: string | null;
 };
@@ -407,6 +408,82 @@ describe('commerce_revoke_entitlement_exact', () => {
       .eq('payload->>source', 'noncommerce_entitlement_status_trigger');
     expect(cleanupError).toBeNull();
     expect(cleanup).toHaveLength(1);
+  });
+
+  it('holds the entitlement row and customer advisory before waiting on the customer row', async () => {
+    // Round-3 canon: entitlement FOR UPDATE -> customer advisory -> customer
+    // FOR SHARE. purge_member_data holds the customers row exclusively while
+    // its captured entitlements are already terminal; a customer-share-first
+    // revoke (the old order) parked here while holding nothing, then took the
+    // entitlement row lock the purge was waiting for -- the AB-BA this test
+    // pins. The parked revoke must instead already own the entitlement row
+    // and the advisory when it reaches the customer wait.
+    const observed = await createActiveEntitlement();
+    let revokePromise!: Promise<RevokeEvidence[]>;
+
+    await sqlA.begin(async (purge) => {
+      // Simulate purge_member_data's exclusive customers hold.
+      const locked = await purge`
+        SELECT id FROM public.customers
+         WHERE id = ${observed.customer_id}::uuid
+         FOR UPDATE
+      `;
+      expect(locked).toHaveLength(1);
+
+      revokePromise = sqlB<RevokeEvidence[]>`
+        SELECT disposition, transition_id, entitlement_id, guild_id,
+               discord_id, status, updated_at
+          FROM public.commerce_revoke_entitlement_exact(
+            ${observed.id}::uuid,
+            ${GUILD_ID}::text,
+            ${observed.status}::text,
+            ${observed.updated_at}::timestamptz,
+            'cancelled'::text
+          )
+      `.execute();
+      await waitForSqlBLock();
+
+      // Parked on the customer share lock, the revoke already holds exactly
+      // the customer advisory key (entitlement -> advisory -> customer)...
+      const [advisory] = await sqlObserver<{ held: number }[]>`
+        SELECT pg_catalog.count(*)::int AS held
+          FROM pg_catalog.pg_locks
+         WHERE pid = ${sqlBBackendPid}
+           AND locktype = 'advisory'
+           AND granted
+      `;
+      expect(advisory?.held).toBe(1);
+
+      // ...and the entitlement row lock: a third session cannot take it.
+      await expect(
+        sqlObserver.begin(async (probe) => {
+          await probe`
+            SELECT id FROM public.entitlements
+             WHERE id = ${observed.id}::uuid
+             FOR UPDATE NOWAIT
+          `;
+        }),
+      ).rejects.toThrow(/could not obtain lock/);
+    });
+
+    // Releasing the customers row lets the parked revoke finish normally:
+    // full CAS semantics survive the reorder.
+    const revokeRows = await revokePromise;
+    expect(revokeRows).toHaveLength(1);
+    expect(revokeRows[0]).toMatchObject({
+      disposition: 'applied',
+      transition_id: expect.any(String),
+      discord_id: CUSTOMER_DISCORD_ID,
+      status: 'cancelled',
+    });
+
+    const { data: entitlement, error: entitlementError } = await supa
+      .from('entitlements')
+      .select('status')
+      .eq('id', observed.id)
+      .single();
+    expect(entitlementError).toBeNull();
+    expect(entitlement?.status).toBe('cancelled');
   });
 
   it('is not executable through the anonymous browser role', async () => {

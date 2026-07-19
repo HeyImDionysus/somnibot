@@ -13,6 +13,11 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import { SOMNI_PALETTE, createLogger, type PlatformEvent } from '@somnibot/shared';
 import { deterministicUuidV8 } from '../utils/deterministic-uuid.js';
+import {
+  codePointLength,
+  prizeSnapshotOf,
+  sqlSpaceTrim,
+} from '../utils/prize-snapshot.js';
 
 const log = createLogger('GiveawayFulfillment');
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -260,8 +265,11 @@ export class GiveawayFulfillmentService {
       || (deliveryKind === 'manual' && productId !== null)
       || typeof prizeSnapshot !== 'string'
       || prizeSnapshot.length === 0
-      || prizeSnapshot.trim() !== prizeSnapshot
-      || prizeSnapshot.length > 1_000
+      // SQL btrim strips only spaces and left() counts code points — a
+      // legal snapshot may carry edge tabs/newlines and up to 1000 code
+      // points of astral content; JS trim()/length would reject it.
+      || sqlSpaceTrim(prizeSnapshot) !== prizeSnapshot
+      || codePointLength(prizeSnapshot) > 1_000
     ) {
       throw new GiveawayPrizeContractError('Malformed queued giveaway notification identity');
     }
@@ -283,11 +291,11 @@ export class GiveawayFulfillmentService {
       || giveaway.prize_product_id !== productId
       // giveaway_atomic_end/reroll snapshot the prize NORMALIZED —
       // btrim(left(btrim(prize), 1000)) — so the stored prize must get the
-      // identical transform before the exact-match check, or any giveaway
-      // created with an untrimmed/oversized prize permanently fails every
-      // winner notification.
+      // byte-exact SQL transform before the exact-match check, or any
+      // giveaway whose stored prize is non-canonical permanently fails
+      // every winner notification.
       || typeof giveaway.prize !== 'string'
-      || giveaway.prize.trim().slice(0, 1_000).trim() !== prizeSnapshot
+      || prizeSnapshotOf(giveaway.prize) !== prizeSnapshot
       || !Array.isArray(giveaway.winners)
       || giveaway.winners.some((value: unknown) =>
         typeof value !== 'string' || !DISCORD_SNOWFLAKE_PATTERN.test(value))

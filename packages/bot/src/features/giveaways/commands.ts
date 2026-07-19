@@ -13,6 +13,7 @@ import {
 } from 'discord.js';
 import type { GiveawayManager } from './giveaway-manager.js';
 import { createLogger } from '@somnibot/shared';
+import { codePointSlice } from '../../utils/prize-snapshot.js';
 
 const log = createLogger('GiveawayCmds');
 
@@ -77,8 +78,11 @@ export async function handleGiveawayCommand(
     switch (sub) {
       case 'start': {
         // Canonical prize form — the winner-notification contract compares
-        // btrim(left(btrim(prize), 1000)) snapshots.
-        const prize = interaction.options.getString('prize', true).trim().slice(0, 1_000).trim();
+        // btrim(left(btrim(prize), 1000)) snapshots; slice by code points so
+        // an astral-heavy prize is never cut mid-surrogate.
+        const prize = codePointSlice(
+          interaction.options.getString('prize', true).trim(), 1_000,
+        ).trim();
         if (prize.length === 0) {
           await interaction.reply({ content: '❌ Prize cannot be empty.', ephemeral: true });
           return;

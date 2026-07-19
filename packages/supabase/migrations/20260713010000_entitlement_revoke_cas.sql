@@ -2,6 +2,10 @@
 -- transition.  The caller must present the status and updated_at value it
 -- observed; a terminal replay is a no-op and any other changed live row is
 -- stale.  Only the winning transaction records lifecycle audit evidence.
+--
+-- Lock canon: entitlement row -> ADV('noncommerce-entitlement-customer')
+-- -> customers FOR SHARE -> products FOR SHARE, matching the entitlement
+-- status triggers, the relink activation worker, and purge_member_data.
 
 BEGIN;
 
@@ -66,10 +70,9 @@ BEGIN
     ELSE 'expired'
   END;
 
-  -- Observe only the immutable parent identity first. Locking the child before
-  -- its FK parents would invert PostgreSQL's parent-delete order and can
-  -- deadlock (child UPDATE waits on parent while parent DELETE's FK check waits
-  -- on the child). The exact status decision is made only after parent locks.
+  -- Observe the immutable parent identity without any lock first, so a
+  -- missing or malformed row reports its exact contract disposition before
+  -- this transaction does any serialization work.
   SELECT entitlement.* INTO v_observed
     FROM public.entitlements AS entitlement
    WHERE entitlement.id = p_entitlement_id
@@ -97,29 +100,27 @@ BEGIN
       MESSAGE = 'commerce_revoke_entitlement_exact: parent identity is malformed';
   END IF;
 
-  -- Canonical FK lock order: customer -> product -> entitlement. Parent
-  -- deletion therefore either finishes before this transition or waits behind
-  -- it; neither side can hold the lock the other side needs next.
-  SELECT customer.* INTO v_customer
-    FROM public.customers AS customer
-   WHERE customer.id = v_observed.customer_id
-     AND customer.guild_id = p_guild_id
-   FOR SHARE;
-  IF NOT FOUND THEN
-    RAISE EXCEPTION USING ERRCODE = '23514',
-      MESSAGE = 'commerce_revoke_entitlement_exact: customer identity mismatch';
-  END IF;
-
-  SELECT product.* INTO v_product
-    FROM public.products AS product
-   WHERE product.id = v_observed.product_id
-     AND product.guild_id = p_guild_id
-   FOR SHARE;
-  IF NOT FOUND THEN
-    RAISE EXCEPTION USING ERRCODE = '23514',
-      MESSAGE = 'commerce_revoke_entitlement_exact: product identity mismatch';
-  END IF;
-
+  -- Canonical carrier lock order (round-3 canon), shared by every acquirer of
+  -- the {entitlement rows, ADV('noncommerce-entitlement-customer'),
+  -- customers rows} triple:
+  --
+  --   entitlement FOR UPDATE -> advisory -> customers FOR SHARE
+  --     -> products FOR SHARE
+  --
+  -- * The status triggers on this table fire while their UPDATE already holds
+  --   the entitlement row lock and only then acquire the advisory and read
+  --   the customer, so any customer-first or advisory-first acquisition here
+  --   is a two-transaction AB-BA against every trigger-bearing lifecycle
+  --   write.
+  -- * The relink activation worker
+  --   (commerce_request_noncommerce_relink_activation) holds queue ->
+  --   entitlement FOR SHARE -> advisory -> customer FOR SHARE.
+  -- * purge_member_data cancels the captured identity set's live entitlements
+  --   first (rows exclusively locked, triggers then take the advisory) and
+  --   locks customers last, with NOWAIT.
+  -- * purge_guild_data's deletion phase removes entitlements before
+  --   customers, so child-first is also the parent-delete direction; the old
+  --   customer-first order here inverted against it.
   SELECT entitlement.* INTO v_entitlement
     FROM public.entitlements AS entitlement
    WHERE entitlement.id = p_entitlement_id
@@ -147,20 +148,43 @@ BEGIN
       MESSAGE = 'commerce_revoke_entitlement_exact: parent identity changed';
   END IF;
 
-  -- Customer-level carrier serialization comes only after the entitlement row
-  -- lock.  The status triggers on this table acquire the same advisory key
-  -- while their firing UPDATE already holds the row lock, so an advisory-first
-  -- acquisition here is a two-transaction lock-order inversion against every
-  -- trigger-bearing lifecycle write (row -> advisory vs advisory -> row).  The
-  -- customer FOR SHARE above pins discord_id against relinks for this whole
-  -- transaction, and the CAS evidence lives on the row locked above, so no
-  -- write can slip between the row lock and this acquisition.
+  -- Customer-level carrier serialization comes immediately after the row
+  -- lock, exactly as the trigger family acquires it mid-UPDATE.  The CAS
+  -- evidence lives on the row locked above, so no lifecycle write can slip
+  -- between the row lock and this acquisition.
   PERFORM pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended(
       'noncommerce-entitlement-customer:' || v_entitlement.customer_id::TEXT,
       0
     )
   );
+
+  -- Parent share locks are taken only now, after the row lock and advisory.
+  -- Relinks hold the customer row exclusively, so the discord_id read under
+  -- this share lock is the committed current identity and stays pinned from
+  -- here through the lifecycle event below; a relink that committed before
+  -- this point simply IS the current identity the audit evidence must carry.
+  -- The parent re-check above (40001) already rejected any drifted parent
+  -- linkage, so a missing row here is the same contract violation as before.
+  SELECT customer.* INTO v_customer
+    FROM public.customers AS customer
+   WHERE customer.id = v_entitlement.customer_id
+     AND customer.guild_id = p_guild_id
+   FOR SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING ERRCODE = '23514',
+      MESSAGE = 'commerce_revoke_entitlement_exact: customer identity mismatch';
+  END IF;
+
+  SELECT product.* INTO v_product
+    FROM public.products AS product
+   WHERE product.id = v_entitlement.product_id
+     AND product.guild_id = p_guild_id
+   FOR SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING ERRCODE = '23514',
+      MESSAGE = 'commerce_revoke_entitlement_exact: product identity mismatch';
+  END IF;
 
   -- Every already-terminal row is a completed operational no-op.  In
   -- particular, a late expiry may not overwrite a cancellation (or vice

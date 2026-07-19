@@ -18,6 +18,29 @@ import {
 
 let supa!: SupabaseClient;
 let sql!: ReturnType<typeof postgres>;
+// Dedicated second session + observer for deterministic two-session
+// lock-order interleavings (purge-vs-relink shape), mirroring the
+// waitForSqlBLock/pg_locks style of the revoke CAS suite.
+let sqlSessionB!: ReturnType<typeof postgres>;
+let sqlWatch!: ReturnType<typeof postgres>;
+let sqlSessionBPid!: number;
+
+async function waitForSessionBLock(timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const [activity] = await sqlWatch<{
+      state: string;
+      wait_event_type: string | null;
+    }[]>`
+      SELECT state, wait_event_type
+        FROM pg_catalog.pg_stat_activity
+       WHERE pid = ${sqlSessionBPid}
+    `;
+    if (activity?.state === 'active' && activity.wait_event_type === 'Lock') return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('session B did not reach the expected lock wait');
+}
 
 const GUILD_ID = `test-role-income-${Date.now()}`;
 const OTHER_GUILD_ID = `${GUILD_ID}-other`;
@@ -174,6 +197,18 @@ async function createPaidEntitlementFixture(
 beforeAll(async () => {
   supa = await requireSupabase();
   sql = postgres(getTestDbUrl(), { max: 1 });
+  sqlSessionB = postgres(getTestDbUrl(), { max: 1 });
+  sqlWatch = postgres(getTestDbUrl(), { max: 1 });
+  await Promise.all([
+    sqlSessionB`SET lock_timeout = '10s'`,
+    sqlSessionB`SET statement_timeout = '15s'`,
+    sqlWatch`SET statement_timeout = '10s'`,
+  ]);
+  const [backend] = await sqlSessionB<{ pid: number }[]>`
+    SELECT pg_backend_pid() AS pid
+  `;
+  if (!backend?.pid) throw new Error('failed to capture session B backend PID');
+  sqlSessionBPid = backend.pid;
 
   const { error: guildError } = await supa.from('guild').insert([
     {
@@ -369,7 +404,11 @@ afterAll(async () => {
   await supa.from('guild_config').delete().in('guild_id', TEST_GUILD_IDS);
   // Guild rows with immutable audit_logs stay behind deliberately (the FK
   // pins them); ids are unique per run, so reruns are unaffected.
-  await sql?.end({ timeout: 5 });
+  await Promise.allSettled([
+    sql?.end({ timeout: 5 }),
+    sqlSessionB?.end({ timeout: 5 }),
+    sqlWatch?.end({ timeout: 5 }),
+  ]);
 });
 
 describe('economy_collect_role_income', () => {
@@ -1611,6 +1650,180 @@ describe('economy_collect_role_income', () => {
         FROM public.bot_action_queue
        WHERE id = ${actionId}
     `).toEqual([{ count: 0 }]);
+  });
+
+  it('purges without holding the customers row while waiting on entitlement work (relink-then-forgetme)', async () => {
+    // Round-3 regression: the relink activation worker holds
+    // ADV('noncommerce-entitlement-customer') plus the entitlement FOR SHARE
+    // and then key-shares the customers row; the old purge held customers
+    // FOR UPDATE first and then cancelled entitlements — the AB-BA deadlock.
+    // The fixed purge locks candidate entitlements first and customers last,
+    // so while it is parked on the worker's entitlement share lock it must
+    // hold no customers lock at all, and the worker's next canonical step
+    // (customer FOR SHARE) must proceed instead of deadlocking.
+    const workerUser = '210000000000000601';
+    const workerRole = '210000000000000602';
+    const { data: customer, error: customerError } = await supa
+      .from('customers')
+      .insert({
+        guild_id: GUILD_ID,
+        discord_id: workerUser,
+        discord_username: 'purge-vs-relink-worker',
+      })
+      .select('id')
+      .single();
+    expect(customerError).toBeNull();
+    const { data: entitlement, error: entitlementError } = await supa
+      .from('entitlements')
+      .insert({
+        customer_id: customer!.id,
+        guild_id: GUILD_ID,
+        product_id: inactiveProductId,
+        type: 'one_time',
+        status: 'active',
+        source: 'manual',
+        granted_role_ids: [workerRole],
+        granted_channel_ids: [],
+      })
+      .select('id')
+      .single();
+    expect(entitlementError).toBeNull();
+
+    let purgePromise!: Promise<Array<{ result: Record<string, unknown> }>>;
+    await sql.begin(async (worker) => {
+      // The worker's held set at the historical deadlock moment:
+      // entitlement FOR SHARE, then the customer advisory key.
+      const shared = await worker`
+        SELECT id FROM public.entitlements
+         WHERE id = ${entitlement!.id}::uuid
+         FOR SHARE
+      `;
+      expect(shared).toHaveLength(1);
+      await worker`
+        SELECT pg_catalog.pg_advisory_xact_lock(
+          pg_catalog.hashtextextended(
+            ${`noncommerce-entitlement-customer:${customer!.id}`}::text, 0
+          )
+        )
+      `;
+
+      purgePromise = sqlSessionB<Array<{ result: Record<string, unknown> }>>`
+        SELECT public.purge_member_data(
+          ${GUILD_ID}::text, ${workerUser}::text
+        ) AS result
+      `.execute();
+      await waitForSessionBLock();
+
+      // Parked on the entitlement row, the purge holds no customers lock: a
+      // third session can still take the row exclusively without waiting.
+      await sqlWatch.begin(async (probe) => {
+        const probed = await probe`
+          SELECT id FROM public.customers
+           WHERE id = ${customer!.id}::uuid
+           FOR UPDATE NOWAIT
+        `;
+        expect(probed).toHaveLength(1);
+      });
+
+      // The worker's next canonical step therefore cannot deadlock.
+      const pinned = await worker`
+        SELECT id FROM public.customers
+         WHERE id = ${customer!.id}::uuid
+         FOR SHARE
+      `;
+      expect(pinned).toHaveLength(1);
+    });
+
+    const purgeRows = await purgePromise;
+    expect(purgeRows).toHaveLength(1);
+    // The pending activation/terminal carriers keep phase one open, but the
+    // captured identity set's live entitlement was revoked exactly once.
+    expect(purgeRows[0]!.result).toMatchObject({
+      purge_status: 'pending_role_cleanup',
+      entitlements_revoked: 1,
+    });
+    expect(await sql<{ status: string }[]>`
+      SELECT status FROM public.entitlements WHERE id = ${entitlement!.id}
+    `).toEqual([{ status: 'cancelled' }]);
+    expect(await sql<{ discord_id: string }[]>`
+      SELECT discord_id FROM public.customers WHERE id = ${customer!.id}
+    `).toEqual([{ discord_id: workerUser }]);
+  });
+
+  it('fails closed with a retryable 40001 instead of waiting when a relink holds the identity row', async () => {
+    // The purge takes its customers locks NOWAIT: waiting there while holding
+    // entitlement row locks would re-create the inverted cycle against
+    // customer-share-first commerce writers. A mid-flight relink therefore
+    // surfaces as an immediate 40001, and the retry still reaches the
+    // relinked-away identity through the immutable relink carrier — a raced
+    // relink can never let member data survive.
+    const relinkOld = '210000000000000603';
+    const relinkNew = '210000000000000604';
+    const relinkRole = '210000000000000605';
+    const { data: customer, error: customerError } = await supa
+      .from('customers')
+      .insert({
+        guild_id: GUILD_ID,
+        discord_id: relinkOld,
+        discord_username: 'purge-vs-relink-race',
+      })
+      .select('id')
+      .single();
+    expect(customerError).toBeNull();
+    const { data: entitlement, error: entitlementError } = await supa
+      .from('entitlements')
+      .insert({
+        customer_id: customer!.id,
+        guild_id: GUILD_ID,
+        product_id: inactiveProductId,
+        type: 'one_time',
+        status: 'active',
+        source: 'manual',
+        granted_role_ids: [relinkRole],
+        granted_channel_ids: [],
+      })
+      .select('id')
+      .single();
+    expect(entitlementError).toBeNull();
+
+    await sql.begin(async (relink) => {
+      // An uncommitted relink holds the customers row exclusively.
+      await relink`
+        UPDATE public.customers
+           SET discord_id = ${relinkNew}
+         WHERE id = ${customer!.id}::uuid
+      `;
+
+      const attempt = await sqlSessionB`
+        SELECT public.purge_member_data(
+          ${GUILD_ID}::text, ${relinkOld}::text
+        ) AS result
+      `.catch((error: unknown) => error);
+      const pgError = attempt as { code?: string; message?: string };
+      expect(pgError.code).toBe('40001');
+      expect(pgError.message).toContain('purge_member_data');
+    });
+
+    // The relink committed A -> B. Retrying by the erased member's original
+    // id still captures the relinked-away customer through the relink
+    // carrier's immutable old_discord_id payload and revokes its live
+    // entitlement: the erasure contract survives the race.
+    const retryRows = await sqlSessionB<Array<{ result: Record<string, unknown> }>>`
+      SELECT public.purge_member_data(
+        ${GUILD_ID}::text, ${relinkOld}::text
+      ) AS result
+    `;
+    expect(retryRows).toHaveLength(1);
+    expect(retryRows[0]!.result).toMatchObject({
+      purge_status: 'pending_role_cleanup',
+      entitlements_revoked: 1,
+    });
+    expect(await sql<{ status: string }[]>`
+      SELECT status FROM public.entitlements WHERE id = ${entitlement!.id}
+    `).toEqual([{ status: 'cancelled' }]);
+    expect(await sql<{ discord_id: string }[]>`
+      SELECT discord_id FROM public.customers WHERE id = ${customer!.id}
+    `).toEqual([{ discord_id: relinkNew }]);
   });
 
   it('keeps commerce evidence isolated by guild', async () => {

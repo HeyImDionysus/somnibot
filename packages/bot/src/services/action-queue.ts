@@ -37,6 +37,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { writeGuildSnapshot } from './guild-snapshot.js';
 import { writeAuditLog } from './audit.js';
+import { codePointLength, sqlSpaceTrim } from '../utils/prize-snapshot.js';
 import {
   CommerceFulfillmentService,
   RECEIPT_DELIVERY_ACTION,
@@ -686,8 +687,10 @@ export async function handleGiveawayWinnerNotification(
     || (payload.delivery_kind === 'manual' && payload.product_id !== null)
     || typeof payload.prize_snapshot !== 'string'
     || payload.prize_snapshot.length === 0
-    || payload.prize_snapshot.trim() !== payload.prize_snapshot
-    || payload.prize_snapshot.length > 1_000
+    // btrim/left replica: SQL snapshots may legally carry edge tabs or
+    // newlines and count length in code points, not UTF-16 units.
+    || sqlSpaceTrim(payload.prize_snapshot) !== payload.prize_snapshot
+    || codePointLength(payload.prize_snapshot) > 1_000
   ) {
     return {
       success: false,
