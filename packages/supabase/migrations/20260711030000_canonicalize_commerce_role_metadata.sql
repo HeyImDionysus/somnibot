@@ -14939,7 +14939,8 @@ BEGIN
   DELETE FROM public.guild_desired_state WHERE guild_id = p_guild_id;
   DELETE FROM public.role_templates WHERE guild_id = p_guild_id;
   DELETE FROM public.channel_templates WHERE guild_id = p_guild_id;
-  DELETE FROM public.server_templates WHERE guild_id = p_guild_id;
+  -- server_templates was dropped in 20260601000004_v53_dead_table_cleanup;
+  -- deleting from it aborted every guild purge at runtime.
   DELETE FROM public.automod_rules WHERE guild_id = p_guild_id;
   DELETE FROM public.reaction_roles WHERE guild_id = p_guild_id;
   DELETE FROM public.ticket_panels WHERE guild_id = p_guild_id;
@@ -17830,10 +17831,11 @@ BEGIN
   GET DIAGNOSTICS cnt = ROW_COUNT;
   result := result || jsonb_build_object('expired_infractions', cnt);
 
-  DELETE FROM public.mutes
-   WHERE guild_id = p_guild_id AND active = true AND expires_at < now();
-  GET DIAGNOSTICS cnt = ROW_COUNT;
-  result := result || jsonb_build_object('expired_mutes', cnt);
+  -- No mutes table has ever existed: mutes are infractions rows with
+  -- type='mute' and are already covered by the expired_infractions delete
+  -- above. The result key stays for API compatibility (same pattern as
+  -- expired_temp_roles below).
+  result := result || jsonb_build_object('expired_mutes', 0);
 
   -- Retention scrubs, never deletes (owner decision, 2026-07-18): identity
   -- and payloads leave at the retention boundary, the forensic skeleton

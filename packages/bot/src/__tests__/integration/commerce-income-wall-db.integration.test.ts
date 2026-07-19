@@ -4392,6 +4392,28 @@ describe('commerce income wall database invariant', () => {
       .eq('id', secondPayment!.id);
     expect(secondSettledBeforeRefund.error?.code).toBe('23505');
 
+    // While the stray pending capture is still part of the order's payment
+    // set, the capture set is ambiguous and prepare fails closed: only an
+    // operator may decide what the extra attempt row means.
+    const childPrepareBlocked = await supa.rpc('commerce_prepare_admin_refund', {
+      p_order_id: childFixture.orderId,
+      p_guild_id: GUILD_A,
+      p_actor_id: nextSnowflake(),
+      p_reason: 'full child-set invariant',
+    });
+    expect(childPrepareBlocked.error).toMatchObject({ code: '23514' });
+    expect(childPrepareBlocked.error?.message).toContain(
+      'payment capture set requires operator remediation',
+    );
+
+    // Operator remediation: remove the stray never-settled capture attempt,
+    // after which the one-settled-capture order is refundable again.
+    const removeStrayPending = await supa
+      .from('payments')
+      .delete()
+      .eq('id', secondPayment!.id);
+    expect(removeStrayPending.error).toBeNull();
+
     const childPrepared = await supa.rpc('commerce_prepare_admin_refund', {
       p_order_id: childFixture.orderId,
       p_guild_id: GUILD_A,
@@ -4417,10 +4439,30 @@ describe('commerce income wall database invariant', () => {
       p_guild_id: GUILD_A,
     });
     expect(childFinalized.error).toBeNull();
+    // A fresh pending capture attempt can still be recorded against the now
+    // refunded order, but it can never settle: the settled-capture identity
+    // is structurally single-occupancy per order and the deferred parent
+    // status FK forbids completion under a refunded order.
+    const { data: postRefundPending, error: postRefundPendingError } = await supa
+      .from('payments')
+      .insert({
+        order_id: childFixture.orderId,
+        customer_id: childFixture.customerId,
+        guild_id: GUILD_A,
+        paypal_payment_id: nextName('post-refund-pending-capture'),
+        paypal_resource_type: 'capture',
+        amount_cents: 1_000,
+        currency: 'USD',
+        provider: 'paypal',
+        status: 'pending',
+      })
+      .select('id')
+      .single();
+    expect(postRefundPendingError).toBeNull();
     const secondSettledAfterRefund = await supa
       .from('payments')
       .update({ status: 'completed' })
-      .eq('id', secondPayment!.id);
+      .eq('id', postRefundPending!.id);
     expect(['23503', '23505']).toContain(secondSettledAfterRefund.error?.code);
   });
 
@@ -5512,6 +5554,19 @@ describe('commerce income wall database invariant', () => {
       .update({ status: 'expired', cancelled_at: new Date().toISOString() })
       .eq('id', fixture.entitlementId);
     expect(expired.error).toBeNull();
+    // The handler also revokes the order's license keys before the marker:
+    // commerce_live_license_order_fk pins every live key to a completed
+    // order, so the key must be terminal before the order can leave
+    // 'completed'. The key-status trigger drains its active sessions.
+    const revokedKey = await supa
+      .from('license_keys')
+      .update({
+        status: 'revoked',
+        revoked_at: new Date().toISOString(),
+        revocation_reason: 'refunded',
+      })
+      .eq('id', fixture.licenseKeyId);
+    expect(revokedKey.error).toBeNull();
 
     const finalizeArgs = {
       p_payment_id: fixture.paymentId,
@@ -5657,8 +5712,11 @@ describe('commerce income wall database invariant', () => {
         )
       `,
     ).rejects.toMatchObject({
+      // A sale-family ledger event on a one-time capture order fails the
+      // order-family contract gate before the adopted payment resource
+      // identity is even compared; either way the wrong family fails closed.
       code: '23514',
-      message: expect.stringContaining('resource type mismatch'),
+      message: expect.stringContaining('payment contract mismatch'),
     });
     await expect(
       sqlA`

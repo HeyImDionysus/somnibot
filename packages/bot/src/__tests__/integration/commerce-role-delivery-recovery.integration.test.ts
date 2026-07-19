@@ -298,6 +298,20 @@ async function createPaidFixture(options: {
       p_currency: 'USD',
     });
     expect(capture.error).toBeNull();
+  } else {
+    // Subscription fixtures skip the checkout pair above, so the order never
+    // leaves 'pending' on its own. The paid-live FK
+    // (commerce_paid_live_entitlement_order_fk) makes every live 'purchase'
+    // entitlement the child of one exact COMPLETED order identity, so model
+    // provider-side subscription activation by completing the never-frozen
+    // order directly; the snapshot-protection trigger only locks orders after
+    // their first freeze, and 'completed' is not a terminal-cleanup signal.
+    const { error: completeError } = await supa
+      .from('orders')
+      .update({ status: 'completed' })
+      .eq('id', orderId)
+      .eq('guild_id', GUILD_ID);
+    expect(completeError).toBeNull();
   }
 
   const { data: entitlement, error: entitlementError } = await supa
@@ -2542,8 +2556,14 @@ describe('noncommerce relink activation dependency matrix', () => {
       .eq('discord_id', discordB)
       .single();
     expect(survivingBError).toBeNull();
+    // The B -> C customer relink durably marked B's generation
+    // cleanup_required at trigger time (durable cleanup intent precedes any
+    // Discord write). Because C's destination delivery failed, the relink
+    // carrier finalized as destination_unproven WITHOUT mutating Discord: B
+    // keeps every delivered role (owned_role_ids intact) and its intent stays
+    // cleanup_required until a proven destination authorizes exact cleanup.
     expect(survivingB).toEqual({
-      state: 'open',
+      state: 'cleanup_required',
       discord_id: discordB,
       owned_role_ids: [roleId],
     });
@@ -3676,6 +3696,28 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
         await completeLegacyNoncommerceAction(action.id as string);
       }
 
+      // Owner decision (2026-07-18): audit rows are NEVER deleted. A guild
+      // purge must instead scrub every identity-bearing field and detach the
+      // forensic skeleton from the erased guild so the guild row itself can
+      // go. Seed one maximal identity-bearing row and prove that contract.
+      const auditFixtureId = randomUUID();
+      await sqlA`
+        INSERT INTO public.audit_logs (
+          id, guild_id, actor_type, actor_id, action, category,
+          target_type, target_id, details, before_state, after_state,
+          correlation_id, success, error_message
+        ) VALUES (
+          ${auditFixtureId}, ${guildId}, 'system', ${originalDiscordId},
+          'entitlement.revoked', 'commerce', 'entitlement',
+          ${entitlement!.id},
+          ${JSON.stringify({ productId: product!.id, roleIds: [roleId] })}::JSONB,
+          ${JSON.stringify({ entitled: true })}::JSONB,
+          ${JSON.stringify({ entitled: false })}::JSONB,
+          ${`commerce-entitlement-transition:${auditFixtureId}`},
+          true, 'identity-bearing failure text'
+        )
+      `;
+
       const completed = await supa.rpc('purge_guild_data', {
         p_guild_id: guildId,
       });
@@ -3686,6 +3728,39 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
         guild_deleted: 1,
       });
       guildDeleted = true;
+
+      // The row persists forever, scrubbed: action/actor type/outcome remain
+      // for forensics; every identity-bearing field is anonymized and the
+      // guild binding is detached (which is exactly what allowed the guild
+      // row deletion asserted above to succeed past the audit FK).
+      const { data: anonymized, error: anonymizedError } = await supa
+        .from('audit_logs')
+        .select(
+          'guild_id,actor_type,actor_id,action,target_id,details,'
+          + 'before_state,after_state,error_message,correlation_id,success',
+        )
+        .eq('id', auditFixtureId)
+        .single();
+      expect(anonymizedError).toBeNull();
+      expect(anonymized).toEqual({
+        guild_id: null,
+        actor_type: 'system',
+        actor_id: 'anonymized',
+        action: 'entitlement.revoked',
+        target_id: 'anonymized',
+        details: { anonymized: true },
+        before_state: null,
+        after_state: null,
+        error_message: null,
+        correlation_id: null,
+        success: true,
+      });
+      const { count: retainedGuildAudit, error: retainedGuildAuditError } = await supa
+        .from('audit_logs')
+        .select('id', { count: 'exact', head: true })
+        .eq('guild_id', guildId);
+      expect(retainedGuildAuditError).toBeNull();
+      expect(retainedGuildAudit).toBe(0);
     } finally {
       if (!guildDeleted) {
         await sqlA`
@@ -3931,13 +4006,24 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
       .update({ status: 'cancelled' })
       .eq('id', poisonTarget!.id);
     expect(protectedTerminal.error).toBeNull();
+    // Locate the trigger-minted carrier by durable identity first so any
+    // snapshot divergence surfaces as a field-level payload diff instead of
+    // an opaque zero-row key lookup, then hold the determinism contract:
+    // the canonical payload is exactly reconstructible and the idempotency
+    // key is exactly the key the rejected byte-perfect forgery tried to mint.
     const { data: protectedCarrier, error: protectedCarrierError } = await supa
       .from('bot_action_queue')
-      .select('id,idempotency_key')
-      .eq('idempotency_key', forgedKey)
+      .select('id,idempotency_key,payload')
+      .contains('payload', {
+        source: 'noncommerce_entitlement_status_trigger',
+        entitlement_id: poisonTarget!.id,
+        entitlement_status: 'cancelled',
+      })
       .single();
     expect(protectedCarrierError).toBeNull();
     expect(protectedCarrier?.id).toBeTruthy();
+    expect(protectedCarrier?.payload).toEqual(forgedPayload);
+    expect(protectedCarrier?.idempotency_key).toBe(forgedKey);
     const { data: unchanged, error: unchangedError } = await supa
       .from('entitlements')
       .select('status')

@@ -44,7 +44,9 @@ const ROLE_TEMP = 'role-income-temp';
 const ROLE_REVOKE = 'role-income-revoke';
 const ROLE_OTHER_GUILD = 'role-income-other-guild';
 const ROLE_ROLLBACK = 'role-income-rollback';
-const ROLE_TRIGGER = 'role-income-trigger';
+// Terminal-transition coverage seeds delivery intents, whose role vectors
+// must be canonical Discord snowflakes.
+const ROLE_TRIGGER = '210000000000000106';
 const ROLE_STALE_QUEUE = 'role-income-stale-queue';
 const ROLE_PURGE = 'role-income-purge';
 const ROLE_STARTING_BALANCE = 'role-income-starting-balance';
@@ -1080,33 +1082,62 @@ describe('economy_collect_role_income', () => {
       'terminal-trigger',
     );
 
+    // The shipped protocol no longer emits revoke_roles carriers for paid
+    // entitlements: proven role custody lives on the durable delivery
+    // intent, and terminal transitions enqueue exact-intent
+    // reconcile_entitlement_roles cleanup carriers instead. Seed the steady
+    // post-delivery custody shape (owned = completed = permanent).
+    const intentId = randomUUID();
+    await sql`
+      INSERT INTO public.commerce_role_delivery_intents (
+        id, action_id, origin_claim_token, delivery_claim_token,
+        guild_id, entitlement_id, customer_id, discord_id,
+        order_id, product_id, entitlement_type,
+        permanent_role_ids, completed_role_ids, owned_role_ids, state
+      ) VALUES (
+        ${intentId}, ${randomUUID()}, ${randomUUID()}, ${randomUUID()},
+        ${GUILD_ID}, ${fixture.entitlementId}, ${fixture.customerId}, ${userId},
+        ${fixture.orderId}, ${inactiveProductId}, 'one_time',
+        ARRAY[${ROLE_TRIGGER}]::TEXT[],
+        ARRAY[${ROLE_TRIGGER}]::TEXT[],
+        ARRAY[${ROLE_TRIGGER}]::TEXT[],
+        'open'
+      )
+    `;
+
     const terminal = await supa
       .from('entitlements')
       .update({ status: 'expired', expires_at: new Date().toISOString() })
       .eq('id', fixture.entitlementId);
     expect(terminal.error).toBeNull();
 
+    // The terminal transition and the durable cleanup carrier commit in the
+    // same transaction. A directly-seeded intent carries no revalidatable
+    // origin claim (its action_id never existed in the queue), so the
+    // classifier fails closed to operator custody rather than automatic
+    // cleanup_required -- but the exact-intent cleanup carrier is still
+    // durably enqueued before the entitlement row goes terminal.
+    expect(await sql<{ state: string }[]>`
+      SELECT state
+        FROM public.commerce_role_delivery_intents
+       WHERE id = ${intentId}
+    `).toEqual([{ state: 'operator_required' }]);
+
     const { data: queued, error: queueError } = await supa
       .from('bot_action_queue')
-      .select('guild_id,action,status,payload')
-      .eq('guild_id', GUILD_ID)
-      .eq('action', 'revoke_roles')
-      .eq('payload->>entitlement_id', fixture.entitlementId)
+      .select('guild_id,action,status,lane,payload')
+      .eq('idempotency_key', `commerce-role-delivery-cleanup:${intentId}`)
       .single();
     expect(queueError).toBeNull();
     expect(queued).toMatchObject({
       guild_id: GUILD_ID,
-      action: 'revoke_roles',
+      action: 'reconcile_entitlement_roles',
       status: 'pending',
+      lane: 'commerce',
       payload: {
+        mode: 'cleanup',
+        target_delivery_intent_id: intentId,
         guild_id: GUILD_ID,
-        discord_id: userId,
-        role_ids: [ROLE_TRIGGER],
-        entitlement_id: fixture.entitlementId,
-        customer_id: fixture.customerId,
-        order_id: fixture.orderId,
-        product_id: inactiveProductId,
-        source: 'entitlement_status_trigger',
       },
     });
 
@@ -1130,10 +1161,34 @@ describe('economy_collect_role_income', () => {
       userId,
       'terminal-rollback',
     );
-    const suffix = fixture.entitlementId.replaceAll('-', '').slice(0, 16);
-    const functionName = `test_reject_revoke_${suffix}`;
-    const triggerName = `test_reject_revoke_${suffix}`;
-    const quotedEntitlementId = fixture.entitlementId.replaceAll("'", "''");
+
+    // 'No lost revocations' protects provably-delivered roles: only an
+    // entitlement with a durable delivery intent recording live role custody
+    // demands synchronous cleanup work at its terminal transition. (A bare
+    // entitlement row with no intent has no proven delivery to clean up, so
+    // its transition owes nothing to the queue.) Seed the proven-delivery
+    // shape, then make the cleanup carrier unpersistable.
+    const intentId = randomUUID();
+    await sql`
+      INSERT INTO public.commerce_role_delivery_intents (
+        id, action_id, origin_claim_token, delivery_claim_token,
+        guild_id, entitlement_id, customer_id, discord_id,
+        order_id, product_id, entitlement_type,
+        permanent_role_ids, completed_role_ids, owned_role_ids, state
+      ) VALUES (
+        ${intentId}, ${randomUUID()}, ${randomUUID()}, ${randomUUID()},
+        ${GUILD_ID}, ${fixture.entitlementId}, ${fixture.customerId}, ${userId},
+        ${fixture.orderId}, ${inactiveProductId}, 'one_time',
+        ARRAY[${ROLE_TRIGGER}]::TEXT[],
+        ARRAY[${ROLE_TRIGGER}]::TEXT[],
+        ARRAY[${ROLE_TRIGGER}]::TEXT[],
+        'open'
+      )
+    `;
+
+    const suffix = intentId.replaceAll('-', '').slice(0, 16);
+    const functionName = `test_reject_cleanup_${suffix}`;
+    const triggerName = `test_reject_cleanup_${suffix}`;
 
     await sql.unsafe(`
       CREATE OR REPLACE FUNCTION public.${functionName}()
@@ -1142,9 +1197,9 @@ describe('economy_collect_role_income', () => {
       SET search_path = ''
       AS $body$
       BEGIN
-        IF NEW.action = 'revoke_roles'
-           AND NEW.payload ->> 'entitlement_id' = '${quotedEntitlementId}' THEN
-          RAISE EXCEPTION 'forced test revocation queue failure';
+        IF NEW.action = 'reconcile_entitlement_roles'
+           AND NEW.payload ->> 'target_delivery_intent_id' = '${intentId}' THEN
+          RAISE EXCEPTION 'forced test cleanup carrier failure';
         END IF;
         RETURN NEW;
       END;
@@ -1170,10 +1225,17 @@ describe('economy_collect_role_income', () => {
         .eq('id', fixture.entitlementId)
         .single();
       expect(entitlement?.status).toBe('active');
+      // The whole transition rolled back: the intent never left custody
+      // tracking and no cleanup carrier survived.
+      expect(await sql<{ state: string }[]>`
+        SELECT state
+          FROM public.commerce_role_delivery_intents
+         WHERE id = ${intentId}
+      `).toEqual([{ state: 'open' }]);
       const { count: queuedCount } = await supa
         .from('bot_action_queue')
         .select('*', { count: 'exact', head: true })
-        .eq('payload->>entitlement_id', fixture.entitlementId);
+        .eq('idempotency_key', `commerce-role-delivery-cleanup:${intentId}`);
       expect(queuedCount).toBe(0);
     } finally {
       await sql.unsafe(`DROP TRIGGER IF EXISTS ${triggerName} ON public.bot_action_queue`);
@@ -1390,12 +1452,13 @@ describe('economy_collect_role_income', () => {
         id, action_id, origin_claim_token, delivery_claim_token,
         guild_id, entitlement_id, customer_id, discord_id,
         order_id, product_id, entitlement_type, permanent_role_ids,
-        owned_role_ids, state, cleanup_action_id, cleanup_claim_token
+        completed_role_ids, owned_role_ids, state,
+        cleanup_action_id, cleanup_claim_token
       ) VALUES (
         ${intentId}, ${originActionId}, ${randomUUID()}, ${randomUUID()},
         ${GUILD_ID}, ${entitlementId}, ${customerId}, ${newDiscordId},
         ${orderId}, ${productId}, 'one_time', ARRAY[${roleId}]::TEXT[],
-        ARRAY[${roleId}]::TEXT[], 'operator_required',
+        ARRAY[${roleId}]::TEXT[], ARRAY[${roleId}]::TEXT[], 'operator_required',
         ${cleanupActionId}, ${randomUUID()}
       )
     `;
@@ -1797,6 +1860,24 @@ describe('economy_collect_role_income', () => {
       FROM paid_order
     `;
 
+    // Audit rows are never deleted (owner decision, 2026-07-18): tenant
+    // deletion must scrub identity and detach the skeleton so the guild row
+    // itself can go.
+    const auditSeeds = await sql<{ id: string }[]>`
+      INSERT INTO public.audit_logs (
+        guild_id, actor_type, actor_id, action, target_type, target_id,
+        details, before_state, after_state, error_message, correlation_id
+      ) VALUES (
+        ${GUILD_PURGE_ID}, 'user', '100000000000000104',
+        'guild-purge-children-audit', 'member', '100000000000000104',
+        '{"pii":"seed"}'::JSONB, '{"before":true}'::JSONB,
+        '{"after":true}'::JSONB, 'sensitive failure detail',
+        'corr-guild-purge-children'
+      )
+      RETURNING id
+    `;
+    expect(auditSeeds).toHaveLength(1);
+
     const { data, error } = await supa.rpc('purge_guild_data', {
       p_guild_id: GUILD_PURGE_ID,
     });
@@ -1827,5 +1908,180 @@ describe('economy_collect_role_income', () => {
       order_count: 0,
       fraud_signal_count: 0,
     });
+
+    // The audit row persists scrubbed and detached: identity, payload
+    // snapshots, error text, and correlation are gone; the forensic skeleton
+    // (action, actor type, time, outcome) survives with no guild link.
+    expect(await sql`
+      SELECT guild_id, actor_id, target_id, details, before_state,
+             after_state, error_message, correlation_id
+        FROM public.audit_logs
+       WHERE id = ${auditSeeds[0]!.id}
+    `).toEqual([
+      {
+        guild_id: null,
+        actor_id: 'anonymized',
+        target_id: 'anonymized',
+        details: { anonymized: true },
+        before_state: null,
+        after_state: null,
+        error_message: null,
+        correlation_id: null,
+      },
+    ]);
+  });
+
+  it('anonymizes and detaches audit rows instead of deleting them on guild purge', async () => {
+    const auditGuildId = `${GUILD_ID}-audit-purge`;
+    const { error: guildError } = await supa.from('guild').insert({
+      id: auditGuildId,
+      name: 'Audit Anonymize Purge Guild',
+      owner_discord_id: '100000000000000005',
+    });
+    expect(guildError).toBeNull();
+
+    const seeded = await sql<{ id: string }[]>`
+      INSERT INTO public.audit_logs (
+        guild_id, actor_type, actor_id, action, target_type, target_id,
+        details, before_state, after_state, error_message, correlation_id
+      ) VALUES
+      (
+        ${auditGuildId}, 'user', '100000000000000005',
+        'guild-audit-purge-with-target', 'member', '100000000000000006',
+        '{"pii":"actor"}'::JSONB, '{"before":true}'::JSONB,
+        '{"after":true}'::JSONB, 'sensitive failure', 'corr-with-target'
+      ),
+      (
+        ${auditGuildId}, 'system', '100000000000000005',
+        'guild-audit-purge-without-target', NULL, NULL,
+        '{"pii":"system"}'::JSONB, NULL, NULL, NULL, NULL
+      )
+      RETURNING id
+    `;
+    expect(seeded).toHaveLength(2);
+
+    const { data, error } = await supa.rpc('purge_guild_data', {
+      p_guild_id: auditGuildId,
+    });
+    expect(error).toBeNull();
+    // purge_guild_data reports no audit_logs deletion count: audit rows are
+    // never deleted, so the completed result carries only the purge outcome.
+    expect(data).toEqual({
+      purge_status: 'completed',
+      pending_role_cleanup_count: 0,
+      guild_deleted: 1,
+    });
+
+    const survivors = await sql`
+      SELECT action, guild_id, actor_id, target_id, details, before_state,
+             after_state, error_message, correlation_id
+        FROM public.audit_logs
+       WHERE id IN ${sql(seeded.map((row) => row.id))}
+       ORDER BY action
+    `;
+    expect(survivors).toEqual([
+      {
+        action: 'guild-audit-purge-with-target',
+        guild_id: null,
+        actor_id: 'anonymized',
+        target_id: 'anonymized',
+        details: { anonymized: true },
+        before_state: null,
+        after_state: null,
+        error_message: null,
+        correlation_id: null,
+      },
+      {
+        action: 'guild-audit-purge-without-target',
+        guild_id: null,
+        actor_id: 'anonymized',
+        target_id: null,
+        details: { anonymized: true },
+        before_state: null,
+        after_state: null,
+        error_message: null,
+        correlation_id: null,
+      },
+    ]);
+
+    expect(await sql<{ count: number }[]>`
+      SELECT pg_catalog.count(*)::INTEGER AS count
+        FROM public.guild
+       WHERE id = ${auditGuildId}
+    `).toEqual([{ count: 0 }]);
+  });
+
+  it('refuses direct audit log deletion even on the privileged connection', async () => {
+    const seeded = await sql<{ id: string }[]>`
+      INSERT INTO public.audit_logs (
+        guild_id, actor_type, actor_id, action
+      ) VALUES (
+        ${GUILD_ID}, 'system', 'audit-delete-guard-actor',
+        'audit-delete-guard-probe'
+      )
+      RETURNING id
+    `;
+
+    await expect(
+      sql`DELETE FROM public.audit_logs WHERE id = ${seeded[0]!.id}`,
+    ).rejects.toThrow('Audit log entries cannot be deleted');
+
+    expect(await sql<{ count: number }[]>`
+      SELECT pg_catalog.count(*)::INTEGER AS count
+        FROM public.audit_logs
+       WHERE id = ${seeded[0]!.id}
+    `).toEqual([{ count: 1 }]);
+  });
+
+  it('scrubs stale audit rows once at the retention boundary while keeping guild attribution', async () => {
+    const seeded = await sql<{ id: string }[]>`
+      INSERT INTO public.audit_logs (
+        guild_id, timestamp, actor_type, actor_id, action, target_type,
+        target_id, details, before_state, after_state, error_message,
+        correlation_id
+      ) VALUES (
+        ${GUILD_ID}, pg_catalog.clock_timestamp() - INTERVAL '91 days',
+        'user', 'prune-probe-actor', 'prune-audit-probe', 'member',
+        'prune-probe-target', '{"pii":"stale"}'::JSONB,
+        '{"before":true}'::JSONB, '{"after":true}'::JSONB,
+        'stale failure detail', 'corr-prune-probe'
+      )
+      RETURNING id
+    `;
+
+    const first = await supa.rpc('prune_expired_data', {
+      p_guild_id: GUILD_ID,
+    });
+    expect(first.error).toBeNull();
+    expect(first.data).toMatchObject({
+      old_audit_logs: 1,
+      expired_mutes: 0,
+    });
+
+    // Retention scrubs, never deletes: unlike tenant deletion the guild link
+    // is KEPT so per-guild forensics stay queryable.
+    expect(await sql`
+      SELECT guild_id, actor_id, target_id, details, before_state,
+             after_state, error_message, correlation_id
+        FROM public.audit_logs
+       WHERE id = ${seeded[0]!.id}
+    `).toEqual([
+      {
+        guild_id: GUILD_ID,
+        actor_id: 'anonymized',
+        target_id: 'anonymized',
+        details: { anonymized: true },
+        before_state: null,
+        after_state: null,
+        error_message: null,
+        correlation_id: null,
+      },
+    ]);
+
+    const second = await supa.rpc('prune_expired_data', {
+      p_guild_id: GUILD_ID,
+    });
+    expect(second.error).toBeNull();
+    expect(second.data).toMatchObject({ old_audit_logs: 0 });
   });
 });
