@@ -107,6 +107,20 @@ export interface BootstrapLiveOptions {
    * so a caller can deliberately opt into a feature the default keeps off.
    */
   guildConfigOverrides?: Record<string, unknown>;
+  /**
+   * When true, `cleanup()` skips the shared-Supabase-realtime teardown
+   * (`removeAllChannels()` + `realtime.disconnect()`) and only stops this guild's
+   * router services. All SomniClient instances share ONE Supabase singleton, so
+   * `removeAllChannels()` closes EVERY guild's action-queue Realtime channel — and
+   * that listener auto-reconnects on CLOSE with no stop API. Across a many-guild
+   * run (the scenario runner boots one stack per scenario) those mass closes turn
+   * into a reconnect storm whose colliding `bot-action-queue-<Date.now()>` channel
+   * names throw. Deferring keeps each guild's channel SUBSCRIBED (healthy, no
+   * reconnect) for the run; the vitest fork worker tears the socket down on exit
+   * — the same process-lifetime teardown the action-queue listener is designed
+   * around. Single-boot callers leave this false and keep the full teardown.
+   */
+  deferRealtimeTeardown?: boolean;
 }
 
 /** The seeded economy config, echoed back so tests assert against known values. */
@@ -348,6 +362,7 @@ export async function bootstrapLiveClient(
     throw new LiveRunnerError(`guild context init failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  const deferRealtimeTeardown = options.deferRealtimeTeardown ?? false;
   let cleaned = false;
   return {
     client,
@@ -359,7 +374,7 @@ export async function bootstrapLiveClient(
     async cleanup(): Promise<void> {
       if (cleaned) return;
       cleaned = true;
-      await disposeRouter(router, client);
+      await disposeRouter(router, client, deferRealtimeTeardown);
       await disposeClient(client);
     },
   };
@@ -376,11 +391,22 @@ export async function bootstrapLiveClient(
  * the socket from lingering; the vitest fork worker is terminated after the
  * suite regardless (the test-time equivalent of production's process exit).
  */
-async function disposeRouter(router: GuildRouter, client: SomniClient): Promise<void> {
+async function disposeRouter(
+  router: GuildRouter,
+  client: SomniClient,
+  deferRealtimeTeardown = false,
+): Promise<void> {
   try {
     router.destroyAll();
   } catch {
     // Best-effort teardown — a failure here must not mask a test result.
+  }
+  if (deferRealtimeTeardown) {
+    // Leave the shared Supabase-realtime channels SUBSCRIBED: closing them here
+    // would fan a reconnect storm across every other still-booted guild's
+    // action-queue listener (see BootstrapLiveOptions.deferRealtimeTeardown). The
+    // fork worker's exit is the real teardown for these process-lifetime channels.
+    return;
   }
   try {
     await client.supabase.removeAllChannels();

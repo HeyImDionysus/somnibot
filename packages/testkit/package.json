@@ -16,6 +16,7 @@
   },
   "devDependencies": {
     "@somnibot/bot": "workspace:*",
+    "@somnibot/e2e": "workspace:*",
     "@types/node": "^22.0.0",
     "discord.js": "^14.24.0",
     "typescript": "^5.7.0",
