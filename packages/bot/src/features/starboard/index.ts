@@ -31,13 +31,17 @@ interface StarboardConfig {
 }
 
 const CONFIG_TTL = 60_000;
-let _configCache: StarboardConfig | null = null;
-let _configCacheTime = 0;
+// Per-guild cache: a single-process bot serves many guilds, so the cache MUST be
+// keyed by guildId. A module-global entry let the first guild's starboard config
+// (channel, threshold, emoji, enabled, self-star) serve every other guild for the
+// whole TTL — cross-guild config bleed.
+const _configCache = new Map<string, { config: StarboardConfig; time: number }>();
 
-async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<StarboardConfig> {
+export async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<StarboardConfig> {
   const now = Date.now();
-  if (_configCache && now - _configCacheTime < CONFIG_TTL) {
-    return _configCache;
+  const cached = _configCache.get(guildId);
+  if (cached && now - cached.time < CONFIG_TTL) {
+    return cached.config;
   }
 
   const { data } = await supabase
@@ -46,15 +50,15 @@ async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<St
     .eq('guild_id', guildId)
     .maybeSingle();
 
-  _configCache = {
+  const config: StarboardConfig = {
     starboard_enabled: data?.starboard_enabled ?? false,
     starboard_channel_id: data?.starboard_channel_id ?? null,
     starboard_threshold: data?.starboard_threshold ?? 3,
     starboard_emoji: data?.starboard_emoji ?? '⭐',
     starboard_self_star: data?.starboard_self_star ?? false,
   };
-  _configCacheTime = now;
-  return _configCache;
+  _configCache.set(guildId, { config, time: now });
+  return config;
 }
 
 /**
@@ -191,6 +195,7 @@ export async function handleStarboardReaction(
 /**
  * Invalidate config cache (called from ConfigWatcher).
  */
-export function invalidateStarboardCache(): void {
-  _configCache = null;
+export function invalidateStarboardCache(guildId?: string): void {
+  if (guildId) _configCache.delete(guildId);
+  else _configCache.clear();
 }
