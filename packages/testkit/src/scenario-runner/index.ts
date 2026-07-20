@@ -30,3 +30,4 @@ export { runDomainProof, collectFindings, type RunDomainOptions } from './runner
 export { formatReport, summarize, type ReportSummary } from './report.js';
 
 export { gameEconomyWalletRewardsProof } from './scripts/game-economy-wallet-rewards.js';
+export { ALL_DOMAIN_PROOFS } from './scripts/all-proofs.js';
