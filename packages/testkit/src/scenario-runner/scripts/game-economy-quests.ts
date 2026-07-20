@@ -199,6 +199,20 @@ async function readWallet(handle: LiveClientHandle, userId: string): Promise<Wal
   return (data as WalletRow | null) ?? null;
 }
 
+/** The guild's configured wallet starting balance. economy_get_or_create_wallet
+ *  seeds a brand-new wallet at guild_config.economy_starting_balance, so a claim's
+ *  payout lands ON TOP of it — a wallet reads (starting_balance + reward), NOT the
+ *  bare reward. Reading it (rather than hardcoding the harness's seeded 500) keeps
+ *  the payout/exactly-once assertions correct regardless of the seeded value. */
+async function startingBalance(handle: LiveClientHandle): Promise<number> {
+  const { data } = await handle.supabase
+    .from('guild_config')
+    .select('economy_starting_balance')
+    .eq('guild_id', handle.guildId)
+    .maybeSingle();
+  return Number((data as { economy_starting_balance?: number } | null)?.economy_starting_balance ?? 0);
+}
+
 /**
  * Count quests-attributable rows in the append-only audit_logs table. Returns null
  * (NOT 0) when the read errors, so a failed query can never masquerade as "no audit
@@ -318,8 +332,21 @@ async function proveRlsIsolation(ctx: ScenarioContext, handle: LiveClientHandle,
     return;
   }
   const rows = await progressRows(handle, userId);
-  const serviceSees = rows.length > 0;
-  ctx.expect(serviceSees && anonRows === 0, {
+  // Non-vacuity: the anon-deny proof only means something when a positive control
+  // exists (a progress row the service role actually sees). If this scenario
+  // arranged none, an anon read of zero proves nothing — there was nothing to
+  // leak — so GATE rather than misreport a phantom "exposed to anon". (Anon
+  // reading 0 here is a genuine 42501 GRANT/RLS deny, not a leak.)
+  if (rows.length === 0) {
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'anon/authenticated clients read zero economy_quest_progress rows (guild-scoped RLS + GRANT lockdown).',
+      `no positive control: the service role sees 0 quest-progress row(s) for the user under guild "${handle.guildId}", so anon reading 0 is vacuous — anon-denial is proven positively in scenarios that do arrange a progress row`,
+    );
+    return;
+  }
+  ctx.expect(anonRows === 0, {
     assertionClass: 'database-RLS',
     channel: 'db-rls',
     promise:
@@ -515,15 +542,16 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   const totalXp = claimed.reduce((s, r) => s + (r.reward_xp ?? 0), 0);
   if (totalCoins > 0) await payout(handle, userA, totalCoins);
   const wallet = await readWallet(handle, userA);
+  const start = await startingBalance(handle);
   const expectedCoins = (active?.reward_currency ?? 0) + (hard?.reward_currency ?? 0);
   const expectedXp = (active?.reward_xp ?? 0) + (hard?.reward_xp ?? 0);
-  ctx.expect(claimed.length === 2 && totalCoins === expectedCoins && totalXp === expectedXp && wallet?.wallet === expectedCoins, {
+  ctx.expect(claimed.length === 2 && totalCoins === expectedCoins && totalXp === expectedXp && wallet?.wallet === start + expectedCoins, {
     assertionClass: 'Discord',
     channel: 'db-observable',
-    promise: 'Claiming completed quests pays the exact template coin + XP totals once into the play-money wallet.',
+    promise: 'Claiming completed quests pays the exact template coin + XP totals once into the play-money wallet (on top of the guild starting balance).',
     observation:
       `claimed ${claimed.length} quest(s) for ${totalCoins} coins / ${totalXp} XP (expected ${expectedCoins}/${expectedXp}); ` +
-      `wallet=${wallet?.wallet} (expected ${expectedCoins}).`,
+      `wallet=${wallet?.wallet} (expected ${start + expectedCoins} = ${start} starting + ${expectedCoins} reward).`,
     impact: 'A quest claim did not pay the exact template totals into the wallet.',
   });
 
@@ -587,11 +615,12 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   const coins = claimed.reduce((s, r) => s + (r.reward_currency ?? 0), 0);
   if (coins > 0) await payout(handle, userA, coins);
   const wallet = await readWallet(handle, userA);
-  ctx.expect(Boolean(activePid) && claimed.length === 1 && wallet?.wallet === (active?.reward_currency ?? -1), {
+  const start = await startingBalance(handle);
+  ctx.expect(Boolean(activePid) && claimed.length === 1 && wallet?.wallet === start + (active?.reward_currency ?? -1), {
     assertionClass: 'Discord',
     channel: 'db-observable',
-    promise: 'A claim under the resized config still pays the completed quest’s template total exactly once.',
-    observation: `claimed ${claimed.length} quest(s) for ${coins} coins; wallet=${wallet?.wallet} (expected ${active?.reward_currency}).`,
+    promise: 'A claim under the resized config still pays the completed quest’s template total exactly once (on top of the guild starting balance).',
+    observation: `claimed ${claimed.length} quest(s) for ${coins} coins; wallet=${wallet?.wallet} (expected ${start + (active?.reward_currency ?? 0)} = ${start} starting + ${active?.reward_currency} reward).`,
     impact: 'The claim path stopped paying correctly under the resized config.',
   });
 
@@ -636,11 +665,12 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
   const coins = claimed.reduce((s, r) => s + (r.reward_currency ?? 0), 0);
   if (coins > 0) await payout(handle, userA, coins);
   const wallet = await readWallet(handle, userA);
-  ctx.expect(Boolean(pid) && claimed.length === 1 && wallet?.wallet === (weekly?.reward_currency ?? -1), {
+  const start = await startingBalance(handle);
+  ctx.expect(Boolean(pid) && claimed.length === 1 && wallet?.wallet === start + (weekly?.reward_currency ?? -1), {
     assertionClass: 'Discord',
     channel: 'db-observable',
     promise: 'Disabling dailies leaves already-completed weekly quests fully claimable — nothing is lost.',
-    observation: `previously-completed weekly claim: ${claimed.length} quest(s), ${coins} coins; wallet=${wallet?.wallet} (expected ${weekly?.reward_currency}).`,
+    observation: `previously-completed weekly claim: ${claimed.length} quest(s), ${coins} coins; wallet=${wallet?.wallet} (expected ${start + (weekly?.reward_currency ?? 0)} = ${start} starting + ${weekly?.reward_currency} reward).`,
     impact: 'Disabling a cadence piece broke claiming of already-completed quests in the other cadence.',
   });
 
@@ -870,14 +900,15 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   if (secondCoins > 0) await payout(handle, userA, secondCoins); // guarded on 0 → no-op
 
   const wallet = await readWallet(handle, userA);
+  const start = await startingBalance(handle);
   const row = pid ? await readProgressById(handle, pid) : null;
-  ctx.expect(first.length === 1 && second.length === 0 && wallet?.wallet === (tmpl?.reward_currency ?? -1) && row?.claimed === true, {
+  ctx.expect(first.length === 1 && second.length === 0 && wallet?.wallet === start + (tmpl?.reward_currency ?? -1) && row?.claimed === true, {
     assertionClass: 'replay-safety',
     channel: 'db-observable',
-    promise: 'Re-delivering a claim never double-pays: the atomic claim returns zero rows on replay, leaving exactly one payout.',
+    promise: 'Re-delivering a claim never double-pays: the atomic claim returns zero rows on replay, leaving exactly one payout on top of the starting balance.',
     observation:
       `first claim flipped ${first.length} row(s) (${firstCoins} coins), replayed claim flipped ${second.length} row(s) (${secondCoins} coins); ` +
-      `wallet=${wallet?.wallet} (exactly-once=${tmpl?.reward_currency}; a double-pay would read ${(tmpl?.reward_currency ?? 0) * 2}).`,
+      `wallet=${wallet?.wallet} (exactly-once=${start + (tmpl?.reward_currency ?? 0)} = ${start} starting + ${tmpl?.reward_currency} reward; a double-pay would read ${start + (tmpl?.reward_currency ?? 0) * 2}).`,
     impact: 'A replayed /quests claim double-paid — the atomic claim did not dedupe already-claimed quests.',
   });
 
@@ -937,11 +968,12 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
   const coins = claimed.reduce((s, r) => s + (r.reward_currency ?? 0), 0);
   if (coins > 0) await payout(second, userA, coins);
   const wallet = await readWallet(second, userA);
-  ctx.expect(claimed.length === 1 && wallet?.wallet === (tmpl?.reward_currency ?? -1), {
+  const start = await startingBalance(second);
+  ctx.expect(claimed.length === 1 && wallet?.wallet === start + (tmpl?.reward_currency ?? -1), {
     assertionClass: 'Discord',
     channel: 'db-observable',
-    promise: 'A quest completed before the restart is still claimable after it and pays its exact total.',
-    observation: `post-restart claim: ${claimed.length} quest(s), ${coins} coins; wallet=${wallet?.wallet} (expected ${tmpl?.reward_currency}).`,
+    promise: 'A quest completed before the restart is still claimable after it and pays its exact total (on top of the starting balance).',
+    observation: `post-restart claim: ${claimed.length} quest(s), ${coins} coins; wallet=${wallet?.wallet} (expected ${start + (tmpl?.reward_currency ?? 0)} = ${start} starting + ${tmpl?.reward_currency} reward).`,
     impact: 'A pre-restart completed quest could not be claimed after the restart.',
   });
 
@@ -976,13 +1008,14 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
   const coins = [...c1, ...c2].reduce((s, r) => s + (r.reward_currency ?? 0), 0);
   if (coins > 0) await payout(handle, userA, coins);
   const wallet = await readWallet(handle, userA);
-  ctx.expect(Boolean(pid) && totalFlipped === 1 && wallet?.wallet === (tmpl?.reward_currency ?? -1), {
+  const start = await startingBalance(handle);
+  ctx.expect(Boolean(pid) && totalFlipped === 1 && wallet?.wallet === start + (tmpl?.reward_currency ?? -1), {
     assertionClass: 'replay-safety',
     channel: 'db-observable',
     promise: 'Two simultaneous claims of the same completed quest pay exactly once (atomic claim; one flips, one gets nothing).',
     observation:
       `concurrent claims flipped ${totalFlipped} row(s) total (c1=${c1.length}, c2=${c2.length}); ` +
-      `wallet=${wallet?.wallet} (exactly-once=${tmpl?.reward_currency}; a double would read ${(tmpl?.reward_currency ?? 0) * 2}).`,
+      `wallet=${wallet?.wallet} (exactly-once=${start + (tmpl?.reward_currency ?? 0)} = ${start} starting + ${tmpl?.reward_currency} reward; a double would read ${start + (tmpl?.reward_currency ?? 0) * 2}).`,
     impact: 'Concurrent claims double-paid — the atomic claim did not serialize the flip.',
   });
 
@@ -1065,19 +1098,20 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   const walletA = await readWallet(handleA, userA);
   const rowB = pidB ? await readProgressById(handleB, pidB) : null;
   const walletB = await readWallet(handleB, userA);
+  const startB = await startingBalance(handleB);
   ctx.expect(
     afterA?.claimed === snapA?.claimed &&
       afterA?.claimed === false &&
       walletA === null &&
       rowB?.claimed === true &&
-      walletB?.wallet === (tB?.reward_currency ?? -1),
+      walletB?.wallet === startB + (tB?.reward_currency ?? -1),
     {
       assertionClass: 'Discord',
       channel: 'db-observable',
       promise: 'Completing and claiming quests in a second guild never touches the first guild’s slate, progress, or wallet.',
       observation:
         `guild A quest claimed=${afterA?.claimed} (unchanged, expected false), guild A wallet=${walletA === null ? 'none' : walletA?.wallet}; ` +
-        `guild B quest claimed=${rowB?.claimed} (expected true), guild B wallet=${walletB?.wallet} (expected ${tB?.reward_currency}).`,
+        `guild B quest claimed=${rowB?.claimed} (expected true), guild B wallet=${walletB?.wallet} (expected ${startB + (tB?.reward_currency ?? 0)} = ${startB} starting + ${tB?.reward_currency} reward).`,
       impact: 'Cross-guild quest activity mutated another guild’s quests or wallet — per-guild isolation broken.',
     },
   );

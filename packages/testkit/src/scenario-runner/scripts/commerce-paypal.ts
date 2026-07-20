@@ -59,16 +59,15 @@ interface PaymentInsert {
   amount_cents: number;
   currency: string;
   status: 'completed' | 'refunded' | 'reversed' | 'pending' | 'failed';
-}
-
-interface RefundInsert {
-  payment_id: string;
-  order_id: string;
-  guild_id: string;
-  paypal_refund_id: string;
-  event_type: string;
-  amount_cents: number | null;
-  currency: string | null;
+  /**
+   * Mirrors the production webhook route, which ALWAYS stamps the PayPal
+   * resource type ('capture' for one-time captures, 'sale' for subscription
+   * charges) — enforced by the payments_resource_type_required /
+   * payments_resource_type_valid CHECK constraints. The BEFORE-INSERT trigger
+   * only auto-fills 'sale' for subscription orders, so a one-time capture that
+   * omits this is rejected (23514). Defaults to 'capture' in insertPayment.
+   */
+  paypal_resource_type?: 'capture' | 'sale';
 }
 
 /** A supabase-js write outcome reduced to the two fields the proofs read. */
@@ -151,18 +150,13 @@ async function arrangeCommerceChain(
 }
 
 async function insertPayment(handle: LiveClientHandle, row: PaymentInsert): Promise<WriteOutcome> {
+  // Stamp the resource type the same way the production webhook route does, so
+  // the row satisfies payments_resource_type_required/_valid. Every capture the
+  // proof arranges is a one-time capture (the proof inserts no subscription
+  // 'sale' rows), so 'capture' is the faithful default.
   const { data, error } = await handle.supabase
     .from('payments')
-    .insert(row)
-    .select('id')
-    .maybeSingle();
-  return { id: (data as { id: string } | null)?.id ?? null, code: error?.code ?? null };
-}
-
-async function insertRefund(handle: LiveClientHandle, row: RefundInsert): Promise<WriteOutcome> {
-  const { data, error } = await handle.supabase
-    .from('payment_refunds')
-    .insert(row)
+    .insert({ paypal_resource_type: 'capture', ...row })
     .select('id')
     .maybeSingle();
   return { id: (data as { id: string } | null)?.id ?? null, code: error?.code ?? null };
@@ -314,6 +308,23 @@ async function anonInsertDenied(
   }
 }
 
+/**
+ * Why the refund-ledger idempotency assertions GATE in this bot-only harness.
+ *
+ * payment_refunds is written ONLY by the commerce_record_paypal_refund_event
+ * SECURITY DEFINER RPC (invoked by the dashboard PayPal webhook/refund route):
+ * service_role holds SELECT-only on the table by design, so a direct-insert
+ * mirror is denied with 42501 BEFORE any FK/UNIQUE constraint evaluates — it can
+ * never reach, and therefore never prove, the DB fence. The exactly-once refund
+ * fence itself (payment_refunds.paypal_refund_id UNIQUE + the RPC's
+ * already-recorded witness under FOR UPDATE) is proven by that RPC and the
+ * dashboard paypal-webhook-refunds / commerce-e2e-flow integration tests. The
+ * capture-side exactly-once fence (payments.paypal_payment_id UNIQUE) IS
+ * mirror-provable and is proven directly in DEF / REPLAY / RACE / RESTART.
+ */
+const REFUND_LEDGER_RPC_ONLY =
+  'payment_refunds is written only by the commerce_record_paypal_refund_event SECURITY DEFINER RPC (dashboard webhook/refund route); service_role is SELECT-only on it by design, so a direct-insert mirror is denied (42501) before any constraint evaluates. The exactly-once refund fence (paypal_refund_id UNIQUE + the RPC already-recorded witness) is proven by that RPC and the paypal-webhook-refunds / commerce-e2e-flow integration tests — not reachable bot-only. The capture-side UNIQUE fence is proven directly in DEF / REPLAY / RACE / RESTART.';
+
 // ── Reusable per-class proofs ─────────────────────────────────────────────
 
 /**
@@ -348,7 +359,23 @@ async function proveMoneyRls(
     return;
   }
   const serviceRows = await countGuildRows(handle, table);
-  ctx.expect(serviceRows > 0 && anonRows === 0, {
+  // The anon-deny proof is only non-vacuous when a positive control exists: a row
+  // the service role actually sees under this guild. If the scenario could not
+  // arrange one (serviceRows === 0), an anon read of zero proves nothing — there
+  // was nothing to leak — so GATE rather than misreport it as an exposure. The
+  // absent-arrangement failure is already surfaced by the scenario's own
+  // arrangement assertion; folding it in here would double-count it AND slap the
+  // wrong "readable by anon" headline on a row that never existed.
+  if (serviceRows === 0) {
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      `anon/authenticated clients read zero ${table} rows (service_role-only RLS lockdown).`,
+      `no positive control: the service role sees 0 ${table} row(s) under guild "${handle.guildId}", so anon reading 0 is vacuous — the row-arrangement failure is surfaced by this scenario's own arrangement assertion`,
+    );
+    return;
+  }
+  ctx.expect(anonRows === 0, {
     assertionClass: 'database-RLS',
     channel: 'db-rls',
     promise: `The service role reads this guild's ${table} row(s) while an anon client reads zero of them (RLS money-row lockdown).`,
@@ -666,48 +693,24 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
     return;
   }
 
-  // A refund against a NEVER-captured order cannot persist an attempt row: the
-  // payment_refunds.payment_id NOT NULL + FK rejects an orphan refund (23503) —
-  // "never fabricate a payment to refund", enforced at the DB. Resubmitting stays
-  // a pure no-op (deterministic rejection), so no ledger growth.
-  const orphanPaymentId = '00000000-0000-4000-8000-0000000000ff';
-  const refundId = uid(ctx, 'refund');
-  const attempt1 = await insertRefund(handle, {
-    payment_id: orphanPaymentId,
-    order_id: chain.orderId,
-    guild_id: handle.guildId,
-    paypal_refund_id: refundId,
-    event_type: 'PAYMENT.CAPTURE.REFUNDED',
-    amount_cents: 500,
-    currency: 'USD',
-  });
-  const attempt2 = await insertRefund(handle, {
-    payment_id: orphanPaymentId,
-    order_id: chain.orderId,
-    guild_id: handle.guildId,
-    paypal_refund_id: refundId,
-    event_type: 'PAYMENT.CAPTURE.REFUNDED',
-    amount_cents: 500,
-    currency: 'USD',
-  });
-  const refundRows = await countByEq(handle, 'payment_refunds', 'paypal_refund_id', refundId);
-  ctx.expect(attempt1.code === '23503' && attempt2.code === '23503' && refundRows === 0, {
-    assertionClass: 'database-RLS',
-    channel: 'db-observable',
-    promise:
-      'A refund attempt against a never-captured payment cannot persist a ledger row (payment_refunds.payment_id NOT NULL + FK); resubmitting stays a pure no-op.',
-    observation:
-      `first orphan-refund insert code=${attempt1.code ?? 'ok(!)'}; resubmit code=${attempt2.code ?? 'ok(!)'}; ` +
-      `payment_refunds rows for the request id = ${refundRows} (expected 0).`,
-    impact: 'An orphan refund (no captured payment) wrote a ledger row — the DB fabricated/permitted a payment to refund.',
-  });
-  ctx.expect(attempt2.code === '23503' && refundRows === 0, {
-    assertionClass: 'replay-safety',
-    channel: 'db-observable',
-    promise: 'Resubmitting the invalid refund repeatedly stays a pure no-op with no ledger growth.',
-    observation: `resubmit code=${attempt2.code ?? 'ok(!)'}; payment_refunds rows=${refundRows} (expected 0).`,
-    impact: 'A resubmitted invalid refund accumulated ledger rows.',
-  });
+  // A refund against a NEVER-captured order must NOT persist an attempt row. In
+  // production that rejection is the commerce_record_paypal_refund_event RPC
+  // validating the payment identity FIRST and raising 23514 for an orphan; the
+  // direct-insert mirror can't stand in for it (service_role is SELECT-only on
+  // payment_refunds — the write is denied 42501 before the FK/NOT-NULL even
+  // evaluates), so GATE and point at where the fence is actually enforced.
+  ctx.gate(
+    'database-RLS',
+    'db-observable',
+    'A refund attempt against a never-captured payment persists no ledger row; resubmitting stays a pure no-op.',
+    REFUND_LEDGER_RPC_ONLY,
+  );
+  ctx.gate(
+    'replay-safety',
+    'db-observable',
+    'Resubmitting the invalid refund repeatedly stays a pure no-op with no ledger growth.',
+    REFUND_LEDGER_RPC_ONLY,
+  );
 
   await proveMoneyRls(ctx, handle, 'orders');
   await proveNoOwnerAlert(ctx, handle);
@@ -935,28 +938,14 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
 async function REPLAY(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
   const chain = await arrangeCommerceChain(handle, ctx);
-  const paymentId = chain
-    ? (
-        await insertPayment(handle, {
-          order_id: chain.orderId,
-          customer_id: chain.customerId,
-          guild_id: handle.guildId,
-          paypal_payment_id: uid(ctx, 'capture'),
-          paypal_event_id: uid(ctx, 'evt'),
-          amount_cents: 2500,
-          currency: 'USD',
-          status: 'completed',
-        })
-      ).id
-    : null;
-  ctx.expect(paymentId !== null, {
+  ctx.expect(chain !== null, {
     assertionClass: 'database-RLS',
     channel: 'db-observable',
-    promise: 'Test arrangement: a captured payment exists to redeliver capture + refund events against.',
-    observation: `payment arranged = ${paymentId !== null}.`,
-    impact: 'Could not arrange the payment — the replay-exactness proof setup is invalid.',
+    promise: 'Test arrangement: a completed order exists to redeliver capture events against.',
+    observation: `commerce chain arranged = ${chain !== null}.`,
+    impact: 'Could not arrange the commerce chain — the replay-exactness proof setup is invalid.',
   });
-  if (!chain || !paymentId) {
+  if (!chain) {
     gateBuyerBranding(ctx);
     gateBuyerDiscord(ctx);
     return;
@@ -964,6 +953,9 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
 
   // (a) The capture event redelivered FIVE times (its provider ids fixed): every
   //     redelivery is rejected by paypal_payment_id UNIQUE — payments stays at 1.
+  //     This is the ONLY settling capture on the order, so it also exercises the
+  //     one-settled-capture-per-order fence rather than colliding with a second
+  //     arrangement payment.
   const captureId = uid(ctx, 'capture-fixed');
   const seed = await insertPayment(handle, {
     order_id: chain.orderId,
@@ -1001,36 +993,14 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   });
 
   // (b) Re-submitting a refund with the SAME attempt/request id produces no second
-  //     ledger create (paypal_refund_id UNIQUE) — the provider-refund fence.
-  const refundId = uid(ctx, 'refund-fixed');
-  const firstRefund = await insertRefund(handle, {
-    payment_id: paymentId,
-    order_id: chain.orderId,
-    guild_id: handle.guildId,
-    paypal_refund_id: refundId,
-    event_type: 'PAYMENT.CAPTURE.REFUNDED',
-    amount_cents: 2500,
-    currency: 'USD',
-  });
-  const resubmitRefund = await insertRefund(handle, {
-    payment_id: paymentId,
-    order_id: chain.orderId,
-    guild_id: handle.guildId,
-    paypal_refund_id: refundId,
-    event_type: 'PAYMENT.CAPTURE.REFUNDED',
-    amount_cents: 2500,
-    currency: 'USD',
-  });
-  const refundRows = await countByEq(handle, 'payment_refunds', 'paypal_refund_id', refundId);
-  ctx.expect(firstRefund.id !== null && resubmitRefund.code === '23505' && refundRows === 1, {
-    assertionClass: 'database-RLS',
-    channel: 'db-observable',
-    promise: 'Re-submitting a refund with the same attempt id appends no duplicate create (payment_refunds.paypal_refund_id UNIQUE) — one ledger row keyed to the provider id.',
-    observation:
-      `first refund row=${firstRefund.id !== null}; resubmit code=${resubmitRefund.code ?? 'ok(!)'}; ` +
-      `payment_refunds rows for the refund id = ${refundRows} (expected 1).`,
-    impact: 'A re-submitted refund appended a second ledger create — the append-only attempt ledger is not fenced on the request id.',
-  });
+  //     ledger create (paypal_refund_id UNIQUE). That fence lives in the RPC-only
+  //     payment_refunds write path, so it GATEs here.
+  ctx.gate(
+    'database-RLS',
+    'db-observable',
+    'Re-submitting a refund with the same attempt id appends no duplicate create — one ledger row keyed to the provider id.',
+    REFUND_LEDGER_RPC_ONLY,
+  );
 
   // (c) The event log is keyed on the provider event id (PK) — redelivery no-op.
   const eventId = uid(ctx, 'wevt');
@@ -1068,11 +1038,12 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
 /** RESTART — money state survives a full stack restart (it lives in Supabase, not memory). */
 async function RESTART(ctx: ScenarioContext): Promise<void> {
   const guildId = ctx.scenarioGuildId('a');
-  const refundId = uid(ctx, 'refund');
   const captureId = uid(ctx, 'capture');
 
-  // Boot #1: a captured payment + a pending refund ledger row + an active
-  // entitlement, then snapshot and shut down.
+  // Boot #1: a captured payment + an active entitlement, then snapshot and shut
+  // down. The refund-ledger row is written only by the RPC-backed webhook route
+  // (see REFUND_LEDGER_RPC_ONLY), so restart-persistence is proven on the payment
+  // row — the refund row lives in the exact same durable Supabase store.
   const first = await ctx.bootGuild({ guildId, label: 'a' });
   const chain = await arrangeCommerceChain(first, ctx);
   let paymentId: string | null = null;
@@ -1089,42 +1060,22 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
         status: 'completed',
       })
     ).id;
-    if (paymentId) {
-      await insertRefund(first, {
-        payment_id: paymentId,
-        order_id: chain.orderId,
-        guild_id: first.guildId,
-        paypal_refund_id: refundId,
-        event_type: 'PAYMENT.CAPTURE.REFUNDED',
-        amount_cents: 700,
-        currency: 'USD',
-      });
-    }
     await insertActiveEntitlement(first, chain);
   }
   const paymentsBefore = await countGuildRows(first, 'payments');
-  const refundsBefore = await countGuildRows(first, 'payment_refunds');
   await first.cleanup(); // simulate the full-stack shutdown
 
-  // Boot #2: SAME guild id (restart). The money rows must be byte-identical — they
-  // live in Supabase, never in process memory.
+  // Boot #2: SAME guild id (restart). The money row must be byte-identical — it
+  // lives in Supabase, never in process memory.
   const second = await ctx.bootGuild({ guildId, label: 'a' });
   const paymentsAfter = await countGuildRows(second, 'payments');
-  const refundsAfter = await countGuildRows(second, 'payment_refunds');
-  const refundAfter = await countByEq(second, 'payment_refunds', 'paypal_refund_id', refundId);
   ctx.expect(
-    paymentId !== null &&
-      paymentsAfter === paymentsBefore &&
-      paymentsAfter === 1 &&
-      refundsAfter === refundsBefore &&
-      refundAfter === 1,
+    paymentId !== null && paymentsAfter === paymentsBefore && paymentsAfter === 1,
     {
       assertionClass: 'database-RLS',
       channel: 'db-observable',
-      promise: 'After a full stack restart the refund-attempt row and payment row persist unchanged (money state lives in Supabase, not process memory).',
-      observation:
-        `pre-restart payments=${paymentsBefore}/refunds=${refundsBefore}; ` +
-        `post-restart payments=${paymentsAfter}/refunds=${refundsAfter}; refund-by-id=${refundAfter} (expected 1/1).`,
+      promise: 'After a full stack restart the captured payment row persists unchanged (money state lives in Supabase, not process memory).',
+      observation: `pre-restart payments=${paymentsBefore}; post-restart payments=${paymentsAfter} (expected 1, unchanged).`,
       impact: 'Money rows did not survive the restart — settlement depended on process memory / persistence was lost.',
     },
   );
@@ -1184,34 +1135,21 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
 async function RACE(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
   const chain = await arrangeCommerceChain(handle, ctx);
-  const paymentId = chain
-    ? (
-        await insertPayment(handle, {
-          order_id: chain.orderId,
-          customer_id: chain.customerId,
-          guild_id: handle.guildId,
-          paypal_payment_id: uid(ctx, 'capture'),
-          paypal_event_id: uid(ctx, 'evt'),
-          amount_cents: 900,
-          currency: 'USD',
-          status: 'completed',
-        })
-      ).id
-    : null;
-  ctx.expect(chain !== null && paymentId !== null, {
+  ctx.expect(chain !== null, {
     assertionClass: 'database-RLS',
     channel: 'db-observable',
-    promise: 'Test arrangement: a captured payment exists to race a refund against.',
-    observation: `chain=${chain !== null}, payment=${paymentId !== null}.`,
-    impact: 'Could not arrange the payment — the race proof setup is invalid.',
+    promise: 'Test arrangement: a completed order exists to race a capture delivery against.',
+    observation: `commerce chain arranged = ${chain !== null}.`,
+    impact: 'Could not arrange the commerce chain — the race proof setup is invalid.',
   });
-  if (!chain || !paymentId) {
+  if (!chain) {
     gateBuyerBranding(ctx);
     gateBuyerDiscord(ctx);
     return;
   }
 
-  // (a) Two PARALLEL deliveries of one capture event: the paypal_payment_id UNIQUE
+  // (a) Two PARALLEL deliveries of one capture event, racing for the order's FIRST
+  //     settlement (no prior settling capture exists): the paypal_payment_id UNIQUE
   //     constraint (a DB-level claim, not process memory) lets exactly one win.
   const raceCaptureId = uid(ctx, 'race-capture');
   const [d1, d2] = await Promise.all([
@@ -1249,40 +1187,15 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     impact: 'A concurrent capture race created two payment rows — the DB claim did not arbitrate the race.',
   });
 
-  // (b) Two PARALLEL refund submissions for one order (same request id): exactly
-  //     one provider-refund ledger row survives (paypal_refund_id UNIQUE).
-  const raceRefundId = uid(ctx, 'race-refund');
-  const [r1, r2] = await Promise.all([
-    insertRefund(handle, {
-      payment_id: paymentId,
-      order_id: chain.orderId,
-      guild_id: handle.guildId,
-      paypal_refund_id: raceRefundId,
-      event_type: 'PAYMENT.CAPTURE.REFUNDED',
-      amount_cents: 900,
-      currency: 'USD',
-    }),
-    insertRefund(handle, {
-      payment_id: paymentId,
-      order_id: chain.orderId,
-      guild_id: handle.guildId,
-      paypal_refund_id: raceRefundId,
-      event_type: 'PAYMENT.CAPTURE.REFUNDED',
-      amount_cents: 900,
-      currency: 'USD',
-    }),
-  ]);
-  const refundWinners = [r1, r2].filter((r) => r.id !== null).length;
-  const refundRows = await countByEq(handle, 'payment_refunds', 'paypal_refund_id', raceRefundId);
-  ctx.expect(refundWinners === 1 && refundRows === 1, {
-    assertionClass: 'database-RLS',
-    channel: 'db-observable',
-    promise: 'Two concurrent refund submissions for one order yield a single ledger attempt (paypal_refund_id UNIQUE) — one provider refund, the loser observes the existing attempt.',
-    observation:
-      `parallel refund inserts → winners=${refundWinners}; ` +
-      `payment_refunds rows for the refund id = ${refundRows} (expected 1).`,
-    impact: 'Two competing refund attempts both persisted — the refund ledger is not single-effect under a race.',
-  });
+  // (b) Two PARALLEL refund submissions (same request id) collapse to one ledger
+  //     row (paypal_refund_id UNIQUE + the RPC's FOR UPDATE witness). That fence
+  //     lives in the RPC-only payment_refunds write path — GATE.
+  ctx.gate(
+    'database-RLS',
+    'db-observable',
+    'Two concurrent refund submissions for one order yield a single ledger attempt — one provider refund, the loser observes the existing attempt.',
+    REFUND_LEDGER_RPC_ONLY,
+  );
 
   await proveMoneyRls(ctx, handle, 'payments');
   await proveNoOwnerAlert(ctx, handle);
@@ -1403,17 +1316,6 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
         status: 'completed',
       })
     ).id;
-    if (paymentId) {
-      await insertRefund(handle, {
-        payment_id: paymentId,
-        order_id: chain.orderId,
-        guild_id: handle.guildId,
-        paypal_refund_id: uid(ctx, 'refund'),
-        event_type: 'PAYMENT.CAPTURE.REFUNDED',
-        amount_cents: 600,
-        currency: 'USD',
-      });
-    }
     await insertActiveEntitlement(handle, chain);
   }
   // An append-only audit row that retention must PRESERVE across the sweep.
@@ -1429,14 +1331,14 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
 
   const ordersBefore = await countGuildRows(handle, 'orders');
   const paymentsBefore = await countGuildRows(handle, 'payments');
-  const refundsBefore = await countGuildRows(handle, 'payment_refunds');
   const auditBefore = await countGuildRows(handle, 'audit_logs');
-  ctx.expect(ordersBefore >= 1 && paymentsBefore >= 1 && refundsBefore >= 1 && auditBefore >= 1, {
+  ctx.expect(ordersBefore >= 1 && paymentsBefore >= 1 && auditBefore >= 1, {
     assertionClass: 'Discord',
     channel: 'db-observable',
-    promise: 'The scenario created run-prefixed money rows + an audit row (pre-cleanup baseline).',
-    observation:
-      `pre-cleanup: orders=${ordersBefore}, payments=${paymentsBefore}, payment_refunds=${refundsBefore}, audit_logs=${auditBefore}.`,
+    promise:
+      'The scenario created run-prefixed money rows + an audit row (pre-cleanup baseline). ' +
+      'payment_refunds is RPC-only-write (see REFUND_LEDGER_RPC_ONLY), so the refund ledger is not part of this bot-only baseline — the sweep still verifies zero refund residue below.',
+    observation: `pre-cleanup: orders=${ordersBefore}, payments=${paymentsBefore}, audit_logs=${auditBefore}.`,
     impact: 'The cleanup scenario could not establish a baseline of run-prefixed money rows.',
   });
 
