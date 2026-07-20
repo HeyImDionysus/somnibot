@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 131 migration files in packages/supabase/migrations/
+ * Source: 132 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1763,6 +1763,7 @@ export interface DbEconomyLotteryTickets {
   user_id: string;
   ticket_number: number;
   purchased_at: string;
+  request_id: string | null;
 }
 
 export interface DbEconomyMarketListings {
@@ -1824,6 +1825,7 @@ export interface DbEconomyPrestige {
   title: string | null;
   last_prestige: string | null;
   created_at: string;
+  last_request_id: string | null;
 }
 
 export interface DbEconomyProfiles {

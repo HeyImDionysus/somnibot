@@ -126,145 +126,65 @@ describe('LotteryManager', () => {
       }));
     });
 
-    it('rejects when insufficient balance', async () => {
-      supabase = makeSupabase(
-        {
-          guild_config: { economy_lottery_enabled: true, economy_lottery_max_tickets: 10, economy_lottery_ticket_price: 100 },
-          economy_wallets: { wallet: 50 },
-        },
-      );
+    // The atomic RPC now does the funds check + debit + ticket insert; the manager
+    // maps its status. Each case mocks lottery_buy_tickets_atomic's return.
+    const activeDrawing = { id: 'd1', jackpot: 500, status: 'active', created_at: new Date().toISOString() };
+    const cfg = { economy_lottery_enabled: true, economy_lottery_max_tickets: 10, economy_lottery_ticket_price: 100 };
+
+    it('rejects when the RPC reports insufficient funds', async () => {
+      supabase = makeSupabase({ guild_config: cfg, economy_lottery_drawings: activeDrawing },
+        { lottery_buy_tickets_atomic: { data: { status: 'insufficient_funds', replayed: false }, error: null } });
       mgr = new LotteryManager(supabase as any);
       const interaction = makeInteraction();
       await mgr.buyTickets(interaction as any, 1);
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('need'),
-      }));
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('need') }));
     });
 
-    it('rejects when no wallet found', async () => {
-      supabase = makeSupabase(
-        {
-          guild_config: { economy_lottery_enabled: true, economy_lottery_max_tickets: 10, economy_lottery_ticket_price: 100 },
-          economy_wallets: null,
-        },
-      );
+    it('purchases tickets successfully via the atomic RPC', async () => {
+      supabase = makeSupabase({ guild_config: cfg, economy_lottery_drawings: activeDrawing },
+        { lottery_buy_tickets_atomic: { data: { status: 'purchased', replayed: false, tickets: 1, jackpot: 600 }, error: null } });
       mgr = new LotteryManager(supabase as any);
       const interaction = makeInteraction();
       await mgr.buyTickets(interaction as any, 1);
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('need'),
-      }));
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ embeds: expect.any(Array) }));
     });
 
-    it('purchases tickets successfully', async () => {
-      supabase = makeSupabase(
-        {
-          guild_config: { economy_lottery_enabled: true, economy_lottery_max_tickets: 10, economy_lottery_ticket_price: 100 },
-          economy_wallets: { wallet: 1000 },
-          economy_lottery_drawings: { id: 'd1', jackpot: 500, status: 'active', created_at: new Date().toISOString() },
-        },
-        {
-          economy_subtract_balance: { data: true, error: null },
-          lottery_buy_tickets: { data: 600, error: null },
-        },
-      );
+    it('is idempotent: a replayed buy reports success without a second charge', async () => {
+      supabase = makeSupabase({ guild_config: cfg, economy_lottery_drawings: activeDrawing },
+        { lottery_buy_tickets_atomic: { data: { status: 'purchased', replayed: true, tickets: 1, jackpot: 700 }, error: null } });
       mgr = new LotteryManager(supabase as any);
       const interaction = makeInteraction();
       await mgr.buyTickets(interaction as any, 1);
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        embeds: expect.any(Array),
-      }));
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ embeds: expect.any(Array) }));
     });
 
-    it('handles debit failure', async () => {
-      supabase = makeSupabase(
-        {
-          guild_config: { economy_lottery_enabled: true, economy_lottery_max_tickets: 10, economy_lottery_ticket_price: 100 },
-          economy_wallets: { wallet: 1000 },
-          economy_lottery_drawings: { id: 'd1', jackpot: 500, status: 'active', created_at: new Date().toISOString() },
-        },
-        {
-          economy_subtract_balance: { error: { message: 'insufficient funds' } },
-        },
-      );
+    it('reports a generic failure when the RPC errors (no silent coin loss)', async () => {
+      supabase = makeSupabase({ guild_config: cfg, economy_lottery_drawings: activeDrawing },
+        { lottery_buy_tickets_atomic: { error: { message: 'DB error' } } });
       mgr = new LotteryManager(supabase as any);
       const interaction = makeInteraction();
       await mgr.buyTickets(interaction as any, 1);
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining("don't have enough"),
-      }));
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('try again') }));
     });
 
-    it('handles buy RPC failure with refund', async () => {
-      supabase = makeSupabase(
-        {
-          guild_config: { economy_lottery_enabled: true, economy_lottery_max_tickets: 10, economy_lottery_ticket_price: 100 },
-          economy_wallets: { wallet: 1000 },
-          economy_lottery_drawings: { id: 'd1', jackpot: 500, status: 'active', created_at: new Date().toISOString() },
-        },
-        {
-          economy_subtract_balance: { data: true, error: null },
-          lottery_buy_tickets: { error: { message: 'DB error' } },
-          economy_add_balance: { data: true, error: null },
-        },
-      );
+    it('explains when the max tickets are already held', async () => {
+      supabase = makeSupabase({ guild_config: cfg, economy_lottery_drawings: activeDrawing },
+        { lottery_buy_tickets_atomic: { data: { status: 'max_tickets', replayed: false }, error: null } });
       mgr = new LotteryManager(supabase as any);
       const interaction = makeInteraction();
       await mgr.buyTickets(interaction as any, 1);
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('refunded'),
-      }));
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('maximum') }));
     });
 
-    it('handles buy RPC failure with max tickets exceeded', async () => {
-      supabase = makeSupabase(
-        {
-          guild_config: { economy_lottery_enabled: true, economy_lottery_max_tickets: 10, economy_lottery_ticket_price: 100 },
-          economy_wallets: { wallet: 1000 },
-          economy_lottery_drawings: { id: 'd1', jackpot: 500, status: 'active', created_at: new Date().toISOString() },
-        },
-        {
-          economy_subtract_balance: { data: true, error: null },
-          lottery_buy_tickets: { error: { message: 'would exceed max tickets' } },
-          economy_add_balance: { data: true, error: null },
-        },
-      );
+    it('explains when the drawing closed while the buy was in flight (nothing charged)', async () => {
+      supabase = makeSupabase({ guild_config: cfg, economy_lottery_drawings: activeDrawing },
+        { lottery_buy_tickets_atomic: { data: { status: 'drawing_closed', replayed: false }, error: null } });
       mgr = new LotteryManager(supabase as any);
       const interaction = makeInteraction();
       await mgr.buyTickets(interaction as any, 1);
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('maximum'),
-      }));
-    });
-
-    it('refunds and explains when the drawing closed while the buy was in flight', async () => {
-      supabase = makeSupabase(
-        {
-          guild_config: { economy_lottery_enabled: true, economy_lottery_max_tickets: 10, economy_lottery_ticket_price: 100 },
-          economy_wallets: { wallet: 1000 },
-          economy_lottery_drawings: { id: 'd1', jackpot: 500, status: 'active', created_at: new Date().toISOString() },
-        },
-        {
-          economy_subtract_balance: { data: true, error: null },
-          // Typed guard from 20260709190000: the scheduler claimed the
-          // drawing while this purchase waited on the row lock.
-          lottery_buy_tickets: { error: { message: 'lottery_buy_tickets: drawing d1 is not active (status=drawing)' } },
-          economy_add_balance: { data: true, error: null },
-        },
-      );
-      mgr = new LotteryManager(supabase as any);
-      const interaction = makeInteraction();
-      await mgr.buyTickets(interaction as any, 1);
-      // The debit must be refunded — the user cannot silently lose coins.
-      expect(supabase.rpc).toHaveBeenCalledWith('economy_add_balance', expect.objectContaining({
-        p_guild_id: 'g1', p_user_id: 'u1', p_amount: 100,
-      }));
       expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
         content: expect.stringContaining('just closed'),
         ephemeral: true,
-      }));
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('refunded'),
       }));
     });
 

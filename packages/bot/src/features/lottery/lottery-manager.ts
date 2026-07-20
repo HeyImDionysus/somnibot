@@ -275,87 +275,60 @@ export class LotteryManager {
 
     const totalCost = count * ticketPrice;
 
-    // Check balance
-    const { data: wallet } = await this.supabase
-      .from('economy_wallets')
-      .select('wallet')
-      .eq('guild_id', guildId)
-      .eq('user_id', userId)
-      .single();
-
-    if (!wallet || wallet.wallet < totalCost) {
-      await interaction.reply({ content: `❌ You need **${totalCost.toLocaleString()}** coins (${count} × ${ticketPrice.toLocaleString()}).`, ephemeral: true });
-      return;
-    }
-
     const drawing = await this.ensureActiveDrawing(guildId);
     if (!drawing) {
       await interaction.reply({ content: '❌ Could not create lottery drawing.', ephemeral: true });
       return;
     }
 
-    // Deduct balance — bail if insufficient funds
-    const { error: debitErr } = await this.supabase.rpc('economy_subtract_balance', {
-      p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
-    });
-    if (debitErr) {
-      await interaction.reply({
-        content: `❌ You don't have enough to buy ${count} ticket(s) (need **${totalCost.toLocaleString()}**).`,
-        ephemeral: true,
-      });
-      return;
-    }
-
-    // V6 Audit §4.2: Atomic ticket purchase + jackpot increment via RPC.
-    // Replaces the TOCTOU-vulnerable SELECT-then-INSERT pattern and the
-    // separate jackpot-increment call. The RPC locks the drawing row,
-    // checks existing count, inserts tickets, and increments the jackpot
-    // in a single transaction — no partial state on failure.
-    const { data: newJackpot, error: buyErr } = await this.supabase.rpc('lottery_buy_tickets', {
+    // Atomic + idempotent purchase: the funds check, debit, ticket insert, and
+    // jackpot increment commit as ONE call keyed on the interaction id, so a
+    // redelivered /lottery buy charges and issues tickets exactly once (no
+    // double-charge). Insufficient funds / a closed drawing roll everything back.
+    const { data, error: buyErr } = await this.supabase.rpc('lottery_buy_tickets_atomic', {
       p_drawing_id: drawing.id,
       p_guild_id: guildId,
       p_user_id: userId,
       p_count: count,
       p_max: maxTickets,
       p_cost: totalCost,
+      p_request_id: interaction.id,
     });
-    if (buyErr) {
-      // RPC failed — entire transaction rolled back, no tickets inserted,
-      // no jackpot changed. Just refund the balance debit.
-      const isLimitExceeded = buyErr.message?.includes('would exceed max tickets');
-      // Typed guard from 20260709190000: the drawing was claimed for its
-      // draw (or finalised/cancelled) between ensureActiveDrawing and the
-      // RPC's row lock, so tickets sold now could never win. The RPC rejects
-      // instead of appending unwinnable tickets; refund and say so.
-      const isDrawingClosed = buyErr.message?.includes('is not active');
-      log.error('lottery_buy_tickets failed, refunding user:', buyErr.message);
-      const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
-        p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
-      });
-      if (refundErr) {
-        log.error('CRITICAL: lottery_buy_tickets failed AND refund failed', {
-          guildId, userId, totalCost, buyErr, refundErr,
-        });
-      }
-      await interaction.reply({
-        content: isLimitExceeded
-          ? `❌ You already have the maximum number of tickets for this drawing (max ${maxTickets}).`
-          : isDrawingClosed
-            ? '⏰ That drawing just closed — its winner is being drawn. Your coins were refunded; buy tickets again once the next drawing starts!'
-            : '❌ Failed to record your tickets — your coins were refunded.',
-        ephemeral: true,
-      });
+    if (buyErr || !data || typeof data !== 'object') {
+      log.error('lottery_buy_tickets_atomic failed:', buyErr?.message);
+      await interaction.reply({ content: '❌ Could not buy tickets right now — please try again.', ephemeral: true });
       return;
     }
 
-    getQuestsManager(guildId)?.trackProgress(guildId, userId, 'lottery', count).catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+    const result = data as { status?: string; replayed?: boolean; jackpot?: number };
+    switch (result.status) {
+      case 'insufficient_funds':
+        await interaction.reply({ content: `❌ You need **${totalCost.toLocaleString()}** coins (${count} × ${ticketPrice.toLocaleString()}).`, ephemeral: true });
+        return;
+      case 'max_tickets':
+        await interaction.reply({ content: `❌ You already have the maximum number of tickets for this drawing (max ${maxTickets}).`, ephemeral: true });
+        return;
+      case 'drawing_closed':
+        await interaction.reply({ content: '⏰ That drawing just closed — its winner is being drawn. Buy tickets again once the next drawing starts!', ephemeral: true });
+        return;
+      case 'purchased':
+        break;
+      default:
+        await interaction.reply({ content: '❌ Could not buy tickets right now — please try again.', ephemeral: true });
+        return;
+    }
+
+    // Quest progress is not idempotent — credit it only on the first application.
+    if (!result.replayed) {
+      getQuestsManager(guildId)?.trackProgress(guildId, userId, 'lottery', count).catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+    }
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
         .setTitle('🎟️ Lottery Tickets Purchased!')
         .setDescription(
           `You bought **${count}** ticket(s) for **${totalCost.toLocaleString()}** coins.\n` +
-          `Current jackpot: **${(newJackpot ?? drawing.jackpot + totalCost).toLocaleString()}** coins 💰`
+          `Current jackpot: **${(result.jackpot ?? drawing.jackpot + totalCost).toLocaleString()}** coins 💰`
         )
         .setColor(0x5865F2)],
     });

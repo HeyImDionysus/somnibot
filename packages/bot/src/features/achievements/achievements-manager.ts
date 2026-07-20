@@ -148,75 +148,52 @@ export class AchievementsManager {
       await interaction.reply({ content: '❌ Prestige is not enabled.', ephemeral: true }); return;
     }
 
-    // Check level + net worth requirements
-    const [{ data: wallet }, { data: memberLevel }] = await Promise.all([
-      this.supabase
-        .from('economy_wallets').select('wallet, bank').eq('guild_id', guildId).eq('user_id', userId).single(),
-      this.supabase
-        .from('member_levels').select('level').eq('guild_id', guildId).eq('member_id', userId).single(),
-    ]);
-
-    const netWorth = (wallet?.wallet ?? 0) + (wallet?.bank ?? 0);
-    const userLevel = memberLevel?.level ?? 0;
     const minLevel = config.economy_prestige_min_level ?? 50;
     const minNetWorth = config.economy_prestige_min_net_worth ?? 1000000;
-
-    if (userLevel < minLevel) {
-      await interaction.reply({
-        content: `❌ You need to be at least **level ${minLevel}** to prestige. You're level **${userLevel}**.`,
-        ephemeral: true,
-      });
-      return;
-    }
-
-    if (netWorth < minNetWorth) {
-      await interaction.reply({
-        content: `❌ You need at least **${minNetWorth.toLocaleString()}** net worth to prestige. You have **${netWorth.toLocaleString()}**.`,
-        ephemeral: true,
-      });
-      return;
-    }
-
-    // Get or create prestige record
-    const { data: existing } = await this.supabase
-      .from('economy_prestige').select('*').eq('guild_id', guildId).eq('user_id', userId).single();
-
-    const currentLevel = existing?.prestige_level ?? 0;
-    const newLevel = currentLevel + 1;
     const multiplierGain = config.economy_prestige_multiplier_pct ?? 10;
-    const newMultiplier = (existing?.multiplier_pct ?? 0) + multiplierGain;
 
-    // Reset wallet and bank
-    await this.supabase.from('economy_wallets')
-      .update({ wallet: 0, bank: 0 }).eq('guild_id', guildId).eq('user_id', userId);
+    // Atomic + idempotent: the requirement checks, wallet/bank reset, and
+    // prestige-record bump commit as ONE call keyed on the interaction id, so a
+    // redelivered /prestige applies exactly once (a replay never double-bumps the
+    // level or the earning multiplier).
+    const { data, error } = await this.supabase.rpc('economy_prestige_apply', {
+      p_guild_id: guildId,
+      p_user_id: userId,
+      p_min_level: minLevel,
+      p_min_net_worth: minNetWorth,
+      p_multiplier_gain: multiplierGain,
+      p_request_id: interaction.id,
+    });
 
-    // Upsert prestige record
-    if (existing) {
-      await this.supabase.from('economy_prestige').update({
-        prestige_level: newLevel,
-        total_resets: existing.total_resets + 1,
-        multiplier_pct: newMultiplier,
-        last_prestige: new Date().toISOString(),
-      }).eq('id', existing.id);
-    } else {
-      await this.supabase.from('economy_prestige').insert({
-        guild_id: guildId,
-        user_id: userId,
-        prestige_level: newLevel,
-        total_resets: 1,
-        multiplier_pct: newMultiplier,
-        last_prestige: new Date().toISOString(),
-      });
+    if (error || !data || typeof data !== 'object') {
+      log.error('economy_prestige_apply failed', { detail: error?.message });
+      await interaction.reply({ content: '❌ Could not prestige right now — please try again.', ephemeral: true });
+      return;
+    }
+
+    const result = data as { status?: string; new_level?: number; new_multiplier?: number; level?: number; net_worth?: number };
+    switch (result.status) {
+      case 'level_too_low':
+        await interaction.reply({ content: `❌ You need to be at least **level ${minLevel}** to prestige. You're level **${result.level ?? 0}**.`, ephemeral: true });
+        return;
+      case 'net_worth_too_low':
+        await interaction.reply({ content: `❌ You need at least **${minNetWorth.toLocaleString()}** net worth to prestige. You have **${(result.net_worth ?? 0).toLocaleString()}**.`, ephemeral: true });
+        return;
+      case 'prestiged':
+        break;
+      default:
+        await interaction.reply({ content: '❌ Could not prestige right now — please try again.', ephemeral: true });
+        return;
     }
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
-        .setTitle(`⭐ Prestige Level ${newLevel}!`)
+        .setTitle(`⭐ Prestige Level ${result.new_level}!`)
         .setDescription(
           `You\'ve prestiged! Your wallet and bank have been reset.\n\n` +
           `✅ *Kept:* Inventory, pets, achievements, streaks\n` +
           `🔄 *Reset:* Wallet, bank\n` +
-          `📈 *New earning multiplier:* +**${newMultiplier}%**`
+          `📈 *New earning multiplier:* +**${result.new_multiplier}%**`
         )
         .setColor(0xF1C40F)],
     });

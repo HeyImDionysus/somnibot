@@ -417,162 +417,57 @@ describe('AchievementsManager', () => {
       }));
     });
 
-    it('rejects when user level too low', async () => {
-      const fromMock = vi.fn();
-      const sb: Record<string, any> = {
-        from: fromMock,
-        rpc: vi.fn().mockResolvedValue({ error: null }),
-      };
-
-      fromMock.mockImplementation((table: string) => {
+    // prestige now delegates the requirement checks + reset + bump to the atomic
+    // economy_prestige_apply RPC; each case mocks getConfig (guild_config)
+    // enabled and the RPC's returned status.
+    function prestigeSb(rpcData: unknown) {
+      const fromMock = vi.fn().mockImplementation((table: string) => {
         const chain: Record<string, any> = {};
-        const methods = ['select', 'eq', 'order', 'limit', 'single', 'insert', 'update', 'maybeSingle'];
-        for (const m of methods) {
-          chain[m] = vi.fn().mockReturnValue(chain);
-        }
-        if (table === 'guild_config') {
-          chain.then = (resolve: (v: any) => void) => resolve({
-            data: { economy_prestige_enabled: true, economy_prestige_min_level: 50, economy_prestige_min_net_worth: 1000000 },
-            error: null,
-          });
-        } else if (table === 'economy_wallets') {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: { wallet: 2000000, bank: 0 }, error: null });
-        } else if (table === 'member_levels') {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: { level: 10 }, error: null });
-        } else {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
-        }
+        for (const m of ['select', 'eq', 'order', 'limit', 'single', 'insert', 'update', 'maybeSingle']) chain[m] = vi.fn().mockReturnValue(chain);
+        chain.then = (resolve: (v: any) => void) => resolve(table === 'guild_config'
+          ? { data: { economy_prestige_enabled: true, economy_prestige_min_level: 50, economy_prestige_min_net_worth: 1000000, economy_prestige_multiplier_pct: 10 }, error: null }
+          : { data: null, error: null });
         (chain as any)[Symbol.toStringTag] = 'Promise';
         return chain;
       });
+      return { from: fromMock, rpc: vi.fn().mockResolvedValue({ data: rpcData, error: null }) };
+    }
 
-      mgr = new AchievementsManager(sb as any);
+    it('rejects when user level too low', async () => {
+      mgr = new AchievementsManager(prestigeSb({ status: 'level_too_low', replayed: false, level: 10 }) as any);
       const interaction = makeInteraction();
       await mgr.prestige(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('level'),
-        ephemeral: true,
-      }));
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('level'), ephemeral: true }));
     });
 
     it('rejects when net worth too low', async () => {
-      const fromMock = vi.fn();
-      const sb: Record<string, any> = {
-        from: fromMock,
-        rpc: vi.fn().mockResolvedValue({ error: null }),
-      };
-
-      fromMock.mockImplementation((table: string) => {
-        const chain: Record<string, any> = {};
-        const methods = ['select', 'eq', 'order', 'limit', 'single', 'insert', 'update', 'maybeSingle'];
-        for (const m of methods) {
-          chain[m] = vi.fn().mockReturnValue(chain);
-        }
-        if (table === 'guild_config') {
-          chain.then = (resolve: (v: any) => void) => resolve({
-            data: { economy_prestige_enabled: true, economy_prestige_min_level: 50, economy_prestige_min_net_worth: 1000000 },
-            error: null,
-          });
-        } else if (table === 'economy_wallets') {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: { wallet: 100, bank: 50 }, error: null });
-        } else if (table === 'member_levels') {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: { level: 60 }, error: null });
-        } else {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
-        }
-        (chain as any)[Symbol.toStringTag] = 'Promise';
-        return chain;
-      });
-
-      mgr = new AchievementsManager(sb as any);
+      mgr = new AchievementsManager(prestigeSb({ status: 'net_worth_too_low', replayed: false, net_worth: 150 }) as any);
       const interaction = makeInteraction();
       await mgr.prestige(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('net worth'),
-        ephemeral: true,
-      }));
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('net worth'), ephemeral: true }));
     });
 
-    it('successfully prestiges (new prestige record)', async () => {
-      const fromMock = vi.fn();
-      const sb: Record<string, any> = {
-        from: fromMock,
-        rpc: vi.fn().mockResolvedValue({ error: null }),
-      };
-
-      fromMock.mockImplementation((table: string) => {
-        const chain: Record<string, any> = {};
-        const methods = ['select', 'eq', 'order', 'limit', 'single', 'insert', 'update', 'maybeSingle'];
-        for (const m of methods) {
-          chain[m] = vi.fn().mockReturnValue(chain);
-        }
-        if (table === 'guild_config') {
-          chain.then = (resolve: (v: any) => void) => resolve({
-            data: { economy_prestige_enabled: true, economy_prestige_min_level: 50, economy_prestige_min_net_worth: 1000000, economy_prestige_multiplier_pct: 10 },
-            error: null,
-          });
-        } else if (table === 'economy_wallets') {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: { wallet: 500000, bank: 600000 }, error: null });
-        } else if (table === 'member_levels') {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: { level: 55 }, error: null });
-        } else if (table === 'economy_prestige') {
-          // No existing prestige record
-          chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
-        } else {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
-        }
-        (chain as any)[Symbol.toStringTag] = 'Promise';
-        return chain;
-      });
-
-      mgr = new AchievementsManager(sb as any);
+    it('successfully prestiges via the atomic RPC', async () => {
+      mgr = new AchievementsManager(prestigeSb({ status: 'prestiged', replayed: false, new_level: 1, new_multiplier: 10 }) as any);
       const interaction = makeInteraction();
       await mgr.prestige(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        embeds: expect.any(Array),
-      }));
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ embeds: expect.any(Array) }));
     });
 
-    it('successfully prestiges with existing record', async () => {
-      const fromMock = vi.fn();
-      const sb: Record<string, any> = {
-        from: fromMock,
-        rpc: vi.fn().mockResolvedValue({ error: null }),
-      };
-
-      fromMock.mockImplementation((table: string) => {
-        const chain: Record<string, any> = {};
-        const methods = ['select', 'eq', 'order', 'limit', 'single', 'insert', 'update', 'maybeSingle'];
-        for (const m of methods) {
-          chain[m] = vi.fn().mockReturnValue(chain);
-        }
-        if (table === 'guild_config') {
-          chain.then = (resolve: (v: any) => void) => resolve({
-            data: { economy_prestige_enabled: true, economy_prestige_min_level: 50, economy_prestige_min_net_worth: 1000000, economy_prestige_multiplier_pct: 15 },
-            error: null,
-          });
-        } else if (table === 'economy_wallets') {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: { wallet: 800000, bank: 500000 }, error: null });
-        } else if (table === 'member_levels') {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: { level: 60 }, error: null });
-        } else if (table === 'economy_prestige') {
-          chain.then = (resolve: (v: any) => void) => resolve({
-            data: { id: 'p1', prestige_level: 2, total_resets: 2, multiplier_pct: 30 },
-            error: null,
-          });
-        } else {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
-        }
-        (chain as any)[Symbol.toStringTag] = 'Promise';
-        return chain;
-      });
-
-      mgr = new AchievementsManager(sb as any);
+    it('is idempotent: a replayed prestige reports success without a second bump', async () => {
+      mgr = new AchievementsManager(prestigeSb({ status: 'prestiged', replayed: true, new_level: 3, new_multiplier: 30 }) as any);
       const interaction = makeInteraction();
       await mgr.prestige(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        embeds: expect.any(Array),
-      }));
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ embeds: expect.any(Array) }));
+    });
+
+    it('prestiges an existing record (RPC bumps level + multiplier)', async () => {
+      // The RPC handles reading the existing record and bumping it; here it
+      // returns the post-bump level 3 / multiplier 45.
+      mgr = new AchievementsManager(prestigeSb({ status: 'prestiged', replayed: false, new_level: 3, new_multiplier: 45 }) as any);
+      const interaction = makeInteraction();
+      await mgr.prestige(interaction as any);
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ embeds: expect.any(Array) }));
     });
   });
 });
