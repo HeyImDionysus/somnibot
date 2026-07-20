@@ -77,7 +77,7 @@ export async function GET() {
       syncEnabled: config?.sync_enabled ?? true,
       syncIntervalMinutes: config?.sync_interval_minutes ?? 15,
       autoRepair: config?.sync_auto_repair ?? false,
-      autoRepairEveryone: config?.sync_auto_repair_everyone ?? true,
+      autoRepairEveryone: config?.sync_auto_repair_everyone ?? false,
     },
     recentEvents: recentEvents ?? [],
   });
