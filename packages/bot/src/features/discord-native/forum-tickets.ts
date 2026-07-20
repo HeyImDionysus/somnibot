@@ -126,7 +126,7 @@ export class ForumTicketService {
 
       // Generate ticket number (same RPC as ticket-service)
       let ticketNumber = 1;
-      const { data: rpcNum } = await this.supabase.rpc('nextval_ticket', {});
+      const { data: rpcNum } = await this.supabase.rpc('nextval_ticket', { p_guild_id: this.guild.id });
       if (rpcNum != null) {
         ticketNumber = rpcNum as number;
       } else {

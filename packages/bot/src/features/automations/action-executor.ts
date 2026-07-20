@@ -410,7 +410,7 @@ async function executeAction(
 
       // Generate ticket number atomically via Postgres sequence
       let ticketNumber: number;
-      const { data: seqVal, error: seqErr } = await ctx.supabase.rpc('nextval_ticket');
+      const { data: seqVal, error: seqErr } = await ctx.supabase.rpc('nextval_ticket', { p_guild_id: ctx.guildId });
       if (seqErr || seqVal == null) {
         const { count } = await ctx.supabase
           .from('tickets')

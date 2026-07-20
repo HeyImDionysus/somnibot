@@ -31,11 +31,11 @@
  *      re-check + branded ephemeral denial + denied-attempt audit row, none of
  *      which exist (lifecycle authorization rests solely on Discord channel
  *      visibility).
- *   2. XGUILD: `nextval_ticket()` is `MAX(ticket_number)+1` over the WHOLE
- *      `ticket_transcripts` table — a single global counter, not per-guild. A
- *      second guild's first allocation is contaminated by the first guild's
- *      transcripts, so the catalog's "each guild's numbering advances
- *      independently" is not met.
+ *   2. (FIXED) XGUILD ticket numbering: nextval_ticket() used to be
+ *      MAX(ticket_number)+1 over the WHOLE ticket_transcripts table — a single
+ *      global counter. It now takes p_guild_id and counts that guild's own
+ *      tickets + transcripts (migration 20260720060000), so XGUILD positively
+ *      proves each guild's numbering advances independently.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -1053,23 +1053,22 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  // FINDING — ticket numbering is NOT per-guild. nextval_ticket() returns
-  // MAX(ticket_number)+1 over the WHOLE ticket_transcripts table (a single global
-  // counter). Insert a distinctively high transcript in guild A, then a guild-B
-  // allocation jumps to follow it — proving cross-guild contamination.
-  const { data: baseData, error: baseErr } = await handleA.supabase.rpc('nextval_ticket');
+  // Ticket numbering is per-guild (nextval_ticket(p_guild_id) = MAX+1 over that
+  // guild's tickets + transcripts). Insert a distinctively high transcript in
+  // guild A; guild B's next allocation must NOT follow it.
+  const { data: baseData, error: baseErr } = await handleA.supabase.rpc('nextval_ticket', { p_guild_id: guildA });
   if (baseErr || baseData == null) {
     ctx.gate(
       'Discord',
       'db-observable',
       'Each guild’s ticket numbering advances independently of other guilds.',
-      `could not call nextval_ticket() to probe the numbering primitive (${baseErr?.message ?? 'null result'})`,
+      `could not call nextval_ticket(p_guild_id) to probe the numbering primitive (${baseErr?.message ?? 'null result'})`,
     );
   } else {
     const base = Number(baseData);
     const marker = base + 500;
     await insertTranscript(handleA, ctx, { ticketId: null, ticketNumber: marker, creatorId: creator, closedById: creator });
-    const { data: nextForBData } = await handleB.supabase.rpc('nextval_ticket');
+    const { data: nextForBData } = await handleB.supabase.rpc('nextval_ticket', { p_guild_id: guildB });
     const nextForB = Number(nextForBData);
     // Per-guild-independent numbering: guild B (no transcripts of its own) must NOT
     // be pushed forward by guild A's transcript. Reality: nextForB = marker + 1.

@@ -29,7 +29,7 @@ const log = createLogger('Tickets');
 // ── Ticket Number ────────────────────────────────────────
 
 async function getNextTicketNumber(supabase: SupabaseClient, guildId: string): Promise<number> {
-  const { data, error } = await supabase.rpc('nextval_ticket', {});
+  const { data, error } = await supabase.rpc('nextval_ticket', { p_guild_id: guildId });
   if (error || data == null) {
     // Fallback: count existing tickets + 1
     const { count } = await supabase
