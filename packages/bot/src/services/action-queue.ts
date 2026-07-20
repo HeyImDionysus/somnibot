@@ -3445,6 +3445,14 @@ export async function checkLanePendingDepthAlerts(
 
 export interface ActionQueueHandle {
   staleRecoveryTimer: ReturnType<typeof setInterval>;
+  /**
+   * Stop the Realtime subscription loop. Cancels any pending reconnect timer
+   * and prevents further resubscribe attempts. Must be called on guild
+   * teardown so a scheduled reconnect can't fire after the Supabase client is
+   * torn down (which throws an uncaught error from realtime-js when it rejects
+   * `.on()` bindings on a reused/non-closed channel).
+   */
+  stop: () => void;
 }
 
 export async function startActionQueueListener(
@@ -3501,8 +3509,20 @@ export async function startActionQueueListener(
   // a delay, with exponential backoff capped at 30s.
   let reconnectDelay = 1_000;
   const MAX_RECONNECT_DELAY = 30_000;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+
+  function scheduleReconnect(): void {
+    if (stopped) return;
+    reconnectTimer = setTimeout(() => {
+      subscribeToQueue();
+    }, reconnectDelay);
+    reconnectTimer.unref?.();
+    reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+  }
 
   function subscribeToQueue(): void {
+    if (stopped) return;
     const dispatchPendingAction = async (payload: { new: Record<string, unknown> }) => {
       const action = payload.new as unknown as ActionRow;
       if (action.status !== 'pending') return;
@@ -3521,29 +3541,44 @@ export async function startActionQueueListener(
       );
     };
 
-    supabase
-      .channel(`bot-action-queue-${Date.now()}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'bot_action_queue',
-          filter: `guild_id=eq.${guild.id}`,
-        },
-        dispatchPendingAction,
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'bot_action_queue',
-          filter: `guild_id=eq.${guild.id}`,
-        },
-        dispatchPendingAction,
-      )
-      .subscribe((status, err) => {
+    // Build the channel + bindings defensively. realtime-js throws from
+    // `.on('postgres_changes')` if the channel isn't in a 'closed' state
+    // (e.g. a reused channel, or a client mid-teardown). Without this guard
+    // the throw escapes the reconnect setTimeout as an uncaught exception.
+    // On failure, fall back to the backoff-scheduled reconnect instead.
+    let channel: ReturnType<typeof supabase.channel>;
+    try {
+      channel = supabase
+        .channel(`bot-action-queue-${Date.now()}`)
+        .on(
+          'postgres_changes',
+          {
+            event: 'INSERT',
+            schema: 'public',
+            table: 'bot_action_queue',
+            filter: `guild_id=eq.${guild.id}`,
+          },
+          dispatchPendingAction,
+        )
+        .on(
+          'postgres_changes',
+          {
+            event: 'UPDATE',
+            schema: 'public',
+            table: 'bot_action_queue',
+            filter: `guild_id=eq.${guild.id}`,
+          },
+          dispatchPendingAction,
+        );
+    } catch (err) {
+      log.warn(`Realtime subscribe setup failed, reconnecting in ${reconnectDelay}ms`, {
+        error: String(err),
+      });
+      scheduleReconnect();
+      return;
+    }
+
+    channel.subscribe((status, err) => {
         if (status === 'SUBSCRIBED') {
           log.info('Realtime subscription: SUBSCRIBED');
           reconnectDelay = 1_000; // reset backoff on success
@@ -3564,10 +3599,7 @@ export async function startActionQueueListener(
           log.warn(`Realtime subscription ${status}, reconnecting in ${reconnectDelay}ms`, {
             error: err ? String(err) : undefined,
           });
-          setTimeout(() => {
-            subscribeToQueue();
-          }, reconnectDelay);
-          reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+          scheduleReconnect();
         } else {
           log.info(`Realtime subscription: ${status}`);
         }
@@ -3578,5 +3610,11 @@ export async function startActionQueueListener(
 
   log.info('Action queue listener active');
 
-  return { staleRecoveryTimer };
+  return {
+    staleRecoveryTimer,
+    stop: () => {
+      stopped = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+    },
+  };
 }
