@@ -209,7 +209,7 @@ async function handleTicketFromMessageModal(
 
   // Generate ticket number atomically via Postgres sequence
   let ticketNumber: number;
-  const { data: seqVal, error: seqErr } = await supabase.rpc('nextval_ticket');
+  const { data: seqVal, error: seqErr } = await supabase.rpc('nextval_ticket', { p_guild_id: guild.id });
   if (seqErr || seqVal == null) {
     // Fallback: count + 1 (less safe under concurrency)
     const { count } = await supabase
