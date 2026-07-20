@@ -99,16 +99,18 @@ async function txns(
   return (data as Array<{ type: string; amount: number }> | null) ?? [];
 }
 
-async function alertCount(handle: LiveClientHandle): Promise<number> {
-  try {
-    const { count } = await handle.supabase
-      .from('alerts')
-      .select('*', { count: 'exact', head: true })
-      .eq('guild_id', handle.guildId);
-    return count ?? 0;
-  } catch {
-    return 0;
-  }
+/**
+ * Count owner alerts for the guild. Returns null (NOT 0) when the query itself
+ * errors, so a failed read can never masquerade as "no alert raised" — the
+ * caller GATEs on null rather than recording a false-clean PASS.
+ */
+async function alertCount(handle: LiveClientHandle): Promise<number | null> {
+  const { count, error } = await handle.supabase
+    .from('alerts')
+    .select('*', { count: 'exact', head: true })
+    .eq('guild_id', handle.guildId);
+  if (error) return null;
+  return count ?? 0;
 }
 
 /** Read the last editReply/reply content string a handler produced. */
@@ -150,9 +152,25 @@ async function anonReadCount(
     const res = await fetch(url, {
       headers: { apikey: anonKey, Authorization: `Bearer ${anonKey}` },
     });
-    if (!res.ok) return 0; // permission/RLS denial → nothing visible
-    const rows = (await res.json()) as unknown;
-    return Array.isArray(rows) ? rows.length : 0;
+    if (res.ok) {
+      const rows = (await res.json()) as unknown;
+      return Array.isArray(rows) ? rows.length : 0;
+    }
+    // Non-2xx: distinguish a genuine AUTHORIZATION denial (the anon role is
+    // blocked from the table by RLS / a missing GRANT — zero rows visible, the
+    // deny we want to prove) from the KEY itself being rejected before authz ran
+    // (inconclusive → GATE). PostgREST surfaces the former as SQLSTATE 42501
+    // "permission denied for table" (HTTP 401/403); the latter as a JWT/apikey error.
+    let body: { code?: string; message?: string } = {};
+    try {
+      body = (await res.json()) as { code?: string; message?: string };
+    } catch {
+      return null; // non-JSON error body — inconclusive
+    }
+    if (body.code === '42501' || (body.message ?? '').toLowerCase().includes('permission denied')) {
+      return 0; // the anon role is denied the table — RLS/GRANT working
+    }
+    return null; // rejected/invalid key or other error → inconclusive (GATE)
   } catch {
     return null;
   }
@@ -160,18 +178,54 @@ async function anonReadCount(
 
 // ── Reusable per-class proofs ─────────────────────────────────────────────
 
-function proveBranding(ctx: ScenarioContext, content: string, econ: EconomyDisplay): void {
-  const hasEmoji = content.includes(econ.currencyEmoji);
-  const hasName = content.includes(econ.currencyName);
-  ctx.expect(hasEmoji || hasName, {
-    assertionClass: 'branding',
-    channel: 'captured-reply',
-    promise: 'Member-facing wallet surfaces show the owner-configured currency name and emoji.',
-    observation:
-      `reply "${truncate(content)}" ${hasEmoji ? 'includes' : 'omits'} emoji "${econ.currencyEmoji}" ` +
-      `and ${hasName ? 'includes' : 'omits'} name "${econ.currencyName}".`,
-    impact: 'A wallet reply did not reflect the configured currency branding (stock-bot wording leaked).',
-  });
+/** Every member-facing text surface of a reply: content + embed title/description/fields/footer. */
+function brandingSurface(captured: CapturedResponse): string {
+  const parts: string[] = [];
+  const content = replyContent(captured);
+  if (content) parts.push(content);
+  const embed = replyEmbedData(captured);
+  if (embed) {
+    if (typeof embed.title === 'string') parts.push(embed.title);
+    if (typeof embed.description === 'string') parts.push(embed.description);
+    const fields = embed.fields as Array<{ name?: string; value?: string }> | undefined;
+    for (const f of fields ?? []) {
+      if (typeof f.name === 'string') parts.push(f.name);
+      if (typeof f.value === 'string') parts.push(f.value);
+    }
+    const footer = (embed.footer as { text?: string } | undefined)?.text;
+    if (typeof footer === 'string') parts.push(footer);
+  }
+  return parts.join('\n');
+}
+
+/**
+ * Prove the member-facing reply carries the owner-configured currency branding,
+ * checked against the REAL captured reply (content + embed) — never a synthetic
+ * string. When a scenario produced no inspectable reply, the currency-branding
+ * assertion GATEs (nothing to check) rather than recording a hollow PASS.
+ */
+function proveBranding(ctx: ScenarioContext, captured: CapturedResponse, econ: EconomyDisplay): void {
+  const surface = brandingSurface(captured);
+  if (!surface) {
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'Member-facing wallet surfaces show the owner-configured currency name and emoji.',
+      'this scenario produced no member-facing reply/embed to inspect for currency branding',
+    );
+  } else {
+    const hasEmoji = surface.includes(econ.currencyEmoji);
+    const hasName = surface.includes(econ.currencyName);
+    ctx.expect(hasEmoji || hasName, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise: 'Member-facing wallet surfaces show the owner-configured currency name and emoji.',
+      observation:
+        `reply surface "${truncate(surface)}" ${hasEmoji ? 'includes' : 'omits'} emoji "${econ.currencyEmoji}" ` +
+        `and ${hasName ? 'includes' : 'omits'} name "${econ.currencyName}".`,
+      impact: 'A wallet reply did not reflect the configured currency branding (stock-bot wording leaked).',
+    });
+  }
   ctx.gate(
     'branding',
     'discord-readback',
@@ -182,13 +236,22 @@ function proveBranding(ctx: ScenarioContext, content: string, econ: EconomyDispl
 
 async function proveNoOwnerAlert(ctx: ScenarioContext, handle: LiveClientHandle): Promise<void> {
   const alerts = await alertCount(handle);
-  ctx.expect(alerts === 0, {
-    assertionClass: 'owner-notification',
-    channel: 'db-observable',
-    promise: "This scenario's happy path raises no owner alert.",
-    observation: `the alerts table holds ${alerts} row(s) for the scenario guild.`,
-    impact: 'An owner alert was raised on a happy path — a false alarm / notification noise.',
-  });
+  if (alerts === null) {
+    ctx.gate(
+      'owner-notification',
+      'db-observable',
+      "This scenario's happy path raises no owner alert.",
+      'the alerts table read errored, so "no alert" cannot be proven (never recorded as a false-clean pass)',
+    );
+  } else {
+    ctx.expect(alerts === 0, {
+      assertionClass: 'owner-notification',
+      channel: 'db-observable',
+      promise: "This scenario's happy path raises no owner alert.",
+      observation: `the alerts table holds ${alerts} row(s) for the scenario guild.`,
+      impact: 'An owner alert was raised on a happy path — a false alarm / notification noise.',
+    });
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
@@ -202,31 +265,18 @@ async function proveRlsIsolation(
   handle: LiveClientHandle,
   userId: string,
 ): Promise<void> {
-  const inGuild = await readWallet(handle, userId);
-  const { data: cross } = await handle.supabase
-    .from('economy_wallets')
-    .select('user_id')
-    .eq('guild_id', `${handle.guildId}-absent-scope`)
-    .eq('user_id', userId)
-    .maybeSingle();
-  ctx.expect(inGuild !== null && cross === null, {
-    assertionClass: 'database-RLS',
-    channel: 'db-rls',
-    promise:
-      'Wallet rows are guild-scoped: the service role sees this guild’s rows while a different guild scope sees none of them.',
-    observation:
-      `service-role sees the wallet under guild "${handle.guildId}"; ` +
-      `a query scoped to a different guild returns none.`,
-    impact: 'Wallet rows leak across guild scopes — cross-guild data exposure.',
-  });
-
+  // The genuine RLS proof is the anon-denial probe below, made non-vacuous by a
+  // positive control: the scenario has already created this user's wallet under
+  // the guild (the service role can see it), so an anon client reading ZERO of
+  // those rows is a real deny, not "there was nothing to read." Cross-GUILD
+  // isolation across two REAL guilds is proven separately in XGUILD.
   const anonKey = ctx.capabilities.anonKey;
   if (!anonKey) {
     ctx.gate(
       'database-RLS',
       'db-rls',
       'anon/authenticated clients read zero economy_wallets rows (RLS economy_wallets_deny_all policy).',
-      'no anon Supabase key exported (set SUPABASE_ANON_KEY); guild-scoping proven via the service role',
+      'no anon Supabase key exported (set SUPABASE_ANON_KEY); anon-denial not exercised — cross-guild scoping is still proven in XGUILD',
     );
     return;
   }
@@ -236,16 +286,21 @@ async function proveRlsIsolation(
       'database-RLS',
       'db-rls',
       'anon/authenticated clients read zero economy_wallets rows.',
-      'anon REST probe request failed (no SUPABASE_URL or network error)',
+      'the anon REST probe was inconclusive (no SUPABASE_URL, a network error, or the anon key was rejected at the gateway before RLS evaluated)',
     );
     return;
   }
-  ctx.expect(anonRows === 0, {
+  const serviceSees = await readWallet(handle, userId);
+  ctx.expect(serviceSees !== null && anonRows === 0, {
     assertionClass: 'database-RLS',
     channel: 'db-rls',
-    promise: 'anon/authenticated clients read zero economy_wallets rows (RLS deny_all policy).',
-    observation: `an anon-key REST read returned ${anonRows} economy_wallets row(s) for the guild.`,
-    impact: 'RLS is not denying anon reads of wallet rows — direct data exposure.',
+    promise:
+      'The service role reads this guild’s wallet row while an anon client reads zero of them (RLS economy_wallets_deny_all).',
+    observation:
+      `service-role sees the user's wallet under guild "${handle.guildId}" (${serviceSees !== null}); ` +
+      `an anon-key REST read returned ${anonRows} economy_wallets row(s) for that guild.`,
+    impact:
+      'A wallet row visible to the service role was also readable with an anon key — RLS is not denying anon reads (direct data exposure).',
   });
 }
 
@@ -390,7 +445,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     );
   }
 
-  proveBranding(ctx, replyContent(payCaptured) || replyContent(wd), econ);
+  proveBranding(ctx, payCaptured, econ);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
   gateLiveGuildReadback(ctx);
@@ -459,7 +514,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
     );
   }
 
-  proveBranding(ctx, replyContent(captured), econ);
+  proveBranding(ctx, captured, econ);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
   gateLiveGuildReadback(ctx);
@@ -508,7 +563,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     impact: 'The clamped withdraw ledger row did not reflect the actual clamped amount.',
   });
 
-  proveBranding(ctx, replyContent(wd), econ);
+  proveBranding(ctx, wd, econ);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
   gateLiveGuildReadback(ctx);
@@ -567,7 +622,7 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  proveBranding(ctx, '🪙 Coins', display(handle));
+  proveBranding(ctx, bal, display(handle));
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
@@ -672,7 +727,7 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
     impact: 'The role-income ledger row included commerce-sourced income.',
   });
 
-  proveBranding(ctx, replyContent(captured), econ);
+  proveBranding(ctx, captured, econ);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
   // Other UNAUTH facets (non-admin dashboard save refused; a member cannot mutate
@@ -818,8 +873,8 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
     impact: 'A replayed collection wrote a duplicate ledger row.',
   });
 
-  // (b) /pay is NOT idempotent (no request-id / dedup): re-delivering the SAME /pay
-  //     interaction id applies the transfer AGAIN. This is a REAL finding.
+  // (b) /pay IS idempotent (economy_pay is keyed on the interaction id — PR #301):
+  //     re-delivering the SAME /pay interaction id applies the transfer exactly once.
   await seedWallet(handle, userA, 1000, 0);
   const payId = `${ctx.runPrefix}pay-int`;
   const payOpts = { user: { id: userB, bot: false }, amount: 100 };
@@ -831,15 +886,15 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
     assertionClass: 'replay-safety',
     channel: 'db-observable',
     promise:
-      'Replays never double-transfer: re-delivering the /pay interaction leaves exactly one transfer (catalog: persisted idempotency keys, one effect per logical action).',
+      'Replays never double-transfer: re-delivering the /pay interaction leaves exactly one transfer (persisted idempotency key = interaction id, one effect per logical action).',
     observation:
       `after TWO deliveries of one /pay interaction id: A wallet=${payA?.wallet}, B wallet=${payB?.wallet} ` +
-      `(exactly-once would read 900/100; the observed 800/200 is a double-apply).`,
+      `(exactly-once reads 900/100; a double-apply would read 800/200).`,
     impact:
-      '/pay has no application-level idempotency key; it relies on Discord single-delivery. A re-delivered identical /pay double-transfers — the catalog contracts an idempotency key with exactly one effect.',
+      'A re-delivered identical /pay double-transferred — economy_pay did not dedupe on the interaction id (an idempotency regression on the money path).',
   });
 
-  proveBranding(ctx, replyContent(first) || replyContent(payCaptured), econ);
+  proveBranding(ctx, payCaptured, econ);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
   gateLiveGuildReadback(ctx);
@@ -899,7 +954,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     impact: 'A ledger row did not survive the restart.',
   });
 
-  proveBranding(ctx, `${display(second).currencyEmoji}`, display(second));
+  proveBranding(ctx, balCaptured, display(second));
   await proveRlsIsolation(ctx, second, userA);
   await proveNoOwnerAlert(ctx, second);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
@@ -934,12 +989,12 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     impact: 'A concurrent /balance produced no reply.',
   });
 
-  // (b) Two deliveries of ONE /pay interaction: /pay has no idempotency key, so both
-  //     apply — a REAL finding (the catalog contracts "applies exactly once").
+  // (b) Two deliveries of ONE /pay interaction id apply the transfer exactly once
+  //     (economy_pay dedupes on the interaction id — PR #301).
   await seedWallet(handle, userA, 1000, 0);
   const payId = `${ctx.runPrefix}race-pay`;
   const payOpts = { user: { id: userB, bot: false }, amount: 100 };
-  await ctx.runSlash(handle, { commandName: 'pay', userId: userA, options: payOpts, interactionId: payId });
+  const racePay = await ctx.runSlash(handle, { commandName: 'pay', userId: userA, options: payOpts, interactionId: payId });
   await ctx.runSlash(handle, { commandName: 'pay', userId: userA, options: payOpts, interactionId: payId });
   const a = await readWallet(handle, userA);
   const b = await readWallet(handle, userB);
@@ -949,9 +1004,9 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     promise: 'Two deliveries of one /pay interaction apply the transfer exactly once.',
     observation:
       `after two deliveries of one /pay interaction id: A wallet=${a?.wallet}, B wallet=${b?.wallet} ` +
-      `(exactly-once → 900/100; observed double-apply → 800/200).`,
+      `(exactly-once → 900/100; a double-apply would read 800/200).`,
     impact:
-      '/pay is not idempotent on the interaction id; a re-delivered /pay double-transfers. The catalog contracts exactly-once under re-delivery.',
+      'A re-delivered /pay double-transferred — economy_pay did not dedupe on the interaction id (idempotency regression on the money path).',
   });
 
   // (c) Concurrent /daily → exactly one credit + one refusal: needs the Valkey SET NX slot.
@@ -962,13 +1017,15 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     'no Valkey/Redis reachable — the SET NX cooldown that guarantees single-claim cannot run',
   );
 
-  ctx.pass(
-    'audit',
-    'audit-row',
-    'Concurrent wallet mutations still land append-only ledger rows.',
-    `pay ledger rows present after the race (pay_send=${(await txns(handle, userA, 'pay_send')).length}).`,
-  );
-  proveBranding(ctx, `${econ.currencyEmoji}`, econ);
+  const racePaySend = await txns(handle, userA, 'pay_send');
+  ctx.expect(racePaySend.length === 1 && racePaySend[0]!.amount === -100, {
+    assertionClass: 'audit',
+    channel: 'audit-row',
+    promise: 'Two deliveries of one /pay interaction write exactly one append-only pay_send ledger row (never two).',
+    observation: `pay_send ledger rows after the race = ${racePaySend.length} (amount ${racePaySend[0]?.amount}); exactly-once expects one −100 row.`,
+    impact: 'A raced /pay wrote a duplicate ledger row — the transfer was not idempotent at the ledger level.',
+  });
+  proveBranding(ctx, racePay, econ);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
 }
@@ -987,7 +1044,7 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   const snapA = await readWallet(handleA, userA);
 
   // Same user earns in guild B: a SEPARATE wallet is created under guild B.
-  await ctx.runSlash(handleB, { commandName: 'balance', userId: userA });
+  const xgBal = await ctx.runSlash(handleB, { commandName: 'balance', userId: userA });
   await seedWallet(handleB, userA, 123, 0);
   const walletB = await readWallet(handleB, userA);
   const walletAAfter = await readWallet(handleA, userA);
@@ -1005,36 +1062,52 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  // A service query scoped to guild B reads zero of guild A's rows (and vice versa).
-  const { data: bSeesA } = await handleB.supabase
+  // Each guild scope reads its OWN distinct wallet row and never the other's:
+  // scoping to guild B returns B's 123-coin row, scoping to guild A returns A's
+  // 700-coin row. If guild-scoping leaked, one scope would return the other's row.
+  const { data: bScoped } = await handleB.supabase
     .from('economy_wallets')
-    .select('user_id')
+    .select('wallet, guild_id')
     .eq('guild_id', guildB)
     .eq('user_id', userA)
     .maybeSingle();
-  const { count: aRowsUnderB } = await handleB.supabase
+  const { data: aScoped } = await handleA.supabase
     .from('economy_wallets')
-    .select('*', { count: 'exact', head: true })
-    .eq('guild_id', guildA);
-  ctx.expect(Boolean(bSeesA) && (aRowsUnderB ?? 0) >= 0, {
-    assertionClass: 'database-RLS',
-    channel: 'db-rls',
-    promise:
-      'A client scoped to guild B reads guild B rows and zero guild A rows; service-role probes confirm independent evolution.',
-    observation:
-      `guild B sees its own wallet (${Boolean(bSeesA)}); the two guilds’ wallet rows are distinct and guild-scoped.`,
-    impact: 'A guild-B-scoped read saw guild A rows — cross-guild leakage.',
-  });
+    .select('wallet, guild_id')
+    .eq('guild_id', guildA)
+    .eq('user_id', userA)
+    .maybeSingle();
+  const bRow = bScoped as { wallet: number; guild_id: string } | null;
+  const aRow = aScoped as { wallet: number; guild_id: string } | null;
+  ctx.expect(
+    bRow?.guild_id === guildB &&
+      bRow?.wallet === 123 &&
+      aRow?.guild_id === guildA &&
+      aRow?.wallet === 700,
+    {
+      assertionClass: 'database-RLS',
+      channel: 'db-rls',
+      promise:
+        'Each guild scope reads its OWN wallet row and never the other guild’s: guild B → its 123-coin row, guild A → its 700-coin row.',
+      observation:
+        `guild-B-scoped read = ${bRow?.wallet} under "${bRow?.guild_id}"; ` +
+        `guild-A-scoped read = ${aRow?.wallet} under "${aRow?.guild_id}" (distinct rows under distinct guild_ids).`,
+      impact: 'A guild-scoped read returned the other guild’s wallet row — cross-guild leakage.',
+    },
+  );
   await proveRlsIsolation(ctx, handleA, userA);
 
-  ctx.pass(
+  // This isolation scenario seeds wallets directly and drives no ledger-writing
+  // action, so there is no economy_transactions row to check here; per-guild
+  // ledger scoping is proven in DEF/SET-A/UNAUTH where real ledger rows are written.
+  ctx.gate(
     'audit',
     'audit-row',
     'Each guild keeps its own ledger; starting-balance/transfer rows do not cross guilds.',
-    `guild A ledger rows and guild B ledger rows are separately guild-scoped.`,
+    'this cross-guild wallet-isolation scenario writes no economy_transactions row; per-guild ledger scoping is proven in DEF/SET-A/UNAUTH',
   );
   await proveNoOwnerAlert(ctx, handleA);
-  proveBranding(ctx, `${display(handleA).currencyEmoji}`, display(handleA));
+  proveBranding(ctx, xgBal, display(handleB));
   gateLiveGuildReadback(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -1047,7 +1120,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
 
   // Create run-prefixed operational rows: wallets + a transfer's ledger rows.
   await seedWallet(handle, userA, 500, 0);
-  await ctx.runSlash(handle, { commandName: 'pay', userId: userA, options: { user: { id: userB, bot: false }, amount: 50 } });
+  const cleanupPay = await ctx.runSlash(handle, { commandName: 'pay', userId: userA, options: { user: { id: userB, bot: false }, amount: 50 } });
 
   const walletsBefore =
     (await walletCount(handle, userA)) + (await walletCount(handle, userB));
@@ -1063,7 +1136,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
   // Prove the off-theme classes while the rows still exist (before the sweep removes them).
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  proveBranding(ctx, `${display(handle).currencyEmoji}`, display(handle));
+  proveBranding(ctx, cleanupPay, display(handle));
 
   // Run the sweep (the same one teardown uses) and verify ZERO run-prefixed rows remain.
   await ctx.sweepGuildRows(handle);

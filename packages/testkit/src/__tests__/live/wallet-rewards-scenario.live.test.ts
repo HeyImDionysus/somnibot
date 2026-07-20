@@ -6,9 +6,10 @@
  * proofs against LOCAL Supabase through the REAL production dispatcher, then asserts:
  *   1. the FRAMEWORK ran every scenario × every assertion class (a complete report),
  *   2. the DB-observable proofs that MUST pass DO pass (the genuine live evidence),
- *   3. every discovered behavior-bug FINDING is a DOCUMENTED, expected one — a NEW
- *      finding fails the suite (a real regression surfaces), while the documented
- *      /pay-idempotency finding is reported, not force-green'd or hidden.
+ *   3. every discovered behavior-bug FINDING fails the suite — this domain is
+ *      expected to surface ZERO findings now that the /pay double-spend was fixed
+ *      in PR #301 (economy_pay is idempotent on the interaction id); any NEW
+ *      finding is a real regression to adjudicate.
  *
  * ⚠️  LIVE: requires a running local Supabase (with Realtime). Excluded from the
  *     fast `vitest run`; runs only via `test:live` (vitest.live.config.ts). If the
@@ -31,13 +32,10 @@ import { ASSERTION_CLASSES, SCENARIO_CLASSES } from '@somnibot/e2e';
  * owner to adjudicate — reported, never hidden. A finding OUTSIDE this set fails
  * the suite (an undocumented regression); the set is deliberately small.
  */
-const KNOWN_FINDINGS: ReadonlySet<string> = new Set([
-  // /pay carries no application-level idempotency key (it relies on Discord's
-  // single-delivery guarantee), so a re-delivered identical /pay double-transfers.
-  // The catalog contracts persisted idempotency keys with exactly one effect.
-  'REPLAY/replay-safety',
-  'RACE/replay-safety',
-]);
+// PR #301 made economy_pay idempotent on the interaction id, fixing the /pay
+// double-spend this domain previously surfaced. So the domain is now expected to
+// surface ZERO findings; any finding fails the suite as an undocumented regression.
+const KNOWN_FINDINGS: ReadonlySet<string> = new Set<string>();
 
 /** Cells that MUST be PASS — the genuine DB-observable live proofs. */
 const MUST_PASS: ReadonlyArray<[string, string]> = [
@@ -60,6 +58,12 @@ const MUST_PASS: ReadonlyArray<[string, string]> = [
   ['XGUILD', 'Discord'],
   ['XGUILD', 'database-RLS'],
   ['CLEANUP', 'cleanup'],
+  // Post-#301: re-delivering one /pay interaction id now transfers exactly once,
+  // so the replay-safety cells that previously FAILED (the double-spend finding)
+  // must now PASS. REPLAY/audit covers the /collect-income exactly-once ledger.
+  ['REPLAY', 'replay-safety'],
+  ['REPLAY', 'audit'],
+  ['RACE', 'replay-safety'],
 ];
 
 function cellStatus(report: DomainReport, scenarioClass: string, assertionClass: string): AssertionStatus | undefined {
@@ -125,12 +129,11 @@ describe('LIVE catalog scenario runner — game-economy-wallet-rewards', () => {
       `UNDOCUMENTED behavior-bug finding(s) surfaced — a real regression to adjudicate: ${undocumented.join(', ')}`,
     ).toEqual([]);
 
-    // The documented /pay-idempotency finding must be present and precisely described
-    // (it is reported to the owner, not hidden). If the bot later adds an idempotency
-    // key, this expectation flips and the KNOWN_FINDINGS entry should be removed.
+    // PR #301 added the /pay idempotency key, so the previously-documented /pay
+    // double-spend finding must NO LONGER appear — its replay-safety cells PASS
+    // now. This guards against the fix silently regressing back into a finding.
     const payFinding = report.findings.find((f) => f.scenarioClass === 'REPLAY' && f.assertionClass === 'replay-safety');
-    expect(payFinding, 'expected the documented /pay non-idempotency finding to be surfaced').toBeDefined();
-    expect(payFinding!.impact).toContain('idempotency');
+    expect(payFinding, 'the /pay non-idempotency finding should be gone after PR #301 (economy_pay is idempotent)').toBeUndefined();
   });
 
   it('honored gating: reward-cooldown (/daily) and Discord/PayPal readback are GATED, never faked', () => {

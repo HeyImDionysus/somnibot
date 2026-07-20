@@ -38,6 +38,13 @@ import { LOOPBACK_E2E_CONFIRMATION } from '../../guard.js';
 const LOCAL_DEMO_SERVICE_ROLE_KEY =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU';
 
+/** Well-known Supabase CLI local-dev anon JWT (issuer `supabase-demo`). Valid
+ *  ONLY against a local instance — not a secret. Exported so the RLS anon-denial
+ *  sub-probe actually runs (an anon key that reads zero wallet rows is the real
+ *  RLS proof); without it the database-RLS anon check would only GATE. */
+const LOCAL_DEMO_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
+
 /** Local Supabase REST endpoint — the only host the guard accepts. */
 const LOCAL_SUPABASE_URL = 'http://127.0.0.1:54321';
 
@@ -72,6 +79,8 @@ def('NODE_ENV', 'test');
 //    LOCAL key — the URL above is already pinned local) ──
 def('SUPABASE_SECRET_KEY', LOCAL_DEMO_SERVICE_ROLE_KEY);
 def('SUPABASE_SERVICE_ROLE_KEY', LOCAL_DEMO_SERVICE_ROLE_KEY);
+// Anon key for the RLS anon-denial sub-probe (local demo key; operator-tunable).
+def('SUPABASE_ANON_KEY', LOCAL_DEMO_ANON_KEY);
 
 // ── Explicit operator confirmation (guard Gate B) ──
 def('SOMNIBOT_LOOPBACK_E2E_CONFIRMATION', LOOPBACK_E2E_CONFIRMATION);
