@@ -83,10 +83,37 @@ const modConfig = {
   ],
   infractionExpiryDays: 30,
   modLogChannelId: 'mod-ch',
+  automodEnabled: true,
+  automodMode: 'enforce' as const, // these tests assert enforcement
 };
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe('executeAutoModAction — observe mode (shipped default)', () => {
+  const observeConfig = { ...modConfig, automodMode: 'observe' as const };
+
+  it('does NOT enforce — no delete, ban/kick/timeout, or infraction — even for a ban rule', async () => {
+    const msg = makeMessage();
+    const client = makeClient();
+    await executeAutoModAction(client, msg, makeRule({ action: 'ban' }), 'violation', observeConfig);
+    expect(msg.delete).not.toHaveBeenCalled();
+    expect(msg.member.ban).not.toHaveBeenCalled();
+    expect(msg.member.kick).not.toHaveBeenCalled();
+    expect(msg.member.timeout).not.toHaveBeenCalled();
+    expect(createInfraction).not.toHaveBeenCalled();
+  });
+
+  it('logs the would-be violation to the mod log + audit trail', async () => {
+    const msg = makeMessage();
+    const client = makeClient();
+    await executeAutoModAction(client, msg, makeRule({ action: 'ban' }), 'violation', observeConfig);
+    expect(postModLogEntry).toHaveBeenCalledWith(client, expect.objectContaining({ action: 'ban' }));
+    expect(writeAuditLog).toHaveBeenCalledWith(client.supabase, expect.objectContaining({
+      action: 'automod.observe.ban',
+    }));
+  });
 });
 
 describe('executeAutoModAction — delete action', () => {

@@ -701,8 +701,11 @@ export function registerEvents(client: SomniClient): void {
     // Auto-mod pipeline
     try {
       const modConfig = await loadModConfig(client, message.guild.id);
-      const handled = await processMessage(client, message, modConfig);
-      if (handled) return;
+      // Master switch: when automod is disabled, run nothing (no scan, no action).
+      if (modConfig.automodEnabled) {
+        const handled = await processMessage(client, message, modConfig);
+        if (handled) return;
+      }
     } catch (err) {
       log.error('Auto-mod error:', { error: String(err) });
     }
@@ -976,7 +979,13 @@ export function registerEvents(client: SomniClient): void {
 
 /** Per-guild moderation config cache */
 const _modConfigCache = new Map<string, {
-  data: { escalationChain: EscalationStep[]; infractionExpiryDays: number; modLogChannelId: string | null };
+  data: {
+    escalationChain: EscalationStep[];
+    infractionExpiryDays: number;
+    modLogChannelId: string | null;
+    automodEnabled: boolean;
+    automodMode: 'observe' | 'enforce';
+  };
   time: number;
 }>();
 const MOD_CONFIG_TTL = 60_000;
@@ -990,6 +999,8 @@ async function loadModConfig(client: SomniClient, guildId?: string): Promise<{
   escalationChain: EscalationStep[];
   infractionExpiryDays: number;
   modLogChannelId: string | null;
+  automodEnabled: boolean;
+  automodMode: 'observe' | 'enforce';
 }> {
   const id = guildId ?? client.guildId;
   const now = Date.now();
@@ -1003,7 +1014,7 @@ async function loadModConfig(client: SomniClient, guildId?: string): Promise<{
 
   const { data } = await client.supabase
     .from('guild_config')
-    .select('escalation_chain, infraction_expiry_days, mod_log_channel_id')
+    .select('escalation_chain, infraction_expiry_days, mod_log_channel_id, automod_enabled, automod_mode')
     .eq('guild_id', id)
     .maybeSingle();
 
@@ -1011,6 +1022,9 @@ async function loadModConfig(client: SomniClient, guildId?: string): Promise<{
     escalationChain: Array.isArray(data?.escalation_chain) ? (data.escalation_chain as EscalationStep[]) : [],
     infractionExpiryDays: (data?.infraction_expiry_days as number) ?? 30,
     modLogChannelId: (data?.mod_log_channel_id as string) ?? null,
+    // Ship observe-only + enabled by default (matches the catalog safety promise).
+    automodEnabled: (data?.automod_enabled as boolean) ?? true,
+    automodMode: ((data?.automod_mode as string) === 'enforce' ? 'enforce' : 'observe') as 'observe' | 'enforce',
   };
   // Evict oldest entry if at capacity (Map preserves insertion order)
   if (_modConfigCache.size >= MOD_CONFIG_MAX_ENTRIES) {
