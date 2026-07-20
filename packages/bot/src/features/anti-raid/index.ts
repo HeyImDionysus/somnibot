@@ -154,17 +154,25 @@ export function clearAntiRaidGuildState(guildId: string): void {
   _memoryRaidBanned.delete(guildId);
 }
 
-async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<AntiRaidConfig> {
+// Exported for integration testing: proves the config SELECT matches the real
+// guild_config schema (a non-existent column silently breaks ALL settings).
+export async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<AntiRaidConfig> {
   const now = Date.now();
   const cached = _configCache.get(guildId);
   if (cached && now - cached.time < CONFIG_TTL) {
     return cached.config;
   }
 
+  // NOTE: anti_raid_auto_unban is intentionally NOT selected — it is not a
+  // persisted guild_config column. Including it made PostgREST reject the WHOLE
+  // select (undefined column 42703) → data was null → every configured anti-raid
+  // setting silently fell back to its default, so no guild's raid config ever
+  // took effect. Auto-unban keeps its default-on behavior below; making it a
+  // real toggle is a separate feature (add the column + a dashboard control).
   const { data } = await supabase
     .from('guild_config')
     .select(
-      'anti_raid_enabled, anti_raid_join_threshold, anti_raid_join_window_seconds, anti_raid_account_age_days, anti_raid_action, anti_raid_auto_unban, anti_raid_ban_delete_seconds, anti_raid_log_channel_id, mod_log_channel_id',
+      'anti_raid_enabled, anti_raid_join_threshold, anti_raid_join_window_seconds, anti_raid_account_age_days, anti_raid_action, anti_raid_ban_delete_seconds, anti_raid_log_channel_id, mod_log_channel_id',
     )
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -175,7 +183,7 @@ async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<An
     anti_raid_join_window_seconds: data?.anti_raid_join_window_seconds ?? 10,
     anti_raid_account_age_days: data?.anti_raid_account_age_days ?? 7,
     anti_raid_action: data?.anti_raid_action ?? 'kick',
-    anti_raid_auto_unban: data?.anti_raid_auto_unban ?? true,
+    anti_raid_auto_unban: true, // not persisted; auto-unban stays on by default
     anti_raid_ban_delete_seconds: data?.anti_raid_ban_delete_seconds ?? 86400,
     anti_raid_log_channel_id: data?.anti_raid_log_channel_id ?? null,
     mod_log_channel_id: data?.mod_log_channel_id ?? null,
