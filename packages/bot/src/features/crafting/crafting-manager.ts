@@ -346,7 +346,11 @@ export class CraftingManager {
         name: r.name,
         emoji: r.emoji,
         description: r.description,
-        inputs: JSON.stringify(r.inputs),
+        // economy_recipes.inputs is jsonb — pass the array directly. Stringifying
+        // it first double-encodes into a jsonb STRING scalar, so getRecipes()
+        // reads back a JS string and every `.inputs.map(...)` / `for..of` throws,
+        // breaking /recipes render and /craft from first use.
+        inputs: r.inputs,
         output_item_id: itemId,
         output_qty: r.output_qty,
         cooldown_seconds: r.cooldown_seconds,
