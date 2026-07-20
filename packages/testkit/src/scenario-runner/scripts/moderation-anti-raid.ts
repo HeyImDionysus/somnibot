@@ -38,13 +38,14 @@
  *   - the cleanup sweep clearing every run-prefixed anti-raid config row
  *     (CLEANUP).
  *
- * Behavior-bug discovery: the REAL join handler's `loadConfig` SELECTs a column,
- * `anti_raid_auto_unban`, that DOES NOT EXIST in any migration. Every scenario
- * that depends on the config actually reaching the bot runs that EXACT select
- * against the real schema and records a FAIL if it errors — because when it
- * errors production swallows it and falls back to ALL anti-raid defaults
- * (anti_raid_enabled = false), so a saved "enable anti-raid" would silently
- * never take effect. That is a finding for the owner, surfaced not softened.
+ * Config-read integrity: the REAL join handler's `loadConfig` SELECTs
+ * `anti_raid_auto_unban`, which had no guild_config column — PostgREST rejected
+ * the whole query (42703), loadConfig swallowed the error and fell back to ALL
+ * anti-raid defaults (anti_raid_enabled = false), so a saved "enable anti-raid"
+ * silently never took effect. That is now fixed (the column was added by
+ * migration 20260720040000, default true, so the toggle is honored); every
+ * scenario that depends on the config reaching the bot runs the real select
+ * against the real schema and proves it succeeds.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -74,10 +75,12 @@ const CONFIG_COLUMNS =
 
 /**
  * The EXACT column list the REAL join handler's `loadConfig`
- * (packages/bot/src/features/anti-raid/index.ts) selects — including
- * `anti_raid_auto_unban`, which is NOT present in any migration. Reproduced
- * verbatim so the config-read-integrity proof exercises production's real query
- * against the real schema.
+ * (packages/bot/src/features/anti-raid/index.ts) selects — INCLUDING
+ * `anti_raid_auto_unban`. That column previously did not exist, which made
+ * PostgREST reject the whole query (42703) so loadConfig silently ran on
+ * all-defaults; it is now added by migration (default true). This constant
+ * mirrors the real query verbatim so the config-read-integrity proof exercises
+ * production's real read against the real schema and POSITIVELY proves it works.
  */
 const BOT_LOADCONFIG_SELECT =
   'anti_raid_enabled, anti_raid_join_threshold, anti_raid_join_window_seconds, ' +

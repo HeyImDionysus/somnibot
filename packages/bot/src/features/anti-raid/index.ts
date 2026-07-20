@@ -154,13 +154,20 @@ export function clearAntiRaidGuildState(guildId: string): void {
   _memoryRaidBanned.delete(guildId);
 }
 
-async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<AntiRaidConfig> {
+// Exported for integration testing: proves the config SELECT matches the real
+// guild_config schema (a non-existent column silently breaks ALL settings).
+export async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<AntiRaidConfig> {
   const now = Date.now();
   const cached = _configCache.get(guildId);
   if (cached && now - cached.time < CONFIG_TTL) {
     return cached.config;
   }
 
+  // anti_raid_auto_unban is a real, persisted guild_config column (added in the
+  // 20260720040000 migration). Before it existed, selecting it made PostgREST
+  // reject the WHOLE query (42703) → data was null → every configured anti-raid
+  // setting silently fell back to its default and no guild's raid config took
+  // effect. It is a genuine toggle (owners can turn auto-unban off), honored below.
   const { data } = await supabase
     .from('guild_config')
     .select(
