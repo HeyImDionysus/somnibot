@@ -187,7 +187,13 @@ describe('SyncEngine deep branches', () => {
     (shared.computeStateDiff as any).mockReturnValueOnce({ roles: [], channels: [], everyoneDrift: { actual: '2048', desired: '0' } });
 
     const { runSyncCycle } = await import('../sync/sync-engine.js');
-    const fromMock = vi.fn(() => chain({ guild_id: 'g1', roles: [], channels: [] }));
+    // autoRepair:true also reaches the store-sync-report insert, which is awaited
+    // directly — make the chain thenable so that path resolves.
+    const fromMock = vi.fn(() => {
+      const c = chain({ guild_id: 'g1', roles: [], channels: [] });
+      c.then = (resolve: any) => resolve({ data: null, error: null });
+      return c;
+    });
     const supa = { from: fromMock } as any;
     const g = makeGuild();
 
