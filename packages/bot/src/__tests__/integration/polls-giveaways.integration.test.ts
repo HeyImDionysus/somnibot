@@ -6,7 +6,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type { ChatInputCommandInteraction } from 'discord.js';
 import { requireSupabase } from './helpers.js';
+import { PollsManager } from '../../features/polls/polls-manager.js';
 
 let supa!: SupabaseClient;
 const GUILD_ID = `test-polls-guild-${Date.now()}`;
@@ -130,6 +132,58 @@ describe('Polls lifecycle', () => {
     expect(error).toBeNull();
     expect(data!.status).toBe('closed');
     expect(data!.closed_at).toBeDefined();
+  });
+
+  it('PollsManager.closePoll actually closes an active poll (regression guard)', async () => {
+    // Drive the REAL closePoll, whose status-gated UPDATE flips only while
+    // status='active'. A wrong literal (the old 'open') matches zero rows, so the
+    // handler wrongly reports "already closed" and never closes a fresh poll.
+    const creatorId = 'user-close-creator';
+    const { data: created } = await supa
+      .from('polls')
+      .insert({
+        guild_id: GUILD_ID,
+        channel_id: 'channel-close',
+        creator_user_id: creatorId,
+        title: 'Close-path poll',
+        allow_multiple: false,
+        ends_at: new Date(Date.now() + 3600_000).toISOString(),
+      })
+      .select()
+      .single();
+    expect(created!.status).toBe('active');
+    // A real poll always has options; the close embed renders their tallies.
+    await supa.from('poll_options').insert([
+      { poll_id: created!.id, label: 'Yes', emoji: '✅', sort_order: 0 },
+      { poll_id: created!.id, label: 'No', emoji: '❌', sort_order: 1 },
+    ]);
+
+    const manager = new PollsManager(supa);
+    const replies: unknown[] = [];
+    const mockInteraction = {
+      user: { id: creatorId },
+      reply: async (arg: unknown) => {
+        replies.push(arg);
+      },
+    } as unknown as ChatInputCommandInteraction;
+
+    await manager.closePoll(mockInteraction, created!.id);
+
+    // The active poll is now actually closed in the DB.
+    const { data: after } = await supa
+      .from('polls')
+      .select('status, closed_at')
+      .eq('id', created!.id)
+      .single();
+    expect(after!.status).toBe('closed');
+    expect(after!.closed_at).not.toBeNull();
+    // The reply is the results embed, not the "already closed" error.
+    expect(JSON.stringify(replies)).toContain('Poll Closed');
+
+    // Idempotency: a second close now correctly reports already-closed.
+    replies.length = 0;
+    await manager.closePoll(mockInteraction, created!.id);
+    expect(JSON.stringify(replies)).toContain('already closed');
   });
 });
 
