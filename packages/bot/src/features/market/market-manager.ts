@@ -295,29 +295,40 @@ export class MarketManager {
 
   // ── Buy ───────────────────────────────────────────────
 
-  async buy(userId: string, listingIdPrefix: string, quantity: number = 1): Promise<EmbedBuilder> {
+  async buy(userId: string, listingIdPrefix: string, quantity: number = 1, requestId?: string): Promise<EmbedBuilder> {
     const config = await this.getConfig();
     if (!config.economy_market_enabled) {
       return new EmbedBuilder().setDescription('🚫 The market is not enabled.').setColor(0xff0000);
     }
 
-    // Find listing by ID prefix
+    // A redelivered /market buy must not settle twice — require the interaction id.
+    if (!requestId) {
+      log.error('MarketManager.buy called without a requestId (idempotency key)');
+      return new EmbedBuilder().setDescription('❌ Could not process the purchase right now — please try again.').setColor(0xff0000);
+    }
+
+    // Find listing by ID prefix. Listing ids are uuids and the browse view shows a
+    // short prefix, so resolve in JS: a Postgres uuid column has NO ILIKE operator,
+    // so the old `.ilike('id', prefix%)` errored (42883 uuid ~~* unknown) → the
+    // query returned null and a /market buy could NEVER find its listing.
     const { data: listings } = await this.supabase
       .from('economy_market_listings')
       .select('*')
       .eq('guild_id', this.guild.id)
       .eq('status', 'active')
       .gt('remaining', 0)
-      .ilike('id', `${listingIdPrefix}%`)
-      .limit(1);
+      .limit(1000);
 
-    if (!listings || listings.length === 0) {
+    const prefix = listingIdPrefix.toLowerCase();
+    const listing = (listings ?? []).find(
+      (l) => String((l as MarketListing).id).toLowerCase().startsWith(prefix),
+    ) as MarketListing | undefined;
+
+    if (!listing) {
       return new EmbedBuilder()
         .setDescription('❌ Listing not found or no longer active.')
         .setColor(0xff0000);
     }
-
-    const listing = listings[0] as MarketListing;
 
     if (listing.seller_id === userId) {
       return new EmbedBuilder()
@@ -325,108 +336,66 @@ export class MarketManager {
         .setColor(0xff0000);
     }
 
-    // Atomically decrement listing remaining (prevents TOCTOU — concurrent buys can't oversell)
-    const { data: actualBuyQty } = await this.supabase.rpc('economy_market_buy', {
+    // Atomic + idempotent settlement keyed on the interaction id: decrement the
+    // listing, debit the buyer, credit the seller net of fee, deliver inventory,
+    // and write the ledger — all in ONE transaction. A redelivered /market buy is
+    // a proven no-op (previously the four separate RPCs each double-applied).
+    const { data, error } = await this.supabase.rpc('economy_market_settle_buy', {
+      p_guild_id: this.guild.id,
       p_listing_id: listing.id,
-      p_quantity: Math.min(quantity, listing.remaining),
+      p_buyer_id: userId,
+      p_quantity: quantity,
+      p_fee_pct: config.economy_market_fee_pct,
+      p_request_id: requestId,
     });
 
-    if (!actualBuyQty || actualBuyQty <= 0) {
+    if (error || !data || typeof data !== 'object') {
+      log.error('economy_market_settle_buy failed', { detail: error?.message });
       return new EmbedBuilder()
-        .setDescription('❌ This listing is no longer available.')
+        .setDescription('❌ Could not process the purchase right now — please try again.')
         .setColor(0xff0000);
     }
 
-    const buyQty = actualBuyQty as number;
-    const totalCost = buyQty * listing.price_per_unit;
+    const result = data as {
+      status?: string; replayed?: boolean; item_name?: string; quantity?: number;
+      requested_qty?: number; total_cost?: number; fee?: number;
+    };
 
-    // Calculate fee
-    const fee = Math.floor(totalCost * config.economy_market_fee_pct / 100);
-    const sellerEarnings = totalCost - fee;
-
-    // Deduct buyer (atomic — prevents race conditions and negative balances)
-    const { error: debitErr } = await this.supabase.rpc('economy_subtract_balance', {
-      p_guild_id: this.guild.id,
-      p_user_id: userId,
-      p_amount: totalCost,
-    });
-
-    if (debitErr) {
-      // Refund listing remaining since we already decremented it
-      await Promise.resolve(this.supabase.rpc('economy_market_buy_revert', {
-        p_listing_id: listing.id,
-        p_quantity: buyQty,
-      })).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
-      return new EmbedBuilder()
-        .setDescription(`❌ You need **${totalCost.toLocaleString()}** coins but don't have enough.`)
-        .setColor(0xff0000);
+    switch (result.status) {
+      case 'listing_unavailable':
+        return new EmbedBuilder().setDescription('❌ This listing is no longer available.').setColor(0xff0000);
+      case 'own_listing':
+        return new EmbedBuilder().setDescription("❌ You can't buy your own listing!").setColor(0xff0000);
+      case 'insufficient_funds':
+        return new EmbedBuilder()
+          .setDescription(`❌ You need **${(result.total_cost ?? 0).toLocaleString()}** coins but don't have enough.`)
+          .setColor(0xff0000);
+      case 'purchased':
+        break;
+      default:
+        return new EmbedBuilder()
+          .setDescription('❌ Could not process the purchase right now — please try again.')
+          .setColor(0xff0000);
     }
 
-    // V49-C5: Pay seller — if this fails, refund buyer and restore listing
-    const { error: payErr } = await this.supabase.rpc('economy_add_balance', {
-      p_guild_id: this.guild.id,
-      p_user_id: listing.seller_id,
-      p_amount: sellerEarnings,
-    });
-    if (payErr) {
-      log.error(`economy_add_balance failed for seller ${listing.seller_id} — refunding buyer:`, payErr.message);
-      // Refund buyer
-      await Promise.resolve(this.supabase.rpc('economy_add_balance', {
-        p_guild_id: this.guild.id,
-        p_user_id: userId,
-        p_amount: totalCost,
-      })).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
-      // Restore listing quantity
-      await Promise.resolve(this.supabase.rpc('economy_market_buy_revert', {
-        p_listing_id: listing.id,
-        p_quantity: buyQty,
-      })).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
-      return new EmbedBuilder()
-        .setDescription('❌ Purchase failed — your coins have been refunded.')
-        .setColor(0xff0000);
-    }
+    const buyQty = result.quantity ?? quantity;
+    const totalCost = result.total_cost ?? 0;
+    const fee = result.fee ?? 0;
 
-    // Add item to buyer inventory — V49-C5: check error, refund if failed
-    const { error: invErr } = await this.supabase.rpc('economy_upsert_inventory', {
-      p_guild_id: this.guild.id,
-      p_user_id: userId,
-      p_item_id: listing.item_id,
-      p_quantity: buyQty,
-    });
-    if (invErr) {
-      log.error(`inventory upsert failed for buyer ${userId} — refunding:`, invErr.message);
-      // Refund buyer and claw back seller payment
-      await Promise.resolve(this.supabase.rpc('economy_add_balance', {
-        p_guild_id: this.guild.id,
-        p_user_id: userId,
-        p_amount: totalCost,
-      })).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
-      await Promise.resolve(this.supabase.rpc('economy_subtract_balance', {
-        p_guild_id: this.guild.id,
-        p_user_id: listing.seller_id,
-        p_amount: sellerEarnings,
-      })).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
-      await Promise.resolve(this.supabase.rpc('economy_market_buy_revert', {
-        p_listing_id: listing.id,
-        p_quantity: buyQty,
-      })).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
-      return new EmbedBuilder()
-        .setDescription('❌ Failed to add items to your inventory — your coins have been refunded.')
-        .setColor(0xff0000);
+    // Quest progress — only on a genuinely new (non-replayed) trade.
+    if (!result.replayed) {
+      getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'market_trade').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
     }
-
-    // Quest progress — market trade (buyer counts as completing a trade)
-    getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'market_trade').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     // V5 Audit §4.2: Inform user when fewer items were purchased than requested
-    const qtyNote = buyQty < quantity
+    const qtyNote = buyQty < (result.requested_qty ?? quantity)
       ? `\n⚠️ Only **${buyQty}** of your requested **${quantity}** were available.`
       : '';
 
     return new EmbedBuilder()
       .setTitle('✅ Purchase Complete!')
       .setDescription(
-        `Bought **${listing.item_name}** x${buyQty}\n` +
+        `Bought **${result.item_name ?? listing.item_name}** x${buyQty}\n` +
         `💰 Cost: **${totalCost.toLocaleString()}** coins\n` +
         `💸 Fee: **${fee.toLocaleString()}** coins (${config.economy_market_fee_pct}%)` +
         qtyNote,

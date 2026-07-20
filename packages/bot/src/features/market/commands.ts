@@ -83,7 +83,7 @@ export async function handleMarketCommand(
     case 'buy': {
       const listingId = interaction.options.getString('listing', true);
       const quantity = interaction.options.getInteger('quantity') ?? 1;
-      const embed = await manager.buy(interaction.user.id, listingId, quantity);
+      const embed = await manager.buy(interaction.user.id, listingId, quantity, interaction.id);
       await interaction.editReply({ embeds: [embed] });
       break;
     }
