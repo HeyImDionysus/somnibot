@@ -8,7 +8,7 @@ import type { Guild, GuildMember, Message } from 'discord.js';
 import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
-import type { PlatformEvent } from '@somnibot/shared';
+import type { PlatformEvent, PlatformEventType } from '@somnibot/shared';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { AutomationLoader, type LoadedAutomation } from './automation-loader.js';
 import { evaluateConditions, createRegexBudget, type ConditionContext, type RegexBudget } from './condition-evaluator.js';
@@ -46,6 +46,7 @@ export class AutomationEngine {
   private rateLimiter: AutomationRateLimiter;
   private executionLogger: ExecutionLogger;
   private alertService: AlertService | null;
+  private eventHandler: ((event: PlatformEvent) => Promise<void>) | null = null;
   /**
    * V10 Audit §2: Per-execution chain depth tracking.
    *
@@ -98,7 +99,7 @@ export class AutomationEngine {
     // active automation executions, inherit the highest active depth.
     // This handles side-effect events (e.g., role.gained from give_role)
     // that round-trip through Discord and lose async context.
-    this.eventBus.onAny(async (event: PlatformEvent) => {
+    this.eventHandler = async (event: PlatformEvent) => {
       if (event.guildId !== this.guild.id) return;
       if (
         event.data !== null
@@ -115,9 +116,23 @@ export class AutomationEngine {
         if (maxDepth > 0) event._chainDepth = maxDepth;
       }
       await this.handleEvent(event);
-    });
+    };
+    this.eventBus.onAny(this.eventHandler);
 
     log.info('Started and listening for events');
+  }
+
+  /**
+   * Tear down: remove the Realtime subscription and the event-bus listener.
+   * Called from guild teardown (destroyGuildServices) so a re-init doesn't
+   * leak channels/listeners or collide with a stale subscribed channel.
+   */
+  stop(): void {
+    this.loader.unsubscribe();
+    if (this.eventHandler) {
+      this.eventBus.off('*' as PlatformEventType, this.eventHandler);
+      this.eventHandler = null;
+    }
   }
 
   /**

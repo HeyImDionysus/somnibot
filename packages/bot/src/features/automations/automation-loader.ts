@@ -1,7 +1,7 @@
 /**
  * Automation loader — loads automations from Supabase and subscribes to Realtime.
  */
-import type { SupabaseClient } from '@supabase/supabase-js';
+import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import type {
   ActionType,
   ConditionType,
@@ -113,6 +113,7 @@ function toLoaded(row: DbAutomation): LoadedAutomation | null {
 export class AutomationLoader {
   private automations: Map<string, LoadedAutomation> = new Map();
   private onChange: (() => void) | null = null;
+  private channel: RealtimeChannel | null = null;
 
   constructor(
     private supabase: SupabaseClient,
@@ -151,8 +152,14 @@ export class AutomationLoader {
    * Subscribe to Supabase Realtime for automation changes.
    */
   subscribe(): void {
-    this.supabase
-      .channel('automation-changes')
+    // A fixed channel name collides across guilds that share one Supabase
+    // client: realtime-js returns the first guild's already-subscribed
+    // channel, and `.on('postgres_changes')` on a non-'closed' channel throws
+    // "cannot add postgres_changes callbacks ... after subscribe()", silently
+    // breaking Realtime automation reloads for every guild after the first.
+    // Scope the name per guild + instance so each gets a fresh channel.
+    this.channel = this.supabase
+      .channel(`automation-changes-${this.guildId}-${Date.now()}`)
       .on(
         'postgres_changes',
         {
@@ -185,6 +192,18 @@ export class AutomationLoader {
         },
       )
       .subscribe();
+  }
+
+  /**
+   * Tear down the Realtime subscription. Removes the channel from the shared
+   * client so it doesn't leak, and so a re-init doesn't collide with a stale
+   * subscribed channel.
+   */
+  unsubscribe(): void {
+    if (this.channel) {
+      this.supabase.removeChannel(this.channel);
+      this.channel = null;
+    }
   }
 
   /**
