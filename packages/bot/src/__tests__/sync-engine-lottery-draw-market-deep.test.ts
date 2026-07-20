@@ -182,19 +182,27 @@ describe('SyncEngine deep branches', () => {
     expect(result.driftItems[0].entityName).toBe('real-channel');
   });
 
-  it('runSyncCycle with autoRepairEveryone', async () => {
+  it('runSyncCycle repairs @everyone when auto-repair AND the @everyone opt-in are both on', async () => {
     const shared = await import('@somnibot/shared');
     (shared.computeStateDiff as any).mockReturnValueOnce({ roles: [], channels: [], everyoneDrift: { actual: '2048', desired: '0' } });
-    
+
     const { runSyncCycle } = await import('../sync/sync-engine.js');
-    const fromMock = vi.fn(() => chain({ guild_id: 'g1', roles: [], channels: [] }));
+    // autoRepair:true also reaches the store-sync-report insert, which is awaited
+    // directly — make the chain thenable so that path resolves.
+    const fromMock = vi.fn(() => {
+      const c = chain({ guild_id: 'g1', roles: [], channels: [] });
+      c.then = (resolve: any) => resolve({ data: null, error: null });
+      return c;
+    });
     const supa = { from: fromMock } as any;
     const g = makeGuild();
-    
+
+    // @everyone repair now requires BOTH flags (gating on autoRepairEveryone alone
+    // silently wiped @everyone out of the box).
     const result = await runSyncCycle(g, supa, makeEventBus(), {
-      enabled: true, intervalMinutes: 5, autoRepair: false, autoRepairEveryone: true,
+      enabled: true, intervalMinutes: 5, autoRepair: true, autoRepairEveryone: true,
     });
-    
+
     expect(g.roles.everyone.setPermissions).toHaveBeenCalledWith(0n, expect.any(String));
     expect(result.repaired).toBe(1);
   });

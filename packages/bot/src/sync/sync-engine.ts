@@ -110,8 +110,10 @@ export async function runSyncCycle(
 
   let repaired = 0;
 
-  // 6. Auto-repair @everyone if configured
-  if (config.autoRepairEveryone && diff.everyoneDrift) {
+  // 6. Auto-repair @everyone only when BOTH general auto-repair and the explicit
+  //    @everyone opt-in are on. Gating on autoRepairEveryone alone let a guild that
+  //    never enabled auto-repair silently reset @everyone's permissions to 0.
+  if (config.autoRepair && config.autoRepairEveryone && diff.everyoneDrift) {
     try {
       const everyoneRole = guild.roles.everyone;
       await everyoneRole.setPermissions(0n, 'SomniBot auto-repair — @everyone must be 0');

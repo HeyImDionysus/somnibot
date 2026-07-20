@@ -142,7 +142,7 @@ describe('runSyncCycle', () => {
     expect(result.driftItems).toEqual([]);
   });
 
-  it('auto-repairs @everyone when configured and drift detected', async () => {
+  it('auto-repairs @everyone only when BOTH auto-repair and the @everyone opt-in are on', async () => {
     const guild = makeGuild();
     const desiredData = { roles: [], channels: [] };
     const supabase = {
@@ -158,7 +158,7 @@ describe('runSyncCycle', () => {
     mockClassifyDrift.mockReturnValueOnce([]);
 
     const bus = makeEventBus();
-    const config = makeConfig({ autoRepairEveryone: true });
+    const config = makeConfig({ autoRepair: true, autoRepairEveryone: true });
 
     await runSyncCycle(guild as any, supabase, bus as any, config);
 
@@ -166,6 +166,31 @@ describe('runSyncCycle', () => {
       0n,
       expect.stringContaining('auto-repair'),
     );
+  });
+
+  it('does NOT reset @everyone when the @everyone opt-in is on but general auto-repair is OFF', async () => {
+    // Regression guard: gating on autoRepairEveryone ALONE (with the old default
+    // true) silently wiped @everyone perms to 0 out of the box.
+    const guild = makeGuild();
+    const desiredData = { roles: [], channels: [] };
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'guild_desired_state') return supaChain(desiredData);
+        if (table === 'discord_id_map') return supaChain([]);
+        if (table === 'audit_logs') return supaChain();
+        return supaChain();
+      }),
+    } as any;
+
+    mockComputeStateDiff.mockReturnValueOnce({ everyoneDrift: true, diffs: [] });
+    mockClassifyDrift.mockReturnValueOnce([]);
+
+    const bus = makeEventBus();
+    const config = makeConfig({ autoRepair: false, autoRepairEveryone: true });
+
+    await runSyncCycle(guild as any, supabase, bus as any, config);
+
+    expect(guild.roles.everyone.setPermissions).not.toHaveBeenCalled();
   });
 
   it('does not auto-repair @everyone when not configured', async () => {

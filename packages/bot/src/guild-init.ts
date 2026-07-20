@@ -205,7 +205,7 @@ export async function initGuildFeatures(
     enabled: guildCfg?.sync_enabled ?? true,
     intervalMinutes: guildCfg?.sync_interval_minutes ?? 15,
     autoRepair: guildCfg?.sync_auto_repair ?? false,
-    autoRepairEveryone: guildCfg?.sync_auto_repair_everyone ?? true,
+    autoRepairEveryone: guildCfg?.sync_auto_repair_everyone ?? false,
   };
   if (syncConfig.enabled) {
     services.syncHandle = startSyncScheduler(guild, supabase, eventBus, syncConfig);
