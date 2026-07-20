@@ -41,6 +41,7 @@ describe('Anti-raid config loading', () => {
       anti_raid_join_window_seconds: 30,
       anti_raid_account_age_days: 14,
       anti_raid_action: 'ban',
+      anti_raid_auto_unban: false, // non-default: proves the toggle is actually read
       anti_raid_ban_delete_seconds: 3600,
       anti_raid_log_channel_id: 'log-chan-antiraid',
       mod_log_channel_id: 'mod-log-antiraid',
@@ -61,7 +62,7 @@ describe('Anti-raid config loading', () => {
     expect(config.anti_raid_ban_delete_seconds).toBe(3600);
     expect(config.anti_raid_log_channel_id).toBe('log-chan-antiraid');
     expect(config.mod_log_channel_id).toBe('mod-log-antiraid');
-    // auto-unban is not a persisted column; it defaults on.
-    expect(config.anti_raid_auto_unban).toBe(true);
+    // The persisted auto-unban toggle is honored (not forced to the default).
+    expect(config.anti_raid_auto_unban).toBe(false);
   });
 });
