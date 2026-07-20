@@ -387,7 +387,7 @@ describe('EconomyManager deeper', () => {
   it('pay another user', async () => {
     const { EconomyManager } = await import('../features/economy/economy-manager.js');
     const mgr = new EconomyManager(guild(), econSupa(), valkey());
-    const result = await mgr.pay('u1', 'u2', 100);
+    const result = await mgr.pay('u1', 'u2', 100, 'req-pay-1');
     expect(result).toBeDefined();
   });
 
