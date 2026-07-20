@@ -99,7 +99,7 @@ describe('Leveling (increment_member_xp RPC)', () => {
     const { data, error } = await supa.rpc('increment_member_xp', {
       p_guild_id: GUILD_ID,
       p_member_id: MEMBER_A,
-      p_xp_gain: 50,
+      p_xp_amount: 50,
     });
 
     expect(error).toBeNull();
@@ -115,7 +115,7 @@ describe('Leveling (increment_member_xp RPC)', () => {
     const { data, error } = await supa.rpc('increment_member_xp', {
       p_guild_id: GUILD_ID,
       p_member_id: MEMBER_A,
-      p_xp_gain: 60,
+      p_xp_amount: 60,
     });
 
     expect(error).toBeNull();
@@ -130,7 +130,7 @@ describe('Leveling (increment_member_xp RPC)', () => {
     await supa.rpc('increment_member_xp', {
       p_guild_id: GUILD_ID,
       p_member_id: MEMBER_C,
-      p_xp_gain: 500,
+      p_xp_amount: 500,
     });
 
     const { data, error } = await supa
@@ -145,5 +145,59 @@ describe('Leveling (increment_member_xp RPC)', () => {
     expect(data![0].xp).toBe(500);
     expect(data![1].member_id).toBe(MEMBER_A);
     expect(data![1].xp).toBe(110);
+  });
+
+  it('tracks a message tick and voice minutes on the member row (the real bot contract)', async () => {
+    const MEMBER_D = 'discord-user-ddd';
+    // A message-XP grant increments total_messages by one and adds XP.
+    await supa.rpc('increment_member_xp', {
+      p_guild_id: GUILD_ID,
+      p_member_id: MEMBER_D,
+      p_xp_amount: 25,
+      p_increment_messages: true,
+      p_voice_minutes: 0,
+    });
+    // A voice-XP grant adds voice minutes (no message tick).
+    const { data, error } = await supa.rpc('increment_member_xp', {
+      p_guild_id: GUILD_ID,
+      p_member_id: MEMBER_D,
+      p_xp_amount: 40,
+      p_increment_messages: false,
+      p_voice_minutes: 15,
+    });
+
+    expect(error).toBeNull();
+    const row = Array.isArray(data) ? data[0] : data;
+    expect(row.new_xp).toBe(65);
+
+    const { data: stored } = await supa
+      .from('member_levels')
+      .select('xp, total_messages, voice_minutes')
+      .eq('guild_id', GUILD_ID)
+      .eq('member_id', MEMBER_D)
+      .single();
+    expect(stored!.xp).toBe(65);
+    expect(stored!.total_messages).toBe(1);
+    expect(stored!.voice_minutes).toBe(15);
+  });
+
+  it('floors XP at zero on an /xp remove (negative amount)', async () => {
+    const MEMBER_E = 'discord-user-eee';
+    await supa.rpc('increment_member_xp', {
+      p_guild_id: GUILD_ID,
+      p_member_id: MEMBER_E,
+      p_xp_amount: 150,
+    });
+    const { data, error } = await supa.rpc('increment_member_xp', {
+      p_guild_id: GUILD_ID,
+      p_member_id: MEMBER_E,
+      p_xp_amount: -1000, // remove more than the member has
+    });
+
+    expect(error).toBeNull();
+    const row = Array.isArray(data) ? data[0] : data;
+    expect(row.new_xp).toBe(0); // floored, never negative
+    expect(row.new_level).toBe(0);
+    expect(row.leveled_up).toBe(false);
   });
 });
