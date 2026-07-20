@@ -116,11 +116,7 @@ export async function recordMemberJoin(
     }
   }
 
-  const memberNumber = isReturning
-    ? undefined // Keep existing number
-    : await getNextMemberNumber(supabase, guildId);
-
-  const record = {
+  const baseRecord = {
     guild_id: guildId,
     discord_id: discordId,
     username: member.user.tag,
@@ -130,21 +126,46 @@ export async function recordMemberJoin(
     onboarding_completed: false,
     is_returning: isReturning,
     total_time_seconds: totalTimeSeconds,
-    ...(memberNumber !== undefined ? { member_number: memberNumber } : {}),
   };
 
-  const { data, error } = await supabase
-    .from('members')
-    .upsert(record, { onConflict: 'guild_id,discord_id' })
-    .select()
-    .single();
+  // Returning members keep their existing number — no member_number, single upsert.
+  if (isReturning) {
+    const { data, error } = await supabase
+      .from('members')
+      .upsert(baseRecord, { onConflict: 'guild_id,discord_id' })
+      .select()
+      .single();
+    if (error) {
+      log.error('Failed to record join:', error.message);
+      return null;
+    }
+    return data as DbMember;
+  }
 
-  if (error) {
+  // New members get a sequential member_number. get_next_member_number draws
+  // MAX+1 but cannot reserve it, so two simultaneous joins can draw the same N;
+  // the uniq_member_number_per_guild index then rejects the loser (23505). Retry
+  // with a freshly-drawn number so a race never DROPS a join (previously the loser
+  // got no member row, number, or welcome at all).
+  const MAX_ATTEMPTS = 5;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const memberNumber = await getNextMemberNumber(supabase, guildId);
+    const { data, error } = await supabase
+      .from('members')
+      .upsert({ ...baseRecord, member_number: memberNumber }, { onConflict: 'guild_id,discord_id' })
+      .select()
+      .single();
+
+    if (!error) return data as DbMember;
+
+    // Only a member_number collision is retryable; redraw and try again.
+    if (error.code === '23505' && attempt < MAX_ATTEMPTS) continue;
+
     log.error('Failed to record join:', error.message);
     return null;
   }
 
-  return data as DbMember;
+  return null;
 }
 
 /**
