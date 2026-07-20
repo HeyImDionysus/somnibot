@@ -21,11 +21,28 @@ interface PortalData {
  * (session-swapping attacks). State is stored in sessionStorage and
  * verified on callback.
  */
+/**
+ * The target guild whose store this portal is for. It arrives in the URL
+ * (`/portal?guild=<id>`) and is persisted so it survives the OAuth round-trip and
+ * the post-login URL cleanup. The portal MUST be per-guild: a Discord identity can
+ * be a customer in many guilds, so the session is scoped to exactly one.
+ */
+function currentGuildId(): string {
+  const fromUrl = new URLSearchParams(window.location.search).get('guild');
+  if (fromUrl) {
+    sessionStorage.setItem('portal_guild', fromUrl);
+    return fromUrl;
+  }
+  return sessionStorage.getItem('portal_guild') || '';
+}
+
 function getDiscordOAuthUrl(): string {
   const clientId = process.env.NEXT_PUBLIC_DISCORD_APPLICATION_ID || '';
   const redirectUri = encodeURIComponent(`${window.location.origin}/portal`);
-  // Generate cryptographically random state for CSRF protection
-  const state = crypto.randomUUID();
+  // CSRF nonce + the target guild, both echoed back by Discord in `state` so the
+  // guild survives the round-trip (query params are dropped on the redirect).
+  const nonce = crypto.randomUUID();
+  const state = `${nonce}.${currentGuildId()}`;
   sessionStorage.setItem('portal_oauth_state', state);
   return `https://discord.com/oauth2/authorize?client_id=${clientId}&response_type=code&redirect_uri=${redirectUri}&scope=identify&state=${encodeURIComponent(state)}`;
 }
@@ -53,7 +70,15 @@ export default function PortalDashboard() {
           return;
         }
 
-        // Exchange the code for a portal session
+        // The target guild rides along in `state` as `<nonce>.<guildId>`.
+        const guildId = returnedState.split('.').slice(1).join('.');
+        if (!guildId) {
+          setError("This portal link is missing its server. Please use your server's portal link (it looks like /portal?guild=…).");
+          setLoading(false);
+          return;
+        }
+
+        // Exchange the code for a portal session, scoped to this guild's store.
         try {
           const res = await fetch('/api/portal/auth', {
             method: 'POST',
@@ -61,6 +86,7 @@ export default function PortalDashboard() {
             body: JSON.stringify({
               action: 'login',
               code,
+              guild_id: guildId,
               redirect_uri: `${window.location.origin}/portal`,
             }),
           });
