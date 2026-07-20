@@ -66,14 +66,14 @@ describe('automod-actions', () => {
   it('executes delete action', async () => {
     const msg = makeMessage();
     const supa = { from: vi.fn(() => makeChain()) } as any;
-    await executeAutoModAction({} as any, msg, { rule: 'test-rule' } as any, 'spam detected', {} as any);
+    await executeAutoModAction({} as any, msg, { rule: 'test-rule' } as any, 'spam detected', { automodMode: 'enforce' } as any);
     expect(msg.delete).toHaveBeenCalled();
   });
 
   it('executes warn action', async () => {
     const msg = makeMessage();
     const supa = { from: vi.fn(() => makeChain()) } as any;
-    await executeAutoModAction({} as any, msg, { rule: 'test-rule' } as any, 'spam detected', {} as any);
+    await executeAutoModAction({} as any, msg, { rule: 'test-rule' } as any, 'spam detected', { automodMode: 'enforce' } as any);
     // Action should attempt to interact with the message
     expect(msg.delete.mock.calls.length + msg.channel.send.mock.calls.length + msg.member.timeout.mock.calls.length).toBeGreaterThanOrEqual(0);
   });
@@ -81,14 +81,14 @@ describe('automod-actions', () => {
   it('executes mute action', async () => {
     const msg = makeMessage();
     const supa = { from: vi.fn(() => makeChain()) } as any;
-    await executeAutoModAction({} as any, msg, { rule: 'test-rule', duration: '5m' } as any, 'spam detected', {} as any);
+    await executeAutoModAction({} as any, msg, { rule: 'test-rule', duration: '5m' } as any, 'spam detected', { automodMode: 'enforce' } as any);
     expect(msg.delete.mock.calls.length + msg.member.timeout.mock.calls.length).toBeGreaterThanOrEqual(0);
   });
 
   it('executes delete_and_warn action', async () => {
     const msg = makeMessage();
     const supa = { from: vi.fn(() => makeChain()) } as any;
-    await executeAutoModAction({} as any, msg, { rule: 'test-rule' } as any, 'spam detected', {} as any);
+    await executeAutoModAction({} as any, msg, { rule: 'test-rule' } as any, 'spam detected', { automodMode: 'enforce' } as any);
     expect(msg.delete.mock.calls.length + msg.channel.send.mock.calls.length).toBeGreaterThanOrEqual(0);
   });
 });
