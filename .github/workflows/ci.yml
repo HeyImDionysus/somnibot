@@ -348,9 +348,10 @@ jobs:
         run: node scripts/check-testkit-isolation.mjs
       # The routing-parity test drives the REAL compiled dispatcher, so bot
       # (and its shared dep) must be built before testkit type-check/tests.
-      - name: Build shared + bot (dispatcher under test)
+      - name: Build shared + e2e + bot (dispatcher + catalog under test)
         run: |
           pnpm --filter @somnibot/shared build
+          pnpm --filter @somnibot/e2e build
           pnpm --filter @somnibot/bot build
       - name: Type-check testkit (source + tests)
         run: |
@@ -506,9 +507,10 @@ jobs:
           exit 1
       # The live runner loads the REAL compiled bot dispatcher/init, so shared +
       # bot must be built first; testkit is built to prove it compiles.
-      - name: Build shared + bot + testkit
+      - name: Build shared + e2e + bot + testkit
         run: |
           pnpm --filter @somnibot/shared build
+          pnpm --filter @somnibot/e2e build
           pnpm --filter @somnibot/bot build
           pnpm --filter @somnibot/testkit build
       - name: Run live-stack E2E (real initGuildFeatures)
