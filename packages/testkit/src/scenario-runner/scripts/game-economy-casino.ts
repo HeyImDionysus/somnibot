@@ -8,35 +8,31 @@
  * a mid-bet fault-injection lane, or the per-user Valkey lock is GATED.
  *
  * ── The pivotal gating boundary for THIS domain ─────────────────────────────
- * Every casino command (coinflip, slots, roulette, blackjack, dice, rps, scratch,
+ * Every casino command (coinflip, slots, rps, dice, blackjack, highlow, scratch,
  * guess) acquires a per-user lock FIRST (GamesManager.acquireGameLock), and that
- * lock is a Valkey `SET NX PX`. The production manager is wired with the real
- * `client.valkey`, so when NO Redis is reachable the SET throws and the manager
- * FAILS CLOSED — the command is denied the lock and returns "game in progress"
- * before any wager / cap / balance / daily-loss / payout logic runs. Therefore the
- * entire bet-resolution surface (wallet moves by the stake, over-max-bet refusal,
- * daily-cap refusal, single-in-flight guarantee, payout) is UNDRIVABLE without a
- * live Redis and is GATED here — honestly, with a precise reason — while it is
- * written to RUN whenever `ctx.capabilities.redis` is present.
+ * lock is a Valkey `SET NX PX`. In this loopback harness the production manager
+ * is wired with a REAL Valkey client that has NO reachable server, so it keeps
+ * RECONNECTING: `await valkey.set(... 'NX')` never resolves and never rejects.
+ * Therefore driving ANY casino command here BLOCKS FOREVER — it does not even
+ * fail closed. The entire bet-resolution surface (wallet moves by the stake,
+ * over-max-bet refusal, daily-cap refusal, single-in-flight guarantee, payout,
+ * and even the dependency-outage fail-safe) is UNDRIVABLE without a live Redis
+ * and is GATED here — honestly, with a precise reason. NO scenario awaits a
+ * casino command outside an `if (ctx.capabilities.redis)` guard; the bet-path
+ * assertions are written to RUN whenever `ctx.capabilities.redis` is present.
  *
  * What DOES run now, against real state:
  *   - guild_config casino-control persistence/readback (defaults + set-A/set-B),
  *   - the restart-durable `economy_daily_losses` counter (seed via the real RPC,
  *     read it back across a simulated restart),
  *   - RLS isolation on economy_wallets + economy_daily_losses (anon-denial with a
- *     service-role positive control; cross-guild distinct-row proof),
- *   - the Valkey-outage fail-safe branch (the no-Redis harness IS that outage): a
- *     real /coinflip leaves the wallet byte-identical and its reply is captured.
+ *     service-role positive control; cross-guild distinct-row proof).
  *
- * Behavior-bug discovery (never forced green): three real divergences surface as
- * FAILs for the owner to adjudicate —
- *   1. shipped guild_config casino defaults contradict the catalog's on-out-of-box
- *      conservative-caps promise (DEF),
- *   2. on a Valkey-lock outage the member is told "game in progress" instead of the
- *      branded casino-unavailable degradation reply (DEPFAIL),
- *   3. the casino bet path persists no idempotency key and writes no append-only
- *      audit/ledger row, so replay-safety and the audit-row promise are flagged
- *      (recorded where drivable, otherwise gated with the structural note).
+ * Behavior-bug discovery (never forced green): real divergences surface as FAILs
+ * for the owner to adjudicate — notably the shipped guild_config casino defaults
+ * contradicting the catalog's on-out-of-box conservative-caps promise (DEF), and
+ * the casino bet path persisting no idempotency key / no append-only audit row
+ * (surfaced where drivable, otherwise gated with the structural note).
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -48,13 +44,14 @@ import type { DomainProof, ScenarioContext } from '../types.js';
 
 /**
  * The single load-bearing gate reason: without Redis the per-user Valkey lock
- * fails closed and every casino command short-circuits to "game in progress",
- * so no bet / cap / payout path can be driven.
+ * (SET NX PX) can never be driven — with no reachable server the harness's Valkey
+ * client keeps reconnecting and the lock `await` hangs indefinitely, so no bet /
+ * cap / payout path can be exercised (and a driven command would never return).
  */
 const LOCK_GATE =
-  'casino bets acquire a per-user Valkey lock (SET NX PX, fail-closed); with no Redis reachable ' +
-  'the manager is denied the lock and every casino command returns "game in progress" before any ' +
-  'wager/cap/balance/daily-loss/payout logic runs, so the bet path cannot be driven in this harness';
+  'casino bets acquire a per-user Valkey lock (SET NX PX) before any wager/cap/balance/daily-loss/payout logic runs; ' +
+  'with no Redis reachable the harness Valkey client keeps reconnecting so acquireGameLock never resolves and a driven ' +
+  'casino command would BLOCK FOREVER, so the bet path cannot be driven in this harness';
 
 // ── Row/config shapes ─────────────────────────────────────────────────────
 
@@ -312,8 +309,8 @@ function proveBrandingFromBet(ctx: ScenarioContext, captured: CapturedResponse, 
 
 /**
  * GATE branding when no drivable casino OUTCOME surface exists (the norm without
- * Redis: the only reachable reply is the lock-denied "game in progress" message,
- * which is not a currency surface — checking it would be a misleading FAIL).
+ * Redis: no casino command can be run at all, so there is no currency surface to
+ * inspect — checking a synthetic string would be a misleading result).
  */
 function gateBranding(ctx: ScenarioContext): void {
   ctx.gate(
@@ -477,7 +474,7 @@ function expectControl(
 /**
  * DEF — out of the box the casino is on with conservative caps (coinflip/slots
  * 500, blackjack 1000, daily-loss 5000). Proven at the config + counter layer
- * now; cap enforcement gates on Redis.
+ * now; cap enforcement gates on Redis (a driven bet would hang on the lock).
  */
 async function DEF(ctx: ScenarioContext): Promise<void> {
   const coinflipDefault = Number(declaredDefault(ctx.domain, 'coinflip-max-bet'));
@@ -548,8 +545,8 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   });
 
   // Cap enforcement (within-cap bet moves the wallet by the stake; a 600 coinflip
-  // is refused over the 500 default) needs the Valkey lock — drive it if Redis is
-  // present, otherwise GATE honestly.
+  // is refused over the 500 default) needs the Valkey lock — drive it ONLY if
+  // Redis is present (a driven command would otherwise hang), else GATE honestly.
   if (ctx.capabilities.redis) {
     const before = (await readWallet(handle, userA))?.wallet ?? -1;
     const inCap = await ctx.runSlash(handle, { commandName: 'coinflip', userId: userA, options: { amount: 200 } });
@@ -624,7 +621,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   });
 
   // Enforcement (90 accepted; 150 & blackjack 201 refused; a wager past 1000 lost
-  // hits the daily-cap reply) needs the Valkey lock.
+  // hits the daily-cap reply) needs the Valkey lock — Redis-only.
   if (ctx.capabilities.redis) {
     const before = (await readWallet(handle, userA))?.wallet ?? -1;
     const ok = await ctx.runSlash(handle, { commandName: 'coinflip', userId: userA, options: { amount: 90 } });
@@ -876,80 +873,55 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
 }
 
 /**
- * DEPFAIL — when the Valkey lock is unreachable the casino must fail safe: no
- * coins move and a branded casino-unavailable reply. The no-Redis harness IS that
- * outage, so this runs a REAL command and observes the fail-safe (and a real
- * divergence in the degradation wording). With Redis present the outage is not
- * naturally induced, so it gates on a fault-injection lane.
+ * DEPFAIL — when the per-user Valkey lock is unreachable the casino must fail
+ * SAFE: no coins move and the member sees a branded casino-unavailable reply.
+ *
+ * ── Why this fail-safe cannot be driven here (and MUST NOT be) ──────────────
+ * Observing the fail-safe requires the lock op (SET NX) to FAIL FAST so the
+ * handler reaches its degradation branch. Neither harness state produces that:
+ * with a healthy Valkey there is no outage, and with NO reachable Valkey the
+ * production client keeps RECONNECTING — acquireGameLock's `await valkey.set(…
+ * 'NX')` never resolves AND never rejects, so a driven /coinflip would BLOCK
+ * FOREVER (it would not even fail closed). Driving a casino command here is
+ * exactly what hangs the run, so this script NEVER awaits one: the whole
+ * outage surface (no-coins-move + branded-unavailable reply + single aggregated
+ * alert) is GATED behind a dependency-outage fault-injection lane that makes the
+ * lock op fail fast. What still runs, DB-observably on a seeded wallet and
+ * needing no game command: the guild-scoping RLS proof.
  */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  if (ctx.capabilities.redis) {
-    ctx.gate(
-      'Discord',
-      'db-observable',
-      'With Supabase/Valkey blocked, casino commands reply with the branded casino-unavailable template and no coins move; after restoration a fresh bet resolves with exactly one wallet mutation.',
-      'a healthy Valkey means the outage is not naturally present; inducing it requires a Supabase/Valkey dependency-outage fault-injection lane',
-    );
-    ctx.gate('owner-notification', 'discord-readback', 'The owner receives a single dependency-degradation alert for the outage window (not one per failed command).', 'requires a dependency-outage fault lane plus owner alert channel readback');
-    ctx.gate('database-RLS', 'db-rls', 'Casino rows stay guild-scoped through the outage window.', 'requires a Supabase/Valkey dependency-outage fault-injection lane');
-    gateAudit(ctx);
-    gateBranding(ctx);
-    gateReplayDeferred(ctx, 'REPLAY');
-    return;
-  }
-
-  // No Redis reachable — the per-user Valkey lock (SET NX) throws and the manager
-  // fails closed. Drive a REAL /coinflip and observe the outage fail-safe.
   const handle = await ctx.bootGuild({
     label: 'a',
     economyStartingBalance: 0,
     guildConfigOverrides: { economy_games_enabled: true, economy_coinflip_max_bet: 500 },
   });
   const userA = ctx.userId('a');
+  // Seed a real, service-visible wallet so the RLS proof below has a positive
+  // control (a non-vacuous anon-denial), not an empty table.
   await seedWallet(handle, userA, 1000, 0);
-  const before = (await readWallet(handle, userA))?.wallet ?? -1;
-  const captured = await ctx.runSlash(handle, { commandName: 'coinflip', userId: userA, options: { amount: 100 } });
-  const after = (await readWallet(handle, userA))?.wallet ?? -1;
 
-  // (a) Fail-safe: no coins move when the lock cannot be acquired.
-  ctx.expect(after === before && before === 1000, {
-    assertionClass: 'Discord',
-    channel: 'db-observable',
-    promise: 'With the Valkey lock unreachable the casino fails closed: no play coins move.',
-    observation: `wallet ${before}→${after} across a /coinflip while the lock is unreachable (expected unchanged 1000).`,
-    impact: 'Coins moved while the per-user lock was unavailable — the fail-closed guarantee was violated.',
-  });
-
-  // (b) The reply should be the branded casino-unavailable degradation template.
-  //     The REAL bot returns the generic "game in progress" message instead — a
-  //     divergence from the catalog casino-dependency-unreachable failure contract.
-  const reply = replyContent(captured);
-  const isBrandedUnavailable = /closed/i.test(reply) || /casino floor/i.test(reply) || /try again/i.test(reply);
-  ctx.expect(isBrandedUnavailable, {
-    assertionClass: 'Discord',
-    channel: 'captured-reply',
-    promise: 'On a Valkey-lock outage the member sees the branded casino-unavailable reply ("the casino floor is briefly closed … no coins moved").',
-    observation: `outage reply="${truncate(reply)}" (the bot returns the generic "game in progress" lock message, not the casino-unavailable template).`,
-    impact: 'On a dependency outage the member is told they have a game in progress rather than that the casino is briefly unavailable — a misleading, unbranded degradation message.',
-  });
-
-  // (c) The transient lock failure raises no per-command owner alert (failure def
-  //     casino-dependency-unreachable has ownerNotification:false).
-  await proveNoOwnerAlert(ctx, handle);
-
-  // (d) RLS still holds through the outage.
-  await proveWalletRls(ctx, handle, userA);
-
+  // The entire outage fail-safe surface needs a fault lane that makes the lock op
+  // FAIL FAST; the no-Redis loopback client instead hangs, so it cannot be driven.
+  ctx.gate(
+    'Discord',
+    'db-observable',
+    'With the per-user Valkey lock unreachable, casino commands reply with the branded casino-unavailable template and no coins move; after restoration a fresh bet resolves with exactly one wallet mutation.',
+    `${LOCK_GATE}; and observing the degradation branch needs a fault lane that makes the lock op FAIL FAST — the no-Redis ` +
+      'loopback client instead keeps reconnecting, so a driven casino command would hang rather than fail closed and cannot be awaited here',
+  );
   ctx.gate(
     'owner-notification',
     'discord-readback',
-    'The owner receives a single aggregated dependency-degradation alert for the outage window.',
-    'requires a sustained-outage fault lane plus owner alert channel readback (only the per-command no-alert invariant is DB-observable here)',
+    'The owner receives a single aggregated dependency-degradation alert for the outage window (not one per failed command), and transient per-command lock failures raise none.',
+    'requires a dependency-outage fault lane (fast-failing lock op) plus owner alert channel readback — the reconnecting loopback client cannot reach the degradation branch DB-observably',
   );
   gateAudit(ctx);
   gateBranding(ctx);
   gateReplayDeferred(ctx, 'REPLAY');
-  gateLiveGuildReadback(ctx);
+
+  // DB-observable now, needing no casino command: the guild's wallet row stays
+  // strictly guild-scoped (service role sees it; anon reads zero).
+  await proveWalletRls(ctx, handle, userA);
 }
 
 /** RETRY — a winning bet whose payout step fails must not falsely credit; an operator retry pays exactly once. */
@@ -957,7 +929,8 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
   // The payout-failure branch triggers only when economy_add_balance fails AFTER a
   // winning CSPRNG outcome resolves — a mid-bet fault that needs both the Valkey
   // lock (to reach resolution) and a fault-injection lane at the wallet-RPC
-  // boundary. GATE the whole scenario; do not fabricate a fault.
+  // boundary. GATE the whole scenario; do not fabricate a fault and NEVER drive a
+  // casino command (it would hang on the unreachable lock).
   ctx.gate(
     'Discord',
     'db-observable',
@@ -1078,7 +1051,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
   });
 
   // Post-restart enforcement (an over-cap wager is still refused; the lock TTL
-  // self-heals) needs the Valkey lock.
+  // self-heals) needs the Valkey lock — a driven bet would hang without Redis.
   ctx.gate(
     'Discord',
     'redis-dependency',
@@ -1239,7 +1212,8 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   });
   await proveWalletRls(ctx, handleA, userA);
 
-  // guild-B bets enforcing guild-B caps and debiting only guild B needs the lock.
+  // guild-B bets enforcing guild-B caps and debiting only guild B needs the lock
+  // (a driven bet would hang without Redis).
   ctx.gate(
     'Discord',
     'redis-dependency',

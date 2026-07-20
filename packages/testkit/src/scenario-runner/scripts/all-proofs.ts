@@ -1,6 +1,5 @@
 /**
- * scenario-runner/scripts/all-proofs — registry of authored domain proofs.
- * (Regenerated to the full 46 once heist/commerce-licenses/license-sdk land.)
+ * scenario-runner/scripts/all-proofs — registry of all 46 domain proofs (catalog order).
  */
 import { communityGiveawaysProof } from './community-giveaways.js';
 import { communityLevelsProof } from './community-levels.js';
@@ -19,6 +18,7 @@ import { gameEconomyCraftingProof } from './game-economy-crafting.js';
 import { gameEconomyFarmingProof } from './game-economy-farming.js';
 import { gameEconomyFishingProof } from './game-economy-fishing.js';
 import { gameEconomyGatheringProof } from './game-economy-gathering.js';
+import { gameEconomyHeistProof } from './game-economy-heist.js';
 import { gameEconomyLotteryProof } from './game-economy-lottery.js';
 import { gameEconomyPetsProof } from './game-economy-pets.js';
 import { gameEconomyQuestsProof } from './game-economy-quests.js';
@@ -33,6 +33,7 @@ import { moderationTicketsTranscriptsProof } from './moderation-tickets-transcri
 import { musicCollaborativeQueueProof } from './music-collaborative-queue.js';
 import { musicPlayerFairnessProof } from './music-player-fairness.js';
 import { commerceFraudProof } from './commerce-fraud.js';
+import { commerceLicensesProof } from './commerce-licenses.js';
 import { commercePaypalProof } from './commerce-paypal.js';
 import { commercePortalProof } from './commerce-portal.js';
 import { commerceProductStoreProof } from './commerce-product-store.js';
@@ -45,6 +46,7 @@ import { administrationRbacProof } from './administration-rbac.js';
 import { administrationServerSyncProof } from './administration-server-sync.js';
 import { administrationTeamManagementProof } from './administration-team-management.js';
 import { infrastructureLauncherProof } from './infrastructure-launcher.js';
+import { infrastructureLicenseSdkProof } from './infrastructure-license-sdk.js';
 
 import type { DomainProof } from '../types.js';
 
@@ -66,6 +68,7 @@ export const ALL_DOMAIN_PROOFS: readonly DomainProof[] = [
   gameEconomyFarmingProof,
   gameEconomyFishingProof,
   gameEconomyGatheringProof,
+  gameEconomyHeistProof,
   gameEconomyLotteryProof,
   gameEconomyPetsProof,
   gameEconomyQuestsProof,
@@ -80,6 +83,7 @@ export const ALL_DOMAIN_PROOFS: readonly DomainProof[] = [
   musicCollaborativeQueueProof,
   musicPlayerFairnessProof,
   commerceFraudProof,
+  commerceLicensesProof,
   commercePaypalProof,
   commercePortalProof,
   commerceProductStoreProof,
@@ -92,4 +96,5 @@ export const ALL_DOMAIN_PROOFS: readonly DomainProof[] = [
   administrationServerSyncProof,
   administrationTeamManagementProof,
   infrastructureLauncherProof,
+  infrastructureLicenseSdkProof,
 ];
