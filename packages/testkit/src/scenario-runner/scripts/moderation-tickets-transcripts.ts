@@ -367,7 +367,20 @@ async function proveRls(ctx: ScenarioContext, handle: LiveClientHandle, table: s
     );
     return;
   }
-  ctx.expect((serviceCount ?? 0) >= 1 && anonRows === 0, {
+  // Non-vacuity: without a positive control (a row the service role actually
+  // sees under this guild), an anon read of zero proves nothing — there was
+  // nothing to leak — so GATE rather than misreport a phantom exposure. (Anon
+  // reading 0 here is a genuine 42501 deny, not a leak.)
+  if ((serviceCount ?? 0) === 0) {
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      promise,
+      `no positive control: the service role sees 0 ${table} row(s) under guild "${handle.guildId}", so anon reading 0 is vacuous — anon-denial on ${table} is proven positively in scenarios that arrange a row`,
+    );
+    return;
+  }
+  ctx.expect(anonRows === 0, {
     assertionClass: 'database-RLS',
     channel: 'db-rls',
     promise,

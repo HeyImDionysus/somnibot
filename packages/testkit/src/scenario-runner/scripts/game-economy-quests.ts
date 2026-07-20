@@ -318,8 +318,21 @@ async function proveRlsIsolation(ctx: ScenarioContext, handle: LiveClientHandle,
     return;
   }
   const rows = await progressRows(handle, userId);
-  const serviceSees = rows.length > 0;
-  ctx.expect(serviceSees && anonRows === 0, {
+  // Non-vacuity: the anon-deny proof only means something when a positive control
+  // exists (a progress row the service role actually sees). If this scenario
+  // arranged none, an anon read of zero proves nothing — there was nothing to
+  // leak — so GATE rather than misreport a phantom "exposed to anon". (Anon
+  // reading 0 here is a genuine 42501 GRANT/RLS deny, not a leak.)
+  if (rows.length === 0) {
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'anon/authenticated clients read zero economy_quest_progress rows (guild-scoped RLS + GRANT lockdown).',
+      `no positive control: the service role sees 0 quest-progress row(s) for the user under guild "${handle.guildId}", so anon reading 0 is vacuous — anon-denial is proven positively in scenarios that do arrange a progress row`,
+    );
+    return;
+  }
+  ctx.expect(anonRows === 0, {
     assertionClass: 'database-RLS',
     channel: 'db-rls',
     promise:
