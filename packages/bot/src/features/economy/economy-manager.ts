@@ -1048,7 +1048,7 @@ export class EconomyManager {
     return (data ?? []) as Array<{ id: string; name: string; description: string | null; emoji: string; category: string; price: number; stock: number | null }>;
   }
 
-  async buyItem(userId: string, itemId: string, quantity: number = 1): Promise<TransactionResult> {
+  async buyItem(userId: string, itemId: string, quantity: number = 1, requestId?: string): Promise<TransactionResult> {
     const cfg = await this.loadConfig();
 
     const { data: item } = await this.supabase
@@ -1064,30 +1064,8 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: wallet, message: '❌ Item not found.' };
     }
 
-    // Stock check (preliminary — final atomic check happens after payment)
-    if (item.stock !== null && item.stock < quantity) {
-      const wallet = await this.getOrCreateWallet(userId);
-      return { success: false, amount: 0, balance: wallet, message: `❌ Only **${item.stock}** left in stock.` };
-    }
-
-    // Max per user check
-    if (item.max_per_user !== null) {
-      const { data: inv } = await this.supabase
-        .from('economy_inventory')
-        .select('quantity')
-        .eq('guild_id', this.guild.id)
-        .eq('user_id', userId)
-        .eq('item_id', itemId)
-        .maybeSingle();
-
-      const owned = inv?.quantity ?? 0;
-      if (owned + quantity > item.max_per_user) {
-        const wallet = await this.getOrCreateWallet(userId);
-        return { success: false, amount: 0, balance: wallet, message: `❌ You can only own **${item.max_per_user}** of this item (you have ${owned}).` };
-      }
-    }
-
-    // Role requirement check
+    // Role requirement — a live-Discord check, so it stays here (the RPC can't
+    // see the member's roles). The RPC re-validates stock/max/funds under a lock.
     if (item.require_role_id) {
       const member = this.guild.members.cache.get(userId);
       if (member && !member.roles.cache.has(item.require_role_id)) {
@@ -1096,56 +1074,55 @@ export class EconomyManager {
       }
     }
 
-    const totalCost = item.price * quantity;
-    const wallet = await this.debitWallet(userId, totalCost);
-    if (!wallet) {
-      const w = await this.getOrCreateWallet(userId);
-      return { success: false, amount: 0, balance: w, message: `${cfg.currency_emoji} You need **${totalCost.toLocaleString()} ${cfg.currency_name}** but only have **${w.wallet.toLocaleString()}**.` };
+    if (!requestId) {
+      log.error('buyItem called without an idempotency request id — refusing to purchase');
+      const wallet = await this.getOrCreateWallet(userId);
+      return { success: false, amount: 0, balance: wallet, message: '❌ Purchase could not be processed. Please try again.' };
     }
 
-    // Reduce stock atomically (prevents overselling via TOCTOU)
-    if (item.stock !== null) {
-      const { data: stockOk } = await this.supabase.rpc('economy_decrement_stock', {
-        p_item_id: itemId,
-        p_quantity: quantity,
-      });
-      if (!stockOk) {
-        // Refund the wallet debit
-        await this.creditWallet(userId, totalCost);
-        const w = await this.getOrCreateWallet(userId);
-        return { success: false, amount: 0, balance: w, message: `❌ Item went out of stock.` };
-      }
-    }
-
-    // V53-C5: Add to inventory — check result, refund payment + restore stock on failure
-    const { error: invErr } = await this.supabase.rpc('economy_upsert_inventory', {
+    // Atomic + idempotent purchase: the funds check, debit, stock decrement,
+    // inventory grant, and ledger row commit as ONE call keyed on the interaction
+    // id, so a redelivered /buy charges and delivers exactly once (no double-spend).
+    const { data, error } = await this.supabase.rpc('economy_buy_item', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_item_id: itemId,
       p_quantity: quantity,
-      p_durability: item.durability,
+      p_request_id: requestId,
     });
-    if (invErr) {
-      log.error('buyItem inventory upsert failed', { detail: invErr.message });
-      // Refund payment
-      await this.creditWallet(userId, totalCost);
-      // FIX #5: Restore stock using the correct economy_increment_stock RPC.
-      // Previously used economy_upsert_inventory with p_user_id='shop' which
-      // writes to inventory instead of restoring economy_items.stock. Stock
-      // was permanently lost on any failed purchase.
-      if (item.stock != null) {
-        await Promise.resolve(this.supabase.rpc('economy_increment_stock', {
-          p_item_id: itemId,
-          p_quantity: quantity,
-        })).catch((err: unknown) => {
-          log.error('CRITICAL: buyItem stock restore failed', { itemId, quantity, detail: err });
-        });
-      }
-      const w = await this.getOrCreateWallet(userId);
-      return { success: false, amount: 0, balance: w, message: '❌ Failed to add item to inventory. You have been refunded.' };
+
+    if (error || !data || typeof data !== 'object') {
+      log.error('buyItem economy_buy_item RPC failed', { detail: error?.message });
+      const wallet = await this.getOrCreateWallet(userId);
+      return { success: false, amount: 0, balance: wallet, message: '❌ Purchase failed. Please try again.' };
     }
 
-    // Grant role if applicable
+    const result = data as {
+      status?: string; replayed?: boolean; total_cost?: number | string;
+      max_per_user?: number; owned?: number; stock?: number;
+    };
+    const wallet = await this.getOrCreateWallet(userId);
+
+    switch (result.status) {
+      case 'item_not_found':
+        return { success: false, amount: 0, balance: wallet, message: '❌ Item not found.' };
+      case 'max_per_user':
+        return { success: false, amount: 0, balance: wallet, message: `❌ You can only own **${result.max_per_user}** of this item (you have ${result.owned}).` };
+      case 'out_of_stock':
+        return { success: false, amount: 0, balance: wallet, message: `❌ Only **${result.stock}** left in stock.` };
+      case 'insufficient_funds': {
+        const need = Number(result.total_cost ?? item.price * quantity);
+        return { success: false, amount: 0, balance: wallet, message: `${cfg.currency_emoji} You need **${need.toLocaleString()} ${cfg.currency_name}** but only have **${wallet.wallet.toLocaleString()}**.` };
+      }
+      case 'purchased':
+        break;
+      default:
+        return { success: false, amount: 0, balance: wallet, message: '❌ Purchase failed. Please try again.' };
+    }
+
+    const totalCost = Number(result.total_cost);
+
+    // Grant role if applicable (member.roles.add is idempotent — safe on a replay).
     if (item.grant_role_id) {
       try {
         const member = await this.guild.members.fetch(userId);
@@ -1155,9 +1132,11 @@ export class EconomyManager {
       }
     }
 
-    await this.recordTransaction(userId, 'shop_buy', -totalCost, wallet.wallet, `Bought ${quantity}x ${item.name}`);
-    await this.logEconomyEvent(userId, `bought ${quantity}x ${item.name}`, -totalCost);
-    getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'shop_buy', quantity).catch((e: unknown) => { log.warn('Quest trackProgress failed', { detail: (e as Error)?.message ?? e }); });
+    // Secondary, non-idempotent effects run only on the FIRST application (never a replay).
+    if (!result.replayed) {
+      await this.logEconomyEvent(userId, `bought ${quantity}x ${item.name}`, -totalCost);
+      getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'shop_buy', quantity).catch((e: unknown) => { log.warn('Quest trackProgress failed', { detail: (e as Error)?.message ?? e }); });
+    }
 
     return {
       success: true,

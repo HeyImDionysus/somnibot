@@ -936,40 +936,67 @@ describe('EconomyManager', () => {
   });
 
   describe('buyItem', () => {
+    const itemRow = { id: 'i1', name: 'Sword', emoji: '⚔️', price: 100, stock: null, max_per_user: null, require_role_id: null, grant_role_id: null, durability: null };
+    function mockItem(row: Record<string, unknown> = itemRow) {
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'economy_items') return chainBuilder({ data: row });
+        if (table === 'economy_wallets') return chainBuilder({ data: makeWallet() });
+        return chainBuilder({ data: supabase._configData });
+      });
+    }
+    function mockBuyRpc(buy: Record<string, unknown>) {
+      supabase.rpc.mockImplementation(async (name: string) => {
+        if (name === 'economy_buy_item') return { data: buy, error: null };
+        return { data: makeWallet(), error: null };
+      });
+    }
+
     it('fails when item not found', async () => {
-      const result = await em.buyItem('u1', 'nonexistent', 1);
+      const result = await em.buyItem('u1', 'nonexistent', 1, 'req-1');
       expect(result.success).toBe(false);
       expect(result.message).toContain('not found');
     });
 
-    it('buys item successfully', async () => {
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'economy_items') {
-          return chainBuilder({
-            data: { id: 'i1', name: 'Sword', emoji: '⚔️', price: 100, stock: null, max_per_user: null, require_role_id: null, grant_role_id: null, durability: null },
-          });
-        }
-        if (table === 'economy_wallets') return chainBuilder({ data: makeWallet() });
-        return chainBuilder({ data: supabase._configData });
-      });
-      const result = await em.buyItem('u1', 'i1', 1);
+    it('buys item successfully via the atomic RPC', async () => {
+      mockItem();
+      mockBuyRpc({ status: 'purchased', replayed: false, total_cost: 100, item_name: 'Sword', quantity: 1, wallet_balance: 900 });
+      const result = await em.buyItem('u1', 'i1', 1, 'req-1');
+      expect(result.success).toBe(true);
+      expect(result.message).toContain('Bought');
+      expect(result.amount).toBe(100);
+    });
+
+    it('fails when the RPC reports out of stock', async () => {
+      mockItem({ ...itemRow, stock: 0 });
+      mockBuyRpc({ status: 'out_of_stock', replayed: false, stock: 0 });
+      const result = await em.buyItem('u1', 'i1', 5, 'req-1');
+      expect(result.success).toBe(false);
+      expect(result.message).toContain('stock');
+    });
+
+    it('reports a replayed purchase as success without re-charging', async () => {
+      mockItem();
+      mockBuyRpc({ status: 'purchased', replayed: true, total_cost: 100, item_name: 'Sword', quantity: 1 });
+      const result = await em.buyItem('u1', 'i1', 1, 'req-replay');
       expect(result.success).toBe(true);
       expect(result.message).toContain('Bought');
     });
 
-    it('fails when out of stock', async () => {
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'economy_items') {
-          return chainBuilder({
-            data: { id: 'i1', name: 'Sword', price: 100, stock: 0, max_per_user: null },
-          });
-        }
-        if (table === 'economy_wallets') return chainBuilder({ data: makeWallet() });
-        return chainBuilder({ data: supabase._configData });
-      });
-      const result = await em.buyItem('u1', 'i1', 5);
+    it('passes the interaction id to the RPC as the idempotency key', async () => {
+      mockItem();
+      mockBuyRpc({ status: 'purchased', replayed: false, total_cost: 100, item_name: 'Sword', quantity: 1 });
+      await em.buyItem('u1', 'i1', 2, 'interaction-xyz');
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'economy_buy_item',
+        expect.objectContaining({ p_item_id: 'i1', p_quantity: 2, p_request_id: 'interaction-xyz' }),
+      );
+    });
+
+    it('refuses to purchase without an idempotency request id', async () => {
+      mockItem();
+      const result = await em.buyItem('u1', 'i1', 1);
       expect(result.success).toBe(false);
-      expect(result.message).toContain('stock');
+      expect(supabase.rpc).not.toHaveBeenCalledWith('economy_buy_item', expect.anything());
     });
   });
 

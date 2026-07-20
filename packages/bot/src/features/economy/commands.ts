@@ -489,7 +489,8 @@ async function handleBuy(interaction: ChatInputCommandInteraction, mgr: EconomyM
   }
 
   await interaction.deferReply();
-  const result = await mgr.buyItem(interaction.user.id, itemId, quantity);
+  // interaction.id is the idempotency key: a redelivered /buy charges + delivers once.
+  const result = await mgr.buyItem(interaction.user.id, itemId, quantity, interaction.id);
   await interaction.editReply({ content: result.message });
 }
 
