@@ -320,8 +320,8 @@ export class ConfigWatcher {
     await this.reloadEmbeds();
     // Invalidate V17 feature in-memory caches so they re-read from DB
     invalidateAntiRaidCache();
-    invalidateStarboardCache();
-    invalidateMessageLogCache();
+    invalidateStarboardCache(this.guild.id);
+    invalidateMessageLogCache(this.guild.id);
     // Invalidate V31 economy in-memory caches
     invalidateEconomyCache(this.guild.id);
     invalidateGatheringCache(this.guild.id);

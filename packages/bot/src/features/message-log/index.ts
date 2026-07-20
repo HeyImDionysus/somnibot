@@ -24,13 +24,18 @@ interface MessageLogConfig {
 }
 
 const CONFIG_TTL = 60_000;
-let _configCache: MessageLogConfig | null = null;
-let _configCacheTime = 0;
+// Per-guild cache: a single-process bot serves many guilds. A module-global entry
+// let the first guild's message-log config ({enabled, channel_id}) serve every
+// other guild for the whole TTL — so a second guild's edits/deletes resolved the
+// wrong (globally-unique) channel id and were silently dropped (missed forensic
+// capture), and a disabled guild could transiently inherit an enabled config.
+const _configCache = new Map<string, { config: MessageLogConfig; time: number }>();
 
-async function loadConfig(client: SomniClient, guildId: string): Promise<MessageLogConfig> {
+export async function loadConfig(client: SomniClient, guildId: string): Promise<MessageLogConfig> {
   const now = Date.now();
-  if (_configCache && now - _configCacheTime < CONFIG_TTL) {
-    return _configCache;
+  const cached = _configCache.get(guildId);
+  if (cached && now - cached.time < CONFIG_TTL) {
+    return cached.config;
   }
 
   const { data } = await client.supabase
@@ -39,12 +44,12 @@ async function loadConfig(client: SomniClient, guildId: string): Promise<Message
     .eq('guild_id', guildId)
     .maybeSingle();
 
-  _configCache = {
+  const config: MessageLogConfig = {
     message_log_enabled: data?.message_log_enabled ?? false,
     message_log_channel_id: data?.message_log_channel_id ?? null,
   };
-  _configCacheTime = now;
-  return _configCache;
+  _configCache.set(guildId, { config, time: now });
+  return config;
 }
 
 function truncate(str: string, max: number): string {
@@ -151,6 +156,7 @@ export async function logMessageDelete(
 /**
  * Invalidate config cache (called from ConfigWatcher).
  */
-export function invalidateMessageLogCache(): void {
-  _configCache = null;
+export function invalidateMessageLogCache(guildId?: string): void {
+  if (guildId) _configCache.delete(guildId);
+  else _configCache.clear();
 }
