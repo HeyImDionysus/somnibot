@@ -245,11 +245,14 @@ export class PollsManager {
 
     // V47-L2: gate the status flip on the current status so concurrent /poll close
     // (or a retry after a deferred reply) cannot reset closed_at or re-post results.
+    // Polls are created with status 'active' (the polls_status_check enum is
+    // {'active','closed'}); gating on a non-existent 'open' status matched zero
+    // rows, so /poll close ALWAYS reported "already closed" and never closed a poll.
     const { data: closedRows } = await this.supabase
       .from('polls')
       .update({ status: 'closed', closed_at: new Date().toISOString() })
       .eq('id', pollId)
-      .eq('status', 'open')
+      .eq('status', 'active')
       .select('id')
       .limit(1000);
 
