@@ -73,4 +73,25 @@ describe('registry-routed command dispatches through the public inject() API', (
     expect(captured.has('reply')).toBe(true);
     expect(captured.count).toBeGreaterThan(0);
   });
+
+  it('a subcommand interaction exposes getSubcommand() + its options to the handler', () => {
+    // Subcommand commands (/giveaway start, /license activate, /xp add, …) read
+    // interaction.options.getSubcommand(). The scenario runner threads a
+    // `subcommand` through runSlash → buildSlashInteraction, so subcommand
+    // handlers run for real instead of being gated as "undrivable".
+    const interaction: any = buildSlashInteraction({
+      commandName: 'giveaway',
+      client: makeMinimalClient(),
+      subcommand: 'start',
+      options: { prize: 'Nitro', winners: 2 },
+    });
+    expect(interaction.commandName).toBe('giveaway');
+    expect(interaction.options.getSubcommand()).toBe('start');
+    expect(interaction.options.getString('prize')).toBe('Nitro');
+    expect(interaction.options.getInteger('winners')).toBe(2);
+    // A required getSubcommand on a plain (no-subcommand) command still throws,
+    // matching discord.js — so we never silently pass a missing selector.
+    const plain: any = buildSlashInteraction({ commandName: 'help', client: makeMinimalClient() });
+    expect(() => plain.options.getSubcommand(true)).toThrow();
+  });
 });
