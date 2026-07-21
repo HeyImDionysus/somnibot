@@ -109,21 +109,24 @@ export class AchievementsManager {
     for (const def of defs ?? []) {
       if (currentValue < def.condition_value) continue;
 
-      // Check if already unlocked
-      const { data: existing } = await this.supabase
+      // Idempotent unlock: INSERT ... ON CONFLICT DO NOTHING against
+      // UNIQUE(guild_id,user_id,achievement_id). A row is RETURNED only when
+      // this call actually inserted the unlock, so a concurrent check or a
+      // re-fire past the same threshold never pays the badge reward twice.
+      const { data: inserted, error: insErr } = await this.supabase
         .from('economy_user_achievements')
-        .select('id')
-        .eq('guild_id', guildId)
-        .eq('user_id', userId)
-        .eq('achievement_id', def.id)
-        .limit(1)
-        .single();
+        .upsert(
+          { guild_id: guildId, user_id: userId, achievement_id: def.id },
+          { onConflict: 'guild_id,user_id,achievement_id', ignoreDuplicates: true },
+        )
+        .select('id');
 
-      if (existing) continue;
-
-      await this.supabase.from('economy_user_achievements').insert({
-        guild_id: guildId, user_id: userId, achievement_id: def.id,
-      });
+      if (insErr) {
+        log.error(`Failed to unlock achievement ${def.id} for ${userId}:`, insErr.message);
+        continue;
+      }
+      // No returned row → the achievement was already unlocked; do not re-reward.
+      if (!inserted || inserted.length === 0) continue;
 
       if (def.reward_currency > 0) {
         const { error: rewardErr } = await this.supabase.rpc('economy_add_balance', {

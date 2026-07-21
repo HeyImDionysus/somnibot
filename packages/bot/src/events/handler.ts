@@ -29,6 +29,7 @@ import { processMessageXp, handleLevelUp } from '../features/levels/index.js';
 import { logMessageEdit, logMessageDelete } from '../features/message-log/index.js';
 import type { EconomyManager } from '../features/economy/economy-manager.js';
 import type { QuestsManager } from '../features/quests/quests-manager.js';
+import type { AchievementsManager } from '../features/achievements/achievements-manager.js';
 import {
   inspectTemporaryRoleGrant,
 } from '../services/temp-role-ownership.js';
@@ -740,6 +741,34 @@ export function registerEvents(client: SomniClient): void {
         const guild = message.guild;
         if (guild) {
           await handleLevelUp(guild, client.supabase, client.eventBus, message.author.id, xpResult.oldLevel, xpResult.newLevel, xpResult.newXp);
+        }
+      }
+
+      // Achievements: passive milestones (messages sent + level) unlock badges.
+      // checkAndUnlock is idempotent, so a re-fire past the same threshold is a
+      // no-op. Only runs on an actual XP grant (rate-limited), not every message.
+      if (xpResult.granted) {
+        const achMgr = guildCtx?.getManager<AchievementsManager>('achievements');
+        if (achMgr) {
+          const gId = message.guild!.id;
+          const uId = message.author.id;
+          const checks: Array<Promise<string | null>> = [];
+          if (typeof xpResult.totalMessages === 'number') {
+            checks.push(achMgr.checkAndUnlock(gId, uId, 'messages_sent', xpResult.totalMessages));
+          }
+          if (xpResult.leveledUp && xpResult.newLevel != null) {
+            checks.push(achMgr.checkAndUnlock(gId, uId, 'level', xpResult.newLevel));
+          }
+          if (checks.length > 0) {
+            const unlocked = (await Promise.all(checks)).filter((n): n is string => Boolean(n));
+            const channel = message.channel;
+            if (unlocked.length > 0 && channel.isTextBased() && 'send' in channel) {
+              for (const name of unlocked) {
+                channel.send({ content: `🏆 <@${uId}> unlocked the **${name}** achievement!` })
+                  .catch((e: unknown) => { log.warn('achievement announce failed:', (e as Error)?.message ?? e); });
+              }
+            }
+          }
         }
       }
     } catch (err) {

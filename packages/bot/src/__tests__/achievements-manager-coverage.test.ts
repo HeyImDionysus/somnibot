@@ -178,15 +178,11 @@ describe('AchievementsManager', () => {
         rpc: vi.fn().mockResolvedValue({ error: null }),
       };
 
-      // Track call count for different tables
       let configCalled = false;
-      let defsCalled = false;
-      let existingCalled = false;
-      let insertCalled = false;
 
       fromMock.mockImplementation((table: string) => {
         const chain: Record<string, any> = {};
-        const methods = ['select', 'eq', 'order', 'limit', 'single', 'insert', 'update', 'maybeSingle'];
+        const methods = ['select', 'eq', 'order', 'limit', 'single', 'insert', 'upsert', 'update', 'maybeSingle'];
         for (const m of methods) {
           chain[m] = vi.fn().mockReturnValue(chain);
         }
@@ -198,18 +194,13 @@ describe('AchievementsManager', () => {
             error: null,
           });
         } else if (table === 'economy_achievement_defs') {
-          defsCalled = true;
           chain.then = (resolve: (v: any) => void) => resolve({
             data: [{ id: 'a1', condition_type: 'messages_sent', condition_value: 50, reward_currency: 100, name: 'Chatterbox' }],
             error: null,
           });
-        } else if (table === 'economy_user_achievements' && !existingCalled) {
-          existingCalled = true;
-          // Check if already unlocked -> no
-          chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
-        } else if (table === 'economy_user_achievements' && existingCalled && !insertCalled) {
-          insertCalled = true;
-          chain.then = (resolve: (v: any) => void) => resolve({ data: {}, error: null });
+        } else if (table === 'economy_user_achievements') {
+          // Idempotent upsert inserted a new row → returns it.
+          chain.then = (resolve: (v: any) => void) => resolve({ data: [{ id: 'ua1' }], error: null });
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
@@ -267,7 +258,7 @@ describe('AchievementsManager', () => {
 
       fromMock.mockImplementation((table: string) => {
         const chain: Record<string, any> = {};
-        const methods = ['select', 'eq', 'order', 'limit', 'single', 'insert', 'update', 'maybeSingle'];
+        const methods = ['select', 'eq', 'order', 'limit', 'single', 'insert', 'upsert', 'update', 'maybeSingle'];
         for (const m of methods) {
           chain[m] = vi.fn().mockReturnValue(chain);
         }
@@ -283,8 +274,8 @@ describe('AchievementsManager', () => {
             error: null,
           });
         } else if (table === 'economy_user_achievements') {
-          // Already unlocked
-          chain.then = (resolve: (v: any) => void) => resolve({ data: { id: 'existing' }, error: null });
+          // Already unlocked → ON CONFLICT DO NOTHING returns no row.
+          chain.then = (resolve: (v: any) => void) => resolve({ data: [], error: null });
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
@@ -304,10 +295,9 @@ describe('AchievementsManager', () => {
         rpc: vi.fn().mockResolvedValue({ error: { message: 'rpc failed' } }),
       };
 
-      let checkCount = 0;
       fromMock.mockImplementation((table: string) => {
         const chain: Record<string, any> = {};
-        const methods = ['select', 'eq', 'order', 'limit', 'single', 'insert', 'update', 'maybeSingle'];
+        const methods = ['select', 'eq', 'order', 'limit', 'single', 'insert', 'upsert', 'update', 'maybeSingle'];
         for (const m of methods) {
           chain[m] = vi.fn().mockReturnValue(chain);
         }
@@ -323,14 +313,8 @@ describe('AchievementsManager', () => {
             error: null,
           });
         } else if (table === 'economy_user_achievements') {
-          checkCount++;
-          if (checkCount === 1) {
-            // Not unlocked yet
-            chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
-          } else {
-            // Insert
-            chain.then = (resolve: (v: any) => void) => resolve({ data: {}, error: null });
-          }
+          // Newly inserted → reward is attempted (and its RPC error is swallowed).
+          chain.then = (resolve: (v: any) => void) => resolve({ data: [{ id: 'ua1' }], error: null });
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
