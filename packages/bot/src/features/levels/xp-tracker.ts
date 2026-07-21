@@ -45,6 +45,8 @@ export interface XpResult {
   oldLevel?: number;
   newLevel?: number;
   leveledUp?: boolean;
+  /** Member's post-increment total_messages (for the 'messages_sent' achievement). */
+  totalMessages?: number;
 }
 
 // Per-guild caches — keyed by guildId to support multi-guild
@@ -263,6 +265,7 @@ export async function processMessageXp(
     oldLevel,
     newLevel,
     leveledUp: newLevel > oldLevel,
+    totalMessages: result.total_messages,
   };
 }
 
@@ -324,6 +327,7 @@ export async function grantVoiceXp(
     oldLevel,
     newLevel,
     leveledUp: newLevel > oldLevel,
+    totalMessages: result.total_messages,
   };
 }
 
