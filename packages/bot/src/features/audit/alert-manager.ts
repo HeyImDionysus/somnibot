@@ -147,10 +147,19 @@ export class AlertManager {
             })
             .eq('id', existing.id);
         } else {
-          // Create new alert
-          await this.supabase
+          // Create new alert. The partial unique index
+          // uniq_alerts_unresolved_diagnostics fences concurrent openers of the
+          // same diagnostic type across processes/shards (the in-memory
+          // activeAlerts Set is empty on a fresh boot, so it can't). A 23505
+          // here means another evaluation already opened this exact alert — the
+          // intended single-row outcome, not a failure; fall through and treat
+          // it as open. Any other error surfaces via the catch below.
+          const { error: insertErr } = await this.supabase
             .from('alerts')
             .insert(alert);
+          if (insertErr && (insertErr as { code?: string }).code !== '23505') {
+            throw insertErr;
+          }
         }
 
         this.activeAlerts.add(alert.alert_type);
