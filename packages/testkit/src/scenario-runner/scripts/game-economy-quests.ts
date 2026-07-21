@@ -501,6 +501,45 @@ async function proveSlateSizing(
   });
 }
 
+/**
+ * Drive the REAL /quests view for a fresh per-scenario member and assert the
+ * branded 'Your Quests' board embed renders (first view assigns the slate, the
+ * second renders it). Live via the subcommand injector — no gate.
+ */
+async function proveBranding(ctx: ScenarioContext, handle: LiveClientHandle): Promise<void> {
+  // A fixed 'brand' member; each scenario runs in its own guild, so the same id
+  // across scenarios never collides (progress rows are guild-scoped).
+  const u = ctx.userId('brand');
+  await ctx.runSlash(handle, { commandName: 'quests', userId: u, subcommand: 'view' });
+  const board = await ctx.runSlash(handle, { commandName: 'quests', userId: u, subcommand: 'view' });
+  const replies = board.allOf('reply');
+  const last = replies[replies.length - 1]?.payload as
+    | { embeds?: Array<{ data?: { title?: string } }> }
+    | undefined;
+  const title = last?.embeds?.[0]?.data?.title ?? '';
+  ctx.expect(typeof title === 'string' && title.includes('Quests'), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'The /quests view board renders as a branded embed listing the member’s active quests.',
+    observation: `/quests view replied with an embed titled ${JSON.stringify(title)} (expected a "Quests" board).`,
+    impact: 'The /quests view branded board did not render.',
+  });
+}
+
+/** When quests are disabled, /quests view replies with the branded disabled notice. */
+async function proveDisabledReply(ctx: ScenarioContext, handle: LiveClientHandle): Promise<void> {
+  const captured = await ctx.runSlash(handle, { commandName: 'quests', userId: ctx.userId('disabled'), subcommand: 'view' });
+  const replies = captured.allOf('reply');
+  const content = String((replies[replies.length - 1]?.payload as { content?: string } | undefined)?.content ?? '');
+  ctx.expect(content.toLowerCase().includes('not enabled'), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'When quests are disabled, /quests view explains the feature is off rather than rendering a board.',
+    observation: `/quests view replied ${JSON.stringify(content)} (expected a "not enabled" notice).`,
+    impact: 'The disabled-quests path did not surface the feature-off notice.',
+  });
+}
+
 function gateReplayDeferredTo(ctx: ScenarioContext, where: string): void {
   ctx.gate(
     'replay-safety',
@@ -788,7 +827,7 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveDisabledReply(ctx, handle);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
@@ -829,7 +868,7 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   await proveQuestAudit(ctx, handle);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveBranding(ctx, handle);
   // The non-admin dashboard save refusal is a dashboard session-auth lane.
   ctx.gate(
     'Discord',
@@ -1035,7 +1074,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
   await proveQuestAudit(ctx, second);
   await proveRlsIsolation(ctx, second, userA);
   await proveNoOwnerAlert(ctx, second);
-  gateBranding(ctx);
+  await proveBranding(ctx, second);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
@@ -1196,7 +1235,7 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
 
   await proveQuestAudit(ctx, handleB);
   await proveNoOwnerAlert(ctx, handleA);
-  gateBranding(ctx);
+  await proveBranding(ctx, handleA);
   gateLiveGuildReadback(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
