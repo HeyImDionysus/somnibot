@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 146 migration files in packages/supabase/migrations/
+ * Source: 147 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -649,6 +649,7 @@ export interface DbAutomationExecution {
   errors: Record<string, unknown>[];
   duration_ms: number | null;
   created_at: string;
+  occurrence_id: string | null;
 }
 
 export interface DbCustomCommand {

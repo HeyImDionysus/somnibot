@@ -5,7 +5,7 @@
  * Listens to platform events → matches triggers → evaluates scope/conditions → executes actions.
  */
 import type { Guild, GuildMember, Message } from 'discord.js';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { PlatformEvent, PlatformEventType } from '@somnibot/shared';
@@ -17,6 +17,17 @@ import type { AlertService } from '../../services/alert-service.js';
 import { AUTOMATION_LIMITS , createLogger } from '@somnibot/shared';
 import { AutomationRateLimiter } from './rate-limiter.js';
 import { ExecutionLogger, type ExecutionResult } from './execution-logger.js';
+
+/**
+ * A stable, uuid-shaped id derived from a durable seed. Same seed → same id, so
+ * a redelivered gateway occurrence maps to the same automation occurrence id
+ * (and the same automation_executions claim), which is how a redelivery is
+ * recognized and skipped. Not RFC-versioned — only stability + uniqueness matter.
+ */
+function stableUuid(seed: string): string {
+  const h = createHash('sha256').update(seed).digest('hex');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
 
 const log = createLogger('AutomationEngine');
 
@@ -205,6 +216,27 @@ export class AutomationEngine {
       }
     }
 
+    // 2b. Durable occurrence claim (BEFORE any action runs). A redelivered
+    //     gateway occurrence resolves to the same occurrenceId and its claim
+    //     INSERT hits automation_executions_occurrence_uidx (23505) → claimed
+    //     false → skip, so grant_entitlement / send_message / give_role never
+    //     re-fire for the same occurrence. Events with no durable key get a
+    //     random occurrenceId that never collides (unchanged behavior).
+    const claim = await this.executionLogger.claim({
+      automationId: automation.id,
+      guildId: this.guild.id,
+      triggeredBy: userId,
+      triggerEvent: event.type,
+      occurrenceId: ctx.occurrenceId,
+    });
+    if (!claim.claimed) {
+      log.info(
+        `Duplicate occurrence for "${automation.name}" (occurrence ${ctx.occurrenceId}) — skipping re-execution`,
+      );
+      return;
+    }
+    const claimRowId = claim.rowId;
+
     // 3. Evaluate conditions
     const conditionCtx: ConditionContext = {
       guild: this.guild,
@@ -222,8 +254,8 @@ export class AutomationEngine {
     );
 
     if (!conditionsPassed) {
-      // Log the execution as conditions-failed
-      await this.executionLogger.log({
+      // Finalize the claimed row as conditions-failed (no actions ran).
+      await this.executionLogger.finalize(claimRowId, {
         automationId: automation.id,
         guildId: this.guild.id,
         triggeredBy: userId,
@@ -281,7 +313,7 @@ export class AutomationEngine {
       durationMs: Date.now() - startTime,
     };
 
-    await this.executionLogger.log(result);
+    await this.executionLogger.finalize(claimRowId, result);
 
     // V53 Phase 2: Track success/failure for alert service
     if (this.alertService) {
@@ -345,6 +377,67 @@ export class AutomationEngine {
    * Build the event context from platform event data.
    * Maps event data to member, channel, message, and template variables.
    */
+  /**
+   * A durable occurrence id for the event: a STABLE id derived from the event's
+   * durable Discord-native identity when one exists (so a gateway redelivery of
+   * the same occurrence resolves to the same id and is deduped), otherwise a
+   * fresh random id (events with no reliably-durable per-occurrence key are never
+   * deduped — unchanged behavior, and no false-dedup of legitimately repeatable
+   * events like member.joined / role.gained / voice.joined).
+   */
+  private occurrenceIdFor(event: PlatformEvent, data: Record<string, unknown>): string {
+    const key = this.durableOccurrenceKey(event, data);
+    return key ? stableUuid(key) : randomUUID();
+  }
+
+  private durableOccurrenceKey(event: PlatformEvent, data: Record<string, unknown>): string | null {
+    const g = event.guildId;
+    const t = event.type;
+    const s = (v: unknown): string | null =>
+      typeof v === 'string' && v ? v : typeof v === 'number' ? String(v) : null;
+    switch (t) {
+      case 'message.sent': {
+        // A message id is unique and immutable — a redelivery repeats it, and it
+        // can never be legitimately re-sent, so it's a safe durable key.
+        const m = s(data.messageId);
+        return m ? `${t}:${g}:${m}` : null;
+      }
+      // NOTE: reaction.added deliberately has NO durable key. Discord reactions
+      // carry no per-event id, and a remove-then-readd of the same (message,
+      // user, emoji) tuple is a LEGITIMATE new occurrence — indistinguishable
+      // from a gateway redelivery by tuple alone. Keying on the tuple would
+      // wrongly dedupe the re-add, so reaction.added keeps a random id.
+      case 'purchase.completed': {
+        const o = s(data.orderId) ?? s(data.orderNumber);
+        return o ? `${t}:${g}:${o}` : null;
+      }
+      case 'ticket.opened':
+      case 'ticket.closed': {
+        const k = s(data.ticketId) ?? s(data.ticketNumber);
+        return k ? `${t}:${g}:${k}` : null;
+      }
+      case 'giveaway.ended': {
+        const k = s(data.giveawayId) ?? s(data.messageId);
+        return k ? `${t}:${g}:${k}` : null;
+      }
+      case 'level.up': {
+        const u = s(data.discordId);
+        const lvl = s(data.newLevel);
+        return u && lvl ? `${t}:${g}:${u}:${lvl}` : null;
+      }
+      case 'member.verified': {
+        const u = s(data.discordId);
+        return u ? `${t}:${g}:${u}` : null;
+      }
+      case 'infraction.created': {
+        const k = s(data.infractionId);
+        return k ? `${t}:${g}:${k}` : null;
+      }
+      default:
+        return null;
+    }
+  }
+
   private buildEventContext(event: PlatformEvent): AutomationEventContext {
     const data = event.data as Record<string, unknown>;
     const variables: Record<string, string> = {};
@@ -450,7 +543,7 @@ export class AutomationEngine {
       messageId,
       message: null, // Message object needs to be attached separately for message-based triggers
       variables,
-      occurrenceId: randomUUID(),
+      occurrenceId: this.occurrenceIdFor(event, data),
       // One budget per event: buildEventContext is called exactly once per
       // event (handleEvent / processMessageEvent / processReactionEvent), so
       // every automation processed for this event draws from the same budget.

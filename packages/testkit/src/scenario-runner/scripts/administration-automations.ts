@@ -31,13 +31,13 @@
  *     cleanup sweep (operational rows deleted, `audit_logs` retained per the
  *     anonymize-over-delete contract; a second sweep is a safe no-op).
  *
- * Behavior-bug discovery (never forced green): the catalog contracts durable,
- * exactly-once-per-occurrence execution (REPLAY/RESTART/RACE) keyed on an
- * occurrence id, but `automation_executions` has NO occurrence_id (or any
- * idempotency-key) column and the engine mints an in-memory occurrenceId per event
- * that is never persisted. That divergence is surfaced as a REAL FAIL in REPLAY —
- * a finding for the owner (the durable-occurrence pipeline is not yet wired) — not
- * softened into a gate.
+ * Durable occurrence idempotency: the catalog contracts exactly-once-per-occurrence
+ * execution (REPLAY/RESTART/RACE) keyed on an occurrence id. `automation_executions`
+ * now has an occurrence_id column + UNIQUE(guild_id, automation_id, occurrence_id),
+ * and the engine stakes a claim on it BEFORE running actions (deriving a STABLE
+ * occurrence id from the event's durable Discord-native identity). REPLAY proves the
+ * DB-level exactly-once dedup directly; the observable Discord-side "exactly once
+ * after redelivery" still needs a live gateway and is gated.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -170,6 +170,41 @@ async function insertExecution(
     duration_ms: 5,
   });
   return error?.message ?? null;
+}
+
+/** Insert an execution row carrying a durable occurrence_id (the dedup claim). */
+async function insertExecutionWithOccurrence(
+  handle: LiveClientHandle,
+  automationId: string,
+  occurrenceId: string,
+): Promise<string | null> {
+  const { error } = await handle.supabase.from('automation_executions').insert({
+    automation_id: automationId,
+    guild_id: handle.guildId,
+    triggered_by: 'system',
+    trigger_event: 'member.joined',
+    conditions_passed: true,
+    actions_executed: 1,
+    actions_failed: 0,
+    errors: [],
+    duration_ms: 5,
+    occurrence_id: occurrenceId,
+  });
+  return error?.message ?? null;
+}
+
+async function occurrenceRowCount(
+  handle: LiveClientHandle,
+  automationId: string,
+  occurrenceId: string,
+): Promise<number> {
+  const { count } = await handle.supabase
+    .from('automation_executions')
+    .select('*', { count: 'exact', head: true })
+    .eq('guild_id', handle.guildId)
+    .eq('automation_id', automationId)
+    .eq('occurrence_id', occurrenceId);
+  return count ?? 0;
 }
 
 async function executionCount(handle: LiveClientHandle): Promise<number> {
@@ -687,7 +722,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
   gateBrandingNoReply(ctx);
 }
 
-/** REPLAY — the exactly-once-per-occurrence contract is unbacked by the schema (FAIL). */
+/** REPLAY — the exactly-once-per-occurrence contract is backed by the occurrence-id unique claim. */
 async function REPLAY(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
 
@@ -695,28 +730,33 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   const { id } = await insertAutomation(ctx, handle, { suffix: 'replay', triggerType: 'member.joined' });
   if (id) await insertExecution(handle, id, { triggerEvent: 'member.joined' });
 
-  // REAL divergence (a finding, never softened): the catalog contracts "exactly one
-  // execution row per occurrence id" and occurrence-id dedup under redelivery, but
-  // `automation_executions` has NO occurrence_id (or any idempotency-key) column —
-  // selecting it errors. The engine mints an in-memory occurrenceId (randomUUID) per
-  // event that is never persisted, so a redelivered gateway occurrence would write a
-  // SECOND execution row and re-run its actions rather than dedup.
-  const { error: occErr } = await handle.supabase
-    .from('automation_executions')
-    .select('occurrence_id')
-    .eq('guild_id', handle.guildId)
-    .limit(1);
-  ctx.expect(occErr === null, {
+  // The exactly-once-per-occurrence contract is now backed by the schema: a
+  // durable occurrence_id column + UNIQUE(guild_id, automation_id, occurrence_id).
+  // Prove it directly — two execution rows for the SAME occurrence: the first
+  // inserts, the second is rejected by the unique index (23505), leaving exactly
+  // one row. (The engine stakes this claim BEFORE running actions, so a
+  // redelivered gateway occurrence dedups to a single execution.)
+  let dedupProven = false;
+  let dedupObservation = 'no automation available to probe occurrence dedup';
+  if (id) {
+    const occ = `${ctx.runPrefix}occ-1`;
+    const first = await insertExecutionWithOccurrence(handle, id, occ);
+    const second = await insertExecutionWithOccurrence(handle, id, occ);
+    const rows = await occurrenceRowCount(handle, id, occ);
+    dedupProven = first === null && second !== null && rows === 1;
+    dedupObservation =
+      `first insert=${first ?? 'ok'}, ` +
+      `replay insert=${second ?? 'ok (UNEXPECTED — duplicate accepted)'}, ` +
+      `rows for the occurrence=${rows} (expected 1).`;
+  }
+  ctx.expect(dedupProven, {
     assertionClass: 'replay-safety',
     channel: 'db-observable',
     promise:
       'The execution log persists a durable occurrence id per event occurrence so a redelivered occurrence dedups to exactly one execution row (never double-executing roles/messages/DMs).',
-    observation:
-      occErr === null
-        ? 'automation_executions exposes an occurrence_id column for per-occurrence dedup.'
-        : `selecting occurrence_id from automation_executions errored: ${occErr.message}`,
+    observation: dedupObservation,
     impact:
-      'automation_executions has no occurrence_id (or any idempotency-key) column, so the catalog’s "exactly one execution row per occurrence id" contract is unbacked by the persisted schema: the engine’s occurrenceId is an in-memory randomUUID that is never persisted, so a redelivered gateway occurrence writes a SECOND execution row and re-runs its actions. The durable-occurrence pipeline is not yet wired (follow-up).',
+      'automation_executions does not enforce one execution per occurrence id, so a redelivered gateway occurrence would write a SECOND execution row and re-run its actions — a replay-safety regression on side effects including grant_entitlement.',
   });
 
   await proveRlsIsolation(ctx, handle, 'automation_executions', await executionCount(handle));
