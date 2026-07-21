@@ -34,12 +34,52 @@ export async function executeAutoModAction(
     escalationChain: EscalationStep[];
     infractionExpiryDays: number;
     modLogChannelId: string | null;
+    automodEnabled: boolean;
+    automodMode: 'observe' | 'enforce';
   },
 ): Promise<void> {
   const member = message.member;
   if (!member) return;
 
   const fullReason = `[Auto-Mod: ${rule.name}] ${violationReason}`;
+
+  // Observe-only mode (the shipped default): record the would-be violation and
+  // touch NOTHING — no delete, timeout, kick, ban, or infraction. Enforcement runs
+  // only in 'enforce' mode, after the owner explicitly opts in.
+  if (modConfig.automodMode !== 'enforce') {
+    try {
+      await postModLogEntry(client, {
+        action: rule.action,
+        member,
+        moderator: 'System (Auto-Mod — OBSERVE, no action taken)',
+        reason: `[observe] would ${rule.action}: ${fullReason}`,
+        channelId: modConfig.modLogChannelId,
+        ruleType: rule.type,
+      });
+    } catch (err) {
+      log.error('Failed to post observe mod-log entry:', err);
+    }
+    try {
+      await writeAuditLog(client.supabase, {
+        guildId: message.guild!.id,
+        actorType: 'bot',
+        actorId: 'automod',
+        action: `automod.observe.${rule.action}`,
+        targetType: 'message',
+        targetId: message.id,
+        details: {
+          rule: rule.name,
+          ruleType: rule.type,
+          violation: violationReason,
+          wouldAction: rule.action,
+          channelId: message.channel.id,
+        },
+      });
+    } catch (err) {
+      log.error('Failed to write observe audit log:', err);
+    }
+    return;
+  }
 
   // Always try to delete the offending message (except 'warn'-only with no delete)
   if (rule.action !== 'warn') {

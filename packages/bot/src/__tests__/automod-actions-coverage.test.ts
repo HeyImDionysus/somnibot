@@ -87,6 +87,8 @@ const defaultModConfig = {
   escalationChain: [] as any[],
   infractionExpiryDays: 30,
   modLogChannelId: 'mod-ch',
+  automodEnabled: true,
+  automodMode: 'enforce' as const, // these tests assert enforcement
 };
 
 describe('executeAutoModAction', () => {

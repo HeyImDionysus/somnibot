@@ -101,6 +101,8 @@ describe('automod-engine', () => {
       escalationChain: [],
       infractionExpiryDays: 30,
       modLogChannelId: null,
+      automodEnabled: true,
+      automodMode: 'enforce' as const,
     };
 
     it('returns false when no guild', async () => {
@@ -446,6 +448,8 @@ describe('automod-engine', () => {
       escalationChain: [],
       infractionExpiryDays: 30,
       modLogChannelId: null,
+      automodEnabled: true,
+      automodMode: 'enforce' as const,
     };
 
     it('bails out of the word loop when the per-message budget is exceeded — no match, no punishment', async () => {

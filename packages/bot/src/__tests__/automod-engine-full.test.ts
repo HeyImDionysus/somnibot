@@ -91,6 +91,8 @@ const modConfig = {
   escalationChain: [],
   infractionExpiryDays: 30,
   modLogChannelId: null,
+  automodEnabled: true,
+  automodMode: 'enforce' as const,
 };
 
 describe('processMessage — bail-out conditions', () => {

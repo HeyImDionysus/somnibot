@@ -170,6 +170,8 @@ export async function processMessage(
     escalationChain: EscalationStep[];
     infractionExpiryDays: number;
     modLogChannelId: string | null;
+    automodEnabled: boolean;
+    automodMode: 'observe' | 'enforce';
   },
 ): Promise<boolean> {
   // Quick bail-outs

@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 140 migration files in packages/supabase/migrations/
+ * Source: 141 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -378,6 +378,8 @@ export interface DbGuildConfig {
   data_retention_days: number;
   ticket_satisfaction_survey: boolean;
   anti_raid_auto_unban: boolean;
+  automod_enabled: boolean;
+  automod_mode: 'observe' | 'enforce';
 }
 
 export interface DbInstanceSettings {
