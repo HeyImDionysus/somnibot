@@ -60,9 +60,15 @@ vi.mock('../features/automations/rate-limiter.js', () => ({
 }));
 
 const mockLogExecution = vi.fn().mockResolvedValue(undefined);
+// The engine now stakes a durable occurrence claim before running, then
+// finalizes it with the result (replacing the old single log() insert).
+const mockClaim = vi.fn().mockResolvedValue({ claimed: true, rowId: 'exec-1' });
+const mockFinalize = vi.fn().mockResolvedValue(undefined);
 vi.mock('../features/automations/execution-logger.js', () => ({
   ExecutionLogger: class {
     log = mockLogExecution;
+    claim = mockClaim;
+    finalize = mockFinalize;
   },
 }));
 
@@ -197,7 +203,7 @@ describe('AutomationEngine', () => {
       // Wait for async processAutomation
       await new Promise((r) => setTimeout(r, 50));
       expect(mockExecuteActions).toHaveBeenCalled();
-      expect(mockLogExecution).toHaveBeenCalled();
+      expect(mockFinalize).toHaveBeenCalled();
     });
 
     it('skips automation when scope excludes user', async () => {
@@ -306,8 +312,9 @@ describe('AutomationEngine', () => {
       });
 
       await new Promise((r) => setTimeout(r, 50));
-      expect(mockLogExecution).toHaveBeenCalled();
-      const logged = mockLogExecution.mock.calls[0][0];
+      expect(mockFinalize).toHaveBeenCalled();
+      // finalize(rowId, result) — the result object is the second arg.
+      const logged = mockFinalize.mock.calls[0][1];
       expect(logged.conditionsPassed).toBe(false);
     });
 
@@ -616,6 +623,35 @@ describe('AutomationEngine', () => {
         mockExecuteActions.mock.calls[1]?.[1] as { occurrenceId: string }
       ).occurrenceId;
       expect(secondOccurrence).not.toBe(firstOccurrence);
+    });
+  });
+
+  // ── durable occurrence claim dedup ──────
+  describe('occurrence claim dedup', () => {
+    it('skips re-execution when the occurrence claim is rejected (redelivery)', async () => {
+      const auto = makeAutomation();
+      mockGetForTrigger.mockReturnValue([auto]);
+      mockEvaluateConditions.mockResolvedValue(true);
+      mockExecuteActions.mockResolvedValue({ executed: 1, failed: 0, errors: [] });
+      // First delivery claims the occurrence; the redelivery's claim is rejected
+      // (the unique index → 23505 → claimed:false), so actions must NOT re-run.
+      mockClaim
+        .mockResolvedValueOnce({ claimed: true, rowId: 'r1' })
+        .mockResolvedValueOnce({ claimed: false, rowId: null });
+      await engine.start();
+
+      const message = { id: 'msg1', content: 'hi', channel: { id: 'ch1' } };
+      const event = {
+        type: 'message.sent',
+        guildId: 'g1',
+        data: { discordId: 'u1', channelId: 'ch1', messageId: 'msg1', content: 'hi' },
+      };
+      await engine.processMessageEvent(event as any, message as any);
+      await engine.processMessageEvent(event as any, message as any); // redelivery
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Exactly one execution despite two deliveries of the same occurrence.
+      expect(mockExecuteActions).toHaveBeenCalledTimes(1);
     });
   });
 
