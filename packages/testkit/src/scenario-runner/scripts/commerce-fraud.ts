@@ -850,15 +850,46 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   });
   await proveTableRls(ctx, 'fraud_signals', guildId, await signalCount(handle, guildId));
 
-  // The signal-level replay dedup ("re-evaluating the same order set appends no
-  // duplicate signal") is detector-driven AND — per the shipped bot — has no DB
-  // idempotency key: createSignal writes unconditionally and fraud_signals has no
-  // unique/identity constraint. Gated, with the divergence flagged for the owner.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'Re-processing the same commerce events / re-delivering the triggering events appends no duplicate fraud_signals for the same crossing.',
-    'signal dedup is detector-driven and the bot has no DB idempotency key on fraud_signals (createSignal inserts unconditionally), so re-running the detector would append a duplicate signal — a probable divergence flagged for the owner; confirming needs a commerce event re-delivery lane',
+  // Signal-level replay dedup: the same (guild, signal_type, entity) inserted
+  // twice leaves exactly one OPEN fraud_signals row (uniq_open_signal_entity
+  // partial index). The shipped createSignal now treats the 23505 conflict as an
+  // idempotent no-op (and only alerts on a genuinely new signal), so a
+  // re-delivered commerce event never duplicates a signal or re-DMs the owner.
+  const dedupEntity = `${ctx.runPrefix}dedup-cust`;
+  const dedupFirst = await insertSignal(handle, guildId, {
+    signalType: 'velocity',
+    severity: 'high',
+    entityId: dedupEntity,
+    evidence: { order_count: 8, window_minutes: 60, threshold: 5 },
+  });
+  const dedupSecond = await insertSignal(handle, guildId, {
+    signalType: 'velocity',
+    severity: 'high',
+    entityId: dedupEntity,
+    evidence: { order_count: 9, window_minutes: 60, threshold: 5 },
+  });
+  const { count: openDedupRows } = await handle.supabase
+    .from('fraud_signals')
+    .select('*', { count: 'exact', head: true })
+    .eq('guild_id', guildId)
+    .eq('signal_type', 'velocity')
+    .eq('entity_type', 'customer')
+    .eq('entity_id', dedupEntity)
+    .eq('status', 'open');
+  ctx.expect(
+    dedupFirst.error === null && dedupSecond.error !== null && (openDedupRows ?? -1) === 1,
+    {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise:
+        'Re-processing the same commerce events / re-delivering the triggering events appends no duplicate fraud_signals for the same crossing (one open signal per (guild, signal_type, entity)).',
+      observation:
+        `first insert error=${dedupFirst.error ?? 'none'}, ` +
+        `replay insert error=${dedupSecond.error ?? 'none (UNEXPECTED — duplicate accepted)'}, ` +
+        `open signal rows for the entity=${openDedupRows ?? 'null'} (expected 1).`,
+      impact:
+        'A re-delivered commerce webhook duplicated a fraud signal, inflating the critical-signal count and risking a falsely auto-opened incident (a replay-safety regression on fraud detection).',
+    },
   );
   ctx.gate(
     'audit',
