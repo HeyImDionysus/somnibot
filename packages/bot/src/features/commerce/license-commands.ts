@@ -140,12 +140,32 @@ async function handleActivate(
     return;
   }
 
-  // Activate the key
+  // Activate the key atomically. The JS status checks above are a check-then-act
+  // that two concurrent /license activate calls can both pass, so guard the flip
+  // on the current status: only the writer that actually transitions a
+  // `pending_activation` row wins. A lost race updates zero rows and must NOT
+  // re-grant the entitlement/roles or write a second key.activated audit entry.
   const now = new Date().toISOString();
-  await supabase
+  const { data: activatedRows } = await supabase
     .from('license_keys')
     .update({ status: 'active', activated_at: now, updated_at: now })
-    .eq('id', licenseKey.id);
+    .eq('id', licenseKey.id)
+    .eq('status', 'pending_activation')
+    .select('id');
+
+  if (!activatedRows || activatedRows.length === 0) {
+    // Another concurrent activation already flipped the key. Report success
+    // (the key is active) without double-granting.
+    await interaction.editReply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xFEE75C)
+          .setTitle('⚠️ Already Activated')
+          .setDescription('This license key is already active.'),
+      ],
+    });
+    return;
+  }
 
   // Update entitlement to active
   await supabase
