@@ -29,13 +29,22 @@ interface CreateSignalParams {
 // ── Signal Creation ────────────────────────────────────────
 
 async function createSignal(ctx: FraudContext, params: CreateSignalParams): Promise<void> {
-  await ctx.supabase.from('fraud_signals').insert({
+  const { error } = await ctx.supabase.from('fraud_signals').insert({
     guild_id: ctx.guildId,
     ...params,
     status: 'open',
   });
 
-  // Notify owner via event bus (if available)
+  if (error) {
+    // 23505 = an OPEN signal for this (guild, signal_type, entity) already
+    // exists (uniq_open_signal_entity partial index). A re-delivered webhook or
+    // re-run detector must not duplicate the signal OR re-alert the owner —
+    // treat the conflict as an idempotent no-op. Any other insert error is a
+    // genuine failure; do not emit a fraud alert we didn't durably record.
+    return;
+  }
+
+  // Notify owner via event bus only when a NEW signal was actually recorded.
   ctx.eventBus?.emit('fraud.detected', ctx.guildId, {
     signal: params.signal_type,
     severity: params.severity,
