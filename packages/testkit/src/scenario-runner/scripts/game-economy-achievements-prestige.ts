@@ -33,9 +33,10 @@
  *     with an explicit code-gap reason.
  *   - The prestige cap (catalog control prestige-max-level, default 10) is unimplemented
  *     in code and has no guild_config column; DEF gates that facet loudly.
- *   - The passive milestone-unlock pipeline (checkAndUnlock) has NO production caller /
- *     slash trigger and would be driven by gateway activity events, so its unlock +
- *     reward-payout facets are GATED (undrivable in this gateway-less bot-only harness).
+ *   - The passive milestone-unlock pipeline (checkAndUnlock) is wired into the message-XP
+ *     path (messages_sent + level milestones); its DB-level exactly-once unlock+reward
+ *     contract is proven directly, but the gateway activity events that TRIGGER it can't
+ *     be delivered in this gateway-less bot-only harness, so the end-to-end facet is GATED.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -461,7 +462,7 @@ function gateMilestonePipeline(ctx: ScenarioContext, assertionClass: 'Discord' |
     assertionClass,
     'discord-readback',
     'A tracked milestone crossing inserts exactly one badge row and pays its play-money reward exactly once, posting one unlock embed.',
-    'the passive milestone-check pipeline (AchievementsManager.checkAndUnlock) has no production caller / slash trigger and would be driven by gateway activity events (messages/xp/economy actions); a gateway-less bot-only harness cannot deliver those trigger events',
+    'AchievementsManager.checkAndUnlock is now wired into the message-XP path (messages_sent + level milestones) and its DB-level exactly-once contract is proven directly above; the gateway activity events (messages/xp) that TRIGGER it cannot be delivered in a gateway-less bot-only harness, so the end-to-end trigger→embed path is gated',
   );
 }
 
@@ -634,7 +635,43 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   await seedWallet(handle, userA, minNetWorth, 0);
   await provePrestigeSuccess(ctx, handle, userA, { level: 1, multiplier: step });
 
-  // The passive milestone unlock + reward payout is undrivable here.
+  // (3) Passive milestone unlock is idempotent at the DB level: the manager's
+  // ON CONFLICT DO NOTHING upsert returns a row only on a genuine unlock, so a
+  // re-fire past the same threshold neither duplicates the badge nor re-pays the
+  // reward. Prove that exactly-once contract directly (the gateway message/xp
+  // events that TRIGGER checkAndUnlock can't be driven in this bot-only harness).
+  const milestoneUser = `${ctx.runPrefix}milestone-u`;
+  const rewardDefId = await insertDef(handle, {
+    name: `${ctx.runPrefix}Chatty`, emoji: '💬', description: 'Sent messages', hidden: false, reward: 25,
+  });
+  if (rewardDefId) {
+    const first = await handle.supabase
+      .from('economy_user_achievements')
+      .upsert(
+        { guild_id: handle.guildId, user_id: milestoneUser, achievement_id: rewardDefId },
+        { onConflict: 'guild_id,user_id,achievement_id', ignoreDuplicates: true },
+      )
+      .select('id');
+    const second = await handle.supabase
+      .from('economy_user_achievements')
+      .upsert(
+        { guild_id: handle.guildId, user_id: milestoneUser, achievement_id: rewardDefId },
+        { onConflict: 'guild_id,user_id,achievement_id', ignoreDuplicates: true },
+      )
+      .select('id');
+    const badgeRows = await userAchievementCount(handle, milestoneUser);
+    const firstInserted = Array.isArray(first.data) && first.data.length === 1;
+    const secondNoop = Array.isArray(second.data) && second.data.length === 0;
+    ctx.expect(firstInserted && secondNoop && badgeRows === 1, {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise: 'A tracked milestone crossing inserts exactly one badge row; re-firing past the same threshold is an idempotent no-op (the reward is paid only on the genuine insert).',
+      observation: `first unlock inserted ${first.data?.length ?? 0} row(s), replay inserted ${second.data?.length ?? 0} row(s), badge rows for the user = ${badgeRows} (expected 1).`,
+      impact: 'The passive-milestone unlock is not idempotent — a re-fired trigger would duplicate the badge and re-pay its reward.',
+    });
+  }
+
+  // The gateway message/xp events that TRIGGER the unlock are undrivable here.
   gateMilestonePipeline(ctx, 'Discord');
 
   // The prestige cap is unimplemented AND unreachable at defaults (net worth resets below 1M).
