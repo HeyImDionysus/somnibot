@@ -21,7 +21,8 @@
  * the bot itself runs:
  *   - poll rows + options land the same shape `createPoll` writes (status defaults to
  *     'active' via the DB default, the exact value the vote/close paths read);
- *   - single-choice voting is the bot's own `poll_vote_single` RPC (insert-if-no-vote);
+ *   - single-choice voting is the bot's own `poll_vote_switch_single` RPC (atomic
+ *     replace-prior-vote, so a re-vote switches the member's choice);
  *   - `prediction_bets` UNIQUE(prediction_id,user_id) + CHECK(amount>0) are the exact
  *     gates `placeBet` relies on for dedupe and amount validation;
  *   - the ticket debit / pool increment / winner payout use the EXACT RPCs
@@ -39,11 +40,7 @@
  *      flip filters `... WHERE status = 'open'` — a value the constraint forbids — so
  *      the UPDATE matches zero rows and every close no-ops as "already closed" with no
  *      tally ever posted. Proven by running that exact UPDATE against a real poll.
- *   2. Single-choice vote-switching is unsupported: `poll_vote_single` only inserts
- *      when the member has NO existing vote on the poll, so a member's second selection
- *      is a no-op and their prior vote stands — contradicting DEF's contracted
- *      vote-switching. Proven by driving the RPC twice.
- *   3. SET-A's raised minimum bet (100) has no implementation: guild_config has no
+ *   2. SET-A's raised minimum bet (100) has no implementation: guild_config has no
  *      `prediction_min_bet` column and `prediction_bets` has no floor beyond
  *      CHECK(amount>0), so a 50-coin bet persists. Proven by the column read erroring
  *      and the sub-minimum bet row inserting.
@@ -214,14 +211,15 @@ async function countPollOptions(handle: LiveClientHandle, pollId: string): Promi
   return count ?? 0;
 }
 
-/** The EXACT single-choice vote primitive the bot runs (insert-if-no-existing-vote). Returns rows inserted. */
+/** The EXACT single-choice vote primitive the bot runs: an atomic switch that
+ * removes the member's prior vote on the poll and records the new option. */
 async function voteSingle(
   handle: LiveClientHandle,
   pollId: string,
   optionId: string,
   userId: string,
 ): Promise<{ inserted: number; error: PgErr }> {
-  const { data, error } = await handle.supabase.rpc('poll_vote_single', {
+  const { data, error } = await handle.supabase.rpc('poll_vote_switch_single', {
     p_poll_id: pollId,
     p_option_id: optionId,
     p_user_id: userId,
@@ -626,20 +624,20 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     impact: 'Poll creation did not persist the poll + options in the shape the bot reads.',
   });
 
-  // 2) Vote recorded — the bot's own poll_vote_single RPC inserts exactly one vote.
+  // 2) Vote recorded — the bot's own poll_vote_switch_single RPC records exactly one vote.
   const rec = await voteSingle(handle, poll.pollId, poll.optionIds[0]!, userB);
   const bVotes = await pollVotesFor(handle, poll.pollId, userB);
   ctx.expect(rec.inserted === 1 && bVotes.length === 1 && bVotes[0]?.option_id === poll.optionIds[0], {
     assertionClass: 'Discord',
     channel: 'db-observable',
     promise: 'A single-choice vote records exactly one poll_votes row for the member on the chosen option.',
-    observation: `poll_vote_single inserted ${rec.inserted} row(s); member holds ${bVotes.length} vote(s) on option ${bVotes[0]?.option_id ?? '(none)'}.`,
+    observation: `poll_vote_switch_single recorded ${rec.inserted} row(s); member holds ${bVotes.length} vote(s) on option ${bVotes[0]?.option_id ?? '(none)'}.`,
     impact: 'A recorded vote did not persist exactly one poll_votes row.',
   });
 
-  // 3) FAIL — single-choice vote-switching is unsupported (DEF contracts it).
+  // 3) Single-choice vote-switching: a member's new vote replaces the prior one.
   await voteSingle(handle, poll.pollId, poll.optionIds[0]!, userA); // first vote on option 1
-  const switchRes = await voteSingle(handle, poll.pollId, poll.optionIds[1]!, userA); // attempt switch to option 2
+  const switchRes = await voteSingle(handle, poll.pollId, poll.optionIds[1]!, userA); // switch to option 2
   const aVotes = await pollVotesFor(handle, poll.pollId, userA);
   const switched = aVotes.length === 1 && aVotes[0]?.option_id === poll.optionIds[1];
   ctx.expect(switched, {
@@ -648,9 +646,9 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     promise: 'In single-choice mode a member’s new vote replaces their prior vote (state machine "vote" transition; DEF contracts vote-switching).',
     observation:
       `after voting option 1 then option 2, the member holds ${aVotes.length} vote(s) on option(s) [${aVotes.map((v) => v.option_id).join(', ')}] ` +
-      `(expected exactly 1 on option 2 "${poll.optionIds[1]}"); the second poll_vote_single inserted ${switchRes.inserted} row(s).`,
+      `(expected exactly 1 on option 2 "${poll.optionIds[1]}"); the switch recorded ${switchRes.inserted} row(s).`,
     impact:
-      'Single-choice vote-switching is unsupported: poll_vote_single only inserts when the member has NO existing vote on the poll, so the second selection is a no-op and the prior vote stands — DEF’s contracted vote-switching does not occur.',
+      'Single-choice vote-switching failed: the member’s prior vote was not replaced by the new selection, so DEF’s contracted vote-switching does not occur.',
   });
 
   // 4) FAIL — /poll close is unsatisfiable: the close primitive filters status='open' but polls are 'active'.
