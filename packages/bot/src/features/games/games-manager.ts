@@ -196,6 +196,11 @@ export class GamesManager {
   // headroom while still self-healing.
   private static readonly LOCK_TTL_MS = 10 * 60 * 1000;
 
+  // Interaction-replay idempotency window. A Discord interaction token lives
+  // ~15 minutes; a claim only needs to outlive the window in which the same
+  // interaction id could be re-delivered.
+  private static readonly IDEM_TTL_MS = 15 * 60 * 1000;
+
   private static readonly IN_MEMORY_TOKEN = '__in_memory__';
 
   private lockKey(guildId: string, userId: string): string {
@@ -261,6 +266,41 @@ export class GamesManager {
       } catch (err) {
         log.warn('game lock: Valkey release failed (will expire via TTL):', (err as Error)?.message ?? err);
       }
+    }
+  }
+
+  private idemKey(interactionId: string): string {
+    return `games:idem:${interactionId}`;
+  }
+
+  /**
+   * Claim an interaction id as processed so a re-delivered INTERACTION_CREATE
+   * (same id) cannot run a SECOND bet after the first one completed. The
+   * per-user game lock only serializes CONCURRENT commands and is released per
+   * command, so on its own it does not fence a replay that arrives after the
+   * first bet's debit + daily-loss write already landed — that would double the
+   * effect. Returns:
+   *   - 'claimed' : first time we've seen this interaction — proceed.
+   *   - 'replay'  : already processed — refuse (idempotent no-op).
+   *   - 'no-fence': no Valkey configured, so no durable claim store exists;
+   *     proceed best-effort (single-process deployments have no cross-delivery
+   *     replay path anyway). A Valkey that is configured-but-unreachable never
+   *     reaches here — acquireGameLock already fails closed on that.
+   */
+  private async claimBetInteraction(
+    interactionId: string,
+  ): Promise<'claimed' | 'replay' | 'no-fence'> {
+    if (!this.valkey) return 'no-fence';
+    try {
+      const claimed = await this.valkey.set(
+        this.idemKey(interactionId), '1', 'PX', GamesManager.IDEM_TTL_MS, 'NX',
+      );
+      return claimed ? 'claimed' : 'replay';
+    } catch (err) {
+      // Configured Valkey erroring here is already covered by the fail-closed
+      // lock acquire above; treat a stray error as best-effort proceed.
+      log.warn('game idempotency: Valkey claim failed:', (err as Error)?.message ?? err);
+      return 'no-fence';
     }
   }
 
@@ -341,6 +381,14 @@ export class GamesManager {
     if (!(await this.checkDailyLimit(guildId, userId, config, amount))) {
       await unlock();
       await interaction.reply({ content: '❌ You\'ve hit your daily loss limit. Try again tomorrow!', ephemeral: true });
+      return null;
+    }
+    // Idempotency fence: claim this interaction so a re-delivered INTERACTION_CREATE
+    // (same id) after the bet already resolved cannot debit + record the loss a
+    // second time. Claimed last, so only a bet that passed every gate is fenced.
+    if ((await this.claimBetInteraction(interaction.id)) === 'replay') {
+      await unlock();
+      await interaction.reply({ content: '⏳ That bet was already processed.', ephemeral: true });
       return null;
     }
     return { config, balance, unlock };
