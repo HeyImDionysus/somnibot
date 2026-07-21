@@ -388,6 +388,12 @@ export interface DbGuildConfig {
   giveaway_dm_winners: boolean;
   giveaway_entry_button_label: string;
   giveaway_winner_announcement_style: 'embed' | 'plain';
+  profiles_enabled: boolean;
+  title_max_length: number;
+  bio_max_length: number;
+  profile_visibility: 'everyone' | 'members-after-onboarding';
+  content_filter_mode: 'lenient' | 'strict';
+  show_game_stats: boolean;
 }
 
 export interface DbInstanceSettings {
