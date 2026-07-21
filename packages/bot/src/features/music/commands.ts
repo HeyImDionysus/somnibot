@@ -110,6 +110,24 @@ export function buildMusicCommands(): SlashCommandBuilder[] {
         .setRequired(true),
     ) as SlashCommandBuilder;
 
+  const move = new SlashCommandBuilder()
+    .setName('move')
+    .setDescription('Move a track you requested to a new position in the queue')
+    .addIntegerOption((opt) =>
+      opt
+        .setName('from')
+        .setDescription('Current position in the upcoming queue (1 = next track)')
+        .setMinValue(1)
+        .setRequired(true),
+    )
+    .addIntegerOption((opt) =>
+      opt
+        .setName('to')
+        .setDescription('New position in the upcoming queue (1 = next track)')
+        .setMinValue(1)
+        .setRequired(true),
+    ) as SlashCommandBuilder;
+
   const pause = new SlashCommandBuilder()
     .setName('pause')
     .setDescription('Pause or resume playback');
@@ -156,7 +174,7 @@ export function buildMusicCommands(): SlashCommandBuilder[] {
         .setRequired(false),
     ) as SlashCommandBuilder;
 
-  return [play, skip, stop, queue, np, volume, loop, shuffle, seek, remove, pause, filter];
+  return [play, skip, stop, queue, np, volume, loop, shuffle, seek, remove, move, pause, filter];
 }
 
 // ── Command Handlers ──────────────────────────────────────
@@ -198,6 +216,9 @@ export async function handleMusicCommand(
       break;
     case 'remove':
       await handleRemove(interaction, musicPlayer, guildId);
+      break;
+    case 'move':
+      await handleMove(interaction, musicPlayer, guildId);
       break;
     case 'pause':
       await handlePause(interaction, musicPlayer, guildId);
@@ -475,6 +496,27 @@ async function handleRemove(
     embeds: [result.success
       ? buildMusicInfoEmbed(result.message)
       : buildMusicErrorEmbed(result.message)],
+  });
+}
+
+/**
+ * /move — reposition an upcoming track. Authorization is inside
+ * musicPlayer.move: a DJ may always reorder; otherwise the requester of that
+ * track may move it only when the requester-move fairness control is enabled.
+ */
+async function handleMove(
+  interaction: ChatInputCommandInteraction,
+  musicPlayer: MusicPlayerManager,
+  guildId: string,
+): Promise<void> {
+  const from = interaction.options.getInteger('from', true);
+  const to = interaction.options.getInteger('to', true);
+  const result = await musicPlayer.move(guildId, interaction.user.id, from, to);
+  await interaction.reply({
+    embeds: [result.success
+      ? buildMusicInfoEmbed(result.message)
+      : buildMusicErrorEmbed(result.message)],
+    ephemeral: !result.success,
   });
 }
 

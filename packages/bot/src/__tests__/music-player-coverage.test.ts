@@ -268,6 +268,17 @@ describe('MusicPlayerManager', () => {
       const result = await manager.voteSkip('g1', 'u1');
       expect(result.success).toBe(false);
     });
+
+    it('self-skip: the requester of the current track skips it without a vote', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      const result = await manager.voteSkip('g1', 'u1'); // u1 requested the current track
+      // It skipped outright — not the "Skip vote: X/Y needed" tally message.
+      expect(result.message).not.toContain('Skip vote');
+    });
   });
 
   describe('stop', () => {

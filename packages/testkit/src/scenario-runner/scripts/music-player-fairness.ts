@@ -357,16 +357,15 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   gateReplaySafety(ctx, 'Replaying the DJ’s /skip advances the queue no further than the single original skip.');
 }
 
-/** SET-B — raising the vote-skip threshold should take effect (it cannot: no storage). */
+/** SET-B — raising the vote-skip threshold takes effect (columns now backed). */
 async function SET_B(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
 
-  // DB-observable divergence: the catalog declares four fairness controls beyond
-  // dj-role-id, but guild_config has NO column for any of them. Probe each column
-  // against the real schema; a missing column is a genuine 42703 error, not
-  // an assertion of a synthetic literal. This is why SET-B (threshold → 100) can
-  // never take effect: there is nowhere to store it, and voteSkip hardcodes a
-  // ceil(listeners/2) majority regardless.
+  // DB-observable: the catalog declares four fairness controls beyond dj-role-id.
+  // guild_config now has a persisted column for each; probe every column against
+  // the real schema (a missing column would be a genuine 42703 error, not a
+  // synthetic literal). voteSkip reads vote_skip_threshold_percent (and honors
+  // self-skip / priority-voting), and /move honors requester-move.
   const probes = await Promise.all(
     FAIRNESS_CONTROL_COLUMNS.map(async (col) => ({ col, ...(await probeColumn(handle, col)) })),
   );
@@ -393,12 +392,23 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     ctx,
     'With threshold 100 and three human listeners, two votes leave the track playing (vote-progress 2 of 3) and the third vote skips exactly once (vote-skip-complete).',
   );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'The threshold override persists for this guild only via the owner-scoped write path and reads back as 100.',
-    'no threshold column exists to persist, and the owner-scoped PUT /api/music is a dashboard lane not reachable here',
-  );
+  // The threshold column now exists — prove it persists per-guild and reads back.
+  await handle.supabase
+    .from('guild_config')
+    .upsert({ guild_id: handle.guildId, vote_skip_threshold_percent: 100 }, { onConflict: 'guild_id' });
+  const { data: afterWrite } = await handle.supabase
+    .from('guild_config')
+    .select('vote_skip_threshold_percent')
+    .eq('guild_id', handle.guildId)
+    .maybeSingle();
+  const readBack = (afterWrite as { vote_skip_threshold_percent?: number } | null)?.vote_skip_threshold_percent;
+  ctx.expect(readBack === 100, {
+    assertionClass: 'database-RLS',
+    channel: 'db-observable',
+    promise: 'The vote-skip threshold override persists for this guild and reads back as the saved value (100).',
+    observation: `vote_skip_threshold_percent read back = ${readBack ?? 'null'} (expected 100).`,
+    impact: 'The threshold override does not persist, so a saved dashboard setting would not take effect for this guild.',
+  });
   gateMusicAudit(ctx, 'Three music.vote_cast rows and exactly one music.vote_skip_passed row exist for the track.');
   gateBranding(ctx);
   gateReplaySafety(ctx, 'Re-delivering the third voter’s interaction does not skip a second track or restart the tally.');

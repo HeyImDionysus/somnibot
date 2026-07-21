@@ -40,6 +40,11 @@ interface MusicConfig {
   djRoleId: string | null;
   autoLeaveTimeout: number;   // ms — default 5 min
   inactivityTimeout: number;  // ms — default 30 min
+  // ── Fairness controls (catalog: music.json) ──
+  voteSkipThresholdPercent: number;  // % of human listeners needed to skip
+  selfSkipEnabled: boolean;          // requester can skip their own track without a vote
+  requesterMoveEnabled: boolean;     // requester can move their own queued track
+  priorityVotingEnabled: boolean;    // a DJ's skip vote carries immediately
 }
 
 const DEFAULT_CONFIG: MusicConfig = {
@@ -49,6 +54,10 @@ const DEFAULT_CONFIG: MusicConfig = {
   djRoleId: null,
   autoLeaveTimeout: 5 * 60 * 1000,
   inactivityTimeout: 30 * 60 * 1000,
+  voteSkipThresholdPercent: 50,
+  selfSkipEnabled: true,
+  requesterMoveEnabled: true,
+  priorityVotingEnabled: true,
 };
 
 // ── Player Manager ────────────────────────────────────────
@@ -109,7 +118,7 @@ export class MusicPlayerManager {
   private async loadConfig(): Promise<void> {
     const { data } = await this.supabase
       .from('guild_config')
-      .select('music_default_volume, dj_role_id, music_auto_leave_minutes, music_auto_destroy_minutes')
+      .select('music_default_volume, dj_role_id, music_auto_leave_minutes, music_auto_destroy_minutes, vote_skip_threshold_percent, self_skip_enabled, requester_move_enabled, priority_voting_enabled')
       .eq('guild_id', this.guild.id)
       .maybeSingle();
 
@@ -122,6 +131,10 @@ export class MusicPlayerManager {
         djRoleId: data.dj_role_id ?? null,
         autoLeaveTimeout: autoLeaveMin * 60 * 1000,
         inactivityTimeout: autoDestroyMin * 60 * 1000,
+        voteSkipThresholdPercent: data.vote_skip_threshold_percent ?? DEFAULT_CONFIG.voteSkipThresholdPercent,
+        selfSkipEnabled: data.self_skip_enabled ?? DEFAULT_CONFIG.selfSkipEnabled,
+        requesterMoveEnabled: data.requester_move_enabled ?? DEFAULT_CONFIG.requesterMoveEnabled,
+        priorityVotingEnabled: data.priority_voting_enabled ?? DEFAULT_CONFIG.priorityVotingEnabled,
       };
     }
   }
@@ -379,12 +392,31 @@ export class MusicPlayerManager {
       return { success: false, message: 'Bot is not in a voice channel' };
     }
 
+    const current = queue.entries[queue.currentIndex];
+
+    // Self-skip: when enabled, the requester of the current track skips it
+    // outright (no vote) — it's their own song.
+    if (this.config.selfSkipEnabled && current && current.requestedBy === userId) {
+      return this.skip(guildId);
+    }
+
+    // Priority voting: when enabled AND a DJ role is actually configured, a DJ's
+    // skip vote carries immediately. (Without a DJ role, isDJ() is true for
+    // everyone, so there is no privileged group — fall through to a normal vote.)
+    if (this.config.priorityVotingEnabled && this.config.djRoleId && (await this.isDJ(userId))) {
+      return this.skip(guildId);
+    }
+
     if (await this.queueManager.hasVotedSkip(guildId, userId)) {
       return { success: false, message: 'You already voted to skip' };
     }
 
+    // Configurable threshold: need ceil(listeners * threshold%) votes (min 1).
     const humanCount = voiceChannel.members.filter((m) => !m.user.bot).size;
-    const required = Math.ceil(humanCount / 2); // Majority vote
+    const required = Math.max(
+      1,
+      Math.ceil((humanCount * this.config.voteSkipThresholdPercent) / 100),
+    );
     const votes = await this.queueManager.addVoteSkip(guildId, userId);
 
     if (votes >= required) {
@@ -520,6 +552,47 @@ export class MusicPlayerManager {
     if (!removed) return { success: false, message: 'Failed to remove track' };
 
     return { success: true, message: `🗑️ Removed **${removed.title}** from the queue` };
+  }
+
+  /**
+   * Move an upcoming track to a new position (both 1-indexed, relative to the
+   * upcoming queue). A DJ may always reorder. Otherwise the requester of that
+   * track may move it only when requester-move is enabled — the fairness control
+   * that lets the person who queued a song reposition it without DJ perms.
+   */
+  async move(
+    guildId: string,
+    userId: string,
+    fromPosition: number,
+    toPosition: number,
+  ): Promise<{ success: boolean; message: string }> {
+    const queue = await this.queueManager.getQueue(guildId);
+    if (!queue) return { success: false, message: 'No active queue' };
+
+    const fromIndex = queue.currentIndex + fromPosition;
+    const toIndex = queue.currentIndex + toPosition;
+    if (fromIndex <= queue.currentIndex || fromIndex >= queue.entries.length) {
+      return { success: false, message: 'Invalid source position' };
+    }
+    if (toIndex <= queue.currentIndex || toIndex >= queue.entries.length) {
+      return { success: false, message: 'Invalid target position' };
+    }
+
+    const entry = queue.entries[fromIndex];
+    if (!entry) return { success: false, message: 'Invalid source position' };
+
+    if (!(await this.isDJ(userId))) {
+      if (!this.config.requesterMoveEnabled) {
+        return { success: false, message: 'Only a DJ can move tracks here.' };
+      }
+      if (entry.requestedBy !== userId) {
+        return { success: false, message: 'You can only move tracks you requested.' };
+      }
+    }
+
+    const moved = await this.queueManager.moveEntry(guildId, fromIndex, toIndex);
+    if (!moved) return { success: false, message: 'Failed to move track' };
+    return { success: true, message: `↔️ Moved **${entry.title}** to position ${toPosition}` };
   }
 
   /** Get the current player position in ms. */
