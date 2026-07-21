@@ -22,6 +22,11 @@ import { dbError, apiServerError } from '@/lib/api/response';
 const portalAuthSchema = z.object({
   action: z.literal('login'),
   code: z.string().min(1).max(512),
+  // The target guild whose store the buyer is logging into. A Discord identity can
+  // be a customer in many guilds (customers is UNIQUE(discord_id, guild_id)), so the
+  // session MUST be scoped to one guild — otherwise the login binds an arbitrary,
+  // possibly wrong, tenant.
+  guild_id: z.string().min(1).max(64),
   redirect_uri: z.string().url().max(2048).optional(),
 });
 
@@ -120,17 +125,19 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // Find customer by verified Discord ID
+      // Find the customer by verified Discord ID SCOPED TO THE TARGET GUILD.
+      // (customers is UNIQUE(discord_id, guild_id) — an unscoped lookup bound the
+      // session to an arbitrary guild for a buyer who is a customer in more than one.)
       const { data: customer } = await admin
         .from('customers')
         .select('id, guild_id, discord_id')
+        .eq('guild_id', body.guild_id)
         .eq('discord_id', discordUser.id)
-        .limit(1)
-        .single();
+        .maybeSingle();
 
       if (!customer) {
         return NextResponse.json(
-          { error: 'No account found for this Discord user.' },
+          { error: "No account found for this Discord user in this server's store." },
           { status: 404 },
         );
       }
