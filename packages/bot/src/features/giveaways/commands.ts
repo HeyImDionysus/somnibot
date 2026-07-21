@@ -88,7 +88,8 @@ export async function handleGiveawayCommand(
           return;
         }
         const durationMin = interaction.options.getInteger('duration', true);
-        const winners = interaction.options.getInteger('winners') ?? 1;
+        // Fall back to the owner-configured default winner count when omitted.
+        const winners = interaction.options.getInteger('winners') ?? (await manager.getDefaultWinnerCount());
         const requiredRole = interaction.options.getRole('required_role');
         const requiredLevel = interaction.options.getInteger('required_level');
 

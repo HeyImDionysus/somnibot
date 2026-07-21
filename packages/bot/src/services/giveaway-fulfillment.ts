@@ -350,12 +350,13 @@ export class GiveawayFulfillmentService {
       giveawayId,
       winnerId,
     ]).replace(/-/g, '').slice(0, 25);
-    const messageId = await this.sendWinnerNotification(
-      winnerId,
-      prizeSnapshot,
-      deliveryKind,
-      nonce,
-    );
+    // dm-winners control: when disabled, the prize is still fulfilled (the
+    // entitlement resolution above) and the winner is announced in-channel by
+    // the manager, but no personal DM is sent. The messageId records the skip.
+    const dmWinners = await this.dmWinnersEnabled();
+    const messageId = dmWinners
+      ? await this.sendWinnerNotification(winnerId, prizeSnapshot, deliveryKind, nonce)
+      : 'dm-disabled';
     return {
       giveawayId,
       winnerId,
@@ -420,6 +421,17 @@ export class GiveawayFulfillmentService {
   /**
    * DM a giveaway winner about their win.
    */
+  /** Whether the guild DMs winners (default true). Channel announcement is
+   *  handled by the manager regardless, so a false value just skips the DM. */
+  private async dmWinnersEnabled(): Promise<boolean> {
+    const { data } = await this.supabase
+      .from('guild_config')
+      .select('giveaway_dm_winners')
+      .eq('guild_id', this.guild.id)
+      .maybeSingle();
+    return data?.giveaway_dm_winners ?? true;
+  }
+
   private async sendWinnerNotification(
     winnerId: string,
     prize: string,
