@@ -27,15 +27,84 @@ export function invalidateProfilesCache(guildId?: string): void {
   }
 }
 
+interface ProfileConfig {
+  profilesEnabled: boolean;
+  titleMaxLength: number;
+  bioMaxLength: number;
+  profileVisibility: 'everyone' | 'members-after-onboarding';
+  contentFilterMode: 'lenient' | 'strict';
+  showGameStats: boolean;
+}
+
+const DEFAULT_PROFILE_CONFIG: ProfileConfig = {
+  profilesEnabled: true,
+  titleMaxLength: 64,
+  bioMaxLength: 256,
+  profileVisibility: 'everyone',
+  contentFilterMode: 'lenient',
+  showGameStats: true,
+};
+
+// Content filter word lists. Lenient blocks only clear violations; strict adds
+// broader categories. Kept deliberately small + explicit (not exhaustive) —
+// server owners choose the mode; the check is a substring match, case-folded.
+const LENIENT_BLOCKLIST = ['nigger', 'faggot', 'kike', 'chink', 'retard'];
+const STRICT_EXTRA_BLOCKLIST = ['fuck', 'shit', 'bitch', 'cunt', 'asshole', 'dick', 'slut', 'whore'];
+
+function isContentBlocked(text: string, mode: 'lenient' | 'strict'): boolean {
+  const lower = text.toLowerCase();
+  const list = mode === 'strict' ? [...LENIENT_BLOCKLIST, ...STRICT_EXTRA_BLOCKLIST] : LENIENT_BLOCKLIST;
+  return list.some((w) => lower.includes(w));
+}
+
 export class ProfilesManager {
   private supabase: SupabaseClient;
   private cache = new Map<string, any>();
+  private configCache = new Map<string, { data: ProfileConfig; time: number }>();
 
   constructor(supabase: SupabaseClient) {
     this.supabase = supabase;
   }
 
-  clearCache(): void { this.cache.clear(); }
+  clearCache(): void { this.cache.clear(); this.configCache.clear(); }
+
+  private async getConfig(guildId: string): Promise<ProfileConfig> {
+    const now = Date.now();
+    const cached = this.configCache.get(guildId);
+    if (cached && now - cached.time < 60_000) return cached.data;
+
+    const { data } = await this.supabase
+      .from('guild_config')
+      .select('profiles_enabled, title_max_length, bio_max_length, profile_visibility, content_filter_mode, show_game_stats')
+      .eq('guild_id', guildId)
+      .maybeSingle();
+
+    const cfg: ProfileConfig = data
+      ? {
+          profilesEnabled: data.profiles_enabled ?? DEFAULT_PROFILE_CONFIG.profilesEnabled,
+          titleMaxLength: data.title_max_length ?? DEFAULT_PROFILE_CONFIG.titleMaxLength,
+          bioMaxLength: data.bio_max_length ?? DEFAULT_PROFILE_CONFIG.bioMaxLength,
+          profileVisibility: data.profile_visibility === 'members-after-onboarding' ? 'members-after-onboarding' : 'everyone',
+          contentFilterMode: data.content_filter_mode === 'strict' ? 'strict' : 'lenient',
+          showGameStats: data.show_game_stats ?? DEFAULT_PROFILE_CONFIG.showGameStats,
+        }
+      : { ...DEFAULT_PROFILE_CONFIG };
+    this.configCache.set(guildId, { data: cfg, time: now });
+    return cfg;
+  }
+
+  /** Whether a viewer may see the target's profile under the visibility policy. */
+  private async canView(guildId: string, viewerId: string, targetId: string, cfg: ProfileConfig): Promise<boolean> {
+    if (cfg.profileVisibility === 'everyone' || viewerId === targetId) return true;
+    // members-after-onboarding: the viewer must have completed onboarding.
+    const { data } = await this.supabase
+      .from('members')
+      .select('onboarding_completed')
+      .eq('guild_id', guildId)
+      .eq('discord_id', viewerId)
+      .maybeSingle();
+    return data?.onboarding_completed === true;
+  }
 
   private async getOrCreateProfile(guildId: string, userId: string): Promise<any> {
     const { data } = await this.supabase
@@ -51,6 +120,19 @@ export class ProfilesManager {
     await interaction.deferReply();
     const target = interaction.options.getUser('user') ?? interaction.user;
     const guildId = interaction.guildId!;
+    const cfg = await this.getConfig(guildId);
+
+    if (!cfg.profilesEnabled) {
+      await interaction.editReply({ content: '❌ Member profiles are disabled on this server.' });
+      return;
+    }
+    if (!(await this.canView(guildId, interaction.user.id, target.id, cfg))) {
+      await interaction.editReply({
+        content: '🔒 Profiles are visible to onboarded members only — finish onboarding to view others’ profiles.',
+      });
+      return;
+    }
+
     const profile = await this.getOrCreateProfile(guildId, target.id);
 
     // V52-L3: await the atomic RPC and log errors instead of fire-and-forget.
@@ -86,26 +168,30 @@ export class ProfilesManager {
 
     if (profile?.bio) embed.setDescription(profile.bio);
 
-    embed.addFields(
-      { name: '💰 Net Worth', value: netWorth.toLocaleString(), inline: true },
-      { name: '👛 Wallet', value: balance.toLocaleString(), inline: true },
-      { name: '🏦 Bank', value: bank.toLocaleString(), inline: true },
-    );
+    // show-game-stats: play-money standing (net worth / wallet / bank / pet /
+    // prestige) is shown only when enabled. Real-store data is never shown here.
+    if (cfg.showGameStats) {
+      embed.addFields(
+        { name: '💰 Net Worth', value: netWorth.toLocaleString(), inline: true },
+        { name: '👛 Wallet', value: balance.toLocaleString(), inline: true },
+        { name: '🏦 Bank', value: bank.toLocaleString(), inline: true },
+      );
 
-    if (pet) {
-      embed.addFields({
-        name: '🐾 Pet',
-        value: `${pet.name} (${pet.pet_type} Lv.${pet.level}${pet.prestige > 0 ? ` ⭐${pet.prestige}` : ''})`,
-        inline: true,
-      });
-    }
+      if (pet) {
+        embed.addFields({
+          name: '🐾 Pet',
+          value: `${pet.name} (${pet.pet_type} Lv.${pet.level}${pet.prestige > 0 ? ` ⭐${pet.prestige}` : ''})`,
+          inline: true,
+        });
+      }
 
-    if (prestige && prestige.prestige_level > 0) {
-      embed.addFields({
-        name: '⭐ Prestige',
-        value: `Level ${prestige.prestige_level} (+${prestige.multiplier_pct}% earnings)`,
-        inline: true,
-      });
+      if (prestige && prestige.prestige_level > 0) {
+        embed.addFields({
+          name: '⭐ Prestige',
+          value: `Level ${prestige.prestige_level} (+${prestige.multiplier_pct}% earnings)`,
+          inline: true,
+        });
+      }
     }
 
     embed.addFields(
@@ -123,24 +209,62 @@ export class ProfilesManager {
   async setTitle(interaction: ChatInputCommandInteraction): Promise<void> {
     const title = interaction.options.getString('title')!;
     const guildId = interaction.guildId!;
-    await this.getOrCreateProfile(guildId, interaction.user.id);
+    const cfg = await this.getConfig(guildId);
 
+    if (!cfg.profilesEnabled) {
+      await interaction.reply({ content: '❌ Member profiles are disabled on this server.', ephemeral: true });
+      return;
+    }
+    // Enforce the owner-tuned cap server-side (Discord's option cap is 64, but an
+    // owner may tighten it below that). Truncate rather than drop the edit.
+    const truncated = title.length > cfg.titleMaxLength;
+    const finalTitle = truncated ? title.slice(0, cfg.titleMaxLength) : title;
+    if (isContentBlocked(finalTitle, cfg.contentFilterMode)) {
+      await interaction.reply({
+        content: '❌ That title was blocked by the content filter. Please choose different wording; contact a moderator to appeal.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    await this.getOrCreateProfile(guildId, interaction.user.id);
     await this.supabase.from('economy_profiles')
-      .update({ title, updated_at: new Date().toISOString() })
+      .update({ title: finalTitle, updated_at: new Date().toISOString() })
       .eq('guild_id', guildId).eq('user_id', interaction.user.id);
 
-    await interaction.reply({ content: `✅ Title set to: **${title}**` });
+    await interaction.reply({
+      content: truncated
+        ? `✅ Title set (truncated to the ${cfg.titleMaxLength}-char limit): **${finalTitle}**`
+        : `✅ Title set to: **${finalTitle}**`,
+    });
   }
 
   async setBio(interaction: ChatInputCommandInteraction): Promise<void> {
     const bio = interaction.options.getString('bio')!;
     const guildId = interaction.guildId!;
-    await this.getOrCreateProfile(guildId, interaction.user.id);
+    const cfg = await this.getConfig(guildId);
 
+    if (!cfg.profilesEnabled) {
+      await interaction.reply({ content: '❌ Member profiles are disabled on this server.', ephemeral: true });
+      return;
+    }
+    const truncated = bio.length > cfg.bioMaxLength;
+    const finalBio = truncated ? bio.slice(0, cfg.bioMaxLength) : bio;
+    if (isContentBlocked(finalBio, cfg.contentFilterMode)) {
+      await interaction.reply({
+        content: '❌ That bio was blocked by the content filter. Please choose different wording; contact a moderator to appeal.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    await this.getOrCreateProfile(guildId, interaction.user.id);
     await this.supabase.from('economy_profiles')
-      .update({ bio, updated_at: new Date().toISOString() })
+      .update({ bio: finalBio, updated_at: new Date().toISOString() })
       .eq('guild_id', guildId).eq('user_id', interaction.user.id);
 
-    await interaction.reply({ content: '✅ Bio updated!' });
+    await interaction.reply({
+      content: truncated ? `✅ Bio updated (truncated to the ${cfg.bioMaxLength}-char limit).` : '✅ Bio updated!',
+    });
   }
 }
