@@ -110,12 +110,21 @@ export default function GiveawaysPage() {
   const [filter, setFilter] = useState<'all' | 'active' | 'ended'>('all');
   const [confirmAction, setConfirmAction] = useState<{ type: 'end' | 'cancel' | 'delete'; id: string; prize: string } | null>(null);
   const [featureEnabled, setFeatureEnabled] = useState(true);
+  const [settings, setSettings] = useState({
+    giveaway_default_winner_count: 1,
+    giveaway_dm_winners: true,
+    giveaway_entry_button_label: 'Count me in!',
+    giveaway_winner_announcement_style: 'embed' as 'embed' | 'plain',
+  });
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
 
   const fetchGiveaways = useCallback(async () => {
     try {
-      const [giveRes, guildRes] = await Promise.all([
+      const [giveRes, guildRes, settingsRes] = await Promise.all([
         fetch('/api/giveaways'),
         fetch('/api/guild'),
+        fetch('/api/giveaways/settings'),
       ]);
       const json = await giveRes.json();
       if (json.success) setGiveaways(json.data);
@@ -124,12 +133,41 @@ export default function GiveawaysPage() {
       if (guildJson.success) {
         setFeatureEnabled(guildJson.config?.giveaways_enabled ?? true);
       }
+      const settingsJson = await settingsRes.json();
+      if (settingsJson.success) setSettings(settingsJson.data);
     } catch {
       setError('Failed to load giveaways');
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const saveSettings = async () => {
+    setSavingSettings(true);
+    try {
+      const res = await fetch('/api/giveaways/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
+      });
+      const json = await res.json();
+      if (json.success) {
+        toast({ title: 'Giveaway defaults saved', variant: 'success' });
+        setSettingsDirty(false);
+      } else {
+        toast({ title: json.error || 'Failed to save', variant: 'error' });
+      }
+    } catch {
+      toast({ title: 'Failed to save giveaway defaults', variant: 'error' });
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const updateSetting = <K extends keyof typeof settings>(key: K, value: (typeof settings)[K]) => {
+    setSettings((prev) => ({ ...prev, [key]: value }));
+    setSettingsDirty(true);
+  };
 
   useEffect(() => {
     fetchGiveaways();
@@ -312,6 +350,65 @@ export default function GiveawaysPage() {
         <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 text-center">
           <p className="text-2xl font-bold text-discord-success">{totalEntries}</p>
           <p className="text-xs text-discord-text-muted">Total Entries</p>
+        </div>
+      </div>
+
+      {/* Default Settings */}
+      <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-discord-text-primary">Default Settings</h2>
+          <button
+            onClick={saveSettings}
+            disabled={savingSettings || !settingsDirty}
+            className={`rounded-input px-3 py-1.5 text-xs font-medium transition-standard ${
+              settingsDirty ? 'bg-discord-accent text-white hover:bg-discord-accent/80' : 'bg-discord-bg-tertiary text-discord-text-muted cursor-not-allowed'
+            }`}
+          >
+            {savingSettings ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="block">
+            <span className="block text-xs font-medium text-discord-text-secondary">Default winner count</span>
+            <input
+              type="number"
+              min={1}
+              max={100}
+              value={settings.giveaway_default_winner_count}
+              onChange={(e) => updateSetting('giveaway_default_winner_count', Math.max(1, Math.min(100, parseInt(e.target.value, 10) || 1)))}
+              className="mt-1 w-24 rounded-input border border-discord-border-subtle bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="block text-xs font-medium text-discord-text-secondary">Entry button label</span>
+            <input
+              type="text"
+              maxLength={80}
+              value={settings.giveaway_entry_button_label}
+              onChange={(e) => updateSetting('giveaway_entry_button_label', e.target.value)}
+              className="mt-1 w-full rounded-input border border-discord-border-subtle bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="block text-xs font-medium text-discord-text-secondary">Winner announcement style</span>
+            <select
+              value={settings.giveaway_winner_announcement_style}
+              onChange={(e) => updateSetting('giveaway_winner_announcement_style', e.target.value === 'plain' ? 'plain' : 'embed')}
+              className="mt-1 w-40 rounded-input border border-discord-border-subtle bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
+            >
+              <option value="embed">Embed</option>
+              <option value="plain">Plain text</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-2 pt-5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={settings.giveaway_dm_winners}
+              onChange={(e) => updateSetting('giveaway_dm_winners', e.target.checked)}
+              className="accent-discord-accent"
+            />
+            <span className="text-sm text-discord-text-secondary">DM winners a personal congratulations</span>
+          </label>
         </div>
       </div>
 
