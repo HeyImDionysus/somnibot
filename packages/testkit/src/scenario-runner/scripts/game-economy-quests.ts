@@ -442,14 +442,63 @@ function gateLiveGuildReadback(ctx: ScenarioContext): void {
   );
 }
 
-/** The exact-count slate sizing is computed inside the subcommand-routed view path. */
-function gateSlateSizing(ctx: ScenarioContext, dailyCount: number, weeklyCount: number): void {
-  ctx.gate(
-    'Discord',
-    'discord-readback',
-    `A member's assigned slate holds exactly ${dailyCount} daily and ${weeklyCount} weekly quests for the cycle.`,
-    'slate sizing runs in QuestsManager.viewQuests → assignDailyQuests/assignWeeklyQuests, reached only via the subcommand-routed `/quests view`; runSlash cannot supply a subcommand, so exact-count assignment is undrivable in-process (needs a subcommand-capable injector or the live Discord readback lane)',
-  );
+/** Count a member's assigned quest-progress rows by their template's quest_type. */
+async function slateCounts(handle: LiveClientHandle, userId: string): Promise<{ daily: number; weekly: number }> {
+  const { data } = await handle.supabase
+    .from('economy_quest_progress')
+    .select('id, template:economy_quest_templates(quest_type)')
+    .eq('guild_id', handle.guildId)
+    .eq('user_id', userId)
+    .limit(1000);
+  const rows = (data as Array<{ template: { quest_type: string } | null }> | null) ?? [];
+  let daily = 0;
+  let weekly = 0;
+  for (const r of rows) {
+    if (r.template?.quest_type === 'daily') daily++;
+    else if (r.template?.quest_type === 'weekly') weekly++;
+  }
+  return { daily, weekly };
+}
+
+/**
+ * Drive the REAL `/quests view` subcommand for a fresh member: QuestsManager.viewQuests
+ * auto-assigns the daily+weekly slate sized by config. Assert the exact counts, then a
+ * second view renders the branded board embed (both live via the subcommand injector).
+ */
+async function proveSlateSizing(
+  ctx: ScenarioContext,
+  handle: LiveClientHandle,
+  dailyCount: number,
+  weeklyCount: number,
+): Promise<void> {
+  const slateUser = ctx.userId('slate');
+  // First view assigns the slate and replies "New quests assigned!".
+  await ctx.runSlash(handle, { commandName: 'quests', userId: slateUser, subcommand: 'view' });
+  const slate = await slateCounts(handle, slateUser);
+  ctx.expect(slate.daily === dailyCount && slate.weekly === weeklyCount, {
+    assertionClass: 'Discord',
+    channel: 'db-observable',
+    promise: `A member's first /quests view assigns exactly ${dailyCount} daily and ${weeklyCount} weekly quests for the cycle.`,
+    observation:
+      `after driving the real /quests view: ${slate.daily} daily + ${slate.weekly} weekly economy_quest_progress ` +
+      `row(s) assigned (expected ${dailyCount}/${weeklyCount}).`,
+    impact: 'The auto-assigned quest slate did not match the configured daily/weekly counts.',
+  });
+
+  // Second view renders the branded board embed for the now-assigned slate.
+  const board = await ctx.runSlash(handle, { commandName: 'quests', userId: slateUser, subcommand: 'view' });
+  const replies = board.allOf('reply');
+  const lastReply = replies[replies.length - 1]?.payload as
+    | { embeds?: Array<{ data?: { title?: string } }> }
+    | undefined;
+  const title = lastReply?.embeds?.[0]?.data?.title ?? '';
+  ctx.expect(typeof title === 'string' && title.includes('Quests'), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'The /quests view board renders as a branded embed listing the member’s active quests.',
+    observation: `/quests view (post-assignment) replied with an embed titled ${JSON.stringify(title)} (expected a "Quests" board).`,
+    impact: 'The /quests view path did not render the branded quest board.',
+  });
 }
 
 function gateReplayDeferredTo(ctx: ScenarioContext, where: string): void {
@@ -559,8 +608,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   await proveQuestAudit(ctx, handle);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
-  gateSlateSizing(ctx, dailyDefault, weeklyDefault);
+  await proveSlateSizing(ctx, handle, dailyDefault, weeklyDefault);
   gateLiveGuildReadback(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -627,8 +675,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   await proveQuestAudit(ctx, handle);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
-  gateSlateSizing(ctx, 1, 2);
+  await proveSlateSizing(ctx, handle, 1, 2);
   gateLiveGuildReadback(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -677,8 +724,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
   await proveQuestAudit(ctx, handle);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
-  gateSlateSizing(ctx, 0, 5);
+  await proveSlateSizing(ctx, handle, 0, 5);
   gateLiveGuildReadback(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
