@@ -101,8 +101,12 @@ function makeValkey() {
   };
 }
 
-function makeInteraction(userId = 'user-1') {
+let interactionSeq = 0;
+function makeInteraction(userId = 'user-1', id?: string) {
   return {
+    // Each Discord interaction carries a unique id; mint one per call unless a
+    // caller pins it (to simulate a re-delivered INTERACTION_CREATE replay).
+    id: id ?? `int-${++interactionSeq}`,
     guildId: 'guild-1',
     channelId: 'ch-1',
     user: { id: userId, username: 'Tester', displayAvatarURL: () => 'url' },
@@ -239,6 +243,29 @@ describe('GamesManager distributed game lock', () => {
     // After the first releases, a new command can proceed.
     await v1.unlock();
     const i3 = makeInteraction();
+    const v3 = await (mgr as any).validateBet(i3, 100, 'economy_coinflip_max_bet');
+    expect(v3).not.toBeNull();
+    await v3.unlock();
+  });
+
+  it('idempotency fence: a re-delivered interaction id (same id) is refused after the first bet released', async () => {
+    const mgr = new GamesManager(makeSupa(), valkey as any);
+    // First bet with a fixed interaction id resolves and releases the lock.
+    const i1 = makeInteraction('user-1', 'dup-int-1');
+    await mgr.coinflip(i1, 100);
+    expect(valkey._store.has('games:lock:guild-1:user-1')).toBe(false);
+    // The idempotency claim persists past the lock release.
+    expect(valkey._store.has('games:idem:dup-int-1')).toBe(true);
+    // A re-delivery of the SAME interaction id must not run a second bet: the
+    // lock is free (so it wouldn't stop it), but validateBet's claim refuses it.
+    const i2 = makeInteraction('user-1', 'dup-int-1');
+    const v2 = await (mgr as any).validateBet(i2, 100, 'economy_coinflip_max_bet');
+    expect(v2).toBeNull();
+    expect(i2.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('already processed') }),
+    );
+    // A different interaction id for the same user still proceeds.
+    const i3 = makeInteraction('user-1', 'fresh-int-2');
     const v3 = await (mgr as any).validateBet(i3, 100, 'economy_coinflip_max_bet');
     expect(v3).not.toBeNull();
     await v3.unlock();
