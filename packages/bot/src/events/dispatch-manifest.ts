@@ -52,7 +52,7 @@ export const SLASH = {
  * (`/play`, `/skip`, …). Exported as a Set to preserve the original `.has` call.
  */
 export const MUSIC_COMMANDS: ReadonlySet<string> = new Set([
-  'play', 'skip', 'stop', 'queue', 'np', 'volume', 'loop', 'shuffle', 'seek', 'remove', 'pause', 'filter',
+  'play', 'skip', 'stop', 'queue', 'np', 'volume', 'loop', 'shuffle', 'seek', 'remove', 'move', 'pause', 'filter',
 ]);
 
 /**

@@ -700,6 +700,11 @@ const musicConfig = z.object({
   music_auto_destroy_minutes: z.number().int().min(0).max(60).optional(),
   // V5 Audit §6.P3a — validate max queue length (bot default 500, hard cap 10 000)
   max_queue_length: z.number().int().min(1).max(10_000).optional(),
+  // Fairness controls (catalog: music.json)
+  vote_skip_threshold_percent: z.number().int().min(1).max(100).optional(),
+  self_skip_enabled: z.boolean().optional(),
+  requester_move_enabled: z.boolean().optional(),
+  priority_voting_enabled: z.boolean().optional(),
 });
 
 // ── Product file schemas ────────────────────────────

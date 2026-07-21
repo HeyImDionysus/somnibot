@@ -19,6 +19,10 @@ interface MusicConfig {
   dj_role_id: string | null;
   music_auto_leave_minutes: number;
   music_auto_destroy_minutes: number;
+  vote_skip_threshold_percent: number;
+  self_skip_enabled: boolean;
+  requester_move_enabled: boolean;
+  priority_voting_enabled: boolean;
 }
 
 interface DiscordRole {
@@ -34,6 +38,10 @@ const DEFAULT_CONFIG: MusicConfig = {
   dj_role_id: null,
   music_auto_leave_minutes: 5,
   music_auto_destroy_minutes: 30,
+  vote_skip_threshold_percent: 50,
+  self_skip_enabled: true,
+  requester_move_enabled: true,
+  priority_voting_enabled: true,
 };
 
 // ── Component ─────────────────────────────────────────────
@@ -231,6 +239,79 @@ export default function MusicSettingsPage() {
 
             {/* Ghost controls for max_queue_length and allow_duplicates removed in V29 —
                 these columns were dropped from the DB in V18 and the API doesn't read/write them. */}
+          </div>
+
+          {/* Fairness Controls */}
+          <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 space-y-5">
+            <div>
+              <h2 className="text-lg font-semibold text-discord-text-primary">Fairness Controls</h2>
+              <p className="mt-1 text-sm text-discord-text-muted">
+                Control how listeners skip and manage the queue.
+              </p>
+            </div>
+
+            {/* Vote-skip threshold */}
+            <div>
+              <label className="block text-sm font-medium text-discord-text-secondary">
+                Vote-Skip Threshold
+              </label>
+              <p className="mt-0.5 text-xs text-discord-text-muted">
+                Percentage of listeners whose votes are needed to skip a track (1–100).
+              </p>
+              <div className="mt-2 flex items-center gap-3">
+                <input
+                  type="range"
+                  min={1}
+                  max={100}
+                  value={config.vote_skip_threshold_percent}
+                  onChange={(e) => updateField('vote_skip_threshold_percent', parseInt(e.target.value, 10))}
+                  className="flex-1 accent-discord-accent"
+                />
+                <span className="w-12 text-right text-sm font-mono text-discord-text-primary">
+                  {config.vote_skip_threshold_percent}%
+                </span>
+              </div>
+            </div>
+
+            {/* Toggles */}
+            <div className="space-y-3 pt-2 border-t border-discord-border-subtle">
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={config.self_skip_enabled}
+                  onChange={(e) => updateField('self_skip_enabled', e.target.checked)}
+                  className="mt-1 accent-discord-accent"
+                />
+                <span>
+                  <span className="block text-sm font-medium text-discord-text-secondary">Self-skip</span>
+                  <span className="block text-xs text-discord-text-muted">Let the requester skip their own track without a vote.</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={config.requester_move_enabled}
+                  onChange={(e) => updateField('requester_move_enabled', e.target.checked)}
+                  className="mt-1 accent-discord-accent"
+                />
+                <span>
+                  <span className="block text-sm font-medium text-discord-text-secondary">Requester move</span>
+                  <span className="block text-xs text-discord-text-muted">Let the requester reposition their own queued track (via /move).</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={config.priority_voting_enabled}
+                  onChange={(e) => updateField('priority_voting_enabled', e.target.checked)}
+                  className="mt-1 accent-discord-accent"
+                />
+                <span>
+                  <span className="block text-sm font-medium text-discord-text-secondary">Priority voting</span>
+                  <span className="block text-xs text-discord-text-muted">A DJ&apos;s skip vote takes effect immediately.</span>
+                </span>
+              </label>
+            </div>
           </div>
 
           {/* Auto Behaviors */}
