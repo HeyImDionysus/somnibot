@@ -244,7 +244,7 @@ describe('PollsManager', () => {
       );
     });
 
-    it('prevents duplicate single vote (empty RPC result)', async () => {
+    it('switches a single vote to a new option (previous option returned)', async () => {
       supabase.from.mockImplementation((table: string) => {
         if (table === 'polls') {
           return chainBuilder({
@@ -254,15 +254,16 @@ describe('PollsManager', () => {
         }
         return chainBuilder();
       });
-      supabase.rpc.mockResolvedValueOnce({ data: [], error: null });
+      // poll_vote_switch_single returns the new vote id plus the prior option.
+      supabase.rpc.mockResolvedValueOnce({ data: [{ vote_id: 'vote2', previous_option_id: 'opt2' }], error: null });
       const btn = makeBtnInteraction('poll_vote:poll1:opt1');
       await mgr.handlePollVote(btn as any);
       expect(btn.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('already voted') }),
+        expect.objectContaining({ content: expect.stringContaining('Vote updated') }),
       );
     });
 
-    it('handles RPC unique violation (duplicate vote per option)', async () => {
+    it('re-clicking the same option is a no-op (already voted for this option)', async () => {
       supabase.from.mockImplementation((table: string) => {
         if (table === 'polls') {
           return chainBuilder({
@@ -272,11 +273,12 @@ describe('PollsManager', () => {
         }
         return chainBuilder();
       });
-      supabase.rpc.mockResolvedValueOnce({ data: null, error: { code: '23505', message: 'unique violation' } });
+      // previous_option_id === the clicked option → nothing changed.
+      supabase.rpc.mockResolvedValueOnce({ data: [{ vote_id: 'vote3', previous_option_id: 'opt1' }], error: null });
       const btn = makeBtnInteraction('poll_vote:poll1:opt1');
       await mgr.handlePollVote(btn as any);
       expect(btn.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('already voted') }),
+        expect.objectContaining({ content: expect.stringContaining('already voted for this option') }),
       );
     });
 

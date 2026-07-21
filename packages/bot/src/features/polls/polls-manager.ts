@@ -169,35 +169,40 @@ export class PollsManager {
     }
 
     if (!poll.allow_multiple) {
-      // V50-M3: use poll_vote_single RPC — atomically inserts a vote only
-      // if the user has no existing vote on this poll. The previous
-      // read-then-write pattern let concurrent clicks both pass the
-      // "already voted?" check and insert duplicate votes.
-      const { data: voteRows, error: voteErr } = await this.supabase.rpc('poll_vote_single', {
+      // V50-M3 / switch: single-choice polls let a member MOVE their vote.
+      // poll_vote_switch_single atomically removes the user's prior vote on this
+      // poll and records the new option, returning the previous option so we can
+      // distinguish a first vote, a switch, and a same-option re-click. Doing it
+      // in one RPC keeps concurrent clicks race-safe (no read-then-write window).
+      const { data: voteRows, error: voteErr } = await this.supabase.rpc('poll_vote_switch_single', {
         p_poll_id: pollId,
         p_option_id: optionId,
         p_user_id: userId,
       });
 
       if (voteErr) {
-        // 23505 = unique_violation from uniq_poll_vote_per_option index
-        if ((voteErr as { code?: string }).code === '23505') {
-          await buttonInteraction.reply({ content: 'You already voted for this option!', ephemeral: true });
-          return;
-        }
-        log.error('poll_vote_single RPC error:', voteErr);
+        log.error('poll_vote_switch_single RPC error:', voteErr);
         await buttonInteraction.reply({ content: '❌ Failed to record vote — please try again.', ephemeral: true });
         return;
       }
 
-      // RPC returns empty set if user already had a vote on this poll
-      if (!voteRows || (Array.isArray(voteRows) && voteRows.length === 0)) {
-        await buttonInteraction.reply({ content: 'You already voted! (Single vote poll)', ephemeral: true });
+      const row = Array.isArray(voteRows) ? voteRows[0] : voteRows;
+      const previousOptionId = (row as { previous_option_id?: string | null } | null)?.previous_option_id ?? null;
+
+      if (previousOptionId === optionId) {
+        // Re-clicking the option they already hold — nothing changed.
+        await buttonInteraction.reply({ content: 'You already voted for this option!', ephemeral: true });
         return;
       }
 
-      getQuestsManager(buttonInteraction.guildId ?? undefined)?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
-      await buttonInteraction.reply({ content: '✅ Vote recorded!', ephemeral: true });
+      // Only credit a quest on a genuinely new vote, not on a switch.
+      if (previousOptionId === null) {
+        getQuestsManager(buttonInteraction.guildId ?? undefined)?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+      }
+      await buttonInteraction.reply({
+        content: previousOptionId === null ? '✅ Vote recorded!' : '🔄 Vote updated!',
+        ephemeral: true,
+      });
       return;
     }
 
