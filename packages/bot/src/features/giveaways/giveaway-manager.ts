@@ -38,8 +38,24 @@ interface GiveawayRow {
   created_at: string;
 }
 
+interface GiveawayConfig {
+  defaultWinnerCount: number;
+  dmWinners: boolean;
+  entryButtonLabel: string;
+  winnerAnnouncementStyle: 'embed' | 'plain';
+}
+
+const DEFAULT_GIVEAWAY_CONFIG: GiveawayConfig = {
+  defaultWinnerCount: 1,
+  dmWinners: true,
+  entryButtonLabel: 'Count me in!',
+  winnerAnnouncementStyle: 'embed',
+};
+
 export class GiveawayManager {
   private checkTimer: NodeJS.Timeout | null = null;
+  private cfg: GiveawayConfig = { ...DEFAULT_GIVEAWAY_CONFIG };
+  private cfgLoadedAt = 0;
 
   constructor(
     private guild: Guild,
@@ -47,6 +63,40 @@ export class GiveawayManager {
     private valkey: Valkey,
     private eventBus: PlatformEventBus,
   ) {}
+
+  /** Load the guild's giveaway config (cached ~60s). Feeds the button label,
+   *  announcement style, default winner count, and DM-winners toggle. */
+  private async loadConfig(): Promise<void> {
+    const now = Date.now();
+    if (now - this.cfgLoadedAt < 60_000) return;
+    const { data } = await this.supabase
+      .from('guild_config')
+      .select('giveaway_default_winner_count, giveaway_dm_winners, giveaway_entry_button_label, giveaway_winner_announcement_style')
+      .eq('guild_id', this.guild.id)
+      .maybeSingle();
+    if (data) {
+      const style = data.giveaway_winner_announcement_style === 'plain' ? 'plain' : 'embed';
+      this.cfg = {
+        defaultWinnerCount: data.giveaway_default_winner_count ?? DEFAULT_GIVEAWAY_CONFIG.defaultWinnerCount,
+        dmWinners: data.giveaway_dm_winners ?? DEFAULT_GIVEAWAY_CONFIG.dmWinners,
+        entryButtonLabel: data.giveaway_entry_button_label ?? DEFAULT_GIVEAWAY_CONFIG.entryButtonLabel,
+        winnerAnnouncementStyle: style,
+      };
+    }
+    this.cfgLoadedAt = now;
+  }
+
+  /** The configured default winner count (used when /giveaway start omits winners). */
+  async getDefaultWinnerCount(): Promise<number> {
+    await this.loadConfig();
+    return this.cfg.defaultWinnerCount;
+  }
+
+  /** Whether winners should be DM'd (channel-announced regardless). */
+  async getDmWinners(): Promise<boolean> {
+    await this.loadConfig();
+    return this.cfg.dmWinners;
+  }
 
   async start(): Promise<void> {
     // Check every 30 seconds for giveaways that need to end
@@ -82,6 +132,7 @@ export class GiveawayManager {
     prizeProductId?: string;
     prizeLicenseCount?: number;
   }): Promise<GiveawayRow | null> {
+    await this.loadConfig(); // so the entry button renders with the owner's label
     const endsAt = new Date(Date.now() + options.durationMs);
 
     const { data, error } = await this.supabase
@@ -379,6 +430,7 @@ export class GiveawayManager {
   }
 
   private async selectWinnersAndEnd(giveaway: GiveawayRow): Promise<string[]> {
+    await this.loadConfig();
     const winners = this.pickRandom(giveaway.entries, giveaway.winner_count);
 
     // V50-M2: use giveaway_atomic_end RPC — gates the status flip on
@@ -400,14 +452,31 @@ export class GiveawayManager {
     const endedGiveaway = { ...giveaway, status: 'ended' as const, winners };
     await this.updateGiveawayMessage(endedGiveaway);
 
-    // Announce winners
+    // Announce winners in the configured style (embed or plain text).
     const channel = this.guild.channels.cache.get(giveaway.channel_id) as TextChannel | undefined;
     if (channel) {
       if (winners.length > 0) {
         const winnerMentions = winners.map((id) => `<@${id}>`).join(', ');
-        await channel.send({
-          content: `🎉 **Giveaway ended!** Prize: **${giveaway.prize}**\nWinner${winners.length > 1 ? 's' : ''}: ${winnerMentions}\n\nCongratulations!`,
-        });
+        if (this.cfg.winnerAnnouncementStyle === 'embed') {
+          const embed = new EmbedBuilder()
+            .setTitle('🎉 Giveaway ended!')
+            .setDescription(
+              `Prize: **${giveaway.prize}**\n` +
+              `Winner${winners.length > 1 ? 's' : ''}: ${winnerMentions}\n\nCongratulations!`,
+            )
+            .setColor(0x57F287);
+          await channel.send({ content: winnerMentions, embeds: [embed] });
+        } else {
+          await channel.send({
+            content: `🎉 **Giveaway ended!** Prize: **${giveaway.prize}**\nWinner${winners.length > 1 ? 's' : ''}: ${winnerMentions}\n\nCongratulations!`,
+          });
+        }
+      } else if (this.cfg.winnerAnnouncementStyle === 'embed') {
+        const embed = new EmbedBuilder()
+          .setTitle('😔 Giveaway ended!')
+          .setDescription(`Prize: **${giveaway.prize}**\nNo valid entries — no winners selected.`)
+          .setColor(0xED4245);
+        await channel.send({ embeds: [embed] });
       } else {
         await channel.send({
           content: `😔 **Giveaway ended!** Prize: **${giveaway.prize}**\nNo valid entries — no winners selected.`,
@@ -499,10 +568,14 @@ export class GiveawayManager {
 
   private buildEntryButton(giveaway: GiveawayRow): ActionRowBuilder<ButtonBuilder> {
     const isPaused = giveaway.status === 'paused';
+    // Uses the owner-configured entry-button label (cfg is refreshed by
+    // loadConfig() before any render path). Falls back to the default until the
+    // first load completes.
+    const enterLabel = this.cfg.entryButtonLabel || DEFAULT_GIVEAWAY_CONFIG.entryButtonLabel;
     return new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(`giveaway_enter:${giveaway.id}`)
-        .setLabel(isPaused ? `Paused (${giveaway.entries.length})` : `Enter (${giveaway.entries.length})`)
+        .setLabel(isPaused ? `Paused (${giveaway.entries.length})` : `${enterLabel} (${giveaway.entries.length})`)
         .setEmoji(isPaused ? '⏸️' : '🎉')
         .setStyle(isPaused ? ButtonStyle.Secondary : ButtonStyle.Success)
         .setDisabled(isPaused),

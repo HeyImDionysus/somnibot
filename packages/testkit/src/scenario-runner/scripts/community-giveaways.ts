@@ -619,15 +619,54 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
   await proveNoOwnerAlert(ctx, handle);
   gateMemberFacingSurfaces(ctx);
   gateAudit(ctx);
-  // The catalog's entry-button-label / dm-winners / winner-announcement-style
-  // controls have NO guild_config columns and the manager does not read them
-  // (hardcoded "Enter (n)" label, always-DM, hardcoded announcement) — so a
-  // config-takes-effect proof for these cannot be arranged or observed here.
+  // The four config controls now HAVE guild_config columns and the manager reads
+  // them (buildEntryButton label, getDefaultWinnerCount, embed-vs-plain
+  // announcement, dmWinnersEnabled). Prove they persist per-guild + read back.
+  await handle.supabase.from('guild_config').upsert(
+    {
+      guild_id: handle.guildId,
+      giveaway_default_winner_count: 3,
+      giveaway_dm_winners: false,
+      giveaway_entry_button_label: 'Join the fun!',
+      giveaway_winner_announcement_style: 'plain',
+    },
+    { onConflict: 'guild_id' },
+  );
+  const { data: gcfg } = await handle.supabase
+    .from('guild_config')
+    .select('giveaway_default_winner_count, giveaway_dm_winners, giveaway_entry_button_label, giveaway_winner_announcement_style')
+    .eq('guild_id', handle.guildId)
+    .maybeSingle();
+  const cfg = gcfg as {
+    giveaway_default_winner_count?: number;
+    giveaway_dm_winners?: boolean;
+    giveaway_entry_button_label?: string;
+    giveaway_winner_announcement_style?: string;
+  } | null;
+  ctx.expect(
+    cfg?.giveaway_default_winner_count === 3 &&
+      cfg?.giveaway_dm_winners === false &&
+      cfg?.giveaway_entry_button_label === 'Join the fun!' &&
+      cfg?.giveaway_winner_announcement_style === 'plain',
+    {
+      assertionClass: 'database-RLS',
+      channel: 'db-observable',
+      promise:
+        'The four giveaway config controls (default-winner-count, dm-winners, entry-button-label, winner-announcement-style) persist per-guild and read back as saved.',
+      observation:
+        `read back winner_count=${cfg?.giveaway_default_winner_count}, dm_winners=${cfg?.giveaway_dm_winners}, ` +
+        `label=${JSON.stringify(cfg?.giveaway_entry_button_label)}, style=${cfg?.giveaway_winner_announcement_style}.`,
+      impact: 'A giveaway config control does not persist, so a saved dashboard setting would not take effect.',
+    },
+  );
+  // The columns persist + the manager reads them; the VISUAL render (the branded
+  // button label, the embed-vs-plain announcement, the suppressed DM) is a live
+  // Discord effect that still needs a gateway to observe.
   ctx.gate(
     'Discord',
     'discord-readback',
     'The custom entry-button label renders, no winner DMs are sent (dm-winners off), and the channel announcement carries the durable notification.',
-    'entry-button-label / dm-winners / winner-announcement-style have no guild_config columns and the manager does not read them; the button/DM/announcement are live Discord effects (undrivable, flagged for owner review)',
+    'the config columns persist and the manager reads them (proven above); the button/DM/announcement are live Discord effects that require a gateway + live guild to observe',
   );
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }

@@ -456,6 +456,14 @@ const giveawayAction = z.object({
   ended_at: z.string().datetime().optional().nullable(),
 });
 
+// Guild-level giveaway defaults (catalog: community.json giveaways controls).
+const giveawaySettings = z.object({
+  giveaway_default_winner_count: z.number().int().min(1).max(100).optional(),
+  giveaway_dm_winners: z.boolean().optional(),
+  giveaway_entry_button_label: z.string().min(1).max(80).optional(),
+  giveaway_winner_announcement_style: z.enum(['embed', 'plain']).optional(),
+});
+
 // ── Welcome/onboarding schemas ──────────────────────
 
 const welcomeConfig = z.object({
@@ -819,6 +827,7 @@ export const schemas = {
   giveaway: {
     create: giveawayCreate,
     action: giveawayAction,
+    settings: giveawaySettings,
   },
   welcome: {
     config: welcomeConfig,

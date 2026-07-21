@@ -84,6 +84,7 @@ function makeSupabase(options: {
   productResponses?: QueryResult[];
   customerResponses?: QueryResult[];
   entitlementResponses?: QueryResult[];
+  guildConfigResponses?: QueryResult[];
   grantRows?: (requestId: string) => unknown;
   grantError?: { message: string } | null;
 } = {}) {
@@ -109,11 +110,16 @@ function makeSupabase(options: {
       error: null,
     },
   ]);
+  // dmWinnersEnabled() reads guild_config; default (null) → dm-winners on.
+  const guildConfigQuery = fluentQuery(options.guildConfigResponses ?? [
+    { data: null, error: null },
+  ]);
   const from = vi.fn((table: string) => {
     if (table === 'giveaways') return giveawayQuery;
     if (table === 'products') return productQuery;
     if (table === 'customers') return customerQuery;
     if (table === 'entitlements') return entitlementQuery;
+    if (table === 'guild_config') return guildConfigQuery;
     throw new Error(`Unexpected table: ${table}`);
   });
   const rpc = vi.fn(async (_name: string, params: Record<string, unknown>) => ({
@@ -438,6 +444,40 @@ describe('durable giveaway winner notifications', () => {
     });
     expect(sentDescription(send)).toMatch(/delivery is being processed/i);
     expect(sentDescription(send)).not.toMatch(/automatically delivered/i);
+  });
+
+  it('skips the winner DM when dm-winners is disabled (prize still fulfilled)', async () => {
+    const { service, sends } = makeService({
+      giveawayResponses: [{ data: GIVEAWAY, error: null }],
+      entitlementResponses: [
+        {
+          data: {
+            id: ENTITLEMENT_ID,
+            guild_id: GUILD_ID,
+            order_id: requestId,
+            product_id: PRODUCT_ID,
+            source: 'giveaway',
+            status: 'active',
+          },
+          error: null,
+        },
+      ],
+      guildConfigResponses: [{ data: { giveaway_dm_winners: false }, error: null }],
+    });
+
+    const result = await service.notifyQueuedWinner({
+      source: 'giveaway_atomic_end',
+      giveawayId: GIVEAWAY_ID,
+      winnerId: WINNER_ID,
+      productId: PRODUCT_ID,
+      deliveryKind: 'product',
+      prizeSnapshot: 'VIP Prize',
+    });
+
+    // Entitlement still resolved (prize delivered), but no DM was sent.
+    expect(result.entitlementId).toBe(ENTITLEMENT_ID);
+    expect(result.messageId).toBe('dm-disabled');
+    expect(sends.has(WINNER_ID)).toBe(false);
   });
 
   it('keeps a product notification retryable until its deterministic entitlement exists', async () => {
