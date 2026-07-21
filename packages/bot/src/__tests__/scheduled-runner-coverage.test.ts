@@ -34,7 +34,7 @@ import { ScheduledMessageRunner } from '../features/scheduled-messages/runner.js
 
 function chainBuilder(resolveValue: any = { data: null, error: null }) {
   const chain: any = {};
-  for (const m of ['select', 'eq', 'in', 'limit', 'order', 'maybeSingle', 'single', 'update']) {
+  for (const m of ['select', 'eq', 'in', 'limit', 'order', 'maybeSingle', 'single', 'update', 'or']) {
     chain[m] = vi.fn().mockReturnValue(chain);
   }
   chain.then = (res: any, rej?: any) => Promise.resolve(resolveValue).then(res, rej);

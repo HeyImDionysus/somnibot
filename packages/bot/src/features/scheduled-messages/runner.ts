@@ -231,6 +231,32 @@ export class ScheduledMessageRunner {
       return;
     }
 
+    // Atomically CLAIM this occurrence before sending. The in-memory 55s check in
+    // tick() is only a cheap pre-filter; two runner instances (multi-shard) or a
+    // replayed tick can both pass it against the same stale last_sent_at and
+    // double-post. The conditional UPDATE advances last_sent_at only when it is
+    // still null or older than the 55s window, and Postgres serializes concurrent
+    // writers on the row — so exactly one claim succeeds per occurrence. A writer
+    // that updates zero rows lost the claim and must NOT send.
+    const claimBefore = new Date(Date.now() - 55_000).toISOString();
+    const { data: claimed, error: claimErr } = await this.supabase
+      .from('scheduled_messages')
+      .update({
+        last_sent_at: new Date().toISOString(),
+        current_sends: schedule.current_sends + 1,
+      })
+      .eq('id', schedule.id)
+      .or(`last_sent_at.is.null,last_sent_at.lt.${claimBefore}`)
+      .select('id');
+    if (claimErr) {
+      log.error(`Failed to claim schedule ${schedule.id}:`, claimErr.message);
+      return;
+    }
+    if (!claimed || claimed.length === 0) {
+      // Another instance/tick already claimed this occurrence — skip (no double-post).
+      return;
+    }
+
     let embed: EmbedBuilder | null = null;
 
     // Load embed config if referenced
@@ -267,20 +293,14 @@ export class ScheduledMessageRunner {
 
     const content = schedule.message ? replaceVariables(schedule.message, this.guild) : undefined;
 
-    // Send the message
+    // Send the message. The occurrence was already claimed atomically above, so
+    // tracking (last_sent_at / current_sends) is persisted whether or not the
+    // send succeeds — a failed send is not retried this window (at-most-once),
+    // which is the correct trade for the "never duplicate" contract.
     await channel.send({
       content: content || undefined,
       embeds: embed ? [embed] : undefined,
     });
-
-    // Update tracking
-    await this.supabase
-      .from('scheduled_messages')
-      .update({
-        last_sent_at: new Date().toISOString(),
-        current_sends: schedule.current_sends + 1,
-      })
-      .eq('id', schedule.id);
 
     log.info(`Sent "${schedule.name}" to #${channel.name}`);
   }

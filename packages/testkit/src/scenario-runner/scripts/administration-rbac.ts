@@ -327,12 +327,11 @@ function gateDashboardAccess(ctx: ScenarioContext, promise: string, extra = ''):
 async function DEF(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
 
-  // FINDING (real, DB-observable): the catalog contracts that first dashboard
-  // setup seeds exactly the five system roles (owner/admin/moderator/support/
-  // finance) for the guild. No reachable runtime path does this — only a
-  // one-time historical migration seeds guilds that pre-existed it (and it seeds
-  // Owner/Admin/Moderator/Viewer/Support, a different set). A guild provisioned
-  // now gets zero. Assert the contract; a mismatch is a finding for the owner.
+  // The catalog contracts that first dashboard setup seeds exactly the five
+  // system roles (owner/admin/moderator/support/finance) for the guild. An
+  // AFTER INSERT trigger on `guild` (seed_default_dashboard_roles) now seeds them
+  // however a guild row is created — so a freshly-provisioned guild holds exactly
+  // the five contracted system roles.
   const systemRoles = await guildRoleCount(handle, { isSystem: true });
   ctx.expect(systemRoles === 5, {
     assertionClass: 'database-RLS',
