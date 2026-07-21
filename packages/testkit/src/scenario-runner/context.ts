@@ -114,6 +114,8 @@ export class ScenarioContextImpl implements ScenarioContext {
       },
       member: params.member,
       options: (params.options ?? {}) as Record<string, OptionValue>,
+      subcommand: params.subcommand,
+      subcommandGroup: params.subcommandGroup,
     });
     return injector.inject(interaction);
   }

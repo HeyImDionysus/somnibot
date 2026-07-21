@@ -228,6 +228,11 @@ export interface RunSlashParams {
   readonly interactionId?: string;
   /** Display name for the acting user (defaults to a run-prefixed label). */
   readonly displayName?: string;
+  /** Subcommand name for subcommand commands (e.g. `/giveaway start`). Drives
+   *  interaction.options.getSubcommand() so subcommand handlers run for real. */
+  readonly subcommand?: string;
+  /** Subcommand group, for grouped subcommands (`/group sub`). */
+  readonly subcommandGroup?: string;
 }
 
 /** A single scenario's proof: given the live context, produce assertions. */
