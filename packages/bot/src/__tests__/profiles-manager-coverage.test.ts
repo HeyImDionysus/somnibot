@@ -251,5 +251,32 @@ describe('ProfilesManager', () => {
         content: expect.stringContaining('Bio updated'),
       }));
     });
+
+    it('truncates a bio longer than the configured bio_max_length', async () => {
+      supabase = makeSupabase({
+        guild_config: { bio_max_length: 10 },
+        economy_profiles: { bio: null },
+      });
+      mgr = new ProfilesManager(supabase as any);
+
+      const interaction = makeInteraction({ bio: 'B'.repeat(50) });
+      await mgr.setBio(interaction as any);
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('truncated'),
+      }));
+    });
+
+    it('refuses when profiles are disabled', async () => {
+      supabase = makeSupabase({
+        guild_config: { profiles_enabled: false },
+      });
+      mgr = new ProfilesManager(supabase as any);
+
+      const interaction = makeInteraction({ bio: 'hi' });
+      await mgr.setBio(interaction as any);
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('disabled'),
+      }));
+    });
   });
 });

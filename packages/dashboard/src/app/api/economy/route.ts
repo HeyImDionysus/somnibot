@@ -49,6 +49,13 @@ const ECONOMY_COLUMNS = [
   'economy_max_wallet',
   'economy_max_bank',
   'economy_log_channel_id',
+  // Member-profile controls (catalog: community.json profiles).
+  'profiles_enabled',
+  'title_max_length',
+  'bio_max_length',
+  'profile_visibility',
+  'content_filter_mode',
+  'show_game_stats',
 ] as const;
 
 /** Zod schema for PATCH validation — matches column types + sane ranges */
@@ -89,6 +96,13 @@ const economyPatchSchema = z.object({
   economy_max_wallet: z.number().int().min(0).max(2_147_483_647).optional(),
   economy_max_bank: z.number().int().min(0).max(2_147_483_647).optional(),
   economy_log_channel_id: z.string().nullable().optional(),
+  // Member-profile controls (catalog: community.json profiles).
+  profiles_enabled: z.boolean().optional(),
+  title_max_length: z.number().int().min(1).max(64).optional(),
+  bio_max_length: z.number().int().min(1).max(256).optional(),
+  profile_visibility: z.enum(['everyone', 'members-after-onboarding']).optional(),
+  content_filter_mode: z.enum(['lenient', 'strict']).optional(),
+  show_game_stats: z.boolean().optional(),
 }).strict();
 
 export async function GET() {

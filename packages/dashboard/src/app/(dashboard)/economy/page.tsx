@@ -48,6 +48,13 @@ interface EconomyConfig {
   economy_max_wallet: number;
   economy_max_bank: number;
   economy_log_channel_id: string | null;
+  // Member-profile controls
+  profiles_enabled: boolean;
+  title_max_length: number;
+  bio_max_length: number;
+  profile_visibility: 'everyone' | 'members-after-onboarding';
+  content_filter_mode: 'lenient' | 'strict';
+  show_game_stats: boolean;
 }
 
 interface EconomyStats {
@@ -87,6 +94,12 @@ const DEFAULT_CONFIG: EconomyConfig = {
   economy_max_wallet: 0,
   economy_max_bank: 0,
   economy_log_channel_id: null,
+  profiles_enabled: true,
+  title_max_length: 64,
+  bio_max_length: 256,
+  profile_visibility: 'everyone',
+  content_filter_mode: 'lenient',
+  show_game_stats: true,
 };
 
 // ── Helpers ───────────────────────────────────────────────
@@ -469,6 +482,61 @@ export default function EconomyPage() {
               value={config.economy_log_channel_id}
               onChange={(v) => updateField('economy_log_channel_id', typeof v === 'string' ? v : null)}
               allowNone
+            />
+          </div>
+
+          {/* Member Profiles */}
+          <div className="rounded-lg border border-discord-bg-tertiary bg-discord-bg-secondary p-6 space-y-4">
+            <SectionHeader title="Member Profiles" description="Controls for /profile, /title, and /bio." />
+            <Toggle
+              label="Profiles Enabled"
+              description="When off, profile commands explain the feature is disabled."
+              checked={config.profiles_enabled}
+              onChange={(v) => updateField('profiles_enabled', v)}
+            />
+            <div className="grid grid-cols-2 gap-4">
+              <NumberField
+                label="Title Max Length"
+                value={config.title_max_length}
+                onChange={(v) => updateField('title_max_length', v)}
+                min={1}
+                max={64}
+              />
+              <NumberField
+                label="Bio Max Length"
+                value={config.bio_max_length}
+                onChange={(v) => updateField('bio_max_length', v)}
+                min={1}
+                max={256}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-discord-text-secondary">Profile Visibility</label>
+              <select
+                value={config.profile_visibility}
+                onChange={(e) => updateField('profile_visibility', e.target.value === 'members-after-onboarding' ? 'members-after-onboarding' : 'everyone')}
+                className="mt-1 w-full rounded-md border border-discord-bg-tertiary bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-blurple focus:outline-none"
+              >
+                <option value="everyone">Everyone</option>
+                <option value="members-after-onboarding">Members after onboarding</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-discord-text-secondary">Content Filter</label>
+              <select
+                value={config.content_filter_mode}
+                onChange={(e) => updateField('content_filter_mode', e.target.value === 'strict' ? 'strict' : 'lenient')}
+                className="mt-1 w-full rounded-md border border-discord-bg-tertiary bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-blurple focus:outline-none"
+              >
+                <option value="lenient">Lenient (block only clear violations)</option>
+                <option value="strict">Strict (block broader categories)</option>
+              </select>
+            </div>
+            <Toggle
+              label="Show Game Stats"
+              description="Show play-money standing (net worth, wallet, bank) on the profile card."
+              checked={config.show_game_stats}
+              onChange={(v) => updateField('show_game_stats', v)}
             />
           </div>
         </>
