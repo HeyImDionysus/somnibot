@@ -11,6 +11,11 @@
  *   - /leaderboard is a subcommand-free slash command that reads member_levels
  *     and edits a text reply, so its ranked standings are captured and asserted
  *     against the REAL rows the scenario seeded (order, level, xp).
+ *   - /rank view and /xp add|remove|set|reset are subcommand-routed and driven
+ *     live through the subcommand injector: /rank view renders the real canvas
+ *     rank-card PNG (captured attachment) or the "no XP yet" fallback, and the
+ *     /xp admin subcommands round-trip the member_levels DB effect + confirmation
+ *     reply (add/remove via the atomic increment_member_xp RPC).
  *   - member_levels / level_rewards / member_rank_settings are guild-scoped
  *     under RLS, so anon-denial (+ a service-role positive control) and
  *     cross-guild isolation are proven exactly like the wallet-rewards template.
@@ -24,9 +29,9 @@
  *     grantVoiceXp) is triggered by gateway messageCreate / voiceStateUpdate
  *     events (no runSlash driver) AND claims its anti-spam cooldown with a
  *     Valkey `SET … NX` (no local Redis). Both are absent here → GATE.
- *   - /rank view and /xp add|remove|set|reset are SUBCOMMAND commands; the
- *     harness's runSlash cannot supply a subcommand selector, and the rank card
- *     is a @napi-rs/canvas PNG (a Discord-readback artifact), so these gate.
+ *   - The rank card's PIXELS (brand-kit colors, avatar, powered-by attribution)
+ *     are a @napi-rs/canvas PNG a bot-only harness cannot inspect — the card path
+ *     executing + the attachment name are asserted; the brand-kit match gates.
  *   - Reward-role grants + level-up / reward announcements post to a live guild
  *     channel via the gateway → discord-readback GATE.
  *   - Levels writes NO append-only audit row and NO owner alert on any path, so
@@ -157,14 +162,22 @@ async function alertCount(handle: LiveClientHandle): Promise<number | null> {
   return count ?? 0;
 }
 
+/** The text of a captured reply/editReply payload — discord.js accepts either a raw
+ *  string or a `{ content }` object, so normalise both (a string payload otherwise
+ *  reads as empty). */
+function payloadText(payload: unknown): string {
+  if (typeof payload === 'string') return payload;
+  return String((payload as { content?: string } | undefined)?.content ?? '');
+}
+
 /** Read the last editReply/reply content string a handler produced. */
 function replyContent(captured: CapturedResponse): string {
   const edits = captured.allOf('editReply');
   if (edits.length > 0) {
-    return String((edits[edits.length - 1]!.payload as { content?: string } | undefined)?.content ?? '');
+    return payloadText(edits[edits.length - 1]!.payload);
   }
   const reply = captured.find('reply');
-  return String((reply?.payload as { content?: string } | undefined)?.content ?? '');
+  return payloadText(reply?.payload);
 }
 
 function truncate(text: string, max = 120): string {
@@ -343,6 +356,101 @@ function gateReplayDeferred(ctx: ScenarioContext, where: string): void {
   );
 }
 
+/**
+ * Drive the REAL `/rank view` subcommand live through the injector (no gate). Proves
+ * both card-path branches: a member WITH recorded XP renders the @napi-rs/canvas
+ * rank-card PNG (the attachment is captured — its bytes are a Discord-readback artifact,
+ * but the card path having executed end-to-end IS asserted), and a member with no XP
+ * gets the branded "no XP yet" text fallback instead of an error.
+ */
+async function proveRankView(ctx: ScenarioContext, handle: LiveClientHandle, memberId: string): Promise<void> {
+  // (1) A member WITH recorded XP → the rank card PNG renders.
+  const withXp = await ctx.runSlash(handle, { commandName: 'rank', userId: memberId, subcommand: 'view' });
+  const edits = withXp.allOf('editReply');
+  const files =
+    (edits[edits.length - 1]?.payload as { files?: Array<{ name?: string }> } | undefined)?.files ?? [];
+  ctx.expect(files.length === 1 && files[0]?.name === 'rank-card.png', {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: '/rank view renders the rank-card PNG for a member with recorded XP (the real canvas card path).',
+    observation: `/rank view (member with XP) replied with ${files.length} file(s): ${
+      files.map((f) => f?.name ?? '?').join(', ') || '(none)'
+    } (expected one rank-card.png).`,
+    impact: 'The /rank view card path did not render a rank-card attachment.',
+  });
+
+  // (2) A member with NO recorded XP → the "no XP yet" text fallback, never an error.
+  const noXp = await ctx.runSlash(handle, { commandName: 'rank', userId: ctx.userId('norank'), subcommand: 'view' });
+  const content = replyContent(noXp).toLowerCase();
+  ctx.expect(content.includes('xp yet'), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'A member with no recorded XP gets a "no XP yet" notice from /rank view rather than an error.',
+    observation: `/rank view (no XP) replied ${JSON.stringify(truncate(replyContent(noXp)))} (expected a "no XP yet" notice).`,
+    impact: 'The /rank view no-data path did not surface the expected notice.',
+  });
+}
+
+/**
+ * Drive the REAL `/xp` admin subcommands (add/remove/set/reset) live through the injector
+ * and assert BOTH the member_levels DB effect and the confirmation reply. add/remove issue
+ * the exact atomic increment_member_xp RPC the deployed handler uses; set/reset upsert the
+ * member_levels row directly. The acting member carries Manage-Guild (permissions.has → true)
+ * so this stays a happy-path drive even once the handler adds an in-handler authz re-check.
+ */
+async function proveXpAdmin(ctx: ScenarioContext, handle: LiveClientHandle): Promise<void> {
+  const admin = ctx.userId('xpadmin');
+  const target = ctx.userId('xptarget');
+  const adminMember = { id: admin, roles: [], permissions: { has: () => true } };
+  const userOpt = { id: target, username: target, displayAvatarURL: () => 'https://cdn.example/avatar.png' };
+  const drive = (subcommand: string, options: Record<string, unknown>) =>
+    ctx.runSlash(handle, { commandName: 'xp', userId: admin, member: adminMember, subcommand, options });
+
+  // /xp add 250 → a member_levels row is created at exactly 250 XP; reply confirms the total.
+  const added = await drive('add', { user: userOpt, amount: 250 });
+  const afterAdd = await readMemberLevel(handle, target);
+  ctx.expect(afterAdd?.xp === 250 && replyContent(added).includes('Added'), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: '/xp add credits the target member the exact amount via the atomic RPC and confirms the new total.',
+    observation: `after /xp add 250: member_levels xp=${afterAdd?.xp} (expected 250); reply "${truncate(replyContent(added))}".`,
+    impact: '/xp add did not credit the member or confirm the new total.',
+  });
+
+  // /xp remove 100 → 150 XP.
+  const removed = await drive('remove', { user: userOpt, amount: 100 });
+  const afterRemove = await readMemberLevel(handle, target);
+  ctx.expect(afterRemove?.xp === 150 && replyContent(removed).includes('Removed'), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: '/xp remove debits the exact amount via the atomic RPC and confirms the reduced total.',
+    observation: `after /xp remove 100: member_levels xp=${afterRemove?.xp} (expected 150); reply "${truncate(replyContent(removed))}".`,
+    impact: '/xp remove did not debit the member correctly.',
+  });
+
+  // /xp set 1000 → XP overwritten to exactly 1000 at the derived level.
+  const set = await drive('set', { user: userOpt, amount: 1000 });
+  const afterSet = await readMemberLevel(handle, target);
+  ctx.expect(afterSet?.xp === 1000 && replyContent(set).includes('Set'), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: '/xp set overwrites the member’s XP to the exact value and confirms it.',
+    observation: `after /xp set 1000: member_levels xp=${afterSet?.xp} (expected 1000); reply "${truncate(replyContent(set))}".`,
+    impact: '/xp set did not overwrite the member’s XP.',
+  });
+
+  // /xp reset → XP and level zeroed.
+  const reset = await drive('reset', { user: userOpt });
+  const afterReset = await readMemberLevel(handle, target);
+  ctx.expect(afterReset?.xp === 0 && afterReset?.level === 0 && replyContent(reset).toLowerCase().includes('reset'), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: '/xp reset zeroes the member’s XP and level and confirms the reset.',
+    observation: `after /xp reset: member_levels xp=${afterReset?.xp}/level=${afterReset?.level} (expected 0/0); reply "${truncate(replyContent(reset))}".`,
+    impact: '/xp reset did not zero the member’s XP.',
+  });
+}
+
 // ── The 12 scenario scripts ───────────────────────────────────────────────
 
 /** DEF — out-of-the-box levels: leaderboard reflects recorded totals; the
@@ -417,12 +525,9 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     ctx,
     'Out of the box, chatting earns 15-25 XP/message under a 60s cooldown (a 4th message inside the window earns nothing) and voice earns 10 XP/5-min interval.',
   );
-  ctx.gate(
-    'Discord',
-    'discord-readback',
-    '/rank view renders a branded rank card (or branded text fallback) showing the member’s XP and level.',
-    '/rank is a subcommand command (runSlash cannot supply a subcommand selector) and the rank card is a @napi-rs/canvas PNG — a Discord-readback artifact',
-  );
+  // /rank view + /xp add|remove|set|reset are subcommand-routed — driven live now.
+  await proveRankView(ctx, handle, userA);
+  await proveXpAdmin(ctx, handle);
 
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
