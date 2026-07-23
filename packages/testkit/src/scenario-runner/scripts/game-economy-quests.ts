@@ -415,23 +415,6 @@ async function proveNoOwnerAlert(ctx: ScenarioContext, handle: LiveClientHandle)
   );
 }
 
-/** Branding lives only on the `/quests view|claim` embeds, which are subcommand-routed
- *  and undrivable here — gate honestly (never a hollow pass). */
-function gateBranding(ctx: ScenarioContext): void {
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'Every member-facing quests surface shows the owner-configured brand name, colors, and voice preset (quest board + claim embed).',
-    'the branded surfaces are the `/quests view` and `/quests claim` embeds (subcommand-routed); the runner’s runSlash cannot supply a subcommand, so no branded quest reply is capturable in-process',
-  );
-  ctx.gate(
-    'branding',
-    'discord-readback',
-    'The full white-label brand kit (colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit.',
-    'requires an embed/message snapshot readback against the live brand kit (DISCORD_TOKEN + live guild)',
-  );
-}
-
 /** The member-facing Discord effects (quest board embed, claim embed in a channel). */
 function gateLiveGuildReadback(ctx: ScenarioContext): void {
   ctx.gate(
@@ -1009,7 +992,7 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   await proveQuestAudit(ctx, handle);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveBranding(ctx, handle);
   gateLiveGuildReadback(ctx);
 }
 
@@ -1152,7 +1135,7 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
   await proveQuestAudit(ctx, handle);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveBranding(ctx, handle);
   gateLiveGuildReadback(ctx);
 }
 
@@ -1266,18 +1249,27 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
   await proveQuestAudit(ctx, handle);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
+  // Drive the branded /quests view for a fresh member BEFORE the sweep — the auto-assigned
+  // slate gives that member their own run-prefixed progress rows, so the zero-rows assertion
+  // below also proves the sweep clears rows created via the live subcommand path.
+  await proveBranding(ctx, handle);
+  const brandUser = ctx.userId('brand');
+  const brandProgressBefore = await progressCount(handle, brandUser);
 
   // Run the same sweep teardown uses and verify ZERO run-prefixed quest rows remain.
   await ctx.sweepGuildRows(handle);
   const templatesAfter = (await readTemplates(handle)).length;
   const progressAfter = await progressCount(handle, userA);
+  const brandProgressAfter = await progressCount(handle, brandUser);
   const walletAfter = await readWallet(handle, userA);
-  ctx.expect(templatesAfter === 0 && progressAfter === 0 && walletAfter === null, {
+  ctx.expect(templatesAfter === 0 && progressAfter === 0 && brandProgressAfter === 0 && walletAfter === null, {
     assertionClass: 'cleanup',
     channel: 'db-observable',
     promise:
-      'Run-prefixed quest template, progress, and wallet rows are deleted; a final sweep finds zero run-prefixed quests resources.',
-    observation: `post-sweep: templates=${templatesAfter}, progress rows=${progressAfter}, wallet=${walletAfter ? walletAfter.wallet : 'none'}.`,
+      'Run-prefixed quest template, progress, and wallet rows are deleted; a final sweep finds zero run-prefixed quests resources (including rows the live /quests view created).',
+    observation:
+      `post-sweep: templates=${templatesAfter}, userA progress rows=${progressAfter}, ` +
+      `brand-member progress rows=${brandProgressAfter} (was ${brandProgressBefore}), wallet=${walletAfter ? walletAfter.wallet : 'none'}.`,
     impact: 'The cleanup sweep left run-prefixed quest rows behind — the suite leaves residue.',
   });
 
@@ -1295,7 +1287,6 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     'Audit history is anonymized rather than deleted (operational rows deleted, audit_logs retained).',
     'requires an audit_logs anonymization readback lane (and quest actions currently write no audit_logs row — see the DEF audit finding)',
   );
-  gateBranding(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY');
 }
 
