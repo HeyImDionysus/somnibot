@@ -7,14 +7,17 @@
  * respects the two-economies wall: license activity writes commerce rows but never
  * a play-money game-economy wallet/ledger row.
  *
- * mostlyGated = true — by construction. The ONLY member surface for this domain is
- * the /license slash command, and /license is entirely SUBCOMMAND-driven
- * (/license activate <key>, /license check, /license info <key>). The runner's
- * `runSlash` cannot supply a slash SUBCOMMAND (context.ts builds the interaction
- * with no `subcommand`, and handleLicenseCommand calls getSubcommand() first),
- * so the command lane cannot be driven through the real dispatcher in-process.
- * Every captured-reply / activation-embed / /license-check-render / admin-info
- * surface is therefore GATED honestly; the STATE and EFFECTS those handlers act on
+ * The ONLY member surface for this domain is the /license slash command, which is
+ * entirely SUBCOMMAND-driven (/license activate <key>, /license check, /license
+ * info <key>). Since the #331 subcommand injector, `runSlash` supplies the
+ * subcommand + options, so the command lane is now DRIVEN through the real
+ * dispatcher in-process: /license activate (success embed + key.activated audit),
+ * the invalid-key / bound-to-another-user / revoked-key refusals, /license check
+ * entitlement listings, and the non-admin /license info refusal are all live
+ * captured-reply assertions. What remains GATED is the activation-embed brand-kit
+ * pixel readback, failure/denial audit rows the handler does not write (a #21 gap),
+ * the portal-driven rotation audit (#20), and the validate-outage / role-add fault
+ * lanes (#19). The STATE and EFFECTS those handlers act on
  * are proven DB-observably instead — never faked.
  *
  * What DOES run NOW against real state:
@@ -50,6 +53,7 @@ import { createHash } from 'node:crypto';
 
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
+import type { CapturedResponse } from '../../captured-response.js';
 import type { LiveClientHandle } from '../../live-runner.js';
 import type { DomainProof, ScenarioContext } from '../types.js';
 
@@ -498,11 +502,56 @@ async function proveNoOwnerAlert(ctx: ScenarioContext, handle: LiveClientHandle)
   );
 }
 
-const SUBCOMMAND_GATE =
-  'runSlash cannot supply a slash SUBCOMMAND, so /license activate|check|info cannot be driven through the real dispatcher in-process; the underlying state/effects are proven DB-observably instead';
+// ── Live /license subcommand drives (through the #331 subcommand injector) ──
 
-function gateSubcommand(ctx: ScenarioContext, promise: string): void {
-  ctx.gate('Discord', 'captured-reply', promise, SUBCOMMAND_GATE);
+/** Drive the REAL /license activate handler as `actor` and return its captured reply. */
+function driveActivate(
+  ctx: ScenarioContext,
+  handle: LiveClientHandle,
+  actor: string,
+  plaintextKey: string,
+): Promise<CapturedResponse> {
+  return ctx.runSlash(handle, {
+    commandName: 'license',
+    userId: actor,
+    subcommand: 'activate',
+    options: { key: plaintextKey },
+  });
+}
+
+/** Drive the REAL /license check handler as `actor` and return its captured reply. */
+function driveCheck(ctx: ScenarioContext, handle: LiveClientHandle, actor: string): Promise<CapturedResponse> {
+  return ctx.runSlash(handle, { commandName: 'license', userId: actor, subcommand: 'check' });
+}
+
+/** Title of the last embed a /license handler replied with (or raw content if not an embed). */
+function embedTitle(captured: CapturedResponse): string {
+  const edits = captured.allOf('editReply');
+  const replies = captured.allOf('reply');
+  const last = (edits.length > 0 ? edits[edits.length - 1] : replies[replies.length - 1])?.payload as
+    | { embeds?: Array<{ data?: { title?: string; description?: string } }>; content?: string }
+    | undefined;
+  return String(last?.embeds?.[0]?.data?.title ?? last?.content ?? '');
+}
+
+/** Description of the last embed a /license handler replied with (for entitlement listings). */
+function embedDescription(captured: CapturedResponse): string {
+  const edits = captured.allOf('editReply');
+  const replies = captured.allOf('reply');
+  const last = (edits.length > 0 ? edits[edits.length - 1] : replies[replies.length - 1])?.payload as
+    | { embeds?: Array<{ data?: { title?: string; description?: string } }>; content?: string }
+    | undefined;
+  return String(last?.embeds?.[0]?.data?.description ?? last?.content ?? '');
+}
+
+/** Count audit_logs rows for an action in the scenario guild. */
+async function auditCount(handle: LiveClientHandle, action: string): Promise<number> {
+  const { count } = await handle.supabase
+    .from('audit_logs')
+    .select('*', { count: 'exact', head: true })
+    .eq('guild_id', handle.guildId)
+    .eq('action', action);
+  return count ?? 0;
 }
 
 function gateActivationAudit(ctx: ScenarioContext, promise: string): void {
@@ -563,33 +612,52 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  // Activation transition (the exact status-guarded writes the /license activate handler performs).
-  const { data: activated } = await handle.supabase
-    .from('license_keys')
-    .update({ status: 'active', activated_at: new Date().toISOString() })
-    .eq('id', arr.licenseKeyId ?? '')
-    .eq('status', 'pending_activation')
-    .select('id');
-  await handle.supabase.from('entitlements').update({ status: 'active' }).eq('license_key_id', arr.licenseKeyId ?? '').eq('guild_id', handle.guildId);
+  // Activation: drive the REAL /license activate handler as the bound buyer. It runs the
+  // exact status-guarded flip (pending_activation → active), activates the entitlement,
+  // writes the key.activated audit row, and replies with the success embed.
+  const activateReply = await driveActivate(ctx, handle, buyer, arr.key.plaintext);
   const keyAfter = await readLicenseKey(handle, arr.licenseKeyId ?? '');
   const entAfter = await readEntitlementByKey(handle, arr.licenseKeyId ?? '');
-  ctx.expect((activated?.length ?? 0) === 1 && keyAfter?.status === 'active' && keyAfter?.activated_at !== null && entAfter?.status === 'active', {
-    assertionClass: 'Discord',
-    channel: 'db-observable',
-    promise: 'A bound activation flips the key and its entitlement to active atomically (the state /license check would list as active).',
-    observation:
-      `guarded activation affected ${activated?.length ?? 0} row(s); key.status=${keyAfter?.status}, ` +
-      `activated_at set=${keyAfter?.activated_at !== null}, entitlement.status=${entAfter?.status}.`,
-    impact: 'Activation did not transition the key + entitlement to active — the pending→active state machine is broken.',
+  ctx.expect(
+    embedTitle(activateReply).includes('License Activated') &&
+      keyAfter?.status === 'active' &&
+      keyAfter?.activated_at !== null &&
+      entAfter?.status === 'active',
+    {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'A bound /license activate flips the key + entitlement to active atomically and replies with the activation embed.',
+      observation:
+        `/license activate replied embed=${JSON.stringify(embedTitle(activateReply))}; ` +
+        `key.status=${keyAfter?.status}, activated_at set=${keyAfter?.activated_at !== null}, entitlement.status=${entAfter?.status}.`,
+      impact: 'Driving /license activate did not transition the key + entitlement to active with a success reply — the activation path is broken.',
+    },
+  );
+
+  // The activation writes exactly one key.activated audit row (un-gated: driven, not simulated).
+  const activationAudits = await auditCount(handle, 'key.activated');
+  ctx.expect(activationAudits === 1, {
+    assertionClass: 'audit',
+    channel: 'audit-row',
+    promise: 'A successful /license activate writes exactly one key.activated audit row (actor, key id, product, granted role ids).',
+    observation: `audit_logs holds ${activationAudits} key.activated row(s) after one /license activate (expected 1).`,
+    impact: 'The /license activate path wrote no key.activated audit row — the activation is untraceable.',
   });
 
-  // Replay-safety: the status guard makes re-activation a no-op, and key_hash UNIQUE fences a duplicate issue.
-  const { data: replayActivate } = await handle.supabase
-    .from('license_keys')
-    .update({ status: 'active' })
-    .eq('id', arr.licenseKeyId ?? '')
-    .eq('status', 'pending_activation')
-    .select('id');
+  // /license check (as the buyer) now lists the active entitlement.
+  const checkReply = await driveCheck(ctx, handle, buyer);
+  ctx.expect(embedTitle(checkReply).includes('Entitlements') && /active/i.test(embedDescription(checkReply)), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'After activation, /license check lists the buyer’s entitlement as active.',
+    observation: `/license check replied title=${JSON.stringify(embedTitle(checkReply))}, body=${JSON.stringify(embedDescription(checkReply).slice(0, 120))}.`,
+    impact: '/license check did not surface the active entitlement for the buyer.',
+  });
+
+  // Replay-safety: a SECOND /license activate is a no-op ("Already Activated"), writes NO
+  // second key.activated audit row, and a duplicate key hash is still fenced (UNIQUE key_hash).
+  const replayReply = await driveActivate(ctx, handle, buyer, arr.key.plaintext);
+  const activationAuditsAfterReplay = await auditCount(handle, 'key.activated');
   const { error: dupKeyErr } = await handle.supabase.from('license_keys').insert({
     order_id: arr.orderId,
     customer_id: arr.customerId,
@@ -601,15 +669,19 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     bound_discord_id: buyer,
     status: 'pending_activation',
   });
-  ctx.expect((replayActivate?.length ?? 0) === 0 && dupKeyErr !== null, {
-    assertionClass: 'replay-safety',
-    channel: 'db-observable',
-    promise: 'Re-activation is a no-op (status-guarded) and a duplicate key hash is rejected (UNIQUE key_hash) — replays never double-grant or re-issue.',
-    observation:
-      `second guarded activation affected ${replayActivate?.length ?? 0} row(s) (expected 0); ` +
-      `duplicate key_hash insert rejected=${dupKeyErr !== null} (error: ${dupKeyErr?.message ?? 'NONE — a duplicate key persisted!'}).`,
-    impact: 'A replayed activation re-granted, or a duplicate key hash persisted — the exactly-once activation fence failed.',
-  });
+  ctx.expect(
+    embedTitle(replayReply).includes('Already Activated') && activationAuditsAfterReplay === 1 && dupKeyErr !== null,
+    {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise: 'Replaying /license activate is a no-op ("Already Activated") that writes no second audit row; a duplicate key hash is rejected (UNIQUE key_hash).',
+      observation:
+        `replayed /license activate embed=${JSON.stringify(embedTitle(replayReply))}; ` +
+        `key.activated audit rows=${activationAuditsAfterReplay} (expected 1); ` +
+        `duplicate key_hash insert rejected=${dupKeyErr !== null} (error: ${dupKeyErr?.message ?? 'NONE — a duplicate key persisted!'}).`,
+      impact: 'A replayed activation re-granted / re-audited, or a duplicate key hash persisted — the exactly-once activation fence failed.',
+    },
+  );
 
   // Branding: generated keys carry the configured white-label prefix.
   ctx.expect(keyAfter?.key_prefix === keyPrefixDefault, {
@@ -623,8 +695,6 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   await proveLicenseRls(ctx, handle, arr.licenseKeyId ?? '');
   await proveTwoEconomiesWall(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateSubcommand(ctx, 'The /license activate success embed lists granted roles and /license check shows the active entitlement.');
-  gateActivationAudit(ctx, 'key.activated is audited with actor, key id, product, and granted role ids.');
   gateBrandingEmbed(ctx, 'The activation embed uses the owner brand with the subtle powered-by-SomniBot attribution.');
 }
 
@@ -696,7 +766,12 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   await proveLicenseRls(ctx, handle, arr.licenseKeyId ?? '');
   await proveTwoEconomiesWall(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateSubcommand(ctx, 'No Discord-side role/entitlement churn from device changes — the holder’s roles stay stable throughout.');
+  ctx.gate(
+    'Discord',
+    'discord-readback',
+    'No Discord-side role/entitlement churn from device changes — the holder’s roles stay stable throughout.',
+    'device operations here touch only license_sessions (never entitlements/roles); confirming the holder’s live Discord roles are untouched needs a live-guild role readback (manual list)',
+  );
   gateActivationAudit(ctx, 'The refused bind, the self-service removal, and the successful rebind are each audited.');
   gateBrandingEmbed(ctx, 'The device-limit-reached copy names the configured limit and points to the owner-branded portal.');
 }
@@ -819,10 +894,22 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     impact: 'A replayed rotation minted an additional key — the exactly-one-new-key fence failed.',
   });
 
+  // Drive the REAL /license activate with the OLD (revoked) key → the found-but-terminal
+  // "Cannot Activate" refusal; the rotated-away key can no longer be activated at the handler.
+  const oldActivateReply = await driveActivate(ctx, handle, buyer, arr.key.plaintext);
+  ctx.expect(/cannot activate|invalid/i.test(embedTitle(oldActivateReply)), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'After rotation, /license activate on the old (revoked) key is refused — the terminal key cannot re-activate.',
+    observation: `/license activate (old revoked key) replied embed=${JSON.stringify(embedTitle(oldActivateReply))} (expected a "Cannot Activate" refusal).`,
+    impact: 'The rotated-away key could still be activated — the invalidation did not cut it off at the handler.',
+  });
+
   await proveLicenseRls(ctx, handle, newKeyId ?? arr.licenseKeyId ?? '');
   await proveTwoEconomiesWall(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateSubcommand(ctx, 'The entitlement/roles persist through rotation and the old key returns invalid-key on /license activate (portal-driven rotation surface).');
+  // The rotation itself is a portal/dashboard operation (simulated by direct writes here); the
+  // audit row linking old→new key ids is written by that portal path — a #20 dashboard-route residual.
   gateActivationAudit(ctx, 'The rotation is audited linking old and new key ids without recording either plaintext.');
   gateBrandingEmbed(ctx, 'The rotation notice uses the key-rotated template with product name and new key tail in the owner’s voice.');
 }
@@ -882,10 +969,23 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
     impact: 'Repeated invalid attempts accumulated state — invalid activation is not side-effect free under retry.',
   });
 
+  // Drive the REAL /license activate with a well-formed but unknown key → the branded
+  // invalid-key embed (the identical refusal every rejected attempt gets).
+  const bogusKey = makeKeyMaterial(prefix, `${ctx.runPrefix}ghost`).plaintext;
+  const invalidReply = await driveActivate(ctx, handle, buyer, bogusKey);
+  ctx.expect(embedTitle(invalidReply).includes('Invalid Key'), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'A rejected /license activate returns the branded invalid-key embed with no probing distinction.',
+    observation: `/license activate (unknown key) replied embed=${JSON.stringify(embedTitle(invalidReply))} (expected "Invalid Key").`,
+    impact: 'The invalid-key path did not return the expected refusal embed.',
+  });
+
   await proveLicenseRls(ctx, handle, arr.licenseKeyId ?? '');
   await proveTwoEconomiesWall(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateSubcommand(ctx, 'Each rejected /license activate returns the same ephemeral invalid-key embed with no probing distinction.');
+  // The handler writes NO audit row for a FAILED activation (only key.activated on success),
+  // so the "failed attempts are logged" promise is not observable — an honest #21 gap, not a subcommand limit.
   gateActivationAudit(ctx, 'Failed activation attempts are logged with the hashed submission (never raw plaintext) for abuse analysis.');
   gateBrandingEmbed(ctx, 'The refusal copy stays friendly and branded with no technical detail.');
 }
@@ -948,10 +1048,39 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
     impact: 'A replayed foreign attempt changed key state — the binding gate is not replay-stable.',
   });
 
+  // Drive the REAL /license activate as the FOREIGN account → the key-bound-to-another-user
+  // refusal; the key stays pending for its rightful buyer.
+  const foreignReply = await driveActivate(ctx, handle, foreign, arr.key.plaintext);
+  const keyAfterForeignDrive = await readLicenseKey(handle, arr.licenseKeyId ?? '');
+  ctx.expect(embedTitle(foreignReply).includes('Another User') && keyAfterForeignDrive?.status === 'pending_activation', {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'A foreign account driving /license activate on someone else’s key is refused (bound-to-another-user) and the key stays pending.',
+    observation: `foreign /license activate embed=${JSON.stringify(embedTitle(foreignReply))}; key status=${keyAfterForeignDrive?.status} (expected pending_activation).`,
+    impact: 'A foreign /license activate was not refused or mutated the key — the binding gate failed.',
+  });
+
+  // Drive the REAL /license info as a NON-admin (no Administrator permission) → the admin-only refusal.
+  const infoReply = await ctx.runSlash(handle, {
+    commandName: 'license',
+    userId: foreign,
+    subcommand: 'info',
+    options: { key: arr.key.plaintext },
+    member: { id: foreign, permissions: { has: () => false } },
+  });
+  ctx.expect(/admin-only/i.test(embedTitle(infoReply)), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'A non-admin invoking /license info is refused with the admin-only notice.',
+    observation: `/license info (non-admin) replied ${JSON.stringify(embedTitle(infoReply))} (expected an "admin-only" refusal).`,
+    impact: '/license info did not enforce its admin-only gate.',
+  });
+
   await proveLicenseRls(ctx, handle, arr.licenseKeyId ?? '');
   await proveTwoEconomiesWall(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateSubcommand(ctx, 'The foreign account sees key-bound-elsewhere and the non-admin sees the admin-only /license info refusal (subcommand-driven).');
+  // The handler writes NO audit row for a denied foreign activation or a denied /license info
+  // call — an honest #21 gap (the deny is now driven above), not a subcommand limit.
   gateActivationAudit(ctx, 'The denied foreign activation and the denied /license info call are logged with caller identities.');
   gateBrandingEmbed(ctx, 'Denial messages are branded and reveal nothing about the key’s true owner.');
 }
@@ -1164,19 +1293,26 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     impact: 'License/session state did not survive a restart — persisted key or session state was lost or altered.',
   });
 
-  // Post-restart the pending key still activates normally (the pending→active transition survived reboot).
-  const { data: activatePending } = await second.supabase
-    .from('license_keys')
-    .update({ status: 'active', activated_at: new Date().toISOString() })
-    .eq('id', pending.licenseKeyId ?? '')
-    .eq('status', 'pending_activation')
-    .select('id');
-  ctx.expect((activatePending?.length ?? 0) === 1, {
+  // Post-restart the pending key still activates normally: drive the REAL /license activate as
+  // its bound holder on first invocation (the pending→active transition survived the reboot).
+  const pendingActivateReply = await driveActivate(ctx, second, other, pending.key.plaintext);
+  const pendingKeyAfter = await readLicenseKey(second, pending.licenseKeyId ?? '');
+  ctx.expect(embedTitle(pendingActivateReply).includes('License Activated') && pendingKeyAfter?.status === 'active', {
     assertionClass: 'Discord',
-    channel: 'db-observable',
-    promise: 'Post-restart, the pending key activates on first attempt (the pending→active transition is intact after reboot).',
-    observation: `post-restart guarded activation of the pending key affected ${activatePending?.length ?? 0} row(s) (expected 1).`,
-    impact: 'The pending key could not activate after restart — the transition did not survive reboot.',
+    channel: 'captured-reply',
+    promise: 'Post-restart, /license activate on the pending key succeeds on first attempt (the pending→active transition is intact after reboot).',
+    observation: `post-restart /license activate embed=${JSON.stringify(embedTitle(pendingActivateReply))}; pending key status=${pendingKeyAfter?.status} (expected active).`,
+    impact: 'The pending key could not activate after restart via the real handler — the transition did not survive reboot.',
+  });
+
+  // And /license check for the active buyer lists their active entitlement on first invocation post-restart.
+  const restartCheck = await driveCheck(ctx, second, buyer);
+  ctx.expect(embedTitle(restartCheck).includes('Entitlements') && /active/i.test(embedDescription(restartCheck)), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'Post-restart, /license check lists the buyer’s active entitlement on first invocation.',
+    observation: `post-restart /license check replied body=${JSON.stringify(embedDescription(restartCheck).slice(0, 120))}.`,
+    impact: '/license check did not surface the active entitlement after restart.',
   });
 
   // Replay-safety: a client heartbeat spanning the restart re-validates the SAME device to its existing session.
@@ -1197,7 +1333,6 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
   await proveLicenseRls(ctx, second, active.licenseKeyId ?? '');
   await proveTwoEconomiesWall(ctx, second);
   await proveNoOwnerAlert(ctx, second); // no spurious alert from the restart
-  gateSubcommand(ctx, 'Post-restart /license activate and /license check work on first invocation with correct state.');
   gateActivationAudit(ctx, 'The audit trail is continuous across the restart with no gap or duplicate transitions.');
   gateBrandingEmbed(ctx, 'Post-restart surfaces render identical owner branding.');
 }
