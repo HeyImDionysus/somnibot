@@ -37,7 +37,7 @@ function lotteryBuy(count: number, requestId: string) {
 function prestige(requestId: string) {
   return supa.rpc('economy_prestige_apply', {
     p_guild_id: GUILD_ID, p_user_id: USER, p_min_level: 50, p_min_net_worth: 1000000,
-    p_multiplier_gain: 10, p_request_id: requestId,
+    p_multiplier_gain: 10, p_max_level: 100, p_request_id: requestId,
   }) as unknown as Promise<{ data: { status: string; replayed: boolean; new_level: number; new_multiplier: number } | null; error: unknown }>;
 }
 async function prestigeRow(): Promise<{ prestige_level: number; multiplier_pct: number; total_resets: number } | null> {
@@ -125,7 +125,7 @@ describe('economy_prestige_apply', () => {
   it('rejects below the level requirement without side effects', async () => {
     const otherUser = `${USER}-lowlevel`;
     const { data, error } = await supa.rpc('economy_prestige_apply', {
-      p_guild_id: GUILD_ID, p_user_id: otherUser, p_min_level: 50, p_min_net_worth: 1000000, p_multiplier_gain: 10, p_request_id: 'interaction-lowlevel',
+      p_guild_id: GUILD_ID, p_user_id: otherUser, p_min_level: 50, p_min_net_worth: 1000000, p_multiplier_gain: 10, p_max_level: 100, p_request_id: 'interaction-lowlevel',
     });
     expect(error).toBeNull();
     expect(data).toMatchObject({ status: 'level_too_low' });
