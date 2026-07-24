@@ -99,16 +99,29 @@ export class SomniClient extends Client {
     this.supabase = getSupabase();
     this.valkey = getValkey();
 
-    // Initialize Shoukaku (Lavalink connector)
+    // Initialize Shoukaku (Lavalink connector).
+    // Music is OPTIONAL: Shoukaku rejects a node whose `auth` is empty
+    // ("auth was not found from the given options"), and that rejection during
+    // construction took down the whole boot — so an instance without Lavalink
+    // configured could never start, even though every non-music feature works
+    // fine without it. Register the node only when a password is actually set;
+    // otherwise start with no nodes (music commands then report no available
+    // node, and the existing lavalink_down alerting covers the degraded state).
+    const lavalinkNodes = env.LAVALINK_PASSWORD
+      ? [
+          {
+            name: 'main',
+            url: `${env.LAVALINK_HOST}:${env.LAVALINK_PORT}`,
+            auth: env.LAVALINK_PASSWORD,
+          },
+        ]
+      : [];
+    if (lavalinkNodes.length === 0) {
+      log.warn('LAVALINK_PASSWORD not set — music playback disabled (all other features unaffected)');
+    }
     this.shoukaku = new Shoukaku(
       new Connectors.DiscordJS(this),
-      [
-        {
-          name: 'main',
-          url: `${env.LAVALINK_HOST}:${env.LAVALINK_PORT}`,
-          auth: env.LAVALINK_PASSWORD,
-        },
-      ],
+      lavalinkNodes,
       {
         moveOnDisconnect: false,
         resume: true,
