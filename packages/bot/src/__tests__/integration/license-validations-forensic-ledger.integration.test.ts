@@ -27,15 +27,23 @@ const DISCORD_ID = '410000000000000001';
 const keyHashes: string[] = [];
 const validationIds: string[] = [];
 let seededProductId: string;
+let seededCustomerId: string;
+let seededOrderId: string;
 
-/** Insert a license key with only its required columns; FKs stay NULL. */
+/** Insert a license key with a fresh order (order_id is UNIQUE per key). */
 async function seedKey(status = 'active'): Promise<string> {
   const keyHash = `ledger-hash-${randomUUID()}`;
   keyHashes.push(keyHash);
+  // Each active license needs its own completed order (UNIQUE license_keys.order_id).
+  const [order] = await sql<{ id: string }[]>`
+    INSERT INTO public.orders (order_number, customer_id, guild_id, product_id, amount_cents, status)
+    VALUES (${'LEDGER-' + randomUUID()}, ${seededCustomerId}, ${GUILD_ID}, ${seededProductId}, 1000, 'completed')
+    RETURNING id
+  `;
   const [row] = await sql<{ id: string }[]>`
     INSERT INTO public.license_keys
-      (key_hash, key_prefix, key_suffix, bound_discord_id, status)
-    VALUES (${keyHash}, 'LEDG', 'TAIL', ${DISCORD_ID}, ${status})
+      (guild_id, order_id, customer_id, product_id, key_hash, key_prefix, key_suffix, bound_discord_id, status)
+    VALUES (${GUILD_ID}, ${order!.id}, ${seededCustomerId}, ${seededProductId}, ${keyHash}, 'LEDG', 'TAIL', ${DISCORD_ID}, ${status})
     RETURNING id
   `;
   return row!.id;
@@ -90,6 +98,29 @@ beforeAll(async () => {
     .single();
   if (productError) throw new Error(`Product seed failed: ${productError.message}`);
   seededProductId = product!.id;
+
+  const { data: customer, error: customerError } = await supa
+    .from('customers')
+    .insert({ guild_id: GUILD_ID, discord_id: DISCORD_ID, discord_username: 'ledger-tester' })
+    .select('id')
+    .single();
+  if (customerError) throw new Error(`Customer seed failed: ${customerError.message}`);
+  seededCustomerId = customer!.id;
+
+  const { data: order, error: orderError } = await supa
+    .from('orders')
+    .insert({
+      order_number: `LEDGER-${GUILD_ID}`,
+      customer_id: seededCustomerId,
+      guild_id: GUILD_ID,
+      product_id: seededProductId,
+      amount_cents: 1000,
+      status: 'completed',
+    })
+    .select('id')
+    .single();
+  if (orderError) throw new Error(`Order seed failed: ${orderError.message}`);
+  seededOrderId = order!.id;
 });
 
 afterAll(async () => {
@@ -144,7 +175,8 @@ describe('license_validations forensic ledger', () => {
     const rows = await sql<{ cleanup_old_records: number }[]>`
       SELECT public.cleanup_old_records('economy_transactions', 90) AS cleanup_old_records
     `;
-    expect(typeof rows[0]!.cleanup_old_records).toBe('number');
+    // bigint counts come back from the pg driver as strings — assert it's a finite numeric.
+    expect(Number.isFinite(Number(rows[0]!.cleanup_old_records))).toBe(true);
   });
 
   it('scrub anonymizes PII past retention but keeps the forensic skeleton', async () => {
