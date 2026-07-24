@@ -169,13 +169,21 @@ async function alertCount(handle: LiveClientHandle): Promise<number | null> {
 }
 
 /** Read the last editReply/reply content string a handler produced. */
+/** The text of a captured reply/editReply payload — discord.js accepts either a
+ *  raw string or a `{ content }` object, so normalise both (a raw-string payload
+ *  otherwise reads as empty; that hid the /infractions denial and produced a
+ *  FALSE "no server-side re-check" finding — the #335 payload lesson). */
+function payloadText(payload: unknown): string {
+  if (typeof payload === 'string') return payload;
+  return String((payload as { content?: string } | undefined)?.content ?? '');
+}
+
 function replyContent(captured: CapturedResponse): string {
   const edits = captured.allOf('editReply');
   if (edits.length > 0) {
-    return String((edits[edits.length - 1]!.payload as { content?: string } | undefined)?.content ?? '');
+    return payloadText(edits[edits.length - 1]!.payload);
   }
-  const reply = captured.find('reply');
-  return String((reply?.payload as { content?: string } | undefined)?.content ?? '');
+  return payloadText(captured.find('reply')?.payload);
 }
 
 /** The embed data of the last editReply/reply (the /infractions history embed). */
@@ -661,7 +669,8 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
-/** UNAUTH — moderation power is gated. Surfaces a REAL finding: no handler re-check. */
+/** UNAUTH — moderation power is gated: the handler re-checks Moderate Members,
+ *  denies the unprivileged member, leaks no history, and AUDITS the denial. */
 async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
   const userA = ctx.userId('a'); // target with history
@@ -673,13 +682,13 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   await seedInfraction(handle, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}unauth-2`, expiryDays: 30 });
   const before = await guildInfractionCount(handle);
 
-  // REAL divergence: the catalog's UNAUTH promise is that the HANDLER re-checks the
-  // Moderate-Members permission and denies the unprivileged member. Drive
-  // /infractions as member B WITHOUT Moderate Members (permissions.has → false).
-  // handleInfractionsCommand performs NO server-side permission re-check, so it
-  // returns the target's moderation history instead of an ephemeral denial. That is
-  // a behavior-bug FINDING (defense-in-depth relies solely on Discord hiding the
-  // command via default_member_permissions). We record the FAIL — never soften it.
+  // Drive /infractions as member B WITHOUT Moderate Members (permissions.has →
+  // false → interaction.memberPermissions mirrors the deny). The handler's
+  // server-side re-check (defense-in-depth beyond Discord's
+  // default_member_permissions hiding) must refuse with an ephemeral denial and
+  // leak zero history. (An earlier run recorded a FALSE "no re-check" finding
+  // here: the denial is a raw-string editReply payload the old replyContent
+  // couldn't read — fixed in payloadText above.)
   const unprivileged = { id: userB, permissions: { has: () => false } };
   const cap = await runInfractions(ctx, handle, userB, userA, 'run-member-a', true, unprivileged);
   const surface = brandingSurface(cap);
@@ -693,7 +702,25 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
       `driving /infractions as an unprivileged member (permissions.has→false) produced surface "${truncate(surface)}"; ` +
       `looksDenied=${looksDenied}, leakedHistory=${leakedHistory}.`,
     impact:
-      'handleInfractionsCommand performs no server-side permission re-check — an unprivileged member (Discord command-hiding bypassed, e.g. via a raw API call) receives another member’s moderation history. The handler-level enforcement the catalog promises is missing.',
+      'handleInfractionsCommand did not refuse an unprivileged member — an unprivileged member (Discord command-hiding bypassed, e.g. via a raw API call) receives another member’s moderation history. The handler-level enforcement the catalog promises is missing.',
+  });
+
+  // The denied attempt is a security event: exactly one append-only audit row
+  // records it with the actor, the target, and success=false.
+  const { data: denialRows } = await handle.supabase
+    .from('audit_logs')
+    .select('action, actor_id, target_id, success')
+    .eq('guild_id', handle.guildId)
+    .eq('action', 'moderation.infractions.denied');
+  const denials = (denialRows as Array<{ actor_id: string; target_id: string | null; success: boolean }> | null) ?? [];
+  ctx.expect(denials.length === 1 && denials[0]!.actor_id === userB && denials[0]!.target_id === userA && denials[0]!.success === false, {
+    assertionClass: 'audit',
+    channel: 'audit-row',
+    promise: 'The denied /infractions attempt lands exactly one append-only audit row (moderation.infractions.denied) with actor, target, and success=false.',
+    observation:
+      `audit_logs holds ${denials.length} moderation.infractions.denied row(s); ` +
+      `actor_id=${denials[0]?.actor_id ?? '(none)'} (expected ${userB}), target_id=${denials[0]?.target_id ?? '(none)'} (expected ${userA}), success=${denials[0]?.success}.`,
+    impact: 'A refused privileged-command attempt left no audit trail — denied moderation attempts are invisible to the owner.',
   });
 
   // The target's recorded history is intact/unchanged by the unauthorized attempt.
@@ -707,11 +734,11 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   });
 
   // /warn refusal itself, and the member-portal appeal-resolution denial, are not
-  // drivable here (/warn needs the gateway; the portal + appeals are unimplemented).
+  // drivable here (/warn needs the gateway; the portal + appeals denial lane is separate).
   gateLiveGuildReadback(
     ctx,
-    'run-member-b’s /warn attempt yields only an ephemeral denial with no infraction created, and every denied attempt writes an audit row.',
-    'driving /warn needs guild.members.fetch + a live gateway; and the manual /warn handler writes no denied-attempt audit row — neither is reachable in the bot-only harness',
+    'run-member-b’s /warn attempt yields only an ephemeral denial with no infraction created (the denied-attempt audit row is now proven above via /infractions).',
+    'driving /warn end-to-end needs guild.members.fetch + a live gateway (the shared deny+audit path is proven via /infractions in this scenario)',
   );
   gateAppealsUnimplemented(ctx, 'audit', 'A member portal session receives a permission error when attempting to resolve their own appeal, and the denial is audited.');
 

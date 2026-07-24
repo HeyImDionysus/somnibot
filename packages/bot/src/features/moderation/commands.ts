@@ -23,8 +23,35 @@ import {
 } from './infraction-service.js';
 import { executeEscalation, getEscalationAction } from './escalation.js';
 import { postModLogEntry } from './mod-log.js';
+import { writeAuditLog } from '../../services/audit.js';
 
 const log = createLogger('ModCommands');
+
+/**
+ * Record a denied moderation-command attempt in the append-only audit ledger.
+ * Mirrors handleXpAdminCommand's denied-attempt audit (the #339 authz pattern):
+ * a refusal is a security event and must leave evidence — actor, command,
+ * missing permission, and the target when one was supplied. writeAuditLog is
+ * internally best-effort, so a ledger failure never blocks the denial reply.
+ */
+async function auditDeniedModAttempt(
+  client: SomniClient,
+  interaction: ChatInputCommandInteraction,
+  command: string,
+  requiredPermission: string,
+): Promise<void> {
+  const targetId = interaction.options.getUser('user')?.id ?? null;
+  await writeAuditLog(client.supabase, {
+    guildId: interaction.guildId!,
+    actorType: 'discord',
+    actorId: interaction.user.id,
+    action: `moderation.${command}.denied`,
+    targetType: targetId ? 'member' : undefined,
+    targetId: targetId ?? undefined,
+    success: false,
+    details: { command, reason: 'missing_permission', required: requiredPermission },
+  });
+}
 
 // ── Command Builders ──────────────────────────────────────
 
@@ -134,6 +161,7 @@ export async function handleWarnCommand(
   // build-time hint a guild admin can override per-command via Integrations, so
   // it cannot be the sole gate. Re-verify the invoker's live permissions here.
   if (!interaction.memberPermissions?.has(PermissionFlagsBits.ModerateMembers)) {
+    await auditDeniedModAttempt(client, interaction, 'warn', 'ModerateMembers');
     await interaction.editReply('❌ You do not have permission to warn members.');
     return;
   }
@@ -283,6 +311,7 @@ export async function handleMuteCommand(
 
   // Server-side authorization re-check (see handleWarnCommand).
   if (!interaction.memberPermissions?.has(PermissionFlagsBits.ModerateMembers)) {
+    await auditDeniedModAttempt(client, interaction, 'mute', 'ModerateMembers');
     await interaction.editReply('❌ You do not have permission to mute members.');
     return;
   }
@@ -397,6 +426,7 @@ export async function handleKickCommand(
 
   // Server-side authorization re-check (see handleWarnCommand).
   if (!interaction.memberPermissions?.has(PermissionFlagsBits.KickMembers)) {
+    await auditDeniedModAttempt(client, interaction, 'kick', 'KickMembers');
     await interaction.editReply('❌ You do not have permission to kick members.');
     return;
   }
@@ -502,6 +532,7 @@ export async function handleBanCommand(
 
   // Server-side authorization re-check (see handleWarnCommand).
   if (!interaction.memberPermissions?.has(PermissionFlagsBits.BanMembers)) {
+    await auditDeniedModAttempt(client, interaction, 'ban', 'BanMembers');
     await interaction.editReply('❌ You do not have permission to ban members.');
     return;
   }
@@ -640,6 +671,7 @@ export async function handlePardonCommand(
 
   // Server-side authorization re-check (see handleWarnCommand).
   if (!interaction.memberPermissions?.has(PermissionFlagsBits.ModerateMembers)) {
+    await auditDeniedModAttempt(client, interaction, 'pardon', 'ModerateMembers');
     await interaction.editReply('❌ You do not have permission to pardon infractions.');
     return;
   }
@@ -712,6 +744,7 @@ export async function handleInfractionsCommand(
   // unprivileged member (once an admin overrides the default permission) could
   // read another member's full moderation history.
   if (!interaction.memberPermissions?.has(PermissionFlagsBits.ModerateMembers)) {
+    await auditDeniedModAttempt(client, interaction, 'infractions', 'ModerateMembers');
     await interaction.editReply('❌ You do not have permission to view infractions.');
     return;
   }

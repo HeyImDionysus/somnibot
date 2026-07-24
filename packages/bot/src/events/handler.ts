@@ -89,7 +89,7 @@ registerCommand('kick', handleKickCommand);
 registerCommand('ban', handleBanCommand);
 registerCommand('pardon', handlePardonCommand);
 registerCommand('infractions', handleInfractionsCommand);
-registerCommand('purge', (i) => handlePurgeCommand(i));
+registerCommand('purge', handlePurgeCommand);
 registerCommand('xp', handleXpAdminCommand);
 
 // Utility
