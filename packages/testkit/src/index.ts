@@ -82,6 +82,15 @@ export {
 } from './gateway-inject.js';
 
 export {
+  startFaultProxy,
+  registerFaultControls,
+  getFaultControls,
+  restoreAllFaults,
+  type FaultProxy,
+  type FaultControls,
+} from './fault-proxy.js';
+
+export {
   bootstrapLiveClient,
   LiveRunnerError,
   type BootstrapLiveOptions,

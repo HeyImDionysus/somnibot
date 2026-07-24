@@ -845,41 +845,105 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferred(ctx, 'exercised in REPLAY');
 }
 
-/** DEPFAIL — Supabase-unreachable fail-safe (needs a dependency-outage fault lane). */
+/** DEPFAIL — Supabase-unreachable fail-safe, driven through the REAL fault
+ *  proxy (ctx.faults severs the actual network path run-one-domain routed the
+ *  stack through). Falls back to honest gates when no proxy is registered
+ *  (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // The harness's whole premise is a REACHABLE local Supabase, so a database
-  // outage cannot be induced without a fault-injection lane. GATE honestly.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'With the database blocked, /rank replies with the branded levels-unavailable message and no totals corrupt; after restoration accrual resumes.',
-    'requires a Supabase dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB)',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const handle = await ctx.bootGuild({ label: 'a', guildConfigOverrides: { levels_enabled: true } });
+    const userA = ctx.userId('a');
+    await seedMemberLevel(handle, userA, { xp: 200, level: 2, totalMessages: 12 });
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let severedReply = '';
+    try {
+      const cap = await ctx.runSlash(handle, { commandName: 'leaderboard', userId: userA });
+      severedReply = replyContent(cap);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: the dispatcher must reply, never crash the pipeline.
+    ctx.expect(threw === null && severedReply.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'With database access blocked, a levels command still replies (fail-safe) instead of crashing the interaction pipeline.',
+      observation: `during the outage window /leaderboard ${threw === null ? `replied ${JSON.stringify(truncate(severedReply))}` : `THREW ${truncate(threw)}`}.`,
+      impact: 'A database outage crashed the levels command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts a branded UNAVAILABLE notice — not a data-shaped
+    //     answer. Replying "No one has earned XP yet!" during an outage is a lie
+    //     about state the bot could not read. Recorded honestly; never softened.
+    const looksUnavailable = /unavailable|try again|temporar|later|degraded|issue|problem/i.test(severedReply);
+    const dataShapedLie = /no one has earned xp/i.test(severedReply);
+    ctx.expect(looksUnavailable && !dataShapedLie, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise: 'With the database blocked, the levels reply is the branded levels-unavailable notice — never a data-shaped answer fabricated from the failed read.',
+      observation: `outage-window reply ${JSON.stringify(truncate(severedReply))} — looksUnavailable=${looksUnavailable}, dataShapedLie=${dataShapedLie}.`,
+      impact: 'During a database outage the levels command replied with a fabricated data-shaped answer ("no XP yet") instead of a degradation notice — members are told a lie about state the bot could not read.',
+    });
+
+    // (3) No corruption: the persisted row is byte-identical after restore.
+    const after = await readMemberLevel(handle, userA);
+    ctx.expect(after?.xp === 200 && after?.level === 2 && after?.total_messages === 12, {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'No totals corrupt across the outage window — the persisted member_levels row is unchanged after restoration.',
+      observation: `post-restore member_levels: xp=${after?.xp}/level=${after?.level}/messages=${after?.total_messages} (expected 200/2/12).`,
+      impact: 'A database outage corrupted persisted level totals.',
+    });
+
+    // (4) Recovery: the very next command works against the restored stack.
+    const recovered = await ctx.runSlash(handle, { commandName: 'leaderboard', userId: userA });
+    ctx.expect(replyContent(recovered).includes(userA) && replyContent(recovered).includes('200'), {
+      assertionClass: 'replay-safety',
+      channel: 'captured-reply',
+      promise: 'After restoration the very next levels command serves the real standings again (no lingering degradation).',
+      observation: `post-restore /leaderboard replied ${JSON.stringify(truncate(replyContent(recovered)))}.`,
+      impact: 'The levels pipeline did not recover after the outage ended.',
+    });
+
+    await proveRlsIsolation(ctx, handle, userA);
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With the database blocked, /rank replies with the branded levels-unavailable message and no totals corrupt; after restoration accrual resumes.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded levels-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate XP survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'member_levels rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window (not one per failed event).',
     'requires a dependency-outage fault lane plus owner alert channel readback',
   );
-  gateAudit(ctx, 'requires the outage fault lane to reach the degraded/recovered levels state transitions');
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'No duplicate XP survives the outage/restore cycle.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded levels-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the levels-unavailable branch',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'member_levels rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
+  gateAudit(ctx, 'requires the degraded/recovered levels state transitions to write audit rows (owner alert channel lane)');
 }
 
 /** RETRY — a transient XP-write fault converges to exactly one grant. */

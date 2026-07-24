@@ -14,6 +14,7 @@ import {
   SlashCommandSubcommandBuilder,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 import { generateRankCard, loadRankCardSettings } from './rank-card.js';
 import { levelProgress } from '@somnibot/shared';
 
@@ -243,13 +244,25 @@ export async function handleLeaderboardCommand(
   const pageSize = 10;
 
   // Fetch first page
-  const { data, count } = await client.supabase
+  const { data, count, error } = await client.supabase
     .from('member_levels')
     .select('member_id, xp, level', { count: 'exact' })
     .eq('guild_id', guildId)
     .order('xp', { ascending: false })
     .range(0, pageSize - 1)
     .limit(1000);
+
+  // A failed READ is not an empty leaderboard: replying "no XP yet" during a
+  // database outage tells members a data-shaped lie about state the bot could
+  // not read. Degrade honestly with the branded unavailable notice instead.
+  if (error) {
+    const brandKit = await resolveBrandKit(client.supabase, guildId, { fallbackName: interaction.guild?.name }).catch(() => null);
+    const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
+    await interaction.editReply({
+      content: `⚠️ ${name}'s leaderboard is temporarily unavailable — please try again in a moment.`,
+    });
+    return;
+  }
 
   if (!data || data.length === 0) {
     await interaction.editReply({ content: 'No one has earned XP yet!' });

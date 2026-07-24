@@ -11,6 +11,7 @@
 import { ASSERTION_CLASSES, type AssertionClass, type DomainContract, type ScenarioClass } from '@somnibot/e2e';
 
 import { bootstrapLiveClient, type LiveClientHandle } from '../live-runner.js';
+import { getFaultControls, type FaultControls } from '../fault-proxy.js';
 import { createInteractionInjector } from '../inject.js';
 import { createGatewayInjector, type GatewayInjector } from '../gateway-inject.js';
 import { mintCapabilityToken } from '../capability.js';
@@ -39,6 +40,7 @@ export class ScenarioContextImpl implements ScenarioContext {
   readonly scenario: DomainContract['scenarios'][number];
   readonly runPrefix: string;
   readonly capabilities: Capabilities;
+  readonly faults: FaultControls | null = getFaultControls();
 
   private readonly guildScopedTables: readonly string[];
   private readonly records: AssertionRecord[] = [];
