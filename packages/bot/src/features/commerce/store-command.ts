@@ -13,6 +13,7 @@ import {
   type Guild,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const HOT_PINK = 0xFF1493;
 const CYAN = 0x00E5FF;
@@ -41,7 +42,16 @@ export async function handleStoreCommand(
     .limit(1000);
 
   if (error) {
-    await interaction.editReply({ content: '❌ Failed to load store. Please try again later.' });
+    // A failed READ is not an empty store — and not a raw vendor error either:
+    // during a database outage the catalog may be full, so degrade honestly
+    // with the branded store-unavailable notice. The brand read is itself
+    // outage-safe (resolveBrandKit never throws; the guild name is the
+    // fallback), so this reply renders even while the database is down.
+    const brandKit = await resolveBrandKit(supabase, guildId, { fallbackName: interaction.guild?.name }).catch(() => null);
+    const name = brandKit?.brandName ?? interaction.guild?.name ?? 'This server';
+    await interaction.editReply({
+      content: `⚠️ ${name}'s store is temporarily unavailable — please try again in a moment.`,
+    });
     return;
   }
 

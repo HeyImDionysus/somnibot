@@ -26,6 +26,7 @@ import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import { eventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Adventures');
 
@@ -428,44 +429,100 @@ export class AdventureManager {
     this.adventureCache = null;
   }
 
-  private async getConfig(): Promise<AdventureConfig> {
-    if (this.configCache) return this.configCache;
-    const { data } = await this.supabase
+  /**
+   * [game-economy-adventures DEPFAIL] Outage-aware config read. A FAILED read
+   * (database unreachable) is NOT "adventures disabled" — the disabled
+   * fallback fabricated from a failed read told members a data-shaped lie AND
+   * was cached, pinning adventures off long after the outage ended. A failed
+   * read is never cached and surfaces `unavailable` so callers degrade
+   * honestly. A missing row (PGRST116) keeps the legitimate default.
+   */
+  private async getConfigChecked(): Promise<{ config: AdventureConfig; unavailable: boolean }> {
+    if (this.configCache) return { config: this.configCache, unavailable: false };
+    const { data, error } = await this.supabase
       .from('guild_config')
       .select('economy_adventures_enabled, economy_adventure_daily_limit, economy_adventure_ticket_cost, economy_adventure_max_scenes')
       .eq('guild_id', this.guild.id)
       .single();
-    this.configCache = data ?? {
+    const config: AdventureConfig = data ?? {
       economy_adventures_enabled: false,
       economy_adventure_daily_limit: 3,
       economy_adventure_ticket_cost: 100,
       economy_adventure_max_scenes: 10,
     };
-    return this.configCache!;
+    if (error && error.code !== 'PGRST116') {
+      return { config, unavailable: true };
+    }
+    this.configCache = config;
+    return { config, unavailable: false };
   }
 
-  private async getAdventures(): Promise<Adventure[]> {
+  private async getConfig(): Promise<AdventureConfig> {
+    return (await this.getConfigChecked()).config;
+  }
+
+  /**
+   * The guild's active adventures, or `null` when the READ FAILED (database
+   * unreachable). A failed read is never cached — caching the fabricated
+   * empty list would break every post-outage start
+   * ([game-economy-adventures DEPFAIL]).
+   */
+  private async getAdventures(): Promise<Adventure[] | null> {
     if (this.adventureCache) return this.adventureCache;
-    const { data } = await this.supabase
+    const { data, error } = await this.supabase
       .from('economy_adventures')
       .select('id, name, emoji, description, adventure_type, difficulty, min_scenes, max_scenes')
       .eq('guild_id', this.guild.id)
       .eq('active', true)
       .limit(1000);
 
+    if (error) {
+      log.error('getAdventures read failed:', error.message);
+      return null;
+    }
     if (!data || data.length === 0) {
       await this.seedDefaults();
-      const { data: seeded } = await this.supabase
+      const { data: seeded, error: seededErr } = await this.supabase
         .from('economy_adventures')
         .select('id, name, emoji, description, adventure_type, difficulty, min_scenes, max_scenes')
         .eq('guild_id', this.guild.id)
         .eq('active', true)
         .limit(1000);
+      if (seededErr) {
+        log.error('getAdventures post-seed read failed:', seededErr.message);
+        return null;
+      }
       this.adventureCache = (seeded ?? []) as Adventure[];
     } else {
       this.adventureCache = data as Adventure[];
     }
     return this.adventureCache!;
+  }
+
+  /**
+   * [game-economy-adventures DEPFAIL] The branded adventures-unavailable
+   * degradation embed. The brand read is itself outage-safe (resolveBrandKit
+   * never throws and is additionally .catch-guarded), falling back to the
+   * guild name.
+   */
+  private async unavailableEmbed(detail: string): Promise<EmbedBuilder> {
+    const brandKit = await resolveBrandKit(this.supabase, this.guild.id, {
+      fallbackName: this.guild.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? this.guild.name ?? 'this server';
+    return new EmbedBuilder()
+      .setDescription(`⚠️ ${name}'s adventures are temporarily unavailable — please try again in a moment. ${detail}`)
+      .setColor(0xffa500);
+  }
+
+  /** Best-effort ticket refund for start paths that abort after the debit. */
+  private async refundTicket(userId: string, ticketCost: number): Promise<void> {
+    if (ticketCost <= 0) return;
+    await Promise.resolve(this.supabase.rpc('economy_add_balance', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_amount: ticketCost,
+    })).catch((e: unknown) => { log.warn('ticket refund failed:', (e as Error)?.message ?? e); });
   }
 
   private async seedDefaults(): Promise<void> {
@@ -507,7 +564,18 @@ export class AdventureManager {
     userId: string,
     adventureType?: string,
   ): Promise<{ embed: EmbedBuilder; row: ActionRowBuilder<ButtonBuilder> | null; sessionId: string | null }> {
-    const config = await this.getConfig();
+    // [game-economy-adventures DEPFAIL] Check the READ ERROR first: with the
+    // database unreachable the config read fails — degrade with the branded
+    // adventures-unavailable notice instead of the fabricated "not enabled"
+    // answer (and never cache the fabricated fallback).
+    const { config, unavailable: configUnavailable } = await this.getConfigChecked();
+    if (configUnavailable) {
+      return {
+        embed: await this.unavailableEmbed('No ticket was charged.'),
+        row: null,
+        sessionId: null,
+      };
+    }
     if (!config.economy_adventures_enabled) {
       return {
         embed: new EmbedBuilder().setDescription('🚫 Adventures are not enabled.').setColor(0xff0000),
@@ -516,14 +584,24 @@ export class AdventureManager {
       };
     }
 
-    // Check daily limit
+    // Check daily limit. [game-economy-adventures DEPFAIL] A failed count read
+    // is not "0 runs today" — abort before any charge rather than proceed on
+    // fabricated state.
     const today = new Date().toISOString().slice(0, 10);
-    const { count } = await this.supabase
+    const { count, error: limitErr } = await this.supabase
       .from('economy_adventure_sessions')
       .select('id', { count: 'exact', head: true })
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
       .gte('started_at', `${today}T00:00:00Z`);
+
+    if (limitErr) {
+      return {
+        embed: await this.unavailableEmbed('No ticket was charged.'),
+        row: null,
+        sessionId: null,
+      };
+    }
 
     if ((count ?? 0) >= config.economy_adventure_daily_limit) {
       return {
@@ -535,14 +613,22 @@ export class AdventureManager {
       };
     }
 
-    // Check active session
-    const { data: active } = await this.supabase
+    // Check active session. Same rule: a failed read is not "no active run".
+    const { data: active, error: activeErr } = await this.supabase
       .from('economy_adventure_sessions')
       .select('id')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
       .eq('status', 'active')
       .limit(1);
+
+    if (activeErr) {
+      return {
+        embed: await this.unavailableEmbed('No ticket was charged.'),
+        row: null,
+        sessionId: null,
+      };
+    }
 
     if (active && active.length > 0) {
       return {
@@ -563,6 +649,16 @@ export class AdventureManager {
       });
 
       if (debitErr) {
+        // [game-economy-adventures DEPFAIL] Only a genuine insufficient-funds
+        // rejection may say "you don't have enough" — a network/RPC failure is
+        // an outage and must degrade honestly (no debit landed; nothing moved).
+        if (!/insufficient/i.test(debitErr.message ?? '')) {
+          return {
+            embed: await this.unavailableEmbed('No ticket was charged.'),
+            row: null,
+            sessionId: null,
+          };
+        }
         return {
           embed: new EmbedBuilder()
             .setDescription(`💰 Adventures cost **${config.economy_adventure_ticket_cost}** coins. You don't have enough!`)
@@ -573,8 +669,18 @@ export class AdventureManager {
       }
     }
 
-    // Pick adventure
+    // Pick adventure. [game-economy-adventures DEPFAIL] An unreadable (or
+    // empty) catalog after the debit refunds the ticket — previously
+    // randomPick on the fabricated empty list crashed the start.
     const adventures = await this.getAdventures();
+    if (!adventures || adventures.length === 0) {
+      await this.refundTicket(userId, config.economy_adventure_ticket_cost);
+      return {
+        embed: await this.unavailableEmbed('Your ticket has been refunded.'),
+        row: null,
+        sessionId: null,
+      };
+    }
     let candidates = adventures;
     if (adventureType) {
       const filtered = adventures.filter((a) => a.adventure_type === adventureType);
@@ -582,17 +688,30 @@ export class AdventureManager {
     }
     const adventure = randomPick(candidates);
 
-    // Get first scene
-    const { data: firstScene } = await this.supabase
+    // Get first scene (maybeSingle so a READ ERROR is distinguishable from a
+    // genuinely missing scene row).
+    const { data: firstScene, error: sceneErr } = await this.supabase
       .from('economy_adventure_scenes')
       .select('*')
       .eq('adventure_id', adventure.id)
       .eq('scene_index', 0)
-      .single();
+      .maybeSingle();
+
+    if (sceneErr) {
+      await this.refundTicket(userId, config.economy_adventure_ticket_cost);
+      return {
+        embed: await this.unavailableEmbed('Your ticket has been refunded.'),
+        row: null,
+        sessionId: null,
+      };
+    }
 
     if (!firstScene) {
+      // V49-L4-adjacent: refund the already-charged ticket — a misconfigured
+      // adventure must not eat the member's play coins.
+      await this.refundTicket(userId, config.economy_adventure_ticket_cost);
       return {
-        embed: new EmbedBuilder().setDescription('❌ Adventure has no scenes configured.').setColor(0xff0000),
+        embed: new EmbedBuilder().setDescription('❌ Adventure has no scenes configured. Your ticket has been refunded.').setColor(0xff0000),
         row: null,
         sessionId: null,
       };

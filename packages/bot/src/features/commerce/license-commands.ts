@@ -14,12 +14,32 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { hashLicenseKey } from './key-generator.js';
 import { createLogger } from '@somnibot/shared';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('LicenseCmd');
 
 const HOT_PINK = 0xFF1493;
 const GREEN = 0x57F287;
 const RED = 0xED4245;
+
+/**
+ * Branded degradation for license surfaces during a database outage. A failed
+ * license/entitlement READ must never be presented as "invalid key" or "no
+ * purchases" — that is a data-shaped lie to a PAYING customer about state the
+ * bot could not read. The brand read is itself outage-safe: resolveBrandKit
+ * never throws and the guild name is the fallback.
+ */
+async function replyLicenseServiceUnavailable(
+  interaction: ChatInputCommandInteraction,
+  supabase: SupabaseClient,
+  guildId: string,
+): Promise<void> {
+  const brandKit = await resolveBrandKit(supabase, guildId, { fallbackName: interaction.guild?.name }).catch(() => null);
+  const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
+  await interaction.editReply({
+    content: `⚠️ ${name}'s license service is temporarily unavailable — please try again in a moment.`,
+  });
+}
 
 export function buildLicenseCommand() {
   return new SlashCommandBuilder()
@@ -81,13 +101,20 @@ async function handleActivate(
   // Hash the key for lookup
   const keyHash = hashLicenseKey(rawKey);
 
-  // Find the license key
-  const { data: licenseKey } = await supabase
+  // Find the license key. A failed READ is not an invalid key: during a
+  // database outage the key may be perfectly valid, so check the error FIRST
+  // and degrade honestly instead of lying to the buyer.
+  const { data: licenseKey, error: keyLookupError } = await supabase
     .from('license_keys')
     .select('*, products(name, granted_role_ids, granted_channel_ids)')
     .eq('key_hash', keyHash)
     .eq('guild_id', guildId)
-    .single();
+    .maybeSingle();
+
+  if (keyLookupError) {
+    await replyLicenseServiceUnavailable(interaction, supabase, guildId);
+    return;
+  }
 
   if (!licenseKey) {
     await interaction.editReply({
@@ -146,12 +173,21 @@ async function handleActivate(
   // `pending_activation` row wins. A lost race updates zero rows and must NOT
   // re-grant the entitlement/roles or write a second key.activated audit entry.
   const now = new Date().toISOString();
-  const { data: activatedRows } = await supabase
+  const { data: activatedRows, error: activateError } = await supabase
     .from('license_keys')
     .update({ status: 'active', activated_at: now, updated_at: now })
     .eq('id', licenseKey.id)
     .eq('status', 'pending_activation')
     .select('id');
+
+  // A FAILED write is not a lost race: replying "Already Activated" on a
+  // database error would tell the buyer their still-pending key is active.
+  // Nothing was applied (the guarded UPDATE errored before matching), so
+  // degrade honestly and let the buyer retry.
+  if (activateError) {
+    await replyLicenseServiceUnavailable(interaction, supabase, guildId);
+    return;
+  }
 
   if (!activatedRows || activatedRows.length === 0) {
     // Another concurrent activation already flipped the key. Report success
@@ -226,13 +262,19 @@ async function handleCheck(
 
   const discordId = interaction.user.id;
 
-  // Find customer
-  const { data: customer } = await supabase
+  // Find customer. Error ≠ "no purchases": a failed read during an outage must
+  // degrade, never tell a paying customer their purchases don't exist.
+  const { data: customer, error: customerLookupError } = await supabase
     .from('customers')
     .select('id')
     .eq('discord_id', discordId)
     .eq('guild_id', guildId)
-    .single();
+    .maybeSingle();
+
+  if (customerLookupError) {
+    await replyLicenseServiceUnavailable(interaction, supabase, guildId);
+    return;
+  }
 
   if (!customer) {
     await interaction.editReply({
@@ -246,14 +288,20 @@ async function handleCheck(
     return;
   }
 
-  // Fetch entitlements
-  const { data: entitlements } = await supabase
+  // Fetch entitlements — same rule: a failed read is NOT an empty entitlement
+  // list, so degrade honestly instead of fabricating "no active entitlements".
+  const { data: entitlements, error: entitlementsError } = await supabase
     .from('entitlements')
     .select('*, products(name)')
     .eq('customer_id', customer.id)
     .eq('guild_id', guildId)
     .order('created_at', { ascending: false })
     .limit(1000);
+
+  if (entitlementsError) {
+    await replyLicenseServiceUnavailable(interaction, supabase, guildId);
+    return;
+  }
 
   if (!entitlements || entitlements.length === 0) {
     await interaction.editReply({
@@ -310,12 +358,19 @@ async function handleInfo(
   const rawKey = interaction.options.getString('key', true).trim().toUpperCase();
   const keyHash = hashLicenseKey(rawKey);
 
-  const { data: licenseKey } = await supabase
+  // Error ≠ "not found": a failed admin lookup during an outage must degrade
+  // rather than misreport a real key as missing.
+  const { data: licenseKey, error: infoLookupError } = await supabase
     .from('license_keys')
     .select('*, products(name), customers(discord_username, discord_id)')
     .eq('key_hash', keyHash)
     .eq('guild_id', guildId)
-    .single();
+    .maybeSingle();
+
+  if (infoLookupError) {
+    await replyLicenseServiceUnavailable(interaction, supabase, guildId);
+    return;
+  }
 
   if (!licenseKey) {
     await interaction.editReply({ content: '❌ License key not found.' });

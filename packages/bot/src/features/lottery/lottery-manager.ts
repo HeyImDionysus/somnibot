@@ -11,6 +11,7 @@ import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { eventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Lottery');
 
@@ -203,16 +204,56 @@ export class LotteryManager {
     }
   }
 
-  private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+  /**
+   * Read the guild config (cached). `degraded` is true only when the read FAILED
+   * (e.g. a database outage) as opposed to genuinely finding no row (PGRST116) —
+   * callers must not present a failed read as "lottery is not enabled".
+   */
+  private async getConfigChecked(
+    guildId: string,
+  ): Promise<{ config: DbGuildConfig | null; degraded: boolean }> {
     const cached = this.configCache.get(guildId);
-    if (cached) return cached;
-    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
+    if (cached) return { config: cached, degraded: false };
+    const { data, error } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
-    return data;
+    return { config: data, degraded: error != null && error.code !== 'PGRST116' };
   }
 
-  private async getActiveDrawing(guildId: string): Promise<any | null> {
-    const { data } = await this.supabase
+  private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+    return (await this.getConfigChecked(guildId)).config;
+  }
+
+  /**
+   * Branded degradation notice for a dependency outage. A failed READ must never
+   * degrade into a data-shaped answer ("no active drawing", "tickets sold: 0") —
+   * that is a lie about state the bot could not read. The brand lookup is itself
+   * outage-safe (resolveBrandKit never throws; belt-and-braces .catch) with the
+   * guild name as the fallback, so this reply renders during a full DB outage.
+   */
+  private async replyLotteryUnavailable(
+    interaction: ChatInputCommandInteraction,
+    suffix = '',
+  ): Promise<void> {
+    const brandKit = await resolveBrandKit(this.supabase, interaction.guildId!, {
+      fallbackName: interaction.guild?.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
+    const content = `⚠️ ${name}'s lottery is temporarily unavailable — please try again in a moment.${suffix}`;
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ content }).catch(() => {});
+    } else {
+      await interaction.reply({ content, ephemeral: true }).catch(() => {});
+    }
+  }
+
+  /**
+   * The guild's active drawing. `degraded` is true only when the read FAILED —
+   * PGRST116 (zero rows) is the genuine "between drawings" state, not an outage.
+   */
+  private async getActiveDrawing(
+    guildId: string,
+  ): Promise<{ drawing: any | null; degraded: boolean }> {
+    const { data, error } = await this.supabase
       .from('economy_lottery_drawings')
       .select('*')
       .eq('guild_id', guildId)
@@ -220,7 +261,7 @@ export class LotteryManager {
       .order('created_at', { ascending: false })
       .limit(1)
       .single();
-    return data;
+    return { drawing: data, degraded: error != null && error.code !== 'PGRST116' };
   }
 
   /**
@@ -245,24 +286,34 @@ export class LotteryManager {
     return data;
   }
 
-  private async ensureActiveDrawing(guildId: string): Promise<any> {
-    let drawing = await this.getActiveDrawing(guildId);
-    if (!drawing) {
-      const { data } = await this.supabase
-        .from('economy_lottery_drawings')
-        .insert({ guild_id: guildId, status: 'active', jackpot: 0 })
-        .select()
-        .single();
-      drawing = data;
-    }
-    return drawing;
+  /**
+   * The active drawing, created if genuinely absent. `degraded` propagates a
+   * FAILED read/insert so the caller can degrade honestly instead of pressing a
+   * money mutation against a database that is already unreachable.
+   */
+  private async ensureActiveDrawing(
+    guildId: string,
+  ): Promise<{ drawing: any | null; degraded: boolean }> {
+    const active = await this.getActiveDrawing(guildId);
+    if (active.drawing || active.degraded) return active;
+    const { data, error } = await this.supabase
+      .from('economy_lottery_drawings')
+      .insert({ guild_id: guildId, status: 'active', jackpot: 0 })
+      .select()
+      .single();
+    return { drawing: data, degraded: error != null };
   }
 
   async buyTickets(interaction: ChatInputCommandInteraction, count: number): Promise<void> {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
-    const config = await this.getConfig(guildId);
+    const { config, degraded } = await this.getConfigChecked(guildId);
 
+    // A failed config read is an outage, not "lottery is off" — degrade honestly.
+    if (degraded) {
+      await this.replyLotteryUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
     if (!config?.economy_lottery_enabled) {
       await interaction.reply({ content: '❌ Lottery is not enabled on this server.', ephemeral: true });
       return;
@@ -281,9 +332,11 @@ export class LotteryManager {
 
     const totalCost = count * ticketPrice;
 
-    const drawing = await this.ensureActiveDrawing(guildId);
-    if (!drawing) {
-      await interaction.reply({ content: '❌ Could not create lottery drawing.', ephemeral: true });
+    const { drawing, degraded: drawingDegraded } = await this.ensureActiveDrawing(guildId);
+    if (drawingDegraded || !drawing) {
+      // The drawing state is unreadable/uncreatable (outage) — never press a
+      // wallet debit against a database we already know is unreachable.
+      await this.replyLotteryUnavailable(interaction, ' Nothing was charged.');
       return;
     }
 
@@ -301,8 +354,10 @@ export class LotteryManager {
       p_request_id: interaction.id,
     });
     if (buyErr || !data || typeof data !== 'object') {
+      // The atomic RPC rolled back (or never reached the DB) — nothing was
+      // charged. Degrade with the branded unavailable notice, never a verdict.
       log.error('lottery_buy_tickets_atomic failed:', buyErr?.message);
-      await interaction.reply({ content: '❌ Could not buy tickets right now — please try again.', ephemeral: true });
+      await this.replyLotteryUnavailable(interaction, ' Nothing was charged.');
       return;
     }
 
@@ -350,8 +405,13 @@ export class LotteryManager {
 
   async viewLottery(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    const config = await this.getConfig(guildId);
+    const { config, degraded } = await this.getConfigChecked(guildId);
 
+    // A failed config read is an outage, not "lottery is off" — degrade honestly.
+    if (degraded) {
+      await this.replyLotteryUnavailable(interaction);
+      return;
+    }
     if (!config?.economy_lottery_enabled) {
       await interaction.reply({ content: '❌ Lottery is not enabled on this server.', ephemeral: true });
       return;
@@ -361,7 +421,13 @@ export class LotteryManager {
     const currencyName = config.currency_name ?? 'Coins';
     const currencyEmoji = config.currency_emoji ?? '🪙';
 
-    const drawing = await this.getActiveDrawing(guildId);
+    const { drawing, degraded: drawingDegraded } = await this.getActiveDrawing(guildId);
+    // A failed READ is not "no active drawing": that empty-state reply would be
+    // a data-shaped lie about a pot the bot could not read. Degrade honestly.
+    if (drawingDegraded) {
+      await this.replyLotteryUnavailable(interaction);
+      return;
+    }
     if (!drawing) {
       // Between drawings the view still renders the guild's LIVE lottery state
       // (configured schedule + branded ticket price), never a bare placeholder.
@@ -378,11 +444,17 @@ export class LotteryManager {
       return;
     }
 
-    const { data: tickets } = await this.supabase
+    const { data: tickets, error: ticketsErr } = await this.supabase
       .from('economy_lottery_tickets')
       .select('user_id')
       .eq('drawing_id', drawing.id)
       .limit(1000);
+
+    // A failed ticket read must not render as "Tickets sold: 0" — degrade.
+    if (ticketsErr) {
+      await this.replyLotteryUnavailable(interaction);
+      return;
+    }
 
     const uniquePlayers = new Set((tickets ?? []).map((t: any) => t.user_id));
 

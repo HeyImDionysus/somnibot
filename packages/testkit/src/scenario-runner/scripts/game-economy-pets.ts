@@ -916,46 +916,157 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
-/** DEPFAIL — Supabase-unreachable fail-safe (needs a dependency-outage fault lane). */
+/** DEPFAIL — Supabase-unreachable fail-safe, driven through the REAL fault
+ *  proxy (ctx.faults severs the actual network path run-one-domain routed the
+ *  stack through). Falls back to honest gates when no proxy is registered
+ *  (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // This DB-observable harness's whole premise is a REACHABLE local Supabase, so a
-  // database-outage cannot be induced without a fault-injection lane. GATE the
-  // outage-dependent behavior honestly rather than fake an outage.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'With database access blocked, /pet view and /pet feed reply with the branded pets-unavailable message and no coins move; after restore a fresh /pet feed debits exactly once and applies.',
-    'requires a Supabase dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB)',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const handle = await ctx.bootGuild({
+      label: 'a',
+      economyStartingBalance: 0,
+      guildConfigOverrides: { economy_pets_enabled: true },
+    });
+    const userA = ctx.userId('a');
+    await seedWallet(handle, userA, 500);
+    await insertPet(handle, userA, { hunger: 40, happiness: 80, energy: 90, level: 3, xp: 120 });
+
+    // Pre-outage: one truthful /pet view baseline. This also warms the manager's
+    // guild-config cache the way a long-running bot holds it, so the outage
+    // window exercises the pet/wallet READ paths, not a cold config fetch.
+    await ctx.runSlash(handle, { commandName: 'pet', userId: userA, subcommand: 'view' });
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let viewReply = '';
+    let feedReply = '';
+    try {
+      viewReply = petReplyText(
+        await ctx.runSlash(handle, { commandName: 'pet', userId: userA, subcommand: 'view' }),
+      );
+      feedReply = petReplyText(
+        await ctx.runSlash(handle, { commandName: 'pet', userId: userA, subcommand: 'feed' }),
+      );
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: both pet commands must reply, never crash the pipeline.
+    ctx.expect(threw === null && viewReply.length > 0 && feedReply.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise:
+        'With database access blocked, /pet view and /pet feed still reply (fail-safe) instead of crashing the interaction pipeline.',
+      observation:
+        threw === null
+          ? `during the outage window /pet view replied ${JSON.stringify(viewReply.slice(0, 140))}; /pet feed replied ${JSON.stringify(feedReply.slice(0, 140))}.`
+          : `an outage-window drive THREW ${threw.slice(0, 140)}.`,
+      impact: 'A database outage crashed the pet command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts the branded pets-unavailable notice — never a
+    //     data-shaped answer fabricated from the failed reads: "You don't have a
+    //     pet!" (a pet EXISTS), a fabricated "you need N coins" balance verdict,
+    //     or a confirmed "Pet Fed!" during an outage are all LIES.
+    const unavailableRe = /unavailable|try again|temporar|later|degraded|issue|problem/i;
+    const viewLie = /have a pet|not enabled/i.test(viewReply);
+    const feedLie = /have a pet|you need|pet fed|not enabled/i.test(feedReply);
+    ctx.expect(
+      unavailableRe.test(viewReply) && unavailableRe.test(feedReply) && !viewLie && !feedLie,
+      {
+        assertionClass: 'branding',
+        channel: 'captured-reply',
+        promise:
+          'With the database blocked, /pet view and /pet feed reply with the branded pets-unavailable notice — never a fabricated no-pet, insufficient-funds, or fed-confirmed verdict.',
+        observation:
+          `outage-window replies: view=${JSON.stringify(viewReply.slice(0, 140))} (dataShapedLie=${viewLie}), ` +
+          `feed=${JSON.stringify(feedReply.slice(0, 140))} (dataShapedLie=${feedLie}).`,
+        impact:
+          'During a database outage a pet command fabricated a data-shaped answer from a failed read — members are told a lie about a pet/balance the bot could not read.',
+      },
+    );
+
+    // (3) ZERO CORRUPTION: no coins or pet stats moved during the outage — the
+    //     seeded rows are byte-identical after restore.
+    const walletAfter = await readWallet(handle, userA);
+    const petAfter = await readPet(handle, userA);
+    ctx.expect(
+      walletAfter?.wallet === 500 && petAfter?.hunger === 40 && petAfter?.level === 3 && petAfter?.xp === 120,
+      {
+        assertionClass: 'Discord',
+        channel: 'db-observable',
+        promise:
+          'No coins move and no pet stat mutates during the outage window: the wallet and the pet row are unchanged after restoration.',
+        observation:
+          `post-restore wallet=${walletAfter?.wallet} (expected 500); pet hunger=${petAfter?.hunger}/level=${petAfter?.level}/xp=${petAfter?.xp} ` +
+          `(expected 40/3/120).`,
+        impact: 'A database outage moved play-money or mutated pet stats — outage-window corruption.',
+      },
+    );
+
+    // (4) RECOVERY: the very next /pet feed debits the 50-coin feed cost exactly
+    //     once and applies (hunger 40 → 70) — the catalog's "fresh /pet feed
+    //     debits exactly once" recovery contract.
+    const recoveredFeed = petReplyText(
+      await ctx.runSlash(handle, { commandName: 'pet', userId: userA, subcommand: 'feed' }),
+    );
+    const walletRecovered = await readWallet(handle, userA);
+    const petRecovered = await readPet(handle, userA);
+    ctx.expect(
+      walletRecovered?.wallet === 450 && petRecovered?.hunger === 70 && /pet fed/i.test(recoveredFeed),
+      {
+        assertionClass: 'replay-safety',
+        channel: 'db-observable',
+        promise:
+          'After restoration a fresh /pet feed debits the feed cost exactly once and applies the hunger gain (no lingering degradation, no double debit).',
+        observation:
+          `post-restore /pet feed replied ${JSON.stringify(recoveredFeed.slice(0, 140))}; wallet 500→${walletRecovered?.wallet} ` +
+          `(expected 450 — one 50 debit); hunger 40→${petRecovered?.hunger} (expected 70).`,
+        impact: 'The pet pipeline did not recover cleanly after the outage ended (no feed applied, or the cost debited zero/multiple times).',
+      },
+    );
+
+    await proveRlsIsolation(ctx, handle, userA);
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With database access blocked, /pet view and /pet feed reply with the branded pets-unavailable message and no coins move; after restore a fresh /pet feed debits exactly once and applies.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate play-coin debit survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded pets-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'Pet rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window (not one per failed pet command).',
-    'requires a dependency-outage fault lane plus owner alert channel readback',
+    'requires the dependency-degradation alert aggregation plus owner alert channel readback (DISCORD_TOKEN + live guild)',
   );
   ctx.gate(
     'audit',
     'audit-row',
     'After restoration a fresh /pet feed debits exactly once and applies, logged with the run-prefixed correlation id.',
-    'requires the outage fault lane; the pet flow also writes no DB-observable audit/ledger row (economy_subtract_balance touches only economy_wallets)',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'No duplicate play-coin debit survives the outage/restore cycle.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded pets-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the pets-unavailable branch',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'Pet rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'the pet care flow writes no DB-observable audit/ledger row (economy_subtract_balance touches only economy_wallets); the exactly-once debit itself is proven above via the wallet delta',
   );
 }
 

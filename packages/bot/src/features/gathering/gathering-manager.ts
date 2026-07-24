@@ -15,6 +15,7 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Gathering');
 
@@ -227,17 +228,39 @@ export class GatheringManager {
       };
     }
 
-    // Tool check — find required tool in inventory
+    // Tool check — find required tool in inventory.
+    // [game-economy-gathering DEPFAIL] A FAILED inventory read (database
+    // unreachable) is not "bare hands" — release the just-claimed cooldown +
+    // idempotency fence (the outage must not consume the member's gather
+    // window) and degrade with the branded notice.
     const toolEffect = sourceConfig.toolEffect;
     const toolResult = await this.checkTool(userId, toolEffect);
+    if (toolResult.unavailable) {
+      await this.releaseGatherClaims(cdKey, interactionId);
+      return {
+        embed: await this.unavailableEmbed(),
+        result: null,
+        error: 'dependency_unavailable',
+      };
+    }
     const toolTier = toolResult.tier;
 
-    // Get loot table for this source type
+    // Get loot table for this source type.
+    // [game-economy-gathering DEPFAIL] Same rule: a failed loot-table read
+    // must NOT surface as "No loot available for your current tool tier".
     let lootTable = await this.getLootTable(sourceType);
+    if (lootTable === null) {
+      await this.releaseGatherClaims(cdKey, interactionId);
+      return {
+        embed: await this.unavailableEmbed(),
+        result: null,
+        error: 'dependency_unavailable',
+      };
+    }
     if (lootTable.length === 0) {
       // Seed defaults
       await this.seedDefaultLoot(sourceType);
-      lootTable = await this.getLootTable(sourceType);
+      lootTable = (await this.getLootTable(sourceType)) ?? [];
     }
 
     // Filter by tool tier
@@ -362,8 +385,13 @@ export class GatheringManager {
 
   // ── Internal helpers ────────────────────────────────────
 
-  private async getLootTable(sourceType: LootSourceType): Promise<LootEntry[]> {
-    const { data } = await this.supabase
+  /**
+   * The guild's loot table for a source, or `null` when the READ FAILED
+   * (database unreachable) — a failed read is not an empty loot table
+   * ([game-economy-gathering DEPFAIL]).
+   */
+  private async getLootTable(sourceType: LootSourceType): Promise<LootEntry[] | null> {
+    const { data, error } = await this.supabase
       .from('economy_loot_tables')
       .select('id, item_name, emoji, rarity, min_qty, max_qty, weight, tool_tier, sell_value, gives_item_id')
       .eq('guild_id', this.guild.id)
@@ -371,7 +399,43 @@ export class GatheringManager {
       .eq('active', true)
       .limit(1000);
 
+    if (error) {
+      log.error('getLootTable read failed:', error.message);
+      return null;
+    }
     return (data as LootEntry[] | null) ?? [];
+  }
+
+  /**
+   * [game-economy-gathering DEPFAIL] Best-effort release of the cooldown and
+   * interaction-idempotency claims when a gather aborts on a dependency
+   * outage, so the outage never consumes the member's gather window.
+   */
+  private async releaseGatherClaims(cdKey: string, interactionId?: string): Promise<void> {
+    try {
+      await this.valkey.del(cdKey);
+      if (interactionId) {
+        await this.valkey.del(`economy:gather:idem:${interactionId}`);
+      }
+    } catch (e: unknown) {
+      log.warn('failed to release gather claims after dependency outage:', (e as Error)?.message ?? e);
+    }
+  }
+
+  /**
+   * [game-economy-gathering DEPFAIL] The branded gathering-unavailable
+   * degradation embed. The brand read is itself outage-safe (resolveBrandKit
+   * never throws and is additionally .catch-guarded), falling back to the
+   * guild name.
+   */
+  private async unavailableEmbed(): Promise<EmbedBuilder> {
+    const brandKit = await resolveBrandKit(this.supabase, this.guild.id, {
+      fallbackName: this.guild.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? this.guild.name ?? 'this server';
+    return new EmbedBuilder()
+      .setDescription(`⚠️ ${name}'s gathering grounds are temporarily unavailable — please try again in a moment. No cooldown was started and nothing was spent.`)
+      .setColor(0xffa500);
   }
 
   private async seedDefaultLoot(sourceType: LootSourceType): Promise<void> {
@@ -387,9 +451,9 @@ export class GatheringManager {
     await this.supabase.from('economy_loot_tables').insert(rows);
   }
 
-  private async checkTool(userId: string, toolEffect: string): Promise<{ tier: number; inventoryId: string | null; durabilityLeft: number | null }> {
+  private async checkTool(userId: string, toolEffect: string): Promise<{ tier: number; inventoryId: string | null; durabilityLeft: number | null; unavailable?: boolean }> {
     // Find items in inventory that have this tool effect
-    const { data: items } = await this.supabase
+    const { data: items, error } = await this.supabase
       .from('economy_inventory')
       .select('id, quantity, durability_remaining, item_id, economy_items!inner(use_effect, category)')
       .eq('guild_id', this.guild.id)
@@ -397,6 +461,12 @@ export class GatheringManager {
       .gt('quantity', 0)
       .limit(1000);
 
+    // [game-economy-gathering DEPFAIL] A FAILED read is not "bare hands" —
+    // callers degrade honestly instead of rolling from fabricated state.
+    if (error) {
+      log.error('checkTool read failed:', error.message);
+      return { tier: 0, inventoryId: null, durabilityLeft: null, unavailable: true };
+    }
     if (!items || items.length === 0) {
       return { tier: 0, inventoryId: null, durabilityLeft: null }; // bare hands
     }

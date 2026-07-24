@@ -113,6 +113,10 @@ function declaredDefault(domain: DomainContract, controlId: string): JsonValue |
   return domain.defaults.find((d) => d.controlId === controlId)?.value;
 }
 
+function truncate(text: string, max = 120): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
 /**
  * Boot a guild with polls + predictions enabled (the DB columns default to false, so
  * they must be seeded to reflect a live guild whose owner turned the features on). The
@@ -1236,47 +1240,163 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'DEF / REPLAY / RACE');
 }
 
-/** DEPFAIL — Supabase-unreachable fail-safe (needs a dependency-outage fault lane). */
+/** DEPFAIL — Supabase-unreachable fail-safe, driven through the REAL fault
+ *  proxy (ctx.faults severs the actual network path run-one-domain routed the
+ *  stack through). Falls back to honest gates when no proxy is registered
+ *  (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // This DB-observable harness's whole premise is a REACHABLE local Supabase, so a
-  // database-outage cannot be induced without a fault-injection lane. GATE the
-  // outage-dependent behavior honestly rather than fake an outage.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'With database access blocked, /predict bet returns the friendly unavailable rejection and no stake is debited; after restore the balance shows no debit and a fresh bet succeeds cleanly.',
-    'requires a Supabase dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB)',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const handle = await bootPollsPredictions(ctx, { label: 'a' });
+    const userA = ctx.userId('a'); // creator
+    const bettor = ctx.userId('b');
+    const pred = await createPredictionRows(ctx, handle, userA, ['Yes', 'No']);
+    await seedWallet(handle, bettor, 1000);
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let severedReply = '';
+    let severedEmbed: { title?: string; description?: string } | undefined;
+    try {
+      const cap = await runPredict(ctx, handle, 'bet', bettor, {
+        prediction_id: pred.predictionId,
+        option: 1,
+        amount: 100,
+      });
+      severedReply = replyText(cap);
+      severedEmbed = replyEmbed(cap);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: the bet command replied, never crashed the pipeline.
+    ctx.expect(threw === null && severedReply.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'With database access blocked, /predict bet still replies (fail-safe rejection) instead of crashing the interaction pipeline.',
+      observation: `during the outage window /predict bet ${threw === null ? `replied ${JSON.stringify(truncate(severedReply, 120))}` : `THREW ${truncate(threw, 120)}`}.`,
+      impact: 'A database outage crashed the /predict bet pipeline instead of degrading to a rejection.',
+    });
+
+    // (2) The catalog contracts the friendly unavailable rejection — never a
+    //     data-shaped answer fabricated from the failed read. "Prediction is
+    //     not open for bets" (unreadable prediction) or "Insufficient balance"
+    //     (unreadable wallet) during an outage are lies about state the bot
+    //     could not read. Recorded honestly; never softened.
+    const looksUnavailable = /unavailable|try again|temporar|later/i.test(severedReply);
+    const dataShapedLie = /not open for bets|insufficient balance|already placed|invalid option/i.test(severedReply) || severedEmbed !== undefined;
+    ctx.expect(looksUnavailable && !dataShapedLie, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise: 'The outage-window bet is rejected with the branded predictions-unavailable notice — never a fabricated state claim ("not open", "insufficient balance") or a bet confirmation.',
+      observation: `outage-window reply ${JSON.stringify(truncate(severedReply, 120))} (embed=${severedEmbed !== undefined}) — looksUnavailable=${looksUnavailable}, dataShapedLie=${dataShapedLie}.`,
+      impact: 'During a database outage /predict bet fabricated a data-shaped rejection (or confirmation) from state it could not read, instead of the branded unavailable notice.',
+    });
+
+    // (3) Money stays safe: zero debits without matching bet rows — no phantom
+    //     or partial money movement through the outage window.
+    const walletAfterOutage = await readWallet(handle, bettor);
+    const betsAfterOutage = await betsFor(handle, pred.predictionId, bettor);
+    const predAfterOutage = await readPrediction(handle, pred.predictionId);
+    ctx.expect(
+      walletAfterOutage?.wallet === 1000 &&
+        betsAfterOutage.length === 0 &&
+        predAfterOutage?.total_pool === 0 &&
+        predAfterOutage?.status === 'open',
+      {
+        assertionClass: 'replay-safety',
+        channel: 'db-observable',
+        promise: 'A bet that could not be recorded debits nothing: after restoration the balance shows no debit, no bet row exists, and the pool is untouched (no phantom stakes).',
+        observation:
+          `post-restore: bettor wallet=${walletAfterOutage?.wallet} (expected untouched 1000), bet rows=${betsAfterOutage.length} (expected 0), ` +
+          `pool=${predAfterOutage?.total_pool} (expected 0), prediction status="${predAfterOutage?.status}" (expected "open").`,
+        impact: 'The outage window produced phantom or partial money movement (a debit without a bet row, a ghost bet, or a corrupted pool).',
+      },
+    );
+
+    // (4) RECOVERY: a fresh bet through the same real handler succeeds cleanly.
+    const freshCap = await runPredict(ctx, handle, 'bet', bettor, {
+      prediction_id: pred.predictionId,
+      option: 1,
+      amount: 100,
+    });
+    const freshEmbed = replyEmbed(freshCap);
+    const walletAfterFresh = await readWallet(handle, bettor);
+    const predAfterFresh = await readPrediction(handle, pred.predictionId);
+    ctx.expect(
+      typeof freshEmbed?.title === 'string' &&
+        /bet placed/i.test(freshEmbed.title) &&
+        walletAfterFresh?.wallet === 900 &&
+        predAfterFresh?.total_pool === 100,
+      {
+        assertionClass: 'Discord',
+        channel: 'captured-reply',
+        promise: 'After restoration a fresh /predict bet succeeds cleanly: branded confirmation, one debit, and the stake escrowed into the pool.',
+        observation:
+          `post-restore /predict bet embed titled ${JSON.stringify(freshEmbed?.title)}; wallet=${walletAfterFresh?.wallet} (expected 900); ` +
+          `pool=${predAfterFresh?.total_pool} (expected 100).`,
+        impact: 'The predictions pipeline did not recover after the outage ended.',
+      },
+    );
+
+    // (5) Append-only evidence for the post-recovery bet: exactly one
+    //     guild-scoped prediction_bets ledger row with the staked amount.
+    const freshBets = await betsFor(handle, pred.predictionId, bettor);
+    ctx.expect(
+      freshBets.length === 1 && freshBets[0]?.amount === 100 && freshBets[0]?.guild_id === handle.guildId,
+      {
+        assertionClass: 'audit',
+        channel: 'audit-row',
+        promise: 'The post-recovery bet lands exactly one append-only prediction_bets row (actor + guild + amount) — the domain’s durable ledger evidence.',
+        observation: `prediction_bets rows for the bettor=${freshBets.length} (expected 1), amount=${freshBets[0]?.amount ?? '(none)'} under guild "${freshBets[0]?.guild_id ?? '(none)'}".`,
+        impact: 'The post-recovery bet did not land exactly one ledger row — the outage cycle corrupted the append-only bet record.',
+      },
+    );
+
+    // Guild-scoping holds across the outage window.
+    await proveRlsIsolation(ctx, handle, 'prediction_bets');
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With database access blocked, /predict bet returns the friendly unavailable rejection and no stake is debited; after restore the balance shows no debit and a fresh bet succeeds cleanly.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'audit',
+      'audit-row',
+      'Append-only rows capture the post-recovery bet with the run-prefixed correlation id.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'Balance history shows zero debits without matching bet rows — no phantom or partial money movement through the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded predictions-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'Poll/prediction/bet/balance rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'A single dependency-degradation alert covers the outage window (not one per failed bet).',
-    'requires a dependency-outage fault lane plus owner alert channel readback',
+    'the degradation alert cannot be written while the database itself is severed and no post-recovery alert emitter exists on this path today; observing the single alert needs the owner alert channel readback (DISCORD_TOKEN + live guild)',
   );
-  ctx.gate(
-    'audit',
-    'audit-row',
-    'Append-only rows capture the post-recovery bet with the run-prefixed correlation id.',
-    'requires the outage fault lane; the money path also writes no economy_transactions ledger row (economy_subtract_balance touches only economy_wallets)',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'Balance history shows zero debits without matching bet rows — no phantom or partial money movement through the outage/restore cycle.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded predictions-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the unavailable branch',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'Poll/prediction/bet/balance rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
+  // The dedicated audit_logs correlation-id lane stays a genuine architectural gap.
+  gateAuditLog(ctx);
 }
 
 /** RETRY — transient settlement failures converge: the per-bet payout marker credits each winner exactly once. */

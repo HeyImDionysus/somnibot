@@ -13,6 +13,7 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Market');
 
@@ -83,20 +84,44 @@ export class MarketManager {
     this.configCache = null;
   }
 
-  private async getConfig(): Promise<MarketConfig> {
-    if (this.configCache) return this.configCache;
-    const { data } = await this.supabase
+  /**
+   * Read the market config (cached). `degraded` is true only when the read
+   * FAILED (e.g. a database outage) — never cached, so a transient blip cannot
+   * poison the manager into permanently replying "the market is not enabled"
+   * (a data-shaped lie about config state the bot could not read). PGRST116
+   * (no config row) is the genuine market-off default and IS cacheable.
+   */
+  private async getConfig(): Promise<{ config: MarketConfig; degraded: boolean }> {
+    if (this.configCache) return { config: this.configCache, degraded: false };
+    const { data, error } = await this.supabase
       .from('guild_config')
       .select('economy_market_enabled, economy_market_fee_pct, economy_market_listing_days, economy_market_max_listings')
       .eq('guild_id', this.guild.id)
       .single();
-    this.configCache = data ?? {
+    const fallback: MarketConfig = {
       economy_market_enabled: false,
       economy_market_fee_pct: 5,
       economy_market_listing_days: 7,
       economy_market_max_listings: 10,
     };
-    return this.configCache!;
+    const degraded = error != null && error.code !== 'PGRST116';
+    if (!degraded) this.configCache = data ?? fallback;
+    return { config: data ?? fallback, degraded };
+  }
+
+  /**
+   * [game-economy-shop-market DEPFAIL] Branded degradation embed for a
+   * dependency outage. The brand lookup is itself outage-safe (resolveBrandKit
+   * never throws; belt-and-braces .catch) with the guild name as the fallback.
+   */
+  private async unavailableEmbed(suffix = ''): Promise<EmbedBuilder> {
+    const brandKit = await resolveBrandKit(this.supabase, this.guild.id, {
+      fallbackName: this.guild.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? this.guild.name ?? 'this server';
+    return new EmbedBuilder()
+      .setDescription(`⚠️ ${name}'s market is temporarily unavailable — please try again in a moment.${suffix}`)
+      .setColor(0xff9800);
   }
 
   // ── List Item ─────────────────────────────────────────
@@ -107,7 +132,11 @@ export class MarketManager {
     quantity: number,
     pricePerUnit: number,
   ): Promise<EmbedBuilder> {
-    const config = await this.getConfig();
+    const { config, degraded } = await this.getConfig();
+    // A failed config read is an outage, not "the market is off" — degrade honestly.
+    if (degraded) {
+      return this.unavailableEmbed(' Nothing was listed or charged.');
+    }
     if (!config.economy_market_enabled) {
       return new EmbedBuilder().setDescription('🚫 The market is not enabled.').setColor(0xff0000);
     }
@@ -239,7 +268,11 @@ export class MarketManager {
     const { search: searchTerm, sort = 'price_asc', minPrice, maxPrice, page = 0 } = options;
     const PAGE_SIZE = 15;
 
-    const config = await this.getConfig();
+    const { config, degraded } = await this.getConfig();
+    // A failed config read is an outage, not "the market is off" — degrade honestly.
+    if (degraded) {
+      return this.unavailableEmbed();
+    }
     if (!config.economy_market_enabled) {
       return new EmbedBuilder().setDescription('🚫 The market is not enabled.').setColor(0xff0000);
     }
@@ -286,7 +319,12 @@ export class MarketManager {
 
     query = query.range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
-    const { data, count } = await query;
+    const { data, count, error: browseErr } = await query;
+    // A FAILED listings read is not "no active listings": that empty-state reply
+    // is a data-shaped lie about listings the bot could not read. Degrade.
+    if (browseErr) {
+      return this.unavailableEmbed();
+    }
     const listings = (data ?? []) as MarketListing[];
     const totalListings = count ?? 0;
     const totalPages = Math.max(1, Math.ceil(totalListings / PAGE_SIZE));
@@ -322,7 +360,12 @@ export class MarketManager {
   // ── Buy ───────────────────────────────────────────────
 
   async buy(userId: string, listingIdPrefix: string, quantity: number = 1, requestId?: string): Promise<EmbedBuilder> {
-    const config = await this.getConfig();
+    const { config, degraded } = await this.getConfig();
+    // A failed config read is an outage, not "the market is off" — degrade
+    // honestly and never press a settlement against an unreachable database.
+    if (degraded) {
+      return this.unavailableEmbed(' Nothing was charged.');
+    }
     if (!config.economy_market_enabled) {
       return new EmbedBuilder().setDescription('🚫 The market is not enabled.').setColor(0xff0000);
     }
@@ -337,13 +380,19 @@ export class MarketManager {
     // short prefix, so resolve in JS: a Postgres uuid column has NO ILIKE operator,
     // so the old `.ilike('id', prefix%)` errored (42883 uuid ~~* unknown) → the
     // query returned null and a /market buy could NEVER find its listing.
-    const { data: listings } = await this.supabase
+    const { data: listings, error: listingsErr } = await this.supabase
       .from('economy_market_listings')
       .select('*')
       .eq('guild_id', this.guild.id)
       .eq('status', 'active')
       .gt('remaining', 0)
       .limit(1000);
+
+    // A FAILED listings read is not "listing not found" — degrade honestly
+    // before any settlement is attempted (nothing was charged).
+    if (listingsErr) {
+      return this.unavailableEmbed(' Nothing was charged.');
+    }
 
     const prefix = listingIdPrefix.toLowerCase();
     const listing = (listings ?? []).find(
@@ -443,13 +492,18 @@ export class MarketManager {
   // ── My Listings ───────────────────────────────────────
 
   async myListings(userId: string): Promise<EmbedBuilder> {
-    const { data } = await this.supabase
+    const { data, error: myErr } = await this.supabase
       .from('economy_market_listings')
       .select('id, item_name, remaining, price_per_unit, status, expires_at')
       .eq('guild_id', this.guild.id)
       .eq('seller_id', userId)
       .order('created_at', { ascending: false })
       .limit(15);
+
+    // A FAILED read is not "you don't have any listings" — degrade honestly.
+    if (myErr) {
+      return this.unavailableEmbed();
+    }
 
     const listings = (data ?? []) as MarketListing[];
 
@@ -478,22 +532,37 @@ export class MarketManager {
     // V49-C3: Look up the listing ID first, then use atomic cancel RPC.
     // The RPC flips status to 'cancelled' only if still 'active', preventing
     // concurrent cancels from both returning items (duplication).
-    const { data: listings } = await this.supabase
+    // Resolve the short id prefix in JS, exactly like /market buy: a Postgres
+    // uuid column has NO ILIKE operator, so the old `.ilike('id', prefix%)`
+    // errored (42883 uuid ~~* unknown) and a member could NEVER cancel their
+    // own listing — the failed query surfaced as "listing not found" and the
+    // items stayed locked in the market. The seller_id + status filters stay in
+    // SQL, so a member still only ever sees their OWN active listings here.
+    const { data: listings, error: cancelReadErr } = await this.supabase
       .from('economy_market_listings')
       .select('id')
       .eq('guild_id', this.guild.id)
       .eq('seller_id', userId)
       .eq('status', 'active')
-      .ilike('id', `${listingIdPrefix}%`)
-      .limit(1);
+      .limit(1000);
 
-    if (!listings || listings.length === 0) {
+    // A FAILED read is not "listing not found" — degrade honestly.
+    if (cancelReadErr) {
+      return this.unavailableEmbed(' Your listing was not touched.');
+    }
+
+    const cancelPrefix = listingIdPrefix.toLowerCase();
+    const match = (listings ?? []).find(
+      (l) => String((l as { id: string }).id).toLowerCase().startsWith(cancelPrefix),
+    ) as { id: string } | undefined;
+
+    if (!match) {
       return new EmbedBuilder()
         .setDescription('❌ Listing not found or already ended.')
         .setColor(0xff0000);
     }
 
-    const listingId = (listings[0] as { id: string }).id;
+    const listingId = match.id;
 
     // Atomic cancel — returns the listing only if it was actually cancelled
     const { data: cancelled } = await this.supabase.rpc('economy_market_atomic_cancel', {

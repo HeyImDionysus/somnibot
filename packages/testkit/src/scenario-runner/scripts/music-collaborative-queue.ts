@@ -603,11 +603,14 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateDashboardConfig(ctx, 'replay-safety', 'Replaying denied requests yields identical denials and zero state change.');
 }
 
-/** DEPFAIL — Valkey-outage fail-safe: fully behind a dependency-outage fault lane. */
+/** DEPFAIL — Valkey-outage fail-safe: fully behind a Valkey dependency-outage fault lane. */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // The queue store IS Valkey. Inducing a controlled outage-then-restore, and the
-  // queue-store-error decline / single owner outage alert / byte-identical recovery,
-  // all require a Valkey fault-injection lane the bot-only harness cannot provide.
+  // The queue store IS Valkey (`queue:<guildId>` et al.), and the catalog's
+  // contracted outage is "Valkey stopped". The ctx.faults proxy lane severs
+  // SUPABASE only this wave — a supabase sever does not model the contracted
+  // queue-store outage, so inducing the controlled outage-then-restore, the
+  // queue-store-error decline, the single owner outage alert, and the
+  // byte-identical recovery all stay honestly gated on the Valkey lane.
   gateQueueStore(
     ctx,
     'Discord',

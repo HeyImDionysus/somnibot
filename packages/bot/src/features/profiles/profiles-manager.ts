@@ -5,6 +5,7 @@ import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { writeAuditLog } from '../../services/audit.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Profiles');
@@ -134,14 +135,40 @@ export class ProfilesManager {
     return data?.onboarding_completed === true;
   }
 
-  private async getOrCreateProfile(guildId: string, userId: string): Promise<any> {
-    const { data } = await this.supabase
-      .from('economy_profiles').select('*').eq('guild_id', guildId).eq('user_id', userId).single();
+  /**
+   * Load (or create on first use) the member's profile row. Returns null ONLY
+   * when the read/write itself FAILED (a database outage) — never for a merely
+   * missing row — so callers can degrade honestly instead of rendering a
+   * fabricated empty profile from a read that never happened.
+   */
+  private async getOrCreateProfile(guildId: string, userId: string): Promise<any | null> {
+    const { data, error } = await this.supabase
+      .from('economy_profiles').select('*').eq('guild_id', guildId).eq('user_id', userId).maybeSingle();
     if (data) return data;
+    if (error) return null; // the read failed (outage) — unavailable, not "no profile yet"
 
     const { data: created } = await this.supabase
       .from('economy_profiles').insert({ guild_id: guildId, user_id: userId }).select().single();
-    return created;
+    return created ?? null;
+  }
+
+  /**
+   * The branded profiles-unavailable degradation notice (catalog message
+   * `profiles-unavailable`). The brand read is itself outage-safe:
+   * resolveBrandKit never throws and the guild name is the fallback, so this
+   * reply always lands even while the database is unreachable.
+   */
+  private async replyProfilesUnavailable(interaction: ChatInputCommandInteraction): Promise<void> {
+    const guildId = interaction.guildId!;
+    const brandKit = await resolveBrandKit(this.supabase, guildId, { fallbackName: interaction.guild?.name })
+      .catch(() => null);
+    const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
+    const content = `⚠️ ${name}'s profiles are snoozing for a second — please try again shortly.`;
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ content });
+    } else {
+      await interaction.reply({ content, ephemeral: true });
+    }
   }
 
   async viewProfile(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -162,6 +189,14 @@ export class ProfilesManager {
     }
 
     const profile = await this.getOrCreateProfile(guildId, target.id);
+    // DEPFAIL fail-soft: a FAILED profile read is not an empty profile.
+    // Rendering a zeroed card during a database outage tells members a
+    // data-shaped lie about state the bot could not read — degrade honestly
+    // with the branded unavailable notice instead (catalog `profiles-unavailable`).
+    if (profile == null) {
+      await this.replyProfilesUnavailable(interaction);
+      return;
+    }
 
     // V52-L3: await the atomic RPC and log errors instead of fire-and-forget.
     // The old code had a non-atomic read-modify-write fallback that could lose
@@ -180,6 +215,21 @@ export class ProfilesManager {
       this.supabase.from('economy_prestige').select('prestige_level, multiplier_pct').eq('guild_id', guildId).eq('user_id', target.id).single(),
       this.supabase.from('economy_user_achievements').select('*', { count: 'exact', head: true }).eq('guild_id', guildId).eq('user_id', target.id),
     ]);
+    // Same fail-soft rule for the standing reads: a genuine read FAILURE (not a
+    // merely-missing row — .single() surfaces that as PGRST116) must never
+    // render as a zero balance / zero achievements.
+    const readFailed = (err: { code?: string } | null): boolean =>
+      err != null && err.code !== 'PGRST116';
+    if (
+      readFailed(walletRes.error) ||
+      readFailed(petRes.error) ||
+      readFailed(prestigeRes.error) ||
+      readFailed(achRes.error)
+    ) {
+      await this.replyProfilesUnavailable(interaction);
+      return;
+    }
+
     const wallet = walletRes.data;
     const pet = petRes.data;
     const prestige = prestigeRes.data;
@@ -269,10 +319,21 @@ export class ProfilesManager {
       return;
     }
 
-    await this.getOrCreateProfile(guildId, interaction.user.id);
-    await this.supabase.from('economy_profiles')
+    // DEPFAIL fail-soft: never confirm a save that did not land. A failed
+    // profile ensure or a failed UPDATE (database outage) degrades to the
+    // branded unavailable notice; the prior value stays untouched.
+    const titleProfileRow = await this.getOrCreateProfile(guildId, interaction.user.id);
+    if (titleProfileRow == null) {
+      await this.replyProfilesUnavailable(interaction);
+      return;
+    }
+    const { error: titleWriteErr } = await this.supabase.from('economy_profiles')
       .update({ title: finalTitle, updated_at: new Date().toISOString() })
       .eq('guild_id', guildId).eq('user_id', interaction.user.id);
+    if (titleWriteErr) {
+      await this.replyProfilesUnavailable(interaction);
+      return;
+    }
 
     // [community-profiles] Append-only audit row on the title save (the catalog
     // contracts one audit row per member-profile state change). Written directly
@@ -334,10 +395,19 @@ export class ProfilesManager {
       return;
     }
 
-    await this.getOrCreateProfile(guildId, interaction.user.id);
-    await this.supabase.from('economy_profiles')
+    // DEPFAIL fail-soft: never confirm a save that did not land (see setTitle).
+    const bioProfileRow = await this.getOrCreateProfile(guildId, interaction.user.id);
+    if (bioProfileRow == null) {
+      await this.replyProfilesUnavailable(interaction);
+      return;
+    }
+    const { error: bioWriteErr } = await this.supabase.from('economy_profiles')
       .update({ bio: finalBio, updated_at: new Date().toISOString() })
       .eq('guild_id', guildId).eq('user_id', interaction.user.id);
+    if (bioWriteErr) {
+      await this.replyProfilesUnavailable(interaction);
+      return;
+    }
 
     // [community-profiles] Append-only audit row on the bio save (the catalog
     // contracts one audit row per member-profile state change). Written directly

@@ -15,6 +15,7 @@ import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { randomInt } from 'node:crypto';
 import { eventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Economy');
 
@@ -60,6 +61,15 @@ export interface WalletData {
   passive: boolean;
   total_earned: number;
   total_spent: number;
+  /**
+   * [game-economy-wallet-rewards DEPFAIL] True ONLY on the non-throwing
+   * fallback wallet fabricated when BOTH the wallet read and the initializer
+   * RPC failed (database unreachable). Read-only display surfaces (/balance)
+   * must treat this as "state unreadable" and degrade with the branded
+   * wallet-unavailable notice — never render the fabricated zero balance as
+   * if it were the member's real coins.
+   */
+  degraded?: boolean;
 }
 
 export interface StreakData {
@@ -279,7 +289,11 @@ export class EconomyManager {
 
     if (created) return created as WalletData;
 
-    // Preserve the established non-throwing fallback when persistence fails.
+    // Preserve the established non-throwing fallback when persistence fails —
+    // but mark it `degraded` so read-only surfaces (/balance) can tell "the
+    // database was unreachable" apart from a real zero-balance wallet and
+    // degrade honestly instead of rendering a fabricated balance
+    // ([game-economy-wallet-rewards DEPFAIL]).
     const cfg = await this.loadConfig();
     const startBal = cfg.economy_starting_balance;
 
@@ -292,7 +306,22 @@ export class EconomyManager {
       passive: false,
       total_earned: startBal,
       total_spent: 0,
+      degraded: true,
     } as WalletData;
+  }
+
+  /**
+   * [game-economy-wallet-rewards DEPFAIL] The branded wallet-unavailable
+   * degradation message. The brand read is itself outage-safe (resolveBrandKit
+   * never throws and is additionally .catch-guarded), falling back to the
+   * guild name.
+   */
+  async walletUnavailableMessage(noun: string): Promise<string> {
+    const brandKit = await resolveBrandKit(this.supabase, this.guild.id, {
+      fallbackName: this.guild.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? this.guild.name ?? 'this server';
+    return `⚠️ ${name}'s ${noun} is temporarily unavailable — please try again in a moment. Your coins are safe and nothing was changed.`;
   }
 
   /**
@@ -512,9 +541,19 @@ export class EconomyManager {
     // Credit wallet — V50-L2: handle null (RPC failure)
     const updated = await this.creditWallet(userId, totalAmount);
     if (!updated) {
-      // [game-economy-wallet-rewards] Outage lane: the reward credit RPC failed.
+      // [game-economy-wallet-rewards DEPFAIL] Outage lane: the reward credit
+      // failed (database unreachable / RPC error). RELEASE the just-claimed
+      // cooldown slot so the outage does NOT consume the member's reward
+      // window — after the dependency recovers a fresh claim must credit
+      // exactly once. Best effort: a failed release is only a stale cooldown,
+      // never a lost reward window claim.
+      try {
+        await this.valkey.del(cooldownKey);
+      } catch (e: unknown) {
+        log.warn('failed to release reward cooldown slot after credit failure', { detail: (e as Error)?.message ?? e });
+      }
       // Raise an owner alert + append-only audit event so the dropped reward is
-      // observable (the cooldown slot was already claimed for this window).
+      // observable.
       await this.raiseRewardOutageAlert(userId, type, totalAmount)
         .catch((e: unknown) => { log.warn('reward outage alert failed', { detail: (e as Error)?.message ?? e }); });
       eventBus.emit('economy.reward_failed', this.guild.id, {
@@ -523,7 +562,14 @@ export class EconomyManager {
         amount: totalAmount,
       });
       const wallet = await this.getOrCreateWallet(userId);
-      return { success: false, amount: 0, balance: wallet, message: `❌ Failed to credit your ${type} reward. Please try again.` };
+      // Degrade honestly with the branded unavailable notice (the brand read is
+      // itself outage-safe) — never a data-shaped answer from the failed write.
+      return {
+        success: false,
+        amount: 0,
+        balance: wallet,
+        message: await this.walletUnavailableMessage(`${type} reward`),
+      };
     }
 
     // Update streak
@@ -1050,7 +1096,16 @@ export class EconomyManager {
 
   // ── Shop operations ─────────────────────────────────────
 
-  async getShopItems(category?: string): Promise<Array<{ id: string; name: string; description: string | null; emoji: string; category: string; price: number; stock: number | null }>> {
+  /**
+   * [game-economy-shop-market DEPFAIL] Error-aware shop-catalog read. `degraded`
+   * is true when the read FAILED (e.g. a database outage) — callers must not
+   * present a failed read as "the shop is empty" / "item not found", which is a
+   * data-shaped lie about a catalog the bot could not read.
+   */
+  async getShopItemsChecked(category?: string): Promise<{
+    items: Array<{ id: string; name: string; description: string | null; emoji: string; category: string; price: number; stock: number | null }>;
+    degraded: boolean;
+  }> {
     let query = this.supabase
       .from('economy_items')
       .select('id, name, description, emoji, category, price, stock')
@@ -1064,20 +1119,35 @@ export class EconomyManager {
       query = query.eq('category', category);
     }
 
-    const { data } = await query;
-    return (data ?? []) as Array<{ id: string; name: string; description: string | null; emoji: string; category: string; price: number; stock: number | null }>;
+    const { data, error } = await query;
+    return {
+      items: (data ?? []) as Array<{ id: string; name: string; description: string | null; emoji: string; category: string; price: number; stock: number | null }>,
+      degraded: error != null,
+    };
+  }
+
+  async getShopItems(category?: string): Promise<Array<{ id: string; name: string; description: string | null; emoji: string; category: string; price: number; stock: number | null }>> {
+    return (await this.getShopItemsChecked(category)).items;
   }
 
   async buyItem(userId: string, itemId: string, quantity: number = 1, requestId?: string): Promise<TransactionResult> {
     const cfg = await this.loadConfig();
 
-    const { data: item } = await this.supabase
+    const { data: item, error: itemErr } = await this.supabase
       .from('economy_items')
       .select('*')
       .eq('id', itemId)
       .eq('guild_id', this.guild.id)
       .eq('active', true)
       .single();
+
+    // [game-economy-shop-market DEPFAIL] A FAILED item read is not "item not
+    // found" — that is a fabricated catalog verdict during an outage. PGRST116
+    // (zero rows) is the genuine not-found case and falls through below.
+    if (itemErr && itemErr.code !== 'PGRST116') {
+      const wallet = await this.getOrCreateWallet(userId);
+      return { success: false, amount: 0, balance: wallet, message: await this.walletUnavailableMessage('shop') };
+    }
 
     if (!item) {
       const wallet = await this.getOrCreateWallet(userId);
@@ -1112,9 +1182,12 @@ export class EconomyManager {
     });
 
     if (error || !data || typeof data !== 'object') {
+      // [game-economy-shop-market DEPFAIL] The atomic RPC rolled back (or never
+      // reached the database) — nothing was charged or delivered. Degrade with
+      // the branded unavailable notice, never a bare stock-bot failure line.
       log.error('buyItem economy_buy_item RPC failed', { detail: error?.message });
       const wallet = await this.getOrCreateWallet(userId);
-      return { success: false, amount: 0, balance: wallet, message: '❌ Purchase failed. Please try again.' };
+      return { success: false, amount: 0, balance: wallet, message: await this.walletUnavailableMessage('shop') };
     }
 
     const result = data as {
@@ -1378,7 +1451,7 @@ export class EconomyManager {
       alert_type: 'economy_reward_outage',
       severity: 'warning',
       title: 'Economy reward credit failed',
-      message: `A ${type} reward of ${amount} failed to credit ${userId}. The claim cooldown was consumed for this window.`,
+      message: `A ${type} reward of ${amount} failed to credit ${userId}. The claim cooldown slot was released so the member can retry once the dependency recovers.`,
       metadata: { user_id: userId, reward_type: type, amount },
     });
   }

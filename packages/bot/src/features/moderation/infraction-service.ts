@@ -139,13 +139,19 @@ export async function getActiveInfractionCount(
 
 /**
  * Get recent infractions for a member (for history display).
+ *
+ * Returns `null` (NOT an empty array) when the read itself fails: a failed READ
+ * is unknown state, and coercing it to [] made /infractions report a clean
+ * record during a database outage — a data-shaped lie about state the bot could
+ * not read (the #356 handleLeaderboardCommand bug class). Callers must
+ * distinguish "no infractions" ([]) from "could not read" (null).
  */
 export async function getMemberInfractions(
   supabase: SupabaseClient,
   guildId: string,
   memberId: string,
   limit = 25,
-): Promise<InfractionRecord[]> {
+): Promise<InfractionRecord[] | null> {
   const { data, error } = await supabase
     .from('infractions')
     .select('*')
@@ -156,7 +162,7 @@ export async function getMemberInfractions(
 
   if (error) {
     log.error('Failed to get member infractions:', error.message);
-    return [];
+    return null;
   }
 
   return (data ?? []) as InfractionRecord[];

@@ -702,18 +702,24 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
       'a second real snapshot evaluation is a 60s DiagnosticsService tick; the update-in-place path across ticks is not observable inside one scenario runtime.',
     );
   } else {
-    // Valkey is up — the outage cannot be induced without a fault lane.
+    // Valkey is up — the contracted outage severs VALKEY, and the fault-proxy
+    // lane severs SUPABASE only this wave (a Supabase sever would break the
+    // snapshot WRITE itself rather than model the contracted valkey_connected=false
+    // condition), so the Valkey sever leg stays honestly gated.
+    const valkeyLane = ctx.faults?.valkey
+      ? 'Valkey is reachable this run; its fault proxy is registered but deliberately not severed this wave (Supabase-sever only) — the mid-run Valkey outage is a later fault-lane wave.'
+      : 'Valkey is reachable this run; no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane), and the contracted outage severs Valkey.';
     ctx.gate(
       'database-RLS',
       'db-observable',
       'With Valkey stopped, the snapshot still writes valkey_connected=false and a critical valkey_disconnected alert opens once.',
-      'Valkey is reachable this run; inducing a mid-run Valkey outage needs a dependency-outage fault-injection lane.',
+      valkeyLane,
     );
     ctx.gate(
       'owner-notification',
       'db-observable',
       'Exactly one open and one resolve notification for the outage condition.',
-      'Valkey is reachable this run; the outage condition cannot be driven.',
+      valkeyLane,
     );
     gateAlertAudit(ctx, 'diagnostics.dependency_down is recorded for the outage.');
     gateBranding(ctx);

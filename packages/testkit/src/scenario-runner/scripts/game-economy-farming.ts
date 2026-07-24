@@ -766,46 +766,163 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
-/** DEPFAIL — Supabase-unreachable fail-safe (needs a dependency-outage fault lane). */
+/** DEPFAIL — Supabase-unreachable fail-safe, driven through the REAL fault
+ *  proxy (ctx.faults severs the actual network path run-one-domain routed the
+ *  stack through). /farm view and /farm harvest are the driven surfaces —
+ *  neither touches Valkey, so the whole scenario runs without Redis. Falls
+ *  back to honest gates when no proxy is registered (the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // This DB-observable harness's whole premise is a REACHABLE local Supabase, so a
-  // database-outage cannot be induced without a fault-injection lane. GATE the
-  // outage-dependent behavior honestly rather than fake an outage.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'With database access blocked, /farm view and /farm harvest reply with the branded farming-unavailable message, no plot mutates and no coins move; after restore a fresh /farm harvest credits exactly once.',
-    'requires a Supabase dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB)',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const handle = await ctx.bootGuild({
+      label: 'a',
+      economyStartingBalance: 0,
+      guildConfigOverrides: { economy_farming_enabled: true },
+    });
+    const userA = ctx.userId('a');
+
+    // Arrange known state on the HEALTHY stack: a funded wallet and a READY
+    // plot (Potato: grow 7200s / wilt 86400s, planted+watered 3h ago → ready).
+    await seedWallet(handle, userA, 500);
+    const cropId = await seedCrop(ctx, handle);
+    const threeHoursAgo = new Date(Date.now() - 3 * 3600_000).toISOString();
+    await insertPlot(handle, userA, { plotIndex: 0, cropId, plantedAt: threeHoursAgo, wateredAt: threeHoursAgo });
+    const plotBefore = await readPlot(handle, userA, 0);
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let viewSurface = '';
+    let harvestSurface = '';
+    try {
+      const view = await ctx.runSlash(handle, { commandName: 'farm', userId: userA, subcommand: 'view' });
+      viewSurface = farmEmbedText(view);
+      const harvest = await ctx.runSlash(handle, { commandName: 'farm', userId: userA, subcommand: 'harvest' });
+      harvestSurface = farmEmbedText(harvest);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: both subcommands replied, never crashed the pipeline.
+    ctx.expect(threw === null && viewSurface.length > 0 && harvestSurface.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'With database access blocked, /farm view and /farm harvest still reply (fail-safe) instead of crashing the interaction pipeline.',
+      observation:
+        threw === null
+          ? `during the outage window /farm view replied ${JSON.stringify(viewSurface.slice(0, 110))} and /farm harvest replied ${JSON.stringify(harvestSurface.slice(0, 110))}.`
+          : `an outage-window /farm command THREW ${threw.slice(0, 110)}.`,
+      impact: 'A database outage crashed the farming command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts the branded farming-UNAVAILABLE notice — never
+    //     a data-shaped answer: an "all plots empty" board or "No crops ready
+    //     to harvest" during an outage is a lie about plots the bot could not
+    //     read.
+    const viewUnavailable = /unavailable|try again|temporar/i.test(viewSurface);
+    const viewLie = /your farm|all plots empty/i.test(viewSurface);
+    const harvestUnavailable = /unavailable|try again|temporar/i.test(harvestSurface);
+    const harvestLie = /no crops ready/i.test(harvestSurface);
+    ctx.expect(viewUnavailable && !viewLie && harvestUnavailable && !harvestLie, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise: 'With the database blocked, /farm view and /farm harvest reply with the branded farming-unavailable notice — never an empty farm board or a "no crops ready" fabricated from the failed read.',
+      observation:
+        `outage-window /farm view ${JSON.stringify(viewSurface.slice(0, 110))} (unavailable=${viewUnavailable}, dataShaped=${viewLie}); ` +
+        `/farm harvest ${JSON.stringify(harvestSurface.slice(0, 110))} (unavailable=${harvestUnavailable}, dataShaped=${harvestLie}).`,
+      impact: 'During a database outage a /farm command replied with a data-shaped answer fabricated from the failed read instead of a degradation notice.',
+    });
+
+    // (3) ZERO CORRUPTION: the plot row and wallet are byte-identical after
+    //     restore; no harvest ledger row was written.
+    const plotAfterOutage = await readPlot(handle, userA, 0);
+    const walletAfterOutage = await readWallet(handle, userA);
+    const outageTxns = await harvestTxnCount(handle, userA);
+    ctx.expect(
+      plotAfterOutage?.harvested === false &&
+        plotAfterOutage?.crop_id === plotBefore?.crop_id &&
+        plotAfterOutage?.planted_at === plotBefore?.planted_at &&
+        plotAfterOutage?.watered_at === plotBefore?.watered_at &&
+        walletAfterOutage?.wallet === 500 &&
+        outageTxns === 0,
+      {
+        assertionClass: 'Discord',
+        channel: 'db-observable',
+        promise: 'No plot mutates and no coins move across the outage window — the ready plot and wallet are unchanged after restoration.',
+        observation:
+          `post-restore plot: harvested=${plotAfterOutage?.harvested}, planted_at match=${plotAfterOutage?.planted_at === plotBefore?.planted_at}, ` +
+          `watered_at match=${plotAfterOutage?.watered_at === plotBefore?.watered_at}; wallet=${walletAfterOutage?.wallet} (expected 500); ` +
+          `farm_harvest ledger rows=${outageTxns} (expected 0).`,
+        impact: 'A database outage mutated a farm plot, moved play coins, or wrote a phantom harvest ledger row.',
+      },
+    );
+
+    // (4) RECOVERY: the very next /farm view renders the REAL farm board again.
+    const recoveredView = await ctx.runSlash(handle, { commandName: 'farm', userId: userA, subcommand: 'view' });
+    ctx.expect(/your farm/i.test(farmEmbedText(recoveredView)), {
+      assertionClass: 'replay-safety',
+      channel: 'captured-reply',
+      promise: 'After restoration the very next /farm view renders the real "Your Farm" board again (no lingering degradation).',
+      observation: `post-restore /farm view surface = ${JSON.stringify(farmEmbedText(recoveredView).slice(0, 110))}.`,
+      impact: 'The farming pipeline did not recover after the outage ended.',
+    });
+
+    // (5) After restoration a FRESH /farm harvest credits exactly once: the
+    //     ready Potato pays its 30-coin sell price once, flips the plot to
+    //     harvested, and writes exactly one farm_harvest ledger row.
+    await ctx.runSlash(handle, { commandName: 'farm', userId: userA, subcommand: 'harvest' });
+    const walletAfterHarvest = await readWallet(handle, userA);
+    const plotAfterHarvest = await readPlot(handle, userA, 0);
+    const txnsAfterHarvest = await harvestTxnCount(handle, userA);
+    ctx.expect(walletAfterHarvest?.wallet === 530 && plotAfterHarvest?.harvested === true && txnsAfterHarvest === 1, {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: 'After restoration a fresh /farm harvest credits the 30-coin sell price exactly once, marks the plot harvested, and writes exactly one append-only farm_harvest ledger row (no duplicate credit survives the outage/restore cycle).',
+      observation:
+        `post-restore /farm harvest: wallet=${walletAfterHarvest?.wallet} (expected 530), plot harvested=${plotAfterHarvest?.harvested}, ` +
+        `farm_harvest ledger rows=${txnsAfterHarvest} (expected exactly 1).`,
+      impact: 'The recovery harvest did not credit exactly once — a play-coin loss or double credit across the outage cycle.',
+    });
+
+    await proveRlsIsolation(ctx, handle);
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With database access blocked, /farm view and /farm harvest reply with the branded farming-unavailable message, no plot mutates and no coins move; after restore a fresh /farm harvest credits exactly once.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'audit',
+      'audit-row',
+      'After restoration a fresh /farm harvest credits exactly once and applies, logged with the run-prefixed correlation id.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate play-money credit survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded farming-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'Farm rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert (farming.dependency_degraded) for the outage window, not one per failed farm command.',
-    'requires a dependency-outage fault lane plus owner alert channel readback',
-  );
-  ctx.gate(
-    'audit',
-    'audit-row',
-    'After restoration a fresh /farm harvest credits exactly once and applies, logged with the run-prefixed correlation id.',
-    'requires the outage fault lane; the harvest ledger row is also written inside the /farm harvest subcommand handler (undrivable here)',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'No duplicate play-money credit survives the outage/restore cycle.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded farming-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the farming-unavailable branch',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'Farm rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'requires the owner alert channel readback lane (the in-window alert write itself hits the severed database)',
   );
 }
 

@@ -255,7 +255,34 @@ describe('HeistManager', () => {
         }
         return chainBuilder();
       });
+      // A GENERIC (network/transient) RPC failure debited nothing — it must not
+      // fabricate a balance verdict; it degrades honestly and says so.
       supabase.rpc.mockResolvedValueOnce({ data: null, error: { message: 'fail' } });
+      const interaction = makeInteraction();
+      await mgr.startHeist(interaction as any);
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringContaining('temporarily unavailable'),
+        }),
+      );
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Nothing was charged') }),
+      );
+    });
+
+    it('reports a genuine insufficient-balance raise as a payment failure', async () => {
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') return chainBuilder({ data: { ...defaultConfig }, error: null });
+        if (table === 'economy_heists') return chainBuilder({ data: null, error: null });
+        if (table === 'economy_wallets') return chainBuilder({ data: { wallet: 500 }, error: null });
+        return chainBuilder();
+      });
+      // The atomic debit RPC RAISES on insufficient balance — the one error that
+      // may legitimately tell the member they lack coins.
+      supabase.rpc.mockResolvedValueOnce({
+        data: null,
+        error: { message: 'insufficient balance for this operation' },
+      });
       const interaction = makeInteraction();
       await mgr.startHeist(interaction as any);
       expect(interaction.reply).toHaveBeenCalledWith(

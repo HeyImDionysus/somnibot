@@ -33,6 +33,25 @@ import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('TicketInteractions');
 
+/**
+ * Branded, outage-safe unavailable notice for a failed ticket-system READ.
+ * A failed read is UNKNOWN state — never tell the member "Ticket not found."
+ * (or "panel not found") for rows the bot could not read: during a database
+ * outage that is a data-shaped lie about unreadable state (the #356
+ * handleLeaderboardCommand bug class). The brand read is itself outage-safe:
+ * resolveBrandKit never throws and the guild name is the fallback.
+ */
+async function ticketsUnavailableMessage(
+  client: SomniClient,
+  guild: { id: string; name: string },
+): Promise<string> {
+  const brandKit = await resolveBrandKit(client.supabase, guild.id, {
+    fallbackName: guild.name,
+  }).catch(() => null);
+  const name = brandKit?.brandName ?? guild.name ?? 'this server';
+  return `⚠️ ${name}'s ticket system is temporarily unavailable — please try again in a moment.`;
+}
+
 interface IntakeFormField {
   label: string;
   placeholder?: string;
@@ -167,9 +186,14 @@ async function openTicketFromPanel(
     .from('ticket_panels')
     .select('*')
     .eq('id', panelId)
-    .single();
+    .maybeSingle();
 
-  if (panelErr || !panel) {
+  // A failed READ is not a missing panel — degrade honestly (never "not found").
+  if (panelErr) {
+    await interaction.reply({ content: await ticketsUnavailableMessage(client, guild), ephemeral: true });
+    return;
+  }
+  if (!panel) {
     await interaction.reply({ content: '❌ Ticket panel not found. It may have been deleted.', ephemeral: true });
     return;
   }
@@ -257,13 +281,18 @@ async function handleTicketClose(
   }
 
   // Fetch ticket to authorize and to generate a transcript before closing.
-  const { data: ticket } = await client.supabase
+  const { data: ticket, error: ticketErr } = await client.supabase
     .from('tickets')
     .select('*')
     .eq('guild_id', guild.id)
     .eq('ticket_number', ticketNumber)
-    .single();
+    .maybeSingle();
 
+  // A failed READ is not a missing ticket — degrade honestly (never "not found").
+  if (ticketErr) {
+    await interaction.reply({ content: await ticketsUnavailableMessage(client, guild), ephemeral: true });
+    return;
+  }
   if (!ticket) {
     await interaction.reply({ content: '❌ Ticket not found.', ephemeral: true });
     return;
@@ -314,13 +343,18 @@ async function handleTicketClaim(
     return;
   }
 
-  const { data: ticket } = await client.supabase
+  const { data: ticket, error: ticketErr } = await client.supabase
     .from('tickets')
     .select('*')
     .eq('guild_id', guild.id)
     .eq('ticket_number', ticketNumber)
-    .single();
+    .maybeSingle();
 
+  // A failed READ is not a missing ticket — degrade honestly (never "not found").
+  if (ticketErr) {
+    await interaction.reply({ content: await ticketsUnavailableMessage(client, guild), ephemeral: true });
+    return;
+  }
   if (!ticket) {
     await interaction.reply({ content: '❌ Ticket not found.', ephemeral: true });
     return;
@@ -371,13 +405,18 @@ async function handleTicketTranscript(
     return;
   }
 
-  const { data: ticket } = await client.supabase
+  const { data: ticket, error: ticketErr } = await client.supabase
     .from('tickets')
     .select('*')
     .eq('guild_id', guild.id)
     .eq('ticket_number', ticketNumber)
-    .single();
+    .maybeSingle();
 
+  // A failed READ is not a missing ticket — degrade honestly (never "not found").
+  if (ticketErr) {
+    await interaction.editReply(await ticketsUnavailableMessage(client, guild));
+    return;
+  }
   if (!ticket) {
     await interaction.editReply('❌ Ticket not found.');
     return;
@@ -408,13 +447,18 @@ async function handleTicketReopen(
     return;
   }
 
-  const { data: ticket } = await client.supabase
+  const { data: ticket, error: ticketErr } = await client.supabase
     .from('tickets')
     .select('*')
     .eq('guild_id', guild.id)
     .eq('ticket_number', ticketNumber)
-    .single();
+    .maybeSingle();
 
+  // A failed READ is not a missing ticket — degrade honestly (never "not found").
+  if (ticketErr) {
+    await interaction.reply({ content: await ticketsUnavailableMessage(client, guild), ephemeral: true });
+    return;
+  }
   if (!ticket) {
     await interaction.reply({ content: '❌ Ticket not found.', ephemeral: true });
     return;
@@ -457,13 +501,18 @@ async function handleTicketDelete(
     return;
   }
 
-  const { data: ticket } = await client.supabase
+  const { data: ticket, error: ticketErr } = await client.supabase
     .from('tickets')
     .select('*')
     .eq('guild_id', guild.id)
     .eq('ticket_number', ticketNumber)
-    .single();
+    .maybeSingle();
 
+  // A failed READ is not a missing ticket — degrade honestly (never "not found").
+  if (ticketErr) {
+    await interaction.reply({ content: await ticketsUnavailableMessage(client, guild), ephemeral: true });
+    return;
+  }
   if (!ticket) {
     await interaction.reply({ content: '❌ Ticket not found.', ephemeral: true });
     return;
@@ -517,9 +566,14 @@ async function handleIntakeModalSubmit(
     .from('ticket_panels')
     .select('*')
     .eq('id', panelId)
-    .single();
+    .maybeSingle();
 
-  if (panelErr || !panel) {
+  // A failed READ is not a missing panel — degrade honestly (never "not found").
+  if (panelErr) {
+    await interaction.editReply(await ticketsUnavailableMessage(client, guild));
+    return;
+  }
+  if (!panel) {
     await interaction.editReply('❌ Ticket panel not found.');
     return;
   }
@@ -595,26 +649,35 @@ async function handleTicketFeedback(
   }
 
   // Verify this is the ticket creator
-  const { data: ticket } = await client.supabase
+  const { data: ticket, error: ticketErr } = await client.supabase
     .from('tickets')
     .select('creator_id')
     .eq('guild_id', guild.id)
     .eq('ticket_number', ticketNumber)
-    .single();
+    .maybeSingle();
 
+  // A failed READ is not "someone else's ticket" — degrade honestly.
+  if (ticketErr) {
+    await interaction.reply({ content: await ticketsUnavailableMessage(client, guild), ephemeral: true });
+    return;
+  }
   if (!ticket || ticket.creator_id !== interaction.user.id) {
     await interaction.reply({ content: '❌ Only the ticket creator can leave feedback.', ephemeral: true });
     return;
   }
 
-  // Save feedback
-  await client.supabase
+  // Save feedback — never thank the member for feedback that failed to persist.
+  const { error: saveErr } = await client.supabase
     .from('tickets')
     .update({
       feedback_rating: rating,
     })
     .eq('guild_id', guild.id)
     .eq('ticket_number', ticketNumber);
+  if (saveErr) {
+    await interaction.reply({ content: await ticketsUnavailableMessage(client, guild), ephemeral: true });
+    return;
+  }
 
   const stars = '⭐'.repeat(rating) + '☆'.repeat(5 - rating);
   await interaction.reply({ content: `Thank you for your feedback! ${stars}`, ephemeral: true });

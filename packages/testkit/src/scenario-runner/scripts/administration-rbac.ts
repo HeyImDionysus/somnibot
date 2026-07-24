@@ -582,23 +582,30 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   );
 }
 
-/** DEPFAIL — when the database is unreachable, access fails closed, never open. */
+/** DEPFAIL — when the database is unreachable, access fails closed, never open.
+ *  The contracted outage IS a Supabase sever, but every observable surface —
+ *  the 401/403 fail-closed lookup, the banner, the mirrored notification, the
+ *  post-recovery rbac.lookup_failed row — is produced by the dashboard's
+ *  getAuthContext / requirePermission behind an OAuth session. There is NO
+ *  ctx-drivable surface (no slash command, no injector component, no gateway
+ *  event) for this domain's outage behavior, so even with the Supabase fault
+ *  proxy registered the sever cannot be observed from this harness. GATE every
+ *  facet honestly rather than fake an outage. */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // This harness's whole premise is a REACHABLE local Supabase, and the
-  // fail-closed permission-lookup path lives in the dashboard's getAuthContext /
-  // requirePermission behind an OAuth session. Neither the outage nor the route
-  // is reachable here — GATE every facet honestly rather than fake an outage.
+  const noCtxSurface = ctx.faults?.supabase
+    ? 'the Supabase fault proxy is registered, but every RBAC outage surface is dashboard-only (getAuthContext/requirePermission behind an OAuth session) — no ctx-drivable surface exists to observe the sever from this bot-only harness'
+    : 'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane); the RBAC outage surface is additionally dashboard-only (getAuthContext/requirePermission behind an OAuth session)';
   ctx.gate(
     'Discord',
     'db-observable',
     'With Supabase connectivity blocked, every gated dashboard request returns 401/403 and no stale permission grant is served (fail-closed).',
-    'requires a Supabase dependency-outage fault-injection lane AND the dashboard permission-lookup route (getAuthContext) behind an OAuth session',
+    noCtxSurface,
   );
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'Exactly one degradation alert is delivered (the rbac-degraded owner notification), not one per denied request.',
-    'requires the outage fault lane plus the owner notification channel + dashboard banner readback',
+    `${noCtxSurface}; the alert additionally needs the owner notification channel + dashboard banner readback`,
   );
   ctx.gate(
     'audit',
@@ -610,19 +617,19 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     'database-RLS',
     'db-observable',
     'After recovery, role and assignment rows are exactly as before the outage.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    noCtxSurface,
   );
   ctx.gate(
     'branding',
     'discord-readback',
     'The degradation banner uses the rbac-degraded template in the owner voice.',
-    'requires the outage fault lane to reach the degraded dashboard banner',
+    `${noCtxSurface}; the degraded dashboard banner is itself a dashboard render`,
   );
   ctx.gate(
     'replay-safety',
     'db-observable',
     'Requests retried during the outage cause no duplicate writes after recovery.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    noCtxSurface,
   );
   ctx.gate(
     'cleanup',

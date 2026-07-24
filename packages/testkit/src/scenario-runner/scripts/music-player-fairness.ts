@@ -491,7 +491,10 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplaySafety(ctx, 'Replaying a denied interaction produces the same denial and no state change.');
 }
 
-/** DEPFAIL — the Lavalink audio backend dies mid-track; fairness state fails safe. */
+/** DEPFAIL — the Lavalink audio backend dies mid-track; fairness state fails safe.
+ *  NOT convertible onto the ctx.faults proxy lane: the contracted outage is the
+ *  LAVALINK backend (with queue/votes in Valkey), and the proxy severs Supabase
+ *  only this wave — a supabase sever models neither, so the gates stay honest. */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
   const dj = djRoleId(ctx);
   const handle = await ctx.bootGuild({ label: 'a', guildConfigOverrides: { dj_role_id: dj } });

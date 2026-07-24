@@ -640,43 +640,47 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY');
 }
 
-/** DEPFAIL — Valkey rate-limiter outage → fail-safe suppression (fault-lane gated). */
+/** DEPFAIL — Valkey rate-limiter outage → fail-safe suppression (Valkey leg honestly gated). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // The whole scenario is a Valkey-outage failure branch: with the rate limiter down,
+  // The whole scenario is a VALKEY-outage failure branch: with the rate limiter down,
   // the engine must SUPPRESS fires (never run unlimited), alert the owner ONCE, and
-  // resume without retroactive replays after recovery. This bot-only harness runs
-  // against a reachable Supabase and cannot induce/observe a Valkey outage window; the
-  // engine itself is not drivable here. GATE every class honestly (never fake an
-  // outage, never force-pass the failure-branch owner alert).
+  // resume without retroactive replays after recovery. The fault-proxy lane severs
+  // SUPABASE only this wave — the contracted Valkey sever is deliberately not
+  // exercised (a Supabase sever would not model this contract), and the engine's
+  // triggers additionally need drivable gateway events. GATE every class honestly
+  // (never fake an outage, never force-pass the failure-branch owner alert).
+  const valkeyLane = ctx.faults?.valkey
+    ? 'the contracted outage severs VALKEY; its fault proxy is registered but deliberately not severed this wave (Supabase-sever only), and the engine additionally needs drivable gateway events to observe suppression'
+    : 'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane); the contracted Valkey-outage leg additionally needs the engine driving gateway events';
   ctx.gate(
     'Discord',
     'redis-dependency',
     'With Valkey stopped, qualifying triggers produce zero executions (fail-safe suppression, never unlimited firing); post-recovery triggers act normally.',
-    'requires a Valkey dependency-outage fault-injection lane + the engine driving gateway events (no reachable Redis and no emittable events here)',
+    valkeyLane,
   );
   ctx.gate(
     'database-RLS',
     'db-rls',
     'No execution rows exist for the outage window, and rule rows stay guild-scoped through it.',
-    'requires a Valkey dependency-outage fault-injection lane to define the outage window',
+    valkeyLane,
   );
   ctx.gate(
     'audit',
     'audit-row',
     'One automation.rate_limiter_down audit row is recorded for the outage.',
-    'the rate_limiter_down audit row is written by the engine on the Valkey-outage branch — requires the outage fault lane + emittable events',
+    `the rate_limiter_down audit row is written by the engine on the Valkey-outage branch — ${valkeyLane}`,
   );
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'Exactly one degradation alert is delivered to the owner (not one per suppressed fire), and it explains the fail-safe choice.',
-    'requires the Valkey-outage fault lane + the owner alert channel readback (this is a failure branch where a single alert is expected, so "no alert" is deliberately NOT asserted)',
+    `${valkeyLane}; the alert additionally needs the owner alert channel readback (this is a failure branch where a single alert is expected, so "no alert" is deliberately NOT asserted)`,
   );
   ctx.gate(
     'replay-safety',
     'redis-dependency',
     'Suppressed occurrences are not fired retroactively after Valkey recovers.',
-    'requires the Valkey-outage/recovery fault lane to prove no retroactive replay',
+    valkeyLane,
   );
   gateBrandingNoReply(ctx);
 }

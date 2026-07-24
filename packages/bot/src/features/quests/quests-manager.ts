@@ -7,6 +7,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
 import { eventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Quests');
 
@@ -44,19 +45,55 @@ export class QuestsManager {
 
   clearCache(): void { this.configCache.clear(); }
 
-  private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+  /**
+   * Read the guild config (cached). `degraded` is true only when the read FAILED
+   * (e.g. a database outage) as opposed to genuinely finding no row (PGRST116) —
+   * callers must not present a failed read as "quests are not enabled".
+   */
+  private async getConfigChecked(
+    guildId: string,
+  ): Promise<{ config: DbGuildConfig | null; degraded: boolean }> {
     const cached = this.configCache.get(guildId);
-    if (cached) return cached;
-    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
+    if (cached) return { config: cached, degraded: false };
+    const { data, error } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
-    return data;
+    return { config: data, degraded: error != null && error.code !== 'PGRST116' };
+  }
+
+  private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+    return (await this.getConfigChecked(guildId)).config;
+  }
+
+  /**
+   * Branded degradation notice for a dependency outage. A failed READ must never
+   * degrade into a data-shaped answer ("New quests assigned!", "No completed
+   * quests to claim") — that is a lie about state the bot could not read. The
+   * brand lookup is itself outage-safe (resolveBrandKit never throws;
+   * belt-and-braces .catch) with the guild name as the fallback.
+   */
+  private async replyQuestsUnavailable(interaction: ChatInputCommandInteraction): Promise<void> {
+    const brandKit = await resolveBrandKit(this.supabase, interaction.guildId!, {
+      fallbackName: interaction.guild?.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
+    const content = `⚠️ ${name}'s quests are temporarily unavailable — please try again in a moment. Your progress is safe.`;
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ content }).catch(() => {});
+    } else {
+      await interaction.reply({ content, ephemeral: true }).catch(() => {});
+    }
   }
 
   async viewQuests(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
-    const config = await this.getConfig(guildId);
+    const { config, degraded } = await this.getConfigChecked(guildId);
 
+    // A failed config read is an outage, not "quests are off" — degrade honestly.
+    if (degraded) {
+      await this.replyQuestsUnavailable(interaction);
+      return;
+    }
     if (!config?.economy_quests_enabled) {
       await interaction.reply({ content: '❌ Quests are not enabled.', ephemeral: true });
       return;
@@ -64,13 +101,21 @@ export class QuestsManager {
 
     // Get active quests — daily from today, weekly from this week's Monday
     const weekStart = getWeekStart().toISOString();
-    const { data: progress } = await this.supabase
+    const { data: progress, error: progressErr } = await this.supabase
       .from('economy_quest_progress')
       .select('*, template:economy_quest_templates(*)')
       .eq('guild_id', guildId)
       .eq('user_id', userId)
       .gte('assigned_at', weekStart)
       .limit(1000);
+
+    // A failed slate read is NOT "no quests yet": falling through would fire the
+    // auto-assign path and reply "New quests assigned!" — a fabricated verdict
+    // about (and a pointless write against) state the bot could not read.
+    if (progressErr) {
+      await this.replyQuestsUnavailable(interaction);
+      return;
+    }
 
     if (!progress || progress.length === 0) {
       // Auto-assign daily + weekly quests
@@ -105,10 +150,18 @@ export class QuestsManager {
     // V49-C1: Atomic claim — RPC flips claimed=true only for rows still
     // unclaimed, returning only the rows it actually flipped.  Two concurrent
     // calls cannot both claim the same quest.
-    const { data: claimed } = await this.supabase.rpc('economy_quest_atomic_claim', {
+    const { data: claimed, error: claimErr } = await this.supabase.rpc('economy_quest_atomic_claim', {
       p_guild_id: guildId,
       p_user_id: userId,
     });
+
+    // A FAILED claim RPC (nothing flipped — the transaction never committed) is
+    // not "no completed quests": that reply is a fabricated verdict about
+    // claimable state the bot could not read. Degrade honestly.
+    if (claimErr) {
+      await this.replyQuestsUnavailable(interaction);
+      return;
+    }
 
     if (!claimed || !Array.isArray(claimed) || claimed.length === 0) {
       await interaction.reply({ content: '❌ No completed quests to claim.', ephemeral: true });

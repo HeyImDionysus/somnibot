@@ -16,6 +16,7 @@ import { joinProp } from '../../utils/db-helpers.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Fishing');
 
@@ -151,12 +152,12 @@ export class FishingManager {
 
   private async getConfig(): Promise<FishingConfig> {
     if (this.configCache) return this.configCache;
-    const { data } = await this.supabase
+    const { data, error } = await this.supabase
       .from('guild_config')
       .select('economy_fishing_enabled, economy_fishing_cooldown_seconds, economy_fishing_junk_chance_pct, economy_fishing_treasure_chance_pct, economy_fishing_collection_reward_enabled, economy_fishing_collection_reward_coins')
       .eq('guild_id', this.guild.id)
       .single();
-    this.configCache = data ?? {
+    const cfg: FishingConfig = data ?? {
       economy_fishing_enabled: true,
       economy_fishing_cooldown_seconds: 30,
       economy_fishing_junk_chance_pct: 15,
@@ -164,31 +165,68 @@ export class FishingManager {
       economy_fishing_collection_reward_enabled: true,
       economy_fishing_collection_reward_coins: 5000,
     };
+    // [game-economy-fishing DEPFAIL] Never CACHE a fallback built from a
+    // FAILED read (database unreachable): a transient outage would otherwise
+    // pin default config until the next cache invalidation. A missing row
+    // (PGRST116) is a legitimate default and may be cached.
+    if (error && error.code !== 'PGRST116') {
+      return cfg;
+    }
+    this.configCache = cfg;
     return this.configCache!;
   }
 
-  private async getSpecies(): Promise<FishSpecies[]> {
+  /**
+   * The guild's active species, or `null` when the READ FAILED (database
+   * unreachable). A failed read must never be cached as an empty catalog —
+   * that would pin "no species" past the outage and lie to every subsequent
+   * /fish collection ([game-economy-fishing DEPFAIL]).
+   */
+  private async getSpecies(): Promise<FishSpecies[] | null> {
     if (this.speciesCache) return this.speciesCache;
-    const { data } = await this.supabase
+    const { data, error } = await this.supabase
       .from('economy_fish_species')
       .select('id, name, emoji, rarity, min_weight, max_weight, base_price')
       .eq('guild_id', this.guild.id)
       .eq('active', true)
       .limit(1000);
 
+    if (error) {
+      log.error('getSpecies read failed:', error.message);
+      return null;
+    }
     if (!data || data.length === 0) {
       await this.seedDefaultSpecies();
-      const { data: seeded } = await this.supabase
+      const { data: seeded, error: seededErr } = await this.supabase
         .from('economy_fish_species')
         .select('id, name, emoji, rarity, min_weight, max_weight, base_price')
         .eq('guild_id', this.guild.id)
         .eq('active', true)
         .limit(1000);
+      if (seededErr) {
+        log.error('getSpecies post-seed read failed:', seededErr.message);
+        return null;
+      }
       this.speciesCache = (seeded ?? []) as FishSpecies[];
     } else {
       this.speciesCache = data as FishSpecies[];
     }
     return this.speciesCache!;
+  }
+
+  /**
+   * [game-economy-fishing DEPFAIL] The branded fishing-unavailable degradation
+   * embed. The brand read is itself outage-safe (resolveBrandKit never throws
+   * and is additionally .catch-guarded), falling back to the guild name.
+   */
+  private async unavailableEmbed(): Promise<EmbedBuilder> {
+    const brandKit = await resolveBrandKit(this.supabase, this.guild.id, {
+      fallbackName: this.guild.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? this.guild.name ?? 'this server';
+    return new EmbedBuilder()
+      .setDescription(`⚠️ ${name}'s fishing pond is temporarily unavailable — please try again in a moment. No coins or bait were spent and no cast cooldown was started.`)
+      .setColor(0xffa500);
   }
 
   private async seedDefaultSpecies(): Promise<void> {
@@ -202,8 +240,8 @@ export class FishingManager {
 
   // ── Check tools ───────────────────────────────────────
 
-  async checkRod(userId: string): Promise<{ hasRod: boolean; rodName: string }> {
-    const { data } = await this.supabase
+  async checkRod(userId: string): Promise<{ hasRod: boolean; rodName: string; unavailable?: boolean }> {
+    const { data, error } = await this.supabase
       .from('economy_inventory')
       .select('id, economy_items!inner(name, category, durability)')
       .eq('guild_id', this.guild.id)
@@ -213,6 +251,13 @@ export class FishingManager {
       .gt('quantity', 0)
       .limit(1);
 
+    // [game-economy-fishing DEPFAIL] A FAILED read (database unreachable) is
+    // not "no rod" — surfacing it as such tells the member a data-shaped lie
+    // about inventory the bot could not read. Callers degrade honestly.
+    if (error) {
+      log.error('checkRod read failed:', error.message);
+      return { hasRod: false, rodName: '', unavailable: true };
+    }
     if (!data || data.length === 0) return { hasRod: false, rodName: '' };
     return { hasRod: true, rodName: (joinProp(data[0], 'economy_items', 'name') as string) ?? 'Fishing Rod' };
   }
@@ -283,7 +328,19 @@ export class FishingManager {
     }
 
     // Rod check
-    const { hasRod, rodName } = await this.checkRod(userId);
+    const { hasRod, rodName, unavailable } = await this.checkRod(userId);
+    // [game-economy-fishing DEPFAIL] With the database unreachable the rod
+    // read fails — release the just-claimed cast cooldown (the outage must not
+    // consume the member's cast window) and degrade with the branded notice,
+    // never the fabricated "You need a Fishing Rod" answer.
+    if (unavailable) {
+      try {
+        await this.valkey.del(cdKey);
+      } catch (e: unknown) {
+        log.warn('failed to release cast cooldown after rod read failure:', (e as Error)?.message ?? e);
+      }
+      return { embed: await this.unavailableEmbed(), cooldownKey: '' };
+    }
     if (!hasRod) {
       return {
         embed: new EmbedBuilder()
@@ -333,6 +390,17 @@ export class FishingManager {
     } else {
       // Fish catch
       const fishCatch = await this.rollFishCatch(userId, baitUsed);
+      // [game-economy-fishing DEPFAIL] A null roll means the species catalog
+      // was unreadable (outage) — release the cast cooldown and degrade
+      // honestly rather than crash or fabricate a catch.
+      if (!fishCatch) {
+        try {
+          await this.valkey.del(cdKey);
+        } catch (e: unknown) {
+          log.warn('failed to release cast cooldown after species read failure:', (e as Error)?.message ?? e);
+        }
+        return { embed: await this.unavailableEmbed(), cooldownKey: '' };
+      }
       // V52-M2: surface wallet credit failure in the embed
       const valueText = fishCatch.paid !== false
         ? `💰 Value: **${fishCatch.price.toLocaleString()}** coins`
@@ -367,8 +435,12 @@ export class FishingManager {
     return { embed, cooldownKey: cdKey };
   }
 
-  private async rollFishCatch(userId: string, baitName: string | null): Promise<FishCatch> {
+  private async rollFishCatch(userId: string, baitName: string | null): Promise<FishCatch | null> {
     const species = await this.getSpecies();
+    // [game-economy-fishing DEPFAIL] Unreadable/empty species catalog: no roll
+    // is possible — the caller degrades honestly (previously this crashed on
+    // randomPick of an empty array).
+    if (!species || species.length === 0) return null;
 
     // Build weight map with bait bonus
     const weights = { ...RARITY_WEIGHTS };
@@ -540,15 +612,21 @@ export class FishingManager {
     if (!config.economy_fishing_collection_reward_enabled) return null;
 
     const species = await this.getSpecies();
+    // Unreadable catalog (outage) → skip the bonus check; the fence row was
+    // not claimed, so a later healthy catch re-checks ([game-economy-fishing]).
+    if (!species) return null;
     const activeCount = species.length;
     if (activeCount === 0) return null;
 
-    const { data: caught } = await this.supabase
+    const { data: caught, error: caughtErr } = await this.supabase
       .from('economy_fish_catches')
       .select('species_id')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
       .limit(10000);
+    // A failed catch-history read must not decide "collection incomplete" from
+    // fabricated emptiness — but the safe outcome is the same: no payout now.
+    if (caughtErr) return null;
 
     const activeIds = new Set(species.map((s) => s.id));
     const discovered = new Set(
@@ -578,13 +656,23 @@ export class FishingManager {
   }
 
   async getCollection(userId: string): Promise<EmbedBuilder> {
+    // [game-economy-fishing DEPFAIL] With the database unreachable neither the
+    // species catalog nor the catch history can be read — degrade with the
+    // branded notice, never render "No species available" / "not caught yet"
+    // fabricated from the failed reads.
     const species = await this.getSpecies();
-    const { data: catches } = await this.supabase
+    if (!species) {
+      return this.unavailableEmbed();
+    }
+    const { data: catches, error: catchesErr } = await this.supabase
       .from('economy_fish_catches')
       .select('species_id, weight')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
       .limit(1000);
+    if (catchesErr) {
+      return this.unavailableEmbed();
+    }
 
     const caught = new Map<string, { count: number; maxWeight: number }>();
     for (const c of (catches ?? []) as { species_id: string; weight: number }[]) {

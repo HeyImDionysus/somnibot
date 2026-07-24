@@ -12,6 +12,8 @@ import {
   type ChatInputCommandInteraction,
 } from 'discord.js';
 import type { GiveawayManager } from './giveaway-manager.js';
+import type { SomniClient } from '../../client.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 import { createLogger } from '@somnibot/shared';
 import { codePointSlice } from '../../utils/prize-snapshot.js';
 
@@ -119,6 +121,21 @@ export async function handleGiveawayCommand(
         const id = interaction.options.getString('id', true);
         await interaction.deferReply({ ephemeral: true });
         const winners = await manager.endGiveaway(id);
+        if (winners === null) {
+          // The database was unreachable — the draw did NOT run. Never claim
+          // "ended / no entries" from a failed read; degrade with the branded
+          // unavailable notice (the brand read is itself outage-safe: it never
+          // throws and falls back to the guild name).
+          const supabase = (interaction.client as SomniClient).supabase;
+          const brandKit = await resolveBrandKit(supabase, interaction.guildId!, {
+            fallbackName: interaction.guild?.name,
+          }).catch(() => null);
+          const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
+          await interaction.editReply({
+            content: `⚠️ ${name}'s giveaways are temporarily unavailable — the draw was not run and the giveaway is untouched. Please try again in a moment.`,
+          });
+          break;
+        }
         await interaction.editReply({
           content: winners.length > 0
             ? `✅ Giveaway ended. Winners: ${winners.map((w) => `<@${w}>`).join(', ')}`

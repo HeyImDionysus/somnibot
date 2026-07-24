@@ -752,42 +752,144 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   );
 }
 
-/** DEPFAIL — Supabase-outage fail-safe (needs a dependency-outage fault lane). */
+/** DEPFAIL — Supabase-outage fail-safe, driven through the REAL fault proxy
+ *  (ctx.faults severs the actual network path run-one-domain routed the stack
+ *  through — a genuine ECONNREFUSED window). The gateway-less drivable lifecycle
+ *  surface (the ticket:claim button, driven elsewhere in this proof) is clicked
+ *  inside the outage; the panel-OPEN outage leg still needs the live gateway
+ *  (guild.channels.create) and stays honestly gated. Falls back to gates when no
+ *  proxy is registered (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
+  const supabaseFault = ctx.faults?.supabase;
   const handle = await ctx.bootGuild({ label: 'a' });
-  await insertPanel(handle, ctx);
+  const creator = ctx.userId('a');
+  const staff = ctx.userId('b');
+  const { row: panel } = await insertPanel(handle, ctx);
 
-  // The one real assertion available in a degraded scenario: the panel row is still
-  // guild-scoped and RLS-isolated even when the create path would fail.
-  await proveRls(ctx, handle, 'ticket_panels');
-  await proveNoOwnerAlert(ctx, handle);
+  if (supabaseFault) {
+    const ticket = await insertTicket(handle, ctx, { panelId: panel?.id ?? null, ticketNumber: 1, creatorId: creator });
 
-  // The DB-observable harness's whole premise is a REACHABLE local Supabase, so a
-  // database outage cannot be induced without a fault-injection lane. GATE the
-  // outage-dependent behavior honestly rather than fake an outage.
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let severedReply = '';
+    try {
+      const cap = await clickTicketButton(ctx, handle, 'claim', 1, staff);
+      severedReply = replySurface(cap);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: the dispatcher must reply, never crash the pipeline.
+    ctx.expect(threw === null && severedReply.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'With database access blocked, a ticket lifecycle click still replies (fail-safe) instead of crashing the interaction pipeline.',
+      observation: `during the outage window the claim click ${threw === null ? `replied ${JSON.stringify(truncate(severedReply))}` : `THREW ${truncate(threw)}`}.`,
+      impact: 'A database outage crashed the ticket interaction pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts a friendly branded failure — never a data-shaped
+    //     answer. Replying "Ticket not found." (or "already claimed") during an
+    //     outage is a lie about a row the bot could not read. Recorded honestly.
+    const looksUnavailable = /unavailable|try again|temporar|later|degraded|issue|problem/i.test(severedReply);
+    const dataShapedLie = /not found|already/i.test(severedReply);
+    ctx.expect(looksUnavailable && !dataShapedLie, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise: 'With the database blocked, the ticket reply is the branded tickets-unavailable notice in the owner voice — never a data-shaped "Ticket not found" fabricated from the failed read.',
+      observation: `outage-window reply ${JSON.stringify(truncate(severedReply))} — looksUnavailable=${looksUnavailable}, dataShapedLie=${dataShapedLie}.`,
+      impact: 'During a database outage the ticket click replied with a fabricated data-shaped answer ("Ticket not found") instead of a degradation notice — members are told a lie about a ticket the bot could not read.',
+    });
+
+    // (3) No corruption / no orphan effect: the open ticket row is byte-identical
+    //     after restore — the severed click left no partial claim behind.
+    const after = await readTicket(handle, 1);
+    ctx.expect(after?.id === ticket?.id && after?.status === 'open' && after?.claimed_by === null && after?.creator_id === creator, {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'No ticket state corrupts across the outage window — the open ticket row is unchanged (still open, unclaimed) after restoration.',
+      observation: `post-restore ticket #1: status="${after?.status}" (expected open), claimed_by=${JSON.stringify(after?.claimed_by)} (expected null), id ${after?.id === ticket?.id ? 'unchanged' : 'CHANGED'}.`,
+      impact: 'A database outage left a partial/orphan claim on the ticket row.',
+    });
+
+    // (4) Recovery: the severed click granted NOTHING, and the very next claim
+    //     applies exactly once against the restored stack.
+    const recovered = await clickTicketButton(ctx, handle, 'claim', 1, staff);
+    const afterRecovery = await readTicket(handle, 1);
+    ctx.expect(afterRecovery?.status === 'claimed' && afterRecovery?.claimed_by === staff && /claim/i.test(replySurface(recovered)), {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise: 'The failed outage-window click granted nothing: after restoration the same member’s claim applies cleanly on the first try (open→claimed exactly once).',
+      observation: `post-restore claim: status="${afterRecovery?.status}" (expected claimed), claimed_by="${afterRecovery?.claimed_by}" (expected ${staff}); reply="${truncate(replySurface(recovered), 60)}".`,
+      impact: 'The ticket pipeline did not recover cleanly after the outage ended (no claim applied, or the outage click double-applied).',
+    });
+
+    // AUDIT: exactly one ticket.claimed row exists — the recovery claim's — and
+    // the severed attempt added none (it never reached the lifecycle transition).
+    const claimAudits = await pollClaimAudits(handle);
+    if (claimAudits.length === 0) {
+      ctx.gate(
+        'audit',
+        'audit-row',
+        'The recovery claim lands exactly one append-only ticket.claimed audit row; the failed outage attempt adds none.',
+        'the AuditService flushes on a 5s batch interval; the ticket.claimed row did not surface within the 15s poll window, so the exactly-one-row assertion could not be affirmed here',
+      );
+    } else {
+      ctx.expect(claimAudits.length === 1 && claimAudits[0]!.actor_id === staff, {
+        assertionClass: 'audit',
+        channel: 'audit-row',
+        promise: 'Exactly one append-only ticket.claimed audit row exists (the recovery claim); the failed outage-window attempt added none.',
+        observation: `after the outage/restore cycle audit_logs holds ${claimAudits.length} ticket.claimed row(s); actor_id="${claimAudits[0]?.actor_id}" (expected ${staff}).`,
+        impact: 'The outage/restore cycle produced a wrong number of claim audit rows — the failed attempt or the recovery was mis-audited.',
+      });
+    }
+
+    await proveRls(ctx, handle, 'tickets');
+  } else {
+    await proveRls(ctx, handle, 'ticket_panels');
+    await proveNoOwnerAlert(ctx, handle);
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With database access blocked, a ticket interaction yields the branded tickets-unavailable reply in the owner voice and no ticket row is corrupted or left behind.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded tickets-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'audit',
+      'db-observable',
+      'Append-only audit rows capture the failed attempt and the clean recovery after restoration.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate ticket effect survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
+
+  // The panel-OPEN outage leg and the degradation alert remain gated in BOTH
+  // lanes: opening a ticket calls guild.channels.create (live gateway), and the
+  // ticket feature raises no dependency-degradation alert row today.
   ctx.gate(
     'Discord',
-    'db-observable',
-    'With database access blocked, a panel click yields the branded ticket-create-failed reply in the owner voice and no ticket thread or row is left behind.',
-    'requires a Supabase dependency-outage fault-injection lane plus a live gateway (the panel-open path calls guild.channels.create); the harness deliberately runs against a reachable DB',
+    'discord-readback',
+    'With database access blocked, a panel click yields the branded ticket-create-failed reply and no ticket thread is left behind; recovery opens with the next sequential number.',
+    'the panel-open path calls guild.channels.create (DISCORD_TOKEN + live guild); the drivable lifecycle surface (claim) proves the outage fail-safe in the fault lane',
   );
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed interaction.',
-    'requires a dependency-outage fault lane plus the owner alert channel readback',
-  );
-  ctx.gate(
-    'audit',
-    'db-observable',
-    'Append-only audit rows capture the failed attempt and the clean recovery open after restoration.',
-    'requires the outage fault lane and a live gateway to drive the failing/recovering opens',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'No duplicate ticket survives the outage/restore cycle; recovery opens with the next sequential number.',
-    'requires a Supabase dependency-outage fault-injection lane + a live gateway',
+    'requires the owner alert channel readback; the ticket feature currently raises no dependency-degradation alert on a failed DB read',
   );
   gateBranding(ctx);
 }

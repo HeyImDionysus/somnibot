@@ -621,8 +621,11 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
   // Anti-raid's join window, raid-mode flag, and ban tracking are Valkey-backed
   // with a capped in-memory fallback; the whole "Valkey blocked → in-memory
   // containment continues" behavior needs a Valkey-outage fault lane AND a
-  // guildMemberAdd event driver. The Supabase config read is Valkey-independent,
-  // so the guild-scoped RLS + happy-path no-alert still run for real.
+  // guildMemberAdd event driver. The ctx.faults proxy lane severs SUPABASE only
+  // this wave — a supabase sever does not model this domain's contracted Valkey
+  // outage, so the gates stay honest. The Supabase config read is
+  // Valkey-independent, so the guild-scoped RLS + happy-path no-alert still run
+  // for real.
   const handle = await ctx.bootGuild({
     label: 'a',
     economyStartingBalance: 0,
@@ -633,7 +636,7 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'discord-readback',
     'With Valkey blocked, a scripted flood still trips stage-one containment from the capped in-memory window, and joins after recovery are tracked normally without double-counting.',
-    'requires a Valkey-outage fault-injection lane + a guildMemberAdd event driver + a live guild — the harness has no Valkey and drives no join events',
+    'requires a Valkey-outage fault-injection lane + a guildMemberAdd event driver + a live guild — the ctx.faults proxy severs Supabase only (a supabase sever does not model this Valkey contract) and the harness drives no join events',
   );
   gateValkeyTracking(
     ctx,

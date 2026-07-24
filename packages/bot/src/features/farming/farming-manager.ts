@@ -14,6 +14,7 @@ import { walletBalance, joinProp } from '../../utils/db-helpers.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Farming');
 
@@ -113,8 +114,14 @@ export class FarmingManager {
       return { embed: new EmbedBuilder().setDescription('❌ Farming is not enabled on this server.').setColor(0xff0000) };
     }
 
+    // [game-economy-farming DEPFAIL] A failed plot/crop read (database
+    // unreachable) must NOT render as an empty farm — that is a data-shaped
+    // lie about plots the bot could not read. Degrade honestly instead.
     const plots = await this.getPlots(userId);
     const crops = await this.getCrops();
+    if (plots === null || crops === null) {
+      return { embed: await this.unavailableEmbed() };
+    }
     const cropMap = new Map(crops.map((c) => [c.id, c]));
 
     // Build grid
@@ -169,10 +176,15 @@ export class FarmingManager {
       return { embed: new EmbedBuilder().setDescription('❌ Farming is not enabled on this server.').setColor(0xff0000) };
     }
 
+    // [game-economy-farming DEPFAIL] A failed crop-catalog read must NOT
+    // surface as "Unknown crop" — degrade honestly with no seed consumed.
     let crops = await this.getCrops();
+    if (crops === null) {
+      return { embed: await this.unavailableEmbed() };
+    }
     if (crops.length === 0) {
       await this.seedDefaultCrops();
-      crops = await this.getCrops();
+      crops = (await this.getCrops()) ?? [];
     }
 
     const crop = crops.find((c) => c.name.toLowerCase() === cropName.toLowerCase());
@@ -187,6 +199,9 @@ export class FarmingManager {
 
     // Find empty plot
     const plots = await this.getPlots(userId);
+    if (plots === null) {
+      return { embed: await this.unavailableEmbed() };
+    }
     const cropMap = new Map(crops.map((c) => [c.id, c]));
     const emptyIndex = this.findEmptyPlot(plots, config, cropMap);
 
@@ -245,6 +260,10 @@ export class FarmingManager {
     }
 
     const plots = await this.getPlots(userId);
+    // [game-economy-farming DEPFAIL] A failed read is not "no crops planted".
+    if (plots === null) {
+      return { embed: await this.unavailableEmbed() };
+    }
     const needsWater = plots.filter((p) => p.crop_id && !p.harvested && !p.watered_at);
 
     if (needsWater.length === 0) {
@@ -280,8 +299,14 @@ export class FarmingManager {
       return { embed: new EmbedBuilder().setDescription('❌ Farming is not enabled on this server.').setColor(0xff0000) };
     }
 
+    // [game-economy-farming DEPFAIL] A failed plot/crop read must NOT surface
+    // as "No crops ready to harvest!" — that fabricates a data-shaped answer
+    // from state the bot could not read. Degrade honestly; nothing mutates.
     const plots = await this.getPlots(userId);
     const crops = await this.getCrops();
+    if (plots === null || crops === null) {
+      return { embed: await this.unavailableEmbed() };
+    }
     const cropMap = new Map(crops.map((c) => [c.id, c]));
 
     const readyPlots = plots.filter((p) => {
@@ -413,6 +438,10 @@ export class FarmingManager {
     }
 
     const plots = await this.getPlots(userId);
+    // [game-economy-farming DEPFAIL] A failed read is not an empty plot.
+    if (plots === null) {
+      return { embed: await this.unavailableEmbed() };
+    }
     const plot = plots.find((p) => p.plot_index === plotIndex);
 
     if (!plot || !plot.crop_id || plot.harvested) {
@@ -448,8 +477,12 @@ export class FarmingManager {
 
   // ── Helpers ─────────────────────────────────────────────
 
-  private async getPlots(userId: string): Promise<Plot[]> {
-    const { data } = await this.supabase
+  /**
+   * A member's plots, or `null` when the READ FAILED (database unreachable) —
+   * a failed read is not an empty farm ([game-economy-farming DEPFAIL]).
+   */
+  private async getPlots(userId: string): Promise<Plot[] | null> {
+    const { data, error } = await this.supabase
       .from('economy_farm_plots')
       .select('id, plot_index, crop_id, planted_at, watered_at, fertilized, harvested')
       .eq('guild_id', this.guild.id)
@@ -457,11 +490,19 @@ export class FarmingManager {
       .order('plot_index')
       .limit(1000);
 
+    if (error) {
+      log.error('getPlots read failed:', error.message);
+      return null;
+    }
     return (data as Plot[] | null) ?? [];
   }
 
-  private async getCrops(): Promise<Crop[]> {
-    const { data } = await this.supabase
+  /**
+   * The guild's crop catalog, or `null` when the READ FAILED — a failed read
+   * is not an empty catalog ([game-economy-farming DEPFAIL]).
+   */
+  private async getCrops(): Promise<Crop[] | null> {
+    const { data, error } = await this.supabase
       .from('economy_crops')
       .select('id, name, emoji, grow_seconds, wilt_seconds, sell_price, seeds_returned, seed_item_id')
       .eq('guild_id', this.guild.id)
@@ -469,7 +510,26 @@ export class FarmingManager {
       .order('sort_order')
       .limit(1000);
 
+    if (error) {
+      log.error('getCrops read failed:', error.message);
+      return null;
+    }
     return (data as Crop[] | null) ?? [];
+  }
+
+  /**
+   * [game-economy-farming DEPFAIL] The branded farming-unavailable degradation
+   * embed. The brand read is itself outage-safe (resolveBrandKit never throws
+   * and is additionally .catch-guarded), falling back to the guild name.
+   */
+  private async unavailableEmbed(): Promise<EmbedBuilder> {
+    const brandKit = await resolveBrandKit(this.supabase, this.guild.id, {
+      fallbackName: this.guild.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? this.guild.name ?? 'this server';
+    return new EmbedBuilder()
+      .setDescription(`⚠️ ${name}'s farm is temporarily unavailable — please try again in a moment. Your plots and coins are untouched.`)
+      .setColor(0xffa500);
   }
 
   private async seedDefaultCrops(): Promise<void> {

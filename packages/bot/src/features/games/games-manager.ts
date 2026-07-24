@@ -18,6 +18,7 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { randomIntRange, randomChance, cryptoShuffle, randomPick } from '../../utils/random.js';
 import { eventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Games');
 
@@ -125,22 +126,65 @@ export class GamesManager {
     return { cName: config.currency_name ?? 'Coins', cEmoji: config.currency_emoji ?? '🪙' };
   }
 
-  private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+  /**
+   * [game-economy-casino DEPFAIL] Outage-aware config read. A FAILED read
+   * (database unreachable) is NOT the same as "no config row / games disabled":
+   * treating it as such fabricates a data-shaped "Mini-games are not enabled"
+   * answer from state the bot could not read. `unavailable` is true only for a
+   * genuine read error (never PGRST116 = row simply absent), and a failed read
+   * is never cached.
+   */
+  private async getConfigChecked(
+    guildId: string,
+  ): Promise<{ config: DbGuildConfig | null; unavailable: boolean }> {
     const cached = this.configCache.get(guildId);
-    if (cached) return cached;
-    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
+    if (cached) return { config: cached, unavailable: false };
+    const { data, error } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
-    return data;
+    return { config: data, unavailable: Boolean(error && error.code !== 'PGRST116') };
   }
 
-  private async getBalance(guildId: string, userId: string): Promise<number> {
-    const { data } = await this.supabase
+  private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+    return (await this.getConfigChecked(guildId)).config;
+  }
+
+  /**
+   * [game-economy-casino DEPFAIL] Outage-aware balance read. A missing wallet
+   * row (PGRST116) legitimately reads as 0; a genuine read error must NOT — a
+   * zero-balance refusal fabricated from a failed read tells the member a lie
+   * about coins the bot could not see.
+   */
+  private async getBalanceChecked(
+    guildId: string,
+    userId: string,
+  ): Promise<{ balance: number; unavailable: boolean }> {
+    const { data, error } = await this.supabase
       .from('economy_wallets')
       .select('wallet')
       .eq('guild_id', guildId)
       .eq('user_id', userId)
       .single();
-    return data?.wallet ?? 0;
+    return {
+      balance: data?.wallet ?? 0,
+      unavailable: Boolean(error && error.code !== 'PGRST116'),
+    };
+  }
+
+  /**
+   * [game-economy-casino DEPFAIL] The branded casino-unavailable degradation
+   * notice. The brand read is itself outage-safe (resolveBrandKit never throws
+   * and is additionally .catch-guarded), falling back to the guild name.
+   */
+  private async replyCasinoUnavailable(interaction: ChatInputCommandInteraction): Promise<void> {
+    const guildId = interaction.guildId!;
+    const brandKit = await resolveBrandKit(this.supabase, guildId, {
+      fallbackName: interaction.guild?.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
+    await interaction.reply({
+      content: `⚠️ ${name}'s casino is temporarily unavailable — please try again in a moment. No bet was placed and your balance is unchanged.`,
+      ephemeral: true,
+    });
   }
 
   /**
@@ -376,7 +420,15 @@ export class GamesManager {
     }
     const unlock = (): Promise<void> => this.releaseGameLock(guildId, userId, token);
 
-    const config = await this.getConfig(guildId);
+    // [game-economy-casino DEPFAIL] Check the READ ERROR first: with the
+    // database unreachable the config read fails — degrade with the branded
+    // casino-unavailable notice instead of the fabricated "not enabled" answer.
+    const { config, unavailable: configUnavailable } = await this.getConfigChecked(guildId);
+    if (configUnavailable) {
+      await unlock();
+      await this.replyCasinoUnavailable(interaction);
+      return null;
+    }
 
     if (!config?.economy_games_enabled) {
       await unlock();
@@ -394,7 +446,14 @@ export class GamesManager {
       await interaction.reply({ content: `❌ Max bet is ${config.currency_emoji} **${maxBet.toLocaleString()}** ${config.currency_name}.`, ephemeral: true });
       return null;
     }
-    const balance = await this.getBalance(guildId, userId);
+    // [game-economy-casino DEPFAIL] Same rule for the balance read: an outage
+    // must never surface as a zero-balance "You only have 0" refusal.
+    const { balance, unavailable: balanceUnavailable } = await this.getBalanceChecked(guildId, userId);
+    if (balanceUnavailable) {
+      await unlock();
+      await this.replyCasinoUnavailable(interaction);
+      return null;
+    }
     if (balance < amount) {
       await unlock();
       await interaction.reply({ content: `❌ You only have ${config.currency_emoji} **${balance.toLocaleString()}** ${config.currency_name}.`, ephemeral: true });

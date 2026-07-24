@@ -13,6 +13,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Polls');
@@ -313,6 +314,27 @@ export class PollsManager {
     });
   }
 
+  /**
+   * The branded predictions-unavailable degradation notice. Replied when a read
+   * the bet path depends on FAILS (a database outage) — never when a read
+   * merely finds no row. No bet row is written and no balance moves before the
+   * failing read is detected, so "nothing was debited" is always true here. The
+   * brand read is itself outage-safe (resolveBrandKit never throws; guild-name
+   * fallback).
+   */
+  private async replyPredictionsUnavailable(interaction: ChatInputCommandInteraction): Promise<void> {
+    const guildId = interaction.guildId!;
+    const brandKit = await resolveBrandKit(this.supabase, guildId, { fallbackName: interaction.guild?.name })
+      .catch(() => null);
+    const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
+    const content = `⚠️ ${name}'s predictions are temporarily unavailable — please try again in a moment. No bet was placed and nothing was debited.`;
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ content });
+    } else {
+      await interaction.reply({ content, ephemeral: true });
+    }
+  }
+
   // ── Predictions ─────────────────────────────────────────
 
   async createPrediction(
@@ -411,12 +433,20 @@ export class PollsManager {
     const minBet = cfg?.prediction_min_bet ?? 1;
     const maxBet = cfg?.prediction_max_bet ?? 0; // 0 = uncapped
 
-    const { data: prediction } = await this.supabase
+    const { data: prediction, error: predictionErr } = await this.supabase
       .from('predictions')
       .select('*')
       .eq('id', predictionId)
       .single();
 
+    // DEPFAIL fail-soft: a FAILED read (database outage) is not a closed
+    // prediction. Replying "not open for bets" would fabricate a state claim
+    // from a read that never happened — degrade honestly and touch no money.
+    // PGRST116 (zero rows) is the genuine unknown-id case and falls through.
+    if (predictionErr && (predictionErr as { code?: string }).code !== 'PGRST116') {
+      await this.replyPredictionsUnavailable(interaction);
+      return;
+    }
     if (!prediction || prediction.status !== 'open') {
       await interaction.reply({ content: '❌ Prediction is not open for bets.', ephemeral: true });
       return;
@@ -433,7 +463,7 @@ export class PollsManager {
     }
 
     // Check for existing bet
-    const { data: existingBet } = await this.supabase
+    const { data: existingBet, error: existingBetErr } = await this.supabase
       .from('prediction_bets')
       .select('id')
       .eq('prediction_id', predictionId)
@@ -441,32 +471,50 @@ export class PollsManager {
       .limit(1)
       .single();
 
+    // A no-existing-bet read surfaces as PGRST116 (healthy). Anything else is a
+    // failed read — proceeding could double-bet, so degrade before touching money.
+    if (existingBetErr && (existingBetErr as { code?: string }).code !== 'PGRST116') {
+      await this.replyPredictionsUnavailable(interaction);
+      return;
+    }
     if (existingBet) {
       await interaction.reply({ content: '❌ You already placed a bet on this prediction.', ephemeral: true });
       return;
     }
 
     // Get option
-    const { data: options } = await this.supabase
+    const { data: options, error: optionsErr } = await this.supabase
       .from('prediction_options')
       .select('*')
       .eq('prediction_id', predictionId)
       .order('sort_order')
       .limit(1000);
 
+    // A failed options read is not an invalid option number — degrade honestly.
+    if (optionsErr) {
+      await this.replyPredictionsUnavailable(interaction);
+      return;
+    }
     if (!options || optionIndex >= options.length) {
       await interaction.reply({ content: '❌ Invalid option number.', ephemeral: true });
       return;
     }
 
     // Check balance
-    const { data: wallet } = await this.supabase
+    const { data: wallet, error: walletErr } = await this.supabase
       .from('economy_wallets')
       .select('wallet')
       .eq('guild_id', guildId)
       .eq('user_id', userId)
       .single();
 
+    // A failed wallet read is not a zero balance — "Insufficient balance"
+    // during an outage would be a lie about money the bot could not read.
+    // PGRST116 (no wallet row) is a genuine zero and falls through.
+    if (walletErr && (walletErr as { code?: string }).code !== 'PGRST116') {
+      await this.replyPredictionsUnavailable(interaction);
+      return;
+    }
     if (!wallet || wallet.wallet < amount) {
       await interaction.reply({ content: '❌ Insufficient balance.', ephemeral: true });
       return;
