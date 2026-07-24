@@ -7,11 +7,10 @@
 import {
   SlashCommandBuilder,
   ChatInputCommandInteraction,
-  type Guild,
-  PermissionFlagsBits,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import { closeTicket, addUserToTicket, removeUserFromTicket } from './ticket-service.js';
+import { canMemberManageTicket, emitTicketDenied, ticketDeniedMessage } from './ticket-authz.js';
 import { generateTranscript } from './transcript-generator.js';
 import { createLogger } from '@somnibot/shared';
 
@@ -83,6 +82,13 @@ export async function handleTicketCommand(
 
   switch (subcommand) {
     case 'close': {
+      // The creator may close their own ticket; anyone else must be a manager.
+      if (!(await canMemberManageTicket(client.supabase, interaction.member, ticket, 'close', interaction.user.id))) {
+        emitTicketDenied(client.eventBus, guild.id, ticket, interaction.user.id);
+        await interaction.reply({ content: ticketDeniedMessage('close'), ephemeral: true });
+        return;
+      }
+
       await interaction.deferReply();
       const reason = interaction.options.getString('reason') || undefined;
 
@@ -111,6 +117,12 @@ export async function handleTicketCommand(
     }
 
     case 'add': {
+      if (!(await canMemberManageTicket(client.supabase, interaction.member, ticket, 'add', interaction.user.id))) {
+        emitTicketDenied(client.eventBus, guild.id, ticket, interaction.user.id);
+        await interaction.reply({ content: ticketDeniedMessage('add'), ephemeral: true });
+        return;
+      }
+
       const user = interaction.options.getUser('user', true);
       const result = await addUserToTicket(guild, client.supabase, ticket.ticket_number, user.id);
 
@@ -124,6 +136,12 @@ export async function handleTicketCommand(
     }
 
     case 'remove': {
+      if (!(await canMemberManageTicket(client.supabase, interaction.member, ticket, 'remove', interaction.user.id))) {
+        emitTicketDenied(client.eventBus, guild.id, ticket, interaction.user.id);
+        await interaction.reply({ content: ticketDeniedMessage('remove'), ephemeral: true });
+        return;
+      }
+
       const user = interaction.options.getUser('user', true);
       const result = await removeUserFromTicket(guild, client.supabase, ticket.ticket_number, user.id);
 

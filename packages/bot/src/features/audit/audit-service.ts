@@ -35,6 +35,8 @@ interface AuditMapping {
   afterState?: (data: Record<string, unknown>) => Record<string, unknown> | undefined;
   /** Extract correlation ID for grouping related entries */
   correlationId?: (data: Record<string, unknown>) => string | undefined;
+  /** Override the row's success flag (defaults to true) — e.g. denied attempts. */
+  success?: boolean;
 }
 
 const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
@@ -174,6 +176,16 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     details: (d) => ({ ticketNumber: d.ticketNumber }),
     beforeState: () => ({ status: 'closed' }),
     afterState: () => ({ status: 'open' }),
+  },
+  'ticket.denied': {
+    action: 'ticket.denied',
+    category: 'tickets',
+    targetType: 'ticket',
+    actorType: 'user',
+    targetId: (d) => d.ticketId as string,
+    actorId: (d) => d.actorDiscordId as string,
+    details: (d) => ({ ticketNumber: d.ticketNumber, reason: d.reason }),
+    success: false,
   },
 
   // ── Commerce ──
@@ -478,7 +490,7 @@ export class AuditService {
         before_state: mapping.beforeState?.(data) ?? null,
         after_state: mapping.afterState?.(data) ?? null,
         correlation_id: mapping.correlationId?.(data) ?? null,
-        success: true,
+        success: mapping.success ?? true,
       };
 
       this.queue.push(entry);

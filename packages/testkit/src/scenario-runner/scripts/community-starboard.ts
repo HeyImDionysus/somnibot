@@ -975,13 +975,14 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   );
   await proveRlsIsolation(ctx, handleA, msgA);
 
-  // The in-process config cache (loadConfig) is a MODULE-LEVEL single object, not
-  // keyed by guild — so the "strictly per-guild caches" behavioral claim across two
-  // guilds' live reactions cannot be validated here (and see the flagged concern).
+  // The in-process config cache (loadConfig) is now a per-guild Map keyed by guildId,
+  // so cross-guild config bleed is fixed at the source (see per-guild-config-cache.test.ts).
+  // End-to-end validation of the "strictly per-guild caches" behavioral claim across two
+  // guilds' live reactions still requires the live reaction engine in one process.
   gateReactionBehavior(
     ctx,
     'Guild A’s starboard gains nothing from guild B activity and vice versa across live reactions (strictly per-guild caches).',
-    'validating the per-guild in-process cache across two guilds’ reactions requires the live reaction engine in one process (DISCORD_TOKEN + live guild); the current loadConfig cache is a single module-level object — flagged for the owner',
+    'validating the per-guild in-process cache across two guilds’ reactions requires the live reaction engine in one process (DISCORD_TOKEN + live guild); the loadConfig cache is now a per-guild Map keyed by guildId (unit-proven in per-guild-config-cache.test.ts)',
   );
 
   await proveNoOwnerAlert(ctx, handleA);
