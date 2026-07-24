@@ -286,11 +286,19 @@ async function anonInsertDenied(
 
 // ── Reusable per-class proofs ─────────────────────────────────────────────
 
+/** The text of a captured reply/editReply payload — discord.js accepts either a
+ *  raw string or a `{ content }` object, so normalise both (a raw-string payload
+ *  otherwise reads as empty — the #335 payload lesson). */
+function payloadText(payload: unknown): string {
+  if (typeof payload === 'string') return payload;
+  return String((payload as { content?: string } | undefined)?.content ?? '');
+}
+
 /** Every member-facing text surface of a captured reply (content + embed). */
 function brandingSurface(captured: CapturedResponse): string {
   const parts: string[] = [];
   const reply = captured.find('reply');
-  const content = (reply?.payload as { content?: string } | undefined)?.content;
+  const content = payloadText(reply?.payload);
   if (content) parts.push(content);
   const embed = (reply?.payload as { embeds?: Array<{ data?: Record<string, unknown> }> } | undefined)?.embeds?.[0]
     ?.data;
