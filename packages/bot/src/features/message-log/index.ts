@@ -21,6 +21,9 @@ const log = createLogger('MessageLog');
 interface MessageLogConfig {
   message_log_enabled: boolean;
   message_log_channel_id: string | null;
+  message_log_edits_enabled: boolean;
+  message_log_deletes_enabled: boolean;
+  message_log_ignored_channel_ids: string[];
 }
 
 const CONFIG_TTL = 60_000;
@@ -40,13 +43,20 @@ export async function loadConfig(client: SomniClient, guildId: string): Promise<
 
   const { data } = await client.supabase
     .from('guild_config')
-    .select('message_log_enabled, message_log_channel_id')
+    .select('message_log_enabled, message_log_channel_id, message_log_edits_enabled, message_log_deletes_enabled, message_log_ignored_channel_ids')
     .eq('guild_id', guildId)
     .maybeSingle();
 
   const config: MessageLogConfig = {
     message_log_enabled: data?.message_log_enabled ?? false,
     message_log_channel_id: data?.message_log_channel_id ?? null,
+    // Catalog defaults: edits/deletes logged unless the owner opts out; no
+    // ignored channels by default.
+    message_log_edits_enabled: data?.message_log_edits_enabled ?? true,
+    message_log_deletes_enabled: data?.message_log_deletes_enabled ?? true,
+    message_log_ignored_channel_ids: Array.isArray(data?.message_log_ignored_channel_ids)
+      ? (data.message_log_ignored_channel_ids as string[])
+      : [],
   };
   _configCache.set(guildId, { config, time: now });
   return config;
@@ -55,6 +65,50 @@ export async function loadConfig(client: SomniClient, guildId: string): Promise<
 function truncate(str: string, max: number): string {
   if (str.length <= max) return str;
   return str.slice(0, max - 3) + '...';
+}
+
+// ── Per-event dedupe (in-memory, short TTL) ──────────────────────────────────
+// A Discord gateway RESUME can re-deliver a buffered messageUpdate/messageDelete.
+// Without a fence the handler posts the embed twice. Track recently-posted event
+// keys for a small window so a re-delivery within it is a no-op.
+const DEDUPE_TTL_MS = 30_000;
+const _sentDedupe = new Map<string, number>();
+
+function alreadyPosted(key: string): boolean {
+  const now = Date.now();
+  // Lazily prune expired keys (the map only ever holds a ~30s working set).
+  for (const [k, expiresAt] of _sentDedupe) {
+    if (expiresAt <= now) _sentDedupe.delete(k);
+  }
+  if (_sentDedupe.has(key)) return true;
+  _sentDedupe.set(key, now + DEDUPE_TTL_MS);
+  return false;
+}
+
+// ── Resilient send (retry + backoff) ─────────────────────────────────────────
+// A transient Discord REST fault (429/5xx/network) on a single send would
+// otherwise permanently drop the forensic record. Retry a few times with
+// exponential backoff; give up immediately on a permanent 4xx (e.g. missing
+// permissions) since retrying cannot succeed.
+const SEND_RETRY_DELAYS_MS = [250, 500, 1000];
+
+async function sendLogEmbed(logChannel: TextChannel, embed: EmbedBuilder): Promise<boolean> {
+  for (let attempt = 0; attempt <= SEND_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      await logChannel.send({ embeds: [embed] });
+      return true;
+    } catch (err) {
+      const status = (err as { status?: number } | undefined)?.status;
+      // Transient: network error (no status), rate limit (429), or server error (5xx).
+      const transient = status === undefined || status === 429 || status >= 500;
+      if (!transient || attempt === SEND_RETRY_DELAYS_MS.length) {
+        log.error('Failed to post message-log embed:', { error: String(err), status, attempt });
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, SEND_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+  return false;
 }
 
 /**
@@ -72,6 +126,9 @@ export async function logMessageEdit(
 
   const config = await loadConfig(client, newMessage.guild.id);
   if (!config.message_log_enabled || !config.message_log_channel_id) return;
+  // SET-B controls: honor the per-guild edit toggle and ignored-channel list.
+  if (!config.message_log_edits_enabled) return;
+  if (config.message_log_ignored_channel_ids.includes(newMessage.channel.id)) return;
 
   const logChannel = newMessage.guild.channels.cache.get(config.message_log_channel_id) as TextChannel | undefined;
   if (!logChannel) return;
@@ -100,11 +157,10 @@ export async function logMessageEdit(
     embed.addFields({ name: 'Link', value: `[Jump to message](${newMessage.url})`, inline: true });
   }
 
-  try {
-    await logChannel.send({ embeds: [embed] });
-  } catch (err) {
-    log.error('Failed to log edit:', { error: String(err) });
-  }
+  // Skip re-delivered edits (keyed by message id + the edit timestamp).
+  if (alreadyPosted(`${newMessage.guild.id}:edit:${newMessage.id}:${newMessage.editedTimestamp ?? ''}`)) return;
+
+  await sendLogEmbed(logChannel, embed);
 }
 
 /**
@@ -120,6 +176,9 @@ export async function logMessageDelete(
 
   const config = await loadConfig(client, message.guild.id);
   if (!config.message_log_enabled || !config.message_log_channel_id) return;
+  // SET-B controls: honor the per-guild delete toggle and ignored-channel list.
+  if (!config.message_log_deletes_enabled) return;
+  if (config.message_log_ignored_channel_ids.includes(message.channel.id)) return;
 
   // Don't log deletions in the log channel itself
   if (message.channel.id === config.message_log_channel_id) return;
@@ -146,17 +205,21 @@ export async function logMessageDelete(
     embed.addFields({ name: 'Attachments', value: truncate(attachmentList, 1024) });
   }
 
-  try {
-    await logChannel.send({ embeds: [embed] });
-  } catch (err) {
-    log.error('Failed to log delete:', { error: String(err) });
-  }
+  // Skip re-delivered deletes (keyed by message id).
+  if (alreadyPosted(`${message.guild.id}:delete:${message.id}`)) return;
+
+  await sendLogEmbed(logChannel, embed);
 }
 
 /**
  * Invalidate config cache (called from ConfigWatcher).
  */
 export function invalidateMessageLogCache(guildId?: string): void {
-  if (guildId) _configCache.delete(guildId);
-  else _configCache.clear();
+  if (guildId) {
+    _configCache.delete(guildId);
+  } else {
+    // Full reset (e.g. tests) clears the per-event dedupe set too.
+    _configCache.clear();
+    _sentDedupe.clear();
+  }
 }

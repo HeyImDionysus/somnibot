@@ -216,6 +216,32 @@ describe('runSyncCycle', () => {
     expect(guild.roles.everyone.setPermissions).not.toHaveBeenCalled();
   });
 
+  it('does NOT reset @everyone when general auto-repair is ON but the @everyone opt-in is OFF', async () => {
+    // Explicit-opt-in guard: @everyone is destructive (reset to 0), so it must
+    // require its OWN opt-in even when general auto-repair is enabled — dropping
+    // the autoRepairEveryone condition would silently wipe @everyone perms.
+    const guild = makeGuild();
+    const desiredData = { roles: [], channels: [] };
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'guild_desired_state') return supaChain(desiredData);
+        if (table === 'discord_id_map') return supaChain([]);
+        if (table === 'audit_logs') return supaChain();
+        return supaChain();
+      }),
+    } as any;
+
+    mockComputeStateDiff.mockReturnValueOnce({ everyoneDrift: true, diffs: [] });
+    mockClassifyDrift.mockReturnValueOnce([]);
+
+    const bus = makeEventBus();
+    const config = makeConfig({ autoRepair: true, autoRepairEveryone: false });
+
+    await runSyncCycle(guild as any, supabase, bus as any, config);
+
+    expect(guild.roles.everyone.setPermissions).not.toHaveBeenCalled();
+  });
+
   it('filters out community-required channels', async () => {
     const channels = new MockCollection();
     const rulesChannel = { id: 'rules1', name: 'rules' };

@@ -80,6 +80,26 @@ function declaredDefault(domain: DomainContract, controlId: string): JsonValue |
 }
 
 /**
+ * A canonical Discord-snowflake-shaped id (18 digits) derived deterministically
+ * from the run-scoped user label. `giveaway_atomic_end` / `giveaway_atomic_reroll`
+ * validate EVERY winner against `^[0-9]{17,20}$` (real winners are Discord
+ * snowflakes drawn from the entrant pool), so any entrant that may be drawn as a
+ * winner must be a snowflake here — the plain `ctx.userId(...)` labels are not.
+ * Seeds off `ctx.userId(label)` so the value stays unique per run + label and
+ * never collides with another scenario's members.
+ */
+function member(ctx: ScenarioContext, label: string): string {
+  const seed = ctx.userId(label);
+  let h = 1469598103934665603n; // FNV-1a 64-bit offset basis
+  for (let i = 0; i < seed.length; i++) {
+    h ^= BigInt(seed.charCodeAt(i));
+    h = (h * 1099511628211n) & 0xffffffffffffffffn;
+  }
+  // Map into [100000000000000000, 999999999999999999] — always 18 digits.
+  return (100000000000000000n + (h % 900000000000000000n)).toString();
+}
+
+/**
  * Insert one giveaway row through the service-role client (the exact table the
  * production manager writes). Returns the persisted row (with its DB-minted id),
  * or null when the insert errored.
@@ -426,9 +446,9 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   const defaultWinners = Number(declaredDefault(ctx.domain, 'default-winner-count'));
   const handle = await ctx.bootGuild({ label: 'a' });
   const admin = ctx.userId('admin');
-  const userA = ctx.userId('a');
-  const userB = ctx.userId('b');
-  const userC = ctx.userId('c');
+  const userA = member(ctx, 'a');
+  const userB = member(ctx, 'b');
+  const userC = member(ctx, 'c');
 
   const giveaway = await seedGiveaway(handle, {
     prize: `${ctx.runPrefix}nitro`,
@@ -573,9 +593,9 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
 async function SET_B(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
   const admin = ctx.userId('admin');
-  const userA = ctx.userId('a');
-  const userB = ctx.userId('b');
-  const userC = ctx.userId('c');
+  const userA = member(ctx, 'a');
+  const userB = member(ctx, 'b');
+  const userC = member(ctx, 'c');
 
   const giveaway = await seedGiveaway(handle, {
     prize: `${ctx.runPrefix}double-prize`,
@@ -828,8 +848,8 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
 async function REPLAY(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
   const admin = ctx.userId('admin');
-  const userA = ctx.userId('a');
-  const userB = ctx.userId('b');
+  const userA = member(ctx, 'a');
+  const userB = member(ctx, 'b');
 
   const giveaway = await seedGiveaway(handle, {
     prize: `${ctx.runPrefix}replay-prize`,
@@ -891,8 +911,8 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
 async function RESTART(ctx: ScenarioContext): Promise<void> {
   const guildId = ctx.scenarioGuildId('a');
   const admin = ctx.userId('admin');
-  const userA = ctx.userId('a');
-  const userB = ctx.userId('b');
+  const userA = member(ctx, 'a');
+  const userB = member(ctx, 'b');
 
   // Boot #1: start a giveaway, take real entries, snapshot, then shut down.
   const first = await ctx.bootGuild({ guildId, label: 'a' });
@@ -929,7 +949,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
 
   // A post-restart entry is accepted on the same giveaway, and the end-time draw
   // commits exactly once after the restart.
-  await addEntry(second, giveawayId, ctx.userId('c'));
+  await addEntry(second, giveawayId, member(ctx, 'c'));
   const end = await atomicEnd(second, giveawayId, [userA]);
   const afterEnd = await readGiveaway(second, giveawayId);
   ctx.expect(end.won && afterEnd !== null && afterEnd.status === 'ended' && afterEnd.winners.length === 1, {
@@ -951,8 +971,8 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
 async function RACE(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
   const admin = ctx.userId('admin');
-  const userA = ctx.userId('a');
-  const userB = ctx.userId('b');
+  const userA = member(ctx, 'a');
+  const userB = member(ctx, 'b');
 
   const giveaway = await seedGiveaway(handle, {
     prize: `${ctx.runPrefix}race-prize`,

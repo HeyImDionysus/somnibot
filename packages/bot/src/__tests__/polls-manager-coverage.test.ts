@@ -483,6 +483,83 @@ describe('PollsManager', () => {
       );
     });
 
+    it('rejects a bet below the configured minimum (branded with currency name)', async () => {
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({
+            data: { predictions_enabled: true, prediction_min_bet: 100, prediction_max_bet: 0, currency_name: 'gold' },
+            error: null,
+          });
+        }
+        if (table === 'predictions') {
+          return chainBuilder({ data: { id: 'pred1', status: 'open' }, error: null });
+        }
+        return chainBuilder();
+      });
+      const interaction = makeInteraction();
+      await mgr.placeBet(interaction as any, 'pred1', 0, 50); // below the 100 floor
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Minimum bet') }),
+      );
+      // White-label: the reply uses the configured currency name, not 'coins'.
+      const msg = String((interaction.reply as any).mock.calls[0][0].content);
+      expect(msg).toContain('gold');
+      expect(msg).not.toContain('coins');
+    });
+
+    it('rejects a bet above the configured maximum when a cap is set', async () => {
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({
+            data: { predictions_enabled: true, prediction_min_bet: 1, prediction_max_bet: 100, currency_name: 'gold' },
+            error: null,
+          });
+        }
+        if (table === 'predictions') {
+          return chainBuilder({ data: { id: 'pred1', status: 'open' }, error: null });
+        }
+        return chainBuilder();
+      });
+      const interaction = makeInteraction();
+      await mgr.placeBet(interaction as any, 'pred1', 0, 500); // above the 100 cap
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Maximum bet') }),
+      );
+    });
+
+    it('allows a bet at/above the minimum when no max cap is set', async () => {
+      let betCallCount = 0;
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({
+            data: { predictions_enabled: true, prediction_min_bet: 50, prediction_max_bet: 0, currency_name: 'gold' },
+            error: null,
+          });
+        }
+        if (table === 'predictions') {
+          return chainBuilder({ data: { id: 'pred1', status: 'open', total_pool: 0 }, error: null });
+        }
+        if (table === 'prediction_bets') {
+          betCallCount++;
+          if (betCallCount === 1) return chainBuilder({ data: null, error: null }); // no existing bet
+          return chainBuilder({ data: { id: 'bet1' }, error: null }); // insert
+        }
+        if (table === 'prediction_options') {
+          return chainBuilder({ data: [{ id: 'opt1', label: 'Yes' }, { id: 'opt2', label: 'No' }], error: null });
+        }
+        if (table === 'economy_wallets') {
+          return chainBuilder({ data: { wallet: 500 }, error: null });
+        }
+        return chainBuilder();
+      });
+      supabase.rpc.mockResolvedValue({ data: 50, error: null });
+      const interaction = makeInteraction();
+      await mgr.placeBet(interaction as any, 'pred1', 0, 50); // exactly at the floor
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ embeds: expect.any(Array) }),
+      );
+    });
+
     it('rejects duplicate bet', async () => {
       let betCallCount = 0;
       supabase.from.mockImplementation((table: string) => {

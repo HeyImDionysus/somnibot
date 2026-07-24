@@ -467,5 +467,51 @@ describe('AdventureManager', () => {
       await mgr.handleChoice(interaction as any, 's1', 0);
       expect(interaction.update).toHaveBeenCalled();
     });
+
+    it('forces an ending once the configured scene cap is reached', async () => {
+      // The session has already traversed 9 scenes; the next transition would be
+      // the 10th, which equals economy_adventure_max_scenes → forced ending even
+      // though scene2 is NOT flagged as an ending and still offers choices.
+      const session = { id: 's1', user_id: 'u1', status: 'active', loot_collected: [], currency_collected: 250, adventure_id: 'a1', current_scene_id: 'sc1', scenes_traversed: 9 };
+      const scene1 = {
+        id: 'sc1', adventure_id: 'a1', scene_index: 8, text: 'Deep in the maze',
+        choices: [{ label: 'Press on', emoji: '➡️', currency: 0, loot: [], next_scene_index: 9 }],
+        loot: [], is_ending: false, ending_type: null,
+      };
+      const scene2 = {
+        id: 'sc2', adventure_id: 'a1', scene_index: 9, text: 'Another junction',
+        choices: [{ label: 'Keep going', emoji: '➡️', currency: 0, loot: [], next_scene_index: 10 }],
+        loot: [], is_ending: false, ending_type: null,
+      };
+      let sessCallCount = 0;
+      let sceneCallCount = 0;
+      supabase.from.mockImplementation((table: string) => {
+        const chain: Record<string, any> = {};
+        const methods = ['select', 'eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'order', 'limit', 'single', 'insert', 'update', 'delete', 'maybeSingle', 'ilike'];
+        for (const m of methods) chain[m] = vi.fn().mockReturnValue(chain);
+        if (table === 'economy_adventure_sessions') {
+          sessCallCount++;
+          chain.then = (r: (v: any) => void) => r({ data: sessCallCount === 1 ? session : null, error: null });
+        } else if (table === 'economy_adventure_scenes') {
+          sceneCallCount++;
+          chain.then = (r: (v: any) => void) => r({ data: sceneCallCount === 1 ? scene1 : scene2, error: null });
+        } else if (table === 'guild_config') {
+          chain.then = (r: (v: any) => void) => r({ data: { economy_adventures_enabled: true, economy_adventure_daily_limit: 3, economy_adventure_ticket_cost: 100, economy_adventure_max_scenes: 10 }, error: null });
+        } else {
+          chain.then = (r: (v: any) => void) => r({ data: null, error: null });
+        }
+        (chain as any)[Symbol.toStringTag] = 'Promise';
+        return chain;
+      });
+      mgr = new AdventureManager(makeGuild() as any, supabase as any, makeValkey() as any);
+      const interaction = { user: { id: 'u1' }, reply: vi.fn(), update: vi.fn() };
+      await mgr.handleChoice(interaction as any, 's1', 0);
+
+      expect(interaction.update).toHaveBeenCalledTimes(1);
+      const payload = interaction.update.mock.calls[0][0];
+      expect(payload.components).toEqual([]);
+      expect(payload.embeds[0].data.title).toContain('Journey');
+      expect(payload.embeds[0].data.description).toContain('reached its end');
+    });
   });
 });

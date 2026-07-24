@@ -27,7 +27,7 @@ import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
 import { createLogger, getGracePeriodDays } from '@somnibot/shared';
 
 const log = createLogger('Fulfillment');
-import { checkPurchaseVelocity, checkPaymentPattern, checkCriticalThreshold } from './fraud-detection.js';
+import { checkPurchaseVelocity, checkPaymentPattern, checkCriticalThreshold, loadFraudThresholds } from './fraud-detection.js';
 
 const KNOWN_ORDER_STATUSES = [
   'pending',
@@ -1888,14 +1888,17 @@ export class CommerceFulfillmentService {
     });
     result.eventEmitted = true;
 
-    // Check for payment pattern fraud (non-blocking)
+    // Check for payment pattern fraud (non-blocking). Thresholds are pulled from
+    // the guild's dashboard-configured fraud_rules, falling back to shipped
+    // catalog defaults, so a lowered rule actually takes effect bot-side.
     const fraudCtx = { supabase: this.supabase, guildId: payload.guild_id, eventBus: this.eventBus };
-    checkPaymentPattern(fraudCtx, payload.customer_id, payload.discord_id).catch((err) =>
-      log.warn('Fraud check error (non-fatal)', { detail: err }),
-    );
-    checkCriticalThreshold(fraudCtx).catch((err) =>
-      log.warn('Critical threshold check error (non-fatal)', { detail: err }),
-    );
+    void (async () => {
+      const thresholds = await loadFraudThresholds(this.supabase, payload.guild_id);
+      await checkPaymentPattern(fraudCtx, payload.customer_id, payload.discord_id, {
+        threshold: thresholds.failedPaymentThreshold,
+      });
+      await checkCriticalThreshold(fraudCtx, { threshold: thresholds.criticalIncidentThreshold });
+    })().catch((err) => log.warn('Fraud check error (non-fatal)', { detail: err }));
 
     // DM warning
     try {
@@ -1914,8 +1917,12 @@ export class CommerceFulfillmentService {
 
   private async runFraudChecks(payload: FulfillmentPayload): Promise<void> {
     const ctx = { supabase: this.supabase, guildId: payload.guild_id, eventBus: this.eventBus };
-    await checkPurchaseVelocity(ctx, payload.customer_id, payload.discord_id);
-    await checkCriticalThreshold(ctx);
+    const thresholds = await loadFraudThresholds(this.supabase, payload.guild_id);
+    await checkPurchaseVelocity(ctx, payload.customer_id, payload.discord_id, {
+      threshold: thresholds.velocityThreshold,
+      windowMs: thresholds.velocityWindowMs,
+    });
+    await checkCriticalThreshold(ctx, { threshold: thresholds.criticalIncidentThreshold });
   }
 
   // ── Receipt DM ───────────────────────────────────────────

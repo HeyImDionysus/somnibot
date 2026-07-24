@@ -154,17 +154,20 @@ export class AchievementsManager {
     const minLevel = config.economy_prestige_min_level ?? 50;
     const minNetWorth = config.economy_prestige_min_net_worth ?? 1000000;
     const multiplierGain = config.economy_prestige_multiplier_pct ?? 10;
+    // New column may not be in the generated types yet — read defensively.
+    const maxLevel = (config as { economy_prestige_max_level?: number | null }).economy_prestige_max_level ?? 10;
 
-    // Atomic + idempotent: the requirement checks, wallet/bank reset, and
-    // prestige-record bump commit as ONE call keyed on the interaction id, so a
-    // redelivered /prestige applies exactly once (a replay never double-bumps the
-    // level or the earning multiplier).
+    // Atomic + idempotent: the requirement checks, prestige-cap check, wallet/bank
+    // reset, and prestige-record bump commit as ONE call keyed on the interaction
+    // id, so a redelivered /prestige applies exactly once (a replay never
+    // double-bumps the level or the earning multiplier).
     const { data, error } = await this.supabase.rpc('economy_prestige_apply', {
       p_guild_id: guildId,
       p_user_id: userId,
       p_min_level: minLevel,
       p_min_net_worth: minNetWorth,
       p_multiplier_gain: multiplierGain,
+      p_max_level: maxLevel,
       p_request_id: interaction.id,
     });
 
@@ -174,13 +177,16 @@ export class AchievementsManager {
       return;
     }
 
-    const result = data as { status?: string; new_level?: number; new_multiplier?: number; level?: number; net_worth?: number };
+    const result = data as { status?: string; new_level?: number; new_multiplier?: number; level?: number; net_worth?: number; max_level?: number };
     switch (result.status) {
       case 'level_too_low':
         await interaction.reply({ content: `❌ You need to be at least **level ${minLevel}** to prestige. You're level **${result.level ?? 0}**.`, ephemeral: true });
         return;
       case 'net_worth_too_low':
         await interaction.reply({ content: `❌ You need at least **${minNetWorth.toLocaleString()}** net worth to prestige. You have **${(result.net_worth ?? 0).toLocaleString()}**.`, ephemeral: true });
+        return;
+      case 'prestige_capped':
+        await interaction.reply({ content: `⭐ You've reached the maximum prestige level (**${result.max_level ?? maxLevel}**). Your earning multiplier is already at its ceiling.`, ephemeral: true });
         return;
       case 'prestiged':
         break;

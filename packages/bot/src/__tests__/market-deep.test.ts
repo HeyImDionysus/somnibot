@@ -75,6 +75,40 @@ describe('MarketManager deep', () => {
     expect(result).toBeDefined();
   });
 
+  // [game-economy-shop-market] Anti-laundering wall: non-tradeable items must
+  // never be listable, and the rejection must happen before any decrement/RPC.
+  it('listItem refuses a non-tradeable item before any decrement', async () => {
+    const rpc = vi.fn(async () => ({ data: { listing: {} }, error: null }));
+    const supa = {
+      from: vi.fn((table: string) => {
+        if (table === 'guild_config') return makeChain({ economy_market_enabled: true, economy_market_max_listings: 10, economy_market_listing_days: 7, economy_market_fee_pct: 5 });
+        if (table === 'economy_inventory') return makeChain({ id: 'inv1', quantity: 5, item_id: 'item1', economy_items: { id: 'item1', name: 'Bound Sword', tradeable: false } });
+        return makeChain(null);
+      }),
+      rpc,
+    } as any;
+    const mgr = new MarketManager(guildId as any, supa, {} as any);
+    const result = await mgr.listItem('user-1', 'Bound Sword', 1, 100);
+    expect(result.data.description).toContain('cannot be traded');
+    expect(rpc).not.toHaveBeenCalled(); // no listing RPC, no decrement
+  });
+
+  it('listItem allows a tradeable item to reach the atomic create RPC', async () => {
+    const rpc = vi.fn(async () => ({ data: { listing: { id: 'l1' } }, error: null }));
+    const supa = {
+      from: vi.fn((table: string) => {
+        if (table === 'guild_config') return makeChain({ economy_market_enabled: true, economy_market_max_listings: 10, economy_market_listing_days: 7, economy_market_fee_pct: 5 });
+        if (table === 'economy_inventory') return makeChain({ id: 'inv1', quantity: 5, item_id: 'item1', economy_items: { id: 'item1', name: 'Iron Sword', tradeable: true } });
+        return makeChain(null);
+      }),
+      rpc,
+    } as any;
+    const mgr = new MarketManager(guildId as any, supa, {} as any);
+    const result = await mgr.listItem('user-1', 'Iron Sword', 1, 100);
+    expect(rpc).toHaveBeenCalledWith('economy_market_atomic_create_listing', expect.anything());
+    expect(result.data.title).toContain('Listed');
+  });
+
   it('buy purchases a listing', async () => {
     const supa = makeSupa({
       guild_config: { guild_id: guildId, market_enabled: true, market_tax_percent: 5, currency_symbol: '💰' },

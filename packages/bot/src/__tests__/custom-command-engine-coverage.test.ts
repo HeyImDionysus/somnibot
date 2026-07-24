@@ -90,7 +90,15 @@ function makeValkey() {
   const store = new Map<string, string>();
   return {
     get: vi.fn().mockImplementation((k: string) => Promise.resolve(store.get(k) ?? null)),
-    set: vi.fn().mockImplementation((k: string, v: string) => { store.set(k, v); return Promise.resolve('OK'); }),
+    // Honors the atomic SET NX form used by the cooldown claim: when 'NX' is
+    // passed and the key already exists, the write is refused (returns null),
+    // otherwise it sets and returns 'OK'.
+    set: vi.fn().mockImplementation((k: string, v: string, ...args: any[]) => {
+      const nx = args.includes('NX');
+      if (nx && store.has(k)) return Promise.resolve(null);
+      store.set(k, v);
+      return Promise.resolve('OK');
+    }),
     ttl: vi.fn().mockResolvedValue(30),
     _store: store,
   };
@@ -178,8 +186,13 @@ describe('handleCustomCommand', () => {
     const valkey = makeValkey();
     const result = await handleCustomCommand(interaction as any, supabase as any, valkey as any, guild as any);
     expect(result).toBe(true);
+    // The denial template names the command and guild (branded copy), not a
+    // generic string.
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringContaining('permission'),
+      content: expect.stringContaining('/hello'),
+    }));
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Test Guild'),
     }));
   });
 
@@ -195,6 +208,10 @@ describe('handleCustomCommand', () => {
     expect(result).toBe(true);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('permission'),
+    }));
+    // Denied-role reply also renders the branded command name.
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('/hello'),
     }));
   });
 
@@ -238,12 +255,51 @@ describe('handleCustomCommand', () => {
     const int1 = makeInteraction('hello');
     await handleCustomCommand(int1 as any, supabase as any, valkey as any, guild as any);
 
-    // Second call should be on cooldown
+    // Second call should be on cooldown, with the branded command name.
     const int2 = makeInteraction('hello');
     await handleCustomCommand(int2 as any, supabase as any, valkey as any, guild as any);
     expect(int2.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('cooldown'),
     }));
+    expect(int2.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('/hello'),
+    }));
+  });
+
+  it('enforces cooldown atomically under concurrent invocations', async () => {
+    const cmd = { ...sampleCmd, cooldown_seconds: 60 };
+    const supabase = makeSupabase([cmd]);
+    const guild = makeGuild();
+    await loadCustomCommands(supabase as any, guild as any, {} as any);
+
+    // A valkey whose SET NX succeeds exactly once then refuses, modelling two
+    // truly-simultaneous claims racing on the same cooldown key.
+    let claims = 0;
+    const valkey = {
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn().mockImplementation((_k: string, _v: string, ..._args: any[]) => {
+        claims += 1;
+        return Promise.resolve(claims === 1 ? 'OK' : null);
+      }),
+      ttl: vi.fn().mockResolvedValue(42),
+    };
+
+    const int1 = makeInteraction('hello');
+    const int2 = makeInteraction('hello');
+    await Promise.all([
+      handleCustomCommand(int1 as any, supabase as any, valkey as any, guild as any),
+      handleCustomCommand(int2 as any, supabase as any, valkey as any, guild as any),
+    ]);
+
+    // Exactly one interaction executed the action; the other got the cooldown notice.
+    const executed = [int1, int2].filter((i) =>
+      (i.reply as any).mock.calls.some((c: any[]) => c[0]?.content === 'Hello TestUser!'),
+    );
+    const cooledDown = [int1, int2].filter((i) =>
+      (i.reply as any).mock.calls.some((c: any[]) => String(c[0]?.content).includes('cooldown')),
+    );
+    expect(executed).toHaveLength(1);
+    expect(cooledDown).toHaveLength(1);
   });
 
   it('executes send_embed action', async () => {

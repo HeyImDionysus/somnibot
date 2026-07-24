@@ -329,41 +329,46 @@ export async function closeTicket(
 
       await channel.send({ embeds: [closeEmbed], components: [reopenRow] });
 
-      // Send feedback prompt to the ticket creator via DM
-      try {
-        const creator = await guild.members.fetch(ticket.creator_id).catch(() => null);
-        if (creator) {
-          const feedbackEmbed = new EmbedBuilder()
-            .setColor(SOMNI_PALETTE.CYAN)
-            .setTitle('📋 How was your support experience?')
-            .setDescription(
-              `Your ticket #${ticketNumber} has been closed. Please rate your experience:`,
-            )
-            .setTimestamp();
-
-          const feedbackRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-            ...[1, 2, 3, 4, 5].map((n) =>
-              new ButtonBuilder()
-                .setCustomId(`ticket:feedback:${ticketNumber}:${n}`)
-                .setLabel('⭐'.repeat(n))
-                .setStyle(n >= 4 ? ButtonStyle.Success : n >= 2 ? ButtonStyle.Secondary : ButtonStyle.Danger),
-            ),
-          );
-
-          // Post feedback in-channel rather than DM to ensure it's visible
-          await channel.send({ embeds: [feedbackEmbed], components: [feedbackRow] });
-        }
-      } catch {
-        // Non-fatal — feedback is optional
-      }
-
-      // Move to closed category if configured
+      // Resolve the ticket's panel once — drives the feedback-prompt gate and
+      // the closed-category move below.
       const { data: panel } = await supabase
         .from('ticket_panels')
-        .select('closed_category_id')
+        .select('closed_category_id, feedback_prompt_enabled')
         .eq('id', ticket.panel_id)
         .single();
 
+      // Send feedback prompt to the ticket creator — unless the panel opts out
+      // (feedback_prompt_enabled=false). Default (missing column / null) is on.
+      if (panel?.feedback_prompt_enabled !== false) {
+        try {
+          const creator = await guild.members.fetch(ticket.creator_id).catch(() => null);
+          if (creator) {
+            const feedbackEmbed = new EmbedBuilder()
+              .setColor(SOMNI_PALETTE.CYAN)
+              .setTitle('📋 How was your support experience?')
+              .setDescription(
+                `Your ticket #${ticketNumber} has been closed. Please rate your experience:`,
+              )
+              .setTimestamp();
+
+            const feedbackRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+              ...[1, 2, 3, 4, 5].map((n) =>
+                new ButtonBuilder()
+                  .setCustomId(`ticket:feedback:${ticketNumber}:${n}`)
+                  .setLabel('⭐'.repeat(n))
+                  .setStyle(n >= 4 ? ButtonStyle.Success : n >= 2 ? ButtonStyle.Secondary : ButtonStyle.Danger),
+              ),
+            );
+
+            // Post feedback in-channel rather than DM to ensure it's visible
+            await channel.send({ embeds: [feedbackEmbed], components: [feedbackRow] });
+          }
+        } catch {
+          // Non-fatal — feedback is optional
+        }
+      }
+
+      // Move to closed category if configured
       if (panel?.closed_category_id) {
         await channel.setParent(panel.closed_category_id, { lockPermissions: false }).catch((e: unknown) => { log.warn('Failed to move channel:', (e as Error)?.message ?? e); });
       }
@@ -586,8 +591,8 @@ export async function checkInactiveTickets(
   eventBus: PlatformEventBus,
   options: { warnAfterMs?: number; closeAfterMs?: number } = {},
 ): Promise<{ warned: number; closed: number }> {
-  const warnAfter = options.warnAfterMs ?? 24 * 60 * 60 * 1000;   // 24h default
-  const closeAfter = options.closeAfterMs ?? 48 * 60 * 60 * 1000; // 48h default
+  const warnAfter = options.warnAfterMs ?? 24 * 60 * 60 * 1000;   // 24h fallback
+  const closeAfter = options.closeAfterMs ?? 48 * 60 * 60 * 1000; // 48h fallback
   const now = Date.now();
 
   const { data: openTickets } = await supabase
@@ -600,6 +605,22 @@ export async function checkInactiveTickets(
 
   if (!openTickets?.length) return { warned: 0, closed: 0 };
 
+  // Resolve per-panel inactivity thresholds (one query for the guild's panels).
+  // Each open ticket uses ITS panel's configured warn/close hours; call-site
+  // options (then the 24h/48h catalog defaults) are the fallback when a panel
+  // has no override or the ticket has no panel.
+  const { data: panels } = await supabase
+    .from('ticket_panels')
+    .select('id, inactivity_warn_hours, inactivity_close_hours')
+    .eq('guild_id', guild.id);
+  const panelThresholds = new Map<string, { warnMs: number; closeMs: number }>();
+  for (const p of panels ?? []) {
+    panelThresholds.set(p.id, {
+      warnMs: ((p.inactivity_warn_hours as number | null) ?? 24) * 60 * 60 * 1000,
+      closeMs: ((p.inactivity_close_hours as number | null) ?? 48) * 60 * 60 * 1000,
+    });
+  }
+
   let warned = 0;
   let closed = 0;
 
@@ -609,7 +630,11 @@ export async function checkInactiveTickets(
     const channel = guild.channels.cache.get(ticket.channel_id) as TextChannel | undefined;
     if (!channel) continue;
 
-    if (idleMs >= closeAfter) {
+    const thresholds = ticket.panel_id ? panelThresholds.get(ticket.panel_id) : undefined;
+    const warnAfterMs = thresholds?.warnMs ?? warnAfter;
+    const closeAfterMs = thresholds?.closeMs ?? closeAfter;
+
+    if (idleMs >= closeAfterMs) {
       // Auto-close
       const result = await closeTicket(
         guild,
@@ -620,7 +645,7 @@ export async function checkInactiveTickets(
         'Closed due to inactivity',
       );
       if (result.success) closed++;
-    } else if (idleMs >= warnAfter && !ticket.inactivity_warned) {
+    } else if (idleMs >= warnAfterMs && !ticket.inactivity_warned) {
       // Send warning
       try {
         await channel.send({

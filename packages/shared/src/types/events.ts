@@ -78,6 +78,14 @@ export interface TicketEventData {
   panelId: string;
 }
 
+export interface TicketDeniedData {
+  ticketId: string;
+  ticketNumber: number;
+  /** The member who attempted the lifecycle action without manager authority. */
+  actorDiscordId: string;
+  reason: 'permission-denied';
+}
+
 export interface InfractionCreatedData {
   infractionId: string;
   userId: string;
@@ -362,6 +370,7 @@ export interface PlatformEventMap {
   'ticket.claimed': TicketEventData;
   'ticket.closed': TicketEventData;
   'ticket.reopened': TicketEventData;
+  'ticket.denied': TicketDeniedData;
   'infraction.created': InfractionCreatedData;
   'member.muted': MemberMutedData;
   'member.kicked': MemberKickedData;

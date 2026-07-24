@@ -22,6 +22,7 @@ export interface CreateInfractionInput {
   automodRuleId?: string;
   durationMinutes?: number;  // For mutes
   expiresAt?: string;        // ISO string — when the infraction expires (falls off)
+  correlationId?: string;    // Idempotency key (e.g. interaction id) — dedups replays
 }
 
 export interface InfractionRecord {
@@ -61,11 +62,24 @@ export async function createInfraction(
       active: true,
       pardoned: false,
       expires_at: input.expiresAt ?? null,
+      correlation_id: input.correlationId ?? null,
     })
     .select()
     .single();
 
   if (error) {
+    // Idempotency: a replayed write (same guild_id + correlation_id) is rejected
+    // by ux_infractions_guild_correlation (23505). Treat it as a no-op and read
+    // back the original row instead of creating a duplicate / re-firing escalation.
+    if (error.code === '23505' && input.correlationId) {
+      const { data: existing } = await supabase
+        .from('infractions')
+        .select('*')
+        .eq('guild_id', input.guildId)
+        .eq('correlation_id', input.correlationId)
+        .maybeSingle();
+      if (existing) return existing as InfractionRecord;
+    }
     log.error('Failed to create infraction:', error.message);
     return null;
   }

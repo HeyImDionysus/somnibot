@@ -25,7 +25,9 @@ interface TempChannelHub {
   default_user_limit: number;
   default_bitrate: number;
   keep_alive_minutes: number;
+  empty_grace_seconds: number;
   allow_text_channel: boolean;
+  allow_claim: boolean;
   moderator_roles: string[];
   active: boolean;
   created_at: string;
@@ -34,11 +36,13 @@ interface TempChannelHub {
 const emptyForm = {
   hub_channel_id: '',
   category_id: '',
-  naming_format: "{username}'s Channel",
+  naming_format: "{owner-name}'s room",
   default_user_limit: '0',
   default_bitrate: '64000',
   keep_alive_minutes: '1',
+  empty_grace_seconds: '15',
   allow_text_channel: false,
+  allow_claim: true,
   moderator_roles: '',
 };
 
@@ -120,7 +124,9 @@ export default function TempChannelsPage() {
         default_user_limit: String(hub.default_user_limit),
         default_bitrate: String(hub.default_bitrate),
         keep_alive_minutes: String(hub.keep_alive_minutes),
+        empty_grace_seconds: String(hub.empty_grace_seconds ?? 15),
         allow_text_channel: hub.allow_text_channel,
+        allow_claim: hub.allow_claim ?? true,
         moderator_roles: hub.moderator_roles.join(', '),
       });
     } else {
@@ -141,11 +147,13 @@ export default function TempChannelsPage() {
       ...(editingId ? { id: editingId } : {}),
       hub_channel_id: form.hub_channel_id,
       category_id: form.category_id,
-      naming_format: form.naming_format || "{username}'s Channel",
+      naming_format: form.naming_format || "{owner-name}'s room",
       default_user_limit: parseInt(form.default_user_limit, 10) || 0,
       default_bitrate: parseInt(form.default_bitrate, 10) || 64000,
       keep_alive_minutes: parseInt(form.keep_alive_minutes, 10) || 1,
+      empty_grace_seconds: Number.isFinite(parseInt(form.empty_grace_seconds, 10)) ? parseInt(form.empty_grace_seconds, 10) : 15,
       allow_text_channel: form.allow_text_channel,
+      allow_claim: form.allow_claim,
       moderator_roles: form.moderator_roles ? form.moderator_roles.split(',').map((s) => s.trim()).filter(Boolean) : [],
     };
 
@@ -268,9 +276,9 @@ export default function TempChannelsPage() {
               <div>
                 <label className="mb-1 block text-xs font-medium text-discord-text-muted">Naming Format</label>
                 <input type="text" value={form.naming_format} onChange={(e) => setForm({ ...form, naming_format: e.target.value })}
-                  placeholder="{username}'s Channel"
+                  placeholder="{owner-name}'s room"
                   className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
-                <p className="mt-1 text-xs text-discord-text-muted">Variables: {'{username}'}, {'{user}'}, {'{tag}'}, {'{count}'}</p>
+                <p className="mt-1 text-xs text-discord-text-muted">Variables: {'{owner-name}'}, {'{username}'}, {'{user}'}, {'{tag}'}, {'{count}'}</p>
               </div>
               <div className="grid gap-4 sm:grid-cols-3">
                 <div>
@@ -293,9 +301,9 @@ export default function TempChannelsPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Keep-Alive (min)</label>
-                  <input type="number" value={form.keep_alive_minutes} onChange={(e) => setForm({ ...form, keep_alive_minutes: e.target.value })}
-                    min="0" max="60"
+                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Empty grace (sec)</label>
+                  <input type="number" value={form.empty_grace_seconds} onChange={(e) => setForm({ ...form, empty_grace_seconds: e.target.value })}
+                    min="0" max="3600"
                     className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
                 </div>
               </div>
@@ -311,6 +319,10 @@ export default function TempChannelsPage() {
               <label className="flex items-center gap-2 text-sm text-discord-text-secondary cursor-pointer">
                 <input type="checkbox" checked={form.allow_text_channel} onChange={(e) => setForm({ ...form, allow_text_channel: e.target.checked })} className="rounded" />
                 Create paired text channel
+              </label>
+              <label className="flex items-center gap-2 text-sm text-discord-text-secondary cursor-pointer">
+                <input type="checkbox" checked={form.allow_claim} onChange={(e) => setForm({ ...form, allow_claim: e.target.checked })} className="rounded" />
+                Allow members to claim an abandoned channel (/voice claim)
               </label>
             </div>
             <div className="mt-6 flex justify-end gap-3">
@@ -349,8 +361,8 @@ export default function TempChannelsPage() {
                         Category: <TCChannelName id={hub.category_id} /> · Format: <code className="bg-discord-bg-tertiary px-1 rounded">{hub.naming_format}</code>
                       </p>
                       <p className="text-xs text-discord-text-muted mt-0.5">
-                        {bitrateLabel(hub.default_bitrate)} · {hub.default_user_limit === 0 ? 'No limit' : `${hub.default_user_limit} users`} · Keep-alive: {hub.keep_alive_minutes}m
-                        {hub.allow_text_channel ? ' · +Text' : ''}
+                        {bitrateLabel(hub.default_bitrate)} · {hub.default_user_limit === 0 ? 'No limit' : `${hub.default_user_limit} users`} · Grace: {hub.empty_grace_seconds ?? (hub.keep_alive_minutes * 60)}s
+                        {hub.allow_text_channel ? ' · +Text' : ''}{hub.allow_claim === false ? ' · No claim' : ''}
                       </p>
                     </div>
                   </div>

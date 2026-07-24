@@ -114,6 +114,28 @@ describe('HeistManager deep', () => {
     expect(responded).toBe(true);
   });
 
+  // [game-economy-heist] embeds must brand with the guild currency, not "coins".
+  it('viewHeist embed brands with the configured currency, never "coins"', async () => {
+    const supa = makeSupa({
+      guild_config: {
+        guild_id: 'guild-1', economy_heist_enabled: true,
+        currency_name: 'Gems', currency_emoji: '💎',
+      },
+      economy_heists: {
+        id: 'heist-1', guild_id: 'guild-1', status: 'recruiting', target_name: 'bank',
+        target_payout: 1000, base_success_chance: 40,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      },
+    });
+    const mgr = new HeistManager(supa, makeClient());
+    const interaction = makeInteraction();
+    await mgr.viewHeist(interaction);
+    const desc = interaction.reply.mock.calls[0][0].embeds[0].data.description as string;
+    expect(desc).toContain('Gems');
+    expect(desc).toContain('💎');
+    expect(desc.toLowerCase()).not.toContain('coins');
+  });
+
   it('startHeist creates heist + initiator atomically via heist_start (finding 2)', async () => {
     // Wallet has funds; no active heist; no cooldown. heist_start returns 'started'.
     const supa = makeSupa({

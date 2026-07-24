@@ -13,6 +13,7 @@ import {
   PermissionFlagsBits,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
+import { writeAuditLog } from '../../services/audit.js';
 import { calculateLevel , createLogger } from '@somnibot/shared';
 
 const log = createLogger('XPAdmin');
@@ -80,6 +81,26 @@ export async function handleXpAdminCommand(
   const sub = interaction.options.getSubcommand();
   const targetUser = interaction.options.getUser('user', true);
   const guildId = interaction.guildId!;
+
+  // Defense-in-depth authorization re-check. setDefaultMemberPermissions(ManageGuild)
+  // is the primary gate for the default (un-overridden) case, but a guild owner can
+  // override per-command permissions in Server Settings → Integrations and grant /xp
+  // to arbitrary roles/members. Re-verify Manage-Guild in the handler so that override
+  // cannot silently confer XP-mutation power, and record the denied attempt.
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+    await writeAuditLog(client.supabase, {
+      guildId,
+      actorType: 'discord',
+      actorId: interaction.user.id,
+      action: 'levels.xp_admin.denied',
+      targetType: 'member',
+      targetId: targetUser.id,
+      success: false,
+      details: { subcommand: sub, reason: 'missing_manage_guild' },
+    });
+    await interaction.editReply('🚫 You need the **Manage Server** permission to use `/xp` admin commands.');
+    return;
+  }
 
   switch (sub) {
     case 'add': {

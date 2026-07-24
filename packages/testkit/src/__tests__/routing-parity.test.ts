@@ -178,7 +178,9 @@ describe('routing parity: synthetic builders ↔ real handleInteraction', () => 
   }> = [
     { command: 'voice', deleteManager: 'tempChannelManager', expected: 'not enabled' },
     { command: 'giveaway', deleteManager: 'giveawayManager', expected: 'not enabled' },
-    { command: 'play', deleteManager: 'musicPlayer', expected: 'not enabled' },
+    // Music enabled but the player manager is missing → the infra-gap "temporarily
+    // unavailable" branch (the disabled case renders a branded "switched off" embed instead).
+    { command: 'play', deleteManager: 'musicPlayer', expected: 'unavailable' },
     { command: 'balance', deleteManager: 'economy', expected: 'not enabled' },
     { command: 'trivia', deleteManager: 'trivia', expected: 'not enabled' },
     { command: 'poll', deleteManager: 'polls', expected: 'not enabled' },

@@ -130,3 +130,19 @@ describe('handleMyDataCommand', () => {
     expect(fromCalls).toContain('poll_votes');
   });
 });
+
+describe('handleMyDataCommand — infractions column', () => {
+  it('queries infractions by member_id (guards the 42703 user_id regression)', async () => {
+    const eqCalls: Array<[string, any]> = [];
+    const chain: any = {};
+    for (const m of ['select', 'order', 'limit', 'maybeSingle', 'single']) chain[m] = vi.fn(() => chain);
+    chain.eq = vi.fn((col: string, val: any) => { eqCalls.push([col, val]); return chain; });
+    chain.then = (res: any) => Promise.resolve({ data: [], error: null }).then(res);
+    const client = { supabase: { from: vi.fn(() => chain) } };
+    const interaction = makeInteraction({ client });
+    await handleMyDataCommand(interaction as any);
+    // member_id is used ONLY by the infractions query in this flow, so its
+    // presence proves the export no longer selects the non-existent user_id column.
+    expect(eqCalls).toContainEqual(['member_id', 'u1']);
+  });
+});

@@ -36,6 +36,6 @@ export async function handleGatheringCommand(
 
   await interaction.deferReply();
 
-  const { embed } = await manager.gather(interaction.user.id, sourceType);
+  const { embed } = await manager.gather(interaction.user.id, sourceType, interaction.id);
   await interaction.editReply({ embeds: [embed] });
 }

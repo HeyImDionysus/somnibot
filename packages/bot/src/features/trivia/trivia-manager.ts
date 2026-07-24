@@ -170,6 +170,21 @@ export class TriviaManager {
       return;
     }
 
+    // [game-economy-trivia] Per-channel cooldown ("breather") that prevents
+    // payout farming. The window is owner-tunable via
+    // economy_trivia_cooldown_seconds; the key is opened when a round ends
+    // (see endRound). ttl() returns the seconds remaining, or <=0 when the
+    // key is absent/expired. Guarded on Valkey so a no-Valkey deployment
+    // simply skips the breather rather than throwing.
+    const cooldownSeconds = config.economy_trivia_cooldown_seconds ?? 30;
+    if (cooldownSeconds > 0 && this.valkey) {
+      const remaining = await this.valkey.ttl(`trivia:cooldown:${guildId}:${channelId}`);
+      if (remaining > 0) {
+        await interaction.reply({ content: `⏳ A trivia round can start again in ${remaining}s.`, ephemeral: true });
+        return;
+      }
+    }
+
     // Pick a question
     const customQuestions = await this.getCustomQuestions(guildId);
     let pool = [...BUILT_IN_QUESTIONS, ...customQuestions];
@@ -253,6 +268,16 @@ export class TriviaManager {
 
     const guildId = interaction.guildId!;
     const config = await this.getConfig(guildId);
+
+    // [game-economy-trivia] Open the per-channel cooldown breather so the next
+    // round in this channel is gated for economy_trivia_cooldown_seconds.
+    const cooldownSeconds = config?.economy_trivia_cooldown_seconds ?? 30;
+    if (cooldownSeconds > 0 && this.valkey) {
+      await this.valkey
+        .set(`trivia:cooldown:${guildId}:${channelId}`, '1', 'EX', cooldownSeconds)
+        .catch((e: unknown) => { log.warn('trivia cooldown set failed:', (e as Error)?.message ?? e); });
+    }
+
     const basePayout = config?.economy_trivia_base_payout ?? 50;
     const streakMultPct = config?.economy_trivia_streak_multiplier_pct ?? 10;
     const diffMult = DIFFICULTY_MULTIPLIERS[round.question.difficulty] ?? 1;

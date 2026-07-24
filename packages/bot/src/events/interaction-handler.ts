@@ -377,11 +377,38 @@ async function handleSlashCommand(
     return;
   }
 
-  // Music commands
+  // Music commands — gated by music_enabled
   if (MUSIC_COMMANDS.has(interaction.commandName)) {
     const mgr = getManager<MusicPlayerManager>(client, 'musicPlayer', guildId);
-    if (mgr) { await handleMusicCommand(interaction, mgr); }
-    else { await interaction.reply({ content: '❌ Music system is not enabled.', ephemeral: true }); }
+    if (mgr) {
+      await handleMusicCommand(interaction, mgr);
+      return;
+    }
+    // No manager is wired. Distinguish an owner-disabled feature
+    // (music_enabled=false) from a genuine infrastructure gap so the two decline
+    // paths are not conflated.
+    const { data: musicFlagCfg } = await client.supabase
+      .from('guild_config')
+      .select('music_enabled')
+      .eq('guild_id', guildId)
+      .maybeSingle();
+    if (musicFlagCfg?.music_enabled === false) {
+      // Catalog `music-disabled`: a branded, guild-named ephemeral embed notice.
+      const disabledEmbed = new EmbedBuilder()
+        .setColor(0x00d4ff)
+        .setTitle('🎵 Music is switched off')
+        .setDescription(
+          `Music is currently switched off in **${interaction.guild?.name ?? 'this server'}** — ` +
+            'an admin can flip it back on from the dashboard.',
+        );
+      await interaction.reply({ embeds: [disabledEmbed], ephemeral: true });
+      return;
+    }
+    // Music is enabled but no manager is available — an infrastructure/startup gap.
+    await interaction.reply({
+      content: '❌ Music system is temporarily unavailable. Please try again shortly.',
+      ephemeral: true,
+    });
     return;
   }
 

@@ -29,6 +29,10 @@ interface ScheduledMessage {
   current_sends: number;
   active: boolean;
   last_sent_at: string | null;
+  status: string | null;
+  last_error: string | null;
+  failed_at: string | null;
+  missed_run_policy: string | null;
 }
 
 interface EmbedConfig {
@@ -152,6 +156,11 @@ export class ScheduledMessageRunner {
       log.info('No active schedules');
     }
 
+    // Apply the missed-run policy for occurrences that were due while the stack
+    // was down (before wiring the regular minute tick so a send-latest catch-up
+    // and the first tick cannot race the same occurrence).
+    await this.handleMissedRuns();
+
     // Check every 60 seconds (aligned to minute boundary)
     const now = Date.now();
     const msToNextMinute = 60_000 - (now % 60_000);
@@ -184,6 +193,7 @@ export class ScheduledMessageRunner {
       .select('*')
       .eq('guild_id', this.guild.id)
       .eq('active', true)
+      .eq('status', 'active')
       .limit(1000);
 
     this.schedules = (data ?? []) as ScheduledMessage[];
@@ -227,7 +237,11 @@ export class ScheduledMessageRunner {
   private async sendMessage(schedule: ScheduledMessage): Promise<void> {
     const channel = this.guild.channels.cache.get(schedule.channel_id) as TextChannel | undefined;
     if (!channel || !channel.isTextBased()) {
+      // The target channel is gone/non-text. Mark the schedule failed, alert the
+      // owner once, and stop it re-firing every minute (loadSchedules filters on
+      // status='active'). Previously this only log.warn()'d forever, silently.
       log.warn(`Channel ${schedule.channel_id} not found`);
+      await this.markFailed(schedule, `channel_missing:${schedule.channel_id}`);
       return;
     }
 
@@ -294,14 +308,197 @@ export class ScheduledMessageRunner {
     const content = schedule.message ? replaceVariables(schedule.message, this.guild) : undefined;
 
     // Send the message. The occurrence was already claimed atomically above, so
-    // tracking (last_sent_at / current_sends) is persisted whether or not the
-    // send succeeds — a failed send is not retried this window (at-most-once),
-    // which is the correct trade for the "never duplicate" contract.
-    await channel.send({
+    // the "never duplicate" contract holds regardless of send outcome. A single
+    // transient Discord blip should not drop the occurrence, so retry with
+    // bounded backoff; only after retries are exhausted do we mark the schedule
+    // failed and alert the owner (matching the delivery-failed contract).
+    const sent = await this.trySend(channel, {
       content: content || undefined,
       embeds: embed ? [embed] : undefined,
     });
+    if (!sent.ok) {
+      log.error(`Failed to send "${schedule.name}" after retries:`, sent.error);
+      await this.markFailed(schedule, `send_failed:${sent.error}`);
+      return;
+    }
 
     log.info(`Sent "${schedule.name}" to #${channel.name}`);
+  }
+
+  /**
+   * Send with bounded exponential backoff. Returns ok:false with the last error
+   * once all attempts are exhausted rather than throwing.
+   */
+  private async trySend(
+    channel: TextChannel,
+    payload: { content?: string; embeds?: EmbedBuilder[] },
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const maxAttempts = 3;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await channel.send(payload);
+        return { ok: true };
+      } catch (err) {
+        lastErr = err;
+        if (attempt < maxAttempts) {
+          const backoffMs = 500 * 2 ** (attempt - 1);
+          log.warn(`Send attempt ${attempt} failed, retrying in ${backoffMs}ms:`, { error: String(err) });
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        }
+      }
+    }
+    return { ok: false, error: String(lastErr) };
+  }
+
+  /**
+   * Mark a schedule failed, raise exactly one owner alert, and stop it firing.
+   * The status transition is conditional (only from 'active') so concurrent
+   * runner instances do not double-alert for the same failure.
+   */
+  private async markFailed(schedule: ScheduledMessage, reason: string): Promise<void> {
+    const { data: transitioned, error } = await this.supabase
+      .from('scheduled_messages')
+      .update({ status: 'failed', last_error: reason, failed_at: new Date().toISOString() })
+      .eq('id', schedule.id)
+      .eq('status', 'active')
+      .select('id');
+    if (error) {
+      log.error(`Failed to mark schedule ${schedule.id} failed:`, error.message);
+      return;
+    }
+    if (!transitioned || transitioned.length === 0) {
+      // Another instance already recorded the failure — do not double-alert.
+      return;
+    }
+
+    const channel = this.guild.channels.cache.get(schedule.channel_id);
+    const channelName =
+      channel && 'name' in channel ? `#${(channel as TextChannel).name}` : `channel ${schedule.channel_id}`;
+    try {
+      await this.supabase.from('alerts').insert({
+        guild_id: this.guild.id,
+        alert_type: 'scheduled_message_delivery_failed',
+        severity: 'warning',
+        title: `Scheduled message "${schedule.name}" could not be delivered`,
+        message:
+          `Scheduled message "${schedule.name}" could not post to ${channelName}: ${reason}. ` +
+          `It has been paused; re-enable it after fixing the issue. Other schedules are unaffected.`,
+        metadata: { schedule_id: schedule.id, channel_id: schedule.channel_id, reason },
+      });
+    } catch (alertErr) {
+      log.error(
+        'Failed to write scheduled-message delivery alert:',
+        alertErr instanceof Error ? alertErr.message : alertErr,
+      );
+    }
+  }
+
+  /**
+   * On startup, apply the per-schedule missed-run policy for occurrences that
+   * were due while the stack was down. Only schedules with a baseline
+   * (last_sent_at or start_date) can have a "missed" occurrence, so a brand-new
+   * schedule never triggers a spurious catch-up.
+   */
+  private async handleMissedRuns(): Promise<void> {
+    const now = new Date();
+    for (const schedule of this.schedules) {
+      try {
+        const baselineStr = schedule.last_sent_at ?? schedule.start_date;
+        if (!baselineStr) continue;
+        const baseline = new Date(baselineStr);
+        if (Number.isNaN(baseline.getTime())) continue;
+
+        if (schedule.end_date && new Date(schedule.end_date) < now) continue;
+        if (schedule.max_sends != null && schedule.current_sends >= schedule.max_sends) continue;
+
+        const lastOcc = this.lastOccurrenceBefore(schedule, now);
+        if (!lastOcc || lastOcc.getTime() <= baseline.getTime()) continue;
+
+        if (schedule.missed_run_policy === 'send-latest') {
+          // Fire exactly one catch-up now; sendMessage's atomic claim prevents a
+          // double-post if another instance also recovers.
+          await this.sendMessage(schedule);
+        } else {
+          // skip-missed (default): drop the occurrences but notify the owner once.
+          await this.noticeMissed(schedule, baseline, lastOcc, now);
+        }
+      } catch (err) {
+        log.error(`Missed-run handling failed for schedule ${schedule.id}:`, err);
+      }
+    }
+  }
+
+  /**
+   * Notify the owner once that occurrences were dropped, then advance
+   * last_sent_at so a later restart does not re-notify for the same miss. The
+   * conditional update makes the notice single-winner across instances.
+   */
+  private async noticeMissed(
+    schedule: ScheduledMessage,
+    baseline: Date,
+    lastOcc: Date,
+    now: Date,
+  ): Promise<void> {
+    const { data: won, error } = await this.supabase
+      .from('scheduled_messages')
+      .update({ last_sent_at: now.toISOString() })
+      .eq('id', schedule.id)
+      .or(`last_sent_at.is.null,last_sent_at.lt.${lastOcc.toISOString()}`)
+      .select('id');
+    if (error || !won || won.length === 0) return;
+
+    const missedCount = this.countOccurrences(schedule, baseline, now);
+    try {
+      await this.supabase.from('alerts').insert({
+        guild_id: this.guild.id,
+        alert_type: 'scheduled_message_missed_occurrence',
+        severity: 'info',
+        title: `Scheduled message "${schedule.name}" missed ${missedCount} occurrence(s)`,
+        message:
+          `While I was offline, "${schedule.name}" missed ${missedCount} occurrence(s). ` +
+          `Per your missed-run policy (skip-missed) nothing was sent late.`,
+        metadata: { schedule_id: schedule.id, missed_count: missedCount },
+      });
+    } catch (alertErr) {
+      log.error(
+        'Failed to write missed-occurrence notice:',
+        alertErr instanceof Error ? alertErr.message : alertErr,
+      );
+    }
+  }
+
+  /**
+   * Most recent fully-past cron occurrence strictly before `upto`, scanning back
+   * a bounded window (2 days) to keep the startup cost constant.
+   */
+  private lastOccurrenceBefore(schedule: ScheduledMessage, upto: Date): Date | null {
+    const maxLookbackMin = 2 * 24 * 60;
+    const start = new Date(upto);
+    start.setSeconds(0, 0);
+    for (let i = 1; i <= maxLookbackMin; i++) {
+      const cand = new Date(start.getTime() - i * 60_000);
+      const local = dateInTimezone(cand, schedule.timezone || 'UTC');
+      if (matchesCron(schedule.cron_expression, local)) return cand;
+    }
+    return null;
+  }
+
+  /**
+   * Count cron occurrences strictly after `after` and at/before `until`,
+   * capped at the same 2-day window.
+   */
+  private countOccurrences(schedule: ScheduledMessage, after: Date, until: Date): number {
+    const maxLookbackMin = 2 * 24 * 60;
+    const start = new Date(until);
+    start.setSeconds(0, 0);
+    let count = 0;
+    for (let i = 1; i <= maxLookbackMin; i++) {
+      const cand = new Date(start.getTime() - i * 60_000);
+      if (cand.getTime() <= after.getTime()) break;
+      const local = dateInTimezone(cand, schedule.timezone || 'UTC');
+      if (matchesCron(schedule.cron_expression, local)) count++;
+    }
+    return count;
   }
 }

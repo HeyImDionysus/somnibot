@@ -17,7 +17,6 @@ import {
   type ModalSubmitInteraction,
   type Interaction,
   EmbedBuilder,
-  PermissionFlagsBits,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -27,6 +26,7 @@ import {
 import type { SomniClient } from '../../client.js';
 import type { DbTicketPanel, TicketTypeConfig } from '@somnibot/shared';
 import { createTicket, claimTicket, closeTicket, reopenTicket, deleteTicket } from './ticket-service.js';
+import { canMemberManageTicket, emitTicketDenied, ticketDeniedMessage } from './ticket-authz.js';
 import { generateTranscript } from './transcript-generator.js';
 import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
 
@@ -246,18 +246,16 @@ async function handleTicketClose(
   interaction: ButtonInteraction,
   client: SomniClient,
 ): Promise<void> {
-  await interaction.deferReply();
-
   const guild = interaction.guild;
   if (!guild) return;
 
   const ticketNumber = parseInt(interaction.customId.split(':')[2], 10);
   if (isNaN(ticketNumber)) {
-    await interaction.editReply('❌ Invalid ticket.');
+    await interaction.reply({ content: '❌ Invalid ticket.', ephemeral: true });
     return;
   }
 
-  // Fetch ticket to generate transcript before closing
+  // Fetch ticket to authorize and to generate a transcript before closing.
   const { data: ticket } = await client.supabase
     .from('tickets')
     .select('*')
@@ -265,7 +263,21 @@ async function handleTicketClose(
     .eq('ticket_number', ticketNumber)
     .single();
 
-  if (ticket && (ticket.status === 'open' || ticket.status === 'claimed')) {
+  if (!ticket) {
+    await interaction.reply({ content: '❌ Ticket not found.', ephemeral: true });
+    return;
+  }
+
+  // The creator may close their own ticket; anyone else must be a manager.
+  if (!(await canMemberManageTicket(client.supabase, interaction.member, ticket, 'close', interaction.user.id))) {
+    emitTicketDenied(client.eventBus, guild.id, ticket, interaction.user.id);
+    await interaction.reply({ content: ticketDeniedMessage('close'), ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply();
+
+  if (ticket.status === 'open' || ticket.status === 'claimed') {
     // Generate transcript before closing
     await generateTranscript(guild, ticket, client.supabase);
   }
@@ -298,6 +310,24 @@ async function handleTicketClaim(
   const ticketNumber = parseInt(interaction.customId.split(':')[2], 10);
   if (isNaN(ticketNumber)) {
     await interaction.reply({ content: '❌ Invalid ticket.', ephemeral: true });
+    return;
+  }
+
+  const { data: ticket } = await client.supabase
+    .from('tickets')
+    .select('*')
+    .eq('guild_id', guild.id)
+    .eq('ticket_number', ticketNumber)
+    .single();
+
+  if (!ticket) {
+    await interaction.reply({ content: '❌ Ticket not found.', ephemeral: true });
+    return;
+  }
+
+  if (!(await canMemberManageTicket(client.supabase, interaction.member, ticket, 'claim', interaction.user.id))) {
+    emitTicketDenied(client.eventBus, guild.id, ticket, interaction.user.id);
+    await interaction.reply({ content: ticketDeniedMessage('claim'), ephemeral: true });
     return;
   }
 
@@ -376,6 +406,24 @@ async function handleTicketReopen(
     return;
   }
 
+  const { data: ticket } = await client.supabase
+    .from('tickets')
+    .select('*')
+    .eq('guild_id', guild.id)
+    .eq('ticket_number', ticketNumber)
+    .single();
+
+  if (!ticket) {
+    await interaction.reply({ content: '❌ Ticket not found.', ephemeral: true });
+    return;
+  }
+
+  if (!(await canMemberManageTicket(client.supabase, interaction.member, ticket, 'reopen', interaction.user.id))) {
+    emitTicketDenied(client.eventBus, guild.id, ticket, interaction.user.id);
+    await interaction.reply({ content: ticketDeniedMessage('reopen'), ephemeral: true });
+    return;
+  }
+
   const result = await reopenTicket(
     guild,
     client.supabase,
@@ -401,19 +449,28 @@ async function handleTicketDelete(
   const guild = interaction.guild;
   if (!guild) return;
 
-  // Only allow managers to delete
-  const member = await guild.members.fetch(interaction.user.id);
-  if (!member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-    await interaction.reply({
-      content: '❌ Only staff with Manage Channels permission can delete tickets.',
-      ephemeral: true,
-    });
-    return;
-  }
-
   const ticketNumber = parseInt(interaction.customId.split(':')[2], 10);
   if (isNaN(ticketNumber)) {
     await interaction.reply({ content: '❌ Invalid ticket.', ephemeral: true });
+    return;
+  }
+
+  const { data: ticket } = await client.supabase
+    .from('tickets')
+    .select('*')
+    .eq('guild_id', guild.id)
+    .eq('ticket_number', ticketNumber)
+    .single();
+
+  if (!ticket) {
+    await interaction.reply({ content: '❌ Ticket not found.', ephemeral: true });
+    return;
+  }
+
+  // Only managers (configured manager roles or Manage Server/Channels) may delete.
+  if (!(await canMemberManageTicket(client.supabase, interaction.member, ticket, 'delete', interaction.user.id))) {
+    emitTicketDenied(client.eventBus, guild.id, ticket, interaction.user.id);
+    await interaction.reply({ content: ticketDeniedMessage('delete'), ephemeral: true });
     return;
   }
 

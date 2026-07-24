@@ -129,7 +129,7 @@ export async function handleCustomCommand(
         : [...member.roles.cache.keys()];
       const hasAllowedRole = cmd.allowed_roles.some((r: string) => memberRoles.includes(r));
       if (!hasAllowedRole) {
-        await interaction.reply({ content: '❌ You don\'t have permission to use this command.', ephemeral: true });
+        await interaction.reply({ content: `❌ You do not have permission to use /${cmd.name} on ${guild.name}.`, ephemeral: true });
         return true;
       }
     }
@@ -144,7 +144,7 @@ export async function handleCustomCommand(
         : [...member.roles.cache.keys()];
       const hasDeniedRole = cmd.denied_roles.some((r: string) => memberRoles.includes(r));
       if (hasDeniedRole) {
-        await interaction.reply({ content: '❌ You don\'t have permission to use this command.', ephemeral: true });
+        await interaction.reply({ content: `❌ You do not have permission to use /${cmd.name} on ${guild.name}.`, ephemeral: true });
         return true;
       }
     }
@@ -152,28 +152,31 @@ export async function handleCustomCommand(
 
   // Check channel restrictions
   if (cmd.allowed_channels.length > 0 && !cmd.allowed_channels.includes(interaction.channelId)) {
-    await interaction.reply({ content: '❌ This command can\'t be used in this channel.', ephemeral: true });
+    await interaction.reply({ content: `❌ /${cmd.name} can't be used in this channel.`, ephemeral: true });
     return true;
   }
 
   if (cmd.denied_channels.length > 0 && cmd.denied_channels.includes(interaction.channelId)) {
-    await interaction.reply({ content: '❌ This command can\'t be used in this channel.', ephemeral: true });
+    await interaction.reply({ content: `❌ /${cmd.name} can't be used in this channel.`, ephemeral: true });
     return true;
   }
 
-  // Check cooldown
+  // Check cooldown — atomic claim so the "enforced atomically" contract holds.
+  // A single SET NX either claims the cooldown window (returns 'OK') or reports
+  // it already held (returns null). Two truly-simultaneous invocations can no
+  // longer both observe "no key" before either writes it, so exactly one wins
+  // the race and executes; the loser gets the cooldown notice.
   if (cmd.cooldown_seconds > 0) {
     const cooldownKey = `${COOLDOWN_PREFIX}:${guild.id}:${cmd.name}:${interaction.user.id}`;
-    const onCooldown = await valkey.get(cooldownKey);
-    if (onCooldown) {
+    const claimed = await valkey.set(cooldownKey, '1', 'EX', cmd.cooldown_seconds, 'NX');
+    if (!claimed) {
       const ttl = await valkey.ttl(cooldownKey);
       await interaction.reply({
-        content: `⏳ Command on cooldown. Try again in ${ttl}s.`,
+        content: `⏳ Easy there — /${cmd.name} is on cooldown. Try again in ${ttl}s.`,
         ephemeral: true,
       });
       return true;
     }
-    await valkey.set(cooldownKey, '1', 'EX', cmd.cooldown_seconds);
   }
 
   // Execute actions

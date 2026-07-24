@@ -116,3 +116,56 @@ describe('GamesManager deep', () => {
     expect(responded).toBe(true);
   });
 });
+
+// ── [game-economy-casino] white-label currency branding ───────────────────
+// The casino outcome surfaces must brand with the guild's configured
+// currency_name/currency_emoji instead of the literal word "coins".
+describe('GamesManager white-label currency branding', () => {
+  // Table-aware mock so validateBet reaches the outcome embed: an enabled
+  // config, a funded wallet, and no-error RPCs for the balance mutations.
+  function makeBrandedSupa() {
+    const config = {
+      guild_id: 'guild-1',
+      economy_games_enabled: true,
+      economy_coinflip_max_bet: 10000,
+      economy_slots_max_bet: 10000,
+      economy_daily_loss_limit: 0,
+      currency_name: 'Gems',
+      currency_emoji: '💎',
+    };
+    return {
+      from: vi.fn((table: string) => {
+        if (table === 'economy_wallets') return makeChain({ wallet: 100000 });
+        return makeChain(config);
+      }),
+      rpc: vi.fn(async () => ({ data: 0, error: null })),
+    } as any;
+  }
+
+  function lastEmbedText(interaction: any): string {
+    const calls = interaction.reply.mock.calls;
+    const args = calls[calls.length - 1][0];
+    const embed = args.embeds[0];
+    const data = embed.data ?? embed;
+    return `${data.title ?? ''} ${data.description ?? ''}`;
+  }
+
+  it('coinflip outcome embed uses the configured currency, never "coins"', async () => {
+    const mgr = new GamesManager(makeBrandedSupa());
+    const interaction = makeInteraction();
+    await mgr.coinflip(interaction, 100);
+    const text = lastEmbedText(interaction);
+    expect(text).toContain('Gems');
+    expect(text).toContain('💎');
+    expect(text.toLowerCase()).not.toContain('coins');
+  });
+
+  it('slots outcome embed uses the configured currency, never "coins"', async () => {
+    const mgr = new GamesManager(makeBrandedSupa());
+    const interaction = makeInteraction();
+    await mgr.slots(interaction, 100);
+    const text = lastEmbedText(interaction);
+    expect(text).toContain('Gems');
+    expect(text.toLowerCase()).not.toContain('coins');
+  });
+});

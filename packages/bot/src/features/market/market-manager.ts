@@ -135,7 +135,7 @@ export class MarketManager {
     // Check inventory
     const { data: inv } = await this.supabase
       .from('economy_inventory')
-      .select('id, quantity, item_id, economy_items!inner(name, id)')
+      .select('id, quantity, item_id, economy_items!inner(name, id, tradeable)')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
       .ilike('economy_items.name', itemName)
@@ -150,7 +150,17 @@ export class MarketManager {
 
     const raw = inv[0];
     const joinedItems = Array.isArray(raw.economy_items) ? raw.economy_items[0] : raw.economy_items;
-    const invEntry = { item_id: raw.item_id as string, quantity: raw.quantity as number, economy_items: joinedItems as { id: string; name: string } };
+    const invEntry = { item_id: raw.item_id as string, quantity: raw.quantity as number, economy_items: joinedItems as { id: string; name: string; tradeable: boolean } };
+
+    // [game-economy-shop-market] Anti-laundering wall: non-tradeable items (e.g.
+    // commerce-granted goods) must never reach the player market. Reject before
+    // any inventory decrement; the RPC re-checks as defense-in-depth.
+    if (invEntry.economy_items?.tradeable === false) {
+      return new EmbedBuilder()
+        .setDescription(`🚫 **${invEntry.economy_items.name}** cannot be traded on the player market.`)
+        .setColor(0xff0000);
+    }
+
     if (invEntry.quantity < quantity) {
       return new EmbedBuilder()
         .setDescription(`❌ You only have **${invEntry.quantity}x** ${itemName} (trying to list ${quantity}).`)
@@ -181,6 +191,12 @@ export class MarketManager {
     }
 
     const result = created as { error?: string; listing?: MarketListing } | null;
+    if (result?.error === 'not_tradeable') {
+      // [game-economy-shop-market] RPC defense-in-depth refused a non-tradeable item.
+      return new EmbedBuilder()
+        .setDescription(`🚫 **${invEntry.economy_items.name}** cannot be traded on the player market.`)
+        .setColor(0xff0000);
+    }
     if (!result?.listing) {
       // Typed 'insufficient_inventory' — a concurrent listing consumed the stack
       return new EmbedBuilder()

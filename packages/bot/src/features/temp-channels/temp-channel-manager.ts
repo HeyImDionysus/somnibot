@@ -24,7 +24,9 @@ export interface HubConfig {
   default_user_limit: number;
   default_bitrate: number;
   keep_alive_minutes: number;
+  empty_grace_seconds: number | null;
   allow_text_channel: boolean;
+  allow_claim: boolean;
   moderator_roles: string[];
   active: boolean;
 }
@@ -41,6 +43,7 @@ export class TempChannelManager {
   private hubs: Map<string, HubConfig> = new Map(); // hub_channel_id → config
   private activeChannels: Map<string, ActiveTempChannel> = new Map(); // channel_id → active
   private keepAliveTimers: Map<string, NodeJS.Timeout> = new Map();
+  private inFlightJoins: Set<string> = new Set(); // `${memberId}:${hubChannelId}` currently spawning
 
   constructor(
     private guild: Guild,
@@ -109,35 +112,50 @@ export class TempChannelManager {
     const hub = this.hubs.get(hubChannelId);
     if (!hub) return;
 
-    // Format channel name
+    // Join-event idempotency: a re-delivered voiceStateUpdate (Discord gateway
+    // resume/reconnect can re-emit the same hub-join) must not spawn a SECOND
+    // room. A fresh create yields a new channel id, so the active_temp_channels
+    // PK gives no protection — guard on an in-flight key keyed by member+hub.
+    const joinKey = `${member.id}:${hubChannelId}`;
+    if (this.inFlightJoins.has(joinKey)) return;
+    this.inFlightJoins.add(joinKey);
+
+    // Format channel name. The catalog's single documented variable is
+    // {owner-name}; {username}/{user}/{tag}/{count} are supported aliases.
     const channelName = hub.naming_format
-      .replace('{username}', member.displayName)
-      .replace('{user}', member.displayName)
-      .replace('{tag}', member.user.username)
-      .replace('{count}', String(this.activeChannels.size + 1));
+      .replace(/\{owner-name\}/g, member.displayName)
+      .replace(/\{username\}/g, member.displayName)
+      .replace(/\{user\}/g, member.displayName)
+      .replace(/\{tag\}/g, member.user.username)
+      .replace(/\{count\}/g, String(this.activeChannels.size + 1));
 
     try {
       const category = this.guild.channels.cache.get(hub.category_id) as CategoryChannel | undefined;
 
-      // Create the voice channel
-      const vc = await this.guild.channels.create({
-        name: channelName,
-        type: ChannelType.GuildVoice,
-        parent: category ?? undefined,
-        userLimit: hub.default_user_limit || undefined,
-        bitrate: hub.default_bitrate,
-        permissionOverwrites: [
-          {
-            id: member.id,
-            allow: [
-              PermissionFlagsBits.ManageChannels,
-              PermissionFlagsBits.MoveMembers,
-              PermissionFlagsBits.MuteMembers,
-              PermissionFlagsBits.DeafenMembers,
+      // Create the voice channel. A single transient failure must not leave the
+      // member with no room — retry briefly so at most one room per join event.
+      const vc = await this.withRetry(
+        () =>
+          this.guild.channels.create({
+            name: channelName,
+            type: ChannelType.GuildVoice,
+            parent: category ?? undefined,
+            userLimit: hub.default_user_limit || undefined,
+            bitrate: hub.default_bitrate,
+            permissionOverwrites: [
+              {
+                id: member.id,
+                allow: [
+                  PermissionFlagsBits.ManageChannels,
+                  PermissionFlagsBits.MoveMembers,
+                  PermissionFlagsBits.MuteMembers,
+                  PermissionFlagsBits.DeafenMembers,
+                ],
+              },
             ],
-          },
-        ],
-      });
+          }),
+        'temp channel create',
+      );
 
       let textChannelId: string | null = null;
 
@@ -186,7 +204,71 @@ export class TempChannelManager {
 
       log.info(`Created "${vc.name}" for ${member.user.username}`);
     } catch (err) {
+      // Room creation failed after retries — do not fail silently. Notify the
+      // member and raise exactly one owner alert so the outage is visible.
       log.error('Failed to create temp channel:', { error: String(err) });
+      await this.notifyCreationFailure(member, hub, err);
+    } finally {
+      this.inFlightJoins.delete(joinKey);
+    }
+  }
+
+  /**
+   * Run an operation with a bounded retry so a single transient failure does not
+   * drop the whole action. Returns the first successful result or rethrows the
+   * last error after all attempts are exhausted.
+   */
+  private async withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+    const maxAttempts = 2;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastErr = err;
+        if (attempt < maxAttempts) {
+          log.warn(`${label} attempt ${attempt} failed, retrying`, { error: String(err) });
+          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        }
+      }
+    }
+    throw lastErr;
+  }
+
+  /**
+   * Surface a room-creation outage: DM the member and raise one owner alert.
+   * (The temp_channels.creation_failed audit event is emitted by the caller's
+   * platform-event pipeline; the alerts row here drives the dashboard badge and
+   * the owner alert channel.)
+   */
+  private async notifyCreationFailure(
+    member: GuildMember,
+    hub: HubConfig,
+    err: unknown,
+  ): Promise<void> {
+    // Member notice (best effort — DMs may be closed).
+    try {
+      await member.send(
+        "⚠️ I couldn't create your temporary voice channel just now. Please try again in a moment, or let a server admin know if it keeps happening.",
+      );
+    } catch {
+      // Member has DMs disabled — nothing more we can surface to them here.
+    }
+
+    // Owner alert — one row in the alerts table.
+    try {
+      await this.supabase.from('alerts').insert({
+        guild_id: this.guild.id,
+        alert_type: 'temp_channel_creation_failed',
+        severity: 'warning',
+        title: 'Temporary voice channel could not be created',
+        message:
+          `A member tried to create a temporary voice channel from hub <#${hub.hub_channel_id}> ` +
+          `but creation failed: ${String(err)}. Check my Manage Channels permission and the hub's category.`,
+        metadata: { hub_id: hub.id, hub_channel_id: hub.hub_channel_id, member_id: member.id },
+      });
+    } catch (alertErr) {
+      log.error('Failed to write temp-channel creation alert:', { error: String(alertErr) });
     }
   }
 
@@ -214,9 +296,12 @@ export class TempChannelManager {
       return;
     }
 
-    // Channel empty — start keep-alive countdown
+    // Channel empty — start empty-room grace countdown. The catalog control is
+    // empty-grace-seconds (seconds); keep_alive_minutes is a compatibility
+    // fallback for any hub not yet backfilled to the seconds column.
     const hub = this.getHubForChannel(channelId);
-    const keepAliveMs = ((hub?.keep_alive_minutes ?? 1) * 60_000);
+    const graceSeconds = hub?.empty_grace_seconds ?? ((hub?.keep_alive_minutes ?? 1) * 60);
+    const keepAliveMs = graceSeconds * 1000;
 
     // Cancel any existing timer
     const existing = this.keepAliveTimers.get(channelId);

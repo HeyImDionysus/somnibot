@@ -169,7 +169,7 @@ async function collectMemberData(
     sb.from('economy_quest_progress').select('*, economy_quest_templates(title, description)').eq('guild_id', guildId).eq('user_id', userId),
     sb.from('economy_market_listings').select('*').eq('guild_id', guildId).eq('seller_id', userId).order('created_at', { ascending: false }).limit(200),
     sb.from('economy_adventure_sessions').select('*').eq('guild_id', guildId).eq('user_id', userId).order('started_at', { ascending: false }).limit(100),
-    sb.from('infractions').select('id, type, reason, moderator_id, created_at, expires_at, active').eq('guild_id', guildId).eq('user_id', userId).order('created_at', { ascending: false }).limit(1000),
+    sb.from('infractions').select('id, type, reason, moderator_id, created_at, expires_at, active').eq('guild_id', guildId).eq('member_id', userId).order('created_at', { ascending: false }).limit(1000),
     sb.from('tickets').select('id, ticket_number, type, status, created_at, closed_at').eq('guild_id', guildId).eq('creator_id', userId).order('created_at', { ascending: false }).limit(1000),
     sb.from('poll_votes').select('*, polls(title), poll_options(label)').eq('guild_id', guildId).eq('user_id', userId).limit(1000),
   ]);

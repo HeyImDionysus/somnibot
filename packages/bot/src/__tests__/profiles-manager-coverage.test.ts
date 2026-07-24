@@ -278,5 +278,22 @@ describe('ProfilesManager', () => {
         content: expect.stringContaining('disabled'),
       }));
     });
+
+    it('ignores a re-delivered write (same interaction id) — no second confirmation', async () => {
+      supabase = makeSupabase({ economy_profiles: { bio: null } });
+      mgr = new ProfilesManager(supabase as any);
+
+      const first = makeInteraction({ bio: 'hello' });
+      (first as any).id = 'int-replay-1';
+      await mgr.setBio(first as any);
+      expect(first.reply).toHaveBeenCalledTimes(1);
+
+      // Gateway redelivery: a fresh interaction object carrying the same id.
+      const replay = makeInteraction({ bio: 'hello' });
+      (replay as any).id = 'int-replay-1';
+      await mgr.setBio(replay as any);
+      // The replay is fenced: no second confirmation is issued.
+      expect(replay.reply).not.toHaveBeenCalled();
+    });
   });
 });

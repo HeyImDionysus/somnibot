@@ -135,6 +135,10 @@ function interaction(opts: any = {}) {
       },
     },
     guildId: 'g1',
+    id: opts.interactionId ?? 'interaction1',
+    // Server-side permission re-check gate. Grants by default; a test can pass
+    // { hasPermission: false } to exercise the denial path.
+    memberPermissions: { has: vi.fn().mockReturnValue(opts.hasPermission ?? true) },
     reply: vi.fn().mockResolvedValue(undefined),
     editReply: vi.fn().mockResolvedValue(undefined),
     deferReply: vi.fn().mockResolvedValue(undefined),
@@ -284,5 +288,36 @@ describe('handleInfractionsCommand', () => {
     const i = interaction({ activeOnly: true });
     await handleInfractionsCommand(i as any, client() as any);
     expect(i.editReply).toHaveBeenCalled();
+  });
+
+  it('denies an invoker without ModerateMembers and leaks no history', async () => {
+    const i = interaction({ hasPermission: false });
+    await handleInfractionsCommand(i as any, client() as any);
+    // Ephemeral denial, no embed/history returned.
+    expect(i.editReply).toHaveBeenCalledWith(expect.stringMatching(/permission/i));
+    const calledWithEmbed = (i.editReply as any).mock.calls.some(
+      (c: any[]) => c[0] && typeof c[0] === 'object' && 'embeds' in c[0],
+    );
+    expect(calledWithEmbed).toBe(false);
+    // getMemberInfractions must not run once the gate denies.
+    const { getMemberInfractions } = await import('../features/moderation/infraction-service.js');
+    expect(getMemberInfractions).not.toHaveBeenCalled();
+  });
+});
+
+describe('moderation command permission gates', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('handleBanCommand denies an invoker without BanMembers', async () => {
+    const i = interaction({ hasPermission: false });
+    await handleBanCommand(i as any, client() as any);
+    expect(i.editReply).toHaveBeenCalledWith(expect.stringMatching(/permission/i));
+    expect(i.guild.members.fetch).not.toHaveBeenCalled();
+  });
+
+  it('handleWarnCommand denies an invoker without ModerateMembers', async () => {
+    const i = interaction({ hasPermission: false });
+    await handleWarnCommand(i as any, client() as any);
+    expect(i.editReply).toHaveBeenCalledWith(expect.stringMatching(/permission/i));
   });
 });

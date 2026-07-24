@@ -310,6 +310,9 @@ export class PollsManager {
       return;
     }
 
+    // White-label: use the owner-configured currency name (never the stock 'coins').
+    const currency = config?.currency_name ?? 'coins';
+
     if (options.length < 2 || options.length > 10) {
       await interaction.reply({ content: '❌ Predictions need 2-10 outcomes.', ephemeral: true });
       return;
@@ -349,9 +352,9 @@ export class PollsManager {
       .setTitle(`🔮 ${title}`)
       .setDescription(
         (insertedOptions ?? []).map((opt: any, i: number) =>
-          `${numberEmojis[i]} **${opt.label}** — 0 coins bet`
+          `${numberEmojis[i]} **${opt.label}** — 0 ${currency} bet`
         ).join('\n') +
-        `\n\n💰 Total pool: **0** coins\n*Use /predict bet to place your bet!*`
+        `\n\n💰 Total pool: **0** ${currency}\n*Use /predict bet to place your bet!*`
       )
       .setColor(0x9B59B6)
       .setFooter({ text: `Prediction ID: ${prediction.id}` });
@@ -374,6 +377,14 @@ export class PollsManager {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
 
+    // Load the guild's prediction bet limits + currency name (white-label).
+    const cfg = await this.getConfig(guildId) as
+      | (DbGuildConfig & { prediction_min_bet?: number; prediction_max_bet?: number })
+      | null;
+    const currency = cfg?.currency_name ?? 'coins';
+    const minBet = cfg?.prediction_min_bet ?? 1;
+    const maxBet = cfg?.prediction_max_bet ?? 0; // 0 = uncapped
+
     const { data: prediction } = await this.supabase
       .from('predictions')
       .select('*')
@@ -382,6 +393,16 @@ export class PollsManager {
 
     if (!prediction || prediction.status !== 'open') {
       await interaction.reply({ content: '❌ Prediction is not open for bets.', ephemeral: true });
+      return;
+    }
+
+    // Enforce the owner-tuned bet floor/cap before touching the wallet.
+    if (amount < minBet) {
+      await interaction.reply({ content: `❌ Minimum bet is **${minBet.toLocaleString()} ${currency}**.`, ephemeral: true });
+      return;
+    }
+    if (maxBet > 0 && amount > maxBet) {
+      await interaction.reply({ content: `❌ Maximum bet is **${maxBet.toLocaleString()} ${currency}**.`, ephemeral: true });
       return;
     }
 
@@ -461,7 +482,7 @@ export class PollsManager {
         .from('prediction_bets')
         .delete()
         .eq('id', insertedBet.id);
-      await interaction.reply({ content: `❌ Payment failed — you need **${amount.toLocaleString()}** coins.`, ephemeral: true });
+      await interaction.reply({ content: `❌ Payment failed — you need **${amount.toLocaleString()}** ${currency}.`, ephemeral: true });
       return;
     }
 
@@ -492,7 +513,7 @@ export class PollsManager {
         .delete()
         .eq('id', insertedBet.id);
       await interaction.reply({
-        content: '❌ Failed to place bet — please try again. Your coins were refunded.',
+        content: `❌ Failed to place bet — please try again. Your ${currency} were refunded.`,
         ephemeral: true,
       });
       return;
@@ -502,8 +523,8 @@ export class PollsManager {
       embeds: [new EmbedBuilder()
         .setTitle('🔮 Bet Placed!')
         .setDescription(
-          `You bet **${amount.toLocaleString()}** coins on **${options[optionIndex].label}**.\n` +
-          `New pool total: **${(newPool ?? prediction.total_pool + amount).toLocaleString()}** coins`
+          `You bet **${amount.toLocaleString()}** ${currency} on **${options[optionIndex].label}**.\n` +
+          `New pool total: **${(newPool ?? prediction.total_pool + amount).toLocaleString()}** ${currency}`
         )
         .setColor(0x9B59B6)],
     });
@@ -515,6 +536,8 @@ export class PollsManager {
     winningIndex: number,
   ): Promise<void> {
     const guildId = interaction.guildId!;
+    // White-label: resolve the configured currency name for the result embed.
+    const currency = (await this.getConfig(guildId))?.currency_name ?? 'coins';
 
     const { data: prediction } = await this.supabase
       .from('predictions')
@@ -643,7 +666,7 @@ export class PollsManager {
         .setTitle(`🔮 Prediction Resolved: ${prediction.title}`)
         .setDescription(
           `✅ Winning outcome: **${winningOption.label}**\n` +
-          `💰 Pool: **${finalTotalPool.toLocaleString()}** coins\n` +
+          `💰 Pool: **${finalTotalPool.toLocaleString()}** ${currency}\n` +
           summaryLine
         )
         .setColor(0x57F287)],

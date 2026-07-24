@@ -405,16 +405,17 @@ describe('AchievementsManager', () => {
     // economy_prestige_apply RPC; each case mocks getConfig (guild_config)
     // enabled and the RPC's returned status.
     function prestigeSb(rpcData: unknown) {
+      const rpc = vi.fn().mockResolvedValue({ data: rpcData, error: null });
       const fromMock = vi.fn().mockImplementation((table: string) => {
         const chain: Record<string, any> = {};
         for (const m of ['select', 'eq', 'order', 'limit', 'single', 'insert', 'update', 'maybeSingle']) chain[m] = vi.fn().mockReturnValue(chain);
         chain.then = (resolve: (v: any) => void) => resolve(table === 'guild_config'
-          ? { data: { economy_prestige_enabled: true, economy_prestige_min_level: 50, economy_prestige_min_net_worth: 1000000, economy_prestige_multiplier_pct: 10 }, error: null }
+          ? { data: { economy_prestige_enabled: true, economy_prestige_min_level: 50, economy_prestige_min_net_worth: 1000000, economy_prestige_multiplier_pct: 10, economy_prestige_max_level: 10 }, error: null }
           : { data: null, error: null });
         (chain as any)[Symbol.toStringTag] = 'Promise';
         return chain;
       });
-      return { from: fromMock, rpc: vi.fn().mockResolvedValue({ data: rpcData, error: null }) };
+      return { from: fromMock, rpc };
     }
 
     it('rejects when user level too low', async () => {
@@ -452,6 +453,21 @@ describe('AchievementsManager', () => {
       const interaction = makeInteraction();
       await mgr.prestige(interaction as any);
       expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ embeds: expect.any(Array) }));
+    });
+
+    it('passes the configured max level and refuses a capped member without a further bump', async () => {
+      const sb = prestigeSb({ status: 'prestige_capped', replayed: false, level: 10, max_level: 10 });
+      mgr = new AchievementsManager(sb as any);
+      const interaction = makeInteraction();
+      await mgr.prestige(interaction as any);
+
+      // The cap is threaded into the atomic RPC.
+      expect(sb.rpc).toHaveBeenCalledWith('economy_prestige_apply', expect.objectContaining({ p_max_level: 10 }));
+      // A capped member gets an ephemeral refusal (no prestige embed).
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('maximum prestige level'),
+        ephemeral: true,
+      }));
     });
   });
 });

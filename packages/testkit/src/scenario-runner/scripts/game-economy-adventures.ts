@@ -368,7 +368,7 @@ async function proveRlsIsolation(ctx: ScenarioContext, handle: LiveClientHandle)
     ctx.gate(
       'database-RLS',
       'db-rls',
-      'anon clients read zero economy_adventure_sessions rows (guild-scoped RLS adventure_sessions_guild).',
+      'anon clients read zero economy_adventure_sessions rows (locked to service_role_full_access; anon grants revoked by migration 20260710010000_rls_pattern_sweep_lockdown.sql).',
       'this scenario seeds no session row to serve as the positive control for the anon-denial probe; guild-scoped RLS is proven in scenarios that seed a session',
     );
     return;
@@ -378,7 +378,7 @@ async function proveRlsIsolation(ctx: ScenarioContext, handle: LiveClientHandle)
     ctx.gate(
       'database-RLS',
       'db-rls',
-      'anon clients read zero economy_adventure_sessions rows (guild-scoped RLS adventure_sessions_guild).',
+      'anon clients read zero economy_adventure_sessions rows (locked to service_role_full_access; anon grants revoked by migration 20260710010000_rls_pattern_sweep_lockdown.sql).',
       'no anon Supabase key exported (set SUPABASE_ANON_KEY); anon-denial not exercised — cross-guild scoping is still proven in XGUILD',
     );
     return;
@@ -397,7 +397,7 @@ async function proveRlsIsolation(ctx: ScenarioContext, handle: LiveClientHandle)
     assertionClass: 'database-RLS',
     channel: 'db-rls',
     promise:
-      'The service role reads this guild’s adventure session rows while an anon client reads zero of them (RLS adventure_sessions_guild).',
+      'The service role reads this guild’s adventure session rows while an anon client reads zero of them (economy_adventure_sessions is locked to service_role_full_access; anon grants revoked by migration 20260710010000_rls_pattern_sweep_lockdown.sql).',
     observation:
       `service-role sees ${svc} session row(s) under guild "${handle.guildId}"; ` +
       `an anon-key REST read returned ${anonRows} economy_adventure_sessions row(s) for that guild.`,

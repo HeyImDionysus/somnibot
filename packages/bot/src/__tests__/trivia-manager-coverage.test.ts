@@ -96,9 +96,17 @@ function makeSupabase(configOverrides: Record<string, unknown> = {}) {
 
 function makeValkey() {
   const store = new Map<string, string>();
+  const expiry = new Map<string, number>();
   return {
     get: vi.fn().mockImplementation((k: string) => Promise.resolve(store.get(k) ?? null)),
-    set: vi.fn().mockImplementation((k: string, v: string) => { store.set(k, v); return Promise.resolve('OK'); }),
+    set: vi.fn().mockImplementation((k: string, v: string, _mode?: string, ttl?: number) => {
+      store.set(k, v);
+      if (ttl) expiry.set(k, ttl);
+      return Promise.resolve('OK');
+    }),
+    // ioredis/iovalkey ttl: seconds remaining, -1 no-expire, -2 absent.
+    ttl: vi.fn().mockImplementation((k: string) =>
+      Promise.resolve(store.has(k) ? (expiry.get(k) ?? -1) : -2)),
   };
 }
 
@@ -198,6 +206,35 @@ describe('TriviaManager', () => {
       const interaction = makeInteraction({ channelId: 'ch4' });
       await mgr.startRound(interaction as any, 'science', 'easy');
       expect(interaction.reply).toHaveBeenCalled();
+    });
+
+    // [game-economy-trivia] Per-channel cooldown ("breather") enforcement.
+    it('refuses a new round while the per-channel cooldown is active', async () => {
+      // Simulate a prior round having opened the cooldown breather.
+      await valkey.set('trivia:cooldown:g1:cdch', '1', 'EX', 30);
+      const interaction = makeInteraction({ channelId: 'cdch' });
+      await mgr.startRound(interaction as any);
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('start again') }),
+      );
+      // No round should have been opened (no embed reply).
+      const openedRound = interaction.reply.mock.calls.some(
+        (c: unknown[]) => c[0] && Array.isArray((c[0] as { embeds?: unknown[] }).embeds),
+      );
+      expect(openedRound).toBe(false);
+    });
+
+    it('opens the per-channel cooldown when a round ends', async () => {
+      vi.useFakeTimers();
+      try {
+        const interaction = makeInteraction({ channelId: 'cdend' });
+        await mgr.startRound(interaction as any);
+        // Fire the 20s round timeout → endRound runs and opens the cooldown.
+        await vi.advanceTimersByTimeAsync(20_000);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(valkey.set).toHaveBeenCalledWith('trivia:cooldown:g1:cdend', '1', 'EX', 30);
     });
 
     it('uses custom questions from DB', async () => {

@@ -58,6 +58,7 @@ export async function POST(req: NextRequest) {
     start_date,
     end_date,
     max_sends,
+    missed_run_policy,
   } = body;
 
   if (!name || !channel_id || !cron_expression) {
@@ -93,6 +94,7 @@ export async function POST(req: NextRequest) {
       start_date: start_date ?? null,
       end_date: end_date ?? null,
       max_sends: max_sends ?? null,
+      missed_run_policy: missed_run_policy ?? 'skip-missed',
       current_sends: 0,
       active: true,
     })
@@ -125,7 +127,7 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing scheduled message id' }, { status: 400 });
   }
 
-  const updates = typedPick(body, ['name', 'channel_id', 'message', 'embed_config_id', 'cron_expression', 'timezone', 'start_date', 'end_date', 'max_sends', 'active']);
+  const updates = typedPick(body, ['name', 'channel_id', 'message', 'embed_config_id', 'cron_expression', 'timezone', 'start_date', 'end_date', 'max_sends', 'missed_run_policy', 'active']);
   updates.updated_at = new Date().toISOString();
 
   const { data, error } = await supabase

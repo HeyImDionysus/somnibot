@@ -139,12 +139,14 @@ export class LotteryManager {
     if (result) {
       // Winner!
       if (channel) {
+        const currencyName = config.currency_name ?? 'Coins';
+        const currencyEmoji = config.currency_emoji ?? '🪙';
         await channel.send({
           embeds: [new EmbedBuilder()
             .setTitle('🎟️ Lottery Drawing Results!')
             .setDescription(
               `🎉 <@${result.winnerId}> won the lottery!\n\n` +
-              `💰 Jackpot: **${result.jackpot.toLocaleString()}** coins\n` +
+              `${currencyEmoji} Jackpot: **${result.jackpot.toLocaleString()}** ${currencyName}\n` +
               `🎫 Winning ticket: #${result.winningNumber}\n\n` +
               `A new lottery has started — buy tickets with \`/lottery buy\`!`
             )
@@ -267,6 +269,9 @@ export class LotteryManager {
 
     const maxTickets = config.economy_lottery_max_tickets ?? 10;
     const ticketPrice = config.economy_lottery_ticket_price ?? 100;
+    // White-label currency branding (parity with the rest of the economy).
+    const currencyName = config.currency_name ?? 'Coins';
+    const currencyEmoji = config.currency_emoji ?? '🪙';
 
     if (count < 1 || count > maxTickets) {
       await interaction.reply({ content: `❌ You can buy 1-${maxTickets} tickets per drawing.`, ephemeral: true });
@@ -303,7 +308,7 @@ export class LotteryManager {
     const result = data as { status?: string; replayed?: boolean; jackpot?: number };
     switch (result.status) {
       case 'insufficient_funds':
-        await interaction.reply({ content: `❌ You need **${totalCost.toLocaleString()}** coins (${count} × ${ticketPrice.toLocaleString()}).`, ephemeral: true });
+        await interaction.reply({ content: `❌ You need **${totalCost.toLocaleString()}** ${currencyName} (${count} × ${ticketPrice.toLocaleString()}).`, ephemeral: true });
         return;
       case 'max_tickets':
         await interaction.reply({ content: `❌ You already have the maximum number of tickets for this drawing (max ${maxTickets}).`, ephemeral: true });
@@ -327,8 +332,8 @@ export class LotteryManager {
       embeds: [new EmbedBuilder()
         .setTitle('🎟️ Lottery Tickets Purchased!')
         .setDescription(
-          `You bought **${count}** ticket(s) for **${totalCost.toLocaleString()}** coins.\n` +
-          `Current jackpot: **${(result.jackpot ?? drawing.jackpot + totalCost).toLocaleString()}** coins 💰`
+          `You bought **${count}** ticket(s) for **${totalCost.toLocaleString()}** ${currencyName}.\n` +
+          `Current jackpot: **${(result.jackpot ?? drawing.jackpot + totalCost).toLocaleString()}** ${currencyName} ${currencyEmoji}`
         )
         .setColor(0x5865F2)],
     });
@@ -361,16 +366,18 @@ export class LotteryManager {
       .limit(1000);
 
     const uniquePlayers = new Set((tickets ?? []).map((t: any) => t.user_id));
+    const currencyName = config.currency_name ?? 'Coins';
+    const currencyEmoji = config.currency_emoji ?? '🪙';
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
         .setTitle('🎟️ Current Lottery')
         .setDescription(
-          `💰 Jackpot: **${(drawing.jackpot ?? 0).toLocaleString()}** coins\n` +
+          `${currencyEmoji} Jackpot: **${(drawing.jackpot ?? 0).toLocaleString()}** ${currencyName}\n` +
           `🎫 Tickets sold: **${(tickets ?? []).length}**\n` +
           `👥 Players: **${uniquePlayers.size}**\n` +
           `📅 Schedule: **${config.economy_lottery_schedule ?? 'weekly'}**\n` +
-          `💵 Ticket price: **${(config.economy_lottery_ticket_price ?? 100).toLocaleString()}** coins`
+          `💵 Ticket price: **${(config.economy_lottery_ticket_price ?? 100).toLocaleString()}** ${currencyName}`
         )
         .setColor(0x5865F2)],
     });

@@ -14,7 +14,7 @@ import { dbError } from '@/lib/api/response';
 const syncConfigAction = z.object({
   action: z.literal('update_config'),
   syncEnabled: z.boolean(),
-  syncIntervalMinutes: z.number().int().min(1).max(1440),
+  syncIntervalMinutes: z.number().int().min(5).max(1440),
   autoRepair: z.boolean(),
   autoRepairEveryone: z.boolean(),
 });

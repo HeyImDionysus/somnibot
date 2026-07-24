@@ -516,6 +516,7 @@ const scheduledMessageCreate = z.object({
   start_date: z.string().datetime().optional().nullable(),
   end_date: z.string().datetime().optional().nullable(),
   max_sends: z.number().int().min(0).optional().nullable(),
+  missed_run_policy: z.enum(['skip-missed', 'send-latest']).optional(),
 });
 
 const scheduledMessageUpdate = z.object({
@@ -529,6 +530,7 @@ const scheduledMessageUpdate = z.object({
   start_date: z.string().datetime().optional().nullable(),
   end_date: z.string().datetime().optional().nullable(),
   max_sends: z.number().int().min(0).optional().nullable(),
+  missed_run_policy: z.enum(['skip-missed', 'send-latest']).optional(),
   active: z.boolean().optional(),
 });
 
@@ -562,9 +564,12 @@ const levelRewardCreate = z.object({
 
 // ── Stats channel schemas ───────────────────────────
 
+const namePlaceholder = (s: string) => s.includes('{value}') || s.includes('{count}');
+const namePlaceholderMsg = 'name_format must contain the {value} placeholder';
+
 const statsChannelCreate = z.object({
   stat_type: z.string().min(1).max(64),
-  name_format: z.string().max(128),
+  name_format: z.string().max(128).refine(namePlaceholder, { message: namePlaceholderMsg }),
   stat_config: z.record(z.unknown()).optional(),
 });
 
@@ -577,7 +582,9 @@ const tempChannelCreate = z.object({
   default_user_limit: z.number().int().min(0).max(99).optional(),
   default_bitrate: z.number().int().min(8000).max(384000).optional(),
   keep_alive_minutes: z.number().int().min(0).max(1440).optional(),
+  empty_grace_seconds: z.number().int().min(0).max(3600).optional(),
   allow_text_channel: z.boolean().optional(),
+  allow_claim: z.boolean().optional(),
   moderator_roles: snowflakeArray,
 });
 
@@ -673,7 +680,7 @@ const syncAction = z.object({
 
 const syncConfig = z.object({
   sync_enabled: z.boolean().optional(),
-  sync_interval_minutes: z.number().int().min(1).max(1440).optional(),
+  sync_interval_minutes: z.number().int().min(5).max(1440).optional(),
   sync_auto_repair: z.boolean().optional(),
   sync_auto_repair_everyone: z.boolean().optional(),
 }).refine(obj => Object.keys(obj).length > 0, 'At least one field required');
@@ -704,8 +711,11 @@ const musicConfig = z.object({
   music_enabled: z.boolean().optional(),
   music_default_volume: z.number().int().min(0).max(150).optional(),
   dj_role_id: snowflake.optional().nullable(),
-  music_auto_leave_minutes: z.number().int().min(0).max(60).optional(),
-  music_auto_destroy_minutes: z.number().int().min(0).max(60).optional(),
+  // A timer of 0 is not a valid setting (the bot floors both to >=1); reject it
+  // with a field-level error instead of letting the route silently clamp it to 1.
+  // auto_destroy caps at 120 to match the route's ceiling (Math.min(120, ...)).
+  music_auto_leave_minutes: z.number().int().min(1).max(60).optional(),
+  music_auto_destroy_minutes: z.number().int().min(1).max(120).optional(),
   // V5 Audit §6.P3a — validate max queue length (bot default 500, hard cap 10 000)
   max_queue_length: z.number().int().min(1).max(10_000).optional(),
   // Fairness controls (catalog: music.json)

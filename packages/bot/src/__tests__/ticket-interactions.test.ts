@@ -20,7 +20,7 @@ vi.mock('discord.js', () => ({
     setFooter() { return this; } setTimestamp() { return this; }
     setAuthor() { return this; } setThumbnail() { return this; }
   },
-  PermissionFlagsBits: { ManageChannels: 4n, ManageMessages: 8192n },
+  PermissionFlagsBits: { ManageGuild: 32n, ManageChannels: 4n, ManageMessages: 8192n },
   ModalBuilder: class { setCustomId() { return this; } setTitle() { return this; } addComponents() { return this; } },
   TextInputBuilder: class { setCustomId() { return this; } setLabel() { return this; } setStyle() { return this; } setRequired() { return this; } setPlaceholder() { return this; } setMinLength() { return this; } setMaxLength() { return this; } },
   TextInputStyle: { Short: 1, Paragraph: 2 },
@@ -40,6 +40,12 @@ vi.mock('./transcript-generator.js', () => ({
 }));
 
 import { handleTicketInteraction } from '../features/tickets/ticket-interactions.js';
+import {
+  memberCanManageTicket,
+  canMemberManageTicket,
+  emitTicketDenied,
+  ticketDeniedMessage,
+} from '../features/tickets/ticket-authz.js';
 
 function makeChain(result: any = { data: null, error: null }) {
   const chain: any = {};
@@ -174,5 +180,215 @@ describe('ticket-interactions', () => {
       const result = await handleTicketInteraction(interaction, makeClient());
       expect(result).toBe(false);
     });
+  });
+});
+
+// ── Lifecycle authorization (finding: tickets-authz) ───────────────────────
+//
+// Claim/reopen/delete buttons and /ticket close|add|remove must re-check
+// manager-role membership at the handler layer; a non-manager non-creator who
+// can merely SEE the ticket channel must be denied (branded ephemeral reply +
+// a ticket.denied event that yields one denied-attempt audit row).
+
+const TICKET_ROW = {
+  id: 't1',
+  guild_id: 'guild-1',
+  panel_id: 'panel-1',
+  channel_id: 'ch-ticket-1',
+  ticket_number: 42,
+  creator_id: 'creator-1',
+  type: 'support',
+  status: 'open',
+  claimed_by: null,
+};
+
+const PANEL_ROW = {
+  id: 'panel-1',
+  manager_roles: ['manager-role-1'],
+  ticket_types: [{ id: 'support', label: 'Support' }],
+};
+
+function makeGateClient() {
+  const client = makeClient({ tickets: TICKET_ROW, ticket_panels: PANEL_ROW });
+  client.eventBus = { emit: vi.fn() };
+  return client;
+}
+
+function makeGateButton(customId: string, userId: string, member: any) {
+  return {
+    customId,
+    guildId: 'guild-1',
+    channelId: 'ch-ticket-1',
+    user: { id: userId, username: userId, tag: `${userId}#0001`, displayAvatarURL: () => 'url' },
+    member,
+    guild: { id: 'guild-1', name: 'Test', members: { fetch: vi.fn() }, channels: { cache: { get: () => undefined } } },
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+    isModalSubmit: () => false,
+    reply: vi.fn().mockResolvedValue({}),
+    editReply: vi.fn().mockResolvedValue({}),
+    deferReply: vi.fn().mockResolvedValue({}),
+    followUp: vi.fn().mockResolvedValue({}),
+    message: { edit: vi.fn() },
+    channel: { send: vi.fn().mockResolvedValue({}) },
+  } as any;
+}
+
+describe('ticket lifecycle authorization', () => {
+  it('(a) denies a claim by an unprivileged non-creator, leaves the ticket unclaimed, and emits one ticket.denied', async () => {
+    const client = makeGateClient();
+    const attacker = { id: 'attacker-1', roles: [], permissions: { has: () => false } };
+    const interaction = makeGateButton('ticket:claim:42', 'attacker-1', attacker);
+
+    const handled = await handleTicketInteraction(interaction, client);
+    expect(handled).toBe(true);
+
+    // Branded ephemeral denial.
+    expect(interaction.reply).toHaveBeenCalled();
+    const replyArg = interaction.reply.mock.calls.at(-1)![0];
+    expect(replyArg.ephemeral).toBe(true);
+    expect(String(replyArg.content)).toMatch(/denied|manager/i);
+
+    // Exactly one denied-attempt event → one audit row.
+    expect(client.eventBus.emit).toHaveBeenCalledTimes(1);
+    expect(client.eventBus.emit).toHaveBeenCalledWith('ticket.denied', 'guild-1', {
+      ticketId: 't1',
+      ticketNumber: 42,
+      actorDiscordId: 'attacker-1',
+      reason: 'permission-denied',
+    });
+    // The ticket was never claimed.
+    expect(client.eventBus.emit).not.toHaveBeenCalledWith(
+      'ticket.claimed',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('(c) allows a manager-role holder to claim (no denial)', async () => {
+    const client = makeGateClient();
+    const manager = { id: 'manager-1', roles: ['manager-role-1'], permissions: { has: () => false } };
+    const interaction = makeGateButton('ticket:claim:42', 'manager-1', manager);
+
+    const handled = await handleTicketInteraction(interaction, client);
+    expect(handled).toBe(true);
+
+    // No denial was emitted and no ephemeral "denied" reply was sent.
+    expect(client.eventBus.emit).not.toHaveBeenCalledWith(
+      'ticket.denied',
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(interaction.reply).toHaveBeenCalled();
+    const replyArg = interaction.reply.mock.calls.at(-1)![0];
+    expect(String(replyArg?.content ?? '')).not.toMatch(/denied/i);
+  });
+
+  it('(admin) allows a member with Manage Server permission to claim', async () => {
+    const client = makeGateClient();
+    const admin = { id: 'admin-1', roles: [], permissions: { has: () => true } };
+    const interaction = makeGateButton('ticket:claim:42', 'admin-1', admin);
+
+    await handleTicketInteraction(interaction, client);
+
+    expect(client.eventBus.emit).not.toHaveBeenCalledWith(
+      'ticket.denied',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+});
+
+describe('ticket authorizer (unit)', () => {
+  const supabaseWithPanel = () =>
+    ({ from: () => makeChain({ data: PANEL_ROW, error: null }) }) as any;
+
+  it('(b) lets the creator close their own ticket without a manager role', async () => {
+    const creator = { id: 'creator-1', roles: [], permissions: { has: () => false } };
+    const allowed = await canMemberManageTicket(
+      supabaseWithPanel(),
+      creator,
+      TICKET_ROW,
+      'close',
+      'creator-1',
+    );
+    expect(allowed).toBe(true);
+  });
+
+  it('does NOT let the creator claim/reopen/delete/add/remove (only close)', async () => {
+    const creator = { id: 'creator-1', roles: [], permissions: { has: () => false } };
+    for (const action of ['claim', 'reopen', 'delete', 'add', 'remove'] as const) {
+      const allowed = await canMemberManageTicket(
+        supabaseWithPanel(),
+        creator,
+        TICKET_ROW,
+        action,
+        'creator-1',
+      );
+      expect(allowed).toBe(false);
+    }
+  });
+
+  it('grants a manager-role holder every lifecycle action', async () => {
+    const manager = { id: 'manager-1', roles: ['manager-role-1'], permissions: { has: () => false } };
+    for (const action of ['claim', 'close', 'reopen', 'delete', 'add', 'remove'] as const) {
+      const allowed = await canMemberManageTicket(
+        supabaseWithPanel(),
+        manager,
+        TICKET_ROW,
+        action,
+        'manager-1',
+      );
+      expect(allowed).toBe(true);
+    }
+  });
+
+  it('memberCanManageTicket honors admin permission, role match, and per-type override', () => {
+    // Manage Server / Manage Channels permission wins outright.
+    expect(memberCanManageTicket({ permissions: { has: () => true }, roles: [] }, [])).toBe(true);
+    // Role membership via a discord.js-style roles.cache Collection.
+    const withCache = { permissions: { has: () => false }, roles: { cache: { has: (id: string) => id === 'r1' } } };
+    expect(memberCanManageTicket(withCache, ['r1'])).toBe(true);
+    expect(memberCanManageTicket(withCache, ['r2'])).toBe(false);
+    // Per-type override takes precedence over the panel manager_roles.
+    const holder = { permissions: { has: () => false }, roles: ['override-role'] };
+    expect(
+      memberCanManageTicket(holder, ['panel-role'], {
+        id: 'support',
+        label: 'Support',
+        emoji: '🎫',
+        color: 'blue',
+        managerRoleOverride: ['override-role'],
+      } as any),
+    ).toBe(true);
+    // A member holding only the panel role is NOT authorized when an override is set.
+    const panelOnly = { permissions: { has: () => false }, roles: ['panel-role'] };
+    expect(
+      memberCanManageTicket(panelOnly, ['panel-role'], {
+        id: 'support',
+        label: 'Support',
+        emoji: '🎫',
+        color: 'blue',
+        managerRoleOverride: ['override-role'],
+      } as any),
+    ).toBe(false);
+  });
+
+  it('emitTicketDenied emits exactly one ticket.denied event with the audit payload', () => {
+    const emit = vi.fn();
+    emitTicketDenied({ emit } as any, 'guild-1', { id: 't1', ticket_number: 42 }, 'attacker-1');
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith('ticket.denied', 'guild-1', {
+      ticketId: 't1',
+      ticketNumber: 42,
+      actorDiscordId: 'attacker-1',
+      reason: 'permission-denied',
+    });
+  });
+
+  it('ticketDeniedMessage is branded and matches the denial contract regex', () => {
+    for (const action of ['claim', 'close', 'reopen', 'delete', 'add', 'remove'] as const) {
+      expect(ticketDeniedMessage(action)).toMatch(/denied|manager/i);
+    }
   });
 });

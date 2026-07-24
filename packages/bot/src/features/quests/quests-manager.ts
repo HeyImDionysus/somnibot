@@ -114,10 +114,16 @@ export class QuestsManager {
       return;
     }
 
+    // [game-economy-quests] quest-reward-base makes the owner-tunable base a
+    // live multiplier. Stored template rewards are base-100-relative (the
+    // default templates seed at base=100), so scale each coin reward by the
+    // guild's configured base / 100. XP is not affected by this control.
+    const cfg = await this.getConfig(guildId);
+    const rewardBase = cfg?.economy_quest_reward_base ?? 100;
     let totalCurrency = 0;
     let totalXp = 0;
     for (const row of claimed) {
-      totalCurrency += row.reward_currency ?? 0;
+      totalCurrency += Math.round((row.reward_currency ?? 0) * rewardBase / 100);
       totalXp += row.reward_xp ?? 0;
     }
 

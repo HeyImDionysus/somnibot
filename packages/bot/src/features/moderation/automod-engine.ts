@@ -161,7 +161,11 @@ function isExempt(
 // cap, so without the word-level check a single regex-mode rule with a few
 // pathological entries could block for words.length × 250ms before the
 // between-rules check ever ran.
+// Catalog defaults for the owner-tunable evaluation budgets. Used as fallbacks
+// when guild_config has no override (automod_message_budget_ms 100-2000 default
+// 500, automod_regex_budget_ms 50-250 default 250).
 const MESSAGE_RULE_BUDGET_MS = 500;
+const REGEX_EVAL_BUDGET_MS = 250;
 
 export async function processMessage(
   client: SomniClient,
@@ -172,6 +176,8 @@ export async function processMessage(
     modLogChannelId: string | null;
     automodEnabled: boolean;
     automodMode: 'observe' | 'enforce';
+    automodMessageBudgetMs?: number;
+    automodRegexBudgetMs?: number;
   },
 ): Promise<boolean> {
   // Quick bail-outs
@@ -182,19 +188,40 @@ export async function processMessage(
 
   const member = message.member;
   const channelId = message.channel.id;
-  const deadline = Date.now() + MESSAGE_RULE_BUDGET_MS;
+  // Owner-configurable per-message aggregate budget (falls back to the default).
+  const messageBudgetMs = modConfig.automodMessageBudgetMs ?? MESSAGE_RULE_BUDGET_MS;
+  const regexBudgetMs = modConfig.automodRegexBudgetMs ?? REGEX_EVAL_BUDGET_MS;
+  const deadline = Date.now() + messageBudgetMs;
 
   for (const rule of rules) {
     // V11 Re-Audit L-3: Bail out if cumulative rule checking exceeds budget
     if (Date.now() > deadline) {
-      log.warn(`Automod budget exhausted (${MESSAGE_RULE_BUDGET_MS}ms) — skipped remaining rules for message ${message.id}`);
+      log.warn(`Automod budget exhausted (${messageBudgetMs}ms) — skipped remaining rules for message ${message.id}`);
       break;
     }
 
     if (isExempt(member, rule, channelId)) continue;
 
-    const violation = await checkRule(client, message, rule, deadline);
+    const violation = await checkRule(client, message, rule, deadline, regexBudgetMs);
     if (violation) {
+      // Idempotency fence: a re-delivered messageCreate (Discord gateway RESUME)
+      // must not double-enforce (second delete / second infraction row). Claim
+      // the message id once via SET NX; a replay finds the key already set and is
+      // a no-op. Keyed on message.id (not author), so distinct messages are never
+      // suppressed. Fails open (enforces) when Valkey is unavailable rather than
+      // silently dropping enforcement.
+      try {
+        const fresh = await client.valkey.set(
+          `automod:handled:${message.guild.id}:${message.id}`,
+          '1',
+          'EX',
+          900,
+          'NX',
+        );
+        if (!fresh) return true;
+      } catch {
+        // Valkey error — proceed with enforcement (fail open).
+      }
       await executeAutoModAction(client, message, rule, violation, modConfig);
       return true;
     }
@@ -216,10 +243,11 @@ async function checkRule(
   message: Message,
   rule: DbAutomodRule,
   deadline: number,
+  regexBudgetMs: number,
 ): Promise<string | null> {
   switch (rule.type) {
     case 'word_filter':
-      return checkWordFilter(message.content, rule.config as WordFilterConfig, deadline);
+      return checkWordFilter(message.content, rule.config as WordFilterConfig, deadline, regexBudgetMs);
     case 'link_filter':
       return checkLinkFilter(message.content, rule.config as LinkFilterConfig);
     case 'invite_filter':
@@ -250,6 +278,7 @@ function checkWordFilter(
   content: string,
   config: WordFilterConfig,
   deadline: number,
+  regexBudgetMs: number = REGEX_EVAL_BUDGET_MS,
 ): string | null {
   if (!config.words || config.words.length === 0) return null;
 
@@ -329,7 +358,7 @@ function checkWordFilter(
           const matched = runInNewContext(
             'regex.test(input)',
             { regex, input },
-            { timeout: 250, microtaskMode: 'afterEvaluate' },
+            { timeout: regexBudgetMs, microtaskMode: 'afterEvaluate' },
           );
 
           if (matched) {
@@ -338,7 +367,7 @@ function checkWordFilter(
         } catch (err) {
           // Timeout, invalid regex, or other error — skip
           if (err instanceof Error && err.message?.includes('timed out')) {
-            log.warn(`Regex pattern "${word}" timed out after 250ms — skipping for safety`);
+            log.warn(`Regex pattern "${word}" timed out after ${regexBudgetMs}ms — skipping for safety`);
           }
         }
         break;

@@ -1014,6 +1014,8 @@ const _modConfigCache = new Map<string, {
     modLogChannelId: string | null;
     automodEnabled: boolean;
     automodMode: 'observe' | 'enforce';
+    automodMessageBudgetMs: number;
+    automodRegexBudgetMs: number;
   };
   time: number;
 }>();
@@ -1030,6 +1032,8 @@ async function loadModConfig(client: SomniClient, guildId?: string): Promise<{
   modLogChannelId: string | null;
   automodEnabled: boolean;
   automodMode: 'observe' | 'enforce';
+  automodMessageBudgetMs: number;
+  automodRegexBudgetMs: number;
 }> {
   const id = guildId ?? client.guildId;
   const now = Date.now();
@@ -1043,7 +1047,7 @@ async function loadModConfig(client: SomniClient, guildId?: string): Promise<{
 
   const { data } = await client.supabase
     .from('guild_config')
-    .select('escalation_chain, infraction_expiry_days, mod_log_channel_id, automod_enabled, automod_mode')
+    .select('escalation_chain, infraction_expiry_days, mod_log_channel_id, automod_enabled, automod_mode, automod_message_budget_ms, automod_regex_budget_ms')
     .eq('guild_id', id)
     .maybeSingle();
 
@@ -1054,6 +1058,9 @@ async function loadModConfig(client: SomniClient, guildId?: string): Promise<{
     // Ship observe-only + enabled by default (matches the catalog safety promise).
     automodEnabled: (data?.automod_enabled as boolean) ?? true,
     automodMode: ((data?.automod_mode as string) === 'enforce' ? 'enforce' : 'observe') as 'observe' | 'enforce',
+    // Owner-tunable evaluation budgets (fall back to the catalog defaults).
+    automodMessageBudgetMs: (data?.automod_message_budget_ms as number) ?? 500,
+    automodRegexBudgetMs: (data?.automod_regex_budget_ms as number) ?? 250,
   };
   // Evict oldest entry if at capacity (Map preserves insertion order)
   if (_modConfigCache.size >= MOD_CONFIG_MAX_ENTRIES) {

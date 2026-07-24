@@ -117,11 +117,13 @@ describe('executeAutoModAction — observe mode (shipped default)', () => {
 });
 
 describe('executeAutoModAction — delete action', () => {
-  it('deletes the message', async () => {
+  it('deletes the message exactly once (no redundant second delete)', async () => {
     const msg = makeMessage();
     const client = makeClient();
     await executeAutoModAction(client, msg, makeRule({ action: 'delete' }), 'violation', modConfig);
-    expect(msg.delete).toHaveBeenCalled();
+    // The shared pre-switch block deletes; the case 'delete' branch must NOT
+    // issue a second (wasted, likely-404ing) delete.
+    expect(msg.delete).toHaveBeenCalledTimes(1);
   });
 
   it('posts mod log when log_to_mod_channel is true', async () => {
