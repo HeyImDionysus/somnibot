@@ -28,7 +28,11 @@
  * the export/denial/retention-updated owner copy (all dashboard/API surfaces, not
  * reachable from the bot-only harness), the live-guild origination of a real
  * warn/role-change/config edit, the owner alert-channel readback, and the
- * dependency-outage (DEPFAIL) / transient-insert-fault (RETRY) fault lanes.
+ * transient-insert-fault (RETRY) fault lane. DEPFAIL is now DRIVEN on the
+ * run-one-domain fault-proxy lane (ctx.faults.supabase severs the real network
+ * path): events emitted during a genuine ECONNREFUSED window buffer in the
+ * AuditService queue and land exactly once after restore — it falls back to
+ * honest gates only when no proxy is registered (the CI vitest lane).
  *
  * Behavior-bug history (wave-2 fixes, 2026-07-24): three real divergences this
  * proof surfaced are now FIXED in the product and asserted as promises — (a) the
@@ -707,53 +711,221 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   ctx.gate('cleanup', 'db-observable', 'No residue exists; teardown verifies unchanged rows.', 'exercised in CLEANUP (audit rows are anonymized, never deleted)');
 }
 
-/** DEPFAIL — a database outage buffers audit entries without dropping any. */
+/** DEPFAIL — a database outage buffers audit entries without dropping any,
+ *  driven through the REAL fault proxy (ctx.faults severs the actual network
+ *  path run-one-domain.mjs routed the whole stack through). Real platform
+ *  events are emitted DURING the outage; the AuditService's flush fails softly
+ *  (supabase-js resolves {data:null,error} on ECONNREFUSED — it never throws)
+ *  and re-queues the batch, and after restore() the buffered entries land
+ *  exactly once. Falls back to honest gates when no proxy is registered
+ *  (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // The harness's whole premise is a REACHABLE local Supabase, so a database
-  // outage cannot be induced without a fault-injection lane. The AuditService
-  // buffers in-memory and re-queues the batch on flush error (max 500), but that
-  // branch is only reachable when the insert fails. GATE honestly.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'With audit batch inserts failing, entries are retained in the durable buffer with zero drops and flushed in order once connectivity returns; guild activity continues normally.',
-    'requires a Supabase dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB)',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-observable',
-    'Post-recovery the audit row count equals the driven action count with no gaps.',
-    'requires the outage fault lane to force the buffered-degraded → recording transition',
-  );
-  ctx.gate(
-    'audit',
-    'audit-row',
-    'audit.flush_failed is recorded once connectivity returns.',
-    'requires the outage fault lane to reach the flush-failure branch',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  const noProxyReason =
+    'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)';
+
+  if (supabaseFault) {
+    const handle = await ctx.bootGuild({ label: 'a' });
+    const guildId = handle.guildId;
+    const targetId = ctx.userId('target');
+    const modId = ctx.userId('mod');
+
+    // Known pre-outage state: a sentinel row (the zero-corruption subject) and a
+    // drained queue (boot's bot.started lifecycle entry lands BEFORE the window,
+    // so the outage buffers ONLY the driven entries).
+    const sentinel = await seedAuditRow(handle, {
+      actor_id: modId,
+      target_id: ctx.userId('sentinel'),
+      action: 'member.role_granted',
+      category: 'members',
+      details: { role: `${ctx.runPrefix}sentinel-role` },
+      before_state: { hasRole: false },
+      after_state: { hasRole: true },
+      correlation_id: `${ctx.runPrefix}sentinel`,
+    });
+    const svcReady = await flushAuditQueue(handle);
+
+    if (!svcReady || !sentinel) {
+      const reason =
+        'the per-guild AuditService manager was not resolvable from the booted context (or the pre-outage sentinel seed failed), so the buffered-outage window could not be driven deterministically';
+      ctx.gate('Discord', 'db-observable', 'With database access blocked while actions occur, the audit pipeline degrades to buffering (no throw, no drop) and guild activity continues.', reason);
+      ctx.gate('database-RLS', 'db-observable', 'Post-recovery the audit row count equals the driven action count with no gaps.', reason);
+      ctx.gate('audit', 'audit-row', 'audit.flush_failed is recorded once connectivity returns.', reason);
+      ctx.gate('replay-safety', 'db-observable', 'Retried flushes never insert an entry twice across the outage/restore cycle.', reason);
+      ctx.gate('cleanup', 'db-observable', 'Outage simulation state is fully reverted at teardown.', reason);
+    } else {
+      // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+      await supabaseFault.sever();
+      let threw: string | null = null;
+      try {
+        // Two real platform events occur DURING the outage — an occurrence-keyed
+        // warn and a keyless mute (both entry shapes the buffer must retain).
+        eventBusOf(handle).emit('infraction.created', guildId, {
+          infractionId: `${ctx.runPrefix}inf-outage`,
+          userId: targetId,
+          moderatorId: modId,
+          type: 'warn',
+          reason: `${ctx.runPrefix}outage-warn`,
+          totalInfractions: 1,
+        });
+        eventBusOf(handle).emit('member.muted', guildId, {
+          discordId: targetId,
+          moderatorId: modId,
+          reason: `${ctx.runPrefix}outage-mute`,
+          duration: 5,
+        });
+        // TWO flush attempts against the severed DB: each must fail SOFTLY
+        // (flush logs the error and re-queues the batch) with every buffered
+        // entry retained — never a throw, never a silent drop.
+        await flushAuditQueue(handle);
+        await flushAuditQueue(handle);
+      } catch (err) {
+        threw = err instanceof Error ? err.message : String(err);
+      }
+      await supabaseFault.restore();
+
+      // (1) Fail-safe: the outage-window pipeline (emit + failed flushes) never
+      //     threw — audit degrades to buffering while guild activity continues.
+      ctx.expect(threw === null, {
+        assertionClass: 'Discord',
+        channel: 'db-observable',
+        promise:
+          'With database connectivity blocked while actions occur, the audit pipeline degrades to buffering — the emit + flush path never throws, so guild activity continues normally during the outage.',
+        observation:
+          threw === null
+            ? 'two platform events + two flush attempts ran against the severed DB without a throw (flush logged the failure and re-queued the batch).'
+            : `the outage-window pipeline THREW: ${threw}.`,
+        impact: 'A database outage crashed the audit pipeline instead of degrading to buffering — audit recording would disrupt guild activity.',
+      });
+
+      // (2) Recovery landing: every buffered entry lands exactly once, no gaps.
+      //     Bounded poll: the 5s background flush timer can interleave with the
+      //     explicit flush (a failed timer flush briefly holds the re-queued
+      //     batch mid-flight), so retry flush+read a few short rounds instead of
+      //     racing it — never a multi-second open-ended wait.
+      let warnRows: AuditRow[] = [];
+      let muteRows: AuditRow[] = [];
+      for (let attempt = 0; attempt < 6; attempt++) {
+        await flushAuditQueue(handle);
+        warnRows = await readAuditRows(handle, guildId, { action: 'warn.issued', targetId });
+        muteRows = await readAuditRows(handle, guildId, { action: 'mute.applied', targetId });
+        if (warnRows.length >= 1 && muteRows.length >= 1) break;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      const landedOnce = warnRows.length === 1 && muteRows.length === 1;
+      ctx.expect(landedOnce, {
+        assertionClass: 'database-RLS',
+        channel: 'db-observable',
+        promise:
+          'After recovery every entry buffered during the outage lands exactly once — the post-recovery row count equals the driven action count (2 of 2) with no gaps and no duplicates.',
+        observation: `post-restore flush landed warn.issued=${warnRows.length} row(s) and mute.applied=${muteRows.length} row(s) for the outage target (expected exactly 1 each).`,
+        impact: 'Entries recorded during a database outage were dropped or duplicated — the audit trail has gaps for the outage window.',
+      });
+
+      // (3) Retried flushes / redelivery never insert an entry twice: redeliver
+      //     the SAME warn occurrence and flush again (in-queue dedupe + the
+      //     uq_audit_logs_guild_occurrence ON CONFLICT DO NOTHING backstop). The
+      //     keyless mute is deliberately NOT re-emitted — keyless entries carry
+      //     no dedupe identity by design.
+      eventBusOf(handle).emit('infraction.created', guildId, {
+        infractionId: `${ctx.runPrefix}inf-outage`,
+        userId: targetId,
+        moderatorId: modId,
+        type: 'warn',
+        reason: `${ctx.runPrefix}outage-warn`,
+        totalInfractions: 1,
+      });
+      await flushAuditQueue(handle);
+      const warnReplay = await readAuditRows(handle, guildId, { action: 'warn.issued', targetId });
+      const muteReplay = await readAuditRows(handle, guildId, { action: 'mute.applied', targetId });
+      ctx.expect(warnReplay.length === 1 && muteReplay.length === 1, {
+        assertionClass: 'replay-safety',
+        channel: 'db-observable',
+        promise:
+          'Retried flushes and a redelivered occurrence never insert an entry twice across the outage/restore cycle (in-queue dedupe + the occurrence-key ON CONFLICT backstop).',
+        observation: `after redelivering the warn occurrence + one more flush: warn.issued=${warnReplay.length} row(s), mute.applied=${muteReplay.length} row(s) (expected 1 each).`,
+        impact: 'The outage/restore cycle duplicated a buffered audit entry — retried flushes over-count real actions.',
+      });
+
+      // (4) audit: the catalog contracts an audit.flush_failed row once
+      //     connectivity returns. Asserted only when the pipeline is proven live
+      //     post-restore (both buffered entries landed) so it can never fail
+      //     vacuously. The AuditService is integrator-owned — this stays an
+      //     honest FAIL until the service records the outage window.
+      if (!landedOnce) {
+        ctx.gate(
+          'audit',
+          'audit-row',
+          'audit.flush_failed is recorded once connectivity returns.',
+          'the buffered entries did not land within the bounded post-restore window, so the flush-failure audit contract could not be evaluated non-vacuously',
+        );
+      } else {
+        const flushFailed = await readAuditRows(handle, guildId, { action: 'audit.flush_failed' });
+        ctx.expect(flushFailed.length >= 1, {
+          assertionClass: 'audit',
+          channel: 'audit-row',
+          promise: 'audit.flush_failed is recorded once connectivity returns (the outage window is itself visible in the audit trail).',
+          observation: `the flush pipeline is live post-restore (both buffered entries landed) but audit_logs holds ${flushFailed.length} audit.flush_failed row(s) for the guild (expected >= 1).`,
+          impact:
+            'AuditService.flush() only log.error()s a failed batch and re-queues it — no audit.flush_failed row is written when connectivity returns, so a database outage window is invisible in the audit trail the catalog contracts.',
+        });
+      }
+
+      // (5) cleanup: the outage simulation is fully reverted — the proxy reports
+      //     restored, reads serve real rows again (recovery), and the pre-outage
+      //     sentinel row is byte-identical (zero corruption).
+      const sentinelAfter = await readAuditById(handle, sentinel.id);
+      const sentinelIntact = JSON.stringify(sentinelAfter) === JSON.stringify(sentinel);
+      ctx.expect(!supabaseFault.severed && sentinelIntact, {
+        assertionClass: 'cleanup',
+        channel: 'db-observable',
+        promise:
+          'Outage simulation state is fully reverted: the severed path is restored, reads serve real rows again, and the pre-outage audit row is byte-identical (zero corruption).',
+        observation:
+          `fault proxy severed=${supabaseFault.severed} (expected false); ` +
+          `pre-outage sentinel row read back ${sentinelAfter ? '' : 'MISSING '}byte-identical=${sentinelIntact}.`,
+        impact: 'The outage window corrupted persisted audit state or left the severed path in place at teardown.',
+      });
+
+      await proveAnonDenial(ctx, handle, guildId);
+    }
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With audit batch inserts failing, entries are retained in the buffer with zero drops and flushed once connectivity returns; guild activity continues normally.',
+      noProxyReason,
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-observable',
+      'Post-recovery the audit row count equals the driven action count with no gaps.',
+      noProxyReason,
+    );
+    ctx.gate('audit', 'audit-row', 'audit.flush_failed is recorded once connectivity returns.', noProxyReason);
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'Retried flushes never insert an entry twice across the outage/restore cycle.',
+      noProxyReason,
+    );
+    ctx.gate('cleanup', 'db-observable', 'Outage simulation state is fully reverted at teardown.', noProxyReason);
+  }
+
+  // The owner-facing buffering notice + degradation banner are owner/dashboard
+  // readback surfaces in every lane (and the integrator-owned AuditService has no
+  // buffering-notice path today — flagged alongside the audit.flush_failed gap).
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'Exactly one buffering notice (audit-write-degraded) reaches the owner for the outage window.',
-    'requires the outage fault lane plus the owner alert-channel readback (DISCORD_TOKEN + live guild)',
+    'requires the owner alert-channel readback (DISCORD_TOKEN + live guild); the AuditService also has no buffering-notice path today (integrator-owned — see the audit.flush_failed finding)',
   );
   ctx.gate(
     'branding',
     'captured-reply',
     'The degradation banner uses the audit-write-degraded template with {guild-name} and {queued-count}.',
-    'requires the outage fault lane to reach the degradation branch (a dashboard/owner surface)',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'Retried flushes never insert an entry twice across the outage/restore cycle.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'cleanup',
-    'db-observable',
-    'Outage simulation state is fully reverted at teardown.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'the degradation banner is a dashboard/owner surface; requires the dashboard render + brand-kit readback lane',
   );
 }
 

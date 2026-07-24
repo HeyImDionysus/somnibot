@@ -754,46 +754,161 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
-/** DEPFAIL — Supabase-unreachable fail-safe (needs a dependency-outage fault lane). */
+/** DEPFAIL — Supabase-unreachable fail-safe, driven through the REAL fault
+ *  proxy (ctx.faults severs the actual network path run-one-domain routed the
+ *  stack through). /recipes and /craft are the driven surfaces — with the
+ *  database severed BOTH exit on the failed recipe read BEFORE the Valkey
+ *  cooldown lock, so the outage window itself needs no Redis; only the
+ *  post-restore /craft recovery leg does. Falls back to honest gates when no
+ *  proxy is registered (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // This DB-observable harness's whole premise is a REACHABLE local Supabase, so a
-  // database-outage cannot be induced without a fault-injection lane. GATE the
-  // outage-dependent behavior honestly rather than fake an outage.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'With database access blocked, /craft and /recipes reply with the branded crafting-unavailable message and no inventory mutation occurs.',
-    'requires a Supabase dependency-outage fault-injection lane (the harness deliberately runs against a reachable local DB)',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const handle = await ctx.bootGuild({
+      label: 'a',
+      economyStartingBalance: 0,
+      guildConfigOverrides: craftingEnabled(60),
+    });
+    const userA = ctx.userId('a');
+
+    // Arrange known state on the HEALTHY stack: the default recipe book (via a
+    // real /recipes drive) and 4 Iron Ore (enough for one "Iron Bar" craft).
+    await ctx.runSlash(handle, { commandName: 'recipes', userId: userA });
+    const recipesBefore = await recipeCount(handle);
+    const ironOreId = await createItem(handle, 'Iron Ore');
+    if (ironOreId) await giveInventory(handle, userA, ironOreId, 4);
+    const ironBarItem = await itemByName(handle, 'Iron Bar');
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let recipesSurface = '';
+    let craftSurface = '';
+    try {
+      const rec = await ctx.runSlash(handle, { commandName: 'recipes', userId: userA });
+      recipesSurface = brandingSurface(rec);
+      const cr = await ctx.runSlash(handle, { commandName: 'craft', userId: userA, options: { item: 'Iron Bar' } });
+      craftSurface = brandingSurface(cr);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: both commands replied, never crashed the pipeline.
+    ctx.expect(threw === null && recipesSurface.length > 0 && craftSurface.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'With database access blocked, /recipes and /craft still reply (fail-safe) instead of crashing the interaction pipeline.',
+      observation:
+        threw === null
+          ? `during the outage window /recipes replied ${JSON.stringify(truncate(recipesSurface))} and /craft replied ${JSON.stringify(truncate(craftSurface))}.`
+          : `an outage-window crafting command THREW ${truncate(threw)}.`,
+      impact: 'A database outage crashed the crafting command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts the branded crafting-UNAVAILABLE notice — never
+    //     a data-shaped answer: an EMPTY recipe book or a "Recipe not found"
+    //     during an outage is a lie about recipes the bot could not read.
+    const recipesUnavailable = /unavailable|try again|temporar/i.test(recipesSurface);
+    const recipesLie = /recipe book|no recipes available/i.test(recipesSurface);
+    const craftUnavailable = /unavailable|try again|temporar/i.test(craftSurface);
+    const craftLie = /not found|missing materials/i.test(craftSurface);
+    ctx.expect(recipesUnavailable && !recipesLie && craftUnavailable && !craftLie, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise: 'With the database blocked, /recipes and /craft reply with the branded crafting-unavailable notice — never an empty recipe book or a "recipe not found" fabricated from the failed read.',
+      observation:
+        `outage-window /recipes ${JSON.stringify(truncate(recipesSurface))} (unavailable=${recipesUnavailable}, dataShaped=${recipesLie}); ` +
+        `/craft ${JSON.stringify(truncate(craftSurface))} (unavailable=${craftUnavailable}, dataShaped=${craftLie}).`,
+      impact: 'During a database outage a crafting command replied with a data-shaped answer fabricated from the failed read instead of a degradation notice.',
+    });
+
+    // (3) ZERO CORRUPTION: the seeded inventory and recipe book are
+    //     byte-identical after restore; no craft ledger row was written.
+    const oreAfterOutage = ironOreId ? await inventoryQty(handle, userA, ironOreId) : -1;
+    const recipesAfterOutage = await recipeCount(handle);
+    const outageTxns = await craftTxns(handle, userA);
+    ctx.expect(oreAfterOutage === 4 && recipesAfterOutage === recipesBefore && outageTxns.length === 0, {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'No inventory mutation occurs across the outage window — the seeded materials and recipe book are unchanged after restoration.',
+      observation:
+        `post-restore Iron Ore qty=${oreAfterOutage} (expected 4); economy_recipes rows=${recipesAfterOutage} (expected ${recipesBefore}); ` +
+        `craft ledger rows=${outageTxns.length} (expected 0).`,
+      impact: 'A database outage consumed materials, mutated the recipe book, or wrote a phantom craft ledger row.',
+    });
+
+    // (4) RECOVERY: the very next /recipes renders the real recipe book again.
+    const recovered = await ctx.runSlash(handle, { commandName: 'recipes', userId: userA });
+    ctx.expect(embedTitle(recovered).includes('Recipe Book'), {
+      assertionClass: 'replay-safety',
+      channel: 'captured-reply',
+      promise: 'After restoration the very next /recipes renders the real recipe book again (no lingering degradation).',
+      observation: `post-restore /recipes embed title="${embedTitle(recovered) || '(no embed)'}".`,
+      impact: 'The crafting pipeline did not recover after the outage ended.',
+    });
+
+    // (5) After restoration a FRESH /craft consumes exactly once and adds its
+    //     output — the outage claimed no craft cooldown. Needs the Valkey lock.
+    if (ctx.capabilities.redis) {
+      await ctx.runSlash(handle, { commandName: 'craft', userId: userA, options: { item: 'Iron Bar' } });
+      const oreAfterCraft = ironOreId ? await inventoryQty(handle, userA, ironOreId) : -1;
+      const barAfterCraft = ironBarItem ? await inventoryQty(handle, userA, ironBarItem.id) : -1;
+      const txAfterCraft = await craftTxns(handle, userA);
+      ctx.expect(oreAfterCraft === 0 && barAfterCraft === 1 && txAfterCraft.length === 1, {
+        assertionClass: 'audit',
+        channel: 'audit-row',
+        promise: 'After restoration a fresh /craft consumes its 4 Iron Ore exactly once, adds exactly 1 Iron Bar, and writes exactly one append-only craft ledger row (the outage claimed no cooldown and no duplicate consumption survives the cycle).',
+        observation: `post-restore /craft: Iron Ore=${oreAfterCraft} (expected 0), Iron Bar=${barAfterCraft} (expected 1), craft ledger rows=${txAfterCraft.length} (expected 1).`,
+        impact: 'The outage wrongly claimed the craft cooldown (blocking the recovery craft) or the recovery craft did not consume/produce exactly once.',
+      });
+    } else {
+      ctx.gate(
+        'audit',
+        'redis-dependency',
+        'After restoration a fresh /craft consumes exactly once and applies.',
+        'no Valkey/Redis reachable — the /craft cooldown lock (SET PX NX) cannot run even inside the fault lane',
+      );
+    }
+
+    await proveRlsIsolation(ctx, handle, 'economy_recipes');
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With database access blocked, /craft and /recipes reply with the branded crafting-unavailable message and no inventory mutation occurs.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'audit',
+      'db-observable',
+      'After restoration a fresh /craft consumes exactly once and applies.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate consumption survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded crafting-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'Crafting rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window (not one per failed craft).',
-    'requires a dependency-outage fault lane plus owner alert channel readback',
-  );
-  ctx.gate(
-    'audit',
-    'db-observable',
-    'After restoration a fresh /craft consumes exactly once and applies.',
-    'requires the outage fault lane and (for /craft) a Valkey/Redis cooldown path',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'No duplicate consumption survives the outage/restore cycle.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded crafting-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the crafting-unavailable branch',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'Crafting rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'requires the owner alert channel readback lane (the in-window alert write itself hits the severed database)',
   );
 }
 

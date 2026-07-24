@@ -516,6 +516,29 @@ async function proveNoOwnerAlert(ctx: ScenarioContext, handle: LiveClientHandle)
 // 'Coins'/🪙 fallback) proves the configured currency actually reaches the surface.
 const BRAND_CURRENCY = { name: 'Doubloons', emoji: '💎' } as const;
 
+/**
+ * The last reply/editReply a handler produced, flattened to inspectable text:
+ * raw-string and { content } payloads plus the first embed's title/description,
+ * so both plain degradation notices and embeds can be asserted uniformly.
+ */
+function replyText(captured: CapturedResponse): string {
+  const edits = captured.allOf('editReply');
+  const replies = captured.allOf('reply');
+  const payload = (edits.at(-1) ?? replies.at(-1))?.payload as
+    | string
+    | { content?: string; embeds?: Array<{ data?: { title?: string; description?: string } }> }
+    | undefined;
+  if (typeof payload === 'string') return payload;
+  const embed = payload?.embeds?.[0]?.data;
+  return [payload?.content ?? '', embed?.title ?? '', embed?.description ?? '']
+    .filter(Boolean)
+    .join(' ');
+}
+
+function truncateText(text: string, max = 140): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
 /** The embed .data (title/description) of the last reply/editReply a handler produced. */
 function replyEmbed(captured: CapturedResponse): { title?: string; description?: string } | undefined {
   const edits = captured.allOf('editReply');
@@ -1281,46 +1304,165 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   );
 }
 
-/** DEPFAIL — Supabase-unreachable fail-safe (needs a dependency-outage fault lane). */
+/** DEPFAIL — Supabase-unreachable fail-safe, driven through the REAL fault
+ *  proxy (ctx.faults severs the actual network path run-one-domain routed the
+ *  stack through). Falls back to honest gates when no proxy is registered
+ *  (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // This DB-observable harness's whole premise is a REACHABLE local Supabase, so a
-  // database outage cannot be induced without a fault-injection lane. GATE the
-  // outage-dependent behavior honestly rather than fake an outage.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'During a Supabase outage, /heist start, join, and status reply with the branded heist-unavailable template and no wallet mutation occurs; after restoration a fresh /heist start debits the entry fee exactly once.',
-    'requires a Supabase dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB)',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const handle = await bootHeist(ctx, {
+      label: 'a',
+      entryFee: 100,
+      basePayout: 500,
+      successBase: 40,
+      minParticipants: 2,
+      maxParticipants: 8,
+    });
+    const userA = ctx.userId('a');
+    await seedWallet(handle, userA, 1000);
+
+    // Pre-outage: one truthful /heist status baseline. This also warms the
+    // manager's guild-config cache exactly the way a long-running bot holds it,
+    // so the outage window exercises the READ paths, not a cold config fetch.
+    await ctx.runSlash(handle, { commandName: 'heist', userId: userA, subcommand: 'status' });
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let statusReply = '';
+    let startReply = '';
+    try {
+      statusReply = replyText(
+        await ctx.runSlash(handle, { commandName: 'heist', userId: userA, subcommand: 'status' }),
+      );
+      startReply = replyText(
+        await ctx.runSlash(handle, { commandName: 'heist', userId: userA, subcommand: 'start' }),
+      );
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: both heist commands must reply, never crash the pipeline.
+    ctx.expect(threw === null && statusReply.length > 0 && startReply.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise:
+        'With database access blocked, /heist status and /heist start still reply (fail-safe) instead of crashing the interaction pipeline.',
+      observation:
+        threw === null
+          ? `during the outage window /heist status replied ${JSON.stringify(truncateText(statusReply))}; /heist start replied ${JSON.stringify(truncateText(startReply))}.`
+          : `an outage-window drive THREW ${truncateText(threw)}.`,
+      impact: 'A database outage crashed the heist command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts the branded heist-unavailable notice — never a
+    //     data-shaped answer fabricated from the failed reads: "no heists have
+    //     been attempted yet" (status) or an insufficient-funds / heists-disabled
+    //     verdict (start) are LIES about state the bot could not read.
+    const unavailableRe = /unavailable|try again|temporar|later|degraded|issue|problem/i;
+    const statusLie = /no heists have been attempted/i.test(statusReply);
+    const startLie = /you need|not enabled|payment failed/i.test(startReply);
+    ctx.expect(
+      unavailableRe.test(statusReply) && unavailableRe.test(startReply) && !statusLie && !startLie,
+      {
+        assertionClass: 'branding',
+        channel: 'captured-reply',
+        promise:
+          'With the database blocked, /heist status and /heist start reply with the branded heist-unavailable notice — never a fabricated empty-state, insufficient-funds, or heists-disabled verdict.',
+        observation:
+          `outage-window replies: status=${JSON.stringify(truncateText(statusReply))} (dataShapedLie=${statusLie}), ` +
+          `start=${JSON.stringify(truncateText(startReply))} (dataShapedLie=${startLie}).`,
+        impact:
+          'During a database outage a heist command fabricated a data-shaped answer from a failed read — members are told a lie about state the bot could not read.',
+      },
+    );
+
+    // (3) ZERO CORRUPTION: no wallet mutation during the outage — the seeded
+    //     wallet is byte-identical after restore and no orphan heist/participant
+    //     row was half-created by the degraded /heist start.
+    const walletAfter = await readWallet(handle, userA);
+    const heistsAfter = await heistCount(handle);
+    const partsAfter = await participantCount(handle);
+    ctx.expect(
+      walletAfter?.wallet === 1000 && walletAfter?.bank === 0 && heistsAfter === 0 && partsAfter === 0,
+      {
+        assertionClass: 'Discord',
+        channel: 'db-observable',
+        promise:
+          'No coins move during the outage window: the seeded wallet is unchanged after restoration and no orphan heist or participant row exists.',
+        observation:
+          `post-restore wallet=${walletAfter?.wallet}/bank=${walletAfter?.bank} (expected 1000/0); ` +
+          `economy_heists rows=${heistsAfter}, participant rows=${partsAfter} (expected 0/0).`,
+        impact: 'A database outage moved play-money or half-created heist rows — outage-window corruption.',
+      },
+    );
+
+    // (4) RECOVERY: the very next /heist start works against the restored stack —
+    //     it debits the entry fee EXACTLY once and opens exactly one recruiting
+    //     heist with the initiator's frozen participant row (the catalog's
+    //     "fresh /heist start debits exactly once" recovery contract).
+    const recoveredStart = await ctx.runSlash(handle, { commandName: 'heist', userId: userA, subcommand: 'start' });
+    const recoveredText = replyText(recoveredStart);
+    const walletRecovered = await walletAmount(handle, userA);
+    const activeHeist = await readActiveHeist(handle);
+    const initiatorRow = activeHeist ? await participantFor(handle, activeHeist.id, userA) : null;
+    ctx.expect(
+      walletRecovered === 900 &&
+        activeHeist?.status === 'recruiting' &&
+        initiatorRow?.entry_fee_paid === 100 &&
+        recoveredText.includes('assembling a crew'),
+      {
+        assertionClass: 'replay-safety',
+        channel: 'db-observable',
+        promise:
+          'After restoration a fresh /heist start debits the entry fee exactly once and opens exactly one recruiting heist (no lingering degradation, no double debit).',
+        observation:
+          `post-restore /heist start replied ${JSON.stringify(truncateText(recoveredText))}; wallet 1000→${walletRecovered} ` +
+          `(expected 900 — one 100 debit); heist status=${activeHeist?.status ?? '(none)'}; initiator entry_fee_paid=${initiatorRow?.entry_fee_paid ?? '(no row)'}.`,
+        impact: 'The heist pipeline did not recover cleanly after the outage ended (no heist opened, or the fee debited zero/multiple times).',
+      },
+    );
+
+    await proveRlsIsolation(ctx, handle);
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'During a Supabase outage, /heist start, join, and status reply with the branded heist-unavailable template and no wallet mutation occurs; after restoration a fresh /heist start debits the entry fee exactly once.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate entry-fee debit, crew payout, or refund survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded heist-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'Heist rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed heist command.',
-    'requires a dependency-outage fault lane plus owner alert channel readback',
+    'requires the dependency-degradation alert aggregation plus owner alert channel readback (DISCORD_TOKEN + live guild)',
   );
   ctx.gate(
     'audit',
     'db-observable',
     'A resolve tick during the outage logs and leaves the heist retryable without crashing; after restoration no debit, payout, or refund is applied twice.',
-    'requires the outage fault lane to exercise the degraded resolve path',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'No duplicate entry-fee debit, crew payout, or refund survives the outage/restore cycle.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded heist-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the heist-unavailable branch',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'Heist rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'the resolve tick fires only on a live setTimeout(join_window_secs) the fast bot-only harness cannot let elapse mid-outage; its idempotent settle path is proven in RETRY',
   );
 }
 

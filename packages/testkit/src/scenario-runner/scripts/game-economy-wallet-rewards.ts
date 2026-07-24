@@ -749,46 +749,167 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
-/** DEPFAIL — Supabase-unreachable fail-safe (needs a dependency-outage fault lane). */
+/** DEPFAIL — Supabase-unreachable fail-safe, driven through the REAL fault
+ *  proxy (ctx.faults severs the actual network path run-one-domain routed the
+ *  stack through). /balance and /daily are the driven surfaces; the runner
+ *  force-restores after every scenario. Falls back to honest gates when no
+ *  proxy is registered (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // This DB-observable harness's whole premise is a REACHABLE local Supabase, so a
-  // database-outage cannot be induced without a fault-injection lane. GATE the
-  // outage-dependent behavior honestly rather than fake an outage.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'With database access blocked, wallet commands reply with the branded wallet-unavailable message and no coins move.',
-    'requires a Supabase dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB)',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const dailyDefault = Number(declaredDefault(ctx.domain, 'economy-daily-amount'));
+    const handle = await ctx.bootGuild({ label: 'a', economyStartingBalance: 0 });
+    const userA = ctx.userId('a');
+    await seedWallet(handle, userA, 750, 250);
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let balSurface = '';
+    let balEmbed: Record<string, unknown> | undefined;
+    let dailySurface = '';
+    try {
+      const bal = await ctx.runSlash(handle, { commandName: 'balance', userId: userA });
+      balSurface = brandingSurface(bal);
+      balEmbed = replyEmbedData(bal);
+      if (ctx.capabilities.redis) {
+        // /daily claims its Valkey SET NX slot first (Valkey stays healthy in
+        // this lane) and then hits the severed credit RPC.
+        const daily = await ctx.runSlash(handle, { commandName: 'daily', userId: userA });
+        dailySurface = brandingSurface(daily);
+      }
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: the pipeline must reply, never crash.
+    ctx.expect(threw === null && balSurface.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'With database access blocked, wallet commands still reply (fail-safe) instead of crashing the interaction pipeline.',
+      observation: `during the outage window /balance ${threw === null ? `replied ${JSON.stringify(truncate(balSurface))}` : `THREW ${truncate(threw)}`}.`,
+      impact: 'A database outage crashed the wallet command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts the branded wallet-UNAVAILABLE notice — never a
+    //     data-shaped answer. Rendering the balance embed (a fabricated zero
+    //     wallet) during an outage is a lie about coins the bot could not read.
+    const balUnavailable = /unavailable|try again|temporar/i.test(balSurface);
+    const balLie = balEmbed !== undefined;
+    ctx.expect(balUnavailable && !balLie, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise: 'With the database blocked, /balance replies with the branded wallet-unavailable notice — never a balance embed fabricated from the failed read.',
+      observation: `outage-window /balance surface ${JSON.stringify(truncate(balSurface))} — looksUnavailable=${balUnavailable}, renderedBalanceEmbed=${balLie}.`,
+      impact: 'During a database outage /balance rendered a fabricated (zero) balance instead of a degradation notice — members are told a lie about coins the bot could not read.',
+    });
+
+    if (ctx.capabilities.redis) {
+      const dailyUnavailable = /unavailable|try again|temporar/i.test(dailySurface);
+      const dailyLie = /already claimed|come back in/i.test(dailySurface);
+      ctx.expect(threw === null && dailyUnavailable && !dailyLie, {
+        assertionClass: 'Discord',
+        channel: 'captured-reply',
+        promise: 'With the database blocked, /daily replies with the branded unavailable notice and does NOT consume the claim window (no false success, no false cooldown).',
+        observation: `outage-window /daily surface ${JSON.stringify(truncate(dailySurface))} — looksUnavailable=${dailyUnavailable}, cooldownShaped=${dailyLie}.`,
+        impact: 'During a database outage /daily replied with a data-shaped answer (a success or cooldown fabricated from the failed write) instead of the branded degradation notice.',
+      });
+    } else {
+      ctx.gate(
+        'Discord',
+        'redis-dependency',
+        'With the database blocked, /daily replies with the branded unavailable notice and its claim window is not consumed.',
+        'no Valkey/Redis reachable — the /daily cooldown (SET NX) path cannot run even inside the fault lane',
+      );
+    }
+
+    // (3) ZERO CORRUPTION: the seeded wallet row is byte-identical after
+    //     restore and the outage window minted no coins and wrote no ledger row.
+    const after = await readWallet(handle, userA);
+    const outageDailyTxns = await txns(handle, userA, 'daily');
+    ctx.expect(after?.wallet === 750 && after?.bank === 250 && outageDailyTxns.length === 0, {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'No coins move across the outage window — the persisted wallet row is unchanged after restoration and no reward ledger row was written.',
+      observation: `post-restore wallet=${after?.wallet}/bank=${after?.bank} (expected 750/250); daily ledger rows=${outageDailyTxns.length} (expected 0).`,
+      impact: 'A database outage moved play coins or wrote a phantom reward ledger row.',
+    });
+
+    // (4) RECOVERY: the very next /balance serves the real balance again.
+    const recovered = await ctx.runSlash(handle, { commandName: 'balance', userId: userA });
+    const recEmbed = replyEmbedData(recovered);
+    const recWalletField = ((recEmbed?.fields as Array<{ name: string; value: string }> | undefined) ?? []).find((f) =>
+      f.name.includes('Wallet'),
+    );
+    ctx.expect(Boolean(recWalletField && recWalletField.value.includes('750')), {
+      assertionClass: 'replay-safety',
+      channel: 'captured-reply',
+      promise: 'After restoration the very next /balance renders the member’s REAL persisted balance again (no lingering degradation).',
+      observation: `post-restore /balance wallet field = "${recWalletField?.value ?? '(missing)'}" (expected the real 750).`,
+      impact: 'The wallet pipeline did not recover after the outage ended.',
+    });
+
+    // (5) After restoration a FRESH /daily credits exactly once (the outage
+    //     did not consume the claim window) with exactly one ledger row.
+    if (ctx.capabilities.redis) {
+      await ctx.runSlash(handle, { commandName: 'daily', userId: userA });
+      const afterDaily = await readWallet(handle, userA);
+      const dailyTxns = await txns(handle, userA, 'daily');
+      ctx.expect(afterDaily?.wallet === 750 + dailyDefault && dailyTxns.length === 1, {
+        assertionClass: 'audit',
+        channel: 'audit-row',
+        promise: `After restoration a fresh /daily credits exactly the ${dailyDefault}-coin reward once, with exactly one append-only daily ledger row (the outage consumed no claim window and no duplicate credit survives the cycle).`,
+        observation: `post-restore /daily: wallet=${afterDaily?.wallet} (expected ${750 + dailyDefault}); daily ledger rows=${dailyTxns.length} (expected exactly 1).`,
+        impact: 'The outage consumed the /daily claim window (the member lost a reward day) or the recovery claim did not credit exactly once.',
+      });
+    } else {
+      ctx.gate(
+        'audit',
+        'redis-dependency',
+        'After restoration a fresh /daily credits exactly once with one ledger row.',
+        'no Valkey/Redis reachable — the /daily cooldown (SET NX) path cannot run even inside the fault lane',
+      );
+    }
+
+    await proveRlsIsolation(ctx, handle, userA);
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With database access blocked, wallet commands reply with the branded wallet-unavailable message and no coins move.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'audit',
+      'db-observable',
+      'After restoration a fresh /daily credits exactly once and applies.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate credit survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded wallet-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'Wallet rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window (not one per failed command).',
-    'requires a dependency-outage fault lane plus owner alert channel readback',
-  );
-  ctx.gate(
-    'audit',
-    'db-observable',
-    'After restoration a fresh /daily credits exactly once and applies.',
-    'requires the outage fault lane and (for /daily) a Valkey/Redis cooldown path',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'No duplicate credit survives the outage/restore cycle.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded wallet-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the wallet-unavailable branch',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'Wallet rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'requires a dependency-outage fault lane plus owner alert channel readback (the in-window alert insert itself hits the severed database)',
   );
 }
 

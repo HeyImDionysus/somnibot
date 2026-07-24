@@ -504,7 +504,12 @@ describe('EconomyManager', () => {
 
       const result = await em.claimTimedReward('u1', 'daily');
       expect(result.success).toBe(false);
-      expect(result.message).toContain('Failed to credit');
+      // [game-economy-wallet-rewards DEPFAIL] The failure branch degrades with
+      // the branded unavailable notice (never a data-shaped answer) and
+      // RELEASES the claimed cooldown slot so the outage does not consume the
+      // member's reward window.
+      expect(result.message).toContain('temporarily unavailable');
+      expect(valkey.del).toHaveBeenCalledWith('economy:g1:u1:daily');
     });
   });
 

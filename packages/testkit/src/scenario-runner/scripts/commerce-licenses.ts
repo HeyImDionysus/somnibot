@@ -1131,17 +1131,22 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateBrandingEmbed(ctx, 'Denial messages are branded and reveal nothing about the key’s true owner.');
 }
 
-/** DEPFAIL — the validate endpoint outage fails safe for paying customers (fault lane mostly gated). */
+/** DEPFAIL — a dependency outage fails safe for paying customers. The Supabase
+ *  leg is driven through the REAL fault proxy (ctx.faults severs the actual
+ *  network path run-one-domain routed the stack through): /license check is
+ *  driven DURING the severed window and must degrade honestly — never reply a
+ *  data-shaped "no purchases" lie — with zero corruption and clean recovery.
+ *  The validate-ENDPOINT legs (SDK validate-degraded semantics, deduped alert,
+ *  license.validate_unavailable audit, queued-retry absorption) stay honestly
+ *  gated: that outage is an HTTP endpoint + SDK lane, not this process's
+ *  Supabase path. Falls back to honest gates when no proxy is registered. */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
   const buyer = ctx.userId('a');
   const arr = await arrangeLicense(ctx, handle, { discordId: buyer, label: 'depfail', keyStatus: 'active', entStatus: 'active' });
 
-  // Arrange a live device session, then simulate the outage window: POST /api/license/validate is
-  // unreachable, so NO validate/heartbeat runs. The invariant we CAN prove now: the outage alone drops
-  // no session and mutates no key state — last-known-good survives (only a terminal key transition ends
-  // a session). The induced outage + degraded copy + deduped alert + audit + queued-retry absorption
-  // require a validate-endpoint fault-injection lane the reachable-DB harness cannot induce → GATED.
+  // Arrange a live device session before any outage window, so "no session is
+  // dropped by the outage" is a real invariant over real state.
   const bind = await bindDevice(handle, arr.licenseKeyId ?? '', `${ctx.runPrefix}depfail-dev`, { maxDevices: 3, policy: 'reject' });
   let sessionArranged = bind.status === 'created' || bind.status === 'existing';
   if (bind.error) {
@@ -1151,26 +1156,130 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     sessionArranged = !sErr;
   }
   const beforeActive = (await activeSessions(handle, arr.licenseKeyId ?? '')).length;
-  // (outage window — no validate/heartbeat is issued)
-  const afterActive = (await activeSessions(handle, arr.licenseKeyId ?? '')).length;
-  const keyStill = await readLicenseKey(handle, arr.licenseKeyId ?? '');
-  if (sessionArranged) {
-    ctx.expect(beforeActive === 1 && afterActive === 1 && keyStill?.status === 'active', {
+
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). Drive the
+    //    paying customer's read surface (/license check) inside the window. ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let severedTitle = '';
+    let severedBody = '';
+    try {
+      const severedCap = await driveCheck(ctx, handle, buyer);
+      severedTitle = embedTitle(severedCap);
+      severedBody = embedDescription(severedCap);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+    const severedSurface = `${severedTitle}\n${severedBody}`;
+
+    // (1) FAIL-SAFE: the license pipeline replied, never crashed.
+    ctx.expect(threw === null && severedSurface.trim().length > 0, {
       assertionClass: 'Discord',
-      channel: 'db-observable',
-      promise: 'A validate-endpoint outage alone drops no session and mutates no key state — the paying customer keeps last-known-good access.',
-      observation: `active sessions across the outage window ${beforeActive} → ${afterActive} (expected 1 → 1); key status=${keyStill?.status} (expected active).`,
-      impact: 'The outage alone dropped a device session or changed key state — the fail-safe-for-paying-customers guarantee failed.',
+      channel: 'captured-reply',
+      promise: 'With database access severed, /license check still replies (fail-safe) instead of crashing the interaction pipeline.',
+      observation: `during the outage window /license check ${threw === null ? `replied ${JSON.stringify(severedSurface.slice(0, 140))}` : `THREW ${threw.slice(0, 140)}`}.`,
+      impact: 'A database outage crashed the license command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The degradation must NEVER be a data-shaped lie: telling a PAYING
+    //     customer "no purchases" / "no active entitlements" during an outage
+    //     asserts state the bot could not read. Recorded honestly; never softened.
+    const looksUnavailable = /unavailable|try again|temporar|later|degraded|issue|problem/i.test(severedSurface);
+    const dataShapedLie = /no purchases|no active entitlements/i.test(severedSurface);
+    ctx.expect(looksUnavailable && !dataShapedLie, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise: 'With the database severed, /license check replies the branded license-unavailable degradation — never a data-shaped "no purchases" answer fabricated from the failed read.',
+      observation: `outage-window reply ${JSON.stringify(severedSurface.slice(0, 160))} — looksUnavailable=${looksUnavailable}, dataShapedLie=${dataShapedLie}.`,
+      impact: 'During a database outage a paying customer was told they own nothing instead of receiving a degradation notice — a lie about unreadable entitlement state.',
+    });
+
+    // (3) ZERO CORRUPTION: the outage window drops no session and mutates no
+    //     key/entitlement — last-known-good survives byte-identically.
+    const afterActive = (await activeSessions(handle, arr.licenseKeyId ?? '')).length;
+    const keyStill = await readLicenseKey(handle, arr.licenseKeyId ?? '');
+    const entStill = await readEntitlementByKey(handle, arr.licenseKeyId ?? '');
+    const keyIntact =
+      keyStill?.status === 'active' &&
+      keyStill?.key_hash === arr.key.hash &&
+      keyStill?.bound_discord_id === buyer &&
+      entStill?.status === 'active';
+    if (sessionArranged) {
+      ctx.expect(beforeActive === 1 && afterActive === 1 && keyIntact, {
+        assertionClass: 'Discord',
+        channel: 'db-observable',
+        promise: 'A REAL severed-database window drops no device session and mutates no key/entitlement state — the paying customer keeps last-known-good access.',
+        observation:
+          `active sessions across the severed window ${beforeActive} → ${afterActive} (expected 1 → 1); ` +
+          `post-restore key status=${keyStill?.status} (expected active), hash-intact=${keyStill?.key_hash === arr.key.hash}, ` +
+          `binding-intact=${keyStill?.bound_discord_id === buyer}; entitlement=${entStill?.status} (expected active).`,
+        impact: 'The outage dropped a paid device session or corrupted key/entitlement state — the fail-safe-for-paying-customers guarantee failed.',
+      });
+    } else {
+      ctx.gate('Discord', 'db-observable', 'A dependency outage drops no live session.', 'could not arrange a live device session (bind RPC not executable and the direct session insert failed)');
+      ctx.expect(keyIntact, {
+        assertionClass: 'Discord',
+        channel: 'db-observable',
+        promise: 'A REAL severed-database window mutates no key/entitlement state — last-known-good survives byte-identically.',
+        observation: `post-restore key status=${keyStill?.status}, hash-intact=${keyStill?.key_hash === arr.key.hash}, binding-intact=${keyStill?.bound_discord_id === buyer}; entitlement=${entStill?.status} (expected active).`,
+        impact: 'The outage window corrupted persisted key/entitlement state.',
+      });
+    }
+
+    // (4) RECOVERY: the very next /license check serves the REAL entitlement.
+    const recovered = await driveCheck(ctx, handle, buyer);
+    ctx.expect(embedTitle(recovered).includes('Entitlements') && /active/i.test(embedDescription(recovered)), {
+      assertionClass: 'replay-safety',
+      channel: 'captured-reply',
+      promise: 'After restoration the very next /license check serves the real active entitlement again (no lingering degradation, no duplicated state).',
+      observation: `post-restore /license check replied title=${JSON.stringify(embedTitle(recovered))}, body=${JSON.stringify(embedDescription(recovered).slice(0, 120))}.`,
+      impact: 'The license pipeline did not recover after the outage ended — the customer still cannot see their paid entitlement.',
     });
   } else {
-    ctx.gate('Discord', 'db-observable', 'A validate outage drops no live session.', 'could not arrange a live device session (bind RPC not executable and the direct session insert failed)');
+    // No proxy in this process: the invariant provable against the reachable
+    // stack is that a quiet (no-validate) window alone drops no session and
+    // mutates no key state; the severed-window legs gate onto the fault lane.
+    const afterActive = (await activeSessions(handle, arr.licenseKeyId ?? '')).length;
+    const keyStill = await readLicenseKey(handle, arr.licenseKeyId ?? '');
+    if (sessionArranged) {
+      ctx.expect(beforeActive === 1 && afterActive === 1 && keyStill?.status === 'active', {
+        assertionClass: 'Discord',
+        channel: 'db-observable',
+        promise: 'A validate-endpoint outage alone drops no session and mutates no key state — the paying customer keeps last-known-good access.',
+        observation: `active sessions across the outage window ${beforeActive} → ${afterActive} (expected 1 → 1); key status=${keyStill?.status} (expected active).`,
+        impact: 'The outage alone dropped a device session or changed key state — the fail-safe-for-paying-customers guarantee failed.',
+      });
+    } else {
+      ctx.gate('Discord', 'db-observable', 'A validate outage drops no live session.', 'could not arrange a live device session (bind RPC not executable and the direct session insert failed)');
+    }
+    ctx.gate(
+      'Discord',
+      'captured-reply',
+      'With the database severed, /license check fails safe with a degradation reply instead of crashing.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The outage-window /license check reply is the branded license-unavailable notice, never a data-shaped "no purchases" lie.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'captured-reply',
+      'After restoration the next /license check serves the real entitlements again.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
   }
 
   await proveLicenseRls(ctx, handle, arr.licenseKeyId ?? '');
   await proveTwoEconomiesWall(ctx, handle);
   await proveNoOwnerAlert(ctx, handle); // a blip raises no owner alert
 
-  ctx.gate('Discord', 'discord-readback', 'With /api/license/validate unreachable the SDK returns validate-degraded and existing activations keep working; recovery reconciles the session with no duplicate row.', 'requires a validate-endpoint outage fault-injection lane (the harness runs against a reachable stack)');
+  ctx.gate('Discord', 'discord-readback', 'With /api/license/validate unreachable the SDK returns validate-degraded and existing activations keep working; recovery reconciles the session with no duplicate row.', 'requires a validate-endpoint outage fault-injection lane (the Supabase fault proxy cannot make the SDK-facing validate HTTP endpoint unreachable)');
   ctx.gate('database-RLS', 'db-observable', 'license_sessions rows are unchanged during the outage and refreshed (not duplicated) on recovery.', 'requires the validate-outage fault lane + a recovery heartbeat');
   ctx.gate('audit', 'audit-row', 'The outage window is recorded as license.validate_unavailable with recovery visible in the trail.', 'requires the validate-outage fault lane to reach the license.validate_unavailable branch');
   ctx.gate('owner-notification', 'discord-readback', 'Sustained validation failure raises exactly one deduped owner alert; a blip raises none.', 'requires the validate-outage fault lane + owner alert channel readback');

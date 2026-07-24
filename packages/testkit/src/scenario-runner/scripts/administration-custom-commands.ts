@@ -767,47 +767,54 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   );
 }
 
-/** DEPFAIL — losing Valkey never lets cooldowns be bypassed (Valkey-outage fault lane). */
+/** DEPFAIL — losing Valkey never lets cooldowns be bypassed (Valkey leg honestly gated). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // The premise is a controlled "stop Valkey mid-run" outage. The engine's cooldown
-  // branch (valkey.get/ttl/set) has no branded temporarily-unavailable fallback a
-  // bot-only harness can deterministically drive; GATE the outage-dependent behavior
-  // honestly rather than fake an outage.
+  // The premise is a controlled "stop Valkey mid-run" outage: the contracted fault
+  // severs VALKEY (the cooldown check-and-set), not Supabase — a Supabase sever
+  // would not model this contract (invocation reads the in-memory registry loaded
+  // at boot; the cooldown is the Valkey branch). The fault-proxy lane severs
+  // SUPABASE only this wave, so the Valkey sever leg stays honestly gated. The
+  // engine's cooldown branch also has no branded temporarily-unavailable fallback
+  // yet — fixing + proving that belongs to the Valkey-sever wave, where the fix
+  // can be driven for real instead of shipped unproven.
+  const valkeyLane = ctx.faults?.valkey
+    ? 'the contracted outage severs VALKEY; its fault proxy is registered but deliberately not severed this wave (Supabase-sever only) — the cooldown-branch degradation (and its missing branded temporarily-unavailable fallback) is proven on the Valkey-sever wave'
+    : 'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane); the contracted outage severs Valkey, not Supabase';
   ctx.gate(
     'Discord',
     'redis-dependency',
     'With Valkey stopped, a cooldown-protected command replies with the branded temporarily-unavailable ephemeral message instead of executing (fail-safe: the cooldown is never bypassed); zero-cooldown message-only commands keep working.',
-    'requires deterministic Valkey-outage control; the engine cooldown branch has no branded temporarily-unavailable fallback path a bot-only harness can drive',
+    valkeyLane,
   );
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives exactly one dependency-loss alert for the outage window.',
-    'requires a Valkey dependency-outage fault lane plus owner alert-channel readback',
+    `${valkeyLane}; the alert additionally needs the owner alert-channel readback`,
   );
   ctx.gate(
     'audit',
     'db-observable',
     'The degraded refusals are recorded for the outage window.',
-    'requires a deterministic Valkey-outage fault lane',
+    valkeyLane,
   );
   ctx.gate(
     'replay-safety',
     'redis-dependency',
     'No cooldown window is bypassed at any point during the outage.',
-    'requires a Valkey dependency-outage fault lane to prove the no-bypass guarantee',
+    valkeyLane,
   );
   ctx.gate(
     'branding',
     'captured-reply',
     'The unavailable copy is calm and branded.',
-    'requires the Valkey-outage fault lane to reach the temporarily-unavailable branch',
+    `${valkeyLane}; the temporarily-unavailable branch does not exist in the engine yet (a real gap to surface on that wave, never faked green here)`,
   );
   ctx.gate(
     'database-RLS',
     'db-rls',
     'No command state is corrupted during the outage.',
-    'requires a deterministic Valkey-outage fault lane',
+    valkeyLane,
   );
 }
 

@@ -18,6 +18,7 @@ import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { eventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Heist');
 
@@ -175,13 +176,44 @@ export class HeistManager {
     this.retryAttempts.delete(heistId);
   }
 
-  private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+  /**
+   * Read the guild config (cached). `degraded` is true only when the read FAILED
+   * (e.g. a database outage) as opposed to genuinely finding no row (PGRST116) —
+   * callers must not present a failed read as "heists are not enabled", which is
+   * a data-shaped lie about config state the bot could not read.
+   */
+  private async getConfig(
+    guildId: string,
+  ): Promise<{ config: DbGuildConfig | null; degraded: boolean }> {
     const cached = this.configCache.get(guildId);
-    if (cached) return cached;
-    const { data } = await this.supabase
+    if (cached) return { config: cached, degraded: false };
+    const { data, error } = await this.supabase
       .from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
-    return data;
+    return { config: data, degraded: error != null && error.code !== 'PGRST116' };
+  }
+
+  /**
+   * Branded degradation notice for a dependency outage. A failed READ must never
+   * degrade into a data-shaped answer ("no heists yet", "you need N coins") —
+   * that is a lie about state the bot could not read. The brand lookup is itself
+   * outage-safe: resolveBrandKit never throws (belt-and-braces .catch) and the
+   * guild name is the fallback, so this reply renders during a full DB outage.
+   */
+  private async replyHeistUnavailable(
+    interaction: ChatInputCommandInteraction,
+    suffix = '',
+  ): Promise<void> {
+    const brandKit = await resolveBrandKit(this.supabase, interaction.guildId!, {
+      fallbackName: interaction.guild?.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
+    const content = `⚠️ ${name}'s heists are temporarily unavailable — please try again in a moment.${suffix}`;
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ content }).catch(() => {});
+    } else {
+      await interaction.reply({ content, ephemeral: true }).catch(() => {});
+    }
   }
 
   /**
@@ -197,8 +229,13 @@ export class HeistManager {
   async startHeist(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
-    const config = await this.getConfig(guildId);
+    const { config, degraded } = await this.getConfig(guildId);
 
+    // A failed config read is an outage, not "heists are off" — degrade honestly.
+    if (degraded) {
+      await this.replyHeistUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
     if (!config?.economy_heist_enabled) {
       await interaction.reply({ content: '🚫 Heists are not enabled on this server.', ephemeral: true });
       return;
@@ -222,7 +259,7 @@ export class HeistManager {
     }
 
     // Check cooldown (DB fallback — covers case where Valkey was unavailable at last resolve)
-    const { data: recent } = await this.supabase
+    const { data: recent, error: recentErr } = await this.supabase
       .from('economy_heists')
       .select('resolved_at')
       .eq('guild_id', guildId)
@@ -230,6 +267,13 @@ export class HeistManager {
       .order('resolved_at', { ascending: false })
       .limit(1)
       .maybeSingle();
+
+    // A failed cooldown read means the database is unreachable — do NOT press on
+    // toward a wallet debit against a dependency we already know is down.
+    if (recentErr) {
+      await this.replyHeistUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
 
     if (recent?.resolved_at) {
       const cooldownMs = cooldownSecs * 1000;
@@ -245,13 +289,20 @@ export class HeistManager {
     }
 
     // Check no active heist
-    const { data: active } = await this.supabase
+    const { data: active, error: activeErr } = await this.supabase
       .from('economy_heists')
       .select('id')
       .eq('guild_id', guildId)
       .in('status', ['recruiting', 'in_progress'])
       .limit(1)
       .maybeSingle();
+
+    // Same honesty rule: an unreadable active-heist state is an outage, never
+    // "no active heist" (pressing on could debit against a down database).
+    if (activeErr) {
+      await this.replyHeistUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
 
     if (active) {
       await interaction.reply({
@@ -263,9 +314,17 @@ export class HeistManager {
 
     // Check balance for entry fee
     const entryFee = config.economy_heist_entry_fee ?? 100;
-    const { data: wallet } = await this.supabase
+    const { data: wallet, error: walletErr } = await this.supabase
       .from('economy_wallets').select('wallet')
       .eq('guild_id', guildId).eq('user_id', userId).single();
+
+    // A FAILED wallet read is not an empty wallet: telling the member they "need
+    // N coins" off a read the bot could not perform is a fabricated balance.
+    // PGRST116 (no row) is a genuine no-wallet case and falls through below.
+    if (walletErr && walletErr.code !== 'PGRST116') {
+      await this.replyHeistUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
 
     if (!wallet || wallet.wallet < entryFee) {
       await interaction.reply({
@@ -280,7 +339,14 @@ export class HeistManager {
       p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
     });
     if (feeErr) {
-      await interaction.reply({ content: `❌ Payment failed — you need ${cEmoji} **${entryFee.toLocaleString()}** ${cName}.`, ephemeral: true });
+      // Only a genuine insufficient-balance raise may claim the member lacks
+      // coins; a network/transient RPC failure debited nothing and must degrade
+      // honestly rather than fabricate a balance verdict.
+      if (/insufficient/i.test(feeErr.message ?? '')) {
+        await interaction.reply({ content: `❌ Payment failed — you need ${cEmoji} **${entryFee.toLocaleString()}** ${cName}.`, ephemeral: true });
+      } else {
+        await this.replyHeistUnavailable(interaction, ' Nothing was charged.');
+      }
       return;
     }
 
@@ -342,6 +408,13 @@ export class HeistManager {
         log.error('CRITICAL: heist_start failed AND refund failed', {
           guildId, userId, entryFee, startErr, refundErr,
         });
+        // Never tell the member their fee "was refunded" when the refund itself
+        // failed — that is a lie about their balance during an outage.
+        await this.replyHeistUnavailable(
+          interaction,
+          ' Your entry fee could not be confirmed — an admin has been notified if your balance looks short.',
+        );
+        return;
       }
       if (duplicate) {
         await interaction.reply({
@@ -398,8 +471,13 @@ export class HeistManager {
   async joinHeist(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
-    const config = await this.getConfig(guildId);
+    const { config, degraded } = await this.getConfig(guildId);
 
+    // A failed config read is an outage, not "heists are off" — degrade honestly.
+    if (degraded) {
+      await this.replyHeistUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
     if (!config?.economy_heist_enabled) {
       await interaction.reply({ content: '🚫 Heists are not enabled.', ephemeral: true });
       return;
@@ -411,7 +489,7 @@ export class HeistManager {
     // status under the heist-row lock and is the sole authority on whether the
     // join is admitted. We only use this row for the target's difficulty modifier
     // (to derive the base success chance) and for a fast "no heist" UX reply.
-    const { data: heist } = await this.supabase
+    const { data: heist, error: heistErr } = await this.supabase
       .from('economy_heists')
       .select('*')
       .eq('guild_id', guildId)
@@ -419,6 +497,13 @@ export class HeistManager {
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
+
+    // A failed read is NOT "no heist recruiting" — that answer is fabricated
+    // from state the bot could not read. Degrade honestly instead.
+    if (heistErr) {
+      await this.replyHeistUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
 
     if (!heist) {
       await interaction.reply({
@@ -554,9 +639,10 @@ export class HeistManager {
 
   async viewHeist(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    const { cName, cEmoji } = this.currencyOf(await this.getConfig(guildId));
+    const { config } = await this.getConfig(guildId);
+    const { cName, cEmoji } = this.currencyOf(config);
 
-    const { data: heist } = await this.supabase
+    const { data: heist, error: heistErr } = await this.supabase
       .from('economy_heists')
       .select('*')
       .eq('guild_id', guildId)
@@ -565,9 +651,16 @@ export class HeistManager {
       .limit(1)
       .maybeSingle();
 
+    // A failed READ is not "no heists yet": answering the empty-state line off a
+    // read the bot could not perform is a data-shaped lie. Degrade honestly.
+    if (heistErr) {
+      await this.replyHeistUnavailable(interaction);
+      return;
+    }
+
     if (!heist) {
       // Show last completed heist
-      const { data: last } = await this.supabase
+      const { data: last, error: lastErr } = await this.supabase
         .from('economy_heists')
         .select('*')
         .eq('guild_id', guildId)
@@ -575,6 +668,11 @@ export class HeistManager {
         .order('resolved_at', { ascending: false })
         .limit(1)
         .maybeSingle();
+
+      if (lastErr) {
+        await this.replyHeistUnavailable(interaction);
+        return;
+      }
 
       if (!last) {
         await interaction.reply({
@@ -631,7 +729,7 @@ export class HeistManager {
   private async resolveHeist(guildId: string, heistId: string, channelId: string): Promise<void> {
     this.resolveTimers.delete(heistId);
 
-    const config = await this.getConfig(guildId);
+    const { config } = await this.getConfig(guildId);
     const minParticipants = config?.economy_heist_min_participants ?? 2;
     const entryFee = config?.economy_heist_entry_fee ?? 100;
     const { cName, cEmoji } = this.currencyOf(config);
@@ -1041,11 +1139,11 @@ export class HeistManager {
       if (remaining <= 0) {
         // Expired while offline — resolve immediately
         // Find the channel from the initiator's last message context — use log channel as fallback
-        const config = await this.getConfig(guildId);
+        const { config } = await this.getConfig(guildId);
         const channelId = config?.economy_log_channel_id ?? '';
         await this.resolveHeist(guildId, heist.id, channelId);
       } else {
-        const config = await this.getConfig(guildId);
+        const { config } = await this.getConfig(guildId);
         const channelId = config?.economy_log_channel_id ?? '';
         const timer = setTimeout(async () => {
           try {

@@ -252,6 +252,17 @@ async function handleBalance(
   const user = interaction.options.getUser('user') ?? interaction.user;
   const cfg = await mgr.loadConfig();
   const wallet = await mgr.getOrCreateWallet(user.id);
+
+  // [game-economy-wallet-rewards DEPFAIL] A `degraded` wallet is the
+  // non-throwing fallback fabricated when the database was unreachable — NOT
+  // the member's real balance. Rendering it would tell the member a
+  // data-shaped lie ("wallet: 0") about state the bot could not read; degrade
+  // with the branded wallet-unavailable notice instead.
+  if (wallet.degraded) {
+    await interaction.reply({ content: await mgr.walletUnavailableMessage('wallet') });
+    return;
+  }
+
   const netWorth = wallet.wallet + wallet.bank;
 
   const embed = new EmbedBuilder()
@@ -441,7 +452,15 @@ async function handlePassive(interaction: ChatInputCommandInteraction, mgr: Econ
 async function handleShop(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
   const category = interaction.options.getString('category') ?? undefined;
   const cfg = await mgr.loadConfig();
-  const items = await mgr.getShopItems(category);
+  const { items, degraded } = await mgr.getShopItemsChecked(category);
+
+  // [game-economy-shop-market DEPFAIL] A FAILED catalog read is not an empty
+  // shop: replying "The shop is empty!" during a database outage is a
+  // data-shaped lie about a catalog the bot could not read. Degrade honestly.
+  if (degraded) {
+    await interaction.reply({ content: await mgr.walletUnavailableMessage('shop'), ephemeral: true });
+    return;
+  }
 
   if (items.length === 0) {
     await interaction.reply({ content: '🏪 The shop is empty!', ephemeral: true });
@@ -482,7 +501,13 @@ async function handleBuy(interaction: ChatInputCommandInteraction, mgr: EconomyM
   const quantity = interaction.options.getInteger('quantity') ?? 1;
 
   // Resolve item by name or ID
-  const itemId = await resolveItemId(mgr, interaction.guildId!, itemName);
+  const { id: itemId, degraded } = await resolveItemId(mgr, interaction.guildId!, itemName);
+  // [game-economy-shop-market DEPFAIL] A FAILED catalog lookup is not "item not
+  // found" — that verdict is fabricated during an outage. Nothing was charged.
+  if (degraded) {
+    await interaction.reply({ content: await mgr.walletUnavailableMessage('shop'), ephemeral: true });
+    return;
+  }
   if (!itemId) {
     await interaction.reply({ content: `❌ Item "${itemName}" not found. Use \`/shop\` to browse available items.`, ephemeral: true });
     return;
@@ -498,7 +523,11 @@ async function handleSell(interaction: ChatInputCommandInteraction, mgr: Economy
   const itemName = interaction.options.getString('item', true);
   const quantity = interaction.options.getInteger('quantity') ?? 1;
 
-  const itemId = await resolveItemId(mgr, interaction.guildId!, itemName);
+  const { id: itemId, degraded } = await resolveItemId(mgr, interaction.guildId!, itemName);
+  if (degraded) {
+    await interaction.reply({ content: await mgr.walletUnavailableMessage('shop'), ephemeral: true });
+    return;
+  }
   if (!itemId) {
     await interaction.reply({ content: `❌ Item "${itemName}" not found.`, ephemeral: true });
     return;
@@ -661,14 +690,20 @@ async function handleCollectIncome(interaction: ChatInputCommandInteraction, mgr
 
 // ── Helpers ───────────────────────────────────────────────
 
-async function resolveItemId(mgr: EconomyManager, guildId: string, nameOrId: string): Promise<string | null> {
+async function resolveItemId(
+  mgr: EconomyManager,
+  guildId: string,
+  nameOrId: string,
+): Promise<{ id: string | null; degraded: boolean }> {
   // Try UUID first
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nameOrId)) {
-    return nameOrId;
+    return { id: nameOrId, degraded: false };
   }
 
-  // Search by name (case-insensitive)
-  const items = await mgr.getShopItems();
+  // Search by name (case-insensitive). A degraded (failed) catalog read must
+  // surface as an outage, never be conflated with "not found".
+  const { items, degraded } = await mgr.getShopItemsChecked();
+  if (degraded) return { id: null, degraded: true };
   const match = items.find((item) => item.name.toLowerCase() === nameOrId.toLowerCase());
-  return match?.id ?? null;
+  return { id: match?.id ?? null, degraded: false };
 }

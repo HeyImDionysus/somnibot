@@ -267,8 +267,14 @@ describe('PetsManager', () => {
         if (table === 'guild_config') {
           chain.then = (resolve: (v: any) => void) => resolve({ data: { economy_pets_enabled: true }, error: null });
         } else if (table === 'economy_pets') {
-          // First call: getPet returns null, second call: insert returns error
-          chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: { message: '23505' } });
+          // The getPet READ must succeed with no row (no pet yet) — a failed
+          // read is an outage the manager now (correctly) refuses to debit
+          // against, which would never reach the refund path under test.
+          // Only the INSERT fails, with the 23505 this test is about.
+          let isInsert = false;
+          chain.insert = vi.fn(() => { isInsert = true; return chain; });
+          chain.then = (resolve: (v: any) => void) =>
+            resolve(isInsert ? { data: null, error: { message: '23505' } } : { data: null, error: null });
         } else if (table === 'economy_wallets') {
           chain.then = (resolve: (v: any) => void) => resolve({ data: { wallet: 10000 }, error: null });
         } else {

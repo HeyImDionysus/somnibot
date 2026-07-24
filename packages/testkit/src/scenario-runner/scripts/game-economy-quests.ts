@@ -302,6 +302,22 @@ function replyContent(captured: CapturedResponse): string {
   return payloadText(captured.find('reply')?.payload);
 }
 
+/** Content + first-embed title/description of the last reply/editReply — the quests
+ *  board is an embed, so the DEPFAIL drives need both surfaces flattened to text. */
+function questReplyText(captured: CapturedResponse): string {
+  const edits = captured.allOf('editReply');
+  const replies = captured.allOf('reply');
+  const payload = (edits[edits.length - 1] ?? replies[replies.length - 1])?.payload as
+    | string
+    | { content?: string; embeds?: Array<{ data?: { title?: string; description?: string } }> }
+    | undefined;
+  if (typeof payload === 'string') return payload;
+  const embed = payload?.embeds?.[0]?.data;
+  return [payload?.content ?? '', embed?.title ?? '', embed?.description ?? '']
+    .filter(Boolean)
+    .join(' ');
+}
+
 /**
  * Anon-denial probe via the PostgREST REST endpoint. Returns the number of rows an
  * anon key can read (RLS/GRANT deny → 0), or null when no anon key / inconclusive
@@ -934,45 +950,166 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
-/** DEPFAIL — Supabase-unreachable fail-safe (needs a dependency-outage fault lane). */
+/** DEPFAIL — Supabase-unreachable fail-safe, driven through the REAL fault
+ *  proxy (ctx.faults severs the actual network path run-one-domain routed the
+ *  stack through). Falls back to honest gates when no proxy is registered
+ *  (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // The harness's premise is a REACHABLE local Supabase, so a database outage cannot be
-  // induced without a fault-injection lane. GATE the outage-dependent behavior honestly.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'During a database outage, /quests view replies with the branded quests-unavailable template and no progress is lost.',
-    'requires a Supabase dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB)',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const handle = await ctx.bootGuild({ label: 'a', guildConfigOverrides: questConfig(ctx) });
+    const userA = ctx.userId('a');
+
+    // Seed the REAL template pool and one in-flight daily quest at progress 1.
+    await seedTemplates(handle);
+    const daily = (await readTemplates(handle, 'daily'))[0] ?? null;
+    const pid = daily ? await insertProgress(handle, userA, daily.id, 1, false) : null;
+
+    // Pre-outage: one truthful /quests view baseline (also lets the view's
+    // weekly auto-assign top up the slate and warms the manager's config cache
+    // the way a long-running bot holds it). Snapshot the full slate after it.
+    await ctx.runSlash(handle, { commandName: 'quests', userId: userA, subcommand: 'view' });
+    const slateBefore = (await progressRows(handle, userA))
+      .map((r) => `${r.template_id}:${r.progress}:${r.completed}:${r.claimed}`)
+      .sort();
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let viewReply = '';
+    let claimReply = '';
+    try {
+      viewReply = questReplyText(
+        await ctx.runSlash(handle, { commandName: 'quests', userId: userA, subcommand: 'view' }),
+      );
+      claimReply = questReplyText(
+        await ctx.runSlash(handle, { commandName: 'quests', userId: userA, subcommand: 'claim' }),
+      );
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: both quest commands must reply, never crash the pipeline.
+    ctx.expect(threw === null && viewReply.length > 0 && claimReply.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise:
+        'With database access blocked, /quests view and /quests claim still reply (fail-safe) instead of crashing the interaction pipeline.',
+      observation:
+        threw === null
+          ? `during the outage window /quests view replied ${JSON.stringify(viewReply.slice(0, 140))}; /quests claim replied ${JSON.stringify(claimReply.slice(0, 140))}.`
+          : `an outage-window drive THREW ${threw.slice(0, 140)}.`,
+      impact: 'A database outage crashed the quests command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts the branded quests-unavailable notice — never a
+    //     data-shaped answer fabricated from the failed reads: "New quests
+    //     assigned!" (nothing was assigned — a slate ALREADY exists), a rendered
+    //     quest board, "Quests are not enabled", or "No completed quests to
+    //     claim" are all LIES about state the bot could not read.
+    const unavailableRe = /unavailable|try again|temporar|later|degraded|issue|problem/i;
+    const viewLie = /new quests assigned|your quests|not enabled/i.test(viewReply);
+    const claimLie = /no completed quests|quests claimed/i.test(claimReply);
+    ctx.expect(
+      unavailableRe.test(viewReply) && unavailableRe.test(claimReply) && !viewLie && !claimLie,
+      {
+        assertionClass: 'branding',
+        channel: 'captured-reply',
+        promise:
+          'With the database blocked, /quests view and /quests claim reply with the branded quests-unavailable notice — never a fabricated assignment, board, or nothing-to-claim verdict.',
+        observation:
+          `outage-window replies: view=${JSON.stringify(viewReply.slice(0, 140))} (dataShapedLie=${viewLie}), ` +
+          `claim=${JSON.stringify(claimReply.slice(0, 140))} (dataShapedLie=${claimLie}).`,
+        impact:
+          'During a database outage a quests command fabricated a data-shaped answer from a failed read — members are told a lie about a slate the bot could not read.',
+      },
+    );
+
+    // (3) ZERO CORRUPTION: the slate is byte-identical after restore — same
+    //     rows, same progress counters, nothing assigned/claimed in the window.
+    const slateAfter = (await progressRows(handle, userA))
+      .map((r) => `${r.template_id}:${r.progress}:${r.completed}:${r.claimed}`)
+      .sort();
+    const seededRow = pid ? await readProgressById(handle, pid) : null;
+    ctx.expect(
+      slateAfter.length === slateBefore.length &&
+        slateAfter.every((s, i) => s === slateBefore[i]) &&
+        seededRow?.progress === 1 &&
+        seededRow?.completed === false,
+      {
+        assertionClass: 'Discord',
+        channel: 'db-observable',
+        promise:
+          'No progress is lost or fabricated during the outage window: the quest slate (every row + counter) is unchanged after restoration.',
+        observation:
+          `slate before=${slateBefore.length} row(s), after=${slateAfter.length}; identical=${slateAfter.every((s, i) => s === slateBefore[i])}; ` +
+          `seeded daily row progress=${seededRow?.progress}/completed=${seededRow?.completed} (expected 1/false).`,
+        impact: 'A database outage mutated or duplicated quest-progress rows — outage-window corruption.',
+      },
+    );
+
+    // (4) RECOVERY: the very next /quests view renders the identical slate with
+    //     its progress counters intact (the catalog's "same slate reappears"
+    //     recovery contract) and assigns nothing new (no duplicate assignment).
+    const recoveredView = questReplyText(
+      await ctx.runSlash(handle, { commandName: 'quests', userId: userA, subcommand: 'view' }),
+    );
+    const slateRecovered = await progressRows(handle, userA);
+    ctx.expect(
+      /your quests/i.test(recoveredView) &&
+        (daily ? recoveredView.includes(daily.title) && recoveredView.includes(`1/${daily.target_count}`) : false) &&
+        slateRecovered.length === slateBefore.length,
+      {
+        assertionClass: 'replay-safety',
+        channel: 'captured-reply',
+        promise:
+          'After restoration the very next /quests view serves the identical slate with progress intact — and assigns no duplicate quests (no lingering degradation).',
+        observation:
+          `post-restore /quests view replied ${JSON.stringify(recoveredView.slice(0, 180))} (expected the board with "${daily?.title}" at 1/${daily?.target_count}); ` +
+          `slate rows=${slateRecovered.length} (expected ${slateBefore.length} — unchanged).`,
+        impact: 'The quests pipeline did not recover cleanly after the outage ended (slate lost, counters reset, or duplicate assignments).',
+      },
+    );
+
+    await proveRlsIsolation(ctx, handle, userA);
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'During a database outage, /quests view replies with the branded quests-unavailable template and no progress is lost.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate assignment or progress survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded quests-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'Quest rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window (not one per failed quest command).',
-    'requires a dependency-outage fault lane plus owner alert channel readback',
+    'requires the dependency-degradation alert aggregation plus owner alert channel readback (DISCORD_TOKEN + live guild)',
   );
   ctx.gate(
     'audit',
     'db-observable',
-    'After restoration the identical slate and progress counters reappear and tracking resumes.',
-    'requires the outage fault lane to exercise the degrade-then-restore cycle',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'No duplicate assignment or progress survives the outage/restore cycle.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded quests-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the quests-unavailable branch (also subcommand-routed via /quests view)',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'Quest rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'After restoration quest tracking resumes: the next tracked member action increments the same progress row exactly once.',
+    'progress tracking fires from OTHER features’ driven actions (trackProgress is invoked by heist/lottery/pet flows, not a /quests surface), so the resume-tracking leg needs one of those cross-feature drives; slate + counter integrity across the outage is proven above',
   );
 }
 

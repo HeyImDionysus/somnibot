@@ -786,8 +786,11 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
 
 /**
  * DEPFAIL — Valkey unreachable: rule loading falls back to the database and the
- * Valkey-backed spam/duplicate counters degrade to inert. The outage behaviour
- * needs a fault lane; the DB fallback SOURCE is provable now.
+ * Valkey-backed spam/duplicate counters degrade to inert. The contracted outage
+ * is a VALKEY outage (with the database healthy as the fallback source), so the
+ * ctx.faults proxy lane — which severs SUPABASE only this wave — cannot model
+ * it; the outage behaviour stays honestly gated on the Valkey lane while the DB
+ * fallback SOURCE is proven now.
  */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
@@ -826,13 +829,13 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
   gateScanningLane(
     ctx,
     'With Valkey blocked, word and caps rules keep evaluating from DB-loaded rules while the Valkey-backed spam/duplicate counters degrade to inert (no false punishment); after restore the counters resume.',
-    'the counters + inert-degradation behaviour need a Valkey-outage fault-injection lane on the messageCreate scanning path',
+    'the counters + inert-degradation behaviour need a Valkey-outage fault-injection lane on the messageCreate scanning path — the ctx.faults proxy severs Supabase only, which does not model this Valkey contract',
   );
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window rather than one alert per message.',
-    'requires a Valkey-outage fault lane + owner alert channel readback',
+    'requires a Valkey-outage fault lane (the ctx.faults proxy severs Supabase only) + owner alert channel readback',
   );
   gateEnforcementAudit(ctx);
   gateMessageEventReplay(ctx);

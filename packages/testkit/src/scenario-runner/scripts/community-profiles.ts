@@ -619,43 +619,170 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
-/** DEPFAIL — database-unreachable fail-soft (needs a dependency-outage fault lane). */
+/** DEPFAIL — database-unreachable fail-soft, driven through the REAL fault
+ *  proxy (ctx.faults severs the actual network path run-one-domain routed the
+ *  stack through). Falls back to honest gates when no proxy is registered
+ *  (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'With the database unreachable, /profile and /bio reply with the branded profiles-unavailable notice and no data is lost.',
-    'requires a Supabase dependency-outage fault-injection lane (this DB-observable harness runs against a deliberately reachable local Supabase)',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const handle = await ctx.bootGuild({ label: 'a' });
+    const userA = ctx.userId('a');
+    const title = `${ctx.runPrefix}pre-outage-title`;
+    const bio = `${ctx.runPrefix}pre-outage-bio`;
+
+    // Arrange known pre-outage state THROUGH the real handlers (2 audit rows).
+    await ctx.runSlash(handle, { commandName: 'title', userId: userA, options: { title } });
+    await ctx.runSlash(handle, { commandName: 'bio', userId: userA, options: { bio } });
+    const before = await readProfile(handle, userA);
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let severedCardReply = '';
+    let severedCardEmbed: Record<string, unknown> | undefined;
+    let severedBioReply = '';
+    const outageBio = `${ctx.runPrefix}outage-bio-never-lands`;
+    try {
+      const cardCap = await ctx.runSlash(handle, { commandName: 'profile', userId: userA });
+      severedCardReply = replyContentOf(cardCap);
+      severedCardEmbed = lastEmbedData(cardCap);
+      const bioCap = await ctx.runSlash(handle, { commandName: 'bio', userId: userA, options: { bio: outageBio } });
+      severedBioReply = replyContentOf(bioCap);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SOFT: both commands replied; the pipeline never crashed.
+    ctx.expect(threw === null && severedCardReply.length > 0 && severedBioReply.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'With the database unreachable, /profile and /bio still reply (fail-soft) instead of crashing the interaction pipeline.',
+      observation:
+        threw === null
+          ? `during the outage /profile replied ${JSON.stringify(truncate(severedCardReply))} and /bio replied ${JSON.stringify(truncate(severedBioReply))}.`
+          : `an outage-window command THREW ${truncate(threw)}.`,
+      impact: 'A database outage crashed the profiles command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts the branded profiles-unavailable notice — never
+    //     a data-shaped answer. A zeroed profile card or a "Bio updated!"
+    //     confirmation during an outage is a lie about state the bot could not
+    //     read/write. Recorded honestly; never softened.
+    const unavailableRe = /snooz|unavailable|try again|temporar|later/i;
+    const cardHonest = unavailableRe.test(severedCardReply) && severedCardEmbed === undefined;
+    const bioHonest = unavailableRe.test(severedBioReply) && !/updated|saved|✅/i.test(severedBioReply);
+    ctx.expect(cardHonest && bioHonest, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise:
+        'During the outage /profile and /bio reply with the branded profiles-unavailable notice ("Profiles are snoozing…") — never a fabricated zeroed card or a false "Bio updated!" confirmation.',
+      observation:
+        `outage-window /profile reply ${JSON.stringify(truncate(severedCardReply))} (embed rendered=${severedCardEmbed !== undefined}); ` +
+        `/bio reply ${JSON.stringify(truncate(severedBioReply))} — cardHonest=${cardHonest}, bioHonest=${bioHonest}.`,
+      impact:
+        'During a database outage the profiles surface fabricated a data-shaped answer (a zeroed card or a success confirmation for a write that never landed) instead of the branded unavailable notice.',
+    });
+
+    // (3) ZERO data loss / corruption: the pre-outage row is byte-identical
+    //     after restore; the outage-window bio never landed.
+    const after = await readProfile(handle, userA);
+    ctx.expect(
+      after !== null &&
+        after.title === before?.title &&
+        after.bio === before?.bio &&
+        after.bio === bio &&
+        after.updated_at === before?.updated_at,
+      {
+        assertionClass: 'Discord',
+        channel: 'db-observable',
+        promise: 'No data is lost across the outage window: the persisted title/bio (and updated_at) are byte-identical after restoration and the outage-window save never landed.',
+        observation:
+          `post-restore profile title=${JSON.stringify(after?.title)}/bio=${JSON.stringify(truncate(after?.bio ?? ''))} ` +
+          `(expected the pre-outage ${JSON.stringify(truncate(bio))}); updated_at ${before?.updated_at} → ${after?.updated_at} (must be unchanged).`,
+        impact: 'A database outage corrupted or partially applied a profile write.',
+      },
+    );
+
+    // (4) RECOVERY: the very next commands serve real data and save again.
+    const recoveredCard = await ctx.runSlash(handle, { commandName: 'profile', userId: userA });
+    const recoveredEmbed = lastEmbedData(recoveredCard);
+    const recoveredTitle = typeof recoveredEmbed?.title === 'string' ? recoveredEmbed.title : '';
+    const recoveredDesc = typeof recoveredEmbed?.description === 'string' ? recoveredEmbed.description : '';
+    const freshBio = `${ctx.runPrefix}post-outage-bio`;
+    const freshCap = await ctx.runSlash(handle, { commandName: 'bio', userId: userA, options: { bio: freshBio } });
+    const afterFresh = await readProfile(handle, userA);
+    const rows = await profileCount(handle, userA);
+    ctx.expect(
+      recoveredTitle.includes(title) &&
+        recoveredDesc === bio &&
+        afterFresh?.bio === freshBio &&
+        rows === 1 &&
+        replyContentOf(freshCap).includes('Bio updated'),
+      {
+        assertionClass: 'replay-safety',
+        channel: 'db-observable',
+        promise: 'After restoration the very next /profile renders the intact pre-outage values and a fresh /bio save applies exactly once (one row, one confirmation — no duplicate or phantom write from the outage cycle).',
+        observation:
+          `post-restore /profile embed title=${JSON.stringify(truncate(recoveredTitle))}, description=${JSON.stringify(truncate(recoveredDesc))}; ` +
+          `fresh save stored bio=${JSON.stringify(truncate(afterFresh?.bio ?? ''))} across ${rows} profile row(s); reply ${JSON.stringify(truncate(replyContentOf(freshCap)))}.`,
+        impact: 'The profiles pipeline did not recover cleanly after the outage ended (stale degradation, lost values, or a duplicated write).',
+      },
+    );
+
+    // (5) Audit: the two pre-outage saves + the one post-recovery save each
+    //     landed exactly one append-only profiles.* audit row; the REFUSED
+    //     outage-window save landed none (no audit row for a write that never
+    //     happened).
+    const auditRows = await profileAuditCount(handle);
+    ctx.expect(auditRows === 3, {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: 'Each applied profile save lands exactly one append-only audit row and the refused outage-window save lands none (3 total: title + bio + post-recovery bio).',
+      observation: `audit_logs holds ${auditRows ?? '(read errored)'} profiles.* row(s) for the guild (expected exactly 3).`,
+      impact: 'The outage cycle broke the profile audit trail (a missing row for an applied save, or a phantom row for a refused one).',
+    });
+
+    // Guild-scoping holds across the outage window.
+    await proveRlsIsolation(ctx, handle, userA);
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With the database unreachable, /profile and /bio reply with the branded profiles-unavailable notice and no data is lost.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'audit',
+      'db-observable',
+      'After restoration the pre-outage title/bio are intact and a fresh save applies exactly once.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate profile write survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded profiles-unavailable template ("Profiles are snoozing…") in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'Profile rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'A single dependency-degradation alert covers the outage window (profile happy paths raise none; non-outage profile failures set ownerNotification=false).',
-    'requires a dependency-outage fault lane plus owner alert channel readback',
-  );
-  ctx.gate(
-    'audit',
-    'db-observable',
-    'After restoration the pre-outage title/bio are intact and a fresh save applies exactly once.',
-    'requires the outage fault lane',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'No duplicate profile write survives the outage/restore cycle.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded profiles-unavailable template ("Profiles are snoozing…") in the owner voice.',
-    'requires the outage fault lane to reach the profiles-unavailable branch',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'Profile rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'the degradation alert cannot be written while the database itself is severed and no post-recovery alert emitter exists on the profiles path today; observing the single alert needs the owner alert channel readback (DISCORD_TOKEN + live guild)',
   );
 }
 

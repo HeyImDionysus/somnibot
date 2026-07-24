@@ -758,6 +758,22 @@ export async function handleInfractionsCommand(
     target.id,
   );
 
+  // A failed READ is not a clean record: replying "no infractions" during a
+  // database outage tells the moderator a data-shaped lie about state the bot
+  // could not read. Degrade honestly with the branded unavailable notice
+  // instead (the brand read is itself outage-safe: resolveBrandKit never
+  // throws, and the guild name is the fallback).
+  if (infractions === null) {
+    const brandKit = await resolveBrandKit(client.supabase, interaction.guildId!, {
+      fallbackName: interaction.guild?.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
+    await interaction.editReply(
+      `⚠️ ${name}'s moderation records are temporarily unavailable — please try again in a moment.`,
+    );
+    return;
+  }
+
   const filtered = activeOnly ? infractions.filter((i) => i.active && !i.pardoned) : infractions;
 
   if (filtered.length === 0) {

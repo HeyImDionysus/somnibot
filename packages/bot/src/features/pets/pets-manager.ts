@@ -18,6 +18,7 @@ import type { Redis } from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { eventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Pets');
 
@@ -182,22 +183,68 @@ export class PetsManager {
     }
   }
 
-  private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+  /**
+   * Read the guild config (cached). `degraded` is true only when the read FAILED
+   * (e.g. a database outage) as opposed to genuinely finding no row (PGRST116) —
+   * callers must not present a failed read as "pets are not enabled".
+   */
+  private async getConfigChecked(
+    guildId: string,
+  ): Promise<{ config: DbGuildConfig | null; degraded: boolean }> {
     const cached = this.configCache.get(guildId);
-    if (cached) return cached;
-    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
+    if (cached) return { config: cached, degraded: false };
+    const { data, error } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
-    return data;
+    return { config: data, degraded: error != null && error.code !== 'PGRST116' };
   }
 
-  private async getPet(guildId: string, userId: string): Promise<any> {
-    const { data } = await this.supabase
+  private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+    return (await this.getConfigChecked(guildId)).config;
+  }
+
+  /**
+   * The member's pet row. `degraded` is true only when the read FAILED — a
+   * PGRST116 zero-rows result is the genuine "no pet yet" state. Callers must
+   * never present a failed read as "You don't have a pet!" (a data-shaped lie
+   * about state the bot could not read).
+   */
+  private async getPet(
+    guildId: string,
+    userId: string,
+  ): Promise<{ pet: any; degraded: boolean }> {
+    const { data, error } = await this.supabase
       .from('economy_pets').select('*').eq('guild_id', guildId).eq('user_id', userId).single();
-    return data;
+    return { pet: data, degraded: error != null && error.code !== 'PGRST116' };
+  }
+
+  /**
+   * Branded degradation notice for a dependency outage. The brand lookup is
+   * itself outage-safe (resolveBrandKit never throws; belt-and-braces .catch)
+   * with the guild name as the fallback, so this renders during a full outage.
+   */
+  private async replyPetsUnavailable(
+    interaction: ChatInputCommandInteraction,
+    suffix = '',
+  ): Promise<void> {
+    const brandKit = await resolveBrandKit(this.supabase, interaction.guildId!, {
+      fallbackName: interaction.guild?.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
+    const content = `⚠️ ${name}'s pets are temporarily unavailable — please try again in a moment.${suffix}`;
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ content }).catch(() => {});
+    } else {
+      await interaction.reply({ content, ephemeral: true }).catch(() => {});
+    }
   }
 
   private async ensureEnabled(interaction: ChatInputCommandInteraction): Promise<boolean> {
-    const config = await this.getConfig(interaction.guildId!);
+    const { config, degraded } = await this.getConfigChecked(interaction.guildId!);
+    // A failed config read is an outage, not "pets are off" — degrade honestly.
+    if (degraded) {
+      await this.replyPetsUnavailable(interaction);
+      return false;
+    }
     if (!config?.economy_pets_enabled) {
       await interaction.reply({ content: '🚫 Pets are not enabled on this server.', ephemeral: true });
       return false;
@@ -208,8 +255,14 @@ export class PetsManager {
   async viewPet(interaction: ChatInputCommandInteraction): Promise<void> {
     if (!(await this.ensureEnabled(interaction))) return;
     const target = interaction.options.getUser('user') ?? interaction.user;
-    const pet = await this.getPet(interaction.guildId!, target.id);
+    const { pet, degraded } = await this.getPet(interaction.guildId!, target.id);
 
+    // A failed READ is not "no pet": that reply would be a data-shaped lie
+    // about state the bot could not read. Degrade honestly instead.
+    if (degraded) {
+      await this.replyPetsUnavailable(interaction);
+      return;
+    }
     if (!pet) {
       await interaction.reply({ content: `${target.id === interaction.user.id ? 'You don\'t' : 'They don\'t'} have a pet! Use \`/pet buy\` to get one.`, ephemeral: true });
       return;
@@ -245,15 +298,28 @@ export class PetsManager {
     const userId = interaction.user.id;
     const petType = interaction.options.getString('type') ?? 'hunting';
 
-    const existing = await this.getPet(guildId, userId);
+    const { pet: existing, degraded: existingDegraded } = await this.getPet(guildId, userId);
+    // An unreadable one-pet-per-member state is an outage — never press a debit
+    // against a database we already know is unreachable.
+    if (existingDegraded) {
+      await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
     if (existing) {
       await interaction.reply({ content: '❌ You already have a pet! One pet per person.', ephemeral: true });
       return;
     }
 
     const price = PET_PRICES[petType] ?? 5000;
-    const { data: wallet } = await this.supabase
+    const { data: wallet, error: walletErr } = await this.supabase
       .from('economy_wallets').select('wallet').eq('guild_id', guildId).eq('user_id', userId).single();
+
+    // A FAILED wallet read is not an empty wallet — "you need N coins" off a
+    // read the bot could not perform is a fabricated balance verdict.
+    if (walletErr && walletErr.code !== 'PGRST116') {
+      await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
 
     if (!wallet || wallet.wallet < price) {
       await interaction.reply({ content: `❌ You need **${price.toLocaleString()}** coins. Check your /balance.`, ephemeral: true });
@@ -264,7 +330,13 @@ export class PetsManager {
       p_guild_id: guildId, p_user_id: userId, p_amount: price,
     });
     if (debitErr) {
-      await interaction.reply({ content: `❌ Payment failed — you need **${price.toLocaleString()}** coins.`, ephemeral: true });
+      // Only a genuine insufficient-balance raise may claim the member lacks
+      // coins; a network/transient RPC failure debited nothing.
+      if (/insufficient/i.test(debitErr.message ?? '')) {
+        await interaction.reply({ content: `❌ Payment failed — you need **${price.toLocaleString()}** coins.`, ephemeral: true });
+      } else {
+        await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
+      }
       return;
     }
 
@@ -304,15 +376,27 @@ export class PetsManager {
     const guildId = interaction.guildId!;
     const config = await this.getConfig(guildId);
     const cost = config?.economy_pet_feed_cost ?? 50;
-    const pet = await this.getPet(guildId, interaction.user.id);
+    const { pet, degraded } = await this.getPet(guildId, interaction.user.id);
 
+    // A failed READ is not "no pet" — degrade honestly, never a fabricated verdict.
+    if (degraded) {
+      await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
     if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
     if (pet.hunger >= 100) { await interaction.reply({ content: '🍖 Your pet is already full!', ephemeral: true }); return; }
 
     // Check balance before deducting
-    const { data: feedWallet } = await this.supabase
+    const { data: feedWallet, error: feedWalletErr } = await this.supabase
       .from('economy_wallets').select('wallet')
       .eq('guild_id', guildId).eq('user_id', interaction.user.id).single();
+
+    // A FAILED wallet read is not an empty wallet — never fabricate "you need
+    // N coins" from a read the bot could not perform.
+    if (feedWalletErr && feedWalletErr.code !== 'PGRST116') {
+      await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
 
     if (!feedWallet || feedWallet.wallet < cost) {
       await interaction.reply({ content: `❌ You need **${cost.toLocaleString()}** coins to feed your pet.`, ephemeral: true });
@@ -323,7 +407,13 @@ export class PetsManager {
       p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
     });
     if (feedDebitErr) {
-      await interaction.reply({ content: `❌ Payment failed — you need **${cost.toLocaleString()}** coins.`, ephemeral: true });
+      // Insufficient balance is the only honest "you need N coins" case; any
+      // other failure debited nothing and degrades honestly.
+      if (/insufficient/i.test(feedDebitErr.message ?? '')) {
+        await interaction.reply({ content: `❌ Payment failed — you need **${cost.toLocaleString()}** coins.`, ephemeral: true });
+      } else {
+        await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
+      }
       return;
     }
 
@@ -362,7 +452,8 @@ export class PetsManager {
       return;
     }
 
-    const pet = await this.getPet(guildId, interaction.user.id);
+    const { pet, degraded } = await this.getPet(guildId, interaction.user.id);
+    if (degraded) { await this.replyPetsUnavailable(interaction); return; }
     if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
 
     // Atomic play — prevents TOCTOU race with decay timer
@@ -389,16 +480,27 @@ export class PetsManager {
     const guildId = interaction.guildId!;
     const config = await this.getConfig(guildId);
     const cost = config?.economy_pet_train_cost ?? 100;
-    const pet = await this.getPet(guildId, interaction.user.id);
+    const { pet, degraded } = await this.getPet(guildId, interaction.user.id);
 
+    // A failed READ is not "no pet" — degrade honestly, never a fabricated verdict.
+    if (degraded) {
+      await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
     if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
     if (pet.energy < 20) { await interaction.reply({ content: '⚡ Your pet needs more energy! Wait or play with it.', ephemeral: true }); return; }
     if (pet.level >= MAX_LEVEL) { await interaction.reply({ content: '🎓 Your pet is at max level! Try `/pet prestige`.', ephemeral: true }); return; }
 
     // Check balance before deducting
-    const { data: trainWallet } = await this.supabase
+    const { data: trainWallet, error: trainWalletErr } = await this.supabase
       .from('economy_wallets').select('wallet')
       .eq('guild_id', guildId).eq('user_id', interaction.user.id).single();
+
+    // A FAILED wallet read is not an empty wallet — never fabricate a balance verdict.
+    if (trainWalletErr && trainWalletErr.code !== 'PGRST116') {
+      await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
 
     if (!trainWallet || trainWallet.wallet < cost) {
       await interaction.reply({ content: `❌ You need **${cost.toLocaleString()}** coins to train your pet.`, ephemeral: true });
@@ -409,7 +511,11 @@ export class PetsManager {
       p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
     });
     if (trainDebitErr) {
-      await interaction.reply({ content: `❌ Payment failed — you need **${cost.toLocaleString()}** coins.`, ephemeral: true });
+      if (/insufficient/i.test(trainDebitErr.message ?? '')) {
+        await interaction.reply({ content: `❌ Payment failed — you need **${cost.toLocaleString()}** coins.`, ephemeral: true });
+      } else {
+        await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
+      }
       return;
     }
 
@@ -444,7 +550,8 @@ export class PetsManager {
   async renamePet(interaction: ChatInputCommandInteraction): Promise<void> {
     if (!(await this.ensureEnabled(interaction))) return;
     const name = interaction.options.getString('name')!;
-    const pet = await this.getPet(interaction.guildId!, interaction.user.id);
+    const { pet, degraded } = await this.getPet(interaction.guildId!, interaction.user.id);
+    if (degraded) { await this.replyPetsUnavailable(interaction); return; }
     if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
 
     await this.supabase.from('economy_pets')
@@ -466,9 +573,15 @@ export class PetsManager {
       await interaction.reply({ content: '❌ You can\'t battle yourself!', ephemeral: true }); return;
     }
 
-    const myPet = await this.getPet(guildId, interaction.user.id);
-    const theirPet = await this.getPet(guildId, opponent.id);
+    const { pet: myPet, degraded: myDegraded } = await this.getPet(guildId, interaction.user.id);
+    const { pet: theirPet, degraded: theirDegraded } = await this.getPet(guildId, opponent.id);
 
+    // A failed pet read is an outage, not "no pet" — never resolve a battle
+    // (or fabricate a no-pet verdict) off state the bot could not read.
+    if (myDegraded || theirDegraded) {
+      await this.replyPetsUnavailable(interaction);
+      return;
+    }
     if (!myPet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
     if (!theirPet) { await interaction.reply({ content: '❌ They don\'t have a pet!', ephemeral: true }); return; }
     if (myPet.status === 'sad' || myPet.status === 'sick') {
@@ -571,7 +684,8 @@ export class PetsManager {
       await interaction.reply({ content: '❌ Pet prestige is not enabled.', ephemeral: true }); return;
     }
 
-    const pet = await this.getPet(guildId, interaction.user.id);
+    const { pet, degraded } = await this.getPet(guildId, interaction.user.id);
+    if (degraded) { await this.replyPetsUnavailable(interaction); return; }
     if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
     if (pet.level < MAX_LEVEL) {
       await interaction.reply({ content: `❌ Your pet must be level ${MAX_LEVEL} to prestige.`, ephemeral: true }); return;

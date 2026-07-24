@@ -909,54 +909,148 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
 }
 
 /**
- * DEPFAIL — when the per-user Valkey lock is unreachable the casino must fail
- * SAFE: no coins move and the member sees a branded casino-unavailable reply.
- *
- * ── Why this fail-safe cannot be driven here (and MUST NOT be) ──────────────
- * Observing the fail-safe requires the lock op (SET NX) to FAIL FAST so the
- * handler reaches its degradation branch. Neither harness state produces that:
- * with a healthy Valkey there is no outage, and with NO reachable Valkey the
- * production client keeps RECONNECTING — acquireGameLock's `await valkey.set(…
- * 'NX')` never resolves AND never rejects, so a driven /coinflip would BLOCK
- * FOREVER (it would not even fail closed). Driving a casino command here is
- * exactly what hangs the run, so this script NEVER awaits one: the whole
- * outage surface (no-coins-move + branded-unavailable reply + single aggregated
- * alert) is GATED behind a dependency-outage fault-injection lane that makes the
- * lock op fail fast. What still runs, DB-observably on a seeded wallet and
- * needing no game command: the guild-scoping RLS proof.
+ * DEPFAIL — the SUPABASE-outage fail-safe, driven through the REAL fault proxy
+ * (ctx.faults severs the actual network path run-one-domain routed the stack
+ * through) whenever Redis is ALSO reachable (the per-user Valkey lock stays
+ * healthy in this lane, so the bet path is drivable and the severed database
+ * is the only fault). /coinflip is the driven surface. The VALKEY-outage leg
+ * of the catalog promise (the lock failing closed) stays honestly gated: this
+ * wave severs Supabase only, and with no Redis the loopback client keeps
+ * reconnecting so the lock op never fails fast.
  */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
+  const supabaseFault = ctx.faults?.supabase;
   const handle = await ctx.bootGuild({
     label: 'a',
     economyStartingBalance: 0,
-    guildConfigOverrides: { economy_games_enabled: true, economy_coinflip_max_bet: 500 },
+    guildConfigOverrides: { economy_games_enabled: true, economy_coinflip_max_bet: 500, economy_daily_loss_limit: 5000 },
   });
   const userA = ctx.userId('a');
-  // Seed a real, service-visible wallet so the RLS proof below has a positive
-  // control (a non-vacuous anon-denial), not an empty table.
+  // Seed a real, service-visible wallet: the outage-window corruption probe and
+  // the RLS proof below both need this exact row.
   await seedWallet(handle, userA, 1000, 0);
 
-  // The entire outage fail-safe surface needs a fault lane that makes the lock op
-  // FAIL FAST; the no-Redis loopback client instead hangs, so it cannot be driven.
+  if (supabaseFault && ctx.capabilities.redis) {
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let severedSurface = '';
+    try {
+      const cap = await ctx.runSlash(handle, { commandName: 'coinflip', userId: userA, options: { amount: 100 } });
+      severedSurface = brandingSurface(cap) || replyContent(cap);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: the bet pipeline replied, never crashed (the healthy lock
+    //     was acquired, the severed config/balance read was caught, the lock
+    //     was released).
+    ctx.expect(threw === null && severedSurface.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'With database access blocked (Valkey healthy), a casino command still replies (fail-safe) instead of crashing the bet pipeline.',
+      observation: `during the outage window /coinflip ${threw === null ? `replied ${JSON.stringify(truncate(severedSurface))}` : `THREW ${truncate(threw)}`}.`,
+      impact: 'A database outage crashed the casino bet pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts the branded casino-UNAVAILABLE notice — never a
+    //     data-shaped answer fabricated from the failed reads ("Mini-games are
+    //     not enabled" from the failed config read, or a zero-balance "You only
+    //     have 0" from the failed wallet read — both lies about unreadable state).
+    const looksUnavailable = /unavailable|try again|temporar/i.test(severedSurface);
+    const dataShapedLie = /not enabled|only have/i.test(severedSurface);
+    ctx.expect(looksUnavailable && !dataShapedLie, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise: 'With the database blocked, the casino reply is the branded casino-unavailable notice — never a fabricated "not enabled" or zero-balance refusal.',
+      observation: `outage-window reply ${JSON.stringify(truncate(severedSurface))} — looksUnavailable=${looksUnavailable}, dataShapedLie=${dataShapedLie}.`,
+      impact: 'During a database outage the casino replied with a data-shaped answer fabricated from the failed reads instead of a degradation notice.',
+    });
+
+    // (3) ZERO CORRUPTION: no coins moved, no daily-loss increment, no ledger
+    //     row — the seeded wallet row is byte-identical after restore.
+    const after = await readWallet(handle, userA);
+    const lossAfter = await readDailyLoss(handle, userA);
+    ctx.expect(after?.wallet === 1000 && after?.bank === 0 && lossAfter === 0, {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'No coins move across the outage window — the persisted wallet and daily-loss counter are unchanged after restoration.',
+      observation: `post-restore wallet=${after?.wallet}/bank=${after?.bank} (expected 1000/0); daily-loss=${lossAfter} (expected 0).`,
+      impact: 'A database outage moved casino coins or recorded a phantom daily loss.',
+    });
+
+    // (4) RECOVERY: a fresh within-cap bet resolves with exactly one wallet
+    //     mutation (|Δ| = stake) against the restored stack.
+    const recovered = await ctx.runSlash(handle, { commandName: 'coinflip', userId: userA, options: { amount: 100 } });
+    const afterBet = (await readWallet(handle, userA))?.wallet ?? -1;
+    ctx.expect(Math.abs(afterBet - 1000) === 100 && Boolean(replyEmbedData(recovered)), {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise: 'After restoration a fresh bet resolves with exactly one wallet mutation (the wallet moves by exactly the stake) and renders its outcome embed.',
+      observation: `post-restore /coinflip 100: wallet 1000→${afterBet} (|Δ|=${Math.abs(afterBet - 1000)}, expected exactly 100); outcome embed=${Boolean(replyEmbedData(recovered))}.`,
+      impact: 'The casino did not recover to an exactly-once settlement after the outage ended.',
+    });
+    gateAudit(ctx);
+  } else if (supabaseFault) {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With database access blocked, casino commands reply with the branded casino-unavailable template and no coins move; after restoration a fresh bet resolves with exactly one wallet mutation.',
+      `${LOCK_GATE} — the Supabase fault proxy is registered but without a healthy Redis no casino command can be driven through it`,
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded casino-unavailable template in the owner voice.',
+      `${LOCK_GATE} — no casino outcome reply is reachable to inspect`,
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate debit/credit survives the outage/restore cycle.',
+      `${LOCK_GATE}`,
+    );
+    gateAudit(ctx);
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With database access blocked, casino commands reply with the branded casino-unavailable template and no coins move; after restoration a fresh bet resolves with exactly one wallet mutation.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded casino-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate debit/credit survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    gateAudit(ctx);
+  }
+
+  // The VALKEY-outage leg (the per-user lock failing CLOSED) is a different
+  // dependency than this wave severs — kept honestly gated, never faked.
   ctx.gate(
     'Discord',
-    'db-observable',
-    'With the per-user Valkey lock unreachable, casino commands reply with the branded casino-unavailable template and no coins move; after restoration a fresh bet resolves with exactly one wallet mutation.',
-    `${LOCK_GATE}; and observing the degradation branch needs a fault lane that makes the lock op FAIL FAST — the no-Redis ` +
-      'loopback client instead keeps reconnecting, so a driven casino command would hang rather than fail closed and cannot be awaited here',
+    'redis-dependency',
+    'With the per-user Valkey lock unreachable, the lock fails closed: the bet is refused before any wager logic and no coins move.',
+    'this wave severs Supabase only; a Valkey-outage leg needs the valkey fault proxy severed with the lock op failing fast (the no-Redis loopback client keeps reconnecting instead)',
   );
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single aggregated dependency-degradation alert for the outage window (not one per failed command), and transient per-command lock failures raise none.',
-    'requires a dependency-outage fault lane (fast-failing lock op) plus owner alert channel readback — the reconnecting loopback client cannot reach the degradation branch DB-observably',
+    'requires the owner alert channel readback lane (the in-window alert write itself hits the severed database)',
   );
-  gateAudit(ctx);
-  gateBranding(ctx);
-  gateReplayDeferred(ctx, 'REPLAY');
 
-  // DB-observable now, needing no casino command: the guild's wallet row stays
-  // strictly guild-scoped (service role sees it; anon reads zero).
+  // DB-observable regardless: the guild's wallet row stays strictly
+  // guild-scoped (service role sees it; anon reads zero).
   await proveWalletRls(ctx, handle, userA);
 }
 

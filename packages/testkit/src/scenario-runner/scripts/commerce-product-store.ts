@@ -854,12 +854,142 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY');
 }
 
-/** DEPFAIL — with PayPal unreachable, checkout fails safe (fault-injection lane). */
+/** DEPFAIL — with a dependency unreachable, the store fails safe. The Supabase
+ *  leg is driven through the REAL fault proxy (ctx.faults severs the actual
+ *  network path run-one-domain routed the stack through): /store is driven
+ *  inside the severed window and must degrade honestly — the branded
+ *  store-unavailable notice, never a data-shaped "store is empty" lie, with
+ *  NO buy/payment button exposed, zero money rows from the window, and clean
+ *  recovery. The PayPal-token legs (Buy-click copy, checkout dependency-failure
+ *  audit, deduped owner alert, Buy-hammering) stay honestly gated — the proxy
+ *  severs Supabase, not PayPal, and Buy is a button behind PayPal credentials. */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // Checkout is a Discord button → PayPal-token → PayPal-order chain. Making the
-  // PayPal token endpoint unreachable requires both the button-interaction lane and
-  // a PayPal outage fault-injection lane; neither exists in the bot-only harness.
-  // GATE the outage-dependent behavior honestly rather than fake an outage.
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const handle = await ctx.bootGuild({ label: 'a' });
+    const productName = `${ctx.runPrefix}depfail-pass`;
+    const productId = await insertProduct(handle, { name: productName, priceCents: 500 });
+    ctx.expect(Boolean(productId), {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'Test arrangement: an active product exists so the outage window degrades a REAL storefront, not an empty one.',
+      observation: `product id=${productId ?? '(null)'}.`,
+      impact: 'Could not arrange the storefront product — the DEPFAIL outage proof setup is invalid.',
+    });
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). Hammer the
+    //    storefront twice inside the window (repeat attempts queue nothing). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let severedSurface = '';
+    let severedButtons: string[] = [];
+    let secondSurface = '';
+    try {
+      const severedCap = await ctx.runSlash(handle, { commandName: 'store', userId: ctx.userId('a') });
+      severedSurface = storeSurface(severedCap);
+      severedButtons = replyButtonIds(severedCap);
+      const hammeredCap = await ctx.runSlash(handle, { commandName: 'store', userId: ctx.userId('a') });
+      secondSurface = storeSurface(hammeredCap);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) FAIL-SAFE: every severed-window drive replied; nothing crashed.
+    ctx.expect(threw === null && severedSurface.trim().length > 0 && secondSurface.trim().length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'With database access severed, /store still replies (fail-safe) on every attempt instead of crashing the interaction pipeline.',
+      observation: `during the outage window /store ${threw === null ? `replied ${JSON.stringify(truncate(severedSurface, 140))} then ${JSON.stringify(truncate(secondSurface, 80))}` : `THREW ${truncate(threw, 140)}`}.`,
+      impact: 'A database outage crashed the storefront command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The degradation is the branded unavailable notice: never the
+    //     data-shaped "store is empty" lie, never a raw provider error, and —
+    //     per the catalog — NO buy button / payment link is exposed while the
+    //     dependency is down.
+    const looksUnavailable = /unavailable|try again|temporar|later|degraded|issue|problem/i.test(severedSurface);
+    const dataShapedLie = /store is empty/i.test(severedSurface) || /store is empty/i.test(secondSurface);
+    const rawProviderError = /ECONNREFUSED|fetch failed|AggregateError|ENOTFOUND/i.test(severedSurface);
+    ctx.expect(looksUnavailable && !dataShapedLie && !rawProviderError && severedButtons.length === 0, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise: 'The outage-window /store reply is the calm branded store-unavailable notice — never a fabricated "store is empty" answer, a raw provider error, or a reply exposing a buy/payment button.',
+      observation:
+        `outage-window reply ${JSON.stringify(truncate(severedSurface, 160))} — looksUnavailable=${looksUnavailable}, ` +
+        `dataShapedLie=${dataShapedLie}, rawProviderError=${rawProviderError}, buy buttons exposed=${severedButtons.length} (expected 0).`,
+      impact: 'During a database outage the storefront lied about the catalog, leaked a raw provider error, or exposed a buy button against an unreadable store.',
+    });
+
+    // (3) ZERO money rows from the outage window + the catalog row survives
+    //     byte-identically: a severed dependency can NEVER half-apply a
+    //     purchase (no order, no payment, no entitlement exists to fire later).
+    const orders = await countRows(handle, 'orders');
+    const payments = await countRows(handle, 'payments');
+    const entitlements = await countRows(handle, 'entitlements');
+    const productAfter = await readProduct(handle, productId ?? '');
+    ctx.expect(
+      orders === 0 && payments === 0 && entitlements === 0 &&
+        productAfter?.name === productName && productAfter?.price_cents === 500 && productAfter?.active === true,
+      {
+        assertionClass: 'database-RLS',
+        channel: 'db-observable',
+        promise: 'The hammered outage window leaves ZERO orders/payments/entitlements rows (no queued or deferred charge can fire later) and the product row is byte-identical after restore.',
+        observation:
+          `post-restore rows for the guild: orders=${orders}, payments=${payments}, entitlements=${entitlements} (all expected 0); ` +
+          `product name=${productAfter?.name}/price=${productAfter?.price_cents}/active=${productAfter?.active} (expected ${productName}/500/true).`,
+        impact: 'A severed-dependency window created or mutated money rows, or corrupted the catalog — a real-money half-apply hazard.',
+      },
+    );
+
+    // (4) RECOVERY: the very next /store serves the real storefront again,
+    //     buy button included — recovery starts from a clean slate.
+    const recovered = await ctx.runSlash(handle, { commandName: 'store', userId: ctx.userId('a') });
+    const recoveredTitles = replyEmbeds(recovered).map((e) => e.title ?? '');
+    const recoveredButtons = replyButtonIds(recovered);
+    ctx.expect(recoveredTitles.includes(productName) && recoveredButtons.includes(`store:buy:${productId}`), {
+      assertionClass: 'replay-safety',
+      channel: 'captured-reply',
+      promise: 'After restoration the very next /store serves the real product with its buy button — recovery starts from a clean slate with no lingering degradation.',
+      observation: `post-restore /store embed titles=${JSON.stringify(recoveredTitles)}; buy buttons=${JSON.stringify(recoveredButtons)}.`,
+      impact: 'The storefront did not recover after the outage ended.',
+    });
+
+    await proveProductsRls(ctx, handle, productId ?? '');
+    await proveTwoEconomiesWall(ctx, handle);
+    await proveNoOwnerAlert(ctx, handle); // an outage BLIP raises no alert (dedup fires only when sustained)
+    gateBrandingDeferredToDef(ctx);
+  } else {
+    ctx.gate(
+      'Discord',
+      'captured-reply',
+      'With the database severed, /store fails safe with the branded store-unavailable reply, exposing no buy button.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The outage-window /store reply is the calm branded unavailable notice, never a data-shaped "store is empty" lie or a raw provider error.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-observable',
+      'A severed-dependency window leaves zero orders/payments/entitlements rows and the catalog byte-identical.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'captured-reply',
+      'After restoration the next /store serves the real storefront again.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
+
+  // The PayPal-token outage itself (Buy click → payment-service-unavailable
+  // copy, dependency-failure audit, deduped owner alert, Buy-hammering) cannot
+  // be modeled by severing Supabase — the proxy does not touch PayPal's
+  // network path, and Buy is a button lane behind PayPal credentials.
   ctx.gate(
     'Discord',
     'discord-readback',
@@ -898,15 +1028,55 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
   );
 }
 
-/** RETRY — a transient /store query failure recovers on the next invocation. */
+/** RETRY — a transient /store query failure recovers on the next invocation.
+ *  The contracted transient IS a one-off products-query (Supabase) failure, so
+ *  a between-ops sever through the REAL fault proxy models it faithfully:
+ *  sever → the /store read fails and degrades honestly → restore → the retried
+ *  /store converges to the full storefront with nothing written. The checkout
+ *  tail (Buy → PayPal order/link/fulfillment) stays gated on the PayPal lane. */
 async function RETRY(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
   const productId = await insertProduct(handle, { name: `${ctx.runPrefix}retry-pass`, priceCents: 500 });
 
-  // The store-unavailable branch fires only when the products query ERRORS — a
-  // Supabase fault the reachable-DB harness cannot induce. GATE the induced
-  // failure; prove the RECOVERED steady state (a healthy /store renders normally),
-  // which is the second half of the contract (retry shows the full storefront).
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    // ── The induced transient: one severed /store attempt (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let failedSurface = '';
+    try {
+      const failedCap = await ctx.runSlash(handle, { commandName: 'store', userId: ctx.userId('a') });
+      failedSurface = storeSurface(failedCap);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+    const ordersAfterFault = await countRows(handle, 'orders');
+    ctx.expect(
+      threw === null &&
+        /unavailable|try again|temporar|later|degraded|issue|problem/i.test(failedSurface) &&
+        !/store is empty/i.test(failedSurface) &&
+        ordersAfterFault === 0,
+      {
+        assertionClass: 'Discord',
+        channel: 'db-observable',
+        promise: 'The one-off products-query failure makes /store degrade once with the branded store-unavailable reply — not an "empty store" lie — and writes no rows.',
+        observation:
+          `severed-window /store ${threw === null ? `replied ${JSON.stringify(truncate(failedSurface, 140))}` : `THREW ${truncate(threw, 140)}`}; ` +
+          `orders rows after the failed attempt=${ordersAfterFault ?? '(read error)'} (expected 0).`,
+        impact: 'The transient query failure crashed /store, fabricated an empty storefront, or wrote rows.',
+      },
+    );
+  } else {
+    ctx.gate(
+      'Discord',
+      'captured-reply',
+      'A one-off products-query failure makes /store degrade once with the branded store-unavailable reply, writing no rows.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
+
+  // The RECOVERED steady state: the retried /store renders the full storefront.
   const recovered = await ctx.runSlash(handle, { commandName: 'store', userId: ctx.userId('a') });
   const titles = replyEmbeds(recovered).map((e) => e.title ?? '');
   ctx.expect(titles.includes(`${ctx.runPrefix}retry-pass`), {
@@ -925,8 +1095,8 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
   ctx.gate(
     'Discord',
     'db-observable',
-    'A one-off products-query failure makes /store reply store-unavailable once, writing no rows; the retried checkout then completes with exactly one order/link/fulfillment.',
-    'requires a Supabase transient-fault injection lane (the harness runs against a reachable DB) + the PayPal checkout path',
+    'The retried checkout completes with exactly one order/link/fulfillment.',
+    'the checkout tail runs Buy → PayPal (button lane + PayPal sandbox); the transient store-query half is exercised on the fault lane above',
   );
   ctx.gate(
     'audit',

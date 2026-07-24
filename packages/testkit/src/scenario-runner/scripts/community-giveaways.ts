@@ -8,11 +8,12 @@
  * dashboard/API surface is GATED — never faked.
  *
  * The hard harness boundary for THIS domain (why it is mostlyGated):
- *   - `/giveaway` is a SUBCOMMAND command (start/end/reroll/pause/resume/list) and
- *     the scenario runner's `runSlash` cannot supply a subcommand (RunSlashParams
- *     has no subcommand field; context.runSlash never sets one). So the whole
- *     member-facing command flow (posting the entry-button campaign, the ephemeral
- *     confirmations, the winner announcement/DM) is UNDRIVABLE here and is GATED.
+ *   - `/giveaway` is a SUBCOMMAND command (start/end/reroll/pause/resume/list).
+ *     Since PR #331 `runSlash` CAN supply a subcommand — DEPFAIL drives the real
+ *     `/giveaway end` draw path through the dispatcher on the fault lane — but the
+ *     member-facing Discord surfaces (posting the entry-button campaign, the
+ *     ephemeral confirmations, the winner announcement/DM) still need a live
+ *     channel/gateway and remain GATED in the other scenarios.
  *   - The entry BUTTON handler needs a live `guild.members.cache` member + gateway
  *     (it replies "could not find your member data" against the gateway-less
  *     minimal guild), so button entries + gate enforcement are GATED too.
@@ -829,14 +830,172 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
-/** DEPFAIL — database unreachable at end time → fail safe (needs an outage lane). */
+/** DEPFAIL — database unreachable at end time → fail safe, driven through the
+ *  REAL fault proxy (ctx.faults severs the actual network path run-one-domain
+ *  routed the stack through). The end trigger is the REAL `/giveaway end`
+ *  subcommand through the production dispatcher + GiveawayManager — the same
+ *  selectWinnersAndEnd draw path the scheduled sweep runs. Falls back to honest
+ *  gates when no proxy is registered (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // This harness's premise is a REACHABLE local Supabase, so a database-outage at
-  // the scheduled end cannot be induced without a fault-injection lane. GATE the
-  // outage-dependent behavior honestly rather than fake an outage.
-  gateFaultLane(
-    ctx,
-    'requires a Supabase dependency-outage fault-injection lane at the scheduled draw',
+  const supabaseFault = ctx.faults?.supabase;
+  if (!supabaseFault) {
+    gateFaultLane(
+      ctx,
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    return;
+  }
+
+  // Giveaways must be ON so guild-init wires the real GiveawayManager behind
+  // the /giveaway dispatcher route (the runner's default seed disables it).
+  const handle = await ctx.bootGuild({ label: 'a', guildConfigOverrides: { giveaways_enabled: true } });
+  const admin = ctx.userId('admin');
+  const adminMember = { id: admin, roles: [], permissions: { has: () => true } };
+  const userA = member(ctx, 'a');
+  const userB = member(ctx, 'b');
+  const userC = member(ctx, 'c');
+
+  const giveaway = await seedGiveaway(handle, {
+    prize: `${ctx.runPrefix}depfail-prize`,
+    channelId: `${ctx.runPrefix}chan`,
+    createdBy: admin,
+    winnerCount: 1,
+    entries: [userA, userB, userC],
+  });
+  ctx.expect(giveaway !== null && giveaway.entries.length === 3, {
+    assertionClass: 'Discord',
+    channel: 'db-observable',
+    promise: 'Test arrangement: an active giveaway with three entrants exists before the outage.',
+    observation: `seeded giveaway id=${giveaway?.id ?? '(none)'} with ${giveaway?.entries.length ?? 0} entries.`,
+    impact: 'Could not arrange the pre-outage giveaway — the DEPFAIL proof setup is invalid.',
+  });
+  const giveawayId = giveaway!.id;
+  const runEnd = () =>
+    ctx.runSlash(handle, {
+      commandName: 'giveaway',
+      userId: admin,
+      member: adminMember,
+      subcommand: 'end',
+      options: { id: giveawayId },
+    });
+
+  // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+  await supabaseFault.sever();
+  let threw: string | null = null;
+  let severedReply = '';
+  try {
+    severedReply = replyContent(await runEnd());
+  } catch (err) {
+    threw = err instanceof Error ? err.message : String(err);
+  }
+  await supabaseFault.restore();
+
+  // (1) Fail-SAFE: the end command replied; the pipeline never crashed.
+  ctx.expect(threw === null && severedReply.length > 0, {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'With database access blocked at end time, /giveaway end still replies (fail-safe) instead of crashing the interaction pipeline.',
+    observation: `during the outage window /giveaway end ${threw === null ? `replied ${JSON.stringify(severedReply)}` : `THREW ${threw}`}.`,
+    impact: 'A database outage crashed the giveaway end pipeline instead of degrading to a reply.',
+  });
+
+  // (2) The reply must NEVER claim a completed draw fabricated from the failed
+  //     read: "✅ Giveaway ended. No entries." during an outage is a lie about
+  //     a draw that never ran against entries the bot could not read. The
+  //     catalog contracts a degradation notice. Recorded honestly; never softened.
+  const looksUnavailable = /unavailable|try again|temporar|later|not run/i.test(severedReply);
+  const fabricatedDraw = /giveaway ended|no entries|winners:/i.test(severedReply);
+  ctx.expect(looksUnavailable && !fabricatedDraw, {
+    assertionClass: 'branding',
+    channel: 'captured-reply',
+    promise: 'The outage-window reply is the branded giveaways-unavailable degradation notice — never a fabricated "ended / no entries" draw result.',
+    observation: `outage-window reply ${JSON.stringify(severedReply)} — looksUnavailable=${looksUnavailable}, fabricatedDraw=${fabricatedDraw}.`,
+    impact: 'During a database outage /giveaway end claimed a completed draw ("ended / no entries") fabricated from a failed read — the admin is told a draw ran when nothing happened.',
+  });
+
+  // (3) ZERO CORRUPTION / no partial draw: after restoration the durable row is
+  //     untouched — still active, same end time, all three entries, no winners.
+  const afterOutage = await readGiveaway(handle, giveawayId);
+  ctx.expect(
+    afterOutage !== null &&
+      afterOutage.status === 'active' &&
+      afterOutage.ends_at === giveaway!.ends_at &&
+      sameSet(afterOutage.entries, [userA, userB, userC]) &&
+      afterOutage.winners.length === 0,
+    {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'No winner is lost and no partial draw leaks: after restoration the giveaway is still active with its original end time, all entries, and zero committed winners.',
+      observation:
+        `post-restore: status=${afterOutage?.status} (expected active), ends_at match=${afterOutage?.ends_at === giveaway!.ends_at}, ` +
+        `entries=[${afterOutage?.entries.join(', ')}] (expected the 3 entrants), winners=${afterOutage?.winners.length} (expected 0).`,
+      impact: 'The blocked draw corrupted durable giveaway state (a partial draw, lost entries, or a premature end).',
+    },
+  );
+
+  // (4) RECOVERY: the draw resumes from durable state and completes exactly
+  //     once — the re-driven end selects one winner from the intact entrant pool.
+  const recoveredReply = replyContent(await runEnd());
+  const afterEnd = await readGiveaway(handle, giveawayId);
+  ctx.expect(
+    /giveaway ended/i.test(recoveredReply) &&
+      afterEnd !== null &&
+      afterEnd.status === 'ended' &&
+      afterEnd.winners.length === 1 &&
+      isSubset(afterEnd.winners, [userA, userB, userC]),
+    {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'After restoration the draw completes from durable state: the re-driven end commits exactly one winner drawn from the pre-outage entrants.',
+      observation:
+        `post-restore /giveaway end replied ${JSON.stringify(recoveredReply)}; status=${afterEnd?.status} (expected ended), ` +
+        `winners=[${afterEnd?.winners.join(', ')}] (expected exactly 1, drawn from the entrant pool).`,
+      impact: 'The draw did not complete correctly after the outage ended.',
+    },
+  );
+
+  // (5) Exactly-once: re-delivering the end AFTER the recovered draw is a
+  //     status-gated no-op — the committed winner set is never re-drawn.
+  const replayedReply = replyContent(await runEnd());
+  const afterReplay = await readGiveaway(handle, giveawayId);
+  ctx.expect(
+    afterReplay !== null &&
+      sameSet(afterReplay.winners, afterEnd?.winners ?? []) &&
+      afterReplay.winners.length === 1 &&
+      /giveaway ended/i.test(replayedReply),
+    {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise: 'Re-delivering the end trigger around the outage cycle never re-draws: the winner set committed by the recovered draw stays byte-identical.',
+      observation:
+        `replayed /giveaway end replied ${JSON.stringify(replayedReply)}; winners after replay=[${afterReplay?.winners.join(', ')}] ` +
+        `(unchanged from the recovered draw [${(afterEnd?.winners ?? []).join(', ')}]).`,
+      impact: 'A re-delivered end after the outage cycle re-drew or mutated the committed winner set — the exactly-once draw guarantee is broken.',
+    },
+  );
+
+  // Guild-scoping holds across the outage window.
+  await proveGiveawayRls(ctx, handle, giveawayId);
+
+  // Residual legs the in-process outage lane cannot observe:
+  ctx.gate(
+    'Discord',
+    'discord-readback',
+    'No premature or partial announcement appears during the outage; after recovery exactly one announcement and one notification per winner appear in the live channel.',
+    'announcement/notification counts require a live channel + gateway readback (DISCORD_TOKEN + live guild); the durable exactly-once draw record is the DB-observable evidence above',
+  );
+  ctx.gate(
+    'owner-notification',
+    'discord-readback',
+    'Exactly one giveaway-alert describes the delayed draw and its recovery.',
+    'the alert row cannot be written while the database itself is severed and no resumed-draw alert emitter fires on this path today; observing the single alert needs the owner alert channel readback (DISCORD_TOKEN + live guild)',
+  );
+  gateAudit(ctx);
+  ctx.gate(
+    'cleanup',
+    'db-observable',
+    'Run-prefixed giveaway rows created around the fault are still swept to zero afterwards.',
+    'end-to-end cleanup of run-prefixed giveaway rows is proven in the CLEANUP scenario',
   );
 }
 
@@ -1171,6 +1330,11 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
 export const communityGiveawaysProof: DomainProof = {
   domainId: 'community-giveaways',
   guildScopedTables: [
+    // giveaway_atomic_end queues one durable notify_giveaway_winner action per
+    // committed winner in bot_action_queue (guild-scoped) — swept so the draws
+    // this proof commits (DEF/SET-B/DEPFAIL/REPLAY/RESTART/RACE) leave no
+    // queue residue behind.
+    'bot_action_queue',
     'giveaways',
     'alerts',
   ],

@@ -49,6 +49,7 @@
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
 import type { LiveClientHandle } from '../../live-runner.js';
+import type { CapturedResponse } from '../../captured-response.js';
 import type { DomainProof, ScenarioContext } from '../types.js';
 
 // ── Row shapes ────────────────────────────────────────────────────────────
@@ -226,6 +227,50 @@ async function speciesCount(handle: LiveClientHandle): Promise<number> {
     .select('*', { count: 'exact', head: true })
     .eq('guild_id', handle.guildId);
   return count ?? 0;
+}
+
+/**
+ * The member-facing surface of a /fish subcommand reply. handleFishingCommand
+ * defers then editReply's an embed, so read the LAST editReply's first embed
+ * (title + description + footer) — falling back to the reply payload.
+ */
+function fishEmbedSurface(captured: CapturedResponse): string {
+  const call = captured.allOf('editReply').at(-1) ?? captured.allOf('reply').at(-1);
+  const payload = call?.payload as
+    | { content?: string; embeds?: Array<{ data?: { title?: string; description?: string; footer?: { text?: string } } }> }
+    | undefined;
+  const parts: string[] = [];
+  if (typeof payload?.content === 'string' && payload.content) parts.push(payload.content);
+  const e = payload?.embeds?.[0]?.data;
+  if (e) {
+    if (typeof e.title === 'string') parts.push(e.title);
+    if (typeof e.description === 'string') parts.push(e.description);
+    if (typeof e.footer?.text === 'string') parts.push(e.footer.text);
+  }
+  return parts.join('\n');
+}
+
+/**
+ * Seed a run-prefixed Fishing Rod (category Tools — the exact
+ * `ilike '%fishing rod%'` shape FishingManager.checkRod matches) + an
+ * inventory row for the member; returns the item id.
+ */
+async function seedRod(
+  ctx: ScenarioContext,
+  handle: LiveClientHandle,
+  userId: string,
+): Promise<string | null> {
+  const { data: item } = await handle.supabase
+    .from('economy_items')
+    .insert({ guild_id: handle.guildId, name: `${ctx.runPrefix}Fishing Rod`, category: 'Tools', price: 100 })
+    .select('id')
+    .single();
+  const itemId = (item as { id: string } | null)?.id ?? null;
+  if (!itemId) return null;
+  await handle.supabase
+    .from('economy_inventory')
+    .insert({ guild_id: handle.guildId, user_id: userId, item_id: itemId, quantity: 1 });
+  return itemId;
 }
 
 /** Seed one run-prefixed Bait item + inventory row and return its item id. */
@@ -800,46 +845,181 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplay(ctx);
 }
 
-/** DEPFAIL — Supabase/Valkey-unreachable fail-safe (needs a dependency-outage fault lane). */
+/** DEPFAIL — the SUPABASE-outage fail-safe, driven through the REAL fault
+ *  proxy (ctx.faults severs the actual network path run-one-domain routed the
+ *  stack through). /fish collection is always drivable; /fish cast claims its
+ *  Valkey cooldown BEFORE the severed reads, so its legs additionally need a
+ *  healthy Redis (present in the fault lane, where only Supabase is severed).
+ *  The VALKEY-outage leg of the catalog promise stays honestly gated this
+ *  wave. Falls back to honest gates when no proxy is registered. */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // This DB-observable harness's whole premise is a REACHABLE local Supabase (and the
-  // cast path additionally needs Valkey), so a dependency outage cannot be induced
-  // without a fault-injection lane. GATE the outage-dependent behavior honestly.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'With the fishing backend unreachable, /fish cast and /fish collection reply with the branded fishing-unavailable template, no wallet moves, no bait is consumed, and no cooldown is wrongly persisted; after restore a fresh cast credits exactly once.',
-    'requires a Supabase/Valkey dependency-outage fault-injection lane plus subcommand injection (the harness deliberately runs against a reachable DB)',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const handle = await ctx.bootGuild({
+      label: 'a',
+      economyStartingBalance: 0,
+      guildConfigOverrides: { economy_fishing_enabled: true },
+    });
+    const userA = ctx.userId('a');
+
+    // Arrange known state on the HEALTHY stack: a funded wallet, the species
+    // catalog, and a Fishing Rod (the exact inventory row checkRod matches).
+    await seedWallet(handle, userA, 300, 0);
+    const species = await seedSpecies(ctx, handle);
+    await seedRod(ctx, handle, userA);
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let collectionSurface = '';
+    let castSurface = '';
+    try {
+      const coll = await ctx.runSlash(handle, { commandName: 'fish', userId: userA, subcommand: 'collection' });
+      collectionSurface = fishEmbedSurface(coll);
+      if (ctx.capabilities.redis) {
+        // The cast path claims its SET NX cooldown on the HEALTHY Valkey first,
+        // then hits the severed rod read.
+        const cast = await ctx.runSlash(handle, { commandName: 'fish', userId: userA, subcommand: 'cast' });
+        castSurface = fishEmbedSurface(cast);
+      }
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: the pipeline replied, never crashed.
+    ctx.expect(threw === null && collectionSurface.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'With the database blocked, fishing commands still reply (fail-safe) instead of crashing the interaction pipeline.',
+      observation: `during the outage window /fish collection ${threw === null ? `replied ${JSON.stringify(collectionSurface.slice(0, 110))}` : `THREW ${threw.slice(0, 110)}`}.`,
+      impact: 'A database outage crashed the fishing command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts the branded fishing-UNAVAILABLE notice — never
+    //     a data-shaped answer: "No species available" / "not caught yet" (from
+    //     the failed catalog read) or "You need a Fishing Rod" (from the failed
+    //     inventory read) are lies about state the bot could not read.
+    const collUnavailable = /unavailable|try again|temporar/i.test(collectionSurface);
+    const collLie = /no species available|not caught yet/i.test(collectionSurface);
+    ctx.expect(collUnavailable && !collLie, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise: 'With the database blocked, /fish collection replies with the branded fishing-unavailable notice — never an empty collection fabricated from the failed read.',
+      observation: `outage-window /fish collection ${JSON.stringify(collectionSurface.slice(0, 110))} — looksUnavailable=${collUnavailable}, dataShapedLie=${collLie}.`,
+      impact: 'During a database outage /fish collection replied with a fabricated empty collection instead of a degradation notice.',
+    });
+    if (ctx.capabilities.redis) {
+      const castUnavailable = /unavailable|try again|temporar/i.test(castSurface);
+      const castLie = /need a .*fishing rod|you caught/i.test(castSurface);
+      ctx.expect(threw === null && castUnavailable && !castLie, {
+        assertionClass: 'Discord',
+        channel: 'captured-reply',
+        promise: 'With the database blocked, /fish cast replies with the branded fishing-unavailable notice — never a fabricated "you need a Fishing Rod" or a phantom catch.',
+        observation: `outage-window /fish cast ${JSON.stringify(castSurface.slice(0, 110))} — looksUnavailable=${castUnavailable}, dataShapedLie=${castLie}.`,
+        impact: 'During a database outage /fish cast replied with a data-shaped answer fabricated from the failed reads instead of a degradation notice.',
+      });
+    } else {
+      ctx.gate(
+        'Discord',
+        'redis-dependency',
+        'With the database blocked, /fish cast replies with the branded fishing-unavailable notice, consumes no bait, and persists no cooldown.',
+        'the cast path claims its Valkey SET NX cooldown before any catch work; with no Redis reachable the loopback client keeps reconnecting and a driven cast would hang',
+      );
+    }
+
+    // (3) ZERO CORRUPTION: wallet, catch history, and species catalog are
+    //     byte-identical after restore.
+    const walletAfterOutage = await readWallet(handle, userA);
+    const catchesAfterOutage = await catchCount(handle, userA);
+    const speciesAfterOutage = await speciesCount(handle);
+    ctx.expect(walletAfterOutage?.wallet === 300 && catchesAfterOutage === 0 && speciesAfterOutage === species.length, {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'No coins move and no catch rows appear across the outage window — wallet, catch history, and species catalog are unchanged after restoration.',
+      observation:
+        `post-restore wallet=${walletAfterOutage?.wallet} (expected 300); catch rows=${catchesAfterOutage} (expected 0); ` +
+        `species rows=${speciesAfterOutage} (expected ${species.length}).`,
+      impact: 'A database outage moved play coins, wrote a phantom catch row, or corrupted the species catalog.',
+    });
+
+    // (4) RECOVERY: the very next /fish collection renders the REAL catalog
+    //     again — the outage never poisoned the species cache with an empty list.
+    const recoveredColl = await ctx.runSlash(handle, { commandName: 'fish', userId: userA, subcommand: 'collection' });
+    const recoveredSurface = fishEmbedSurface(recoveredColl);
+    ctx.expect(/fish collection/i.test(recoveredSurface) && !/no species available/i.test(recoveredSurface), {
+      assertionClass: 'replay-safety',
+      channel: 'captured-reply',
+      promise: 'After restoration the very next /fish collection renders the real species catalog again (the outage did not poison the species cache with a fabricated empty list).',
+      observation: `post-restore /fish collection surface = ${JSON.stringify(recoveredSurface.slice(0, 110))}.`,
+      impact: 'The fishing pipeline did not recover after the outage ended — a cached empty species catalog outlived the outage.',
+    });
+
+    // (5) After restoration a FRESH /fish cast resolves and credits exactly
+    //     once — proving the outage-window cast persisted NO cooldown (a stuck
+    //     cooldown would refuse this cast) and spent nothing.
+    if (ctx.capabilities.redis) {
+      const cast = await ctx.runSlash(handle, { commandName: 'fish', userId: userA, subcommand: 'cast' });
+      const castRecoveredSurface = fishEmbedSurface(cast);
+      const walletAfterCast = await readWallet(handle, userA);
+      const catchesAfterCast = await catchCount(handle, userA);
+      const delta = (walletAfterCast?.wallet ?? 0) - 300;
+      ctx.expect(/you cast your line/i.test(castRecoveredSurface) && delta > 0 && catchesAfterCast <= 1, {
+        assertionClass: 'audit',
+        channel: 'audit-row',
+        promise: 'After restoration a fresh /fish cast resolves (no cooldown was wrongly persisted by the outage window) and credits its catch value exactly once, with at most one appended catch row.',
+        observation:
+          `post-restore /fish cast surface=${JSON.stringify(castRecoveredSurface.slice(0, 110))}; wallet 300→${walletAfterCast?.wallet} ` +
+          `(Δ=${delta}, expected > 0 exactly once); catch rows=${catchesAfterCast} (expected ≤ 1 — junk/treasure catches append none).`,
+        impact: 'The outage wrongly persisted a cast cooldown (blocking recovery) or the recovery cast did not credit exactly once.',
+      });
+    } else {
+      ctx.gate(
+        'audit',
+        'redis-dependency',
+        'After restoration a fresh /fish cast credits exactly once and applies.',
+        'the cast path needs the Valkey SET NX cooldown; no Redis reachable even inside the fault lane',
+      );
+    }
+
+    await proveRlsIsolation(ctx, handle);
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With the fishing backend unreachable, /fish cast and /fish collection reply with the branded fishing-unavailable template, no wallet moves, no bait is consumed, and no cooldown is wrongly persisted; after restore a fresh cast credits exactly once.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'audit',
+      'audit-row',
+      'After restoration a fresh /fish cast credits exactly once and applies, logged with the run-prefixed correlation id.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate credit or catch row survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded fishing-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'Fishing rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window (not one per failed fishing command).',
-    'requires a dependency-outage fault lane plus owner alert channel readback',
-  );
-  ctx.gate(
-    'audit',
-    'audit-row',
-    'After restoration a fresh /fish cast credits exactly once and applies, logged with the run-prefixed correlation id.',
-    'requires the outage fault lane; fishing also writes no DB-observable audit_logs row (the append-only economy_fish_catches row is the only ledger evidence)',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'No duplicate credit or catch row survives the outage/restore cycle.',
-    'requires a Supabase/Valkey dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded fishing-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the fishing-unavailable branch (and subcommand injection to produce the reply)',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'Fishing rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'requires the owner alert channel readback lane (the in-window alert write itself hits the severed database)',
   );
 }
 

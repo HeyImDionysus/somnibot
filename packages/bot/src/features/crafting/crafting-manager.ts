@@ -13,6 +13,7 @@ import { walletBalance, joinProp } from '../../utils/db-helpers.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Crafting');
 
@@ -115,10 +116,16 @@ export class CraftingManager {
       return { embed: new EmbedBuilder().setDescription('❌ Crafting is not enabled on this server.').setColor(0xff0000) };
     }
 
+    // [game-economy-crafting DEPFAIL] Check the READ ERROR first: a failed
+    // recipe read (database unreachable) must NOT render as an empty recipe
+    // book — that is a data-shaped lie about state the bot could not read.
     let recipes = await this.getRecipes();
+    if (recipes === null) {
+      return { embed: await this.unavailableEmbed() };
+    }
     if (recipes.length === 0) {
       await this.seedDefaultRecipes();
-      recipes = await this.getRecipes();
+      recipes = (await this.getRecipes()) ?? [];
     }
 
     // Group by category
@@ -153,11 +160,16 @@ export class CraftingManager {
       return { embed: new EmbedBuilder().setDescription('❌ Crafting is not enabled on this server.').setColor(0xff0000) };
     }
 
-    // Find recipe
+    // Find recipe. [game-economy-crafting DEPFAIL] A failed recipe read
+    // (database unreachable) must NOT surface as "Recipe not found" — degrade
+    // honestly BEFORE the cooldown lock so no cooldown is wrongly claimed.
     let recipes = await this.getRecipes();
+    if (recipes === null) {
+      return { embed: await this.unavailableEmbed() };
+    }
     if (recipes.length === 0) {
       await this.seedDefaultRecipes();
-      recipes = await this.getRecipes();
+      recipes = (await this.getRecipes()) ?? [];
     }
 
     const recipe = recipes.find((r) => r.name.toLowerCase() === recipeName.toLowerCase());
@@ -184,8 +196,18 @@ export class CraftingManager {
       };
     }
 
-    // Check materials
+    // Check materials. [game-economy-crafting DEPFAIL] A failed inventory read
+    // must NOT surface as "missing materials" (a data-shaped lie); release the
+    // just-claimed cooldown and degrade honestly.
     const inventory = await this.getInventory(userId);
+    if (inventory === null) {
+      try {
+        await this.valkey.del(cdKey);
+      } catch (e: unknown) {
+        log.warn('failed to release craft cooldown after inventory read failure:', (e as Error)?.message ?? e);
+      }
+      return { embed: await this.unavailableEmbed() };
+    }
     const missing: string[] = [];
 
     for (const input of recipe.inputs) {
@@ -303,8 +325,13 @@ export class CraftingManager {
 
   // ── Internal helpers ────────────────────────────────────
 
-  private async getRecipes(): Promise<Recipe[]> {
-    const { data } = await this.supabase
+  /**
+   * The guild's active recipes, or `null` when the READ FAILED (database
+   * unreachable) — callers must degrade honestly rather than treat a failed
+   * read as an empty recipe book ([game-economy-crafting DEPFAIL]).
+   */
+  private async getRecipes(): Promise<Recipe[] | null> {
+    const { data, error } = await this.supabase
       .from('economy_recipes')
       .select('id, name, emoji, description, inputs, output_item_id, output_qty, cooldown_seconds, category')
       .eq('guild_id', this.guild.id)
@@ -313,7 +340,27 @@ export class CraftingManager {
       .order('name')
       .limit(1000);
 
+    if (error) {
+      log.error('getRecipes read failed:', error.message);
+      return null;
+    }
     return (data as Recipe[] | null) ?? [];
+  }
+
+  /**
+   * [game-economy-crafting DEPFAIL] The branded crafting-unavailable
+   * degradation embed. The brand read is itself outage-safe (resolveBrandKit
+   * never throws and is additionally .catch-guarded), falling back to the
+   * guild name.
+   */
+  private async unavailableEmbed(): Promise<EmbedBuilder> {
+    const brandKit = await resolveBrandKit(this.supabase, this.guild.id, {
+      fallbackName: this.guild.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? this.guild.name ?? 'this server';
+    return new EmbedBuilder()
+      .setDescription(`⚠️ ${name}'s crafting workshop is temporarily unavailable — please try again in a moment. No materials were consumed.`)
+      .setColor(0xffa500);
   }
 
   // V49-L1: seedDefaultRecipes now creates output items in economy_items
@@ -380,8 +427,13 @@ export class CraftingManager {
     await this.supabase.from('economy_recipes').insert(rows);
   }
 
-  private async getInventory(userId: string): Promise<Array<{ item_name: string; quantity: number; item_id: string }>> {
-    const { data } = await this.supabase
+  /**
+   * A member's inventory, or `null` when the READ FAILED (database
+   * unreachable) — a failed read is not an empty inventory
+   * ([game-economy-crafting DEPFAIL]).
+   */
+  private async getInventory(userId: string): Promise<Array<{ item_name: string; quantity: number; item_id: string }> | null> {
+    const { data, error } = await this.supabase
       .from('economy_inventory')
       .select('quantity, item_id, economy_items(name)')
       .eq('guild_id', this.guild.id)
@@ -389,6 +441,10 @@ export class CraftingManager {
       .gt('quantity', 0)
       .limit(1000);
 
+    if (error) {
+      log.error('getInventory read failed:', error.message);
+      return null;
+    }
     if (!data) return [];
     return (data as Record<string, unknown>[]).map((row) => ({
       item_name: (joinProp(row, 'economy_items', 'name') as string) ?? 'Unknown',

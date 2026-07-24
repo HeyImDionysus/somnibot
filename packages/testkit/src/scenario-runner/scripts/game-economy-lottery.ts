@@ -959,46 +959,162 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY / RETRY / RACE');
 }
 
-/** DEPFAIL — Supabase-unreachable fail-safe (needs a dependency-outage fault lane). */
+/** DEPFAIL — Supabase-unreachable fail-safe, driven through the REAL fault
+ *  proxy (ctx.faults severs the actual network path run-one-domain routed the
+ *  stack through). Falls back to honest gates when no proxy is registered
+ *  (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // This DB-observable harness's whole premise is a REACHABLE local Supabase, so a
-  // database outage cannot be induced without a fault-injection lane. GATE the
-  // outage-dependent behavior honestly rather than fake an outage.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'During a Supabase outage, /lottery buy and /lottery view reply with the branded lottery-unavailable message and no coins move; after restoration a fresh buy debits exactly once.',
-    'requires a Supabase dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB)',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const handle = await bootLottery(ctx, { label: 'a', ticketPrice: 100, maxTickets: 10 });
+    const userA = ctx.userId('a');
+    await seedWallet(handle, userA, 1000);
+
+    // Pre-outage: a REAL 2-ticket buy seeds the known state (wallet 800, one
+    // active drawing at a 200 jackpot, two ticket rows) and warms the manager's
+    // config cache the way a long-running bot holds it, so the outage window
+    // exercises the drawing/ticket READ paths, not a cold config fetch.
+    await runLottery(ctx, handle, { sub: 'buy', userId: userA, options: { tickets: 2 } });
+    const drawing = await readActiveDrawing(handle);
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let viewReply = '';
+    let buyReply = '';
+    try {
+      viewReply = brandingSurface(await runLottery(ctx, handle, { sub: 'view', userId: userA }));
+      buyReply = brandingSurface(
+        await runLottery(ctx, handle, { sub: 'buy', userId: userA, options: { tickets: 1 } }),
+      );
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: both lottery commands must reply, never crash the pipeline.
+    ctx.expect(threw === null && viewReply.length > 0 && buyReply.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise:
+        'With database access blocked, /lottery view and /lottery buy still reply (fail-safe) instead of crashing the interaction pipeline.',
+      observation:
+        threw === null
+          ? `during the outage window /lottery view replied ${JSON.stringify(truncate(viewReply))}; /lottery buy replied ${JSON.stringify(truncate(buyReply))}.`
+          : `an outage-window drive THREW ${truncate(threw)}.`,
+      impact: 'A database outage crashed the lottery command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts the branded lottery-unavailable notice — never a
+    //     data-shaped answer fabricated from the failed reads. "No active
+    //     lottery drawing" / "Tickets sold: 0" during the outage is a LIE (a
+    //     real 200-coin drawing with two tickets exists); so is any not-enabled
+    //     or insufficient-funds verdict on the degraded buy.
+    const unavailableRe = /unavailable|try again|temporar|later|degraded|issue|problem/i;
+    const viewLie = /no active lottery drawing|tickets sold/i.test(viewReply);
+    const buyLie = /not enabled|you need|tickets purchased/i.test(buyReply);
+    ctx.expect(
+      unavailableRe.test(viewReply) && unavailableRe.test(buyReply) && !viewLie && !buyLie,
+      {
+        assertionClass: 'branding',
+        channel: 'captured-reply',
+        promise:
+          'With the database blocked, /lottery view and /lottery buy reply with the branded lottery-unavailable notice — never a fabricated empty-pot, purchase-confirmed, or insufficient-funds verdict.',
+        observation:
+          `outage-window replies: view=${JSON.stringify(truncate(viewReply))} (dataShapedLie=${viewLie}), ` +
+          `buy=${JSON.stringify(truncate(buyReply))} (dataShapedLie=${buyLie}).`,
+        impact:
+          'During a database outage a lottery command fabricated a data-shaped answer from a failed read — members are told a lie about a pot/balance the bot could not read.',
+      },
+    );
+
+    // (3) ZERO CORRUPTION: no coins moved and no ticket landed during the
+    //     outage — the seeded rows are byte-identical after restore.
+    const walletAfter = await readWallet(handle, userA);
+    const drawingAfter = drawing ? await readDrawingById(handle, drawing.id) : null;
+    const ticketsAfter = await guildTicketCount(handle);
+    ctx.expect(
+      walletAfter?.wallet === 800 &&
+        walletAfter?.bank === 0 &&
+        drawingAfter?.status === 'active' &&
+        drawingAfter?.jackpot === 200 &&
+        ticketsAfter === 2,
+      {
+        assertionClass: 'Discord',
+        channel: 'db-observable',
+        promise:
+          'No coins or tickets move during the outage window: the wallet, the drawing (status + jackpot), and the ticket rows are unchanged after restoration.',
+        observation:
+          `post-restore wallet=${walletAfter?.wallet}/bank=${walletAfter?.bank} (expected 800/0); drawing status=${drawingAfter?.status}/` +
+          `jackpot=${drawingAfter?.jackpot} (expected active/200); ticket rows=${ticketsAfter} (expected 2).`,
+        impact: 'A database outage moved play-money or mutated lottery rows — outage-window corruption.',
+      },
+    );
+
+    // (4) RECOVERY: the very next /lottery buy debits exactly once and records
+    //     its ticket against the SAME drawing (the catalog's "fresh buy debits
+    //     exactly once" recovery contract), and the view serves real data again.
+    const recoveredBuy = await runLottery(ctx, handle, { sub: 'buy', userId: userA, options: { tickets: 1 } });
+    const walletRecovered = await walletAmount(handle, userA);
+    const drawingRecovered = drawing ? await readDrawingById(handle, drawing.id) : null;
+    const ticketsRecovered = await guildTicketCount(handle);
+    const recoveredView = brandingSurface(await runLottery(ctx, handle, { sub: 'view', userId: userA }));
+    ctx.expect(
+      walletRecovered === 700 &&
+        drawingRecovered?.jackpot === 300 &&
+        ticketsRecovered === 3 &&
+        brandingSurface(recoveredBuy).includes('300') &&
+        recoveredView.includes('300'),
+      {
+        assertionClass: 'replay-safety',
+        channel: 'db-observable',
+        promise:
+          'After restoration a fresh /lottery buy debits exactly once, lands exactly one ticket on the same drawing, and /lottery view serves the real 300-coin pot again (no lingering degradation, no double debit).',
+        observation:
+          `post-restore buy: wallet 800→${walletRecovered} (expected 700), jackpot=${drawingRecovered?.jackpot} (expected 300), ` +
+          `ticket rows=${ticketsRecovered} (expected 3); view surface ${JSON.stringify(truncate(recoveredView))}.`,
+        impact: 'The lottery pipeline did not recover cleanly after the outage ended (no ticket landed, or the buy debited zero/multiple times).',
+      },
+    );
+
+    await proveRlsIsolation(ctx, handle);
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'During a Supabase outage, /lottery buy and /lottery view reply with the branded lottery-unavailable message and no coins move; after restoration a fresh buy debits exactly once.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate ticket insert, jackpot increment, or payout survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded lottery-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'Lottery rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window (not one per failed lottery command).',
-    'requires a dependency-outage fault lane plus owner alert channel readback',
+    'requires the dependency-degradation alert aggregation plus owner alert channel readback (DISCORD_TOKEN + live guild)',
   );
   ctx.gate(
     'audit',
     'db-observable',
     'A draw tick during the outage logs and skips without crashing, and after restoration no ticket, jackpot, or payout is applied twice.',
-    'requires the outage fault lane to exercise the degraded draw-tick path',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'No duplicate ticket insert, jackpot increment, or payout survives the outage/restore cycle.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded lottery-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the lottery-unavailable branch',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'Lottery rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'the draw tick fires only on the scheduler’s setTimeout(60s)+setInterval(≥1h) a fast bot-only harness cannot let elapse mid-outage; its skip-on-error branches are covered by the RETRY convergence proof',
   );
 }
 

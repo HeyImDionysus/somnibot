@@ -1126,6 +1126,12 @@ export class AuditService {
    */
   private pendingEnqueues = new Set<Promise<void>>();
   /**
+   * An in-progress flush outage (set on a failed batch, cleared once a batch
+   * lands and the window has been recorded as `audit.flush_failed`). Keyed by
+   * its start time so the recovery row is written exactly once per window.
+   */
+  private flushOutage: { attempts: number; firstFailedAt: string; lastError: string } | null = null;
+  /**
    * Last-known guild_config values — the BEFORE side of config.updated
    * diffs. Loaded once at start() (i.e. before any config change this
    * service will observe) and advanced by each config.changed's `changes`,
@@ -1361,10 +1367,75 @@ export class AuditService {
 
     if (error) {
       log.error(`Failed to flush ${batch.length} entries:`, error.message);
+      // Remember the outage window so it can be recorded once the ledger is
+      // writable again — a batch that silently retried would leave the gap
+      // invisible in the very trail that is supposed to explain it.
+      this.flushOutage = {
+        attempts: (this.flushOutage?.attempts ?? 0) + 1,
+        firstFailedAt: this.flushOutage?.firstFailedAt ?? new Date().toISOString(),
+        lastError: error.message,
+      };
       // Re-queue on failure (max 500 to prevent memory leak)
       if (this.queue.length < 500) {
         this.queue.unshift(...batch);
       }
+      return;
+    }
+
+    // The batch landed. If earlier attempts failed, the ledger is writable
+    // again — record the outage window exactly once, keyed on its start so a
+    // retry/restart cannot duplicate it.
+    if (this.flushOutage) {
+      const outage = this.flushOutage;
+      this.flushOutage = null;
+      await this.recordFlushRecovery(batch, outage);
+    }
+  }
+
+  /**
+   * Write the `audit.flush_failed` row describing a completed outage window.
+   * Best-effort by construction: it is written directly (not queued) so it
+   * cannot re-enter the failing batch, and a failure here only restores the
+   * pending-outage marker so the next successful flush tries again — it must
+   * never throw into the flush loop or drop the caller's real audit entries.
+   */
+  private async recordFlushRecovery(
+    batch: Array<Record<string, unknown>>,
+    outage: { attempts: number; firstFailedAt: string; lastError: string },
+  ): Promise<void> {
+    // Attribute the window to a guild present in the recovered batch (the rows
+    // that were stuck), falling back to this service's own guild.
+    const guildId =
+      (batch.find((e) => typeof e.guild_id === 'string')?.guild_id as string | undefined)
+      ?? this.guildId;
+    if (!guildId) return;
+    try {
+      const { error } = await this.supabase.from('audit_logs').upsert(
+        [{
+          guild_id: guildId,
+          actor_type: 'system',
+          actor_id: 'audit-service',
+          action: 'audit.flush_failed',
+          category: 'system',
+          success: false,
+          error_message: outage.lastError,
+          occurrence_key: `audit.flush_failed:${outage.firstFailedAt}`,
+          details: {
+            attempts: outage.attempts,
+            firstFailedAt: outage.firstFailedAt,
+            recoveredAt: new Date().toISOString(),
+            recoveredEntries: batch.length,
+          },
+        }],
+        { onConflict: 'guild_id,occurrence_key', ignoreDuplicates: true },
+      );
+      if (error) {
+        log.warn('Could not record audit.flush_failed:', error.message);
+        this.flushOutage = outage; // try again after the next successful flush
+      }
+    } catch (err) {
+      log.warn('Could not record audit.flush_failed:', (err as Error)?.message ?? err);
+      this.flushOutage = outage;
     }
   }
 }

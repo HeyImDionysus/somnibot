@@ -1044,44 +1044,145 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
 
 /** DEPFAIL — Supabase/Valkey-unreachable fail-safe (needs a dependency-outage fault lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // This DB-observable harness's whole premise is a REACHABLE local Supabase, so a
-  // database/Valkey outage cannot be induced without a fault-injection lane. GATE the
-  // outage-dependent behavior honestly rather than fake an outage.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'During the outage /trivia start replies with the branded trivia-unavailable template in the owner’s voice and no question embed posts; after restoration a full round resolves and pays with pre-outage streaks honored.',
-    'requires a Supabase/Valkey dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB); /trivia start itself is driven live in the happy-path scenarios',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    // Cooldown 0 keeps both the outage drive and the recovery drive Redis-free
+    // (cooldownRemaining short-circuits) — the SUPABASE outage is the fault
+    // under test this wave; the Valkey streak legs stay gated below.
+    const handle = await ctx.bootGuild({
+      label: 'a',
+      economyStartingBalance: 0,
+      guildConfigOverrides: { economy_trivia_enabled: true, economy_trivia_cooldown_seconds: 0 },
+    });
+    const userA = ctx.userId('a');
+    await insertCustomQuestion(ctx, handle, {
+      question: 'Which coin funds the depfail heist?',
+      correct: 'Play coins',
+      wrong: ['Real dollars', 'Gems', 'Tokens'],
+      category: 'somni',
+      difficulty: 'easy',
+    });
+    const packBefore = JSON.stringify((await readCustomQuestions(handle)).sort((a, b) => a.id.localeCompare(b.id)));
+
+    // Deliberately NO pre-outage /trivia start: a started round would hold the
+    // channel's in-memory active-round slot for 20s and block every later
+    // start in this channel. The cold-cache start below is the exact
+    // first-command-of-the-outage path the catalog contracts.
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let startReply = '';
+    let startSurface: RoundSurface = { title: '', description: '', buttonIds: [] };
+    try {
+      const cap = await ctx.runSlash(handle, { commandName: 'trivia', userId: userA, subcommand: 'start', options: {} });
+      startReply = replyContent(cap);
+      startSurface = readRoundSurface(cap);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: /trivia start must reply, never crash the pipeline.
+    ctx.expect(threw === null && startReply.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise:
+        'With database access blocked, /trivia start still replies (fail-safe) instead of crashing the interaction pipeline.',
+      observation:
+        threw === null
+          ? `during the outage window /trivia start replied ${JSON.stringify(truncate(startReply, 140))}.`
+          : `the outage-window drive THREW ${truncate(threw, 140)}.`,
+      impact: 'A database outage crashed the trivia command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts the branded trivia-unavailable notice AND that
+    //     no question embed posts: a "Trivia is not enabled" verdict is a
+    //     config lie, and a round opened blind could neither serve the owner's
+    //     (unreadable) pack nor be settled honestly.
+    const unavailableRe = /unavailable|try again|temporar|later|degraded|issue|problem/i;
+    const startLie = /not enabled/i.test(startReply);
+    const roundPosted = startSurface.buttonIds.length > 0 || startSurface.title.length > 0;
+    ctx.expect(unavailableRe.test(startReply) && !startLie && !roundPosted, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise:
+        'With the database blocked, /trivia start replies with the branded trivia-unavailable notice and posts NO question embed — never a not-enabled verdict or a blind round.',
+      observation:
+        `outage-window reply=${JSON.stringify(truncate(startReply, 140))} (dataShapedLie=${startLie}); ` +
+        `question embed posted=${roundPosted} (title=${JSON.stringify(startSurface.title)}, buttons=${startSurface.buttonIds.length}).`,
+      impact:
+        'During a database outage /trivia start fabricated a verdict or opened a round it could not honestly serve or settle.',
+    });
+
+    // (3) ZERO CORRUPTION: the owner’s custom question pack is byte-identical
+    //     after restore (and the outage never poisoned the pack cache).
+    const packAfter = JSON.stringify((await readCustomQuestions(handle)).sort((a, b) => a.id.localeCompare(b.id)));
+    ctx.expect(packAfter === packBefore && packAfter !== '[]', {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise:
+        'No trivia rows corrupt across the outage window: the owner’s custom question pack reads back byte-identical after restoration.',
+      observation: `custom-question pack identical after restore=${packAfter === packBefore} (rows=${(JSON.parse(packAfter) as unknown[]).length}, expected 1).`,
+      impact: 'A database outage mutated or lost the owner’s custom trivia questions.',
+    });
+
+    // (4) RECOVERY: the very next /trivia start posts a REAL round — the
+    //     question embed with four answer buttons and the 20-second window —
+    //     proving the degradation does not linger (and the failed pack read was
+    //     never cached as an empty pack).
+    const recovered = await ctx.runSlash(handle, { commandName: 'trivia', userId: userA, subcommand: 'start', options: {} });
+    const rec = readRoundSurface(recovered);
+    const recFourButtons = rec.buttonIds.length === 4 && rec.buttonIds.every((id) => /^trivia:[^:]+:[0-3]$/.test(id));
+    ctx.expect(/trivia/i.test(rec.title) && recFourButtons && /20 seconds/i.test(rec.description), {
+      assertionClass: 'replay-safety',
+      channel: 'captured-reply',
+      promise:
+        'After restoration the very next /trivia start posts the real question embed with four answer buttons (no lingering degradation, no poisoned question-pack cache).',
+      observation:
+        `post-restore /trivia start: embed title=${JSON.stringify(rec.title)}, buttons=${JSON.stringify(rec.buttonIds)}, ` +
+        `20-second window present=${/20 seconds/i.test(rec.description)}.`,
+      impact: 'The trivia pipeline did not recover after the outage ended (no round posts, or the custom pack was silently dropped).',
+    });
+
+    await proveRlsIsolation(ctx, handle);
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'During the outage /trivia start replies with the branded trivia-unavailable template in the owner’s voice and no question embed posts; after restoration a fresh round posts.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded trivia-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'Trivia rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window (not one per failed round start).',
-    'requires a dependency-outage fault lane plus owner alert channel readback',
+    'requires the dependency-degradation alert aggregation plus owner alert channel readback (DISCORD_TOKEN + live guild)',
   );
   ctx.gate(
     'audit',
     'audit-row',
     'After restoration a fresh round runs end-to-end with streaks intact, logged with the run-prefixed correlation id.',
-    'requires the outage fault lane; trivia also writes no DB-observable audit/ledger row (economy_add_balance touches only economy_wallets) and streaks live in Valkey',
+    'the full round resolution (endRound payout + results) rides a 20-second setTimeout and the streak math lives in Valkey — the Valkey-outage leg of this scenario stays gated this wave (SUPABASE is the severed dependency); trivia also writes no DB-observable audit/ledger row for payouts',
   );
   ctx.gate(
     'replay-safety',
     'db-observable',
     'No corrupted streaks or double payouts survive the outage/restore cycle.',
-    'requires a Supabase/Valkey dependency-outage fault-injection lane; trivia streaks + answer locks are Valkey/in-memory',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded trivia-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the trivia-unavailable branch',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'Trivia rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'trivia streaks live in Valkey (trivia:streak:*, 24h TTL) and payouts resolve on the 20-second endRound timer — the Valkey-outage leg stays honestly gated this wave (SUPABASE is the severed dependency); the Supabase-side recovery (a real round posts again) is proven above',
   );
 }
 

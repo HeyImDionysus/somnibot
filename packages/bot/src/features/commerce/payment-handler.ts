@@ -19,10 +19,31 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('PaymentHandler');
 
 const HOT_PINK = 0xFF1493;
+
+/**
+ * Branded degradation for a buy click when a checkout READ fails (database
+ * outage). A failed read must never be presented as "product not found" or
+ * silently skipped past the already-purchased guard (which could double-sell)
+ * — check the error FIRST, stop the checkout, and reassure the buyer that no
+ * charge happened. The brand read is itself outage-safe (resolveBrandKit never
+ * throws; the guild name is the fallback).
+ */
+async function replyCheckoutUnavailable(
+  interaction: ButtonInteraction,
+  supabase: SupabaseClient,
+  guildId: string,
+): Promise<void> {
+  const brandKit = await resolveBrandKit(supabase, guildId, { fallbackName: interaction.guild?.name }).catch(() => null);
+  const name = brandKit?.brandName ?? interaction.guild?.name ?? 'This server';
+  await interaction.editReply({
+    content: `⚠️ ${name}'s store is temporarily unavailable — please try again in a moment. You have not been charged.`,
+  });
+}
 
 interface PayPalTokenResponse {
   access_token: string;
@@ -165,14 +186,21 @@ export async function handleBuyButton(
   const discordId = interaction.user.id;
   const discordUsername = interaction.user.username;
 
-  // Fetch product
-  const { data: product } = await supabase
+  // Fetch product. A failed READ is not a missing product: during a database
+  // outage the product may exist and be buyable, so degrade honestly instead
+  // of lying with "not found".
+  const { data: product, error: productLookupError } = await supabase
     .from('products')
     .select('*')
     .eq('id', productId)
     .eq('guild_id', guildId)
     .eq('active', true)
-    .single();
+    .maybeSingle();
+
+  if (productLookupError) {
+    await replyCheckoutUnavailable(interaction, supabase, guildId);
+    return;
+  }
 
   if (!product) {
     await interaction.editReply({ content: '❌ Product not found or no longer available.' });
@@ -196,23 +224,36 @@ export async function handleBuyButton(
     return;
   }
 
-  // Check if user already has an active entitlement for this product
-  const { data: existingCustomer } = await supabase
+  // Check if user already has an active entitlement for this product. These
+  // reads GUARD real money: proceeding when they error (rather than when they
+  // genuinely return nothing) would let an outage bypass the already-purchased
+  // fence and double-sell — so a read error stops the checkout cold.
+  const { data: existingCustomer, error: customerLookupError } = await supabase
     .from('customers')
     .select('id')
     .eq('discord_id', discordId)
     .eq('guild_id', guildId)
-    .single();
+    .maybeSingle();
+
+  if (customerLookupError) {
+    await replyCheckoutUnavailable(interaction, supabase, guildId);
+    return;
+  }
 
   if (existingCustomer) {
-    const { data: existing } = await supabase
+    const { data: existing, error: entitlementLookupError } = await supabase
       .from('entitlements')
       .select('id')
       .eq('customer_id', existingCustomer.id)
       .eq('product_id', productId)
       .in('status', ['active', 'pending', 'grace_period'])
       .limit(1)
-      .single();
+      .maybeSingle();
+
+    if (entitlementLookupError) {
+      await replyCheckoutUnavailable(interaction, supabase, guildId);
+      return;
+    }
 
     if (existing) {
       await interaction.editReply({

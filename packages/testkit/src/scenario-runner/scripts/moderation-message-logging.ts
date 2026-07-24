@@ -584,33 +584,39 @@ function showExportUserMismatch(result: MyDataResult, expectedUserId: string): b
   return result.parsed?.user_id !== undefined && result.parsed.user_id !== expectedUserId;
 }
 
-/** DEPFAIL — Supabase-unreachable fail-closed (needs a dependency-outage fault lane). */
+/** DEPFAIL — Supabase-unreachable fail-closed. NOT convertible onto the supabase
+ *  fault proxy: the whole capture surface fires only on messageUpdate /
+ *  messageDelete GATEWAY events (loadConfig → logMessageEdit/logMessageDelete),
+ *  and this harness has no edit/delete event driver — so even inside a real
+ *  severed-DB window there is nothing ctx-drivable that reaches the contracted
+ *  behavior. GATE honestly rather than fake a drive. (The product side is
+ *  already outage-safe by static trace: loadConfig's error branch returns safe
+ *  fail-closed defaults WITHOUT caching, emits message_log.degraded, and writes
+ *  a throttled owner alert — proving it needs the event lane.) */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // The harness's whole premise is a REACHABLE local Supabase, so a database outage
-  // cannot be induced without a fault-injection lane. GATE honestly rather than fake it.
   ctx.gate(
     'Discord',
     'db-observable',
     'With database access blocked, edits and deletes flow normally for members while no log embed posts and no error reaches any member (fail-closed).',
-    'requires a Supabase dependency-outage fault-injection lane plus a gateway event lane (the harness deliberately runs against a reachable DB)',
+    'the capture path fires only on gateway messageUpdate/messageDelete events — no edit/delete event driver exists in this harness, so the supabase fault proxy (run-one-domain.mjs dependency-outage lane) alone cannot drive the contracted outage behavior',
   );
   ctx.gate(
     'database-RLS',
     'db-rls',
     'Message-log configuration and any forensic rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'the outage window is only meaningful around a driven edit/delete capture — no gateway edit/delete driver exists in this harness',
   );
   ctx.gate(
     'audit',
     'db-observable',
     'Append-only audit rows capture the degradation window and recovery; after restoration the next qualifying edit is captured normally.',
-    'requires the outage fault lane; note the message-log handler currently writes no audit row for config-fetch failures',
+    'the message_log.degraded audit event is emitted from loadConfig only when a gateway edit/delete triggers the failed config read — no edit/delete event driver exists in this harness',
   );
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window rather than one per skipped event.',
-    'requires a dependency-outage fault lane plus owner alert channel readback; note the handler currently raises no such alert',
+    'the throttled message_log_degraded alert write fires only from a gateway-driven capture attempt (and its insert itself needs the DB back) — no edit/delete event driver exists in this harness',
   );
   gateBranding(ctx);
   gateReplaySafety(ctx);

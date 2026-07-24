@@ -19,6 +19,7 @@ import type { Redis } from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { eventBus } from '../../services/event-bus.js';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Trivia');
 
@@ -127,18 +128,57 @@ export class TriviaManager {
     this.customQuestionCache.clear();
   }
 
-  private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+  /**
+   * Read the guild config (cached). `degraded` is true only when the read FAILED
+   * (e.g. a database outage) as opposed to genuinely finding no row (PGRST116) —
+   * callers must not present a failed read as "trivia is not enabled".
+   */
+  private async getConfigChecked(
+    guildId: string,
+  ): Promise<{ config: DbGuildConfig | null; degraded: boolean }> {
     const cached = this.configCache.get(guildId);
-    if (cached) return cached;
-    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
+    if (cached) return { config: cached, degraded: false };
+    const { data, error } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
-    return data;
+    return { config: data, degraded: error != null && error.code !== 'PGRST116' };
   }
 
-  private async getCustomQuestions(guildId: string): Promise<TriviaQuestion[]> {
+  private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+    return (await this.getConfigChecked(guildId)).config;
+  }
+
+  /**
+   * [game-economy-trivia DEPFAIL] Branded degradation notice for a dependency
+   * outage. With the database unreachable a round must NOT open ("no question
+   * embed posts") — a round opened blind could not read the owner's custom pack
+   * and could not be paid/settled honestly. The brand lookup is itself
+   * outage-safe (resolveBrandKit never throws; belt-and-braces .catch).
+   */
+  private async replyTriviaUnavailable(interaction: ChatInputCommandInteraction): Promise<void> {
+    const brandKit = await resolveBrandKit(this.supabase, interaction.guildId!, {
+      fallbackName: interaction.guild?.name,
+    }).catch(() => null);
+    const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
+    const content = `⚠️ ${name}'s trivia is temporarily unavailable — please try again in a moment. No round was started and your streak is safe.`;
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ content }).catch(() => {});
+    } else {
+      await interaction.reply({ content, ephemeral: true }).catch(() => {});
+    }
+  }
+
+  /**
+   * The owner's custom question pack. `degraded` is true only when the read
+   * FAILED — and a failed read is NEVER cached: caching the empty fallback would
+   * permanently drop the owner's pack from every later round (silent pool
+   * corruption persisting past the outage).
+   */
+  private async getCustomQuestions(
+    guildId: string,
+  ): Promise<{ questions: TriviaQuestion[]; degraded: boolean }> {
     const cached = this.customQuestionCache.get(guildId);
-    if (cached) return cached;
-    const { data } = await this.supabase
+    if (cached) return { questions: cached, degraded: false };
+    const { data, error } = await this.supabase
       .from('economy_trivia_questions')
       .select('*')
       .eq('guild_id', guildId)
@@ -150,8 +190,8 @@ export class TriviaManager {
       category: q.category,
       difficulty: q.difficulty as TriviaDifficulty,
     }));
-    this.customQuestionCache.set(guildId, questions);
-    return questions;
+    if (!error) this.customQuestionCache.set(guildId, questions);
+    return { questions, degraded: error != null };
   }
 
   /** Retrieve the trivia streak for a user (persisted in Valkey, survives restarts) */
@@ -176,8 +216,12 @@ export class TriviaManager {
     guildId: string,
     category?: string,
     difficulty?: TriviaDifficulty,
-  ): Promise<TriviaQuestion> {
-    const customQuestions = await this.getCustomQuestions(guildId);
+  ): Promise<TriviaQuestion | null> {
+    const { questions: customQuestions, degraded } = await this.getCustomQuestions(guildId);
+    // A failed pack read means the pool cannot honestly be built (the owner's
+    // custom questions are unreadable, not absent) — callers degrade, never
+    // silently serve a built-ins-only round during an outage.
+    if (degraded) return null;
     let pool = [...BUILT_IN_QUESTIONS, ...customQuestions];
 
     if (category) {
@@ -247,8 +291,14 @@ export class TriviaManager {
   ): Promise<void> {
     const guildId = interaction.guildId!;
     const channelId = interaction.channelId;
-    const config = await this.getConfig(guildId);
+    const { config, degraded } = await this.getConfigChecked(guildId);
 
+    // A failed config read is an outage, not "trivia is off" — degrade honestly
+    // with the branded unavailable notice and post no round.
+    if (degraded) {
+      await this.replyTriviaUnavailable(interaction);
+      return;
+    }
     if (!config?.economy_trivia_enabled) {
       await interaction.reply({ content: '❌ Trivia is not enabled on this server.', ephemeral: true });
       return;
@@ -270,6 +320,11 @@ export class TriviaManager {
     }
 
     const question = await this.selectQuestion(guildId, category, difficulty);
+    // The pool could not be read (outage) — no question embed posts.
+    if (!question) {
+      await this.replyTriviaUnavailable(interaction);
+      return;
+    }
     const { embed, row, correctIndex, shuffled } = this.buildRoundSurface(channelId, question, false);
 
     await interaction.reply({ embeds: [embed], components: [row] });
@@ -314,6 +369,9 @@ export class TriviaManager {
     if (remaining > 0) return { started: false, reason: 'cooldown' };
 
     const question = await this.selectQuestion(guildId, category, difficulty);
+    // The pool could not be read (outage) — skip this hosted tick; the next
+    // scheduled tick retries against a healthy database.
+    if (!question) return { started: false, reason: 'question_pool_unavailable' };
     const { embed, row, correctIndex, shuffled } = this.buildRoundSurface(channelId, question, true);
 
     let edit: RoundEditor;

@@ -199,8 +199,14 @@ describe('LotteryManager', () => {
       mgr = new LotteryManager(supabase as any);
       const interaction = makeInteraction();
       await mgr.buyTickets(interaction as any, 1);
+      // An undrawable/uncreatable drawing means the database is not accepting
+      // the write — the manager must refuse to debit and say so explicitly,
+      // rather than imply the member's purchase merely "failed".
       expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('Could not create'),
+        content: expect.stringContaining('temporarily unavailable'),
+      }));
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('Nothing was charged'),
       }));
     });
   });

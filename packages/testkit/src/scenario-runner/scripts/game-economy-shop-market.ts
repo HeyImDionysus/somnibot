@@ -1163,6 +1163,37 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
     },
   );
 
+  // POSITIVE CONTROL — without this, the refusal above is vacuous: a /market
+  // cancel that is broken for EVERYONE would also "refuse" member B. The owner
+  // must be able to cancel their OWN listing and get the escrowed units back.
+  // (This is precisely the hole a uuid-vs-ILIKE lookup bug hid in: every cancel
+  // errored and reported "listing not found", so nobody could ever cancel.)
+  const heldBeforeOwnCancel = itemId ? await inventoryQty(handle, userA, itemId) : -1;
+  const ownCancelCap = await ctx.runSlash(handle, {
+    commandName: 'market',
+    userId: userA,
+    subcommand: 'cancel',
+    options: { listing: (listingId ?? '').slice(0, 8) },
+  });
+  const listingAfterOwn = listingId ? await readListing(handle, listingId) : null;
+  const heldAfterOwnCancel = itemId ? await inventoryQty(handle, userA, itemId) : -1;
+  const ownCancelDesc = lastEmbedDescription(ownCancelCap);
+  ctx.expect(
+    listingAfterOwn?.status === 'cancelled' && heldAfterOwnCancel === heldBeforeOwnCancel + 3,
+    {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise:
+        "member-A CAN cancel their own listing: it ends and the 3 escrowed units return to A's inventory.",
+      observation:
+        `/market cancel (by the owner A) reply="${truncate(ownCancelDesc)}"; ` +
+        `listing status after=${listingAfterOwn?.status} (expected cancelled); ` +
+        `A's held units ${heldBeforeOwnCancel} → ${heldAfterOwnCancel} (expected +3).`,
+      impact:
+        "A member could not cancel their OWN market listing — the escrowed units stay locked in the market forever.",
+    },
+  );
+
   // Driven live: a member holding a commerce-granted (non-tradeable) item is refused
   // (branded) when trying to /market list it, and it never reaches the market.
   const boundItemId = await seedItem(handle, {
@@ -1219,46 +1250,212 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
-/** DEPFAIL — Supabase-unreachable fail-safe (needs a dependency-outage fault lane). */
+/** DEPFAIL — Supabase-unreachable fail-safe, driven through the REAL fault
+ *  proxy (ctx.faults severs the actual network path run-one-domain routed the
+ *  stack through). Falls back to honest gates when no proxy is registered
+ *  (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // This DB-observable harness's whole premise is a REACHABLE local Supabase, so a
-  // database outage cannot be induced without a fault-injection lane. GATE the
-  // outage-dependent behavior honestly rather than fake an outage.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'With database access blocked, /shop, /buy and /market reply with the branded market-unavailable message and no coins or items move.',
-    'requires a Supabase dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB)',
-  );
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const handle = await ctx.bootGuild({
+      label: 'a',
+      economyStartingBalance: 0,
+      guildConfigOverrides: { economy_market_enabled: true },
+    });
+    const userA = ctx.userId('a');
+    const userB = ctx.userId('b');
+    const price = 200;
+    const itemName = `${ctx.runPrefix}df-potion`;
+
+    const itemId = await seedItem(handle, { name: itemName, price, sellPrice: 50, stock: 5 });
+    await seedWallet(handle, userA, 1000);
+    const listingId = itemId
+      ? await seedListing(handle, userB, itemId, itemName, 3, 50)
+      : null;
+
+    // Pre-outage: one truthful /shop and /market browse baseline (also warms the
+    // economy + market config caches the way a long-running bot holds them, so
+    // the outage window exercises the catalog/listing READ paths).
+    await ctx.runSlash(handle, { commandName: 'shop', userId: userA });
+    await ctx.runSlash(handle, { commandName: 'market', userId: userA, subcommand: 'browse' });
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let shopReply = '';
+    let buyReply = '';
+    let marketReply = '';
+    try {
+      const shopCap = await ctx.runSlash(handle, { commandName: 'shop', userId: userA });
+      shopReply = replyContent(shopCap) || lastEmbedDescription(shopCap);
+      const buyCap = await ctx.runSlash(handle, {
+        commandName: 'buy',
+        userId: userA,
+        options: { item: itemName, quantity: 1 },
+      });
+      buyReply = replyContent(buyCap) || lastEmbedDescription(buyCap);
+      const marketCap = await ctx.runSlash(handle, { commandName: 'market', userId: userA, subcommand: 'browse' });
+      marketReply = replyContent(marketCap) || lastEmbedDescription(marketCap);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: all three trading commands must reply, never crash.
+    ctx.expect(
+      threw === null && shopReply.length > 0 && buyReply.length > 0 && marketReply.length > 0,
+      {
+        assertionClass: 'Discord',
+        channel: 'captured-reply',
+        promise:
+          'With database access blocked, /shop, /buy, and /market browse still reply (fail-safe) instead of crashing the interaction pipeline.',
+        observation:
+          threw === null
+            ? `during the outage window /shop replied ${JSON.stringify(truncate(shopReply))}; /buy replied ${JSON.stringify(truncate(buyReply))}; /market browse replied ${JSON.stringify(truncate(marketReply))}.`
+            : `an outage-window drive THREW ${truncate(threw)}.`,
+        impact: 'A database outage crashed the shop/market command pipeline instead of degrading to a reply.',
+      },
+    );
+
+    // (2) The catalog contracts the branded market-unavailable notice — never a
+    //     data-shaped answer fabricated from the failed reads: "The shop is
+    //     empty!" (a priced item EXISTS), "Item not found", a purchase
+    //     confirmation, or "No active listings" (a listing EXISTS) are LIES.
+    const unavailableRe = /unavailable|try again|temporar|later|degraded|issue|problem/i;
+    const shopLie = /shop is empty/i.test(shopReply);
+    const buyLie = /not found|you need|bought/i.test(buyReply);
+    const marketLie = /no active listings|not enabled|purchase complete/i.test(marketReply);
+    ctx.expect(
+      unavailableRe.test(shopReply) &&
+        unavailableRe.test(buyReply) &&
+        unavailableRe.test(marketReply) &&
+        !shopLie &&
+        !buyLie &&
+        !marketLie,
+      {
+        assertionClass: 'branding',
+        channel: 'captured-reply',
+        promise:
+          'With the database blocked, /shop, /buy, and /market reply with the branded unavailable notice — never a fabricated empty-shop, item-not-found, purchase-confirmed, or no-listings verdict.',
+        observation:
+          `outage-window replies: shop=${JSON.stringify(truncate(shopReply))} (lie=${shopLie}), ` +
+          `buy=${JSON.stringify(truncate(buyReply))} (lie=${buyLie}), market=${JSON.stringify(truncate(marketReply))} (lie=${marketLie}).`,
+        impact:
+          'During a database outage a trading command fabricated a data-shaped answer from a failed read — members are told a lie about a catalog/market the bot could not read.',
+      },
+    );
+
+    // (3) ZERO CORRUPTION: no coins or items moved during the outage — wallet,
+    //     stock, listing, inventory, and the ledger are byte-identical.
+    const walletAfter = await readWallet(handle, userA);
+    const itemAfter = itemId ? await readItem(handle, itemId) : null;
+    const listingAfter = listingId ? await readListing(handle, listingId) : null;
+    const invAfter = itemId ? await inventoryQty(handle, userA, itemId) : -1;
+    const buyTxnsAfter = await txns(handle, userA, 'shop_buy');
+    ctx.expect(
+      walletAfter?.wallet === 1000 &&
+        itemAfter?.stock === 5 &&
+        listingAfter?.status === 'active' &&
+        listingAfter?.remaining === 3 &&
+        invAfter === 0 &&
+        buyTxnsAfter.length === 0,
+      {
+        assertionClass: 'Discord',
+        channel: 'db-observable',
+        promise:
+          'No coins or items move during the outage window: the wallet, shop stock, market listing, inventory, and ledger are unchanged after restoration.',
+        observation:
+          `post-restore wallet=${walletAfter?.wallet} (expected 1000); stock=${itemAfter?.stock} (expected 5); ` +
+          `listing status=${listingAfter?.status}/remaining=${listingAfter?.remaining} (expected active/3); ` +
+          `inventory qty=${invAfter} (expected 0); shop_buy ledger rows=${buyTxnsAfter.length} (expected 0).`,
+        impact: 'A database outage moved coins, stock, or items — outage-window corruption.',
+      },
+    );
+
+    // (4) RECOVERY: the very next /buy debits exactly once and delivers the
+    //     item (the catalog's "fresh /buy debits exactly once" contract), and
+    //     /market browse serves the real listing again.
+    const recoveredBuy = await ctx.runSlash(handle, {
+      commandName: 'buy',
+      userId: userA,
+      options: { item: itemName, quantity: 1 },
+    });
+    const recoveredBuyText = replyContent(recoveredBuy) || lastEmbedDescription(recoveredBuy);
+    const walletRecovered = await readWallet(handle, userA);
+    const itemRecovered = itemId ? await readItem(handle, itemId) : null;
+    const invRecovered = itemId ? await inventoryQty(handle, userA, itemId) : -1;
+    const browseRecovered = await ctx.runSlash(handle, { commandName: 'market', userId: userA, subcommand: 'browse' });
+    const browseRecoveredText = lastEmbedDescription(browseRecovered);
+    ctx.expect(
+      walletRecovered?.wallet === 800 &&
+        itemRecovered?.stock === 4 &&
+        invRecovered === 1 &&
+        recoveredBuyText.includes('Bought') &&
+        browseRecoveredText.includes(itemName),
+      {
+        assertionClass: 'replay-safety',
+        channel: 'db-observable',
+        promise:
+          'After restoration a fresh /buy debits the price exactly once, decrements stock once, and delivers exactly one item; /market browse serves the real listing again (no lingering degradation).',
+        observation:
+          `post-restore /buy replied ${JSON.stringify(truncate(recoveredBuyText))}; wallet 1000→${walletRecovered?.wallet} (expected 800); ` +
+          `stock 5→${itemRecovered?.stock} (expected 4); inventory=${invRecovered} (expected 1); ` +
+          `browse surface ${JSON.stringify(truncate(browseRecoveredText))} (expected to include ${itemName}).`,
+        impact: 'The shop/market pipeline did not recover cleanly after the outage ended (no delivery, or the price debited zero/multiple times).',
+      },
+    );
+
+    // Audit: the recovered purchase lands exactly ONE shop_buy ledger row for
+    // exactly the price — proof the outage/restore cycle produced a single
+    // append-only purchase record, never zero or two.
+    const buyTxnsRecovered = await txns(handle, userA, 'shop_buy');
+    ctx.expect(buyTxnsRecovered.length === 1 && buyTxnsRecovered[0]!.amount === -price, {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise:
+        'The post-restore purchase writes exactly one shop_buy ledger row for exactly the item price — the outage produced no phantom or duplicate ledger entries.',
+      observation: `economy_transactions shop_buy rows=${buyTxnsRecovered.length} (expected 1), amount=${buyTxnsRecovered[0]?.amount} (expected ${-price}).`,
+      impact: 'The outage/restore cycle produced a missing, phantom, or duplicated purchase ledger row.',
+    });
+
+    await proveAnonDenied(ctx, handle, 'economy_market_listings', await listingCount(handle), "member's market listing");
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With database access blocked, /shop, /buy and /market reply with the branded market-unavailable message and no coins or items move.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'audit',
+      'db-observable',
+      'After restoration a fresh /buy debits exactly once and delivers the item.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate debit or delivery survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded market-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'Shop/market rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window (not one per failed command).',
-    'requires a dependency-outage fault lane plus owner alert channel readback',
-  );
-  ctx.gate(
-    'audit',
-    'db-observable',
-    'After restoration a fresh /buy debits exactly once and delivers the item.',
-    'requires the outage fault lane to reach the degraded → restored transition',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'No duplicate debit or delivery survives the outage/restore cycle.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded market-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the market-unavailable branch',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'Shop/market rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'requires the dependency-degradation alert aggregation plus owner alert channel readback (DISCORD_TOKEN + live guild)',
   );
 }
 

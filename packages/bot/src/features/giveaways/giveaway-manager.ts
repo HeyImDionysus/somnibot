@@ -360,15 +360,23 @@ export class GiveawayManager {
 
   /**
    * End a specific giveaway and select winners.
+   *
+   * Returns the committed winner list, [] when the giveaway does not exist, or
+   * NULL when the database was unreachable. A FAILED read must never be
+   * reported as a completed "no entries" draw (that fabricates a draw result
+   * from state the bot could not read) — the command layer degrades to the
+   * branded unavailable notice instead, and the durable row stays undisturbed
+   * so the draw completes exactly once after recovery.
    */
-  async endGiveaway(giveawayId: string): Promise<string[]> {
-    const { data } = await this.supabase
+  async endGiveaway(giveawayId: string): Promise<string[] | null> {
+    const { data, error } = await this.supabase
       .from('giveaways')
       .select('*')
       .eq('id', giveawayId)
       .eq('guild_id', this.guild.id)
       .maybeSingle();
 
+    if (error) return null; // the read failed (outage) — unavailable, not "ended with no entries"
     if (!data) return [];
     const giveaway = data as GiveawayRow;
     if (giveaway.status !== 'active') return giveaway.winners;
@@ -540,7 +548,7 @@ export class GiveawayManager {
     }
   }
 
-  private async selectWinnersAndEnd(giveaway: GiveawayRow): Promise<string[]> {
+  private async selectWinnersAndEnd(giveaway: GiveawayRow): Promise<string[] | null> {
     await this.loadConfig();
     const winners = this.pickRandom(giveaway.entries, giveaway.winner_count);
 
@@ -553,7 +561,14 @@ export class GiveawayManager {
       p_ended_at: new Date().toISOString(),
     });
 
-    if (endErr || !endedRows || (Array.isArray(endedRows) && endedRows.length === 0)) {
+    if (endErr) {
+      // The atomic end could not be executed (database unreachable). The row is
+      // untouched — no partial draw leaked — so surface "unavailable" rather
+      // than a completed draw; the draw runs exactly once after recovery.
+      log.error(`giveaway_atomic_end failed for "${giveaway.prize}":`, endErr.message);
+      return null;
+    }
+    if (!endedRows || (Array.isArray(endedRows) && endedRows.length === 0)) {
       // Another call already ended this giveaway — bail out
       log.info(`giveaway_atomic_end returned empty for "${giveaway.prize}" — already ended`);
       return giveaway.winners;

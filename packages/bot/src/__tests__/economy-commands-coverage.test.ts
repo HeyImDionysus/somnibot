@@ -98,6 +98,12 @@ function makeManager(overrides: any = {}) {
     rob: vi.fn().mockResolvedValue({ success: true, message: 'You robbed 150 coins', balance: { wallet: 650 } }),
     togglePassive: vi.fn().mockResolvedValue({ passive: true }),
     getShopItems: vi.fn().mockResolvedValue([{ id: 'item1', name: 'Sword', price: 100, emoji: '⚔️', description: 'A sword' }]),
+    // The command path reads the CHECKED variant so a failed catalog read is
+    // reported as an outage rather than an empty shop (degraded=false here).
+    getShopItemsChecked: vi.fn().mockResolvedValue({
+      items: [{ id: 'item1', name: 'Sword', price: 100, emoji: '⚔️', description: 'A sword' }],
+      degraded: false,
+    }),
     buyItem: vi.fn().mockResolvedValue({ success: true, message: 'Bought Sword' }),
     sellItem: vi.fn().mockResolvedValue({ success: true, message: 'Sold Sword for 50' }),
     getInventory: vi.fn().mockResolvedValue([{ item_name: 'Sword', quantity: 2, emoji: '⚔️', item_id: 'item1' }]),
@@ -288,7 +294,7 @@ describe('handleEconomyCommand', () => {
     const mgr = makeManager();
     const int = makeInteraction('shop');
     await handleEconomyCommand(int as any, mgr as any);
-    expect(mgr.getShopItems).toHaveBeenCalled();
+    expect(mgr.getShopItemsChecked).toHaveBeenCalled();
   });
 
   it('handles buy command', async () => {

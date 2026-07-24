@@ -748,46 +748,136 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
-/** DEPFAIL — Supabase-unreachable fail-safe (needs a dependency-outage fault lane). */
+/** DEPFAIL — Supabase-unreachable fail-safe, driven through the REAL fault proxy
+ *  (ctx.faults severs the actual network path run-one-domain routed the stack
+ *  through — a genuine ECONNREFUSED window). The one pure-Supabase surface this
+ *  domain exposes (/infractions) is driven inside the outage; the mutating
+ *  /warn + /mute outage legs still need the live gateway (guild.members.fetch +
+ *  member.timeout) and stay honestly gated. Falls back to gates when no proxy is
+ *  registered (e.g. the CI vitest lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // The harness's whole premise is a REACHABLE local Supabase, so a database outage
-  // cannot be induced without a fault-injection lane. GATE the outage-dependent
-  // behavior honestly rather than fake an outage.
+  const supabaseFault = ctx.faults?.supabase;
+  if (supabaseFault) {
+    const handle = await ctx.bootGuild({ label: 'a' });
+    const userA = ctx.userId('a');
+    const modId = ctx.userId('mod');
+    const reason = `${ctx.runPrefix}depfail-warn`;
+    await seedInfraction(handle, { memberId: userA, moderatorId: modId, type: 'warn', reason, expiryDays: 30 });
+    const before = await readInfractions(handle, userA);
+
+    // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
+    await supabaseFault.sever();
+    let threw: string | null = null;
+    let severedReply = '';
+    try {
+      const cap = await runInfractions(ctx, handle, modId, userA, 'run-member-a', true);
+      severedReply = replyContent(cap);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    await supabaseFault.restore();
+
+    // (1) Fail-SAFE: the dispatcher must reply, never crash the pipeline.
+    ctx.expect(threw === null && severedReply.length > 0, {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'With database access blocked, a moderation command still replies (fail-safe) instead of crashing the interaction pipeline.',
+      observation: `during the outage window /infractions ${threw === null ? `replied ${JSON.stringify(truncate(severedReply))}` : `THREW ${truncate(threw)}`}.`,
+      impact: 'A database outage crashed the moderation command pipeline instead of degrading to a reply.',
+    });
+
+    // (2) The catalog contracts a branded failure in the owner voice — never a
+    //     data-shaped answer. Replying "has no active infractions" during an
+    //     outage is a lie about a record the bot could not read (a clean-record
+    //     verdict fabricated from a failed read). Recorded honestly; never softened.
+    const looksUnavailable = /unavailable|try again|temporar|later|degraded|issue|problem/i.test(severedReply);
+    const dataShapedLie = /has no\b.*infraction/i.test(severedReply);
+    ctx.expect(looksUnavailable && !dataShapedLie, {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise: 'With the database blocked, the moderation reply is the branded moderation-unavailable notice — never a data-shaped clean-record answer fabricated from the failed read.',
+      observation: `outage-window reply ${JSON.stringify(truncate(severedReply))} — looksUnavailable=${looksUnavailable}, dataShapedLie=${dataShapedLie}.`,
+      impact: 'During a database outage /infractions replied with a fabricated data-shaped answer ("no infractions") instead of a degradation notice — a moderator is told a clean-record lie about history the bot could not read.',
+    });
+
+    // (3) No corruption: the persisted infraction history is byte-identical after restore.
+    const after = await readInfractions(handle, userA);
+    ctx.expect(
+      before.length === 1 &&
+        after.length === 1 &&
+        after[0]!.id === before[0]!.id &&
+        after[0]!.reason === reason &&
+        after[0]!.active === true &&
+        after[0]!.pardoned === false,
+      {
+        assertionClass: 'Discord',
+        channel: 'db-observable',
+        promise: 'No infraction record corrupts across the outage window — the persisted history is unchanged after restoration.',
+        observation:
+          `infraction rows before=${before.length}/after=${after.length}; post-restore id=${after[0]?.id === before[0]?.id ? 'unchanged' : 'CHANGED'}, ` +
+          `reason=${JSON.stringify(after[0]?.reason)}, active=${after[0]?.active}, pardoned=${after[0]?.pardoned} (expected the one seeded active warn, untouched).`,
+        impact: 'A database outage corrupted or dropped persisted infraction records.',
+      },
+    );
+
+    // (4) Recovery: the very next command serves the real history again.
+    const recovered = await runInfractions(ctx, handle, modId, userA, 'run-member-a', true);
+    const recoveredSurface = brandingSurface(recovered);
+    ctx.expect(/WARN/i.test(recoveredSurface) && recoveredSurface.includes(reason), {
+      assertionClass: 'replay-safety',
+      channel: 'captured-reply',
+      promise: 'After restoration the very next /infractions serves the real recorded history again with consistent counts (no lingering degradation).',
+      observation: `post-restore /infractions surface ${JSON.stringify(truncate(recoveredSurface))} (expected the seeded active WARN with its reason).`,
+      impact: 'The moderation pipeline did not recover after the outage ended.',
+    });
+
+    await proveRlsIsolation(ctx, handle, userA);
+  } else {
+    ctx.gate(
+      'Discord',
+      'db-observable',
+      'With database access blocked, /warn and /mute reply with a branded failure, no timeout is left applied without an infraction record, and after restoration the same commands succeed with consistent counts.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'branding',
+      'captured-reply',
+      'The degradation reply uses the branded moderation-unavailable template in the owner voice.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'replay-safety',
+      'db-observable',
+      'No duplicate infraction/timeout survives the outage/restore cycle.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+    ctx.gate(
+      'database-RLS',
+      'db-rls',
+      'Infraction rows stay guild-scoped through the outage window.',
+      'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane)',
+    );
+  }
+  // The mutating outage legs and the degradation observability remain gated in
+  // BOTH lanes: /warn + /mute call guild.members.fetch + member.timeout (live
+  // gateway), and the moderation feature raises no degradation alert/audit today.
   ctx.gate(
     'Discord',
-    'db-observable',
-    'With database access blocked, /warn and /mute reply with a branded failure, no timeout is left applied without an infraction record, and after restoration the same commands succeed with consistent counts.',
-    'requires a Supabase dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB); the /mute rollback also needs the live member.timeout path (DISCORD_TOKEN + a live guild)',
+    'discord-readback',
+    'With database access blocked, /warn and /mute reply with the branded failure and no timeout is left applied without an infraction record.',
+    'the mutating /warn and /mute outage legs call guild.members.fetch + member.timeout (DISCORD_TOKEN + a live guild); the read-side outage fail-safe is proven via /infractions in the fault lane',
   );
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives a single dependency-degradation alert for the outage window (not one per failed command).',
-    'requires a dependency-outage fault lane plus owner alert channel readback',
+    'requires the owner alert channel readback; the moderation feature currently raises no dependency-degradation alert on a failed DB read',
   );
   ctx.gate(
     'audit',
     'db-observable',
-    'No punishment stands without its infraction record through the outage; after restore the counts are consistent.',
-    'requires the outage fault lane to reach the fail-safe branch',
-  );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'No duplicate infraction/timeout survives the outage/restore cycle.',
-    'requires a Supabase dependency-outage fault-injection lane',
-  );
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'The degradation reply uses the branded moderation-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the unavailable branch',
-  );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'Infraction rows stay guild-scoped through the outage window.',
-    'requires a Supabase dependency-outage fault-injection lane',
+    'Append-only audit rows capture the degradation window and recovery; no punishment stands without its infraction record through the outage.',
+    'the moderation feature writes no degradation/recovery audit rows today, and the punishment-without-record invariant needs the live /mute path',
   );
 }
 
