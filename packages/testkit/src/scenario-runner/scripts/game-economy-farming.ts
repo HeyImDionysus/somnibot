@@ -12,10 +12,12 @@
  * `fertilize`). Since the #331 subcommand injector, `ScenarioContext.runSlash` supplies
  * the subcommand, so every farming-ENABLED scenario drives the REAL `/farm view` through
  * the production dispatcher and asserts the branded "Your Farm" board embed as a live
- * captured-reply (see `proveFarmView`). DEF ships farming OFF (the FarmingManager is never
- * constructed), so its member surface stays gated. What still gates: the white-label
- * brand-kit PIXEL match (live-guild readback) and the audit_logs row the FarmingManager
- * never writes (a real #21 gap). Its sibling is game-economy-adventures.
+ * captured-reply (see `proveFarmView`). Farming now SHIPS ON out of the box (catalog
+ * default true, guild_config.economy_farming_enabled column DEFAULT flipped to true in
+ * 20260724170000_ship_on_defaults), so DEF also boots with the FarmingManager wired and
+ * drives /farm view live. What still gates: the white-label brand-kit PIXEL match
+ * (live-guild readback) and the audit_logs row the FarmingManager never writes (a real
+ * #21 gap). Its sibling is game-economy-adventures.
  *
  * ── What IS proven NOW, non-vacuously ──
  * The farming manager's happy path is orchestration over primitives that ARE drivable
@@ -416,8 +418,8 @@ function farmEmbedText(captured: CapturedResponse): string {
 /**
  * Drive the REAL `/farm view` subcommand (through the #331 injector) for an enabled guild
  * and assert the branded farm board embed renders — the member-facing captured-reply surface.
- * (In a farming-DISABLED guild the FarmingManager is never constructed, so /farm is undrivable;
- * those scenarios keep gateBrandKit only.)
+ * Farming now ships ON by default, so every scenario (DEF included) is an enabled guild and
+ * drives this; an explicitly farming-DISABLED guild would keep gateBrandKit only.
  */
 async function proveFarmView(ctx: ScenarioContext, handle: LiveClientHandle, userId: string): Promise<void> {
   const captured = await ctx.runSlash(handle, { commandName: 'farm', userId, subcommand: 'view' });
@@ -439,17 +441,6 @@ function gateBrandKit(ctx: ScenarioContext): void {
     'The full white-label brand kit (colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on farm embeds.',
     'requires an embed/message snapshot readback against the live brand kit (DISCORD_TOKEN + live guild)',
   );
-}
-
-/** DEF ships farming OFF, so the FarmingManager is never constructed and /farm is undrivable. */
-function gateBranding(ctx: ScenarioContext): void {
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'Member-facing farm surfaces (planted / harvest / view embeds) show the owner brand name, colors, and voice preset with zero stock-bot wording.',
-    'this scenario ships farming disabled, so the FarmingManager is never constructed and /farm produces no member reply to inspect',
-  );
-  gateBrandKit(ctx);
 }
 
 /**
@@ -515,19 +506,20 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  // The catalog declares farming SHIPS ON (economy-farming-enabled default = true), but
-  // guild_config.economy_farming_enabled is a NOT NULL DEFAULT false column and no
-  // onboarding/defaults layer sets it true, so a fresh guild has farming OFF. Surface the
-  // divergence as a finding (never softened to a pass/gate).
+  // The catalog declares farming SHIPS ON (economy-farming-enabled default = true).
+  // guild_config.economy_farming_enabled now ships NOT NULL DEFAULT true (migration
+  // 20260724170000_ship_on_defaults) and FarmingManager.getConfig() falls back to true,
+  // so a freshly-seeded guild has farming ON out of the box — assert that alignment.
   ctx.expect(cfg?.economy_farming_enabled === enabledDefault, {
     assertionClass: 'Discord',
     channel: 'db-observable',
     promise: `Out of the box farming is ON (catalog default economy-farming-enabled = ${enabledDefault}).`,
     observation:
       `a freshly-seeded guild_config holds economy_farming_enabled=${cfg?.economy_farming_enabled} ` +
-      `(the column DEFAULTs false and no layer sets it true), but the catalog declares the default ${enabledDefault}.`,
+      `(the column DEFAULT is now true), matching the catalog default ${enabledDefault}.`,
     impact:
-      'The catalog promises farming ships enabled for the maximal out-of-box experience, but a new guild gets farming OFF — /farm commands reply "not enabled" until an owner flips it on.',
+      'The catalog promises farming ships enabled for the maximal out-of-box experience; were a new ' +
+      'guild to get farming OFF, /farm commands would reply "not enabled" until an owner flipped it on.',
   });
 
   // Harvest payout primitive — the EXACT RPC FarmingManager.addToWallet calls. A Potato's
@@ -566,7 +558,10 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   );
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  // Farming ships ON in DEF now, so the FarmingManager IS wired and /farm view is
+  // driveable live (same as every other enabled scenario) — no longer gated.
+  await proveFarmView(ctx, handle, userA);
+  gateBrandKit(ctx);
   gateAudit(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }

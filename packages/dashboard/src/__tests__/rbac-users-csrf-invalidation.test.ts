@@ -37,6 +37,13 @@ vi.mock('@/lib/api/validation', () => ({
   schemas: {},
 }));
 
+const mockLoadTeamConfig = vi.fn();
+const mockWriteTeamAudit = vi.fn();
+vi.mock('@/lib/team-invitations', () => ({
+  loadTeamConfig: (...args: unknown[]) => mockLoadTeamConfig(...args),
+  writeTeamAudit: (...args: unknown[]) => mockWriteTeamAudit(...args),
+}));
+
 const mockSupabase = { from: vi.fn() };
 vi.mock('@/lib/supabase/admin', () => ({
   createAdminSupabase: () => mockSupabase,
@@ -75,10 +82,34 @@ function buildRequest(path: string, method: string): NextRequest {
 beforeEach(() => {
   vi.clearAllMocks();
   mockRateLimit.mockResolvedValue(null); // not rate limited
+  mockWriteTeamAudit.mockResolvedValue(undefined);
 });
 
+/**
+ * A table-dispatch supabase mock: each table serves a queue of results in call
+ * order. Robust to the extra reads the consent path performs (existing-role
+ * check, pending count) vs. a brittle global call counter.
+ */
+function tableMock(config: Record<string, Array<Record<string, unknown>>>) {
+  const queues: Record<string, Array<Record<string, unknown>>> = {};
+  for (const [t, arr] of Object.entries(config)) queues[t] = [...arr];
+  mockSupabase.from.mockImplementation((table: string) => {
+    const result = queues[table]?.length ? queues[table].shift()! : { data: null, error: null };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const chain: any = {};
+    for (const m of ['select', 'eq', 'lt', 'order', 'limit', 'in']) chain[m] = vi.fn(() => chain);
+    chain.insert = vi.fn(() => chain);
+    chain.update = vi.fn(() => chain);
+    chain.delete = vi.fn(() => chain);
+    chain.single = vi.fn(() => Promise.resolve(result));
+    chain.maybeSingle = vi.fn(() => Promise.resolve(result));
+    chain.then = (resolve: (v: Record<string, unknown>) => unknown) => resolve(result);
+    return chain;
+  });
+}
+
 describe('POST /api/rbac/users — CSRF invalidation on role assignment', () => {
-  it('clears BOTH the current and prev CSRF cookies after a successful assignment', async () => {
+  it('clears BOTH the current and prev CSRF cookies after creating an invitation (consent default)', async () => {
     mockRequirePermission.mockResolvedValue({
       guildId: 'guild-1',
       discordId: '111111111111111111',
@@ -88,34 +119,56 @@ describe('POST /api/rbac/users — CSRF invalidation on role assignment', () => 
       ok: true,
       data: { discord_id: '222222222222222222', role_id: '00000000-0000-0000-0000-000000000001' },
     });
+    mockLoadTeamConfig.mockResolvedValue({
+      directAssignmentEnabled: false,
+      inviteDmEnabled: true,
+      maxPendingInvitations: 25,
+      invitationExpiryMs: 259_200_000,
+    });
 
-    // from('dashboard_roles') → target role lookup; from('dashboard_user_roles') → insert.
-    let fromCall = 0;
-    mockSupabase.from.mockImplementation(() => {
-      fromCall++;
-      if (fromCall === 1) {
-        return {
-          select: vi.fn().mockReturnThis(),
-          eq: vi.fn().mockReturnThis(),
-          single: vi.fn().mockResolvedValue({
-            data: { priority: 1, is_system: false },
-            error: null,
-          }),
-        };
-      }
-      return {
-        insert: vi.fn().mockReturnThis(),
-        select: vi.fn().mockReturnThis(),
-        single: vi.fn().mockResolvedValue({
-          data: { id: 'assignment-1', dashboard_roles: { name: 'member' } },
-          error: null,
-        }),
-      };
+    tableMock({
+      dashboard_roles: [{ data: { priority: 1, is_system: false }, error: null }],
+      dashboard_user_roles: [{ data: null, error: null }],
+      team_invitations: [{ count: 0 }, { data: { id: 'inv-1', dashboard_roles: { name: 'member' } }, error: null }],
     });
 
     const res = await POST(buildRequest('/api/rbac/users', 'POST'));
     expect(res.status).toBe(200);
-    expect((await res.json()).success).toBe(true);
+    const json = await res.json();
+    expect(json.success).toBe(true);
+    expect(json.mode).toBe('invitation');
+
+    assertCookieCleared(res, CSRF_COOKIE_NAME);
+    assertCookieCleared(res, CSRF_PREV_COOKIE_NAME);
+  });
+
+  it('clears BOTH CSRF cookies after a direct assignment when direct-assignment is enabled', async () => {
+    mockRequirePermission.mockResolvedValue({
+      guildId: 'guild-1',
+      discordId: '111111111111111111',
+      isOwner: true,
+    });
+    mockParseBody.mockResolvedValue({
+      ok: true,
+      data: { discord_id: '222222222222222222', role_id: '00000000-0000-0000-0000-000000000001' },
+    });
+    mockLoadTeamConfig.mockResolvedValue({
+      directAssignmentEnabled: true,
+      inviteDmEnabled: true,
+      maxPendingInvitations: 25,
+      invitationExpiryMs: 259_200_000,
+    });
+
+    tableMock({
+      dashboard_roles: [{ data: { priority: 1, is_system: false }, error: null }],
+      dashboard_user_roles: [{ data: { id: 'assignment-1', dashboard_roles: { name: 'member' } }, error: null }],
+    });
+
+    const res = await POST(buildRequest('/api/rbac/users', 'POST'));
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.success).toBe(true);
+    expect(json.mode).toBe('direct');
 
     assertCookieCleared(res, CSRF_COOKIE_NAME);
     assertCookieCleared(res, CSRF_PREV_COOKIE_NAME);

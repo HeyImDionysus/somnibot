@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 175 migration files in packages/supabase/migrations/
+ * Source: 184 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -410,6 +410,19 @@ export interface DbGuildConfig {
   economy_fishing_collection_reward_enabled: boolean;
   economy_fishing_collection_reward_coins: number;
   economy_prestige_max_level: number;
+  economy_trivia_schedule_enabled: boolean;
+  economy_trivia_schedule_interval_minutes: number;
+  economy_trivia_schedule_channel_id: string | null;
+  economy_trivia_schedule_category: string | null;
+  economy_trivia_schedule_difficulty: string | null;
+  economy_trivia_schedule_last_run_at: string | null;
+  team_direct_assignment_enabled: boolean;
+  team_invite_dm_enabled: boolean;
+  team_max_pending_invitations: number;
+  team_invitation_expiry_ms: number;
+  brand_primary_color: number | null;
+  brand_accent_color: number | null;
+  brand_voice_preset: 'default' | 'professional' | 'friendly' | 'playful';
 }
 
 export interface DbInstanceSettings {
@@ -791,6 +804,9 @@ export interface DbTempChannelHub {
   updated_at: string;
   allow_claim: boolean;
   empty_grace_seconds: number | null;
+  room_created_template: string | null;
+  control_applied_template: string | null;
+  control_denied_template: string | null;
 }
 
 export interface DbActiveTempChannel {
@@ -1415,6 +1431,20 @@ export interface DbActionQueueDlq {
   retried_at: string | null;
   created_at: string;
   lane: 'commerce' | 'game';
+}
+
+export interface DbAppeals {
+  id: string;
+  guild_id: string;
+  infraction_id: string;
+  appellant_discord_id: string;
+  reason: string;
+  status: 'pending' | 'approved' | 'denied' | 'expired';
+  reviewer_id: string | null;
+  decision_notified: boolean;
+  decided_at: string | null;
+  created_at: string;
+  expires_at: string | null;
 }
 
 export interface DbButtonRoles {
@@ -2171,6 +2201,23 @@ export interface DbSyncReports {
   attention_count: number;
   total_drift: number;
   details: Json;
+  created_at: string;
+}
+
+export interface DbTeamInvitations {
+  id: string;
+  guild_id: string;
+  discord_id: string;
+  role_id: string;
+  status: 'pending' | 'accepted' | 'declined' | 'expired' | 'revoked';
+  delivery_mode: 'dm' | 'dashboard' | null;
+  dm_status: 'queued' | 'sent' | 'failed' | 'skipped';
+  invited_by: string | null;
+  invited_by_name: string | null;
+  accept_notified: boolean;
+  expires_at: string;
+  accepted_at: string | null;
+  responded_at: string | null;
   created_at: string;
 }
 

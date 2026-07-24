@@ -29,15 +29,15 @@ interface WelcomeConfig {
 }
 
 const DEFAULT_CONFIG: WelcomeConfig = {
-  welcome_enabled: false,
+  welcome_enabled: true,
   welcome_channel_id: null,
   welcome_message: 'Welcome to {server}, {user}! 🎉 You\'re member {memberNumber}.',
   welcome_card_enabled: true,
   welcome_card_background: null,
-  welcome_dm_enabled: false,
+  welcome_dm_enabled: true,
   welcome_dm_message: 'Hey {user.name}! Welcome to {server}. Check out the channels to get started.',
   welcome_auto_roles: [],
-  goodbye_enabled: false,
+  goodbye_enabled: true,
   goodbye_channel_id: null,
   goodbye_message: '{user.name} left. They were with us for {duration}. 👋',
 };

@@ -51,6 +51,9 @@ import { handleChannelCreate, handleChannelUpdate, handleChannelDelete } from '.
 // Feature imports — tickets (for cron)
 import { checkInactiveTickets } from '../features/tickets/index.js';
 
+// Feature imports — appeals (for cron + command)
+import { handleAppealCommand, runAppealsMaintenance } from '../features/appeals/index.js';
+
 // Feature imports — command registrations
 import { handleWarnCommand, handleMuteCommand, handleKickCommand, handleBanCommand, handlePardonCommand, handleInfractionsCommand } from '../features/moderation/commands.js';
 import { handlePurgeCommand } from '../features/moderation/purge-command.js';
@@ -87,6 +90,7 @@ registerCommand('mydata', (i) => handleMyDataCommand(i));
 registerCommand('tutorial', (i) => handleTutorialCommand(i));
 registerCommand('setup', handleSetupCommand);
 registerCommand('ticket', handleTicketCommand);
+registerCommand('appeal', handleAppealCommand);
 
 function registerProcessSafetyNets(): void {
   if (processSafetyNetsRegistered) return;
@@ -964,6 +968,14 @@ export function registerEvents(client: SomniClient): void {
       catch (err) { log.error('Ticket inactivity check error', { guildId: ctx.guildId, error: String(err) }); }
     }
   }, 30 * 60 * 1000));
+
+  // Appeals maintenance (every 15 min): expire stale pending appeals and deliver
+  // any outstanding decision DMs (decisions are made on the dashboard).
+  trackCronHandle(cronHandles, setInterval(() => {
+    runAppealsMaintenance(client).catch((err) => {
+      log.error('Appeals maintenance error', { error: String(err) });
+    });
+  }, 15 * 60 * 1000));
 
   // Temporary role expiry sweep (every 15 min). Commerce rows are acted on
   // only when their order-scoped lifecycle state proves safe ownership;

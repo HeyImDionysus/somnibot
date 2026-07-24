@@ -13,7 +13,8 @@ import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
-import { Brain, Plus, Pencil, Trash2, Upload, Download } from 'lucide-react';
+import { ChannelPicker } from '@/components/shared/channel-picker';
+import { Brain, Plus, Pencil, Trash2, Upload, Download, CalendarClock } from 'lucide-react';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -26,20 +27,33 @@ interface TriviaQuestion {
   wrong_answers: string[];
 }
 
+type ScheduleDifficulty = 'easy' | 'medium' | 'hard' | null;
+
 interface TriviaConfig {
   economy_trivia_enabled: boolean;
   economy_trivia_cooldown_seconds: number;
   economy_trivia_base_payout: number;
   economy_trivia_streak_multiplier_pct: number;
   economy_trivia_hard_multiplier: number;
+  // Hosted / scheduled cadence
+  economy_trivia_schedule_enabled: boolean;
+  economy_trivia_schedule_interval_minutes: number;
+  economy_trivia_schedule_channel_id: string | null;
+  economy_trivia_schedule_category: string | null;
+  economy_trivia_schedule_difficulty: ScheduleDifficulty;
 }
 
 const DEFAULT_CONFIG: TriviaConfig = {
-  economy_trivia_enabled: false,
+  economy_trivia_enabled: true,
   economy_trivia_cooldown_seconds: 30,
   economy_trivia_base_payout: 50,
   economy_trivia_streak_multiplier_pct: 10,
   economy_trivia_hard_multiplier: 2,
+  economy_trivia_schedule_enabled: false,
+  economy_trivia_schedule_interval_minutes: 60,
+  economy_trivia_schedule_channel_id: null,
+  economy_trivia_schedule_category: null,
+  economy_trivia_schedule_difficulty: null,
 };
 
 const CATEGORIES = ['general', 'science', 'history', 'geography', 'art', 'math', 'technology', 'literature'] as const;
@@ -138,11 +152,16 @@ export default function TriviaPage() {
         const cfgJson = await cfgRes.json();
         const gc = cfgJson.config ?? {};
         setConfig({
-          economy_trivia_enabled: gc.economy_trivia_enabled ?? false,
+          economy_trivia_enabled: gc.economy_trivia_enabled ?? true,
           economy_trivia_cooldown_seconds: gc.economy_trivia_cooldown_seconds ?? 30,
           economy_trivia_base_payout: gc.economy_trivia_base_payout ?? 50,
           economy_trivia_streak_multiplier_pct: gc.economy_trivia_streak_multiplier_pct ?? 10,
           economy_trivia_hard_multiplier: gc.economy_trivia_hard_multiplier ?? 2,
+          economy_trivia_schedule_enabled: gc.economy_trivia_schedule_enabled ?? false,
+          economy_trivia_schedule_interval_minutes: gc.economy_trivia_schedule_interval_minutes ?? 60,
+          economy_trivia_schedule_channel_id: gc.economy_trivia_schedule_channel_id ?? null,
+          economy_trivia_schedule_category: gc.economy_trivia_schedule_category ?? null,
+          economy_trivia_schedule_difficulty: gc.economy_trivia_schedule_difficulty ?? null,
         });
       }
       if (questionsRes.ok) {
@@ -312,6 +331,77 @@ export default function TriviaPage() {
             step={0.1}
           />
         </div>
+      </div>
+
+      {/* Hosted / Scheduled Trivia */}
+      <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4 space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold text-discord-text-primary flex items-center gap-2">
+            <CalendarClock className="w-5 h-5" /> Hosted Trivia
+          </h2>
+          <p className="text-xs text-discord-text-secondary mt-1">
+            Automatically post a trivia round to a channel on a fixed interval — no command needed.
+            This runs independently of on-command <code>/trivia</code>.
+          </p>
+        </div>
+
+        <Toggle
+          label="Enable Scheduled Rounds"
+          checked={config.economy_trivia_schedule_enabled}
+          onChange={(v) => saveConfig({ economy_trivia_schedule_enabled: v })}
+        />
+
+        {config.economy_trivia_schedule_enabled && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <span className="block text-sm text-discord-text-secondary mb-1">Channel</span>
+              <ChannelPicker
+                value={config.economy_trivia_schedule_channel_id}
+                onChange={(v) =>
+                  saveConfig({ economy_trivia_schedule_channel_id: (v as string) || null })
+                }
+                channelTypes={['text', 'announcement']}
+                placeholder="Select a channel for hosted rounds…"
+                allowNone
+              />
+            </div>
+            <NumberField
+              label="Interval (minutes)"
+              value={config.economy_trivia_schedule_interval_minutes}
+              onChange={(v) => saveConfig({ economy_trivia_schedule_interval_minutes: v })}
+              min={5}
+              max={10080}
+            />
+            <div>
+              <span className="block text-sm text-discord-text-secondary mb-1">Category (optional)</span>
+              <select
+                className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border px-3 py-2 text-sm text-discord-text-primary"
+                value={config.economy_trivia_schedule_category ?? ''}
+                onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+                  saveConfig({ economy_trivia_schedule_category: e.target.value || null })
+                }
+              >
+                <option value="">Any category</option>
+                {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div>
+              <span className="block text-sm text-discord-text-secondary mb-1">Difficulty (optional)</span>
+              <select
+                className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border px-3 py-2 text-sm text-discord-text-primary"
+                value={config.economy_trivia_schedule_difficulty ?? ''}
+                onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+                  saveConfig({
+                    economy_trivia_schedule_difficulty: (e.target.value || null) as ScheduleDifficulty,
+                  })
+                }
+              >
+                <option value="">Any difficulty</option>
+                {DIFFICULTIES.map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Custom Questions */}

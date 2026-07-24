@@ -11,6 +11,7 @@ import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { invalidateCsrfCookies } from '@/lib/api/csrf';
 import { dbError } from '@/lib/api/response';
+import { loadTeamConfig, writeTeamAudit } from '@/lib/team-invitations';
 
 const rbacUserAssign = z.object({
   discord_id: z.string().regex(/^\d{17,20}$/, 'Must be a Discord snowflake ID'),
@@ -115,6 +116,99 @@ export async function POST(request: NextRequest) {
     }
     // ── End priority escalation check ────────────────────────────
 
+    // ── Consent-based invitation model ───────────────────────────
+    // The catalog contracts consent-based invitations with
+    // direct-assignment-enabled defaulting to false: a manage_team user invites
+    // a member to a role and the member gains permissions only upon acceptance.
+    // Only when the owner explicitly enables direct-assignment do we write a
+    // LIVE role assignment here without the invitee's consent.
+    const teamConfig = await loadTeamConfig(admin, ctx.guildId);
+
+    if (!teamConfig.directAssignmentEnabled) {
+      // Idempotency guard: if the member already holds this role live, there is
+      // nothing to invite them to.
+      const { data: existingAssignment } = await admin
+        .from('dashboard_user_roles')
+        .select('id')
+        .eq('guild_id', ctx.guildId)
+        .eq('discord_id', body.discord_id)
+        .eq('role_id', body.role_id)
+        .maybeSingle();
+      if (existingAssignment) {
+        return NextResponse.json(
+          { error: 'That member already holds this role' },
+          { status: 409 },
+        );
+      }
+
+      // Honor max-pending-invitations (per guild).
+      const { count: pendingCount } = await admin
+        .from('team_invitations')
+        .select('*', { count: 'exact', head: true })
+        .eq('guild_id', ctx.guildId)
+        .eq('status', 'pending');
+      if ((pendingCount ?? 0) >= teamConfig.maxPendingInvitations) {
+        return NextResponse.json(
+          {
+            error: `The pending-invitation limit (${teamConfig.maxPendingInvitations}) has been reached. Revoke or wait for existing invitations to resolve.`,
+          },
+          { status: 409 },
+        );
+      }
+
+      const expiresAt = new Date(Date.now() + teamConfig.invitationExpiryMs).toISOString();
+      const { data: invitation, error: inviteError } = await admin
+        .from('team_invitations')
+        .insert({
+          guild_id: ctx.guildId,
+          discord_id: body.discord_id,
+          role_id: body.role_id,
+          status: 'pending',
+          // invite-dm-enabled drives whether the bot sweeper attempts a DM; when
+          // off, the invitation is dashboard-only from the start.
+          dm_status: teamConfig.inviteDmEnabled ? 'queued' : 'skipped',
+          delivery_mode: teamConfig.inviteDmEnabled ? null : 'dashboard',
+          invited_by: ctx.discordId,
+          expires_at: expiresAt,
+        })
+        .select('*, dashboard_roles(name)')
+        .single();
+
+      if (inviteError) {
+        // 23505 → a pending invitation for this (guild, member, role) already
+        // exists (the partial unique index). Surface it as a clean conflict.
+        if ((inviteError as { code?: string }).code === '23505') {
+          return NextResponse.json(
+            { error: 'A pending invitation for this member and role already exists' },
+            { status: 409 },
+          );
+        }
+        return dbError(inviteError, 'rbac/users:invite');
+      }
+
+      await writeTeamAudit(admin, {
+        guildId: ctx.guildId,
+        actorId: ctx.discordId,
+        action: 'team.invite_sent',
+        targetId: body.discord_id,
+        details: {
+          invitation_id: (invitation as { id?: string })?.id,
+          role_id: body.role_id,
+          dm_enabled: teamConfig.inviteDmEnabled,
+          expires_at: expiresAt,
+        },
+      });
+
+      const inviteResp = NextResponse.json({
+        success: true,
+        mode: 'invitation',
+        data: invitation,
+      });
+      invalidateCsrfCookies(inviteResp);
+      return inviteResp;
+    }
+
+    // ── Direct assignment (owner opt-in) ─────────────────────────
     const { data, error } = await admin
       .from('dashboard_user_roles')
       .insert({
@@ -128,12 +222,20 @@ export async function POST(request: NextRequest) {
 
     if (error) return dbError(error, 'rbac/users');
 
+    await writeTeamAudit(admin, {
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      action: 'team.role_assigned',
+      targetId: body.discord_id,
+      details: { role_id: body.role_id, direct: true },
+    });
+
     // V9 Audit §1.P2: Invalidate CSRF tokens after privilege change.
     // Clearing the cookies forces a re-fetch of /api/csrf, which re-derives
     // the token from the (now changed) session state. Both the current and the
     // rotation `prev` cookie are cleared — otherwise a tab that rotated within
     // the last grace window could keep passing its pre-change token via `prev`.
-    const resp = NextResponse.json({ success: true, data });
+    const resp = NextResponse.json({ success: true, mode: 'direct', data });
     invalidateCsrfCookies(resp);
     return resp;
   } catch (e) {

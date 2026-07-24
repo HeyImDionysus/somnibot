@@ -350,6 +350,13 @@ export interface DbGuildConfig {
   economy_trivia_base_payout: number;
   economy_trivia_streak_multiplier_pct: number;
   economy_trivia_hard_multiplier: number;
+  // Scheduled / hosted trivia cadence
+  economy_trivia_schedule_enabled: boolean;
+  economy_trivia_schedule_interval_minutes: number;
+  economy_trivia_schedule_channel_id: string | null;
+  economy_trivia_schedule_category: string | null;
+  economy_trivia_schedule_difficulty: string | null;
+  economy_trivia_schedule_last_run_at: string | null;
   // PR #45 — Mini-Games
   economy_games_enabled: boolean;
   economy_daily_loss_limit: number;

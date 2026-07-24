@@ -507,8 +507,9 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
       `blackjack=${shippedCfg?.economy_blackjack_max_bet} (expect ${blackjackDefault}), ` +
       `daily-loss=${shippedCfg?.economy_daily_loss_limit} (expect ${dailyCapDefault}).`,
     impact:
-      'The shipped guild_config casino defaults contradict the catalog out-of-box promise (casino ships DISABLED with ' +
-      'much higher caps and no daily-loss cap) — a fresh guild does not get the advertised conservative on-by-default floor.',
+      'Were the shipped guild_config casino defaults to contradict the catalog out-of-box promise (casino DISABLED ' +
+      'with much higher caps and no daily-loss cap), a fresh guild would not get the advertised conservative ' +
+      'on-by-default floor. After 20260724170000_ship_on_defaults the column DEFAULTs are the catalog values.',
   });
 
   // (2) With the catalog defaults APPLIED, prove they persist and govern the caps,

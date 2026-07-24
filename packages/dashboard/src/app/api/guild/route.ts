@@ -124,6 +124,12 @@ const guildConfigPatchSchema = z.object({
   economy_trivia_base_payout: z.number().int().min(0).max(1000000).optional(),
   economy_trivia_streak_multiplier_pct: z.number().int().min(0).max(100).optional(),
   economy_trivia_hard_multiplier: z.number().min(1).max(10).optional(),
+  // Scheduled / hosted trivia cadence
+  economy_trivia_schedule_enabled: z.boolean().optional(),
+  economy_trivia_schedule_interval_minutes: z.number().int().min(5).max(10080).optional(),
+  economy_trivia_schedule_channel_id: z.string().nullable().optional(),
+  economy_trivia_schedule_category: z.string().max(64).nullable().optional(),
+  economy_trivia_schedule_difficulty: z.enum(['easy', 'medium', 'hard']).nullable().optional(),
   // PR #45 — Mini-Games
   economy_games_enabled: z.boolean().optional(),
   economy_daily_loss_limit: z.number().int().min(0).max(100000000).optional(),

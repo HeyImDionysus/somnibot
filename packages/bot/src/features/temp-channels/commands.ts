@@ -18,9 +18,35 @@ import {
   type VoiceChannel,
 } from 'discord.js';
 import type { TempChannelManager } from './temp-channel-manager.js';
+import type { HubConfig } from './temp-channel-manager.js';
+import { renderTempChannelTemplate, type TemplateVars } from './templates.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('TempChannelCmds');
+
+/**
+ * Base variables available to every control surface template. Resolved from the
+ * interaction + guild cache so {owner-name}/{room-name}/{user}/{server} render
+ * regardless of which control was run.
+ */
+function baseTemplateVars(
+  interaction: ChatInputCommandInteraction,
+  ownerId: string | null,
+  vcId: string,
+): TemplateVars {
+  const guild = interaction.guild!;
+  const actor = guild.members.cache.get(interaction.user.id);
+  const owner = ownerId ? guild.members.cache.get(ownerId) : null;
+  const room = guild.channels.cache.get(vcId) as { name?: string } | undefined;
+  const actorName = actor?.displayName ?? interaction.user.username;
+  return {
+    'owner-name': owner?.displayName ?? actorName,
+    'room-name': room?.name ?? '',
+    user: actorName,
+    username: actorName,
+    server: guild.name,
+  };
+}
 
 export function buildTempChannelCommands() {
   const voiceCmd = new SlashCommandBuilder()
@@ -93,9 +119,24 @@ export async function handleTempChannelCommand(
     interaction.guild!.members.cache.get(interaction.user.id)?.roles.cache.has(roleId),
   ) ?? false;
 
+  // Owner-brandable member surfaces. `applied` wraps the per-action status line;
+  // `denied` wraps the per-refusal reason. Both fall back to the built-in
+  // default template when the hub has no override.
+  const applied = (action: string, extra: TemplateVars = {}): string =>
+    renderTempChannelTemplate(hub as HubConfig | null, 'control_applied', {
+      ...baseTemplateVars(interaction, ownerId, vcId),
+      action,
+      ...extra,
+    });
+  const denied = (reason: string): string =>
+    renderTempChannelTemplate(hub as HubConfig | null, 'control_denied', {
+      ...baseTemplateVars(interaction, ownerId, vcId),
+      reason,
+    });
+
   // Only owner or mods can control (except claim)
   if (sub !== 'claim' && !isOwner && !isMod) {
-    await interaction.reply({ content: '❌ Only the channel owner or moderators can use this command.', ephemeral: true });
+    await interaction.reply({ content: denied('❌ Only the channel owner or moderators can use this command.'), ephemeral: true });
     return;
   }
 
@@ -111,7 +152,7 @@ export async function handleTempChannelCommand(
         await vc.permissionOverwrites.edit(interaction.guild.id, {
           Connect: false,
         });
-        await interaction.reply({ content: '🔒 Voice channel locked.', ephemeral: true });
+        await interaction.reply({ content: applied('🔒 Voice channel locked.'), ephemeral: true });
         break;
       }
 
@@ -119,7 +160,7 @@ export async function handleTempChannelCommand(
         await vc.permissionOverwrites.edit(interaction.guild.id, {
           Connect: null,
         });
-        await interaction.reply({ content: '🔓 Voice channel unlocked.', ephemeral: true });
+        await interaction.reply({ content: applied('🔓 Voice channel unlocked.'), ephemeral: true });
         break;
       }
 
@@ -127,7 +168,7 @@ export async function handleTempChannelCommand(
         const count = interaction.options.getInteger('count', true);
         await vc.setUserLimit(count);
         await interaction.reply({
-          content: count === 0 ? '♾️ User limit removed.' : `👥 User limit set to ${count}.`,
+          content: applied(count === 0 ? '♾️ User limit removed.' : `👥 User limit set to ${count}.`),
           ephemeral: true,
         });
         break;
@@ -136,7 +177,7 @@ export async function handleTempChannelCommand(
       case 'name': {
         const name = interaction.options.getString('name', true);
         await vc.setName(name);
-        await interaction.reply({ content: `✏️ Channel renamed to "${name}".`, ephemeral: true });
+        await interaction.reply({ content: applied(`✏️ Channel renamed to "${name}".`, { 'room-name': name }), ephemeral: true });
         break;
       }
 
@@ -146,7 +187,7 @@ export async function handleTempChannelCommand(
           Connect: true,
           ViewChannel: true,
         });
-        await interaction.reply({ content: `✅ <@${user.id}> can now join your channel.`, ephemeral: true });
+        await interaction.reply({ content: applied(`✅ <@${user.id}> can now join your channel.`, { target: `<@${user.id}>` }), ephemeral: true });
         break;
       }
 
@@ -155,7 +196,7 @@ export async function handleTempChannelCommand(
         await vc.permissionOverwrites.create(user.id, {
           Connect: false,
         });
-        await interaction.reply({ content: `🚫 <@${user.id}> can no longer join your channel.`, ephemeral: true });
+        await interaction.reply({ content: applied(`🚫 <@${user.id}> can no longer join your channel.`, { target: `<@${user.id}>` }), ephemeral: true });
         break;
       }
 
@@ -171,29 +212,29 @@ export async function handleTempChannelCommand(
           Connect: false,
           ViewChannel: false,
         });
-        await interaction.reply({ content: `⛔ <@${user.id}> has been banned from your channel.`, ephemeral: true });
+        await interaction.reply({ content: applied(`⛔ <@${user.id}> has been banned from your channel.`, { target: `<@${user.id}>` }), ephemeral: true });
         break;
       }
 
       case 'claim': {
         // Owner may have disabled claiming for this hub's rooms.
         if (hub && hub.allow_claim === false) {
-          await interaction.reply({ content: '❌ Claiming is disabled for these voice channels.', ephemeral: true });
+          await interaction.reply({ content: denied('❌ Claiming is disabled for these voice channels.'), ephemeral: true });
           return;
         }
         if (!ownerId) {
-          await interaction.reply({ content: '❌ This channel has no owner record.', ephemeral: true });
+          await interaction.reply({ content: denied('❌ This channel has no owner record.'), ephemeral: true });
           return;
         }
         // Check if owner is still in the channel
         const ownerInChannel = vc.members.has(ownerId);
         if (ownerInChannel) {
-          await interaction.reply({ content: '❌ The current owner is still in the channel.', ephemeral: true });
+          await interaction.reply({ content: denied('❌ The current owner is still in the channel.'), ephemeral: true });
           return;
         }
         // Transfer ownership
         await manager.transferOwnership(vcId, interaction.user.id);
-        await interaction.reply({ content: '👑 You are now the owner of this voice channel.', ephemeral: true });
+        await interaction.reply({ content: applied('👑 You are now the owner of this voice channel.'), ephemeral: true });
         break;
       }
     }

@@ -144,13 +144,16 @@ describe('FarmingManager', () => {
       expect(supabase.from.mock.calls.length).toBe(c1);
     });
 
-    it('uses defaults when no data', async () => {
+    it('uses ship-on defaults when no data', async () => {
       supabase = makeSupabase({
         guild_config: () => chainBuilder({ data: null }),
       });
       fm = new FarmingManager(makeGuild() as any, supabase as any, makeValkey() as any);
       const cfg = await fm.getConfig();
-      expect(cfg.economy_farming_enabled).toBe(false);
+      // Ship-on default: farming is contracted ON by the catalog, so a guild with
+      // no config row gets farming enabled out of the box (matches the flipped
+      // guild_config.economy_farming_enabled column DEFAULT).
+      expect(cfg.economy_farming_enabled).toBe(true);
       expect(cfg.economy_farm_grid_size).toBe(9);
     });
   });

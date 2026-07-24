@@ -23,7 +23,7 @@ interface PetsConfig {
 }
 
 const DEFAULT_CONFIG: PetsConfig = {
-  economy_pets_enabled: false,
+  economy_pets_enabled: true,
   economy_pet_decay_rate: 5,
   economy_pet_decay_interval_hours: 1,
   economy_pet_low_stat_threshold: 20,

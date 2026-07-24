@@ -150,7 +150,7 @@ export class GatheringManager {
       .maybeSingle();
 
     this.configCache = {
-      economy_gathering_enabled: data?.economy_gathering_enabled ?? false,
+      economy_gathering_enabled: data?.economy_gathering_enabled ?? true,
       economy_gathering_cooldown_seconds: data?.economy_gathering_cooldown_seconds ?? 300,
       // White-label branding: mirror economy-manager's fallbacks so an owner who
       // renamed their currency is honored on gather payouts too.
@@ -213,8 +213,21 @@ export class GatheringManager {
       };
     }
 
+    // Guard an unrecognized source type (slash choices are constrained to
+    // hunt/dig/mine, but never crash on an unexpected value).
+    const sourceConfig = SOURCE_CONFIG[sourceType];
+    if (!sourceConfig) {
+      return {
+        embed: new EmbedBuilder()
+          .setDescription('❌ Unknown gathering activity. Try `hunt`, `dig`, or `mine`.')
+          .setColor(0xff0000),
+        result: null,
+        error: 'invalid_source',
+      };
+    }
+
     // Tool check — find required tool in inventory
-    const toolEffect = SOURCE_CONFIG[sourceType].toolEffect;
+    const toolEffect = sourceConfig.toolEffect;
     const toolResult = await this.checkTool(userId, toolEffect);
     const toolTier = toolResult.tier;
 

@@ -591,10 +591,17 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     difficulty: 'medium',
   });
 
-  // Disabled guild (economy_trivia_enabled defaults false → manager unregistered):
-  // the REAL dispatcher refuses /trivia with the disabled reply (a REAL captured
-  // reply) and the command is not exposed.
-  const disabled = await ctx.bootGuild({ label: 'b', economyStartingBalance: 0 });
+  // Disabled guild (economy_trivia_enabled explicitly OFF → manager unregistered):
+  // trivia now SHIPS ON by default (catalog trivia-enabled=true, guild_config
+  // column DEFAULT flipped to true), so the owner-opts-out path is exercised with
+  // an explicit false override rather than the old ship-OFF default. The REAL
+  // dispatcher refuses /trivia with the disabled reply (a REAL captured reply)
+  // and the command is not exposed.
+  const disabled = await ctx.bootGuild({
+    label: 'b',
+    economyStartingBalance: 0,
+    guildConfigOverrides: { economy_trivia_enabled: false },
+  });
   const refusal = await ctx.runSlash(disabled, { commandName: 'trivia', userId: ctx.userId('a') });
   const refusalText = replyContent(refusal);
   ctx.expect(refusalText.toLowerCase().includes('not enabled'), {

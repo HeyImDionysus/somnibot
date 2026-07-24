@@ -95,7 +95,7 @@ export class FarmingManager {
       .maybeSingle();
 
     this.configCache = {
-      economy_farming_enabled: data?.economy_farming_enabled ?? false,
+      economy_farming_enabled: data?.economy_farming_enabled ?? true,
       economy_farm_grid_size: data?.economy_farm_grid_size ?? 9,
       economy_farming_wilt_enabled: data?.economy_farming_wilt_enabled ?? true,
       economy_fertilizer_time_reduction_pct: data?.economy_fertilizer_time_reduction_pct ?? 50,

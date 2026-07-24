@@ -62,7 +62,7 @@ const DEFAULT_MESSAGE_LOG: MessageLogConfig = {
 };
 
 const DEFAULT_STARBOARD: StarboardConfig = {
-  starboard_enabled: false,
+  starboard_enabled: true,
   starboard_channel_id: null,
   starboard_threshold: 3,
   starboard_emoji: '⭐',
@@ -130,7 +130,7 @@ export default function ModerationPage() {
           message_log_channel_id: gc.message_log_channel_id ?? null,
         });
         setStarboard({
-          starboard_enabled: gc.starboard_enabled ?? false,
+          starboard_enabled: gc.starboard_enabled ?? true,
           starboard_channel_id: gc.starboard_channel_id ?? null,
           starboard_threshold: gc.starboard_threshold ?? 3,
           starboard_emoji: gc.starboard_emoji ?? '⭐',
@@ -273,6 +273,18 @@ export default function ModerationPage() {
             <div>
               <h3 className="font-semibold text-discord-text-primary">Infractions</h3>
               <p className="text-xs text-discord-text-muted">View, search, and manage member infractions</p>
+            </div>
+          </div>
+        </Link>
+        <Link
+          href="/moderation/appeals"
+          className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4 hover:border-somni-pink/50 transition-colors"
+        >
+          <div className="flex items-center gap-3">
+            <span className="text-2xl">⚖️</span>
+            <div>
+              <h3 className="font-semibold text-discord-text-primary">Appeals</h3>
+              <p className="text-xs text-discord-text-muted">Review, approve, and deny member appeals</p>
             </div>
           </div>
         </Link>

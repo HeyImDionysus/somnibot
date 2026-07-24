@@ -28,7 +28,8 @@ import type { DbTicketPanel, TicketTypeConfig } from '@somnibot/shared';
 import { createTicket, claimTicket, closeTicket, reopenTicket, deleteTicket } from './ticket-service.js';
 import { canMemberManageTicket, emitTicketDenied, ticketDeniedMessage } from './ticket-authz.js';
 import { generateTranscript } from './transcript-generator.js';
-import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('TicketInteractions');
 
@@ -344,8 +345,9 @@ async function handleTicketClaim(
     return;
   }
 
+  const brandKit = await resolveBrandKit(client.supabase, guild.id, { fallbackName: guild.name });
   const claimEmbed = new EmbedBuilder()
-    .setColor(SOMNI_PALETTE.CYAN)
+    .setColor(brandKit.accentColor)
     .setDescription(`🙋 **Ticket claimed by <@${interaction.user.id}>**`)
     .setTimestamp();
 
@@ -557,8 +559,9 @@ async function handleIntakeModalSubmit(
   }
 
   if (responses.length > 0) {
+    const brandKit = await resolveBrandKit(client.supabase, guild.id, { fallbackName: guild.name });
     const intakeEmbed = new EmbedBuilder()
-      .setColor(SOMNI_PALETTE.CYAN)
+      .setColor(brandKit.accentColor)
       .setTitle('📝 Intake Form Responses')
       .setDescription(responses.join('\n\n'))
       .setTimestamp()

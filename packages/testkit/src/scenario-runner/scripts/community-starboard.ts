@@ -37,14 +37,14 @@
  *   - Surgical cleanup: the sweep removes every run-prefixed entry (CLEANUP).
  *   - Happy-path owner-notification: no alert row is raised (real `alerts` read).
  *
- * ── Behavior-bug finding surfaced (NOT softened) ─────────────────────────────
- * DEF records a FAIL: the catalog contracts starboard-enabled=true as the
+ * ── Rich-open default now honored (ship-on alignment) ────────────────────────
+ * DEF asserts a PASS: the catalog contracts starboard-enabled=true as the
  * "rich open default" (celebrating members works the moment a channel is chosen),
- * but the implementation defaults it to FALSE everywhere — the guild_config
- * column default, the bot's `loadConfig` fallback, and the dashboard form's
- * initial toggle are all `false`. A freshly-configured guild that only picks a
- * channel stays dormant. That divergence is a ctx.expect that FAILs (a finding
- * for the owner), never a forced pass or a gate.
+ * and the implementation now agrees everywhere — the guild_config column DEFAULT,
+ * the bot's `loadConfig` fallback, and the dashboard form's initial toggle all
+ * ship `true` (20260724170000_ship_on_defaults). A freshly-configured guild that
+ * only picks a channel is active out of the box. That alignment is a ctx.expect
+ * that PASSes; it is never a forced pass or a gate.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -348,9 +348,9 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  // 2) FINDING — the "rich open default" (enabled=true the moment a channel is chosen)
-  //    is NOT met: the column default, the bot loadConfig fallback, and the dashboard
-  //    form toggle are all false. Picking a channel alone leaves the starboard dormant.
+  // 2) Rich-open default MET — enabled=true the moment a channel is chosen: the column
+  //    DEFAULT, the bot loadConfig fallback, and the dashboard form toggle now all default
+  //    true. Picking a channel alone activates the starboard out of the box.
   ctx.expect(cfg?.starboard_enabled === enabledDefault, {
     assertionClass: 'Discord',
     channel: 'db-observable',
@@ -358,10 +358,10 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
       'Rich open default: with only the starboard channel selected the feature is active (starboard-enabled defaults to true).',
     observation:
       `a guild configured with only the channel reads starboard_enabled=${cfg?.starboard_enabled}, ` +
-      `but the catalog contracts the default as ${enabledDefault} (rich-open). The guild_config column default, the ` +
-      `bot loadConfig fallback, and the dashboard form toggle are all false.`,
+      `matching the catalog rich-open default of ${enabledDefault}. The guild_config column DEFAULT, the ` +
+      `bot loadConfig fallback, and the dashboard form toggle now all default true.`,
     impact:
-      'Choosing a starboard channel does not activate the feature — the contracted rich-open default is unmet, so out-of-box celebration silently never fires until the owner also flips an enable toggle.',
+      'Were the rich-open default unmet, choosing a starboard channel would not activate the feature, so out-of-box celebration would silently never fire until the owner also flipped an enable toggle.',
   });
 
   // The threshold-crossing behavior itself is gateway-driven — GATE it.

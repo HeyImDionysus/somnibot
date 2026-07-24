@@ -251,7 +251,7 @@ export default function FarmingPage() {
         const data = await settingsRes.json();
         const gc = data.config ?? {};
         setSettings({
-          economy_farming_enabled: gc.economy_farming_enabled ?? false,
+          economy_farming_enabled: gc.economy_farming_enabled ?? true,
           economy_farm_grid_size: gc.economy_farm_grid_size ?? 9,
           economy_farming_wilt_enabled: gc.economy_farming_wilt_enabled ?? true,
           economy_fertilizer_time_reduction_pct: gc.economy_fertilizer_time_reduction_pct ?? 50,

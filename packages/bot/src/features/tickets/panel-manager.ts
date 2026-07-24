@@ -17,7 +17,8 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbTicketPanel, TicketTypeConfig } from '@somnibot/shared';
-import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+import { resolveBrandKit, type BrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('TicketPanels');
 
@@ -32,18 +33,22 @@ const BUTTON_STYLE_MAP: Record<string, ButtonStyle> = {
 
 // ── Build Panel Message ──────────────────────────────────
 
-function buildPanelEmbed(panel: DbTicketPanel): EmbedBuilder {
+function buildPanelEmbed(panel: DbTicketPanel, brandKit: BrandKit): EmbedBuilder {
   const msg = panel.panel_message;
   const embed = new EmbedBuilder()
-    .setColor(SOMNI_PALETTE.HOT_PINK)
+    .setColor(brandKit.primaryColor)
     .setTitle((msg.title as string) || panel.name || '🎫 Support Tickets')
     .setDescription(
       (msg.description as string) ||
         'Click a button below to open a ticket. Our team will assist you as soon as possible.',
     );
 
+  // Owner-supplied footer wins; otherwise carry the subtle white-label
+  // powered-by attribution (unless the owner turned it off).
   if (msg.footer) {
     embed.setFooter({ text: msg.footer as string });
+  } else if (brandKit.poweredByAttribution) {
+    embed.setFooter({ text: brandKit.poweredByAttribution });
   }
 
   if (msg.thumbnail) {
@@ -116,7 +121,8 @@ export async function postPanel(
     return { success: false, error: `Channel ${panel.channel_id} not found.` };
   }
 
-  const embed = buildPanelEmbed(panel);
+  const brandKit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name });
+  const embed = buildPanelEmbed(panel, brandKit);
   const components =
     panel.input_mode === 'buttons' ? buildButtonsRow(panel) : [buildDropdownRow(panel)];
 

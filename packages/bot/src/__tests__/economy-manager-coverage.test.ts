@@ -232,10 +232,14 @@ describe('EconomyManager', () => {
       expect(supabase.from.mock.calls.length).toBe(callCount);
     });
 
-    it('uses defaults when no config data returned', async () => {
+    it('uses ship-on defaults when no config data returned', async () => {
       supabase.from.mockImplementation(() => chainBuilder({ data: null }));
       const cfg = await em.loadConfig();
-      expect(cfg.economy_enabled).toBe(false);
+      // Ship-on defaults: a guild with no config row still gets the great
+      // out-of-box economy (economy + passive chat income both default ON,
+      // matching the catalog contract + the flipped guild_config column DEFAULTs).
+      expect(cfg.economy_enabled).toBe(true);
+      expect(cfg.economy_chat_income_enabled).toBe(true);
       expect(cfg.currency_name).toBe('Coins');
       expect(cfg.economy_starting_balance).toBe(0);
     });

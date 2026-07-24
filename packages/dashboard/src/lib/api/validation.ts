@@ -586,6 +586,10 @@ const tempChannelCreate = z.object({
   allow_text_channel: z.boolean().optional(),
   allow_claim: z.boolean().optional(),
   moderator_roles: snowflakeArray,
+  // Branded member-surface templates (blank/null ⇒ bot's built-in default).
+  room_created_template: z.string().max(500).nullable().optional(),
+  control_applied_template: z.string().max(500).nullable().optional(),
+  control_denied_template: z.string().max(500).nullable().optional(),
 });
 
 // ── Guild config (PATCH /api/guild) ─────────────────

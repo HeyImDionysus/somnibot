@@ -75,7 +75,7 @@ export async function GET() {
     lastSyncAt: desiredState?.last_sync_at ?? null,
     config: {
       syncEnabled: config?.sync_enabled ?? true,
-      syncIntervalMinutes: config?.sync_interval_minutes ?? 15,
+      syncIntervalMinutes: config?.sync_interval_minutes ?? 60,
       autoRepair: config?.sync_auto_repair ?? false,
       autoRepairEveryone: config?.sync_auto_repair_everyone ?? false,
     },
