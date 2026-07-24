@@ -34,12 +34,18 @@ export type ConfigSection =
  *
  * @param auditEvent  Optional event data for the bot to emit on the PlatformEventBus
  *                    so AuditService can log CRUD operations (Finding #4).
+ * @param before      Optional prior values of the changed keys (read from
+ *                    guild_config BEFORE the caller applied the update) — the
+ *                    bot maps them into the config.updated audit row's
+ *                    before_state. When absent, AuditService falls back to its
+ *                    own last-known guild_config snapshot.
  */
 export async function notifyBot(
   section: ConfigSection,
   changes?: Record<string, unknown>,
   changedBy: string = 'dashboard',
   auditEvent?: ConfigReloadAuditEvent,
+  before?: Record<string, unknown>,
 ): Promise<void> {
   // V10 Audit M-1: Guard against empty/unset DISCORD_GUILD_ID.
   // Previously used a top-level non-null assertion that silently inserted
@@ -59,6 +65,11 @@ export async function notifyBot(
         section,
         changes: changes ?? {},
         changed_by: changedBy,
+        // Stable per-change identity: the bot uses it as the config.updated
+        // audit occurrence key, so a redelivered config_reload action cannot
+        // double-write the audit row.
+        occurrence_id: crypto.randomUUID(),
+        ...(before ? { before } : {}),
         ...(auditEvent ? { audit_event: auditEvent } : {}),
       },
       status: 'pending',

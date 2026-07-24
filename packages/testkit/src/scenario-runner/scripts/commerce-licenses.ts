@@ -16,7 +16,7 @@
  * entitlement listings, and the non-admin /license info refusal are all live
  * captured-reply assertions. What remains GATED is the activation-embed brand-kit
  * pixel readback, failure/denial audit rows the handler does not write (a #21 gap),
- * the portal-driven rotation audit (#20), and the validate-outage / role-add fault
+ * the portal rotation-notice readback (#20), and the validate-outage / role-add fault
  * lanes (#19). The STATE and EFFECTS those handlers act on
  * are proven DB-observably instead — never faked.
  *
@@ -32,7 +32,9 @@
  *     FOR UPDATE) enforces max-devices — a second device is refused, self-service
  *     removal frees a slot, and two devices racing for the last slot resolve to
  *     exactly one session at the DATABASE (not in bot memory).
- *   - Rotation: issuing a new hashed key + invalidating the old one; the license
+ *   - Rotation: the REAL production `license_rotate_key` RPC (atomic, FOR UPDATE)
+ *     revokes the old key, mints the hashed successor carrying the entitlement, and
+ *     audits key.rotated — a replay returns the completed rotation; the license
  *     terminal-transition trigger immediately drains the old key's live sessions.
  *   - Guild-scoping / RLS: the hash+guild-scoped lookup that makes a guild-A key
  *     invalid in guild B, owner-only RLS denying anon reads of license_keys, and
@@ -794,44 +796,45 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     oldSessionArranged = !sErr;
   }
 
-  // Rotate: issue a NEW hashed key for the same order/customer/product, move the entitlement binding,
-  // then invalidate the old key (rotate-and-invalidate).
+  // Rotate through the REAL production `license_rotate_key` RPC (atomic, FOR UPDATE —
+  // the same pattern as `license_validate_device`): it revokes the old key first (the
+  // terminal-transition trigger drains its sessions in the same transaction), mints the
+  // hash-only successor for the same order/customer/product tuple, and moves the
+  // entitlement binding (rotate-and-invalidate as one transaction).
   const newKey = makeKeyMaterial(prefix, `${ctx.runPrefix}setb-new`);
-  const { data: newRow, error: newErr } = await handle.supabase
-    .from('license_keys')
-    .insert({
-      order_id: arr.orderId,
-      customer_id: arr.customerId,
-      product_id: arr.productId,
-      guild_id: handle.guildId,
-      key_hash: newKey.hash,
-      key_prefix: newKey.prefix,
-      key_suffix: newKey.suffix,
-      bound_discord_id: buyer,
-      status: 'active',
-      activated_at: new Date().toISOString(),
-    })
-    .select('id')
-    .single();
-  const newKeyId = (newRow as { id: string } | null)?.id ?? null;
-  if (newKeyId) {
-    await handle.supabase.from('entitlements').update({ license_key_id: newKeyId }).eq('license_key_id', arr.licenseKeyId ?? '').eq('guild_id', handle.guildId);
-  }
-  await handle.supabase
-    .from('license_keys')
-    .update({ status: 'revoked', revoked_at: new Date().toISOString(), revocation_reason: 'rotated' })
-    .eq('id', arr.licenseKeyId ?? '');
+  const { data: rotData, error: rotErr } = await handle.supabase.rpc('license_rotate_key', {
+    p_license_key_id: arr.licenseKeyId,
+    p_new_key_hash: newKey.hash,
+    p_new_key_prefix: newKey.prefix,
+    p_new_key_suffix: newKey.suffix,
+    p_actor_discord_id: buyer,
+  });
+  const rotation = (rotData ?? {}) as { status?: string; old_key_id?: string; new_key_id?: string };
+  const newKeyId = rotation.new_key_id ?? null;
 
-  // The old key hash now resolves to a terminal (revoked) key; the new hash is live.
+  // The old key hash now resolves to a terminal (revoked) key; the new hash is live and
+  // carries the entitlement uninterrupted.
   const oldByHash = await readKeyByHashInGuild(handle, arr.key.hash, handle.guildId);
   const newByHash = await readKeyByHashInGuild(handle, newKey.hash, handle.guildId);
-  ctx.expect(newErr === null && oldByHash?.status === 'revoked' && newByHash?.status === 'active' && oldByHash?.id !== newByHash?.id, {
-    assertionClass: 'database-RLS',
-    channel: 'db-observable',
-    promise: 'Rotate-and-invalidate: the old key hash is invalidated (revoked) while the new key hash is live — distinct rows, old key gone.',
-    observation: `old-hash lookup status=${oldByHash?.status} (expected revoked), new-hash lookup status=${newByHash?.status} (expected active); distinct rows=${oldByHash?.id !== newByHash?.id}.`,
-    impact: 'Rotation did not invalidate the old key or the new key is not live — the rotate-and-invalidate guarantee failed.',
-  });
+  const entOnNew = await readEntitlementByKey(handle, newKeyId ?? '');
+  ctx.expect(
+    rotErr === null &&
+      rotation.status === 'rotated' &&
+      oldByHash?.status === 'revoked' &&
+      newByHash?.status === 'active' &&
+      oldByHash?.id !== newByHash?.id &&
+      entOnNew?.status === 'active',
+    {
+      assertionClass: 'database-RLS',
+      channel: 'db-observable',
+      promise: 'Rotate-and-invalidate: the old key hash is invalidated (revoked) while the new key hash is live and carries the entitlement — distinct rows, old key gone.',
+      observation:
+        `license_rotate_key returned status=${rotation.status ?? rotErr?.message ?? '(none)'} (expected rotated); ` +
+        `old-hash lookup status=${oldByHash?.status} (expected revoked), new-hash lookup status=${newByHash?.status} (expected active); ` +
+        `distinct rows=${oldByHash?.id !== newByHash?.id}; entitlement on the successor=${entOnNew?.status} (expected active).`,
+      impact: 'Rotation did not invalidate the old key or the new key is not live — the rotate-and-invalidate guarantee failed.',
+    },
+  );
 
   // The old key can no longer activate (its status is terminal, not pending_activation/active).
   ctx.expect(oldByHash !== null && oldByHash.status !== 'active' && oldByHash.status !== 'pending_activation', {
@@ -873,7 +876,17 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     ctx.gate('Discord', 'db-observable', 'The old key’s device sessions are terminated on rotation.', 'could not arrange an old-key session (device-bind RPC not executable and the direct session insert failed)');
   }
 
-  // Replay-safety: the UNIQUE key_hash fence rejects re-minting the same new key (replaying the rotation).
+  // Replay-safety: replaying the rotation RPC on the already-rotated key returns the
+  // COMPLETED rotation (same successor, no further mint), and the UNIQUE key_hash fence
+  // rejects re-minting the same new key by any other path.
+  const { data: replayRotData, error: replayRotErr } = await handle.supabase.rpc('license_rotate_key', {
+    p_license_key_id: arr.licenseKeyId,
+    p_new_key_hash: makeKeyMaterial(prefix, `${ctx.runPrefix}setb-replay`).hash,
+    p_new_key_prefix: newKey.prefix,
+    p_new_key_suffix: newKey.suffix,
+    p_actor_discord_id: buyer,
+  });
+  const replayRotation = (replayRotData ?? {}) as { status?: string; new_key_id?: string };
   const { error: dupNewErr } = await handle.supabase.from('license_keys').insert({
     order_id: arr.orderId,
     customer_id: arr.customerId,
@@ -886,13 +899,22 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     status: 'active',
     activated_at: new Date().toISOString(),
   });
-  ctx.expect(dupNewErr !== null, {
-    assertionClass: 'replay-safety',
-    channel: 'db-observable',
-    promise: 'Replaying the rotation never mints a second key: a duplicate of the new key hash is rejected (UNIQUE key_hash).',
-    observation: `duplicate new-key insert rejected=${dupNewErr !== null} (error: ${dupNewErr?.message ?? 'NONE — a second key was minted!'}).`,
-    impact: 'A replayed rotation minted an additional key — the exactly-one-new-key fence failed.',
-  });
+  ctx.expect(
+    replayRotErr === null &&
+      replayRotation.status === 'already_rotated' &&
+      replayRotation.new_key_id === newKeyId &&
+      dupNewErr !== null,
+    {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise: 'Replaying the rotation never mints a second key: the RPC returns the completed rotation (same successor) and a duplicate of the new key hash is rejected (UNIQUE key_hash).',
+      observation:
+        `replayed license_rotate_key returned status=${replayRotation.status ?? replayRotErr?.message ?? '(none)'} (expected already_rotated) ` +
+        `with the same successor=${replayRotation.new_key_id === newKeyId}; ` +
+        `duplicate new-key insert rejected=${dupNewErr !== null} (error: ${dupNewErr?.message ?? 'NONE — a second key was minted!'}).`,
+      impact: 'A replayed rotation minted an additional key — the exactly-one-new-key fence failed.',
+    },
+  );
 
   // Drive the REAL /license activate with the OLD (revoked) key → the found-but-terminal
   // "Cannot Activate" refusal; the rotated-away key can no longer be activated at the handler.
@@ -908,9 +930,33 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
   await proveLicenseRls(ctx, handle, newKeyId ?? arr.licenseKeyId ?? '');
   await proveTwoEconomiesWall(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  // The rotation itself is a portal/dashboard operation (simulated by direct writes here); the
-  // audit row linking old→new key ids is written by that portal path — a #20 dashboard-route residual.
-  gateActivationAudit(ctx, 'The rotation is audited linking old and new key ids without recording either plaintext.');
+
+  // The rotation RPC audits key.rotated inside the same transaction: exactly ONE row
+  // (the replayed RPC above re-audited nothing) linking old and new key ids, with
+  // neither plaintext anywhere in the row.
+  const { data: rotAudits } = await handle.supabase
+    .from('audit_logs')
+    .select('details, target_id')
+    .eq('guild_id', handle.guildId)
+    .eq('action', 'key.rotated');
+  const rotAuditJson = JSON.stringify(rotAudits ?? []);
+  ctx.expect(
+    (rotAudits?.length ?? 0) === 1 &&
+      rotAuditJson.includes(String(arr.licenseKeyId)) &&
+      rotAuditJson.includes(String(newKeyId)) &&
+      !rotAuditJson.includes(arr.key.plaintext) &&
+      !rotAuditJson.includes(newKey.plaintext),
+    {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: 'The rotation is audited linking old and new key ids without recording either plaintext.',
+      observation:
+        `audit_logs holds ${rotAudits?.length ?? 0} key.rotated row(s) after one rotation + one replay (expected 1); ` +
+        `links old key=${rotAuditJson.includes(String(arr.licenseKeyId))}, new key=${rotAuditJson.includes(String(newKeyId))}; ` +
+        `plaintext leaked=${rotAuditJson.includes(arr.key.plaintext) || rotAuditJson.includes(newKey.plaintext)}.`,
+      impact: 'The rotation left no single traceable audit row linking the key generations, or a plaintext key leaked into the audit trail.',
+    },
+  );
   gateBrandingEmbed(ctx, 'The rotation notice uses the key-rotated template with product name and new key tail in the owner’s voice.');
 }
 

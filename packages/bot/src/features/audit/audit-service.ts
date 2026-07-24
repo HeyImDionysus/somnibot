@@ -35,6 +35,20 @@ interface AuditMapping {
   afterState?: (data: Record<string, unknown>) => Record<string, unknown> | undefined;
   /** Extract correlation ID for grouping related entries */
   correlationId?: (data: Record<string, unknown>) => string | undefined;
+  /**
+   * Extract the stable identity of THIS event occurrence for exactly-once
+   * audit writes. Only defined where the payload carries an id that is
+   * structurally created/completed ONCE (an infraction is created once, an
+   * order completes once, a lottery drawing draws once). The resulting
+   * `occurrence_key` (`<action>:<id>`) is deduped in-queue and enforced by
+   * the `uq_audit_logs_guild_occurrence` unique index (flush inserts with
+   * ON CONFLICT DO NOTHING), so a redelivered platform event or a re-flushed
+   * batch cannot write a second row. Events without a stable occurrence
+   * identity (joins, messages, repeated state toggles) stay keyless and are
+   * inserted as-is — a wrong dedupe is worse than a duplicate row there.
+   * Any emit site may alternatively pass `occurrenceId` in the event data.
+   */
+  occurrenceId?: (data: Record<string, unknown>) => string | undefined;
   /** Override the row's success flag (defaults to true) — e.g. denied attempts. */
   success?: boolean;
 }
@@ -98,6 +112,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     details: (d) => ({ type: d.type, reason: d.reason, totalInfractions: d.totalInfractions }),
     beforeState: (d) => ({ totalInfractions: ((d.totalInfractions as number) ?? 1) - 1 }),
     afterState: (d) => ({ totalInfractions: d.totalInfractions }),
+    occurrenceId: (d) => d.infractionId as string | undefined,
   },
   'member.muted': {
     action: 'mute.applied',
@@ -143,6 +158,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorId: (d) => d.userDiscordId as string,
     details: (d) => ({ ticketNumber: d.ticketNumber, channelId: d.channelId }),
     afterState: (d) => ({ status: 'open', ticketNumber: d.ticketNumber }),
+    occurrenceId: (d) => d.ticketId as string | undefined,
   },
   'ticket.claimed': {
     action: 'ticket.claimed',
@@ -207,6 +223,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
       currency: d.currency,
     }),
     correlationId: (d) => `order-${d.orderId}`,
+    occurrenceId: (d) => d.orderId as string | undefined,
   },
   'entitlement.granted': {
     action: 'entitlement.granted',
@@ -304,6 +321,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     targetId: (d) => d.giveawayId as string,
     details: (d) => ({ prize: d.title ?? d.prize, winnerCount: (d.winnerIds as string[])?.length ?? d.winnerCount, winners: d.winnerIds ?? d.winners }),
     afterState: (d) => ({ status: 'ended', winners: d.winnerIds ?? d.winners }),
+    occurrenceId: (d) => d.giveawayId as string | undefined,
   },
 
   // ── Sync & Deploy ──
@@ -372,6 +390,9 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     actorId: (d) => d.changedBy as string,
     details: (d) => ({ section: d.section, source: d.source ?? 'dashboard' }),
+    // Emitter-carried before wins; when absent the enqueue path fills
+    // before_state from the service's last-known guild_config snapshot so the
+    // config.updated diff is two-sided even for legacy emissions.
     beforeState: (d) => (d.before as Record<string, unknown>) ?? undefined,
     afterState: (d) => (d.after ?? d.changes) as Record<string, unknown> | undefined,
   },
@@ -401,6 +422,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorId: (d) => d.createdBy as string,
     details: (d) => ({ automationName: d.automationName, trigger: d.trigger }),
     afterState: (d) => ({ enabled: d.enabled, trigger: d.trigger, actionCount: d.actionCount }),
+    occurrenceId: (d) => d.automationId as string | undefined,
   },
   'automation.updated': {
     action: 'automation.updated',
@@ -628,6 +650,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.userId as string,
     details: (d) => ({ adventureId: d.adventureId, adventureName: d.adventureName, ticketCost: d.ticketCost, sessionId: d.sessionId }),
+    occurrenceId: (d) => d.sessionId as string | undefined,
   },
   'adventure.completed': {
     action: 'adventure.completed',
@@ -745,6 +768,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.heistId as string,
     details: (d) => ({ userId: d.userId, targetName: d.targetName, basePayout: d.basePayout, entryFee: d.entryFee }),
+    occurrenceId: (d) => d.heistId as string | undefined,
   },
   'heist.joined': {
     action: 'heist.joined',
@@ -761,6 +785,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'system',
     targetId: (d) => d.heistId as string,
     details: (d) => ({ outcome: d.outcome, participantCount: d.participantCount, payoutEach: d.payoutEach }),
+    occurrenceId: (d) => d.heistId as string | undefined,
   },
   'heist.settlement_failed': {
     action: 'heist.settlement_failed',
@@ -786,6 +811,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'system',
     targetId: (d) => d.drawingId as string,
     details: (d) => ({ winnerId: d.winnerId, jackpot: d.jackpot, winningNumber: d.winningNumber }),
+    occurrenceId: (d) => d.drawingId as string | undefined,
   },
   'lottery.payout_failed': {
     action: 'lottery.payout_failed',
@@ -911,6 +937,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.giveawayId as string,
     details: (d) => ({ prize: d.prize, winnerCount: d.winnerCount, channelId: d.channelId, endsAt: d.endsAt }),
+    occurrenceId: (d) => d.giveawayId as string | undefined,
   },
   'giveaway.entered': {
     action: 'giveaway.entered',
@@ -1047,6 +1074,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.pollId as string,
     details: (d) => ({ title: d.title, optionCount: d.optionCount, allowMultiple: d.allowMultiple, channelId: d.channelId }),
+    occurrenceId: (d) => d.pollId as string | undefined,
   },
   'poll.closed': {
     action: 'poll.closed',
@@ -1063,6 +1091,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.predictionId as string,
     details: (d) => ({ title: d.title, optionCount: d.optionCount, channelId: d.channelId }),
+    occurrenceId: (d) => d.predictionId as string | undefined,
   },
   'prediction.bet_placed': {
     action: 'prediction.bet_placed',
@@ -1090,6 +1119,23 @@ export class AuditService {
   private eventBus: PlatformEventBus;
   private queue: Array<Record<string, unknown>> = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Event→entry enqueue operations still in flight (the config.changed
+   * before-snapshot path awaits a lookup). flush() drains these first so a
+   * forced flush (shutdown, tests) can never outrun a pending entry.
+   */
+  private pendingEnqueues = new Set<Promise<void>>();
+  /**
+   * Last-known guild_config values — the BEFORE side of config.updated
+   * diffs. Loaded once at start() (i.e. before any config change this
+   * service will observe) and advanced by each config.changed's `changes`,
+   * so it lags the database by exactly the change being audited. This
+   * matters because the dashboard writes guild_config BEFORE the
+   * config.changed event reaches the bot — a read at event time would
+   * return the post-change values and fake the "before" side.
+   */
+  private guildConfigSnapshot: Record<string, unknown> | null = null;
+  private snapshotLoad: Promise<void> | null = null;
 
   constructor(
     guildId: string,
@@ -1105,8 +1151,11 @@ export class AuditService {
    * Start listening to all platform events and logging them.
    */
   start(): void {
+    // Prime the before-snapshot baseline for config.updated diffs.
+    this.snapshotLoad = this.loadGuildConfigSnapshot();
+
     // Listen to every event
-    this.eventBus.onAny(async (event: PlatformEvent) => {
+    this.eventBus.onAny((event: PlatformEvent) => {
       // V11 Audit H-1: Only log events for our guild. The event bus is a
       // process-level singleton and AuditService is per-guild, so without
       // this filter every guild's AuditService writes entries for ALL guilds,
@@ -1116,24 +1165,14 @@ export class AuditService {
       const mapping = EVENT_TO_AUDIT[event.type];
       if (!mapping) return; // untracked event type
 
-      const data = event.data as Record<string, unknown>;
-
-      const entry: Record<string, unknown> = {
-        guild_id: event.guildId,
-        actor_type: mapping.actorType,
-        actor_id: mapping.actorId?.(data) ?? (mapping.actorType === 'system' ? 'system' : 'bot'),
-        action: mapping.action,
-        category: mapping.category,
-        target_type: mapping.targetType ?? null,
-        target_id: mapping.targetId?.(data) ?? null,
-        details: mapping.details?.(data) ?? {},
-        before_state: mapping.beforeState?.(data) ?? null,
-        after_state: mapping.afterState?.(data) ?? null,
-        correlation_id: mapping.correlationId?.(data) ?? null,
-        success: mapping.success ?? true,
-      };
-
-      this.queue.push(entry);
+      const op: Promise<void> = this.enqueueFromEvent(event, mapping)
+        .catch((err: unknown) => {
+          log.error(`Failed to queue audit entry for ${event.type}:`, err);
+        })
+        .finally(() => {
+          this.pendingEnqueues.delete(op);
+        });
+      this.pendingEnqueues.add(op);
     });
 
     // Flush queue every 5 seconds to batch inserts
@@ -1142,6 +1181,108 @@ export class AuditService {
     }, 5000);
 
     log.info('Started — listening to all platform events (with before/after diffs)');
+  }
+
+  /** Map one platform event to an audit entry and queue it (occurrence-deduped). */
+  private async enqueueFromEvent(event: PlatformEvent, mapping: AuditMapping): Promise<void> {
+    const data = event.data as Record<string, unknown>;
+
+    let beforeState = mapping.beforeState?.(data) ?? null;
+    if (event.type === 'config.changed' && beforeState === null) {
+      beforeState = await this.configBeforeSnapshot(data);
+    }
+
+    // Occurrence identity: per-mapping extractor first, then a generic
+    // emitter-supplied `occurrenceId` field any emit site may carry.
+    const occurrence =
+      mapping.occurrenceId?.(data) ??
+      (typeof data.occurrenceId === 'string' && data.occurrenceId !== ''
+        ? data.occurrenceId
+        : undefined);
+
+    const entry: Record<string, unknown> = {
+      guild_id: event.guildId,
+      actor_type: mapping.actorType,
+      actor_id: mapping.actorId?.(data) ?? (mapping.actorType === 'system' ? 'system' : 'bot'),
+      action: mapping.action,
+      category: mapping.category,
+      target_type: mapping.targetType ?? null,
+      target_id: mapping.targetId?.(data) ?? null,
+      details: mapping.details?.(data) ?? {},
+      before_state: beforeState,
+      after_state: mapping.afterState?.(data) ?? null,
+      correlation_id: mapping.correlationId?.(data) ?? null,
+      occurrence_key: occurrence ? `${mapping.action}:${occurrence}` : null,
+      success: mapping.success ?? true,
+      // Keep every queued entry's key set identical to log()'s — PostgREST
+      // bulk inserts require homogeneous objects in one batch.
+      error_message: null,
+    };
+
+    // In-queue occurrence dedupe: a redelivery landing before the next flush
+    // (or while a failed batch sits re-queued) must not enqueue twice. The
+    // uq_audit_logs_guild_occurrence index + ON CONFLICT DO NOTHING flush is
+    // the durable backstop for redeliveries that arrive after a flush.
+    const key = entry.occurrence_key;
+    if (key !== null && this.queue.some((queued) => queued.occurrence_key === key)) {
+      return;
+    }
+
+    this.queue.push(entry);
+  }
+
+  /**
+   * Values of the changed keys BEFORE this config change, taken from the
+   * service's last-known guild_config snapshot (see field doc). Returns null
+   * when nothing is known about any changed key — an honest one-sided diff
+   * beats a fabricated before-state. Advances the snapshot with the change
+   * so consecutive edits diff against each other.
+   */
+  private async configBeforeSnapshot(
+    data: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | null> {
+    const changes = data.changes;
+    if (changes === null || typeof changes !== 'object' || Array.isArray(changes)) return null;
+    const changedKeys = Object.keys(changes as Record<string, unknown>);
+    if (changedKeys.length === 0) return null;
+
+    if (this.snapshotLoad) await this.snapshotLoad;
+    if (!this.guildConfigSnapshot) {
+      // The boot-time load failed (transient DB error) — retry once now.
+      this.snapshotLoad = this.loadGuildConfigSnapshot();
+      await this.snapshotLoad;
+    }
+    const snapshot = this.guildConfigSnapshot;
+    if (!snapshot) return null;
+
+    const before: Record<string, unknown> = {};
+    for (const changedKey of changedKeys) {
+      if (changedKey in snapshot) before[changedKey] = snapshot[changedKey] ?? null;
+    }
+    for (const changedKey of changedKeys) {
+      snapshot[changedKey] = (changes as Record<string, unknown>)[changedKey];
+    }
+    return Object.keys(before).length > 0 ? before : null;
+  }
+
+  /** Load the guild_config baseline used for config.updated before-diffs. */
+  private async loadGuildConfigSnapshot(): Promise<void> {
+    try {
+      const { data, error } = await this.supabase
+        .from('guild_config')
+        .select('*')
+        .eq('guild_id', this.guildId)
+        .maybeSingle();
+      if (!error && data) {
+        this.guildConfigSnapshot = data as Record<string, unknown>;
+      } else if (error) {
+        log.warn(`guild_config before-snapshot load failed: ${error.message}`);
+      }
+    } catch (err) {
+      log.warn(
+        `guild_config before-snapshot load failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -1171,6 +1312,8 @@ export class AuditService {
     beforeState?: Record<string, unknown>;
     afterState?: Record<string, unknown>;
     correlationId?: string;
+    /** Stable occurrence identity — dedupes re-logged/re-flushed entries. */
+    occurrenceKey?: string;
     success?: boolean;
     errorMessage?: string;
   }): Promise<void> {
@@ -1186,6 +1329,7 @@ export class AuditService {
       before_state: entry.beforeState ?? null,
       after_state: entry.afterState ?? null,
       correlation_id: entry.correlationId ?? null,
+      occurrence_key: entry.occurrenceKey ?? null,
       success: entry.success ?? true,
       error_message: entry.errorMessage ?? null,
     });
@@ -1193,15 +1337,27 @@ export class AuditService {
 
   /**
    * Flush buffered entries to Supabase.
+   *
+   * Exactly-once across redeliveries, retried flushes, and restarts: the
+   * batch is written with ON CONFLICT (guild_id, occurrence_key) DO NOTHING
+   * against the uq_audit_logs_guild_occurrence unique index, so an
+   * occurrence-keyed entry that already landed (a prior flush that errored
+   * after commit, a redelivered platform event, a restart re-flush) is
+   * silently skipped instead of duplicating the row. Keyless entries keep
+   * plain insert semantics (NULL keys never conflict).
    */
   private async flush(): Promise<void> {
+    // Never outrun an entry still being resolved (config before-snapshot).
+    if (this.pendingEnqueues.size > 0) {
+      await Promise.all([...this.pendingEnqueues]);
+    }
     if (this.queue.length === 0) return;
 
     const batch = this.queue.splice(0, this.queue.length);
 
     const { error } = await this.supabase
       .from('audit_logs')
-      .insert(batch);
+      .upsert(batch, { onConflict: 'guild_id,occurrence_key', ignoreDuplicates: true });
 
     if (error) {
       log.error(`Failed to flush ${batch.length} entries:`, error.message);

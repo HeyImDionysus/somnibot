@@ -40,11 +40,17 @@
  * (never a synthetic literal, never count>=0, never an unconditional pass); RLS
  * uses the anon-denial + service-role positive-control pattern.
  *
- * Concern surfaced (see CLEANUP audit gate): license_validations carries
- * ON DELETE CASCADE from license_keys, so deleting a key removes its validation
- * ledger rows — at odds with the catalog's "validation-log persists under
- * anonymize-over-delete". Not drivable here (retention is a separate cron path),
- * so it is GATED with the precise reason for owner review rather than asserted.
+ * Ledger semantics (20260724110000_license_validations_forensic_ledger):
+ * license_validations is a PERMANENT forensic ledger (owner decision) — deleting a
+ * license key DETACHES its ledger rows (ON DELETE SET NULL), never erases them,
+ * and retention only ANONYMIZES via scrub_expired_license_validations(). The
+ * earlier CASCADE concern this file surfaced is thereby resolved product-side.
+ * Consequence for the suite's no-residue contract: nothing cascades the seeded
+ * ledger rows away anymore, and a surviving row FK-blocks the products sweep
+ * (license_validations.product_id has no cascade) — so every scenario that seeds
+ * a validation row deletes it explicitly (deleteSeededValidations) before the
+ * guild sweep runs. That is test hygiene on synthetic rows the harness itself
+ * inserted, not an exercise of the production deletion path (which stays gated).
  */
 import { createHash } from 'node:crypto';
 
@@ -313,6 +319,29 @@ async function readValidations(handle: LiveClientHandle, licenseKeyId: string): 
     .select('id, license_key_id, result, ip_address, device_fingerprint')
     .eq('license_key_id', licenseKeyId);
   return (data as ValidationRow[] | null) ?? [];
+}
+
+/** Count the ledger rows attached to a product (survives key deletion: SET NULL). */
+async function countValidationsForProduct(handle: LiveClientHandle, productId: string): Promise<number> {
+  const { count } = await handle.supabase
+    .from('license_validations')
+    .select('*', { count: 'exact', head: true })
+    .eq('product_id', productId);
+  return count ?? 0;
+}
+
+/**
+ * Remove the run's seeded license_validations rows for a product. Production
+ * semantics (20260724110000): the ledger is permanent — key deletion DETACHES via
+ * ON DELETE SET NULL and retention only anonymizes — so nothing cascades these
+ * synthetic rows away, and a surviving row FK-blocks the products sweep
+ * (license_validations.product_id → products has no cascade). Each scenario that
+ * seeds a ledger row must therefore delete it before the guild sweep runs, or the
+ * run-prefixed products row survives as residue.
+ */
+async function deleteSeededValidations(handle: LiveClientHandle, productId: string | null): Promise<void> {
+  if (!productId) return;
+  await handle.supabase.from('license_validations').delete().eq('product_id', productId);
 }
 
 /** license_keys ids for a guild — used to prove parent-scoping of the guild-less
@@ -629,6 +658,10 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     'The route writes exactly one license_validations row per attempt (validate) and one on deactivate, with the caller IP resolved by the route.',
     'the per-attempt ledger write and route-resolved IP happen inside POST /api/license/{validate,deactivate}; only the ledger schema/persistence substrate is provable here, not the route attribution',
   );
+
+  // The seeded ledger row never cascades (permanent forensic ledger — key delete
+  // only DETACHES it) and would FK-block the products sweep: remove it explicitly.
+  await deleteSeededValidations(handle, productId);
 }
 
 /**
@@ -983,6 +1016,10 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     'requires the SDK offline path + an outage fault lane to replay failing calls and observe the post-recovery state',
   );
   gateSdkBranding(ctx);
+
+  // The seeded ledger row never cascades (permanent forensic ledger — key delete
+  // only DETACHES it) and would FK-block the products sweep: remove it explicitly.
+  await deleteSeededValidations(handle, productId);
 }
 
 /**
@@ -1225,6 +1262,11 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     'the SDK revalidation + heartbeat resume run through the @somnibot/license-sdk against the routes, and the admin/portal views are dashboard surfaces — none drivable by the bot-only harness',
   );
   gateSdkBranding(ctx);
+
+  // The seeded ledger row never cascades (permanent forensic ledger — key delete
+  // only DETACHES it) and would FK-block the products sweep on BOTH of this
+  // scenario's handles (same guild, swept once per handle): remove it explicitly.
+  await deleteSeededValidations(second, productId);
 }
 
 /**
@@ -1418,11 +1460,12 @@ async function countGuildRows(handle: LiveClientHandle, tables: readonly string[
 }
 
 /**
- * CLEANUP — run-prefixed license resources sweep to zero (guild-less sessions/
- * validations/config cascade from their parents), and the sweep is idempotent. The
- * anonymize-over-delete retention of the validation log is GATED — and, notably,
- * license_validations carries ON DELETE CASCADE from license_keys, so a key deletion
- * removes its ledger rows: a concern surfaced for the owner, not asserted.
+ * CLEANUP — run-prefixed license resources sweep to zero, and the sweep is
+ * idempotent. Guild-less sessions/config cascade from their parents; the seeded
+ * license_validations ledger rows do NOT (permanent forensic ledger,
+ * 20260724110000: key deletion detaches via SET NULL) — the scenario removes its
+ * own synthetic ledger rows explicitly before the sweep so the products delete is
+ * not FK-blocked. The production anonymize-over-delete retention path stays GATED.
  */
 async function CLEANUP(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a', economyEnabled: false });
@@ -1467,20 +1510,24 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
   });
   await proveNoOwnerAlert(ctx, handle);
 
-  // Sweep (the same one teardown uses) → zero run-prefixed rows; guild-less
-  // sessions/validations/config cascade away with their parents.
+  // Cleanup pass: the seeded ledger row must go FIRST — it never cascades
+  // (key deletion only detaches it via SET NULL) and its product_id FK would
+  // block the products delete — then the sweep (the same one teardown uses)
+  // → zero run-prefixed rows; guild-less sessions/config cascade away with
+  // their parent key/product.
   const keyId = key.id;
   const prodId = productId;
+  await deleteSeededValidations(handle, prodId);
   await ctx.sweepGuildRows(handle);
   const afterGuild = await countGuildRows(handle, guildTables);
   const sessionsAfter = keyId ? await countSessions(handle, keyId) : 0;
-  const validationsAfter = keyId ? (await readValidations(handle, keyId)).length : 0;
+  const validationsAfter = prodId ? await countValidationsForProduct(handle, prodId) : -1;
   const configAfter = prodId ? await readConfig(handle, prodId) : null;
   ctx.expect(afterGuild === 0 && sessionsAfter === 0 && validationsAfter === 0 && configAfter === null, {
     assertionClass: 'cleanup',
     channel: 'db-observable',
-    promise: 'The sweep removes every run-prefixed license row: guild-scoped rows deleted, and the guild-less sessions/validations/config cascade away with their parent key/product.',
-    observation: `post-sweep guild rows=${afterGuild}; sessions=${sessionsAfter}, validations=${validationsAfter}, config present=${configAfter !== null} (all expected 0/absent).`,
+    promise: 'The cleanup pass removes every run-prefixed license row: the seeded validation-ledger rows are deleted explicitly (they never cascade — permanent forensic ledger), then the sweep deletes the guild-scoped rows and the guild-less sessions/config cascade away with their parent key/product.',
+    observation: `post-sweep guild rows=${afterGuild}; sessions=${sessionsAfter}, ledger rows for the run product=${validationsAfter}, config present=${configAfter !== null} (all expected 0/absent).`,
     impact: 'The cleanup sweep left run-prefixed license rows behind — the suite leaves residue in the disposable database.',
   });
 
@@ -1499,7 +1546,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     'audit',
     'audit-row',
     'Validation-log audit rows for the run persist (anonymized, not deleted) under the anonymize-over-delete retention.',
-    'CONCERN: license_validations carries ON DELETE CASCADE from license_keys, so deleting a run key removes its validation-ledger rows — the catalog\'s "validation-log persists anonymized" is a separate retention-cron behavior not exercised by this sweep (surfaced for owner review, not faked)',
+    'the production retention path (20260724110000: key deletion DETACHES ledger rows via ON DELETE SET NULL; PII anonymized by the scrub_expired_license_validations daily cron, never deleted) is a cron behavior with a 60-day floor — not exercisable in a single harness run; the suite deleting its own synthetic seeded ledger rows above is test hygiene, not that path',
   );
   gateDiscordMembership(ctx);
   gateSdkBranding(ctx);
@@ -1510,10 +1557,15 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
 /**
  * The License SDK + validation API domain proof. guildScopedTables are child→parent
  * so FK-constrained rows are removed before their parents (guild_config + guild are
- * always swept in addition by the runner). product_license_config, license_sessions,
- * and license_validations are intentionally OMITTED: they carry no guild_id and
- * cascade from products / license_keys respectively (deleting the parent removes
- * them). audit_logs is likewise omitted so the sweep never touches the audit trail.
+ * always swept in addition by the runner). product_license_config and
+ * license_sessions are intentionally OMITTED: they carry no guild_id and cascade
+ * from products / license_keys (deleting the parent removes them).
+ * license_validations carries no guild_id EITHER and does NOT cascade
+ * (20260724110000: permanent forensic ledger — key deletion detaches via SET
+ * NULL), so each scenario that seeds a ledger row deletes it explicitly via
+ * deleteSeededValidations before the sweep; otherwise the surviving row's
+ * product_id FK blocks the products delete and leaves run-prefixed residue.
+ * audit_logs is likewise omitted so the sweep never touches the audit trail.
  */
 export const infrastructureLicenseSdkProof: DomainProof = {
   domainId: 'infrastructure-license-sdk',

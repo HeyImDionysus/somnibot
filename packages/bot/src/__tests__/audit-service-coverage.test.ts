@@ -20,12 +20,15 @@ import { AuditService } from '../features/audit/audit-service.js';
 // ── Helpers ───────────────────────────────────────────────
 
 function makeSupabase() {
-  const insertMock = vi.fn().mockResolvedValue({ error: null });
+  // flush() writes via upsert(..., { onConflict, ignoreDuplicates }) — the
+  // occurrence-dedupe path (ON CONFLICT DO NOTHING against
+  // uq_audit_logs_guild_occurrence).
+  const upsertMock = vi.fn().mockResolvedValue({ error: null });
   return {
     from: vi.fn().mockReturnValue({
-      insert: insertMock,
+      upsert: upsertMock,
     }),
-    _insertMock: insertMock,
+    _upsertMock: upsertMock,
   };
 }
 
@@ -343,13 +346,14 @@ describe('AuditService', () => {
       service.start();
       // Trigger flush via stop (which calls flush internally)
       service.stop();
-      // from should not be called because queue is empty
-      expect(supabase.from).not.toHaveBeenCalled();
+      // audit_logs must not be written because the queue is empty (start()
+      // legitimately reads guild_config to prime the before-snapshot baseline)
+      expect(supabase.from).not.toHaveBeenCalledWith('audit_logs');
     });
 
     it('re-queues entries on flush error (up to 500)', async () => {
-      supabase._insertMock.mockResolvedValue({ error: { message: 'DB error' } });
-      supabase.from.mockReturnValue({ insert: supabase._insertMock });
+      supabase._upsertMock.mockResolvedValue({ error: { message: 'DB error' } });
+      supabase.from.mockReturnValue({ upsert: supabase._upsertMock });
 
       service.start();
       await service.log({
@@ -364,7 +368,7 @@ describe('AuditService', () => {
       await new Promise((r) => process.nextTick(r));
 
       // Entry should be re-queued
-      expect(supabase._insertMock).toHaveBeenCalled();
+      expect(supabase._upsertMock).toHaveBeenCalled();
     });
 
     it('batches multiple entries in one flush', async () => {
@@ -385,9 +389,12 @@ describe('AuditService', () => {
       service.stop();
       await new Promise((r) => process.nextTick(r));
 
-      expect(supabase._insertMock).toHaveBeenCalledWith(expect.arrayContaining([
-        expect.objectContaining({ action: 'member.joined' }),
-      ]));
+      expect(supabase._upsertMock).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({ action: 'member.joined' }),
+        ]),
+        expect.objectContaining({ onConflict: 'guild_id,occurrence_key', ignoreDuplicates: true }),
+      );
     });
   });
 });
