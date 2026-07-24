@@ -283,6 +283,14 @@ export async function bootstrapLiveClient(
   const client = new SomniClient();
   assertClientSupabaseLocal(client);
 
+  // 2b. Warm the lazy Valkey connection BEFORE feature init. Production connects
+  //     Valkey early via constant use, but the harness leaves it lazy, so the first
+  //     DiagnosticsService health snapshot would otherwise race the initial connect —
+  //     seeing valkey_connected=false and raising a SPURIOUS valkey_disconnected owner
+  //     alert on an otherwise-clean run. A single ping opens the socket (or fails-fast
+  //     and is caught when no Valkey is configured, preserving the gateway-less path).
+  await (client.valkey as unknown as { ping(): Promise<unknown> }).ping().catch(() => {});
+
   // 3. Seed guild + guild_config. `economy_enabled` is the flag under test; the
   //    Discord-REST-heavy features that default ON in the schema
   //    (music/scheduled_messages/giveaways) and the sync scheduler are seeded
@@ -424,11 +432,12 @@ async function disposeRouter(
  *  the lazy Valkey connection was ever opened (unlike `quit()`, which needs a
  *  live socket). */
 async function disposeClient(client: SomniClient): Promise<void> {
-  try {
-    client.valkey.disconnect();
-  } catch {
-    /* not connected — nothing to close */
-  }
+  // NOTE: getValkey() returns a process-wide SINGLETON shared by every booted
+  // scenario. Disconnecting it here tears the socket out from under any other
+  // still-booted scenario (and its DiagnosticsService health snapshot), which
+  // races a spurious valkey_disconnected owner alert. Like the process-lifetime
+  // Supabase-realtime channels, leave the shared Valkey socket open; the vitest
+  // fork worker's exit is the real teardown.
   try {
     await client.destroy();
   } catch {

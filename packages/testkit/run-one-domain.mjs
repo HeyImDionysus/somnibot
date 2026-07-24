@@ -22,6 +22,8 @@ Object.assign(process.env, {
   SUPABASE_SECRET_KEY: process.env.SUPABASE_SECRET_KEY || DEMO_SERVICE,
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY || DEMO_SERVICE,
   SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || DEMO_ANON,
+  // Real Valkey (local docker / CI service) so cooldown/streak/rate-limit legs drive.
+  VALKEY_URL: process.env.VALKEY_URL || 'redis://localhost:6379',
   SOMNIBOT_LOOPBACK_E2E_CONFIRMATION:
     'I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE',
   PAYPAL_ENV: 'sandbox',
