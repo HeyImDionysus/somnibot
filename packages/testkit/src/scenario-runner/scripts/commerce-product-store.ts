@@ -990,6 +990,11 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
     paypal_event_id: eventId,
     amount_cents: 500,
     status: 'completed',
+    // payments_resource_type_required CHECK: every new payment row must carry
+    // its PayPal resource type (capture vs sale). Without it the FIRST insert
+    // fails and this probe records a FALSE "double-recorded" finding — the
+    // paypal_event_id UNIQUE fence itself is fine.
+    paypal_resource_type: 'capture',
   };
   const { error: pay1Err } = await handle.supabase.from('payments').insert(paymentRow);
   const { error: pay2Err } = await handle.supabase.from('payments').insert(paymentRow);
@@ -1283,6 +1288,10 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     paypal_event_id: `${ctx.runPrefix}cleanup-evt`,
     amount_cents: 500,
     status: 'completed',
+    // Required by the payments_resource_type_required CHECK (see REPLAY); the
+    // silent failure here left the ops baseline at 4 rows (< 5) and produced
+    // the false "could not establish a run-prefixed baseline" finding.
+    paypal_resource_type: 'capture',
   });
   await handle.supabase.from('audit_logs').insert({
     guild_id: handle.guildId,
