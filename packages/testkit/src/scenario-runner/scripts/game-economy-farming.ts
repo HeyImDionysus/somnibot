@@ -7,14 +7,15 @@
  * Discord surfaces and fault-injection lanes are GATED — the exact honesty boundary
  * the harness requires.
  *
- * ── Why this domain is MOSTLY GATED on the reply/Discord side ──
+ * ── The `/farm` member surface is DRIVEN live ──
  * Every member entrypoint is a `/farm` SUBCOMMAND (`view`, `plant`, `water`, `harvest`,
- * `fertilize`). The harness's `ScenarioContext.runSlash` (see `RunSlashParams`) carries
- * no subcommand field and the injector builds a subcommand-less interaction, so
- * `handleFarmingCommand`'s first line `interaction.options.getSubcommand()` would throw
- * before any farm work runs. Driving the live flow (the planted / harvest embeds, the
- * grid render, the branded degradation reply) therefore CANNOT happen in this bot-only
- * harness and is GATED — never faked. Its identical sibling is game-economy-adventures.
+ * `fertilize`). Since the #331 subcommand injector, `ScenarioContext.runSlash` supplies
+ * the subcommand, so every farming-ENABLED scenario drives the REAL `/farm view` through
+ * the production dispatcher and asserts the branded "Your Farm" board embed as a live
+ * captured-reply (see `proveFarmView`). DEF ships farming OFF (the FarmingManager is never
+ * constructed), so its member surface stays gated. What still gates: the white-label
+ * brand-kit PIXEL match (live-guild readback) and the audit_logs row the FarmingManager
+ * never writes (a real #21 gap). Its sibling is game-economy-adventures.
  *
  * ── What IS proven NOW, non-vacuously ──
  * The farming manager's happy path is orchestration over primitives that ARE drivable
@@ -44,6 +45,7 @@
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
+import type { CapturedResponse } from '../../captured-response.js';
 import type { LiveClientHandle } from '../../live-runner.js';
 import type { DomainProof, ScenarioContext } from '../types.js';
 
@@ -401,24 +403,53 @@ async function proveRlsIsolation(ctx: ScenarioContext, handle: LiveClientHandle)
   });
 }
 
+/** The title + description of the last farm embed a /farm subcommand replied with. */
+function farmEmbedText(captured: CapturedResponse): string {
+  const edits = captured.allOf('editReply');
+  const last = edits[edits.length - 1]?.payload as
+    | { embeds?: Array<{ data?: { title?: string; description?: string } }> }
+    | undefined;
+  const e = last?.embeds?.[0]?.data;
+  return `${e?.title ?? ''} ${e?.description ?? ''}`.trim();
+}
+
 /**
- * The only member surfaces are the `/farm` subcommand replies/embeds — none drivable here
- * (see file header). Branding is GATED honestly rather than checked against a synthetic
- * string or the generic dispatcher error reply.
+ * Drive the REAL `/farm view` subcommand (through the #331 injector) for an enabled guild
+ * and assert the branded farm board embed renders — the member-facing captured-reply surface.
+ * (In a farming-DISABLED guild the FarmingManager is never constructed, so /farm is undrivable;
+ * those scenarios keep gateBrandKit only.)
  */
-function gateBranding(ctx: ScenarioContext): void {
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'Member-facing farm surfaces (planted / harvest / view embeds) show the owner brand name, colors, and voice preset with the powered-by-SomniBot attribution and zero stock-bot wording.',
-    'every farm entrypoint is a /farm SUBCOMMAND and ScenarioContext.runSlash carries no subcommand, so no member-facing farm reply is produced to inspect (driving it would throw at getSubcommand())',
-  );
+async function proveFarmView(ctx: ScenarioContext, handle: LiveClientHandle, userId: string): Promise<void> {
+  const captured = await ctx.runSlash(handle, { commandName: 'farm', userId, subcommand: 'view' });
+  const text = farmEmbedText(captured);
+  ctx.expect(/your farm/i.test(text), {
+    assertionClass: 'branding',
+    channel: 'captured-reply',
+    promise: 'The /farm view member surface renders as the owner-branded "Your Farm" board embed.',
+    observation: `/farm view replied with a farm embed: ${JSON.stringify(text.slice(0, 100))} (expected the "Your Farm" board).`,
+    impact: 'The /farm view surface did not render the branded farm board embed.',
+  });
+}
+
+/** The white-label brand-kit pixel match on farm embeds stays a live-guild readback residual. */
+function gateBrandKit(ctx: ScenarioContext): void {
   ctx.gate(
     'branding',
     'discord-readback',
     'The full white-label brand kit (colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on farm embeds.',
     'requires an embed/message snapshot readback against the live brand kit (DISCORD_TOKEN + live guild)',
   );
+}
+
+/** DEF ships farming OFF, so the FarmingManager is never constructed and /farm is undrivable. */
+function gateBranding(ctx: ScenarioContext): void {
+  ctx.gate(
+    'branding',
+    'captured-reply',
+    'Member-facing farm surfaces (planted / harvest / view embeds) show the owner brand name, colors, and voice preset with zero stock-bot wording.',
+    'this scenario ships farming disabled, so the FarmingManager is never constructed and /farm produces no member reply to inspect',
+  );
+  gateBrandKit(ctx);
 }
 
 /**
@@ -580,7 +611,8 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveFarmView(ctx, handle, userA);
+  gateBrandKit(ctx);
   gateAudit(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -614,7 +646,8 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveFarmView(ctx, handle, userA);
+  gateBrandKit(ctx);
   gateAudit(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -661,7 +694,8 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveFarmView(ctx, handle, userA);
+  gateBrandKit(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
@@ -732,7 +766,8 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveFarmView(ctx, handle, userA);
+  gateBrandKit(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
@@ -832,7 +867,8 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
   gateAudit(ctx);
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveFarmView(ctx, handle, userA);
+  gateBrandKit(ctx);
 }
 
 /** REPLAY — re-delivering a plant upserts one plot row (no double-plant). */
@@ -877,7 +913,8 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   );
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveFarmView(ctx, handle, userA);
+  gateBrandKit(ctx);
   gateAudit(ctx);
 }
 
@@ -933,7 +970,8 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
   );
   await proveRlsIsolation(ctx, second);
   await proveNoOwnerAlert(ctx, second);
-  gateBranding(ctx);
+  await proveFarmView(ctx, second, userA);
+  gateBrandKit(ctx);
   gateAudit(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -984,7 +1022,8 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveFarmView(ctx, handle, userA);
+  gateBrandKit(ctx);
   gateAudit(ctx);
 }
 
@@ -1063,7 +1102,8 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
     'Guild A’s /farm view is identical before and after guild B activity, and guild B’s harvest credits guild B’s wallet at guild B’s configured crop sell price, observed in the live guilds.',
   );
   await proveNoOwnerAlert(ctx, handleA);
-  gateBranding(ctx);
+  await proveFarmView(ctx, handleA, userA);
+  gateBrandKit(ctx);
   gateAudit(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -1102,9 +1142,10 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     impact: 'The cleanup scenario could not establish a baseline of run-prefixed rows.',
   });
 
-  // Prove the off-theme classes while the rows still exist (before the sweep removes them).
+  // Prove the off-theme classes + the branded /farm view while the rows still exist (pre-sweep).
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
+  await proveFarmView(ctx, handle, userA);
 
   // Run the sweep (the same one teardown uses) and verify ZERO run-prefixed rows remain.
   await ctx.sweepGuildRows(handle);
@@ -1121,7 +1162,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     impact: 'The cleanup sweep left run-prefixed farming rows behind — the suite leaves residue.',
   });
 
-  gateBranding(ctx);
+  gateBrandKit(ctx);
   ctx.gate(
     'Discord',
     'discord-readback',
