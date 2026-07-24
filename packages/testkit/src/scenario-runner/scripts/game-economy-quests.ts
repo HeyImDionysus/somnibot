@@ -257,13 +257,20 @@ async function progressCount(handle: LiveClientHandle, userId: string): Promise<
 }
 
 /** Read the last editReply/reply content string a handler produced. */
+/** The text of a captured reply/editReply payload — discord.js accepts either a
+ *  raw string or a `{ content }` object, so normalise both (a raw-string payload
+ *  otherwise reads as empty — the #335 payload lesson). */
+function payloadText(payload: unknown): string {
+  if (typeof payload === 'string') return payload;
+  return String((payload as { content?: string } | undefined)?.content ?? '');
+}
+
 function replyContent(captured: CapturedResponse): string {
   const edits = captured.allOf('editReply');
   if (edits.length > 0) {
-    return String((edits[edits.length - 1]!.payload as { content?: string } | undefined)?.content ?? '');
+    return payloadText(edits[edits.length - 1]!.payload);
   }
-  const reply = captured.find('reply');
-  return String((reply?.payload as { content?: string } | undefined)?.content ?? '');
+  return payloadText(captured.find('reply')?.payload);
 }
 
 /**

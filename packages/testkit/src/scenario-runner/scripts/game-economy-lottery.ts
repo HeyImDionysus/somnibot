@@ -324,9 +324,16 @@ async function readLotteryAuditRows(handle: LiveClientHandle): Promise<AuditRow[
 
 // ── Captured-reply helpers ─────────────────────────────────────────────────
 
+/** The text of a captured reply/editReply payload — discord.js accepts either a
+ *  raw string or a `{ content }` object, so normalise both (a raw-string payload
+ *  otherwise reads as empty — the #335 payload lesson). */
+function payloadText(payload: unknown): string {
+  if (typeof payload === 'string') return payload;
+  return String((payload as { content?: string } | undefined)?.content ?? '');
+}
+
 function replyContent(captured: CapturedResponse): string {
-  const reply = captured.find('reply');
-  return String((reply?.payload as { content?: string } | undefined)?.content ?? '');
+  return payloadText(captured.find('reply')?.payload);
 }
 
 function replyEmbedData(captured: CapturedResponse): Record<string, unknown> | undefined {

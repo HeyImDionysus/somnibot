@@ -132,12 +132,20 @@ async function configColumnMissing(handle: LiveClientHandle, column: string): Pr
 }
 
 /** The last non-empty content string a handler produced (editReply → reply → followUp). */
+/** The text of a captured reply/editReply payload — discord.js accepts either a
+ *  raw string or a `{ content }` object, so normalise both (a raw-string payload
+ *  otherwise reads as empty — the #335 payload lesson). */
+function payloadText(payload: unknown): string {
+  if (typeof payload === 'string') return payload;
+  return String((payload as { content?: string } | undefined)?.content ?? '');
+}
+
 function replyContentOf(captured: CapturedResponse): string {
   for (let i = captured.calls.length - 1; i >= 0; i -= 1) {
     const call = captured.calls[i]!;
     if (call.method === 'editReply' || call.method === 'reply' || call.method === 'followUp') {
-      const content = (call.payload as { content?: string } | undefined)?.content;
-      if (typeof content === 'string' && content.length > 0) return content;
+      const content = payloadText(call.payload);
+      if (content.length > 0) return content;
     }
   }
   return '';

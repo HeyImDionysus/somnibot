@@ -74,9 +74,16 @@ function lastReplyPayload(captured: CapturedResponse): Record<string, unknown> |
   return (reply?.payload as Record<string, unknown> | undefined) ?? undefined;
 }
 
-function replyText(captured: CapturedResponse): string {
-  const payload = lastReplyPayload(captured);
+/** The text of a captured reply/editReply payload — discord.js accepts either a
+ *  raw string or a `{ content }` object, so normalise both (a raw-string payload
+ *  otherwise reads as empty — the #335 payload lesson). */
+function payloadText(payload: unknown): string {
+  if (typeof payload === 'string') return payload;
   return String((payload as { content?: string } | undefined)?.content ?? '');
+}
+
+function replyText(captured: CapturedResponse): string {
+  return payloadText(lastReplyPayload(captured));
 }
 
 interface EmbedData {

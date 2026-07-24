@@ -79,14 +79,21 @@ function declaredDefault(domain: DomainContract, controlId: string): JsonValue |
   return domain.defaults.find((d) => d.controlId === controlId)?.value;
 }
 
+/** The text of a captured reply/editReply payload — discord.js accepts either a
+ *  raw string or a `{ content }` object, so normalise both (a raw-string payload
+ *  otherwise reads as empty — the #335 payload lesson). */
+function payloadText(payload: unknown): string {
+  if (typeof payload === 'string') return payload;
+  return String((payload as { content?: string } | undefined)?.content ?? '');
+}
+
 /** Read the last editReply/reply content string a handler produced. */
 function replyText(captured: CapturedResponse): string {
   const edits = captured.allOf('editReply');
   if (edits.length > 0) {
-    return String((edits[edits.length - 1]!.payload as { content?: string } | undefined)?.content ?? '');
+    return payloadText(edits[edits.length - 1]!.payload);
   }
-  const reply = captured.find('reply');
-  return String((reply?.payload as { content?: string } | undefined)?.content ?? '');
+  return payloadText(captured.find('reply')?.payload);
 }
 
 function truncate(text: string, max = 90): string {
