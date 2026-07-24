@@ -156,7 +156,7 @@ export class FishingManager {
       .eq('guild_id', this.guild.id)
       .single();
     this.configCache = data ?? {
-      economy_fishing_enabled: false,
+      economy_fishing_enabled: true,
       economy_fishing_cooldown_seconds: 30,
       economy_fishing_junk_chance_pct: 15,
       economy_fishing_treasure_chance_pct: 5,

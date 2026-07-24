@@ -67,7 +67,8 @@ import { FarmingManager, buildFarmingCommands, registerFarmingManager, unregiste
 import { FishingManager, buildFishingCommands, registerFishingManager, unregisterFishingManager } from './features/fishing/index.js';
 import { AdventureManager, buildAdventureCommands, registerAdventureManager, unregisterAdventureManager } from './features/adventures/index.js';
 import { MarketManager, buildMarketCommands, registerMarketManager, unregisterMarketManager } from './features/market/index.js';
-import { TriviaManager, buildTriviaCommands, registerTriviaManager, unregisterTriviaManager } from './features/trivia/index.js';
+import { TriviaManager, buildTriviaCommands, registerTriviaManager, unregisterTriviaManager, TriviaScheduleRunner } from './features/trivia/index.js';
+import { appealCommand } from './features/appeals/index.js';
 import { GamesManager, buildGameCommands, registerGamesManager, unregisterGamesManager } from './features/games/index.js';
 import { LotteryManager, buildLotteryCommands, registerLotteryManager, unregisterLotteryManager } from './features/lottery/index.js';
 import { PollsManager, buildPollCommands, registerPollsManager, unregisterPollsManager } from './features/polls/index.js';
@@ -105,6 +106,7 @@ interface GuildServices {
   tempChannelManager?: TempChannelManager;
   statsManager?: StatsChannelManager;
   scheduledRunner?: ScheduledMessageRunner;
+  triviaScheduleRunner?: TriviaScheduleRunner;
   giveawayManager?: GiveawayManager;
   giveawayFulfillment?: GiveawayFulfillmentService;
   forumTicketService?: ForumTicketService;
@@ -205,7 +207,7 @@ export async function initGuildFeatures(
   // ── Sync engine ──
   const syncConfig: SyncConfig = {
     enabled: guildCfg?.sync_enabled ?? true,
-    intervalMinutes: guildCfg?.sync_interval_minutes ?? 15,
+    intervalMinutes: guildCfg?.sync_interval_minutes ?? 60,
     autoRepair: guildCfg?.sync_auto_repair ?? false,
     autoRepairEveryone: guildCfg?.sync_auto_repair_everyone ?? false,
   };
@@ -216,6 +218,7 @@ export async function initGuildFeatures(
 
   // ── Ticket command (always registered) ──
   allCommands.push(ticketCommand);
+  allCommands.push(appealCommand);
 
   // ── Automation engine ──
   try {
@@ -370,6 +373,10 @@ export async function initGuildFeatures(
         registerTriviaManager(mgr, guildId); ctx.setManager('trivia', mgr);
         const cmds = buildTriviaCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
+        // Hosted/scheduled trivia cadence: tick every minute and start a round when due.
+        services.triviaScheduleRunner = new TriviaScheduleRunner(guild, supabase, mgr);
+        services.triviaScheduleRunner.start();
+        ctx.setManager('triviaScheduleRunner', services.triviaScheduleRunner);
       }
       if (guildCfg.economy_games_enabled) {
         const mgr = new GamesManager(supabase, valkey);
@@ -570,6 +577,7 @@ export function destroyGuildServices(ctx: GuildContext): void {
     services.tempChannelManager,
     services.statsManager,
     services.scheduledRunner,
+    services.triviaScheduleRunner,
     services.giveawayManager,
     services.auditService,
     services.diagnosticsService,

@@ -12,7 +12,8 @@ import {
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import type { InfractionType, EscalationStep } from '@somnibot/shared';
-import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 import {
   createInfraction,
   getMemberInfractions,
@@ -214,14 +215,18 @@ export async function handleWarnCommand(
   const escalationChain = Array.isArray(config?.escalation_chain) ? config.escalation_chain : [];
   const nextAction = getEscalationAction(escalationChain, activeCount);
 
-  // DM the user
+  // DM the user — white-label: brand the member-facing embed with the owner
+  // brand kit (color + subtle powered-by attribution) instead of the hardcoded
+  // SomniBot palette.
   try {
+    const brandKit = await resolveBrandKit(client.supabase, interaction.guildId!, { fallbackName: guild.name });
     const dm = await member.user.createDM();
     const warnEmbed = new EmbedBuilder()
-      .setColor(SOMNI_PALETTE.ORANGE)
+      .setColor(brandKit.primaryColor)
       .setTitle('⚠️ Warning Received')
       .setDescription(`You've been warned in **${guild.name}**.\n\n**Reason:** ${reason}\n\nThis is warning #${activeCount}. Please review the server rules.`)
       .setTimestamp();
+    if (brandKit.poweredByAttribution) warnEmbed.setFooter({ text: brandKit.poweredByAttribution });
     await dm.send({ embeds: [warnEmbed] });
   } catch {
     // DMs disabled — non-fatal
@@ -333,15 +338,17 @@ export async function handleMuteCommand(
     infractionId: infraction?.id,
   });
 
-  // DM the user
+  // DM the user — white-label brand kit color + attribution (see handleWarnCommand).
   try {
+    const brandKit = await resolveBrandKit(client.supabase, interaction.guildId!, { fallbackName: guild.name });
     const dm = await member.user.createDM();
     const durationText = duration >= 1440 ? `${Math.round(duration / 1440)} day(s)` : duration >= 60 ? `${Math.round(duration / 60)} hour(s)` : `${duration} minute(s)`;
     const muteEmbed = new EmbedBuilder()
-      .setColor(SOMNI_PALETTE.HOT_PINK)
+      .setColor(brandKit.primaryColor)
       .setTitle('🔇 Timed Out')
       .setDescription(`You've been timed out in **${guild.name}** for **${durationText}**.\n\n**Reason:** ${reason}`)
       .setTimestamp();
+    if (brandKit.poweredByAttribution) muteEmbed.setFooter({ text: brandKit.poweredByAttribution });
     await dm.send({ embeds: [muteEmbed] });
   } catch { /* non-fatal */ }
 
@@ -394,14 +401,16 @@ export async function handleKickCommand(
     return;
   }
 
-  // DM before kick
+  // DM before kick — white-label brand kit color + attribution (see handleWarnCommand).
   try {
+    const brandKit = await resolveBrandKit(client.supabase, interaction.guildId!, { fallbackName: guild.name });
     const dm = await member.user.createDM();
     const kickEmbed = new EmbedBuilder()
-      .setColor(SOMNI_PALETTE.HOT_PINK)
+      .setColor(brandKit.primaryColor)
       .setTitle('👢 Kicked')
       .setDescription(`You've been kicked from **${guild.name}**.\n\n**Reason:** ${reason}\n\nYou may rejoin if you have an invite link.`)
       .setTimestamp();
+    if (brandKit.poweredByAttribution) kickEmbed.setFooter({ text: brandKit.poweredByAttribution });
     await dm.send({ embeds: [kickEmbed] });
   } catch { /* non-fatal */ }
 
@@ -489,14 +498,16 @@ export async function handleBanCommand(
     return;
   }
 
-  // DM before ban
+  // DM before ban — white-label brand kit color + attribution (see handleWarnCommand).
   try {
+    const brandKit = await resolveBrandKit(client.supabase, interaction.guildId!, { fallbackName: guild.name });
     const dm = await member.user.createDM();
     const banEmbed = new EmbedBuilder()
-      .setColor(0xFF0000)
+      .setColor(brandKit.primaryColor)
       .setTitle('🔨 Banned')
       .setDescription(`You've been banned from **${guild.name}**.\n\n**Reason:** ${reason}`)
       .setTimestamp();
+    if (brandKit.poweredByAttribution) banEmbed.setFooter({ text: brandKit.poweredByAttribution });
     await dm.send({ embeds: [banEmbed] });
   } catch { /* non-fatal */ }
 
@@ -677,8 +688,9 @@ export async function handleInfractionsCommand(
     return `\`${i + 1}.\` **${type}** ${status} — ${date}\n   ${inf.reason}\n   ID: \`${inf.id.slice(0, 8)}…\``;
   });
 
+  const brandKit = await resolveBrandKit(client.supabase, interaction.guildId!, { fallbackName: interaction.guild?.name });
   const embed = new EmbedBuilder()
-    .setColor(SOMNI_PALETTE.CYAN)
+    .setColor(brandKit.accentColor)
     .setTitle(`📋 Infractions — ${target.tag}`)
     .setDescription(lines.join('\n\n'))
     .setFooter({ text: `Showing ${filtered.length} of ${infractions.length} total` })

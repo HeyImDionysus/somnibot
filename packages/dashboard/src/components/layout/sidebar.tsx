@@ -57,6 +57,7 @@ import {
   Award,
   Pickaxe,
   BookOpen,
+  Gavel,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -104,6 +105,7 @@ const navigation: NavGroup[] = [
     items: [
       { label: 'Auto-Mod Rules', href: '/moderation/rules', icon: Shield, requires: 'discord' },
       { label: 'Infractions', href: '/moderation/infractions', icon: FileCode2, requires: 'discord' },
+      { label: 'Appeals', href: '/moderation/appeals', icon: Gavel, requires: 'discord' },
       { label: 'Ticket Panels', href: '/tickets', icon: Ticket, requires: 'discord', badge: OpenTicketsBadge },
     ],
   },

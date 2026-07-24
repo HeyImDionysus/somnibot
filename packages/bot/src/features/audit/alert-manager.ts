@@ -135,7 +135,13 @@ export class AlertManager {
           .eq('resolved', false)
           .maybeSingle();
 
+        // The alert row id anchors the linked incident's source_ref_id below, so
+        // capture it on every branch (existing update, fresh insert, or the race
+        // where a concurrent evaluation already inserted it).
+        let alertId: string | null = null;
+
         if (existing) {
+          alertId = existing.id;
           // Update the existing alert with latest data
           await this.supabase
             .from('alerts')
@@ -160,9 +166,26 @@ export class AlertManager {
           if (insertErr && (insertErr as { code?: string }).code !== '23505') {
             throw insertErr;
           }
+          // Read back the id of the now-open alert (whether this evaluation
+          // inserted it or lost the 23505 race to a concurrent one) so the
+          // linked incident below binds to the single canonical alert row.
+          const { data: openRow } = await this.supabase
+            .from('alerts')
+            .select('id')
+            .eq('guild_id', alert.guild_id)
+            .eq('alert_type', alert.alert_type)
+            .eq('resolved', false)
+            .maybeSingle();
+          alertId = openRow?.id ?? null;
         }
 
         this.activeAlerts.add(alert.alert_type);
+
+        // A critical diagnostics alert automatically opens a LINKED incident with
+        // its source reference set to the alert, deduplicated per alert reference.
+        if (alert.severity === 'critical' && alertId) {
+          await this.openIncidentForCriticalAlert(alert, alertId);
+        }
       } catch (err) {
         log.error(`Failed to upsert alert ${alert.alert_type}:`, err);
       }
@@ -187,6 +210,66 @@ export class AlertManager {
       } catch (err) {
         log.error(`Failed to resolve alert ${alertType}:`, err);
       }
+    }
+  }
+
+  /**
+   * Auto-open a LINKED incident for a critical diagnostics alert, deduplicated
+   * per alert reference. The incident carries source='health_alert' and
+   * source_ref_id=<alert.id> so the operations dashboard can trace the incident
+   * back to the alert that opened it.
+   *
+   * Dedup is enforced two ways: a cheap check-then-insert (skip if an incident
+   * already links this alert) plus the partial unique index uniq_incident_source_ref
+   * (guild_id, source_ref_id) as the real cross-process/shard fence. A 23505 from
+   * a racing evaluation is the intended single-row outcome — swallow it as an
+   * idempotent no-op so one alert can never open (or re-page for) two incidents.
+   */
+  private async openIncidentForCriticalAlert(alert: AlertEntry, alertId: string): Promise<void> {
+    // Already linked? Nothing to do — the alert stays bound to its one incident
+    // across repeated evaluations while it remains unresolved.
+    const { data: linked } = await this.supabase
+      .from('incidents')
+      .select('id')
+      .eq('guild_id', alert.guild_id)
+      .eq('source_ref_id', alertId)
+      .limit(1);
+    if (linked && linked.length > 0) return;
+
+    // Atomic incident number (per the restored sequence draw).
+    const { data: seqVal } = await this.supabase.rpc('nextval_incident');
+    const nextNumber = typeof seqVal === 'number' ? seqVal : 1;
+
+    const { data: incident, error: incidentError } = await this.supabase
+      .from('incidents')
+      .insert({
+        guild_id: alert.guild_id,
+        incident_number: nextNumber,
+        title: `Critical alert: ${alert.title}`,
+        description: alert.message,
+        severity: 'critical',
+        status: 'open',
+        source: 'health_alert',
+        source_ref_id: alertId,
+        created_by: 'system:diagnostics',
+      })
+      .select()
+      .single();
+
+    if (incidentError) {
+      // 23505 = a concurrent evaluation/shard already opened the linked incident
+      // for this alert reference (uniq_incident_source_ref). Idempotent no-op.
+      return;
+    }
+
+    if (incident) {
+      await this.supabase.from('incident_events').insert({
+        incident_id: incident.id,
+        event_type: 'auto_created',
+        actor_id: 'system:diagnostics',
+        message: `Auto-created from critical diagnostics alert "${alert.alert_type}".`,
+        metadata: { alert_type: alert.alert_type, alert_id: alertId },
+      });
     }
   }
 }

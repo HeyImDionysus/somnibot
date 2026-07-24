@@ -99,7 +99,7 @@ export class CraftingManager {
       .maybeSingle();
 
     this.configCache = {
-      economy_crafting_enabled: data?.economy_crafting_enabled ?? false,
+      economy_crafting_enabled: data?.economy_crafting_enabled ?? true,
       economy_crafting_cooldown_seconds: data?.economy_crafting_cooldown_seconds ?? 60,
     };
     this.configCacheTime = now;

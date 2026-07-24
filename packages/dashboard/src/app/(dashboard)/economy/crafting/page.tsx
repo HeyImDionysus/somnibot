@@ -280,7 +280,7 @@ export default function CraftingPage() {
         const data = await settingsRes.json();
         const gc = data.config ?? {};
         setSettings({
-          economy_crafting_enabled: gc.economy_crafting_enabled ?? false,
+          economy_crafting_enabled: gc.economy_crafting_enabled ?? true,
           economy_crafting_cooldown_seconds: gc.economy_crafting_cooldown_seconds ?? 60,
         });
       }

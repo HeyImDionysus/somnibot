@@ -30,9 +30,10 @@
  *
  * Behavior-bug discovery (never forced green): where the REAL bot/schema diverges
  * from the catalog's contracted intent the script records a FAIL (a finding for
- * the owner) — e.g. `get_next_member_number` reading a non-existent relation, the
- * missing safe-fallback config backing, and the out-of-box welcome defaults that
- * contradict the DEF promise.
+ * the owner) — e.g. `get_next_member_number` reading a non-existent relation and the
+ * missing safe-fallback config backing. The out-of-box welcome defaults now ALIGN with
+ * the DEF promise (welcome/DM/goodbye ship ON after 20260724170000_ship_on_defaults),
+ * so DEF asserts that alignment as a PASS.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -363,9 +364,10 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   const userA = ctx.userId('a');
   const userB = ctx.userId('b');
 
-  // 1) Out-of-box divergence: the catalog contracts welcomes ON by default, but the
-  //    shipped guild_config column defaults are OFF and no production seeder writes
-  //    the catalog defaults — a real DEF-promise divergence.
+  // 1) Out-of-box alignment: the catalog contracts welcomes ON by default, and the
+  //    shipped guild_config column DEFAULTs now agree — welcome_enabled/welcome_dm_enabled/
+  //    goodbye_enabled ship true (20260724170000_ship_on_defaults), so a fresh guild's
+  //    join flow loads welcomes ON.
   const cfg = await readWelcomeConfig(handle);
   const catWelcome = declaredDefault(ctx.domain, 'welcome-enabled') === true;
   const catDm = declaredDefault(ctx.domain, 'welcome-dm-enabled') === true;
@@ -379,7 +381,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
       `goodbye_enabled=${cfg?.goodbye_enabled}; catalog defaults are welcome-enabled=${catWelcome}, ` +
       `welcome-dm-enabled=${catDm}, goodbye-enabled=${catGoodbye}.`,
     impact:
-      'The shipped guild_config defaults (welcome_enabled/welcome_dm_enabled/goodbye_enabled = false) contradict the DEF out-of-box promise of a branded channel welcome + DM; with no production seeder applying the catalog defaults, a brand-new guild has welcomes OFF.',
+      'Were the shipped guild_config defaults (welcome_enabled/welcome_dm_enabled/goodbye_enabled) OFF they would contradict the DEF out-of-box promise of a branded channel welcome + DM — a brand-new guild would have welcomes OFF until an owner enabled them.',
   });
 
   // Seed the first membership row (also the RLS positive control below).

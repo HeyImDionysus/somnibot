@@ -26,11 +26,11 @@ interface GamesConfig {
 }
 
 const DEFAULT_CONFIG: GamesConfig = {
-  economy_games_enabled: false,
-  economy_daily_loss_limit: 0,
-  economy_coinflip_max_bet: 10000,
-  economy_slots_max_bet: 5000,
-  economy_blackjack_max_bet: 10000,
+  economy_games_enabled: true,
+  economy_daily_loss_limit: 5000,
+  economy_coinflip_max_bet: 500,
+  economy_slots_max_bet: 500,
+  economy_blackjack_max_bet: 1000,
   economy_lottery_enabled: false,
   economy_lottery_schedule: 'weekly',
   economy_lottery_ticket_price: 100,
@@ -83,11 +83,11 @@ export default function GamesPage() {
         const json = await res.json();
         const gc = json.config ?? {};
         setConfig({
-          economy_games_enabled: gc.economy_games_enabled ?? false,
-          economy_daily_loss_limit: gc.economy_daily_loss_limit ?? 0,
-          economy_coinflip_max_bet: gc.economy_coinflip_max_bet ?? 10000,
-          economy_slots_max_bet: gc.economy_slots_max_bet ?? 5000,
-          economy_blackjack_max_bet: gc.economy_blackjack_max_bet ?? 10000,
+          economy_games_enabled: gc.economy_games_enabled ?? true,
+          economy_daily_loss_limit: gc.economy_daily_loss_limit ?? 5000,
+          economy_coinflip_max_bet: gc.economy_coinflip_max_bet ?? 500,
+          economy_slots_max_bet: gc.economy_slots_max_bet ?? 500,
+          economy_blackjack_max_bet: gc.economy_blackjack_max_bet ?? 1000,
           economy_lottery_enabled: gc.economy_lottery_enabled ?? false,
           economy_lottery_schedule: gc.economy_lottery_schedule ?? 'weekly',
           economy_lottery_ticket_price: gc.economy_lottery_ticket_price ?? 100,

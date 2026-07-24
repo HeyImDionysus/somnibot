@@ -267,7 +267,7 @@ export default function GatheringPage() {
         const data = await settingsRes.json();
         const gc = data.config ?? {};
         setSettings({
-          economy_gathering_enabled: gc.economy_gathering_enabled ?? false,
+          economy_gathering_enabled: gc.economy_gathering_enabled ?? true,
           economy_gathering_cooldown_seconds: gc.economy_gathering_cooldown_seconds ?? 30,
         });
       }

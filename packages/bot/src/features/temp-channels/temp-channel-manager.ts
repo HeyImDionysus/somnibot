@@ -11,6 +11,7 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
+import { renderTempChannelTemplate } from './templates.js';
 
 const log = createLogger('TempChannels');
 
@@ -29,6 +30,10 @@ export interface HubConfig {
   allow_claim: boolean;
   moderator_roles: string[];
   active: boolean;
+  // Owner-brandable member-facing templates (null/blank ⇒ built-in default).
+  room_created_template: string | null;
+  control_applied_template: string | null;
+  control_denied_template: string | null;
 }
 
 export interface ActiveTempChannel {
@@ -202,6 +207,10 @@ export class TempChannelManager {
       // Move the member to the new channel
       await member.voice.setChannel(vc);
 
+      // Post the (owner-brandable) welcome into the new room. Best-effort — a
+      // send failure must never undo a room that was created successfully.
+      await this.sendRoomCreatedMessage(member, hub, vc, textChannelId);
+
       log.info(`Created "${vc.name}" for ${member.user.username}`);
     } catch (err) {
       // Room creation failed after retries — do not fail silently. Notify the
@@ -269,6 +278,46 @@ export class TempChannelManager {
       });
     } catch (alertErr) {
       log.error('Failed to write temp-channel creation alert:', { error: String(alertErr) });
+    }
+  }
+
+  /**
+   * Post the branded "room created" welcome into the new room. Prefers the paired
+   * text channel; otherwise the voice channel's built-in text chat. Best-effort:
+   * a send failure (missing perms, no text surface, etc.) is logged and swallowed
+   * so it can never roll back a room that was created successfully. Mentions are
+   * disabled so a template can't be turned into an @everyone ping.
+   */
+  private async sendRoomCreatedMessage(
+    member: GuildMember,
+    hub: HubConfig,
+    vc: VoiceChannel,
+    textChannelId: string | null,
+  ): Promise<void> {
+    try {
+      const content = renderTempChannelTemplate(hub, 'room_created', {
+        'owner-name': member.displayName,
+        owner: member.displayName,
+        username: member.displayName,
+        user: member.displayName,
+        tag: member.user.username,
+        'room-name': vc.name,
+        server: this.guild.name,
+      });
+      if (!content.trim()) return;
+
+      // Prefer the paired text channel; fall back to the voice channel's own
+      // text chat. Duck-type `.send` (via unknown) so this works for any
+      // sendable channel without a wide discord.js type guard.
+      const target: unknown = textChannelId
+        ? this.guild.channels.cache.get(textChannelId)
+        : vc;
+      const sender = target as { send?: (payload: unknown) => Promise<unknown> } | null | undefined;
+      if (sender && typeof sender.send === 'function') {
+        await sender.send({ content, allowedMentions: { parse: [] } });
+      }
+    } catch (err) {
+      log.warn('Failed to post room-created message:', { error: String(err) });
     }
   }
 

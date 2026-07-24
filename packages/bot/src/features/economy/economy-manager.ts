@@ -207,7 +207,7 @@ export class EconomyManager {
     // Cast — generic Supabase types don't include column names without codegen
     const cfg = data as Partial<EconomyConfig> | null;
     this.configCache = {
-      economy_enabled: cfg?.economy_enabled ?? false,
+      economy_enabled: cfg?.economy_enabled ?? true,
       currency_name: cfg?.currency_name ?? 'Coins',
       currency_emoji: cfg?.currency_emoji ?? '🪙',
       economy_starting_balance: cfg?.economy_starting_balance ?? 0,
@@ -222,7 +222,7 @@ export class EconomyManager {
       economy_crime_fine_pct: cfg?.economy_crime_fine_pct ?? 50,
       economy_crime_min: cfg?.economy_crime_min ?? 200,
       economy_crime_max: cfg?.economy_crime_max ?? 1000,
-      economy_chat_income_enabled: cfg?.economy_chat_income_enabled ?? false,
+      economy_chat_income_enabled: cfg?.economy_chat_income_enabled ?? true,
       economy_chat_income_min: cfg?.economy_chat_income_min ?? 5,
       economy_chat_income_max: cfg?.economy_chat_income_max ?? 15,
       economy_chat_income_cooldown_seconds: cfg?.economy_chat_income_cooldown_seconds ?? 60,

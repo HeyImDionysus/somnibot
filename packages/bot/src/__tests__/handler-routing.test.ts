@@ -53,6 +53,7 @@ vi.mock('../features/discord-ux/index.js', () => ({ handleViewProfile: mockFn(),
 vi.mock('../features/discord-ux/modal-handlers.js', () => ({ handleModalSubmit: mockFn() }));
 vi.mock('../features/discord-ux/autocomplete.js', () => ({ handleAutocomplete: mockFn() }));
 vi.mock('../features/tickets/index.js', () => ({ handleTicketInteraction: vi.fn(async () => false), handleTicketCommand: mockFn(), checkInactiveTickets: mockFn() }));
+vi.mock('../features/appeals/index.js', () => ({ handleAppealCommand: mockFn(), runAppealsMaintenance: mockFn() }));
 vi.mock('../sync/role-events.js', () => ({ handleRoleCreate: mockFn(), handleRoleUpdate: mockFn(), handleRoleDelete: mockFn() }));
 vi.mock('../sync/channel-events.js', () => ({ handleChannelCreate: mockFn(), handleChannelUpdate: mockFn(), handleChannelDelete: mockFn() }));
 vi.mock('../features/levels/index.js', () => ({ processMessageXp: mockFn(), handleLevelUp: mockFn() }));
@@ -243,6 +244,15 @@ describe('handler interaction routing', () => {
     const interaction = makeInteraction({
       isChatInputCommand: vi.fn(() => true),
       commandName: 'ticket',
+    });
+    await fire('interactionCreate', interaction);
+    expect(interaction.isChatInputCommand).toHaveBeenCalled();
+  });
+
+  it('routes /appeal command', async () => {
+    const interaction = makeInteraction({
+      isChatInputCommand: vi.fn(() => true),
+      commandName: 'appeal',
     });
     await fire('interactionCreate', interaction);
     expect(interaction.isChatInputCommand).toHaveBeenCalled();

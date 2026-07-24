@@ -29,9 +29,21 @@ interface TempChannelHub {
   allow_text_channel: boolean;
   allow_claim: boolean;
   moderator_roles: string[];
+  room_created_template: string | null;
+  control_applied_template: string | null;
+  control_denied_template: string | null;
   active: boolean;
   created_at: string;
 }
+
+// Built-in defaults the bot uses when a template override is blank. Shown as
+// placeholder text so owners can see exactly what they are replacing.
+const TEMPLATE_DEFAULTS = {
+  room_created:
+    "🔊 Welcome to your room, {owner-name}! It's yours to run — use /voice to lock it, rename it, set a user limit, or permit friends in.",
+  control_applied: '{action}',
+  control_denied: '{reason}',
+};
 
 const emptyForm = {
   hub_channel_id: '',
@@ -44,6 +56,9 @@ const emptyForm = {
   allow_text_channel: false,
   allow_claim: true,
   moderator_roles: '',
+  room_created_template: '',
+  control_applied_template: '',
+  control_denied_template: '',
 };
 
 // ── Name display helper ───────────────────────────────────
@@ -128,6 +143,9 @@ export default function TempChannelsPage() {
         allow_text_channel: hub.allow_text_channel,
         allow_claim: hub.allow_claim ?? true,
         moderator_roles: hub.moderator_roles.join(', '),
+        room_created_template: hub.room_created_template ?? '',
+        control_applied_template: hub.control_applied_template ?? '',
+        control_denied_template: hub.control_denied_template ?? '',
       });
     } else {
       setEditingId(null);
@@ -155,6 +173,10 @@ export default function TempChannelsPage() {
       allow_text_channel: form.allow_text_channel,
       allow_claim: form.allow_claim,
       moderator_roles: form.moderator_roles ? form.moderator_roles.split(',').map((s) => s.trim()).filter(Boolean) : [],
+      // Blank ⇒ null so the bot falls back to its built-in default.
+      room_created_template: form.room_created_template.trim() || null,
+      control_applied_template: form.control_applied_template.trim() || null,
+      control_denied_template: form.control_denied_template.trim() || null,
     };
 
     try {
@@ -324,6 +346,60 @@ export default function TempChannelsPage() {
                 <input type="checkbox" checked={form.allow_claim} onChange={(e) => setForm({ ...form, allow_claim: e.target.checked })} className="rounded" />
                 Allow members to claim an abandoned channel (/voice claim)
               </label>
+
+              {/* ── Branded message templates ─────────────── */}
+              <div className="border-t border-discord-border-subtle pt-4">
+                <h3 className="text-sm font-semibold text-discord-text-primary">Message Templates</h3>
+                <p className="mb-3 text-xs text-discord-text-muted">
+                  Brand the messages members see. Leave blank to use the default. Variables:{' '}
+                  <code className="bg-discord-bg-tertiary px-1 rounded">{'{owner-name}'}</code>{' '}
+                  <code className="bg-discord-bg-tertiary px-1 rounded">{'{room-name}'}</code>{' '}
+                  <code className="bg-discord-bg-tertiary px-1 rounded">{'{user}'}</code>{' '}
+                  <code className="bg-discord-bg-tertiary px-1 rounded">{'{server}'}</code>
+                </p>
+                <div className="space-y-3">
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-discord-text-muted">Room created (welcome posted in the new room)</label>
+                    <textarea
+                      value={form.room_created_template}
+                      onChange={(e) => setForm({ ...form, room_created_template: e.target.value })}
+                      placeholder={TEMPLATE_DEFAULTS.room_created}
+                      rows={2}
+                      maxLength={500}
+                      className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none resize-y"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-discord-text-muted">Control applied (shown when a /voice control succeeds)</label>
+                    <textarea
+                      value={form.control_applied_template}
+                      onChange={(e) => setForm({ ...form, control_applied_template: e.target.value })}
+                      placeholder="{action} — e.g. 🎧 {server} · {action}"
+                      rows={2}
+                      maxLength={500}
+                      className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none resize-y"
+                    />
+                    <p className="mt-1 text-xs text-discord-text-muted">
+                      <code className="bg-discord-bg-tertiary px-1 rounded">{'{action}'}</code> is the status line (e.g. &quot;🔒 Voice channel locked.&quot;). Also{' '}
+                      <code className="bg-discord-bg-tertiary px-1 rounded">{'{target}'}</code> for permit/deny/ban.
+                    </p>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-discord-text-muted">Control denied (shown when a control is refused)</label>
+                    <textarea
+                      value={form.control_denied_template}
+                      onChange={(e) => setForm({ ...form, control_denied_template: e.target.value })}
+                      placeholder="{reason} — e.g. 🚫 {reason}"
+                      rows={2}
+                      maxLength={500}
+                      className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none resize-y"
+                    />
+                    <p className="mt-1 text-xs text-discord-text-muted">
+                      <code className="bg-discord-bg-tertiary px-1 rounded">{'{reason}'}</code> is the refusal detail (e.g. &quot;❌ Only the channel owner…&quot;).
+                    </p>
+                  </div>
+                </div>
+              </div>
             </div>
             <div className="mt-6 flex justify-end gap-3">
               <button onClick={() => setShowForm(false)} className="rounded-input bg-discord-bg-tertiary px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-primary/50 transition-standard">

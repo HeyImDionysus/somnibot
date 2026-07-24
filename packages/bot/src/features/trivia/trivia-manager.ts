@@ -10,6 +10,8 @@ import {
   ButtonStyle,
   type ChatInputCommandInteraction,
   type ButtonInteraction,
+  type Guild,
+  type TextChannel,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig, TriviaDifficulty } from '@somnibot/shared';
@@ -78,12 +80,23 @@ const DIFFICULTY_MULTIPLIERS: Record<TriviaDifficulty, number> = { easy: 1, medi
 
 // ── Active rounds tracking ────────────────────────────────
 
+/**
+ * Editor for the round's message surface. Both entrypoints resolve a round the
+ * same way — the only difference is WHERE the question was posted:
+ *   - `/trivia start` posts via the slash reply, so `edit` is `interaction.editReply`;
+ *   - a hosted/scheduled round posts via `channel.send`, so `edit` is `message.edit`.
+ * `endRound` is fully interaction-agnostic: it drives whichever editor is attached.
+ */
+type RoundEditor = (payload: { embeds: EmbedBuilder[]; components: never[] }) => Promise<unknown>;
+
 interface ActiveRound {
   question: TriviaQuestion;
   answers: Map<string, number>; // userId → chosen index
   correctIndex: number;
   shuffled: string[];
   timeout: ReturnType<typeof setTimeout>;
+  guildId: string;
+  edit: RoundEditor;
 }
 
 // ── Manager ───────────────────────────────────────────────
@@ -151,6 +164,81 @@ export class TriviaManager {
     await this.valkey.set(`trivia:streak:${guildId}:${userId}`, String(val), 'EX', 86400);
   }
 
+  /**
+   * Build the served question pool for a guild (built-ins + custom pack) and
+   * pick one, honoring an optional category / difficulty filter. A filter that
+   * would empty the pool is ignored (falls back to the unfiltered pool) so a
+   * hosted schedule pinned to a category with no matching custom question still
+   * runs from the built-ins.
+   */
+  private async selectQuestion(
+    guildId: string,
+    category?: string,
+    difficulty?: TriviaDifficulty,
+  ): Promise<TriviaQuestion> {
+    const customQuestions = await this.getCustomQuestions(guildId);
+    let pool = [...BUILT_IN_QUESTIONS, ...customQuestions];
+
+    if (category) {
+      const filtered = pool.filter((q) => q.category.toLowerCase() === category.toLowerCase());
+      if (filtered.length > 0) pool = filtered;
+    }
+    if (difficulty) {
+      const filtered = pool.filter((q) => q.difficulty === difficulty);
+      if (filtered.length > 0) pool = filtered;
+    }
+
+    return randomPick(pool);
+  }
+
+  /**
+   * Shuffle the answers and build the question embed + answer-button row for a
+   * channel. The button customIds encode the channelId so `handleAnswer` routes
+   * a press back to the round in that channel — identical for command-driven and
+   * hosted rounds.
+   */
+  private buildRoundSurface(
+    channelId: string,
+    question: TriviaQuestion,
+    hosted: boolean,
+  ): { embed: EmbedBuilder; row: ActionRowBuilder<ButtonBuilder>; correctIndex: number; shuffled: string[] } {
+    const allAnswers = cryptoShuffle([question.correct, ...question.wrong]);
+    const correctIndex = allAnswers.indexOf(question.correct);
+
+    const labels = ['🅰️', '🅱️', '🅲', '🅳'];
+    const embed = new EmbedBuilder()
+      .setTitle(hosted ? '🎉 Hosted Trivia!' : '🧠 Trivia Time!')
+      .setDescription(
+        `**${question.question}**\n\n` +
+        allAnswers.map((a, i) => `${labels[i]} ${a}`).join('\n') +
+        `\n\n*Difficulty: ${question.difficulty.toUpperCase()} • Category: ${question.category}*\n*You have 20 seconds to answer!*`
+      )
+      .setColor(0x5865F2);
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      allAnswers.map((_, i) =>
+        new ButtonBuilder()
+          .setCustomId(`trivia:${channelId}:${i}`)
+          .setLabel(labels[i])
+          .setStyle(ButtonStyle.Secondary)
+      )
+    );
+
+    return { embed, row, correctIndex, shuffled: allAnswers };
+  }
+
+  /**
+   * Per-channel cooldown ("breather") probe. Returns the seconds remaining on the
+   * breather, or 0 when it is absent/expired or Valkey is unavailable. The window
+   * is owner-tunable via economy_trivia_cooldown_seconds and is opened when a
+   * round ends (see endRound), preventing back-to-back payout farming.
+   */
+  private async cooldownRemaining(guildId: string, channelId: string, cooldownSeconds: number): Promise<number> {
+    if (cooldownSeconds <= 0 || !this.valkey) return 0;
+    const remaining = await this.valkey.ttl(`trivia:cooldown:${guildId}:${channelId}`);
+    return remaining > 0 ? remaining : 0;
+  }
+
   async startRound(
     interaction: ChatInputCommandInteraction,
     category?: string,
@@ -171,57 +259,17 @@ export class TriviaManager {
     }
 
     // [game-economy-trivia] Per-channel cooldown ("breather") that prevents
-    // payout farming. The window is owner-tunable via
-    // economy_trivia_cooldown_seconds; the key is opened when a round ends
-    // (see endRound). ttl() returns the seconds remaining, or <=0 when the
-    // key is absent/expired. Guarded on Valkey so a no-Valkey deployment
-    // simply skips the breather rather than throwing.
+    // payout farming. Guarded on Valkey so a no-Valkey deployment simply skips
+    // the breather rather than throwing.
     const cooldownSeconds = config.economy_trivia_cooldown_seconds ?? 30;
-    if (cooldownSeconds > 0 && this.valkey) {
-      const remaining = await this.valkey.ttl(`trivia:cooldown:${guildId}:${channelId}`);
-      if (remaining > 0) {
-        await interaction.reply({ content: `⏳ A trivia round can start again in ${remaining}s.`, ephemeral: true });
-        return;
-      }
+    const remaining = await this.cooldownRemaining(guildId, channelId, cooldownSeconds);
+    if (remaining > 0) {
+      await interaction.reply({ content: `⏳ A trivia round can start again in ${remaining}s.`, ephemeral: true });
+      return;
     }
 
-    // Pick a question
-    const customQuestions = await this.getCustomQuestions(guildId);
-    let pool = [...BUILT_IN_QUESTIONS, ...customQuestions];
-
-    if (category) {
-      const filtered = pool.filter((q) => q.category.toLowerCase() === category.toLowerCase());
-      if (filtered.length > 0) pool = filtered;
-    }
-    if (difficulty) {
-      const filtered = pool.filter((q) => q.difficulty === difficulty);
-      if (filtered.length > 0) pool = filtered;
-    }
-
-    const question = randomPick(pool);
-
-    // Shuffle answers
-    const allAnswers = cryptoShuffle([question.correct, ...question.wrong]);
-    const correctIndex = allAnswers.indexOf(question.correct);
-
-    const labels = ['🅰️', '🅱️', '🅲', '🅳'];
-    const embed = new EmbedBuilder()
-      .setTitle('🧠 Trivia Time!')
-      .setDescription(
-        `**${question.question}**\n\n` +
-        allAnswers.map((a, i) => `${labels[i]} ${a}`).join('\n') +
-        `\n\n*Difficulty: ${question.difficulty.toUpperCase()} • Category: ${question.category}*\n*You have 20 seconds to answer!*`
-      )
-      .setColor(0x5865F2);
-
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      allAnswers.map((_, i) =>
-        new ButtonBuilder()
-          .setCustomId(`trivia:${channelId}:${i}`)
-          .setLabel(labels[i])
-          .setStyle(ButtonStyle.Secondary)
-      )
-    );
+    const question = await this.selectQuestion(guildId, category, difficulty);
+    const { embed, row, correctIndex, shuffled } = this.buildRoundSurface(channelId, question, false);
 
     await interaction.reply({ embeds: [embed], components: [row] });
 
@@ -229,10 +277,66 @@ export class TriviaManager {
       question,
       answers: new Map(),
       correctIndex,
-      shuffled: allAnswers,
-      timeout: setTimeout(() => this.endRound(channelId, interaction), 20_000),
+      shuffled,
+      guildId,
+      edit: (payload) => interaction.editReply(payload),
+      timeout: setTimeout(() => this.endRound(channelId), 20_000),
     };
     this.activeRounds.set(channelId, round);
+  }
+
+  /**
+   * Start a hosted / scheduled trivia round in a channel WITHOUT an interaction.
+   *
+   * This is the entrypoint the TriviaScheduleRunner drives when the owner-scheduled
+   * cadence is due. It mirrors startRound's gating (enabled → active → cooldown)
+   * but posts the question via `channel.send` and resolves through `message.edit`,
+   * so the exact same button-answer + payout lifecycle runs. Returns a structured
+   * result (never throws for an expected skip) so the scheduler can log why a hosted
+   * round did not open.
+   */
+  async startScheduledRound(
+    guild: Guild,
+    channel: TextChannel,
+    category?: string,
+    difficulty?: TriviaDifficulty,
+  ): Promise<{ started: boolean; reason?: string }> {
+    const guildId = guild.id;
+    const channelId = channel.id;
+    const config = await this.getConfig(guildId);
+
+    if (!config?.economy_trivia_enabled) return { started: false, reason: 'trivia_disabled' };
+    if (this.activeRounds.has(channelId)) return { started: false, reason: 'round_active' };
+
+    const cooldownSeconds = config.economy_trivia_cooldown_seconds ?? 30;
+    const remaining = await this.cooldownRemaining(guildId, channelId, cooldownSeconds);
+    if (remaining > 0) return { started: false, reason: 'cooldown' };
+
+    const question = await this.selectQuestion(guildId, category, difficulty);
+    const { embed, row, correctIndex, shuffled } = this.buildRoundSurface(channelId, question, true);
+
+    let edit: RoundEditor;
+    try {
+      // Post the hosted question to the channel and resolve the round by editing
+      // that same message (the command path edits the slash reply instead).
+      const message = await channel.send({ embeds: [embed], components: [row] });
+      edit = (payload) => message.edit(payload);
+    } catch (e: unknown) {
+      log.warn('hosted trivia send failed:', (e as Error)?.message ?? e);
+      return { started: false, reason: 'send_failed' };
+    }
+
+    const round: ActiveRound = {
+      question,
+      answers: new Map(),
+      correctIndex,
+      shuffled,
+      guildId,
+      edit,
+      timeout: setTimeout(() => this.endRound(channelId), 20_000),
+    };
+    this.activeRounds.set(channelId, round);
+    return { started: true };
   }
 
   async handleAnswer(buttonInteraction: ButtonInteraction): Promise<void> {
@@ -257,16 +361,13 @@ export class TriviaManager {
     await buttonInteraction.reply({ content: `✅ Answer locked in: ${round.shuffled[choiceIndex]}`, ephemeral: true });
   }
 
-  private async endRound(
-    channelId: string,
-    interaction: ChatInputCommandInteraction,
-  ): Promise<void> {
+  private async endRound(channelId: string): Promise<void> {
     const round = this.activeRounds.get(channelId);
     if (!round) return;
     this.activeRounds.delete(channelId);
     clearTimeout(round.timeout);
 
-    const guildId = interaction.guildId!;
+    const guildId = round.guildId;
     const config = await this.getConfig(guildId);
 
     // [game-economy-trivia] Open the per-channel cooldown breather so the next
@@ -336,9 +437,9 @@ export class TriviaManager {
       .setColor(winners.length > 0 ? 0x57F287 : 0xED4245);
 
     try {
-      await interaction.editReply({ embeds: [embed], components: [] });
+      await round.edit({ embeds: [embed], components: [] });
     } catch {
-      // interaction may have expired
+      // the reply/message may have been deleted or expired
     }
   }
 }

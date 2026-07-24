@@ -33,6 +33,7 @@ export type BotLevelServices = {
   heartbeat?: Stoppable | null;
   presence?: Stoppable | null;
   stopAntiRaidPruner?: (() => void) | null;
+  stopTeamInvitationSweeper?: (() => void) | null;
 };
 
 type ShutdownDependencies = {
@@ -90,6 +91,7 @@ export async function shutdownBot({
   stopSafely('Heartbeat service', () => botLevelServices.heartbeat?.stop(), log);
   stopSafely('Presence manager', () => botLevelServices.presence?.stop(), log);
   stopSafely('Anti-raid pruner', botLevelServices.stopAntiRaidPruner, log);
+  stopSafely('Team-invitation sweeper', botLevelServices.stopTeamInvitationSweeper, log);
 
   try {
     client.shoukaku?.nodes?.forEach((node) => node.disconnect(1000, 'shutdown'));

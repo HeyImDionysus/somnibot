@@ -39,6 +39,10 @@ import {
 import { decideBoot } from './services/boot-decision.js';
 import { startLauncherIpcHeartbeat, stopLauncherIpcHeartbeat } from './services/launcher-ipc.js';
 import { startAntiRaidPruner, stopAntiRaidPruner } from './features/anti-raid/index.js';
+import {
+  startTeamInvitationSweeper,
+  stopTeamInvitationSweeper,
+} from './features/team-invitations/index.js';
 import { BotPresenceManager } from './features/discord-ux/index.js';
 import { shutdownBot, type BotLevelServices } from './services/bot-shutdown.js';
 import { EmbedBuilder, Events } from 'discord.js';
@@ -236,6 +240,7 @@ async function main(): Promise<void> {
   const client = new SomniClient();
   const botLevelServices: BotLevelServices = {
     stopAntiRaidPruner,
+    stopTeamInvitationSweeper,
   };
 
   // 4. Register events
@@ -605,6 +610,12 @@ async function runFullBoot(
       // Start once at bot level instead of per-guild in guild-init.ts.
       startAntiRaidPruner();
       log.info('Anti-raid pruner started');
+
+      // Consent-based dashboard-team invitations: a process-wide worker that
+      // delivers invitation DMs, mirrors acceptances to the owner, and expires
+      // overdue invitations. Bot-level singleton (sweeps every guild's rows).
+      startTeamInvitationSweeper(client, client.supabase);
+      log.info('Team-invitation sweeper started');
 
       // V10 Audit L-4: BotPresenceManager sets client-wide presence.
       // Create once at bot level (using primary guild for config/member count).

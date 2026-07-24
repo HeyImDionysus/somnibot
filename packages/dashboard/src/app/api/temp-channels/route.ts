@@ -17,6 +17,8 @@ import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
+// Branded member-surface templates: blank/null ⇒ bot's built-in default.
+const templateField = z.string().max(500).nullable().optional();
 const tempChannelUpdate = z.object({
   id: z.string().uuid(),
   hub_channel_id: snowflake.optional(),
@@ -29,6 +31,9 @@ const tempChannelUpdate = z.object({
   allow_text_channel: z.boolean().optional(),
   allow_claim: z.boolean().optional(),
   moderator_roles: z.array(snowflake).max(100).optional(),
+  room_created_template: templateField,
+  control_applied_template: templateField,
+  control_denied_template: templateField,
   active: z.boolean().optional(),
 });
 export async function GET() {
@@ -76,6 +81,9 @@ export async function POST(req: NextRequest) {
     allow_text_channel,
     allow_claim,
     moderator_roles,
+    room_created_template,
+    control_applied_template,
+    control_denied_template,
   } = body;
 
   if (!hub_channel_id || !category_id) {
@@ -112,6 +120,10 @@ export async function POST(req: NextRequest) {
       allow_text_channel: allow_text_channel ?? false,
       allow_claim: allow_claim ?? true,
       moderator_roles: moderator_roles ?? [],
+      // Normalize blank overrides to NULL so the bot falls back to its default.
+      room_created_template: room_created_template?.trim() ? room_created_template : null,
+      control_applied_template: control_applied_template?.trim() ? control_applied_template : null,
+      control_denied_template: control_denied_template?.trim() ? control_denied_template : null,
       active: true,
     })
     .select()
@@ -139,7 +151,13 @@ export async function PUT(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  const updates = typedPick(body, ['hub_channel_id', 'category_id', 'naming_format', 'default_user_limit', 'default_bitrate', 'keep_alive_minutes', 'empty_grace_seconds', 'allow_text_channel', 'allow_claim', 'moderator_roles', 'active']);
+  const updates = typedPick(body, ['hub_channel_id', 'category_id', 'naming_format', 'default_user_limit', 'default_bitrate', 'keep_alive_minutes', 'empty_grace_seconds', 'allow_text_channel', 'allow_claim', 'moderator_roles', 'room_created_template', 'control_applied_template', 'control_denied_template', 'active']);
+  // Normalize blank template overrides to NULL so the bot uses its default.
+  for (const key of ['room_created_template', 'control_applied_template', 'control_denied_template'] as const) {
+    if (typeof updates[key] === 'string' && !(updates[key] as string).trim()) {
+      updates[key] = null;
+    }
+  }
   updates.updated_at = new Date().toISOString();
 
   const { data, error } = await supabase

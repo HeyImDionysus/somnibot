@@ -97,6 +97,7 @@ export const PROFILE_COMMANDS: readonly string[] = ['profile', 'title', 'bio'];
 export const REGISTRY_COMMAND_NAMES: readonly string[] = [
   'warn', 'mute', 'kick', 'ban', 'pardon', 'infractions', 'purge', 'xp',
   'help', 'forgetme', 'privacy', 'mydata', 'tutorial', 'setup', 'ticket',
+  'appeal',
 ];
 
 /**

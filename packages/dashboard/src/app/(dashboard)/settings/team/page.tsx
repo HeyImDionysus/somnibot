@@ -33,6 +33,19 @@ interface TeamMember {
   }>;
 }
 
+interface PendingInvitation {
+  id: string;
+  discord_id: string;
+  role_id: string;
+  status: string;
+  dm_status: string;
+  delivery_mode: string | null;
+  invited_by: string | null;
+  expires_at: string;
+  created_at: string;
+  dashboard_roles: { name: string; description: string | null; priority: number } | null;
+}
+
 // ── Permission display ────────────────────────────────────
 
 const PERM_LABELS: Record<string, string> = {
@@ -66,6 +79,15 @@ function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+function dmStatusLabel(inv: PendingInvitation): string {
+  switch (inv.dm_status) {
+    case 'sent': return '📨 DM delivered';
+    case 'failed': return '⚠️ DM failed — share the dashboard link';
+    case 'skipped': return 'Dashboard-only';
+    default: return '⏳ DM queued';
+  }
+}
+
 // ── Component ─────────────────────────────────────────────
 
 export default function TeamSettingsPage() {
@@ -75,6 +97,7 @@ export default function TeamSettingsPage() {
   const [tab, setTab] = useState<'members' | 'roles'>('members');
   const [roles, setRoles] = useState<DashboardRole[]>([]);
   const [members, setMembers] = useState<TeamMember[]>([]);
+  const [invitations, setInvitations] = useState<PendingInvitation[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Add member form
@@ -104,30 +127,60 @@ export default function TeamSettingsPage() {
     if (json.success) setMembers(json.data);
   }, []);
 
+  const loadInvitations = useCallback(async () => {
+    const res = await fetch('/api/rbac/invitations');
+    const json = await res.json();
+    if (json.success) setInvitations(json.data);
+  }, []);
+
   const loadAll = useCallback(async () => {
     setLoading(true);
-    await Promise.all([loadRoles(), loadMembers()]);
+    await Promise.all([loadRoles(), loadMembers(), loadInvitations()]);
     setLoading(false);
-  }, [loadRoles, loadMembers]);
+  }, [loadRoles, loadMembers, loadInvitations]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
   const addMember = async () => {
     if (!newDiscordId || !selectedRoleId) return;
-    await fetch('/api/rbac/users', {
+    const res = await fetch('/api/rbac/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ discord_id: newDiscordId, role_id: selectedRoleId }),
     });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast({ title: json.error || 'Could not send invitation', variant: 'error' });
+      return;
+    }
+    // Default (consent) model returns mode:'invitation'; the owner may have
+    // enabled direct assignment (mode:'direct').
+    toast(
+      json.mode === 'direct'
+        ? { title: 'Role assigned', variant: 'success' }
+        : { title: 'Invitation sent — the member gains access once they accept', variant: 'success' },
+    );
     setNewDiscordId('');
     setSelectedRoleId('');
     setShowAddMember(false);
     loadMembers();
+    loadInvitations();
   };
 
   const removeMemberRole = async (assignmentId: string) => {
     await fetch(`/api/rbac/users?id=${assignmentId}`, { method: 'DELETE' });
     loadMembers();
+  };
+
+  const revokeInvitation = async (invitationId: string) => {
+    const res = await fetch(`/api/rbac/invitations/${invitationId}`, { method: 'DELETE' });
+    if (res.ok) {
+      toast({ title: 'Invitation revoked', variant: 'success' });
+    } else {
+      const json = await res.json().catch(() => ({}));
+      toast({ title: json.error || 'Could not revoke invitation', variant: 'error' });
+    }
+    loadInvitations();
   };
 
   const createRole = async () => {
@@ -225,6 +278,48 @@ export default function TeamSettingsPage() {
               >
                 Assign Role
               </button>
+            </div>
+          )}
+
+          {invitations.length > 0 && (
+            <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-semibold text-discord-text-primary">Pending Invitations</h3>
+                <span className="rounded-full bg-discord-bg-tertiary px-2 py-0.5 text-[10px] text-discord-text-muted">
+                  {invitations.length}
+                </span>
+              </div>
+              <p className="text-xs text-discord-text-muted">
+                Invitees gain access only after they accept from the dashboard. Invitations expire automatically.
+              </p>
+              <div className="space-y-2">
+                {invitations.map((inv) => (
+                  <div
+                    key={inv.id}
+                    className="flex items-center justify-between rounded-md bg-discord-bg-tertiary px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs text-discord-text-primary truncate">{inv.discord_id}</span>
+                        <span className="rounded-full bg-[#FF1493]/20 px-2 py-0.5 text-[10px] font-medium text-[#FF1493]">
+                          {inv.dashboard_roles?.name || 'role'}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 flex flex-wrap gap-x-3 text-[10px] text-discord-text-muted">
+                        <span>{dmStatusLabel(inv)}</span>
+                        <span>Expires {formatDate(inv.expires_at)}</span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => revokeInvitation(inv.id)}
+                      className="shrink-0 text-xs text-discord-text-muted hover:text-red-400 transition-colors"
+                      title="Revoke invitation"
+                    >
+                      Revoke
+                    </button>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 

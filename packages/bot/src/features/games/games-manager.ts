@@ -143,22 +143,39 @@ export class GamesManager {
   }
 
   /**
-   * Adjust a user's balance. Returns true on success, false on failure.
-   * Critical: never swallow errors — callers must handle failure.
+   * Settle a resolved bet atomically. The single economy_resolve_bet RPC applies
+   * the net wallet delta (credit on a win, debit on a loss), records the daily
+   * loss when money was lost, and writes the casino_bet ledger row in ONE
+   * transaction — replacing the former split adjustBalance + addDailyLoss dance
+   * that could debit the wallet without recording the loss (or vice-versa) on a
+   * mid-sequence failure. The RPC is idempotent on the interaction id: a
+   * re-delivered interaction returns the first settlement and moves no more money.
+   *
+   * `net` is the wallet delta (>0 win, <0 loss). The daily-loss amount is the
+   * magnitude of a net debit (a win records no loss), matching the old behavior.
+   *
+   * Returns true when the bet settled (or replayed), false when the RPC errored
+   * or the wallet had insufficient funds for a debit — callers surface failure.
    */
-  private async adjustBalance(guildId: string, userId: string, amount: number): Promise<boolean> {
-    if (amount >= 0) {
-      const { error } = await this.supabase.rpc('economy_add_balance', {
-        p_guild_id: guildId, p_user_id: userId, p_amount: amount,
-      });
-      if (error) { log.error('economy_add_balance failed:', error.message); return false; }
-    } else {
-      const { error } = await this.supabase.rpc('economy_subtract_balance', {
-        p_guild_id: guildId, p_user_id: userId, p_amount: Math.abs(amount),
-      });
-      if (error) { log.error('economy_subtract_balance failed:', error.message); return false; }
-    }
-    // Track quest progress for any gamble action (win or loss)
+  private async settleBet(
+    guildId: string,
+    userId: string,
+    net: number,
+    game: string,
+    interactionId: string,
+  ): Promise<boolean> {
+    const { data, error } = await this.supabase.rpc('economy_resolve_bet', {
+      p_guild_id: guildId,
+      p_user_id: userId,
+      p_net: net,
+      p_loss: net < 0 ? -net : 0,
+      p_game: game,
+      p_idempotency_key: interactionId,
+    });
+    if (error) { log.error('economy_resolve_bet failed:', error.message); return false; }
+    if ((data as { status?: string } | null)?.status === 'insufficient_funds') return false;
+
+    // Track quest progress for any gamble action (win or loss).
     getQuestsManager(guildId)?.trackProgress(guildId, userId, 'gamble').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
     return true;
   }
@@ -332,21 +349,6 @@ export class GamesManager {
     return ((current ?? 0) + amount) <= limit;
   }
 
-  // V53-M1: Await the RPC so callers can react to failure.  The daily loss
-  // counter gates how much a user can lose per day — if the increment silently
-  // fails, the limit is bypassed on subsequent bets.
-  private async addDailyLoss(guildId: string, userId: string, amount: number): Promise<void> {
-    if (amount <= 0) return;
-    const { error } = await this.supabase.rpc('economy_increment_daily_loss', {
-      p_guild_id: guildId,
-      p_user_id: userId,
-      p_amount: amount,
-    });
-    if (error) {
-      log.error('economy_increment_daily_loss failed:', { error: String(error) });
-    }
-  }
-
   private async validateBet(
     interaction: ChatInputCommandInteraction,
     amount: number,
@@ -418,7 +420,7 @@ export class GamesManager {
       const result = randomChance(50) ? 'Heads' : 'Tails';
 
       if (win) {
-        const ok = await this.adjustBalance(guildId, userId, amount);
+        const ok = await this.settleBet(guildId, userId, amount, 'coinflip', interaction.id);
         await interaction.reply({
           embeds: [new EmbedBuilder()
             .setTitle(`🪙 ${result}!`)
@@ -426,12 +428,11 @@ export class GamesManager {
             .setColor(ok ? 0x57F287 : 0xFEE75C)],
         });
       } else {
-        const ok = await this.adjustBalance(guildId, userId, -amount);
+        const ok = await this.settleBet(guildId, userId, -amount, 'coinflip', interaction.id);
         if (!ok) {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        await this.addDailyLoss(guildId, userId, amount);
         await interaction.reply({
           embeds: [new EmbedBuilder()
             .setTitle(`🪙 ${result}!`)
@@ -472,12 +473,11 @@ export class GamesManager {
 
       if (payout > 0) {
         const net = payout - amount;
-        const ok = await this.adjustBalance(guildId, userId, net);
+        const ok = await this.settleBet(guildId, userId, net, 'slots', interaction.id);
         if (!ok && net < 0) {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        if (net < 0) await this.addDailyLoss(guildId, userId, Math.abs(net));
         await interaction.reply({
           embeds: [new EmbedBuilder()
             .setTitle('🎰 Slots')
@@ -485,12 +485,11 @@ export class GamesManager {
             .setColor(net >= 0 ? 0x57F287 : 0xFEE75C)],
         });
       } else {
-        const ok = await this.adjustBalance(guildId, userId, -amount);
+        const ok = await this.settleBet(guildId, userId, -amount, 'slots', interaction.id);
         if (!ok) {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        await this.addDailyLoss(guildId, userId, amount);
         await interaction.reply({
           embeds: [new EmbedBuilder()
             .setTitle('🎰 Slots')
@@ -526,17 +525,16 @@ export class GamesManager {
       const desc = `${emojis[choice]} vs ${emojis[botChoice]}`;
 
       if (result === 'win') {
-        const ok = await this.adjustBalance(guildId, userId, amount);
+        const ok = await this.settleBet(guildId, userId, amount, 'rps', interaction.id);
         await interaction.reply({
           embeds: [new EmbedBuilder().setTitle('✂️ Rock Paper Scissors').setDescription(`${desc}\n\n${ok ? `You win ${cEmoji} **${amount.toLocaleString()}** ${cName}! 🎉` : '⚠️ You won but the payout failed — contact an admin.'}`).setColor(ok ? 0x57F287 : 0xFEE75C)],
         });
       } else if (result === 'lose') {
-        const ok = await this.adjustBalance(guildId, userId, -amount);
+        const ok = await this.settleBet(guildId, userId, -amount, 'rps', interaction.id);
         if (!ok) {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        await this.addDailyLoss(guildId, userId, amount);
         await interaction.reply({
           embeds: [new EmbedBuilder().setTitle('✂️ Rock Paper Scissors').setDescription(`${desc}\n\nYou lost ${cEmoji} **${amount.toLocaleString()}** ${cName}. 😢`).setColor(0xED4245)],
         });
@@ -564,17 +562,16 @@ export class GamesManager {
       const botRoll = randomIntRange(1, 6) + randomIntRange(1, 6);
 
       if (playerRoll > botRoll) {
-        const ok = await this.adjustBalance(guildId, userId, amount);
+        const ok = await this.settleBet(guildId, userId, amount, 'dice', interaction.id);
         await interaction.reply({
           embeds: [new EmbedBuilder().setTitle('🎲 Dice Roll').setDescription(`You rolled **${playerRoll}** vs bot's **${botRoll}**\n\n${ok ? `You win ${cEmoji} **${amount.toLocaleString()}** ${cName}! 🎉` : '⚠️ You won but the payout failed — contact an admin.'}`).setColor(ok ? 0x57F287 : 0xFEE75C)],
         });
       } else if (playerRoll < botRoll) {
-        const ok = await this.adjustBalance(guildId, userId, -amount);
+        const ok = await this.settleBet(guildId, userId, -amount, 'dice', interaction.id);
         if (!ok) {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        await this.addDailyLoss(guildId, userId, amount);
         await interaction.reply({
           embeds: [new EmbedBuilder().setTitle('🎲 Dice Roll').setDescription(`You rolled **${playerRoll}** vs bot's **${botRoll}**\n\nYou lost ${cEmoji} **${amount.toLocaleString()}** ${cName}. 😢`).setColor(0xED4245)],
         });
@@ -616,9 +613,8 @@ export class GamesManager {
           : { result: `♠️ BLACKJACK! You win ${cEmoji} **${Math.floor(amount * 1.5).toLocaleString()}** ${cName}! 🎉`, color: 0x57F287, net: Math.floor(amount * 1.5) };
 
         if (net !== 0) {
-          const ok = await this.adjustBalance(guildId, userId, net);
+          const ok = await this.settleBet(guildId, userId, net, 'blackjack', interaction.id);
           if (!ok && net < 0) { await interaction.reply({ content: '❌ Transaction failed.', ephemeral: true }); return; }
-          if (net < 0) await this.addDailyLoss(guildId, userId, Math.abs(net));
         }
 
         await interaction.reply({ embeds: [this.bjEmbed(playerHand, dealerHand, result, color, false)] });
@@ -658,8 +654,7 @@ export class GamesManager {
               // Bust
               collector.stop('bust');
               const net = -currentBet;
-              const ok = await this.adjustBalance(guildId, userId, net);
-              if (ok) await this.addDailyLoss(guildId, userId, Math.abs(net));
+              await this.settleBet(guildId, userId, net, 'blackjack', interaction.id);
               await btnInteraction.update({
                 embeds: [this.bjEmbed(playerHand, dealerHand, `Bust! You went over with **${pv}**. Lost ${cEmoji} **${currentBet.toLocaleString()}** ${cName}.`, 0xED4245, false)],
                 components: [],
@@ -670,7 +665,7 @@ export class GamesManager {
             if (pv === 21) {
               // Auto-stand on 21
               collector.stop('stand');
-              await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur);
+              await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur, interaction.id);
               return;
             }
 
@@ -682,7 +677,7 @@ export class GamesManager {
 
           } else if (btnInteraction.customId === 'bj_stand') {
             collector.stop('stand');
-            await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur);
+            await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur, interaction.id);
 
           } else if (btnInteraction.customId === 'bj_double') {
             // Double down: double the bet, take exactly one more card, then stand
@@ -695,14 +690,13 @@ export class GamesManager {
 
             if (pv > 21) {
               const net = -currentBet;
-              const ok = await this.adjustBalance(guildId, userId, net);
-              if (ok) await this.addDailyLoss(guildId, userId, Math.abs(net));
+              await this.settleBet(guildId, userId, net, 'blackjack', interaction.id);
               await btnInteraction.update({
                 embeds: [this.bjEmbed(playerHand, dealerHand, `Bust on double down! **${pv}**. Lost ${cEmoji} **${currentBet.toLocaleString()}** ${cName}.`, 0xED4245, false)],
                 components: [],
               });
             } else {
-              await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur);
+              await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur, interaction.id);
             }
           }
         } catch (err) {
@@ -715,7 +709,7 @@ export class GamesManager {
         if (reason === 'time') {
           // Timed out — auto-stand and resolve
           try {
-            await this.resolveBlackjackTimeout(interaction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur);
+            await this.resolveBlackjackTimeout(interaction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur, interaction.id);
           } catch (err) {
             log.error('Blackjack timeout resolution error:', { error: String(err) });
           }
@@ -760,6 +754,7 @@ export class GamesManager {
     playerHand: Card[], dealerHand: Card[], deck: Card[],
     currentBet: number, _doubled: boolean,
     cur: { cName: string; cEmoji: string },
+    interactionId: string,
   ): Promise<void> {
     const playerVal = handValue(playerHand);
     const dealerVal = this.dealerPlay(dealerHand, deck);
@@ -767,8 +762,7 @@ export class GamesManager {
     const { result, color, net } = this.bjOutcome(playerVal, playerHand.length, dealerVal, currentBet, cur);
 
     if (net !== 0) {
-      const ok = await this.adjustBalance(guildId, userId, net);
-      if (ok && net < 0) await this.addDailyLoss(guildId, userId, Math.abs(net));
+      await this.settleBet(guildId, userId, net, 'blackjack', interactionId);
     }
 
     await btnInteraction.update({
@@ -784,6 +778,7 @@ export class GamesManager {
     playerHand: Card[], dealerHand: Card[], deck: Card[],
     currentBet: number, _doubled: boolean,
     cur: { cName: string; cEmoji: string },
+    interactionId: string,
   ): Promise<void> {
     const playerVal = handValue(playerHand);
     const dealerVal = this.dealerPlay(dealerHand, deck);
@@ -791,8 +786,7 @@ export class GamesManager {
     const { result, color, net } = this.bjOutcome(playerVal, playerHand.length, dealerVal, currentBet, cur);
 
     if (net !== 0) {
-      const ok = await this.adjustBalance(guildId, userId, net);
-      if (ok && net < 0) await this.addDailyLoss(guildId, userId, Math.abs(net));
+      await this.settleBet(guildId, userId, net, 'blackjack', interactionId);
     }
 
     try {
@@ -881,7 +875,7 @@ export class GamesManager {
       if (multiplier > 0) {
         const payout = Math.floor(amount * multiplier);
         const net = payout - amount;
-        const ok = await this.adjustBalance(guildId, userId, net);
+        const ok = await this.settleBet(guildId, userId, net, 'scratch', interaction.id);
         if (!ok && net < 0) {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
@@ -893,12 +887,11 @@ export class GamesManager {
             .setColor(0x57F287)],
         });
       } else {
-        const ok = await this.adjustBalance(guildId, userId, -amount);
+        const ok = await this.settleBet(guildId, userId, -amount, 'scratch', interaction.id);
         if (!ok) {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        await this.addDailyLoss(guildId, userId, amount);
         await interaction.reply({
           embeds: [new EmbedBuilder()
             .setTitle('🎫 Scratch Card')
@@ -937,12 +930,11 @@ export class GamesManager {
       const net = payout - amount;
 
       if (net !== 0) {
-        const ok = await this.adjustBalance(guildId, userId, net);
+        const ok = await this.settleBet(guildId, userId, net, 'guess', interaction.id);
         if (!ok && net < 0) {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        if (net < 0) await this.addDailyLoss(guildId, userId, Math.abs(net));
       }
 
       await interaction.reply({

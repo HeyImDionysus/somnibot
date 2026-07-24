@@ -22,7 +22,8 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbTicketPanel, DbTicket, TicketTypeConfig } from '@somnibot/shared';
 import type { PlatformEventBus } from '../../services/event-bus.js';
-import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Tickets');
 
@@ -145,8 +146,12 @@ export async function createTicket(
     panel.introduction_message ||
     `Welcome <@${member.id}>! A staff member will be with you shortly.`;
 
+  // White-label: member-facing ticket embeds carry the owner brand kit colors
+  // rather than the hardcoded SomniBot palette.
+  const brandKit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name });
+
   const introEmbed = new EmbedBuilder()
-    .setColor(SOMNI_PALETTE.CYAN)
+    .setColor(brandKit.accentColor)
     .setTitle(`🎫 Ticket #${ticketNumber} — ${ticketType.label}`)
     .setDescription(
       `${introText}\n\n💡 **Tip:** Include your order number (e.g., INS-00042) for faster assistance.`,
@@ -305,9 +310,11 @@ export async function closeTicket(
       await channel.permissionOverwrites.edit(ticket.creator_id, {
         SendMessages: false,
       });
+      // White-label: brand the close + feedback embeds with the owner kit.
+      const brandKit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name });
       // Post closing message
       const closeEmbed = new EmbedBuilder()
-        .setColor(SOMNI_PALETTE.HOT_PINK)
+        .setColor(brandKit.primaryColor)
         .setTitle('🔒 Ticket Closed')
         .setDescription(
           `Closed by <@${closedById}>${reason ? `\n**Reason:** ${reason}` : ''}\n\nThis ticket is now locked. A transcript has been saved.`,
@@ -344,7 +351,7 @@ export async function closeTicket(
           const creator = await guild.members.fetch(ticket.creator_id).catch(() => null);
           if (creator) {
             const feedbackEmbed = new EmbedBuilder()
-              .setColor(SOMNI_PALETTE.CYAN)
+              .setColor(brandKit.accentColor)
               .setTitle('📋 How was your support experience?')
               .setDescription(
                 `Your ticket #${ticketNumber} has been closed. Please rate your experience:`,
@@ -446,8 +453,9 @@ export async function reopenTicket(
         await channel.setParent(panel.open_category_id, { lockPermissions: false }).catch((e: unknown) => { log.warn('Failed to move channel:', (e as Error)?.message ?? e); });
       }
 
+      const brandKit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name });
       const reopenEmbed = new EmbedBuilder()
-        .setColor(SOMNI_PALETTE.CYAN)
+        .setColor(brandKit.accentColor)
         .setTitle('🔓 Ticket Reopened')
         .setDescription(`Reopened by <@${reopenedById}>. You can continue the conversation.`)
         .setTimestamp();
@@ -621,6 +629,10 @@ export async function checkInactiveTickets(
     });
   }
 
+  // Resolve the owner brand kit once for the guild so the inactivity warning
+  // embed is white-labeled instead of using the hardcoded SomniBot palette.
+  const brandKit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name });
+
   let warned = 0;
   let closed = 0;
 
@@ -651,7 +663,7 @@ export async function checkInactiveTickets(
         await channel.send({
           embeds: [
             new EmbedBuilder()
-              .setColor(SOMNI_PALETTE.ORANGE)
+              .setColor(brandKit.primaryColor)
               .setTitle('⏰ Inactivity Warning')
               .setDescription(
                 `This ticket has been inactive for over ${Math.round(idleMs / 3600000)} hours. ` +

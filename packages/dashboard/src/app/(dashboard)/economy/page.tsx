@@ -66,7 +66,7 @@ interface EconomyStats {
 }
 
 const DEFAULT_CONFIG: EconomyConfig = {
-  economy_enabled: false,
+  economy_enabled: true,
   currency_name: 'Coins',
   currency_emoji: '🪙',
   economy_starting_balance: 0,
@@ -81,7 +81,7 @@ const DEFAULT_CONFIG: EconomyConfig = {
   economy_crime_fine_pct: 50,
   economy_crime_min: 200,
   economy_crime_max: 1000,
-  economy_chat_income_enabled: false,
+  economy_chat_income_enabled: true,
   economy_chat_income_min: 5,
   economy_chat_income_max: 15,
   economy_chat_income_cooldown_seconds: 60,

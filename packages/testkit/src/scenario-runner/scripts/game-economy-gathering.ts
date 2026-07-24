@@ -35,10 +35,11 @@
  *     role sees the row an anon / second-guild client must not).
  *
  * Behavior-bug discovery: where the REAL bot diverges from the catalog's contracted
- * intent, the script records a FAIL (promise / observation / impact). DEF surfaces
- * the documented `gathering-enabled` default conflict (catalog: ships ON; shipped
- * code: DB column + getConfig fallback default OFF). It never forces green and
- * never weakens the catalog.
+ * intent, the script records a FAIL (promise / observation / impact). DEF now asserts
+ * the `gathering-enabled` ship-on alignment (catalog: ships ON; shipped code: DB column
+ * DEFAULT true + getConfig fallback true, after 20260724170000_ship_on_defaults), so a
+ * fresh guild has gathering ON out of the box. It never forces green and never weakens
+ * the catalog.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -578,19 +579,19 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     impact: 'The live gathering cooldown default diverged from the catalog-declared default.',
   });
 
-  // Enabled default: the catalog contracts ships-ON, but the shipped code
-  // (migration column DEFAULT false + GatheringManager.getConfig() `?? false`)
-  // leaves gathering OFF out of the box — a documented conflict (INTENT-DELTAS.md).
-  // Surface it as a FAIL for owner adjudication; do NOT soften it into a gate.
+  // Enabled default: the catalog contracts ships-ON, and the shipped code now agrees —
+  // guild_config.economy_gathering_enabled ships NOT NULL DEFAULT true (migration
+  // 20260724170000_ship_on_defaults) and GatheringManager.getConfig() falls back to true,
+  // so gathering is ON out of the box. Assert that alignment.
   ctx.expect(cfg?.economy_gathering_enabled === enabledDefault, {
     assertionClass: 'Discord',
     channel: 'db-observable',
     promise: `Out of the box gathering is ENABLED (catalog default gathering-enabled=${enabledDefault}) so /hunt·/dig·/mine work without setup.`,
     observation:
       `live guild_config economy_gathering_enabled=${cfg?.economy_gathering_enabled} ` +
-      `(catalog contracts ${enabledDefault}); the shipped column DEFAULT is false and getConfig() falls back to false.`,
+      `(catalog contracts ${enabledDefault}); the shipped column DEFAULT is now true and getConfig() falls back to true.`,
     impact:
-      'Gathering ships DISABLED, contradicting the catalog "great-defaults / works out of the box" promise — a new guild sees no gathering until an admin toggles it on (documented conflict awaiting owner decision).',
+      'Were gathering to ship DISABLED it would contradict the catalog "great-defaults / works out of the box" promise — a new guild would see no gathering until an admin toggled it on.',
   });
 
   // Bare-hands (tier 0) loot pool: a seeded tier-0 coin drop is in the pool; a
@@ -624,15 +625,14 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     impact: 'The coin-drop credit did not add exactly the sell value to the play-money wallet.',
   });
 
-  // DEF boots at the SHIPPED default, which leaves gathering DISABLED (the finding
-  // above), so the REAL initGuildFeatures never wired the GatheringManager at this
-  // boot — a live /mine cannot resolve a roll here regardless of Redis. GATE the
-  // live roll + its ledger honestly (the live gather IS driven in SET-A/SET-B/
-  // REPLAY/RACE, which boot with gathering enabled).
+  // Gathering ships ON in DEF now, so initGuildFeatures DID wire the GatheringManager —
+  // but a live /mine roll acquires a Valkey SET PX NX cooldown lock, so it is gated on
+  // Redis (no Redis reachable here). GATE the live roll + its ledger honestly (the live
+  // gather IS driven in SET-A/SET-B/REPLAY/RACE when Redis is present).
   gateLiveGather(
     ctx,
     'Out of the box a bare-handed /mine returns a tier-0 result embed, a coin drop credits the wallet by its sell value with one gather ledger row, and a second /mine within 300s is refused with the branded cooldown message.',
-    'the shipped default leaves gathering disabled (see the enabled-default finding), so initGuildFeatures does not wire the GatheringManager at this boot and the roll also depends on the Valkey cooldown path',
+    'the GatheringManager IS wired now that gathering ships ON, so this gate is purely the Redis/Valkey cooldown dependency (not a disabled feature)',
   );
   gateGatherAudit(ctx);
 

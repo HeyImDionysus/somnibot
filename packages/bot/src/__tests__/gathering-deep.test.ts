@@ -59,7 +59,8 @@ describe('GatheringManager deep', () => {
         { id: 'l1', source_type: 'mine', item_id: 'ore-1', item_name: 'Iron Ore', emoji: '⛏️', rarity: 'common', weight: 100, min_qty: 1, max_qty: 3 },
       ],
     });
-    const mgr = new GatheringManager(guildId as any, supa, {} as any);
+    const valkey = { set: vi.fn().mockResolvedValue('OK'), pttl: vi.fn().mockResolvedValue(0) };
+    const mgr = new GatheringManager(guildId as any, supa, valkey as any);
     const result = await mgr.gather('user-1', 'mine');
     expect(result).toBeDefined();
   });

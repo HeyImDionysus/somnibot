@@ -51,7 +51,7 @@ export async function loadConfig(supabase: SupabaseClient, guildId: string): Pro
     .maybeSingle();
 
   const config: StarboardConfig = {
-    starboard_enabled: data?.starboard_enabled ?? false,
+    starboard_enabled: data?.starboard_enabled ?? true,
     starboard_channel_id: data?.starboard_channel_id ?? null,
     starboard_threshold: data?.starboard_threshold ?? 3,
     starboard_emoji: data?.starboard_emoji ?? '⭐',

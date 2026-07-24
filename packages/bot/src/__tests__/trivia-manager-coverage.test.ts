@@ -129,6 +129,21 @@ function makeButtonInteraction(customId: string, userId = 'u1') {
   };
 }
 
+function makeGuild(id = 'g1') {
+  return { id };
+}
+
+function makeChannel(id = 'sch-ch') {
+  const message = { edit: vi.fn().mockResolvedValue(undefined) };
+  return {
+    id,
+    name: 'trivia-time',
+    isTextBased: () => true,
+    send: vi.fn().mockResolvedValue(message),
+    _message: message,
+  };
+}
+
 describe('registerTriviaManager & invalidateTriviaCache', () => {
   it('registers and invalidates cache', () => {
     const supabase = makeSupabase();
@@ -323,6 +338,81 @@ describe('TriviaManager', () => {
       await mgr.startRound(interaction2 as any);
       // supabase.from should have been called again
       expect(supabase.from).toHaveBeenCalledWith('guild_config');
+    });
+  });
+
+  // ── Hosted / scheduled rounds (no interaction) ──────────────
+  describe('startScheduledRound', () => {
+    it('posts a hosted round to the channel and registers it', async () => {
+      const channel = makeChannel('sch1');
+      const res = await mgr.startScheduledRound(makeGuild() as any, channel as any);
+      expect(res.started).toBe(true);
+      expect(channel.send).toHaveBeenCalledWith(
+        expect.objectContaining({ embeds: expect.any(Array), components: expect.any(Array) }),
+      );
+    });
+
+    it('refuses when trivia is disabled', async () => {
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({ data: { economy_trivia_enabled: false }, error: null });
+        }
+        return chainBuilder();
+      });
+      const channel = makeChannel('sch-off');
+      const res = await mgr.startScheduledRound(makeGuild() as any, channel as any);
+      expect(res.started).toBe(false);
+      expect(res.reason).toBe('trivia_disabled');
+      expect(channel.send).not.toHaveBeenCalled();
+    });
+
+    it('refuses when a round is already active in the channel', async () => {
+      const channel = makeChannel('busy');
+      await mgr.startScheduledRound(makeGuild() as any, channel as any); // opens the round
+      const res = await mgr.startScheduledRound(makeGuild() as any, channel as any);
+      expect(res.started).toBe(false);
+      expect(res.reason).toBe('round_active');
+    });
+
+    it('refuses while the per-channel cooldown breather is active', async () => {
+      await valkey.set('trivia:cooldown:g1:cdsch', '1', 'EX', 30);
+      const res = await mgr.startScheduledRound(makeGuild('g1') as any, makeChannel('cdsch') as any);
+      expect(res.started).toBe(false);
+      expect(res.reason).toBe('cooldown');
+    });
+
+    it('honors a pinned category + difficulty without emptying the pool', async () => {
+      const channel = makeChannel('sch-pin');
+      const res = await mgr.startScheduledRound(makeGuild() as any, channel as any, 'science', 'easy');
+      expect(res.started).toBe(true);
+      expect(channel.send).toHaveBeenCalled();
+    });
+
+    it('resolves the hosted round via message.edit when it ends', async () => {
+      vi.useFakeTimers();
+      const channel = makeChannel('edch');
+      try {
+        await mgr.startScheduledRound(makeGuild() as any, channel as any);
+        // Fire the 20s round timeout → endRound edits the posted message.
+        await vi.advanceTimersByTimeAsync(20_000);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(channel._message.edit).toHaveBeenCalledWith(
+        expect.objectContaining({ components: [] }),
+      );
+    });
+
+    it('returns send_failed when the channel send throws', async () => {
+      const channel = {
+        id: 'boom',
+        name: 'boom',
+        isTextBased: () => true,
+        send: vi.fn().mockRejectedValue(new Error('missing perms')),
+      };
+      const res = await mgr.startScheduledRound(makeGuild() as any, channel as any);
+      expect(res.started).toBe(false);
+      expect(res.reason).toBe('send_failed');
     });
   });
 });
