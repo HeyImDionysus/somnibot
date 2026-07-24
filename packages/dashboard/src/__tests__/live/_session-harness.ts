@@ -22,6 +22,43 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { createServerClient } from '@supabase/ssr';
 
+/** The demo local-Supabase service + anon JWTs (same as run-one-domain.mjs). */
+const DEMO_SERVICE =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU';
+const DEMO_ANON =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
+
+/**
+ * Arm the local-rig env every dashboard live test needs, filling in the demo
+ * keys/URL only where not already provided (CI passes real ones). Call at module
+ * top of a live test file, BEFORE importing any route (routes read env lazily,
+ * so this is in time). Returns the resolved SUPABASE_URL for reachability probes.
+ */
+export function armDashboardLiveEnv(): string {
+  const url = process.env.SUPABASE_URL || 'http://127.0.0.1:54321';
+  Object.assign(process.env, {
+    SUPABASE_URL: url,
+    NEXT_PUBLIC_SUPABASE_URL: url,
+    NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:
+      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY || DEMO_ANON,
+    SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || DEMO_ANON,
+    SUPABASE_SECRET_KEY: process.env.SUPABASE_SECRET_KEY || DEMO_SERVICE,
+    SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY || DEMO_SERVICE,
+  });
+  return url;
+}
+
+/** Probe whether local Supabase (GoTrue) is reachable, so a live suite self-skips
+ *  in the plain unit env (no Supabase) and runs in the Live-Stack job. */
+export async function localSupabaseReachable(url = process.env.SUPABASE_URL || 'http://127.0.0.1:54321'): Promise<boolean> {
+  try {
+    const res = await fetch(`${url}/auth/v1/health`);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export interface CookieRecord {
   name: string;
   value: string;
