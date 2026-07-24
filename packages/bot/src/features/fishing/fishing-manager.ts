@@ -25,6 +25,8 @@ interface FishingConfig {
   economy_fishing_cooldown_seconds: number;
   economy_fishing_junk_chance_pct: number;
   economy_fishing_treasure_chance_pct: number;
+  economy_fishing_collection_reward_enabled: boolean;
+  economy_fishing_collection_reward_coins: number;
 }
 
 interface FishSpecies {
@@ -150,7 +152,7 @@ export class FishingManager {
     if (this.configCache) return this.configCache;
     const { data } = await this.supabase
       .from('guild_config')
-      .select('economy_fishing_enabled, economy_fishing_cooldown_seconds, economy_fishing_junk_chance_pct, economy_fishing_treasure_chance_pct')
+      .select('economy_fishing_enabled, economy_fishing_cooldown_seconds, economy_fishing_junk_chance_pct, economy_fishing_treasure_chance_pct, economy_fishing_collection_reward_enabled, economy_fishing_collection_reward_coins')
       .eq('guild_id', this.guild.id)
       .single();
     this.configCache = data ?? {
@@ -158,6 +160,8 @@ export class FishingManager {
       economy_fishing_cooldown_seconds: 30,
       economy_fishing_junk_chance_pct: 15,
       economy_fishing_treasure_chance_pct: 5,
+      economy_fishing_collection_reward_enabled: true,
+      economy_fishing_collection_reward_coins: 5000,
     };
     return this.configCache!;
   }
@@ -342,6 +346,16 @@ export class FishingManager {
         .setColor(RARITY_COLORS[fishCatch.species.rarity])
         .addFields({ name: 'Rarity', value: fishCatch.species.rarity.toUpperCase(), inline: true })
         .setFooter({ text: `Using ${rodName}${baitUsed ? ` + ${baitUsed}` : ''}` });
+
+      // [game-economy-fishing] One-time collection completion bonus: only a fish
+      // catch can discover a new species, so the completion check lives here.
+      const completion = await this.maybePayCollectionReward(userId);
+      if (completion) {
+        embed.addFields({
+          name: '📖 Collection Complete!',
+          value: `You've discovered every species! Bonus: 💰 **${completion.coins.toLocaleString()}** coins!`,
+        });
+      }
     }
 
     // (V48-M1) cooldown was already claimed via SET NX above
@@ -387,21 +401,88 @@ export class FishingManager {
     const weightMultiplier = weight / ((picked.min_weight + picked.max_weight) / 2);
     const price = Math.round(picked.base_price * weightMultiplier);
 
-    // Record catch + pay
-    await this.supabase.from('economy_fish_catches').insert({
+    // Record catch + pay. [game-economy-fishing] Insert the catch paid=false
+    // FIRST and flip to true only once the credit lands, so a failed auto-sell
+    // payout leaves a durable unpaid row (paid=false) that an operator — or the
+    // retryUnpaidPayouts sweep — can settle exactly once. A blind re-credit is
+    // no longer possible because only still-unpaid rows are ever re-credited.
+    const { data: inserted } = await this.supabase.from('economy_fish_catches').insert({
       guild_id: this.guild.id,
       user_id: userId,
       species_id: picked.id,
       weight: parseFloat(weight.toFixed(2)),
       price_earned: price,
-    });
-    // V52-M2: check addCurrency and flag failed payout on the catch record
+      paid: false,
+    }).select('id').single();
+
     const paid = await this.addCurrency(userId, price);
-    if (!paid) {
-      log.error(`Fish catch recorded but wallet credit failed for ${userId} — ${price} coins lost`);
+    if (paid) {
+      if (inserted?.id) {
+        await this.supabase.from('economy_fish_catches').update({ paid: true }).eq('id', inserted.id);
+      }
+    } else {
+      log.error(`Fish catch recorded but wallet credit failed for ${userId} — ${price} coins left unpaid (paid=false) for retry`);
+      // Raise a payout-degraded owner alert so the unpaid catch is visible.
+      await this.raisePayoutDegradedAlert(userId, price)
+        .catch((e: unknown) => { log.warn('payout-degraded alert failed:', (e as Error)?.message ?? e); });
     }
 
     return { species: picked, weight, price, paid };
+  }
+
+  /**
+   * [game-economy-fishing] Raise a payout-degraded owner alert when a fish
+   * auto-sell credit fails, so an operator knows unpaid catches exist. Best
+   * effort — a failed alert never blocks the catch flow.
+   */
+  private async raisePayoutDegradedAlert(userId: string, amount: number): Promise<void> {
+    await this.supabase.from('alerts').insert({
+      guild_id: this.guild.id,
+      alert_type: 'fishing_payout_degraded',
+      severity: 'warning',
+      title: 'Fishing payout degraded',
+      message: `A fishing auto-sell credit of ${amount} failed for ${userId}. The catch is recorded unpaid and will be retried.`,
+      metadata: { user_id: userId, amount },
+    });
+  }
+
+  /**
+   * [game-economy-fishing] Operator/periodic retry sweep for catches whose
+   * auto-sell credit failed (paid=false). Uses an atomic claim (flip false→true,
+   * returning the claimed row) so only ONE worker credits a given row; on a
+   * credit failure the flag is reverted to false so a later sweep retries. This
+   * makes re-crediting idempotent — a row is only ever credited while unpaid.
+   * Returns the number of catches successfully settled.
+   */
+  async retryUnpaidPayouts(limit = 100): Promise<number> {
+    const { data: unpaid } = await this.supabase
+      .from('economy_fish_catches')
+      .select('id, user_id, price_earned')
+      .eq('guild_id', this.guild.id)
+      .eq('paid', false)
+      .limit(limit);
+
+    let settled = 0;
+    for (const row of (unpaid ?? []) as Array<{ id: string; user_id: string; price_earned: number }>) {
+      // Atomic claim: only the writer that flips false→true proceeds to credit.
+      const { data: claimed } = await this.supabase
+        .from('economy_fish_catches')
+        .update({ paid: true })
+        .eq('id', row.id)
+        .eq('paid', false)
+        .select('id');
+      if (!claimed || claimed.length === 0) continue; // another worker took it
+
+      const ok = await this.addCurrency(row.user_id, row.price_earned);
+      if (ok) {
+        settled++;
+      } else {
+        // Credit failed after the claim — revert so a later sweep retries.
+        await this.supabase.from('economy_fish_catches')
+          .update({ paid: false }).eq('id', row.id);
+      }
+    }
+    return settled;
   }
 
   // ── Sell fish from bucket ─────────────────────────────
@@ -426,6 +507,57 @@ export class FishingManager {
   }
 
   // ── Collection ────────────────────────────────────────
+
+  /**
+   * [game-economy-fishing] Pay the one-time collection completion bonus when a
+   * member has caught every active species. The per-member fence table
+   * (economy_fish_collection_rewards, PK guild_id+user_id) makes the payout
+   * idempotent: the upsert with ignoreDuplicates only returns a row the first
+   * time, so the bonus is credited at most once. Returns the coins paid, or null
+   * when the reward is disabled, the collection is incomplete, already claimed,
+   * or the credit failed (in which case the fence is rolled back so it retries).
+   */
+  private async maybePayCollectionReward(userId: string): Promise<{ coins: number } | null> {
+    const config = await this.getConfig();
+    if (!config.economy_fishing_collection_reward_enabled) return null;
+
+    const species = await this.getSpecies();
+    const activeCount = species.length;
+    if (activeCount === 0) return null;
+
+    const { data: caught } = await this.supabase
+      .from('economy_fish_catches')
+      .select('species_id')
+      .eq('guild_id', this.guild.id)
+      .eq('user_id', userId)
+      .limit(10000);
+
+    const activeIds = new Set(species.map((s) => s.id));
+    const discovered = new Set(
+      ((caught ?? []) as { species_id: string }[])
+        .map((c) => c.species_id)
+        .filter((id) => activeIds.has(id)),
+    );
+    if (discovered.size < activeCount) return null;
+
+    // One-time fence: the primary key makes this claim idempotent under
+    // concurrent catches. ignoreDuplicates → a conflict returns zero rows.
+    const { data: claimedRows } = await this.supabase
+      .from('economy_fish_collection_rewards')
+      .upsert({ guild_id: this.guild.id, user_id: userId }, { onConflict: 'guild_id,user_id', ignoreDuplicates: true })
+      .select('user_id');
+    if (!claimedRows || claimedRows.length === 0) return null; // already rewarded
+
+    const coins = config.economy_fishing_collection_reward_coins ?? 5000;
+    const paid = await this.addCurrency(userId, coins);
+    if (!paid) {
+      // Roll back the fence so the bonus is retried; never mark rewarded-but-unpaid.
+      await this.supabase.from('economy_fish_collection_rewards')
+        .delete().eq('guild_id', this.guild.id).eq('user_id', userId);
+      return null;
+    }
+    return { coins };
+  }
 
   async getCollection(userId: string): Promise<EmbedBuilder> {
     const species = await this.getSpecies();

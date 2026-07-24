@@ -94,15 +94,9 @@ export async function executeAutoModAction(
 
   switch (rule.action) {
     case 'delete': {
-      // Delete only — no infraction, but delete the message
-      try {
-        if (message.deletable) {
-          await message.delete();
-        }
-      } catch {
-        // Already deleted or can't delete
-      }
-
+      // Delete only — no infraction. The message was already deleted by the
+      // shared pre-switch block above (runs for every non-'warn' action), so no
+      // second delete() call is issued here.
       if (rule.log_to_mod_channel) {
         await postModLogEntry(client, {
           action: 'delete',

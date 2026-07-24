@@ -34,7 +34,7 @@ function makeSupabase() {
       resolve({ data: null, error: null }),
   };
   const supabase = { from: vi.fn(() => chain) };
-  return { supabase, inserted };
+  return { supabase, inserted, chain };
 }
 
 beforeEach(() => {
@@ -65,6 +65,59 @@ describe('POST /api/sync', () => {
     expect(body.error).toContain('manual review');
     expect(supabase.from).not.toHaveBeenCalledWith('audit_logs');
     expect(inserted).toHaveLength(0);
+  });
+
+  it('rejects update_config with an out-of-range interval (2000) with 400 and no write', async () => {
+    const { supabase, chain } = makeSupabase();
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await POST(makeRequest({
+      action: 'update_config',
+      syncEnabled: true,
+      syncIntervalMinutes: 2000,
+      autoRepair: false,
+      autoRepairEveryone: false,
+    }));
+
+    expect(res.status).toBe(400);
+    expect(chain.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects update_config with a below-minimum interval (3) with 400 — bound unified at 5', async () => {
+    const { supabase, chain } = makeSupabase();
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await POST(makeRequest({
+      action: 'update_config',
+      syncEnabled: true,
+      syncIntervalMinutes: 3,
+      autoRepair: false,
+      autoRepairEveryone: false,
+    }));
+
+    expect(res.status).toBe(400);
+    expect(chain.upsert).not.toHaveBeenCalled();
+  });
+
+  it('accepts update_config with an in-range interval (15)', async () => {
+    const { supabase, chain } = makeSupabase();
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await POST(makeRequest({
+      action: 'update_config',
+      syncEnabled: true,
+      syncIntervalMinutes: 15,
+      autoRepair: false,
+      autoRepairEveryone: false,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ success: true });
+    expect(chain.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ sync_interval_minutes: 15 }),
+      expect.anything(),
+    );
   });
 
   it('keeps legacy non-permission accepts working', async () => {

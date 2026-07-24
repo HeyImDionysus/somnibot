@@ -22,6 +22,8 @@ const log = createLogger('Gathering');
 export interface GatheringConfig {
   economy_gathering_enabled: boolean;
   economy_gathering_cooldown_seconds: number;
+  currency_name: string;
+  currency_emoji: string;
 }
 
 interface LootEntry {
@@ -143,13 +145,17 @@ export class GatheringManager {
 
     const { data } = await this.supabase
       .from('guild_config')
-      .select('economy_gathering_enabled, economy_gathering_cooldown_seconds')
+      .select('economy_gathering_enabled, economy_gathering_cooldown_seconds, currency_name, currency_emoji')
       .eq('guild_id', this.guild.id)
       .maybeSingle();
 
     this.configCache = {
       economy_gathering_enabled: data?.economy_gathering_enabled ?? false,
       economy_gathering_cooldown_seconds: data?.economy_gathering_cooldown_seconds ?? 300,
+      // White-label branding: mirror economy-manager's fallbacks so an owner who
+      // renamed their currency is honored on gather payouts too.
+      currency_name: data?.currency_name ?? 'Coins',
+      currency_emoji: data?.currency_emoji ?? '🪙',
     };
     this.configCacheTime = now;
     return this.configCache;
@@ -160,6 +166,7 @@ export class GatheringManager {
   async gather(
     userId: string,
     sourceType: LootSourceType,
+    interactionId?: string,
   ): Promise<{ embed: EmbedBuilder; result: GatherResult | null; error?: string }> {
     const config = await this.getConfig();
     if (!config.economy_gathering_enabled) {
@@ -168,6 +175,25 @@ export class GatheringManager {
         result: null,
         error: 'disabled',
       };
+    }
+
+    // Interaction-scoped idempotency fence — independent of the cooldown clock.
+    // The cooldown key only absorbs a redelivered interaction WITHIN its window;
+    // an interaction re-delivered after the cooldown elapses would otherwise
+    // re-roll and re-credit. This fence keys on the interaction id (TTL well
+    // beyond a Discord interaction token's ~15m lifetime) so a replay pays once.
+    if (interactionId) {
+      const idemKey = `economy:gather:idem:${interactionId}`;
+      const idemResult = await this.valkey.set(idemKey, '1', 'PX', 900_000, 'NX');
+      if (idemResult !== 'OK') {
+        return {
+          embed: new EmbedBuilder()
+            .setDescription('⏳ That gather was already processed.')
+            .setColor(0xffa500),
+          result: null,
+          error: 'duplicate',
+        };
+      }
     }
 
     // V49-M2: Atomic cooldown via SET PX NX — prevents two concurrent
@@ -283,7 +309,7 @@ export class GatheringManager {
         `${RARITY_LABELS[picked.rarity]}\n\n` +
         (picked.gives_item_id
           ? `Added to your inventory!`
-          : `💰 Sold for **${totalValue.toLocaleString()}** coins`) +
+          : `${config.currency_emoji} Sold for **${totalValue.toLocaleString()} ${config.currency_name}**`) +
         (toolResult.durabilityLeft !== null
           ? `\n🔧 Tool durability: **${Math.max(0, toolResult.durabilityLeft - 1)}** uses left`
           : ''),

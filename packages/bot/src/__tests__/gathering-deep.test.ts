@@ -63,4 +63,49 @@ describe('GatheringManager deep', () => {
     const result = await mgr.gather('user-1', 'mine');
     expect(result).toBeDefined();
   });
+
+  function sellableLootSupa() {
+    return makeSupa({
+      guild_config: {
+        guild_id: guildId,
+        economy_gathering_enabled: true,
+        economy_gathering_cooldown_seconds: 30,
+        currency_name: 'Gilder',
+        currency_emoji: '💠',
+      },
+      economy_loot_tables: [
+        { id: 'l1', item_name: 'Iron Ore', emoji: '⛏️', rarity: 'common', min_qty: 1, max_qty: 1, weight: 100, tool_tier: 0, sell_value: 50, gives_item_id: null },
+      ],
+    });
+  }
+
+  it('brands the coin-sale line with the configured currency, not stock "coins"', async () => {
+    const supa = sellableLootSupa();
+    const valkey = { set: vi.fn().mockResolvedValue('OK'), pttl: vi.fn().mockResolvedValue(0) };
+    const mgr = new GatheringManager(guildId as any, supa, valkey as any);
+
+    const result = await mgr.gather('user-1', 'mine', 'interaction-1');
+    expect(result.result).not.toBeNull();
+    const desc: string = (result.embed as any).data?.description ?? '';
+    expect(desc).toContain('Gilder');
+    expect(desc).toContain('💠');
+    expect(desc).not.toContain('coins');
+  });
+
+  it('idempotency fence: a redelivered interaction is refused before any credit', async () => {
+    const supa = sellableLootSupa();
+    // SET NX fails for the interaction-scoped idem key (already processed), so
+    // the gather refuses without re-rolling or re-crediting.
+    const valkey = {
+      set: vi.fn((key: string) => Promise.resolve(key.includes(':idem:') ? null : 'OK')),
+      pttl: vi.fn().mockResolvedValue(0),
+    };
+    const mgr = new GatheringManager(guildId as any, supa, valkey as any);
+
+    const result = await mgr.gather('user-1', 'mine', 'interaction-replayed');
+    expect(result.error).toBe('duplicate');
+    expect(result.result).toBeNull();
+    // No wallet credit was attempted on the replay.
+    expect(supa.rpc).not.toHaveBeenCalled();
+  });
 });

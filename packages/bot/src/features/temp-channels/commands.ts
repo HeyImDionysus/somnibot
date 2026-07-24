@@ -176,6 +176,11 @@ export async function handleTempChannelCommand(
       }
 
       case 'claim': {
+        // Owner may have disabled claiming for this hub's rooms.
+        if (hub && hub.allow_claim === false) {
+          await interaction.reply({ content: '❌ Claiming is disabled for these voice channels.', ephemeral: true });
+          return;
+        }
         if (!ownerId) {
           await interaction.reply({ content: '❌ This channel has no owner record.', ephemeral: true });
           return;

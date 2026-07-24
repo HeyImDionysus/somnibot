@@ -129,6 +129,14 @@ export async function handleWarnCommand(
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
 
+  // Server-side authorization re-check. setDefaultMemberPermissions is only a
+  // build-time hint a guild admin can override per-command via Integrations, so
+  // it cannot be the sole gate. Re-verify the invoker's live permissions here.
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ModerateMembers)) {
+    await interaction.editReply('❌ You do not have permission to warn members.');
+    return;
+  }
+
   const target = interaction.options.getMember('user');
   const reason = interaction.options.getString('reason', true);
   const guild = interaction.guild;
@@ -174,7 +182,9 @@ export async function handleWarnCommand(
 
   const expiryDays = config?.infraction_expiry_days ?? 30;
 
-  // Create infraction
+  // Create infraction. interaction.id is the idempotency key: a re-delivered
+  // /warn (gateway RESUME) reuses the same key and dedups (no duplicate row,
+  // no double escalation).
   const infraction = await createInfraction(client.supabase, {
     guildId: interaction.guildId!,
     memberId: member.id,
@@ -182,6 +192,7 @@ export async function handleWarnCommand(
     type: 'warn',
     reason,
     expiresAt: calculateExpiryDate(expiryDays),
+    correlationId: interaction.id,
   });
 
   if (!infraction) {
@@ -251,6 +262,12 @@ export async function handleMuteCommand(
   client: SomniClient,
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
+
+  // Server-side authorization re-check (see handleWarnCommand).
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ModerateMembers)) {
+    await interaction.editReply('❌ You do not have permission to mute members.');
+    return;
+  }
 
   const target = interaction.options.getMember('user');
   const duration = interaction.options.getInteger('duration', true);
@@ -348,6 +365,12 @@ export async function handleKickCommand(
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
 
+  // Server-side authorization re-check (see handleWarnCommand).
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.KickMembers)) {
+    await interaction.editReply('❌ You do not have permission to kick members.');
+    return;
+  }
+
   const target = interaction.options.getMember('user');
   const reason = interaction.options.getString('reason', true);
   const guild = interaction.guild;
@@ -435,6 +458,12 @@ export async function handleBanCommand(
   client: SomniClient,
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
+
+  // Server-side authorization re-check (see handleWarnCommand).
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.BanMembers)) {
+    await interaction.editReply('❌ You do not have permission to ban members.');
+    return;
+  }
 
   const target = interaction.options.getMember('user');
   const reason = interaction.options.getString('reason', true);
@@ -557,6 +586,12 @@ export async function handlePardonCommand(
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
 
+  // Server-side authorization re-check (see handleWarnCommand).
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ModerateMembers)) {
+    await interaction.editReply('❌ You do not have permission to pardon infractions.');
+    return;
+  }
+
   const infractionId = interaction.options.getString('infraction_id', true);
   const reason = interaction.options.getString('reason') ?? 'Pardoned by moderator';
 
@@ -610,6 +645,14 @@ export async function handleInfractionsCommand(
   client: SomniClient,
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
+
+  // Server-side authorization re-check (see handleWarnCommand). Without this an
+  // unprivileged member (once an admin overrides the default permission) could
+  // read another member's full moderation history.
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ModerateMembers)) {
+    await interaction.editReply('❌ You do not have permission to view infractions.');
+    return;
+  }
 
   const target = interaction.options.getUser('user', true);
   const activeOnly = interaction.options.getBoolean('active_only') ?? true;

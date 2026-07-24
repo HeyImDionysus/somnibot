@@ -32,6 +32,9 @@ const ticketPanelUpdate = z.object({
   dm_transcript_to_creator: z.boolean().optional(),
   max_open_per_user: z.number().int().min(1).max(10).optional(),
   introduction_message: z.string().max(2000).optional(),
+  inactivity_warn_hours: z.number().int().min(1).max(720).optional(),
+  inactivity_close_hours: z.number().int().min(1).max(720).optional(),
+  feedback_prompt_enabled: z.boolean().optional(),
   active: z.boolean().optional(),
 });
 export async function GET() {
@@ -143,7 +146,7 @@ export async function PUT(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  const updates = typedPick(body, ['name', 'channel_id', 'panel_message', 'input_mode', 'ticket_types', 'manager_roles', 'open_category_id', 'closed_category_id', 'transcript_channel_id', 'dm_transcript_to_creator', 'max_open_per_user', 'introduction_message', 'active']);
+  const updates = typedPick(body, ['name', 'channel_id', 'panel_message', 'input_mode', 'ticket_types', 'manager_roles', 'open_category_id', 'closed_category_id', 'transcript_channel_id', 'dm_transcript_to_creator', 'max_open_per_user', 'introduction_message', 'inactivity_warn_hours', 'inactivity_close_hours', 'feedback_prompt_enabled', 'active']);
 
   updates.updated_at = new Date().toISOString();
 

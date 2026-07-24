@@ -560,3 +560,53 @@ describe('invalidateRulesCache', () => {
     await expect(invalidateRulesCache(client, 'g1')).resolves.not.toThrow();
   });
 });
+
+describe('processMessage — idempotency fence', () => {
+  it('a replayed messageCreate does not double-enforce', async () => {
+    // First delivery claims the message id (SET NX -> 'OK'); the replay finds
+    // the key already set (SET NX -> null) and is a no-op. The rule action is
+    // 'delete', so a re-enforce would call message.delete() a second time.
+    const setMock = vi
+      .fn()
+      .mockResolvedValueOnce('OK')
+      .mockResolvedValueOnce(null);
+    const client = makeClient([makeRule()], { set: setMock });
+    const msg = makeMessage('badword');
+
+    const first = await processMessage(client, msg, modConfig);
+    const second = await processMessage(client, msg, modConfig);
+
+    expect(first).toBe(true);
+    expect(second).toBe(true); // handled (no-op), not re-enforced
+    // The enforcement side effect fired exactly once across the two deliveries.
+    expect(msg.delete).toHaveBeenCalledTimes(1);
+    expect(setMock).toHaveBeenCalledWith('automod:handled:g1:msg1', '1', 'EX', 900, 'NX');
+  });
+
+  it('enforces (fails open) when Valkey SET throws', async () => {
+    const setMock = vi.fn(async () => { throw new Error('valkey down'); });
+    const client = makeClient([makeRule()], { set: setMock });
+    const msg = makeMessage('badword');
+    const handled = await processMessage(client, msg, modConfig);
+    expect(handled).toBe(true);
+    expect(msg.delete).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('processMessage — owner-configurable budgets', () => {
+  it('threads automodMessageBudgetMs into the per-message deadline', async () => {
+    const client = makeClient([makeRule()]); // 'badword' delete rule
+    // An already-exhausted budget (deadline in the past) skips all rules, so a
+    // matching message is NOT enforced — proving the field drives the deadline.
+    const msg = makeMessage('badword');
+    const exhausted = await processMessage(client, msg, { ...modConfig, automodMessageBudgetMs: -1 });
+    expect(exhausted).toBe(false);
+    expect(msg.delete).not.toHaveBeenCalled();
+
+    // A normal budget evaluates the rule and enforces.
+    const msg2 = makeMessage('badword', { id: 'msg2' });
+    const enforced = await processMessage(client, msg2, { ...modConfig, automodMessageBudgetMs: 500 });
+    expect(enforced).toBe(true);
+    expect(msg2.delete).toHaveBeenCalledTimes(1);
+  });
+});

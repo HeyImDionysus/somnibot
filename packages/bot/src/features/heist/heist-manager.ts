@@ -154,6 +154,16 @@ export class HeistManager {
     return data;
   }
 
+  /**
+   * Resolve the guild's white-label currency display. Every member-facing heist
+   * embed brands with these instead of the literal word "coins", mirroring the
+   * rest of the economy (economy/commands.ts). Columns are NOT NULL, so the
+   * fallbacks only guard a null/partial config.
+   */
+  private currencyOf(config: DbGuildConfig | null): { cName: string; cEmoji: string } {
+    return { cName: config?.currency_name ?? 'Coins', cEmoji: config?.currency_emoji ?? '🪙' };
+  }
+
   async startHeist(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
@@ -163,6 +173,7 @@ export class HeistManager {
       await interaction.reply({ content: '🚫 Heists are not enabled on this server.', ephemeral: true });
       return;
     }
+    const { cName, cEmoji } = this.currencyOf(config);
 
     // V53-L3: Valkey-based atomic cooldown (defense-in-depth alongside DB check + unique index)
     const cooldownSecs = config.economy_heist_cooldown_seconds ?? 300;
@@ -228,7 +239,7 @@ export class HeistManager {
 
     if (!wallet || wallet.wallet < entryFee) {
       await interaction.reply({
-        content: `❌ You need **${entryFee.toLocaleString()}** coins to start a heist.`,
+        content: `❌ You need ${cEmoji} **${entryFee.toLocaleString()}** ${cName} to start a heist.`,
         ephemeral: true,
       });
       return;
@@ -239,7 +250,7 @@ export class HeistManager {
       p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
     });
     if (feeErr) {
-      await interaction.reply({ content: `❌ Payment failed — you need **${entryFee.toLocaleString()}** coins.`, ephemeral: true });
+      await interaction.reply({ content: `❌ Payment failed — you need ${cEmoji} **${entryFee.toLocaleString()}** ${cName}.`, ephemeral: true });
       return;
     }
 
@@ -333,9 +344,9 @@ export class HeistManager {
         .setTitle(`🏴‍☠️ Heist: ${target.name}`)
         .setDescription(
           `<@${userId}> is assembling a crew to rob **${target.name}**!\n\n` +
-          `💰 Potential payout: **${basePayout.toLocaleString()}** coins (split among crew)\n` +
+          `💰 Potential payout: ${cEmoji} **${basePayout.toLocaleString()}** ${cName} (split among crew)\n` +
           `🎯 Base success chance: **${baseChance}%** (+7% per extra member)\n` +
-          `💵 Entry fee: **${entryFee.toLocaleString()}** coins\n` +
+          `💵 Entry fee: ${cEmoji} **${entryFee.toLocaleString()}** ${cName}\n` +
           `👥 Crew: 1/${maxParticipants}\n\n` +
           `Use \`/heist join\` within **${joinWindowSecs}s** to join the crew!`
         )
@@ -353,6 +364,7 @@ export class HeistManager {
       await interaction.reply({ content: '🚫 Heists are not enabled.', ephemeral: true });
       return;
     }
+    const { cName, cEmoji } = this.currencyOf(config);
 
     // Find the active recruiting heist for display context (target name / max).
     // This read is NOT a guard — the atomic heist_join RPC below re-checks the
@@ -414,7 +426,7 @@ export class HeistManager {
       // claiming any charge or refund; the user can simply retry.
       log.error(`heist_join failed for heist ${heist.id}, user ${userId}:`, joinErr.message);
       await interaction.reply({
-        content: '❌ Something went wrong joining the heist. No coins were charged — please try `/heist join` again.',
+        content: `❌ Something went wrong joining the heist. No ${cName} were charged — please try \`/heist join\` again.`,
         ephemeral: true,
       });
       return;
@@ -429,7 +441,7 @@ export class HeistManager {
       // The claim won the row lock first (or the heist is gone). Nothing was
       // charged — no refund to confirm, no stranded fee, no "Joined" embed.
       await interaction.reply({
-        content: '❌ The heist already got underway before you could join. No coins were charged.',
+        content: `❌ The heist already got underway before you could join. No ${cName} were charged.`,
         ephemeral: true,
       });
       return;
@@ -444,7 +456,7 @@ export class HeistManager {
     }
     if (joinStatus === 'insufficient_funds') {
       await interaction.reply({
-        content: `❌ You need **${entryFee.toLocaleString()}** coins to join.`,
+        content: `❌ You need ${cEmoji} **${entryFee.toLocaleString()}** ${cName} to join.`,
         ephemeral: true,
       });
       return;
@@ -493,6 +505,7 @@ export class HeistManager {
 
   async viewHeist(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
+    const { cName, cEmoji } = this.currencyOf(await this.getConfig(guildId));
 
     const { data: heist } = await this.supabase
       .from('economy_heists')
@@ -534,7 +547,7 @@ export class HeistManager {
           .setDescription(
             `${resultEmoji} **${last.status === 'success' ? 'SUCCESS' : 'FAILED'}**\n\n` +
             `👥 Crew: ${lastCrew.join(', ')}\n` +
-            `💰 Payout: **${last.target_payout.toLocaleString()}** coins\n` +
+            `💰 Payout: ${cEmoji} **${last.target_payout.toLocaleString()}** ${cName}\n` +
             `📅 ${new Date(last.resolved_at).toLocaleString()}`
           )
           .setColor(last.status === 'success' ? 0x57F287 : 0xED4245)],
@@ -559,7 +572,7 @@ export class HeistManager {
           `Status: **${heist.status}**\n\n` +
           `👥 Crew: ${participants}\n` +
           `🎯 Success chance: **${displayChance}%**\n` +
-          `💰 Potential payout: **${heist.target_payout.toLocaleString()}** coins\n` +
+          `💰 Potential payout: ${cEmoji} **${heist.target_payout.toLocaleString()}** ${cName}\n` +
           `⏱️ ${remainingSecs > 0 ? `Resolves in **${remainingSecs}s**` : 'Resolving...'}`
         )
         .setColor(0xFFA500)],
@@ -572,6 +585,7 @@ export class HeistManager {
     const config = await this.getConfig(guildId);
     const minParticipants = config?.economy_heist_min_participants ?? 2;
     const entryFee = config?.economy_heist_entry_fee ?? 100;
+    const { cName, cEmoji } = this.currencyOf(config);
 
     // Read the row for the display fields (target, chance). Not a guard —
     // the atomic claim below is the sole authority on whether we resolve.
@@ -873,7 +887,7 @@ export class HeistManager {
       // We only reach here once every credit succeeded (the failedPayouts guard
       // above returns early otherwise), so every crew member is paid.
       const crewList = partList
-        .map((p) => `• <@${p.user_id}> — **${p.role}** (+${perPerson.toLocaleString()} coins)`)
+        .map((p) => `• <@${p.user_id}> — **${p.role}** (+${cEmoji} ${perPerson.toLocaleString()} ${cName})`)
         .join('\n');
 
       const story = randomPick(SUCCESS_STORIES);
@@ -885,7 +899,7 @@ export class HeistManager {
             .setTitle(`✅ Heist Success: ${heist.target_name}`)
             .setDescription(
               `${story}\n\n` +
-              `💰 Total haul: **${heist.target_payout.toLocaleString()}** coins\n\n` +
+              `💰 Total haul: ${cEmoji} **${heist.target_payout.toLocaleString()}** ${cName}\n\n` +
               `**Crew Payouts:**\n${crewList}`
             )
             .setColor(0x57F287)],
@@ -920,7 +934,7 @@ export class HeistManager {
           .setDescription(
             `${story}\n\n` +
             `👥 ${participants.map((id) => `<@${id}>`).join(', ')}\n\n` +
-            `Each crew member lost their **${entryFee.toLocaleString()}** coin entry fee.`
+            `Each crew member lost their ${cEmoji} **${entryFee.toLocaleString()}** ${cName} entry fee.`
           )
           .setColor(0xED4245)],
       });

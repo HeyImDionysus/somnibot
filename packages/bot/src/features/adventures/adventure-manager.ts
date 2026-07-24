@@ -70,6 +70,7 @@ interface Session {
   currency_collected: number;
   message_id: string | null;
   channel_id: string | null;
+  scenes_traversed?: number;
 }
 
 // ── Difficulty Multipliers ────────────────────────────────
@@ -748,6 +749,15 @@ export class AdventureManager {
       }
     }
 
+    // Count this scene against the configured cap. Once a run has traversed
+    // economy_adventure_max_scenes scenes it is forced to an ending regardless
+    // of the scene graph, so looping / overlong custom adventures always resolve
+    // (adventure-max-scenes: "upper bound on scenes an adventure may traverse
+    // before it is forced to an ending").
+    const config = await this.getConfig();
+    const scenesTraversed = (sess.scenes_traversed ?? 1) + 1;
+    const capReached = scenesTraversed >= config.economy_adventure_max_scenes;
+
     // Update session
     await this.supabase
       .from('economy_adventure_sessions')
@@ -755,23 +765,29 @@ export class AdventureManager {
         current_scene_id: next.id,
         loot_collected: lootCollected,
         currency_collected: currencyCollected,
+        scenes_traversed: scenesTraversed,
       })
       .eq('id', sessionId);
 
-    if (next.is_ending) {
-      // End adventure
-      const endType = next.ending_type ?? 'success';
+    if (next.is_ending || capReached) {
+      // A scene flagged as an ending resolves with its own ending_type; a run
+      // forced to stop by the scene cap resolves as a success with what it has
+      // collected (the member is not penalised for the owner's length bound).
+      const endType: AdventureEndingType = next.is_ending ? (next.ending_type ?? 'success') : 'success';
       const finalLoot = endType === 'death' ? [] : endType === 'partial' ? lootCollected.slice(0, Math.ceil(lootCollected.length / 2)) : lootCollected;
       const finalCurrency = endType === 'death' ? 0 : endType === 'partial' ? Math.floor(currencyCollected / 2) : currencyCollected;
 
       await this.endSession(sess, endType === 'death' ? 'failed' : 'completed', finalLoot, finalCurrency);
 
       const color = endType === 'success' ? 0x4caf50 : endType === 'death' ? 0xf44336 : 0xff9800;
-      const title = endType === 'success' ? '🎉 Adventure Complete!' : endType === 'death' ? '💀 Adventure Failed!' : '⚠️ Partial Success';
+      const title = next.is_ending
+        ? (endType === 'success' ? '🎉 Adventure Complete!' : endType === 'death' ? '💀 Adventure Failed!' : '⚠️ Partial Success')
+        : '🏁 Journey\'s End';
+      const capNote = next.is_ending ? '' : `\n\n_Your journey reached its end after ${config.economy_adventure_max_scenes} scenes._`;
 
       const embed = new EmbedBuilder()
         .setTitle(title)
-        .setDescription(next.text + '\n\n' + this.buildRewardsSummary(finalLoot, finalCurrency))
+        .setDescription(next.text + capNote + '\n\n' + this.buildRewardsSummary(finalLoot, finalCurrency))
         .setColor(color);
 
       await interaction.update({ embeds: [embed], components: [] });

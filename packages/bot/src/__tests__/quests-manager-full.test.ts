@@ -214,6 +214,32 @@ describe('QuestsManager.claimQuests', () => {
     }));
   });
 
+  // [game-economy-quests] quest-reward-base must scale the coin payout.
+  it('scales the coin payout by economy_quest_reward_base', async () => {
+    const claimed = [{ id: 'q1', reward_currency: 100, reward_xp: 50 }];
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'guild_config') {
+          return supaChain({ economy_quests_enabled: true, economy_quest_reward_base: 500 });
+        }
+        return supaChain();
+      }),
+      rpc: vi.fn(async (fn: string) => {
+        if (fn === 'economy_quest_atomic_claim') return { data: claimed, error: null };
+        return { data: null, error: null };
+      }),
+    } as any;
+    const mgr = new QuestsManager(supabase);
+    const interaction = makeInteraction();
+
+    await mgr.claimQuests(interaction);
+
+    // Active Member seeds base-100 at reward_currency=100; base=500 → 100*5.
+    expect(supabase.rpc).toHaveBeenCalledWith('economy_add_balance', expect.objectContaining({
+      p_amount: 500,
+    }));
+  });
+
   it('reverts claims on payout failure', async () => {
     const claimed = [{ id: 'q1', reward_currency: 100, reward_xp: 0 }];
     const supabase = {

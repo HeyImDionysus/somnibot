@@ -1,0 +1,168 @@
+/**
+ * POST /api/portal/cancel — Buyer self-service subscription cancellation.
+ *
+ * Commerce-portal contracts self-service-cancellation (default ON) with
+ * cancellation-timing = end-of-term: the buyer schedules cancellation, keeps
+ * access until the current term ends, and the subscription does not renew.
+ *
+ * This route:
+ *  - authenticates the portal customer via x-portal-token,
+ *  - verifies the target subscription entitlement belongs to the customer,
+ *  - cancels the PayPal subscription so it stops renewing,
+ *  - marks the entitlement's cancellation as scheduled (status stays 'active'
+ *    until expires_at — end of the current term),
+ *  - is idempotent: a second confirm resolves to the single scheduled
+ *    cancellation without a second provider call or state change.
+ *
+ * Body: { entitlement_id: uuid }
+ */
+import { NextResponse, type NextRequest } from 'next/server';
+import { createAdminSupabase } from '@/lib/supabase/admin';
+import { createHash } from 'crypto';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+import { rateLimits } from '@/lib/api/rate-limit';
+import { getPayPalRuntimeConfig, getPayPalToken } from '@/lib/paypal';
+
+function hashToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+const portalCancelSchema = z.object({
+  entitlement_id: z.string().uuid(),
+});
+
+function scheduledResponse(entitlement: { id: string; status: string; expires_at: string | null; cancelled_at: string | null }, deduped: boolean) {
+  return NextResponse.json({
+    success: true,
+    deduped,
+    message: 'cancellation-scheduled',
+    data: {
+      entitlement_id: entitlement.id,
+      status: entitlement.status,
+      // Access continues until the end of the current term.
+      access_until: entitlement.expires_at,
+      cancellation_scheduled_at: entitlement.cancelled_at,
+    },
+  });
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const token = request.headers.get('x-portal-token');
+    if (!token) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+    }
+
+    const admin = createAdminSupabase();
+    const { data: session } = await admin
+      .from('portal_sessions')
+      .select('customer_id, guild_id')
+      .eq('token_hash', hashToken(token))
+      .eq('revoked', false)
+      .gt('expires_at', new Date().toISOString())
+      .single();
+
+    if (!session) {
+      return NextResponse.json({ error: 'Invalid or expired session' }, { status: 401 });
+    }
+
+    const rl = await rateLimits.portalData(hashToken(token));
+    if (rl.limited) {
+      return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
+    }
+
+    const parsed = await parseBody(request, portalCancelSchema);
+    if (!parsed.ok) return parsed.response;
+    const { entitlement_id } = parsed.data;
+
+    // The entitlement MUST be a subscription owned by this customer in this guild.
+    const { data: entitlement } = await admin
+      .from('entitlements')
+      .select('id, status, type, expires_at, cancelled_at, order_id')
+      .eq('id', entitlement_id)
+      .eq('customer_id', session.customer_id)
+      .eq('guild_id', session.guild_id)
+      .maybeSingle();
+
+    if (!entitlement || entitlement.type !== 'subscription') {
+      return NextResponse.json({ error: 'Subscription not found' }, { status: 404 });
+    }
+    if (!['active', 'grace_period'].includes(entitlement.status)) {
+      return NextResponse.json({ error: 'This subscription is not active.' }, { status: 409 });
+    }
+
+    // Idempotent: already scheduled → return the single scheduled cancellation
+    // without a second provider call.
+    if (entitlement.cancelled_at) {
+      return scheduledResponse(entitlement, true);
+    }
+
+    // Cancel the PayPal subscription so it stops renewing. Access continues until
+    // the current term end (expires_at) — this is the end-of-term effect.
+    if (entitlement.order_id) {
+      const { data: order } = await admin
+        .from('orders')
+        .select('paypal_subscription_id')
+        .eq('id', entitlement.order_id)
+        .maybeSingle();
+      const subscriptionId = order?.paypal_subscription_id ?? null;
+
+      if (subscriptionId) {
+        const config = await getPayPalRuntimeConfig();
+        const paypalToken = await getPayPalToken(config);
+        if (!paypalToken) {
+          return NextResponse.json(
+            { error: 'Payment provider unavailable. Please try again shortly.' },
+            { status: 502 },
+          );
+        }
+        const res = await fetch(`${config.apiBase}/v1/billing/subscriptions/${subscriptionId}/cancel`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${paypalToken}` },
+          body: JSON.stringify({ reason: 'Customer requested cancellation via self-service portal' }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        // 204 = cancelled. 422 = subscription already cancelled/invalid state at
+        // PayPal — treat as the desired end state (idempotent). Any other status
+        // means we could not stop renewal; do NOT mark scheduled.
+        if (!res.ok && res.status !== 422) {
+          return NextResponse.json(
+            { error: 'Could not schedule cancellation with the payment provider. Please try again.' },
+            { status: 502 },
+          );
+        }
+      }
+    }
+
+    // Mark the scheduled cancellation. The `.is('cancelled_at', null)` guard makes
+    // the write single-winner under a race; status stays 'active' until expires_at.
+    const now = new Date().toISOString();
+    const { data: updated } = await admin
+      .from('entitlements')
+      .update({ cancelled_at: now, updated_at: now })
+      .eq('id', entitlement.id)
+      .eq('customer_id', session.customer_id)
+      .is('cancelled_at', null)
+      .select('id, status, expires_at, cancelled_at')
+      .maybeSingle();
+
+    if (updated) {
+      return scheduledResponse(updated, false);
+    }
+
+    // A concurrent confirm already scheduled it — resolve to that single entry.
+    const { data: current } = await admin
+      .from('entitlements')
+      .select('id, status, expires_at, cancelled_at')
+      .eq('id', entitlement.id)
+      .maybeSingle();
+    return scheduledResponse(
+      current ?? { id: entitlement.id, status: entitlement.status, expires_at: entitlement.expires_at, cancelled_at: now },
+      true,
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Unknown error';
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
+}

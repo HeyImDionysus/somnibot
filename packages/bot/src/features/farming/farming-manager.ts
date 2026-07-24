@@ -292,17 +292,33 @@ export class FarmingManager {
       return { embed: new EmbedBuilder().setDescription('❌ No crops ready to harvest!').setColor(0xff0000) };
     }
 
-    // Harvest all ready crops
-    const harvested: Array<{ crop: Crop; plot: Plot }> = [];
-    for (const plot of readyPlots) {
-      const crop = cropMap.get(plot.crop_id!);
-      if (!crop) continue;
-      harvested.push({ crop, plot });
+    // Atomically transition ONLY the ready plots that are still un-harvested and
+    // pay out exactly the rows THIS call flipped. The `.eq('harvested', false)`
+    // guard turns the read-then-write into a compare-and-set: two simultaneous
+    // /farm harvest calls both see the plots ready, but only the winner's UPDATE
+    // matches un-harvested rows — the loser gets zero rows back and credits
+    // nothing, so the ready crops pay out exactly once (fixes the RACE double-pay).
+    const readyIds = readyPlots.map((p) => p.id);
+    const { data: claimedRows } = await this.supabase.from('economy_farm_plots')
+      .update({ harvested: true })
+      .eq('guild_id', this.guild.id)
+      .eq('user_id', userId)
+      .in('id', readyIds)
+      .eq('harvested', false)
+      .select('id, crop_id');
 
-      // Mark harvested
-      await this.supabase.from('economy_farm_plots')
-        .update({ harvested: true })
-        .eq('id', plot.id);
+    const plotById = new Map(readyPlots.map((p) => [p.id, p]));
+    const harvested: Array<{ crop: Crop; plot: Plot }> = [];
+    for (const row of (claimedRows as Array<{ id: string; crop_id: string | null }> | null) ?? []) {
+      const plot = plotById.get(row.id);
+      const crop = row.crop_id ? cropMap.get(row.crop_id) : undefined;
+      if (!plot || !crop) continue;
+      harvested.push({ crop, plot });
+    }
+
+    if (harvested.length === 0) {
+      // A concurrent /farm harvest already claimed every ready plot.
+      return { embed: new EmbedBuilder().setDescription('❌ No crops ready to harvest!').setColor(0xff0000) };
     }
 
     // Calculate earnings and return seeds

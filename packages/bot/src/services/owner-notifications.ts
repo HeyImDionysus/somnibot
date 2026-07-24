@@ -20,6 +20,9 @@ const log = createLogger('OwnerNotify');
 interface NotificationConfig {
   ownerDiscordId: string;
   adminChannelId: string | null;
+  // commerce-fraud controls (staff-alert-channel / owner-dm-on-critical).
+  fraudStaffChannelId: string | null;
+  fraudOwnerDmOnCritical: boolean;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -49,31 +52,30 @@ export class OwnerNotificationService {
 
     const { data: guildConfig } = await this.supabase
       .from('guild_config')
-      .select('mod_log_channel_id')
+      .select('mod_log_channel_id, fraud_staff_alert_channel_id, fraud_owner_dm_on_critical')
       .eq('guild_id', this.guildId)
       .maybeSingle();
+
+    const rawStaffChannel = guildConfig?.fraud_staff_alert_channel_id ?? null;
 
     this.config = {
       ownerDiscordId: guild?.owner_discord_id ?? '',
       adminChannelId: guildConfig?.mod_log_channel_id ?? null,
+      // Treat empty string (catalog default for staff-alert-channel) as unset.
+      fraudStaffChannelId: rawStaffChannel && rawStaffChannel.length > 0 ? rawStaffChannel : null,
+      fraudOwnerDmOnCritical: guildConfig?.fraud_owner_dm_on_critical ?? true,
     };
 
     // Subscribe to critical events — store references for stop() cleanup.
 
-    // fraud.detected — emitted by fraud-detection service when signals are created
+    // fraud.detected — emitted by fraud-detection service when signals are created.
+    // Contract (commerce-fraud): mirror every fraud alert to the configured staff
+    // channel, and DM the owner ONLY for critical signals when owner-dm-on-critical
+    // is on — never leak buyer payment details.
     this.listen('fraud.detected', (event) => {
       const data = event.data as Record<string, unknown>;
-      this.notify('fraud.detected', {
-        title: '🚨 Fraud Detected',
-        description: `A potentially fraudulent transaction was flagged.`,
-        color: 0xFF0000,
-        fields: [
-          { name: 'Signal', value: String(data.signal ?? 'Unknown'), inline: true },
-          { name: 'Order', value: String(data.orderId ?? 'N/A'), inline: true },
-          { name: 'Customer', value: data.discordId ? `<@${data.discordId}>` : 'Unknown', inline: true },
-          { name: 'Action', value: String(data.action ?? 'Flagged for review'), inline: false },
-        ],
-      });
+      const severity = String(data.severity ?? '');
+      void this.notifyFraud(severity, data);
     });
 
     // incident.created — emitted when a critical incident is auto-created
@@ -190,6 +192,58 @@ export class OwnerNotificationService {
     }
 
     // DM the owner
+    if (this.config.ownerDiscordId) {
+      try {
+        const owner = await this.client.users.fetch(this.config.ownerDiscordId);
+        await owner.send({ embeds: [discordEmbed] });
+      } catch (err) {
+        log.error('Failed to DM owner:', { error: String(err) });
+      }
+    }
+  }
+
+  /**
+   * Fraud-specific notification honoring the commerce-fraud contract:
+   *  - mirror EVERY fraud signal to the configured staff channel (if set),
+   *    carrying only type/severity/subject — never buyer payment details;
+   *  - DM the owner ONLY for critical signals and only when
+   *    owner-dm-on-critical is enabled (default true), throttled by cooldown.
+   */
+  private async notifyFraud(severity: string, data: Record<string, unknown>): Promise<void> {
+    if (!this.config) return;
+
+    const discordEmbed = new EmbedBuilder()
+      .setColor(severity === 'critical' ? 0xFF0000 : 0xFFAA00)
+      .setTitle('🚨 Fraud Signal')
+      .setDescription('A potentially fraudulent pattern was flagged for review.')
+      .setTimestamp()
+      .setFooter({ text: 'SomniBot Fraud Alert' })
+      .addFields(
+        { name: 'Signal', value: String(data.signal ?? 'Unknown'), inline: true },
+        { name: 'Severity', value: (severity || 'unknown').toUpperCase(), inline: true },
+        { name: 'Subject', value: data.discordId ? `<@${String(data.discordId)}>` : 'Unknown', inline: true },
+      );
+
+    // Staff-channel mirror — every fraud signal, no payment details.
+    if (this.config.fraudStaffChannelId) {
+      try {
+        const guild = this.client.guilds.cache.get(this.guildId);
+        const channel = guild?.channels.cache.get(this.config.fraudStaffChannelId);
+        if (channel && 'send' in channel) {
+          await (channel as { send: (opts: unknown) => Promise<unknown> }).send({ embeds: [discordEmbed] });
+        }
+      } catch (err) {
+        log.error('Failed to mirror fraud alert to staff channel:', { error: String(err) });
+      }
+    }
+
+    // Owner DM — critical only, gated on the owner-dm-on-critical toggle.
+    if (severity !== 'critical' || !this.config.fraudOwnerDmOnCritical) return;
+
+    const lastSent = this.cooldowns.get('fraud.detected') ?? 0;
+    if (Date.now() - lastSent < this.cooldownMs) return;
+    this.cooldowns.set('fraud.detected', Date.now());
+
     if (this.config.ownerDiscordId) {
       try {
         const owner = await this.client.users.fetch(this.config.ownerDiscordId);

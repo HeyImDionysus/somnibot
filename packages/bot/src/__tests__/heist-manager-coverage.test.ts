@@ -236,7 +236,7 @@ describe('HeistManager', () => {
       const interaction = makeInteraction();
       await mgr.startHeist(interaction as any);
       expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('coins to start') }),
+        expect.objectContaining({ content: expect.stringMatching(/coins to start/i) }),
       );
     });
 
@@ -449,7 +449,7 @@ describe('HeistManager', () => {
       await mgr.joinHeist(interaction as any);
       const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
       expect(replyArg.embeds).toBeUndefined();
-      expect(replyArg.content).toContain('coins to join');
+      expect(replyArg.content.toLowerCase()).toContain('coins to join');
     });
 
     // ── Root serialization fix (codex heist-manager.ts:797) ─────────────────
@@ -473,7 +473,7 @@ describe('HeistManager', () => {
       const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
       expect(replyArg.embeds).toBeUndefined();
       expect(replyArg.content).toContain('already got underway');
-      expect(replyArg.content).toContain('No coins were charged');
+      expect(replyArg.content.toLowerCase()).toContain('no coins were charged');
     });
 
     it('surfaces a clean error and confirms no charge when heist_join errors (tx rolled back)', async () => {
@@ -487,7 +487,7 @@ describe('HeistManager', () => {
       expect(rpcCalls.some((c) => c.fn === 'economy_add_balance')).toBe(false);
       const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
       expect(replyArg.embeds).toBeUndefined();
-      expect(replyArg.content).toContain('No coins were charged');
+      expect(replyArg.content.toLowerCase()).toContain('no coins were charged');
     });
   });
 

@@ -18,7 +18,10 @@ vi.mock('@somnibot/shared', () => ({
 
 vi.mock('discord.js', () => {
   class EmbedBuilder {
-    setColor() { return this; } setTitle() { return this; } setDescription() { return this; }
+    data: Record<string, unknown> = {};
+    setColor() { return this; }
+    setTitle(t: unknown) { this.data.title = t; return this; }
+    setDescription(d: unknown) { this.data.description = d; return this; }
     setThumbnail() { return this; } setTimestamp() { return this; } setFooter() { return this; }
     addFields() { return this; } setAuthor() { return this; } setImage() { return this; }
   }
@@ -734,7 +737,7 @@ describe('handler interaction routing', () => {
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('not enabled') }));
   });
 
-  it('music command replies disabled when no manager', async () => {
+  it('music command replies infra-unavailable when no manager but music_enabled is not false', async () => {
     const setup2 = makeClient();
     (setup2.client.router.getContextSync('guild-1') as any)._managers.delete('musicPlayer');
     registerEvents(setup2.client);
@@ -743,7 +746,36 @@ describe('handler interaction routing', () => {
       commandName: 'play',
     });
     await setup2.fire('interactionCreate', interaction);
-    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('not enabled') }));
+    // guild_config.music_enabled is not false here (default chain omits it), so the
+    // decline is the distinct infrastructure/startup message, not the disabled notice.
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('temporarily unavailable') }));
+  });
+
+  it('music command replies with a branded, guild-named notice when music_enabled=false', async () => {
+    // guild_config.music_enabled=false -> the catalog `music-disabled` branded embed.
+    const chain2: any = {};
+    for (const m of ['from', 'select', 'eq', 'maybeSingle']) {
+      chain2[m] = vi.fn(() => chain2);
+    }
+    chain2.maybeSingle = vi.fn().mockResolvedValue({ data: { music_enabled: false }, error: null });
+    const setup2 = makeClient();
+    (setup2.client.router.getContextSync('guild-1') as any)._managers.delete('musicPlayer');
+    setup2.client.supabase.from = vi.fn(() => chain2);
+    registerEvents(setup2.client);
+    const interaction = makeInteraction({
+      isChatInputCommand: vi.fn(() => true),
+      commandName: 'queue',
+      guild: { id: 'guild-1', name: 'AcmeBrand' },
+    });
+    await setup2.fire('interactionCreate', interaction);
+    const call = (interaction.reply as any).mock.calls[0][0];
+    expect(call.ephemeral).toBe(true);
+    expect(call.embeds).toHaveLength(1);
+    const desc = String(call.embeds[0].data.description);
+    // Names the guild brand (white-label) and carries the catalog "switched off" copy.
+    expect(desc).toContain('AcmeBrand');
+    expect(desc).toContain('switched off');
+    expect(desc).toContain('dashboard');
   });
 
   it('games command replies disabled when no manager', async () => {

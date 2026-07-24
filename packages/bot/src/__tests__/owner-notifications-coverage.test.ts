@@ -122,17 +122,75 @@ describe('OwnerNotificationService', () => {
   });
 
   describe('fraud.detected', () => {
-    it('sends notification on fraud detection', async () => {
+    it('DMs the owner for a critical signal', async () => {
       await service.start();
       eventBus._emit('fraud.detected', {
-        signal: 'duplicate_payment',
-        orderId: 'order123',
+        signal: 'velocity',
+        severity: 'critical',
         discordId: 'u1',
-        action: 'Blocked',
+        action: 'Flagged',
       });
       // Wait for async notify
       await new Promise((r) => process.nextTick(r));
       expect(client._sendMock).toHaveBeenCalled();
+    });
+
+    it('does NOT DM the owner for a non-critical signal (no staff channel)', async () => {
+      await service.start();
+      eventBus._emit('fraud.detected', {
+        signal: 'payment_pattern',
+        severity: 'medium',
+        discordId: 'u1',
+      });
+      await new Promise((r) => process.nextTick(r));
+      // No staff channel configured + non-critical → neither mirror nor DM.
+      expect(client._sendMock).not.toHaveBeenCalled();
+    });
+
+    it('does NOT DM the owner when owner-dm-on-critical is disabled', async () => {
+      supabase = makeSupabase({
+        guild: { owner_discord_id: 'owner1' },
+        guild_config: { mod_log_channel_id: 'ch1', fraud_owner_dm_on_critical: false },
+      });
+      client = makeClient({ hasChannel: false });
+      service = new OwnerNotificationService(client as any, 'g1', supabase as any, eventBus as any);
+      await service.start();
+      eventBus._emit('fraud.detected', { signal: 'velocity', severity: 'critical', discordId: 'u1' });
+      await new Promise((r) => process.nextTick(r));
+      expect(client._sendMock).not.toHaveBeenCalled();
+    });
+
+    it('mirrors every signal to the staff channel and DMs owner on critical', async () => {
+      supabase = makeSupabase({
+        guild: { owner_discord_id: 'owner1' },
+        guild_config: { mod_log_channel_id: 'ch1', fraud_staff_alert_channel_id: 'staff1', fraud_owner_dm_on_critical: true },
+      });
+      client = makeClient({ hasChannel: true });
+      service = new OwnerNotificationService(client as any, 'g1', supabase as any, eventBus as any);
+      await service.start();
+      eventBus._emit('fraud.detected', { signal: 'velocity', severity: 'critical', discordId: 'u1' });
+      await new Promise((r) => process.nextTick(r));
+      // One send to the staff channel mirror + one owner DM.
+      expect(client._sendMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('mirrors a non-critical signal to the staff channel without DMing owner', async () => {
+      const dmMock = vi.fn().mockResolvedValue(undefined);
+      const channelSend = vi.fn().mockResolvedValue(undefined);
+      const localClient = {
+        guilds: { cache: { get: vi.fn().mockReturnValue({ channels: { cache: { get: vi.fn().mockReturnValue({ send: channelSend }) } } }) } },
+        users: { fetch: vi.fn().mockResolvedValue({ send: dmMock }) },
+      };
+      supabase = makeSupabase({
+        guild: { owner_discord_id: 'owner1' },
+        guild_config: { mod_log_channel_id: 'ch1', fraud_staff_alert_channel_id: 'staff1', fraud_owner_dm_on_critical: true },
+      });
+      service = new OwnerNotificationService(localClient as any, 'g1', supabase as any, eventBus as any);
+      await service.start();
+      eventBus._emit('fraud.detected', { signal: 'payment_pattern', severity: 'medium', discordId: 'u1' });
+      await new Promise((r) => process.nextTick(r));
+      expect(channelSend).toHaveBeenCalledTimes(1);
+      expect(dmMock).not.toHaveBeenCalled();
     });
   });
 
@@ -230,12 +288,13 @@ describe('OwnerNotificationService', () => {
     it('respects cooldown for same event type', async () => {
       await service.start();
 
-      eventBus._emit('fraud.detected', { signal: 'test1' });
+      eventBus._emit('fraud.detected', { signal: 'test1', severity: 'critical' });
       await new Promise((r) => process.nextTick(r));
       const firstCallCount = client._sendMock.mock.calls.length;
+      expect(firstCallCount).toBeGreaterThan(0);
 
-      // Emit again immediately — should be throttled
-      eventBus._emit('fraud.detected', { signal: 'test2' });
+      // Emit again immediately — the owner-DM path should be throttled
+      eventBus._emit('fraud.detected', { signal: 'test2', severity: 'critical' });
       await new Promise((r) => process.nextTick(r));
       expect(client._sendMock.mock.calls.length).toBe(firstCallCount);
     });
@@ -251,7 +310,7 @@ describe('OwnerNotificationService', () => {
       service = new OwnerNotificationService(client as any, 'g1', supabase as any, eventBus as any);
       await service.start();
 
-      eventBus._emit('fraud.detected', { signal: 'test' });
+      eventBus._emit('fraud.detected', { signal: 'test', severity: 'critical' });
       await new Promise((r) => process.nextTick(r));
       expect(client._sendMock).toHaveBeenCalled();
     });
@@ -262,7 +321,7 @@ describe('OwnerNotificationService', () => {
       client.users.fetch.mockRejectedValue(new Error('Cannot DM user'));
       await service.start();
 
-      eventBus._emit('fraud.detected', { signal: 'test' });
+      eventBus._emit('fraud.detected', { signal: 'test', severity: 'critical' });
       await new Promise((r) => process.nextTick(r));
       // Should not throw
     });

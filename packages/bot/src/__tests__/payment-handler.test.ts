@@ -522,3 +522,52 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
     },
   );
 });
+
+describe('handleBuyButton — white-label PayPal checkout brand', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('uses the owner store_brand_name as the PayPal one-time checkout brand', async () => {
+    const { supabase } = makeQueryEngine({
+      products: [oneTimeProduct],
+      customers: [{ id: 'cust-1', guild_id: VICTIM_GUILD, discord_id: 'user-1' }],
+      entitlements: [],
+      guild_config: [{ guild_id: VICTIM_GUILD, store_brand_name: 'Acme Emporium', store_show_powered_by: true }],
+      orders: [],
+    });
+    const fetchMock = makePayPalFetch();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await handleBuyButton(
+      makeInteraction(), supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    const orderCall = fetchMock.mock.calls.find(([u]) => String(u).includes('/v2/checkout/orders'));
+    expect(orderCall).toBeDefined();
+    const payload = JSON.parse((orderCall![1] as RequestInit).body as string);
+    expect(payload.application_context.brand_name).toBe('Acme Emporium');
+  });
+
+  it('falls back to the guild name when no owner brand is configured', async () => {
+    const { supabase } = makeQueryEngine({
+      products: [oneTimeProduct],
+      customers: [{ id: 'cust-1', guild_id: VICTIM_GUILD, discord_id: 'user-1' }],
+      entitlements: [],
+      orders: [],
+    });
+    const fetchMock = makePayPalFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const interaction = { ...makeInteraction(), guild: { name: 'Cool Server' } };
+
+    await handleBuyButton(
+      interaction as any, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    const orderCall = fetchMock.mock.calls.find(([u]) => String(u).includes('/v2/checkout/orders'));
+    const payload = JSON.parse((orderCall![1] as RequestInit).body as string);
+    expect(payload.application_context.brand_name).toBe('Cool Server');
+  });
+});

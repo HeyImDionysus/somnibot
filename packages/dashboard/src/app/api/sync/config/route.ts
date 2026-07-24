@@ -33,12 +33,9 @@ export async function PUT(req: NextRequest) {
     if (key in body) allowed[key] = body[key];
   }
 
-  // Validate interval
-  if ('sync_interval_minutes' in allowed && typeof allowed.sync_interval_minutes === 'number') {
-    const val = allowed.sync_interval_minutes as number;
-    if (val < 5) allowed.sync_interval_minutes = 5;
-    if (val > 1440) allowed.sync_interval_minutes = 1440;
-  }
+  // sync_interval_minutes range (5..1440) is enforced by schemas.sync.config,
+  // which rejects out-of-range values with a 400 before this point — matching
+  // the /api/sync update_config route (reject, never silently clamp/partial-write).
 
   const { error } = await supabase
     .from('guild_config')

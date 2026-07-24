@@ -1,10 +1,14 @@
 /**
- * Integration test: nextval_ticket assigns ticket numbers PER GUILD.
+ * Integration test: nextval_ticket assigns ticket numbers PER GUILD, atomically.
  *
- * Regression guard for the bug where nextval_ticket() was MAX(ticket_number)+1
- * over the ENTIRE ticket_transcripts table — a single global counter, so a second
- * guild's first ticket inherited the first guild's numbering (and only looked at
- * closed transcripts, so open tickets could be re-numbered).
+ * Regression guard for two bugs:
+ *  1. nextval_ticket() was a single GLOBAL MAX(ticket_number)+1 counter, so a
+ *     second guild's first ticket inherited the first guild's numbering.
+ *  2. Even once per-guild, MAX+1 was non-atomic with no unique backstop, so two
+ *     draws in one guild before either row committed both returned the same
+ *     number. It is now a durable per-guild counter (guild_ticket_counters) drawn
+ *     via an atomic INSERT ... ON CONFLICT DO UPDATE, with a unique index on
+ *     tickets(guild_id, ticket_number).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -26,6 +30,7 @@ afterAll(async () => {
   for (const g of [GUILD_A, GUILD_B]) {
     await supa.from('tickets').delete().eq('guild_id', g);
     await supa.from('ticket_transcripts').delete().eq('guild_id', g);
+    await supa.from('guild_ticket_counters').delete().eq('guild_id', g);
     await supa.from('guild').delete().eq('id', g);
   }
 });
@@ -36,36 +41,26 @@ async function nextTicket(guildId: string): Promise<number> {
   return data as number;
 }
 
-describe('nextval_ticket per-guild numbering', () => {
-  it("does not leak one guild's ticket count into another guild's numbering", async () => {
-    // Guild A has 5 closed transcripts (#1..#5).
-    await supa.from('ticket_transcripts').insert(
-      [1, 2, 3, 4, 5].map((n) => ({
-        guild_id: GUILD_A,
-        ticket_number: n,
-        creator_id: 'creator',
-        closed_by_id: 'closer',
-        message_count: 1,
-        html_content: '<html></html>',
-      })),
-    );
+describe('nextval_ticket per-guild atomic numbering', () => {
+  it('assigns distinct sequential numbers per guild, independent across guilds', async () => {
+    // Two draws in GUILD_A BEFORE any ticket row exists must be distinct — the
+    // old MAX+1 read returned the same number for both under this race.
+    const a1 = await nextTicket(GUILD_A);
+    const a2 = await nextTicket(GUILD_A);
+    expect(a1).toBe(1);
+    expect(a2).toBe(2);
 
-    // A advances past its own max; B — which has NO tickets — starts at 1, not 6.
-    expect(await nextTicket(GUILD_A)).toBe(6);
+    // A brand-new guild starts its OWN sequence, unaffected by GUILD_A's draws.
     expect(await nextTicket(GUILD_B)).toBe(1);
-
-    // An OPEN (not-yet-closed) ticket also counts: after B opens #1, B's next is 2.
-    await supa.from('tickets').insert({
-      guild_id: GUILD_B,
-      channel_id: 'chan-b-1',
-      ticket_number: 1,
-      creator_id: 'creator',
-      type: 'support',
-      status: 'open',
-      message_count: 0,
-    });
     expect(await nextTicket(GUILD_B)).toBe(2);
-    // A is unaffected by B's activity.
-    expect(await nextTicket(GUILD_A)).toBe(6);
+
+    // GUILD_A continues its own sequence, unaffected by GUILD_B.
+    expect(await nextTicket(GUILD_A)).toBe(3);
+  });
+
+  it('never reissues a number under concurrent draws', async () => {
+    const draws = await Promise.all(Array.from({ length: 10 }, () => nextTicket(GUILD_A)));
+    // All draws are distinct (the atomic counter serializes concurrent callers).
+    expect(new Set(draws).size).toBe(draws.length);
   });
 });

@@ -18,6 +18,8 @@ import {
   checkIPMismatch,
   checkPaymentPattern,
   checkCriticalThreshold,
+  loadFraudThresholds,
+  DEFAULT_FRAUD_THRESHOLDS,
 } from '../services/fraud-detection.js';
 
 function mockSupaChain(data: any = null, error: any = null, count: number | null = null) {
@@ -405,7 +407,7 @@ describe('checkCriticalThreshold', () => {
       rpc: vi.fn(async () => ({ data: 1, error: null })),
     };
     const ctx = { supabase: supabase as any, guildId: 'g1' };
-    
+
     const incidentData = { id: 'inc2', title: 'test', incident_number: 1 };
     supabase.from.mockImplementation((table: string) => {
       if (table === 'fraud_signals') return countChain(3);
@@ -428,5 +430,85 @@ describe('checkCriticalThreshold', () => {
 
     // Should not throw — eventBus?.emit is optional chaining
     await expect(checkCriticalThreshold(ctx as any)).resolves.not.toThrow();
+  });
+
+  // Finding: concurrent bursts open duplicate fraud_auto incidents. The partial
+  // unique index uniq_open_fraud_auto_incident is the fence; the insert that
+  // loses the race gets 23505 and must no-op (no incident.created emitted).
+  it('no-ops (no incident.created) when the insert loses the unique race (23505)', async () => {
+    const { ctx, supabase, eventBus } = createCtx();
+    supabase.from.mockImplementation((table: string) => {
+      if (table === 'fraud_signals') return countChain(4);
+      if (table === 'incidents') {
+        const chain: any = {};
+        const methods = ['select','eq','not','gte','limit','insert','single'];
+        for (const m of methods) chain[m] = vi.fn((..._: any[]) => chain);
+        chain.then = (resolve: any) => resolve({ data: [], error: null });
+        chain.insert = vi.fn(() => {
+          const ic: any = {};
+          ic.select = vi.fn(() => ic);
+          ic.single = vi.fn(async () => ({ data: null, error: { code: '23505', message: 'duplicate key value' } }));
+          return ic;
+        });
+        return chain;
+      }
+      if (table === 'incident_events') return insertChain();
+      return countChain(0);
+    });
+    supabase.rpc.mockResolvedValue({ data: 7, error: null });
+
+    await checkCriticalThreshold(ctx);
+    expect(eventBus.emit).not.toHaveBeenCalledWith('incident.created', expect.anything(), expect.anything());
+  });
+
+  it('honors a configured critical-incident threshold (no fire below it)', async () => {
+    const { ctx, supabase, eventBus } = createCtx();
+    supabase.from.mockReturnValue(countChain(4)); // 4 < configured 5
+    await checkCriticalThreshold(ctx, { threshold: 5 });
+    expect(eventBus.emit).not.toHaveBeenCalled();
+  });
+});
+
+describe('loadFraudThresholds — config controls are now honored bot-side', () => {
+  it('returns catalog defaults when the guild has no fraud_rules', async () => {
+    const supabase = { from: vi.fn(() => dataChain([])) };
+    const thresholds = await loadFraudThresholds(supabase as any, 'g1');
+    expect(thresholds).toEqual(DEFAULT_FRAUD_THRESHOLDS);
+  });
+
+  it('applies configured thresholds from enabled fraud_rules rows', async () => {
+    const rules = [
+      { rule_type: 'velocity_limit', config: { threshold: 2, window_minutes: 30 }, enabled: true },
+      { rule_type: 'failed_payment', config: { threshold: 4 }, enabled: true },
+      { rule_type: 'critical_incident', config: { threshold: 5 }, enabled: true },
+    ];
+    const supabase = { from: vi.fn(() => dataChain(rules)) };
+    const thresholds = await loadFraudThresholds(supabase as any, 'g1');
+    expect(thresholds.velocityThreshold).toBe(2);
+    expect(thresholds.velocityWindowMs).toBe(30 * 60_000);
+    expect(thresholds.failedPaymentThreshold).toBe(4);
+    expect(thresholds.criticalIncidentThreshold).toBe(5);
+  });
+});
+
+describe('checkPurchaseVelocity honors a configured threshold', () => {
+  it('raises a velocity signal at the lowered threshold (2nd in-window order)', async () => {
+    const { ctx, supabase, eventBus } = createCtx();
+    supabase.from.mockImplementation((table: string) => {
+      if (table === 'orders') return countChain(2);
+      if (table === 'fraud_signals') return insertChain();
+      return countChain(0);
+    });
+    await checkPurchaseVelocity(ctx, 'cust1', 'discord1', { threshold: 2, windowMs: 3_600_000 });
+    expect(eventBus.emit).toHaveBeenCalledWith('fraud.detected', 'g1', expect.objectContaining({
+      signal: 'velocity',
+    }));
+  });
+
+  it('does not raise a signal below the configured threshold', async () => {
+    const { ctx, supabase, eventBus } = createCtx();
+    supabase.from.mockReturnValue(countChain(1));
+    await checkPurchaseVelocity(ctx, 'cust1', 'discord1', { threshold: 2 });
+    expect(eventBus.emit).not.toHaveBeenCalled();
   });
 });

@@ -54,6 +54,81 @@ async function createSignal(ctx: FraudContext, params: CreateSignalParams): Prom
   });
 }
 
+// ── Configurable Thresholds ────────────────────────────────
+// The catalog (commerce.json commerce-fraud) advertises velocity/payment/
+// critical thresholds as owner-configurable. The dashboard persists them as
+// fraud_rules rows (rule_type + typed jsonb config). Load them once per event
+// and thread them into the detectors so a lowered rule actually takes effect
+// bot-side; anything unset falls back to the shipped/catalog default so a guild
+// that never customized fraud behaves exactly as before.
+
+export interface FraudThresholds {
+  velocityThreshold: number;
+  velocityWindowMs: number;
+  failedPaymentThreshold: number;
+  criticalIncidentThreshold: number;
+}
+
+export const DEFAULT_FRAUD_THRESHOLDS: FraudThresholds = {
+  velocityThreshold: 5,
+  velocityWindowMs: 3_600_000,
+  failedPaymentThreshold: 3,
+  criticalIncidentThreshold: 3,
+};
+
+function toPositiveInt(value: unknown): number | null {
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+/**
+ * Load per-guild fraud thresholds from the enabled fraud_rules rows the
+ * dashboard writes (/api/fraud/rules). Best-effort: on any read failure or
+ * missing rule, the catalog default (== shipped detector value) is used, so
+ * detection never blocks fulfillment.
+ */
+export async function loadFraudThresholds(
+  supabase: SupabaseClient,
+  guildId: string,
+): Promise<FraudThresholds> {
+  const result: FraudThresholds = { ...DEFAULT_FRAUD_THRESHOLDS };
+  try {
+    const { data: rules } = await supabase
+      .from('fraud_rules')
+      .select('rule_type, config, enabled')
+      .eq('guild_id', guildId)
+      .eq('enabled', true)
+      .limit(500);
+
+    for (const rule of rules ?? []) {
+      const config = (rule.config ?? {}) as Record<string, unknown>;
+      const threshold = toPositiveInt(config.threshold);
+      switch (rule.rule_type) {
+        case 'velocity_limit': {
+          if (threshold !== null) result.velocityThreshold = threshold;
+          const windowMs = toPositiveInt(config.window_ms);
+          const windowMinutes = toPositiveInt(config.window_minutes);
+          if (windowMs !== null) result.velocityWindowMs = windowMs;
+          else if (windowMinutes !== null) result.velocityWindowMs = windowMinutes * 60_000;
+          break;
+        }
+        case 'failed_payment':
+        case 'payment_pattern': {
+          if (threshold !== null) result.failedPaymentThreshold = threshold;
+          break;
+        }
+        case 'critical_incident': {
+          if (threshold !== null) result.criticalIncidentThreshold = threshold;
+          break;
+        }
+      }
+    }
+  } catch {
+    // keep defaults
+  }
+  return result;
+}
+
 // ── Velocity Check ─────────────────────────────────────────
 // Triggers if a customer places too many orders in a short window.
 
@@ -61,11 +136,13 @@ export async function checkPurchaseVelocity(
   ctx: FraudContext,
   customerId: string,
   discordId: string | null,
+  opts?: { threshold?: number; windowMs?: number },
 ): Promise<void> {
-  const windowMinutes = 60;
-  const threshold = 5;
+  const threshold = opts?.threshold ?? DEFAULT_FRAUD_THRESHOLDS.velocityThreshold;
+  const windowMs = opts?.windowMs ?? DEFAULT_FRAUD_THRESHOLDS.velocityWindowMs;
+  const windowMinutes = Math.max(1, Math.round(windowMs / 60_000));
 
-  const since = new Date(Date.now() - windowMinutes * 60 * 1000).toISOString();
+  const since = new Date(Date.now() - windowMs).toISOString();
 
   const { count } = await ctx.supabase
     .from('orders')
@@ -159,7 +236,10 @@ export async function checkPaymentPattern(
   ctx: FraudContext,
   customerId: string,
   discordId: string | null,
+  opts?: { threshold?: number },
 ): Promise<void> {
+  const threshold = opts?.threshold ?? DEFAULT_FRAUD_THRESHOLDS.failedPaymentThreshold;
+  const escalateAt = threshold + 2; // default 3 → escalate to 'high' at 5
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
   const { count: failedCount } = await ctx.supabase
@@ -169,15 +249,15 @@ export async function checkPaymentPattern(
     .eq('status', 'failed')
     .gte('created_at', since);
 
-  if (failedCount && failedCount >= 3) {
+  if (failedCount && failedCount >= threshold) {
     await createSignal(ctx, {
       signal_type: 'payment_pattern',
-      severity: failedCount >= 5 ? 'high' : 'medium',
+      severity: failedCount >= escalateAt ? 'high' : 'medium',
       entity_type: 'customer',
       entity_id: customerId,
       discord_id: discordId,
-      description: `${failedCount} failed payments in the last 24 hours`,
-      evidence: { failed_count: failedCount, window_hours: 24 },
+      description: `${failedCount} failed payments in the last 24 hours (threshold: ${threshold})`,
+      evidence: { failed_count: failedCount, window_hours: 24, threshold },
     });
   }
 }
@@ -185,7 +265,11 @@ export async function checkPaymentPattern(
 // ── Auto-Incident Creation ─────────────────────────────────
 // Creates incidents from critical fraud signals or alert thresholds.
 
-export async function checkCriticalThreshold(ctx: FraudContext): Promise<void> {
+export async function checkCriticalThreshold(
+  ctx: FraudContext,
+  opts?: { threshold?: number },
+): Promise<void> {
+  const threshold = opts?.threshold ?? DEFAULT_FRAUD_THRESHOLDS.criticalIncidentThreshold;
   const since = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // last hour
 
   const { count } = await ctx.supabase
@@ -196,7 +280,7 @@ export async function checkCriticalThreshold(ctx: FraudContext): Promise<void> {
     .eq('severity', 'critical')
     .gte('created_at', since);
 
-  if (count && count >= 3) {
+  if (count && count >= threshold) {
     // Check if we already created an incident for this burst
     const { data: existing } = await ctx.supabase
       .from('incidents')
@@ -212,7 +296,13 @@ export async function checkCriticalThreshold(ctx: FraudContext): Promise<void> {
       const { data: seqVal } = await ctx.supabase.rpc('nextval_incident');
       const nextNumber = typeof seqVal === 'number' ? seqVal : 1;
 
-      const { data: incident } = await ctx.supabase
+      // The check-above/insert-below is a check-then-act: two concurrent bursts
+      // can both find no open incident and both reach here. The partial unique
+      // index uniq_open_fraud_auto_incident (guild_id) WHERE source='fraud_auto'
+      // AND status<>'resolved' is the real fence — the losing racer's insert
+      // fails with 23505 and must no-op (no duplicate incident, no double page)
+      // rather than surface an error or emit incident.created.
+      const { data: incident, error: incidentError } = await ctx.supabase
         .from('incidents')
         .insert({
           guild_id: ctx.guildId,
@@ -226,6 +316,12 @@ export async function checkCriticalThreshold(ctx: FraudContext): Promise<void> {
         })
         .select()
         .single();
+
+      if (incidentError) {
+        // 23505 = another concurrent burst already opened the live fraud_auto
+        // incident for this guild. Treat as idempotent no-op.
+        return;
+      }
 
       if (incident) {
         await ctx.supabase.from('incident_events').insert({

@@ -25,7 +25,9 @@ const tempChannelUpdate = z.object({
   default_user_limit: z.number().int().min(0).max(99).optional(),
   default_bitrate: z.number().int().min(8000).max(384000).optional(),
   keep_alive_minutes: z.number().int().min(0).max(1440).optional(),
+  empty_grace_seconds: z.number().int().min(0).max(3600).optional(),
   allow_text_channel: z.boolean().optional(),
+  allow_claim: z.boolean().optional(),
   moderator_roles: z.array(snowflake).max(100).optional(),
   active: z.boolean().optional(),
 });
@@ -70,7 +72,9 @@ export async function POST(req: NextRequest) {
     default_user_limit,
     default_bitrate,
     keep_alive_minutes,
+    empty_grace_seconds,
     allow_text_channel,
+    allow_claim,
     moderator_roles,
   } = body;
 
@@ -100,11 +104,13 @@ export async function POST(req: NextRequest) {
       guild_id: guildId,
       hub_channel_id,
       category_id,
-      naming_format: naming_format ?? "{username}'s Channel",
+      naming_format: naming_format ?? "{owner-name}'s room",
       default_user_limit: default_user_limit ?? 0,
       default_bitrate: default_bitrate ?? 64000,
       keep_alive_minutes: keep_alive_minutes ?? 1,
+      empty_grace_seconds: empty_grace_seconds ?? 15,
       allow_text_channel: allow_text_channel ?? false,
+      allow_claim: allow_claim ?? true,
       moderator_roles: moderator_roles ?? [],
       active: true,
     })
@@ -133,7 +139,7 @@ export async function PUT(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  const updates = typedPick(body, ['hub_channel_id', 'category_id', 'naming_format', 'default_user_limit', 'default_bitrate', 'keep_alive_minutes', 'allow_text_channel', 'moderator_roles', 'active']);
+  const updates = typedPick(body, ['hub_channel_id', 'category_id', 'naming_format', 'default_user_limit', 'default_bitrate', 'keep_alive_minutes', 'empty_grace_seconds', 'allow_text_channel', 'allow_claim', 'moderator_roles', 'active']);
   updates.updated_at = new Date().toISOString();
 
   const { data, error } = await supabase

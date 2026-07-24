@@ -128,6 +128,26 @@ async function getPayPalToken(
 }
 
 /**
+ * Resolve the owner white-label store brand for buyer-facing surfaces. Falls
+ * back to the guild name, then a neutral default — never hardcoded vendor
+ * branding.
+ */
+async function resolveStoreBrandName(
+  supabase: SupabaseClient,
+  guildId: string,
+  guild: Guild | null,
+): Promise<string> {
+  const { data } = await supabase
+    .from('guild_config')
+    .select('store_brand_name')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  const configured = typeof data?.store_brand_name === 'string' ? data.store_brand_name.trim() : '';
+  if (configured.length > 0) return configured;
+  return guild?.name ?? 'Store';
+}
+
+/**
  * Handle a store "Buy" button interaction.
  */
 export async function handleBuyButton(
@@ -240,6 +260,8 @@ export async function handleBuyButton(
   const price = (product.price_cents / 100).toFixed(2);
   const returnUrl = `${dashboardUrl}/store?order_complete=true`;
   const cancelUrl = `${dashboardUrl}/store?order_cancelled=true`;
+  // White-label: the PayPal checkout brand must be the owner's store brand.
+  const brandName = await resolveStoreBrandName(supabase, guildId, interaction.guild);
 
   if (product.type === 'one_time') {
     // Create PayPal order
@@ -263,7 +285,7 @@ export async function handleBuyButton(
         },
       ],
       application_context: {
-        brand_name: 'SomniBot Store',
+        brand_name: brandName,
         landing_page: 'LOGIN',
         user_action: 'PAY_NOW',
         return_url: returnUrl,
@@ -397,7 +419,7 @@ export async function handleBuyButton(
         discord_id: discordId,
       }),
       application_context: {
-        brand_name: 'SomniBot Store',
+        brand_name: brandName,
         locale: 'en-US',
         user_action: 'SUBSCRIBE_NOW',
         return_url: returnUrl,

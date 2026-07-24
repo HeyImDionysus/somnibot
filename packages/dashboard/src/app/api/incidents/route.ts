@@ -16,7 +16,7 @@ const snowflake = z.string().regex(/^\d{17,20}$/);
 const incidentCreate = z.object({
   title: z.string().min(1).max(256).trim(),
   description: z.string().max(4000).optional().nullable(),
-  severity: z.enum(['info', 'warning', 'critical']).default('warning'),
+  severity: z.enum(['info', 'warning', 'critical', 'outage']).default('warning'),
   source: z.string().max(64).default('manual'),
   source_ref_id: z.string().max(256).optional().nullable(),
   assigned_to: snowflake.optional().nullable(),
@@ -25,7 +25,7 @@ const incidentCreate = z.object({
 const incidentUpdate = z.object({
   id: z.string().uuid(),
   status: z.enum(['open', 'investigating', 'identified', 'monitoring', 'resolved', 'closed']).optional(),
-  severity: z.enum(['info', 'warning', 'critical']).optional(),
+  severity: z.enum(['info', 'warning', 'critical', 'outage']).optional(),
   assigned_to: snowflake.optional().nullable(),
   impact_summary: z.string().max(4000).optional(),
   root_cause: z.string().max(4000).optional(),

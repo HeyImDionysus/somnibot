@@ -128,4 +128,64 @@ describe('FarmingManager deep', () => {
     const config = await manager.getConfig();
     expect(config).toBeDefined();
   });
+
+  // ── Harvest exactly-once (guarded compare-and-set) ────────
+  // The harness distinguishes the read of ready plots from the guarded UPDATE:
+  // reads of economy_farm_plots return `plots`, while the `.update(...).select()`
+  // returns `claimed` — the rows the compare-and-set actually transitioned.
+  function harvestSupa(opts: { plots: any[]; crops: any[]; claimed: any[] }) {
+    const rpc = vi.fn(async () => ({ data: null, error: null }));
+    const from = vi.fn((table: string) => {
+      let isUpdate = false;
+      const chain: any = {};
+      for (const m of ['select', 'insert', 'delete', 'upsert', 'eq', 'neq', 'single', 'maybeSingle', 'order', 'limit', 'in', 'match', 'gt', 'gte', 'lt', 'lte', 'is', 'contains', 'or', 'not', 'count', 'range', 'ilike', 'like']) {
+        chain[m] = vi.fn(() => chain);
+      }
+      chain.update = vi.fn(() => { isUpdate = true; return chain; });
+      const resolveData = () => {
+        if (table === 'economy_farm_plots') return isUpdate ? opts.claimed : opts.plots;
+        if (table === 'economy_crops') return opts.crops;
+        if (table === 'guild_config') return { guild_id: guildId, economy_farming_enabled: true, economy_farming_wilt_enabled: true, economy_fertilizer_time_reduction_pct: 50, economy_farm_grid_size: 9 };
+        return null;
+      };
+      chain.single = vi.fn(() => Promise.resolve({ data: resolveData(), error: null }));
+      chain.maybeSingle = vi.fn(() => Promise.resolve({ data: resolveData(), error: null }));
+      chain.then = (resolve: Function) => {
+        const d = resolveData();
+        resolve({ data: Array.isArray(d) ? d : (d ? [d] : []), error: null, count: 0 });
+      };
+      return chain;
+    });
+    return { from, rpc } as any;
+  }
+
+  const readyPlot = {
+    id: 'p1', plot_index: 0, crop_id: 'c1',
+    planted_at: new Date(Date.now() - 7200000).toISOString(),
+    watered_at: new Date(Date.now() - 3600000).toISOString(),
+    fertilized: false, harvested: false,
+  };
+  const wheat = { id: 'c1', name: 'Wheat', emoji: '🌾', grow_seconds: 60, wilt_seconds: 86400, sell_price: 10, seeds_returned: 0, seed_item_id: null };
+
+  it('harvest credits only the rows the guarded UPDATE actually transitioned (winner)', async () => {
+    const supa = harvestSupa({ plots: [readyPlot], crops: [wheat], claimed: [{ id: 'p1', crop_id: 'c1' }] });
+    manager = new FarmingManager(guildId as any, supa, {} as any);
+    const result = await manager.harvest('user-1');
+
+    const addCalls = supa.rpc.mock.calls.filter((c: any[]) => c[0] === 'economy_add_balance');
+    expect(addCalls).toHaveLength(1);
+    expect(addCalls[0][1]).toMatchObject({ p_amount: 10 });
+    expect((result.embed as any).data?.title).toContain('Harvest Complete');
+  });
+
+  it('harvest pays nothing when a concurrent call already claimed the ready plots (loser)', async () => {
+    // The guarded UPDATE returns zero transitioned rows — the other harvest won.
+    const supa = harvestSupa({ plots: [readyPlot], crops: [wheat], claimed: [] });
+    manager = new FarmingManager(guildId as any, supa, {} as any);
+    const result = await manager.harvest('user-1');
+
+    const addCalls = supa.rpc.mock.calls.filter((c: any[]) => c[0] === 'economy_add_balance');
+    expect(addCalls).toHaveLength(0);
+    expect((result.embed as any).data?.description).toContain('No crops ready');
+  });
 });

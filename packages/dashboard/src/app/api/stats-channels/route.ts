@@ -19,7 +19,13 @@ import { dbError } from '@/lib/api/response';
 const statsChannelUpdate = z.object({
   id: z.string().uuid(),
   stat_type: z.string().min(1).max(64).optional(),
-  name_format: z.string().max(128).optional(),
+  name_format: z
+    .string()
+    .max(128)
+    .refine((s) => s.includes('{value}') || s.includes('{count}'), {
+      message: 'name_format must contain the {value} placeholder',
+    })
+    .optional(),
   stat_config: z.record(z.unknown()).optional(),
   active: z.boolean().optional(),
 });

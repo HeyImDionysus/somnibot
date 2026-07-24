@@ -185,4 +185,44 @@ describe('PUT /api/music', () => {
     const body = await res.json();
     expect(body.success).toBe(true);
   });
+
+  // ── Out-of-range timers are REJECTED, not silently clamped ──
+  // The route used to clamp a submitted 0 to 1 (Math.max(1, ...)); the Zod
+  // schema now rejects it with a field-level error so nothing is persisted.
+  it('rejects music_auto_leave_minutes=0 with a field-named validation error (real schema)', async () => {
+    const actual = await vi.importActual<typeof import('@/lib/api/validation')>('@/lib/api/validation');
+    const req = makePutRequest({ music_auto_leave_minutes: 0 });
+    const result = await actual.parseBody(req as never, actual.schemas.music.config as never);
+    expect(result.ok).toBe(false);
+    const response = (result as { response: Response }).response;
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toContain('Validation');
+    const paths = (body.details as Array<{ path: string }>).map((d) => d.path);
+    expect(paths).toContain('music_auto_leave_minutes');
+  });
+
+  it('accepts the minimum valid timers (auto_leave=1, auto_destroy=120) (real schema)', async () => {
+    const actual = await vi.importActual<typeof import('@/lib/api/validation')>('@/lib/api/validation');
+    const req = makePutRequest({ music_auto_leave_minutes: 1, music_auto_destroy_minutes: 120 });
+    const result = await actual.parseBody(req as never, actual.schemas.music.config as never);
+    expect(result.ok).toBe(true);
+  });
+
+  it('does not write guild_config (no silent clamp to 1) when the timer is rejected', async () => {
+    mockAuthSuccess();
+    // Validation rejects the out-of-range timer before the route touches the DB.
+    (parseBody as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      response: new Response(JSON.stringify({ success: false, error: 'Validation failed' }), {
+        status: 400, headers: { 'Content-Type': 'application/json' },
+      }),
+    });
+    const chain = { upsert: vi.fn().mockResolvedValue({ error: null }) };
+    mockFrom.mockReturnValue(chain);
+
+    const res = await PUT(makePutRequest({ music_auto_leave_minutes: 0 }) as never);
+    expect(res.status).toBe(400);
+    expect(chain.upsert).not.toHaveBeenCalled();
+  });
 });

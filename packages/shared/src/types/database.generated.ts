@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 151 migration files in packages/supabase/migrations/
+ * Source: 175 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -394,6 +394,22 @@ export interface DbGuildConfig {
   profile_visibility: 'everyone' | 'members-after-onboarding';
   content_filter_mode: 'lenient' | 'strict';
   show_game_stats: boolean;
+  fraud_owner_dm_on_critical: boolean;
+  fraud_staff_alert_channel_id: string | null;
+  store_brand_name: string | null;
+  store_show_powered_by: boolean;
+  prediction_min_bet: number;
+  prediction_max_bet: number;
+  fallback_mode: 'grant-after-timeout' | 'manual-review';
+  fallback_timeout_minutes: number;
+  message_log_edits_enabled: boolean;
+  message_log_deletes_enabled: boolean;
+  message_log_ignored_channel_ids: string[];
+  automod_regex_budget_ms: number;
+  automod_message_budget_ms: number;
+  economy_fishing_collection_reward_enabled: boolean;
+  economy_fishing_collection_reward_coins: number;
+  economy_prestige_max_level: number;
 }
 
 export interface DbInstanceSettings {
@@ -537,6 +553,7 @@ export interface DbInfraction {
   pardoned_at: string | null;
   expires_at: string | null;
   created_at: string;
+  correlation_id: string | null;
 }
 
 export interface DbMessageReport {
@@ -578,6 +595,9 @@ export interface DbTicketPanel {
   forum_config: Record<string, unknown> | null;
   intake_form_enabled: boolean;
   intake_form_fields: Json[];
+  inactivity_warn_hours: number;
+  inactivity_close_hours: number;
+  feedback_prompt_enabled: boolean;
 }
 
 export interface DbTicket {
@@ -769,6 +789,8 @@ export interface DbTempChannelHub {
   active: boolean;
   created_at: string;
   updated_at: string;
+  allow_claim: boolean;
+  empty_grace_seconds: number | null;
 }
 
 export interface DbActiveTempChannel {
@@ -813,6 +835,10 @@ export interface DbScheduledMessage {
   last_sent_at: string | null;
   created_at: string;
   updated_at: string;
+  status: 'active' | 'failed';
+  last_error: string | null;
+  failed_at: string | null;
+  missed_run_policy: 'skip-missed' | 'send-latest';
 }
 
 // — Commerce — Products —
@@ -1483,6 +1509,18 @@ export interface DbCommerceNoncommerceActivationHeads {
   updated_at: string;
 }
 
+export interface DbCommercePortalRequests {
+  id: string;
+  guild_id: string;
+  customer_id: string;
+  order_id: string | null;
+  type: 'refund' | 'service';
+  status: 'pending' | 'reviewing' | 'resolved' | 'rejected';
+  reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DbCommerceProductTempRoleConfig {
   id: string;
   product_id: string;
@@ -1600,6 +1638,7 @@ export interface DbEconomyAdventureSessions {
   started_at: string;
   ended_at: string | null;
   loot_failed: boolean;
+  scenes_traversed: number;
 }
 
 export interface DbEconomyAdventures {
@@ -1665,6 +1704,13 @@ export interface DbEconomyFishCatches {
   weight: number;
   price_earned: number;
   caught_at: string;
+  paid: boolean;
+}
+
+export interface DbEconomyFishCollectionRewards {
+  guild_id: string;
+  user_id: string;
+  paid_at: string;
 }
 
 export interface DbEconomyFishSpecies {
@@ -1998,6 +2044,11 @@ export interface DbFeatureEmbedOverrides {
   thumbnail_url: string | null;
   author_name: string | null;
   updated_at: string;
+}
+
+export interface DbGuildTicketCounters {
+  guild_id: string;
+  last_number: number;
 }
 
 export interface DbHealthMetrics {

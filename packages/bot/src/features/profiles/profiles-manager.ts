@@ -61,12 +61,35 @@ export class ProfilesManager {
   private supabase: SupabaseClient;
   private cache = new Map<string, any>();
   private configCache = new Map<string, { data: ProfileConfig; time: number }>();
+  // Lightweight replay fence for /title and /bio, keyed by interaction id. A
+  // re-delivered interaction (gateway RESUME/redelivery) must not re-run the
+  // write or re-confirm — the writes are value-idempotent, so skipping is safe.
+  private processedWrites = new Map<string, number>();
+  private static readonly WRITE_DEDUP_TTL_MS = 10 * 60_000;
 
   constructor(supabase: SupabaseClient) {
     this.supabase = supabase;
   }
 
-  clearCache(): void { this.cache.clear(); this.configCache.clear(); }
+  clearCache(): void { this.cache.clear(); this.configCache.clear(); this.processedWrites.clear(); }
+
+  /**
+   * Returns true when this interaction id was already handled (a replay), else
+   * records it and returns false. Prunes expired entries as it goes so the map
+   * stays bounded.
+   */
+  private isReplayedWrite(interactionId: string): boolean {
+    const now = Date.now();
+    if (this.processedWrites.size > 500) {
+      for (const [id, t] of this.processedWrites) {
+        if (now - t > ProfilesManager.WRITE_DEDUP_TTL_MS) this.processedWrites.delete(id);
+      }
+    }
+    const seen = this.processedWrites.get(interactionId);
+    if (seen !== undefined && now - seen < ProfilesManager.WRITE_DEDUP_TTL_MS) return true;
+    this.processedWrites.set(interactionId, now);
+    return false;
+  }
 
   private async getConfig(guildId: string): Promise<ProfileConfig> {
     const now = Date.now();
@@ -207,6 +230,8 @@ export class ProfilesManager {
   }
 
   async setTitle(interaction: ChatInputCommandInteraction): Promise<void> {
+    // Replay fence: a re-delivered interaction skips the write + confirmation.
+    if (this.isReplayedWrite(interaction.id)) return;
     const title = interaction.options.getString('title')!;
     const guildId = interaction.guildId!;
     const cfg = await this.getConfig(guildId);
@@ -240,6 +265,8 @@ export class ProfilesManager {
   }
 
   async setBio(interaction: ChatInputCommandInteraction): Promise<void> {
+    // Replay fence: a re-delivered interaction skips the write + confirmation.
+    if (this.isReplayedWrite(interaction.id)) return;
     const bio = interaction.options.getString('bio')!;
     const guildId = interaction.guildId!;
     const cfg = await this.getConfig(guildId);

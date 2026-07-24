@@ -98,6 +98,43 @@ describe('LotteryManager deep', () => {
     expect(responded).toBe(true);
   });
 
+  it('viewLottery brands the embed with the configured currency, not stock "coins"', async () => {
+    const supa = makeSupa({
+      guild_config: {
+        guild_id: 'guild-1', economy_lottery_enabled: true, economy_lottery_ticket_price: 100,
+        economy_lottery_schedule: 'weekly', currency_name: 'Gems', currency_emoji: '💎',
+      },
+      economy_lottery_drawings: { id: 'draw-1', guild_id: 'guild-1', status: 'active', jackpot: 500 },
+      economy_lottery_tickets: [{ user_id: 'user-1' }, { user_id: 'user-2' }],
+    });
+    const mgr = new LotteryManager(supa);
+    const interaction = makeInteraction();
+    await mgr.viewLottery(interaction);
+
+    const desc: string = interaction.reply.mock.calls[0][0].embeds[0].data.description ?? '';
+    expect(desc).toContain('Gems');
+    expect(desc).toContain('💎');
+    expect(desc).not.toContain('coins');
+  });
+
+  it('buyTickets brands the purchase embed with the configured currency', async () => {
+    const supa = makeSupa({
+      guild_config: {
+        guild_id: 'guild-1', economy_lottery_enabled: true, economy_lottery_ticket_price: 100,
+        economy_lottery_max_tickets: 10, currency_name: 'Gems', currency_emoji: '💎',
+      },
+      economy_lottery_drawings: { id: 'draw-1', guild_id: 'guild-1', status: 'active', jackpot: 0 },
+    });
+    supa.rpc = vi.fn(async () => ({ data: { status: 'purchased', replayed: false, jackpot: 300 }, error: null }));
+    const mgr = new LotteryManager(supa);
+    const interaction = makeInteraction();
+    await mgr.buyTickets(interaction, 3);
+
+    const desc: string = interaction.reply.mock.calls[0][0].embeds[0].data.description ?? '';
+    expect(desc).toContain('Gems');
+    expect(desc).not.toContain('coins');
+  });
+
   it('drawWinner picks a lottery winner', async () => {
     const supa = makeSupa({
       guild_config: {
