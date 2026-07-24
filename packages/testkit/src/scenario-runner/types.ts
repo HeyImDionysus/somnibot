@@ -22,6 +22,7 @@ import type { LiveClientHandle, BootstrapLiveOptions } from '../live-runner.js';
 import type { CapturedResponse } from '../captured-response.js';
 import type { SyntheticInteraction } from '../interaction-builders.js';
 import type { SyntheticMessage } from '../gateway-builders.js';
+import type { FaultControls } from '../fault-proxy.js';
 
 /**
  * A capability-token-bound injector: the scenario context mints and holds the
@@ -157,6 +158,14 @@ export interface ScenarioContext {
   readonly runPrefix: string;
   /** The credentials/dependencies present for this run. */
   readonly capabilities: Capabilities;
+  /**
+   * Dependency-outage fault controls, present when the process was routed
+   * through the fault proxies (run-one-domain.mjs). A DEPFAIL/RETRY script
+   * severs/restores a REAL network path inside its own sequential window; the
+   * runner force-restores after every scenario. Null when the process runs
+   * directly against the stack — fault scenarios then GATE honestly.
+   */
+  readonly faults: FaultControls | null;
 
   /** Boot a live guild handle; the runner disposes it and sweeps its rows. */
   bootGuild(options?: BootGuildOptions): Promise<LiveClientHandle>;

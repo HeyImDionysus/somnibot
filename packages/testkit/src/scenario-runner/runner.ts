@@ -20,6 +20,7 @@ import {
 } from '@somnibot/e2e';
 
 import { detectCapabilities } from './capabilities.js';
+import { restoreAllFaults } from '../fault-proxy.js';
 import { ScenarioContextImpl } from './context.js';
 import type {
   Capabilities,
@@ -72,6 +73,10 @@ export async function runDomainProof(
           err instanceof Error ? `${err.name}: ${err.message}` : String(err);
       }
     }
+    // Safety net: a fault script that threw mid-outage must never leave the
+    // stack severed for teardown or the next scenario — force-close every
+    // open outage window before touching the DB again.
+    await restoreAllFaults();
     // Always tear down (dispose handles + sweep run-prefixed rows), even on throw.
     await ctx.teardown();
     scenarios.push(ctx.buildEvidence(error));
