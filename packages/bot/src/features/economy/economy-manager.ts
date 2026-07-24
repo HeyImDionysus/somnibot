@@ -1129,7 +1129,9 @@ export class EconomyManager {
       case 'max_per_user':
         return { success: false, amount: 0, balance: wallet, message: `❌ You can only own **${result.max_per_user}** of this item (you have ${result.owned}).` };
       case 'out_of_stock':
-        return { success: false, amount: 0, balance: wallet, message: `❌ Only **${result.stock}** left in stock.` };
+        // White-label branding: even the sold-out refusal renders the item's
+        // price in the owner-configured currency (never an unbranded stock reply).
+        return { success: false, amount: 0, balance: wallet, message: `❌ Only **${result.stock}** of ${item.emoji} **${item.name}** left in stock (${cfg.currency_emoji} ${item.price.toLocaleString()} ${cfg.currency_name} each).` };
       case 'insufficient_funds': {
         const need = Number(result.total_cost ?? item.price * quantity);
         return { success: false, amount: 0, balance: wallet, message: `${cfg.currency_emoji} You need **${need.toLocaleString()} ${cfg.currency_name}** but only have **${wallet.wallet.toLocaleString()}**.` };

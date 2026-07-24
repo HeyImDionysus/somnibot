@@ -161,7 +161,9 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     targetType: 'ticket',
     actorType: 'user',
     targetId: (d) => d.ticketId as string,
-    actorId: (d) => d.userDiscordId as string,
+    // The ACTING closer when carried (a manager closing another member's
+    // ticket); falls back to the creator for legacy emissions.
+    actorId: (d) => (d.actorId ?? d.userDiscordId) as string,
     details: (d) => ({ ticketNumber: d.ticketNumber }),
     beforeState: () => ({ status: 'open' }),
     afterState: () => ({ status: 'closed' }),
@@ -172,7 +174,8 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     targetType: 'ticket',
     actorType: 'user',
     targetId: (d) => d.ticketId as string,
-    actorId: (d) => d.userDiscordId as string,
+    // The ACTING reopener when carried; creator fallback (see ticket.closed).
+    actorId: (d) => (d.actorId ?? d.userDiscordId) as string,
     details: (d) => ({ ticketNumber: d.ticketNumber }),
     beforeState: () => ({ status: 'closed' }),
     afterState: () => ({ status: 'open' }),
@@ -578,6 +581,22 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     details: (d) => ({ questCount: d.questCount, currency: d.currency, reason: d.reason }),
     success: false,
   },
+  'quest.slate_assigned': {
+    action: 'quest.slate_assigned',
+    category: 'economy',
+    targetType: 'member',
+    actorType: 'user',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ questType: d.questType, count: d.count }),
+  },
+  'quest.completed': {
+    action: 'quest.completed',
+    category: 'economy',
+    targetType: 'member',
+    actorType: 'user',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ questId: d.questId, actionType: d.actionType, progress: d.progress }),
+  },
   'casino.bet_settled': {
     action: 'casino.bet_settled',
     category: 'economy',
@@ -942,14 +961,11 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     targetId: (d) => d.targetId as string,
     details: (d) => ({ operation: d.operation, amount: d.amount, newXp: d.newXp, newLevel: d.newLevel }),
   },
-  'profile.updated': {
-    action: 'profile.updated',
-    category: 'profiles',
-    targetType: 'member',
-    actorType: 'user',
-    targetId: (d) => d.userId as string,
-    details: (d) => ({ field: d.field, value: d.value, truncated: d.truncated }),
-  },
+  // NOTE: 'profile.updated' deliberately has NO EVENT_TO_AUDIT entry.
+  // ProfilesManager writes its audit rows directly (profiles.title_updated /
+  // profiles.bio_updated / profiles.content_rejected via writeAuditLog) so each
+  // save lands EXACTLY ONE row; a mapping here would double-write via the batch
+  // flush. The eventBus event itself still fires for non-audit consumers.
   'starboard.post_created': {
     action: 'starboard.post_created',
     category: 'starboard',

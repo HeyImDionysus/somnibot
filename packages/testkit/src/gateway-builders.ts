@@ -18,6 +18,8 @@
  * new field) surfaces as an error rather than a silent stub.
  */
 
+import { randomBytes } from 'node:crypto';
+
 // ── Message ────────────────────────────────────────────────────────────────
 
 /** A captured `channel.send(...)` payload from a driven gateway event (e.g. an
@@ -93,10 +95,14 @@ export interface BuildMessageParams {
 
 const DEFAULT_MSG_CHANNEL_ID = '222222222222222222';
 
+// Process-unique like real Discord snowflakes (see interaction-builders nextId):
+// a bare counter would re-issue the same message ids in every fresh process,
+// colliding with any message-id-keyed idempotency fence in the shared Valkey.
+const MSG_PROCESS_NONCE = randomBytes(4).toString('hex');
 let msgIdCounter = 0;
 function nextMsgId(): string {
   msgIdCounter += 1;
-  return `synthetic-message-${msgIdCounter}`;
+  return `synthetic-message-${MSG_PROCESS_NONCE}-${msgIdCounter}`;
 }
 
 function makeRoleCache(ids: string[]): SyntheticRoleCache {

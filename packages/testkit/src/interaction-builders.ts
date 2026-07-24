@@ -18,6 +18,8 @@
  * value-level dependency on discord.js internals.
  */
 
+import { randomBytes } from 'node:crypto';
+
 import { CapturedResponse } from './captured-response.js';
 
 // ── Shared shapes ──────────────────────────────────────────────────────
@@ -170,10 +172,19 @@ const DEFAULT_GUILD_ID = '111111111111111111';
 const DEFAULT_CHANNEL_ID = '222222222222222222';
 const DEFAULT_USER_ID = '333333333333333333';
 
+// Real Discord ids are globally-unique snowflakes; a bare per-process counter is
+// NOT (every fresh `run-one-domain` process restarts at 1, so successive local
+// runs re-issue the SAME ids). Features that key idempotency fences on the
+// interaction id alone (e.g. the games `games:idem:${interactionId}` claim, TTL
+// 15min in the SHARED local Valkey) then see run #2's bets as replays of run #1
+// and refuse them — the "casino flake" was this collision, not randomness. A
+// per-process nonce restores production fidelity (globally unique per drive);
+// REPLAY proofs still pass an explicit `id` override to model true re-delivery.
+const PROCESS_NONCE = randomBytes(4).toString('hex');
 let idCounter = 0;
 function nextId(prefix: string): string {
   idCounter += 1;
-  return `${prefix}-${idCounter}`;
+  return `${prefix}-${PROCESS_NONCE}-${idCounter}`;
 }
 
 function makeUser(overrides?: Partial<SyntheticUser>): SyntheticUser {

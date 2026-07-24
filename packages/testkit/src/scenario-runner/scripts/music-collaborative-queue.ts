@@ -29,18 +29,26 @@
  *     THIS guild's row while an anon key reads zero) — the owner-only config gate.
  *   - The owner-notification sink (`alerts`) is asserted empty on happy paths.
  *   - CLEANUP proves the sweep removes run-prefixed guild_config while audit_logs
- *     rows are RETAINED (never-delete, no cascade from guild).
+ *     rows are RETAINED (never-delete, no cascade from guild). The retained
+ *     baseline is one probe-seeded run-prefixed audit row: every music.* audit
+ *     WRITER (dashboard save, Valkey outage, queue teardown) is behind a gated
+ *     lane, and retention-through-sweep — not the writers — is the promise here.
  *
- * BEHAVIOR-BUG DISCOVERY: with music disabled the REAL dispatcher answers a music
- * command with the stock `❌ Music system is not enabled.` — NOT the catalog's
- * branded, guild-named `music-disabled` notice. SET-B captures that real reply and
- * records the branding divergence as a FAIL (a finding for the owner), never
- * softened to a pass.
+ * DISABLED-DECLINE PROOF: with music disabled the REAL dispatcher's manager-absent
+ * branch reads guild_config.music_enabled=false and must answer a music command
+ * with the catalog's branded, guild-named `music-disabled` notice ("Music is
+ * currently switched off in {guild-name} — an admin can flip it back on from the
+ * dashboard."), resolved through the white-label brand kit. SET-B drives /queue
+ * against the real dispatcher and asserts BOTH conjuncts on the captured reply's
+ * full member-facing surface (content + embed): the switched-off decline exists
+ * (Discord) and it names the guild brand (branding). A regression to the old
+ * stock unbranded fallback fails here — never softened to a pass.
  */
 import type { AssertionClass, DomainContract, JsonValue } from '@somnibot/e2e';
 
 import type { LiveClientHandle } from '../../live-runner.js';
 import type { CapturedResponse } from '../../captured-response.js';
+import { buildSlashInteraction } from '../../interaction-builders.js';
 import type { DomainProof, ScenarioContext } from '../types.js';
 
 // ── Small live-stack helpers ──────────────────────────────────────────────
@@ -417,7 +425,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   );
 }
 
-/** SET-B — disable music; the config toggles + the disabled decline is captured (and its branding gap is a FAIL). */
+/** SET-B — disable music; the config toggles + the branded, guild-named disabled decline is asserted. */
 async function SET_B(ctx: ScenarioContext): Promise<void> {
   const brandName = `${ctx.runPrefix}BrandGuild`;
   const handle = await ctx.bootGuild({
@@ -436,38 +444,59 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     impact: 'The music-enabled toggle did not persist to guild_config.',
   });
 
-  // (2) Real captured reply: a member uses /queue while music is disabled. The REAL
-  //     dispatcher (interaction-handler.ts) answers with a stock decline because the
-  //     manager is not wired when music_enabled=false.
-  const declineCaptured = await ctx.runSlash(handle, {
-    commandName: 'queue',
-    userId: ctx.userId('a'),
-    displayName: 'SET-B member',
-  });
-  const declineText = replyContent(declineCaptured);
-  ctx.expect(declineText.length > 0, {
+  // (2) Real captured reply: a member uses /queue while music is disabled. The
+  //     REAL dispatcher (interaction-handler.ts) takes the manager-absent branch,
+  //     reads guild_config.music_enabled=false, and must decline with the catalog
+  //     `music-disabled` notice. The interaction is hand-built (injectorFor, the
+  //     capability-bound real ingress) so it carries the REAL guild name the way
+  //     every production gateway interaction does — interaction.guild.name IS the
+  //     guild's actual name in production, and bootGuild named this guild
+  //     `brandName`; runSlash's default synthetic stand-in name would misreport
+  //     the very brand surface under test.
+  const declineCaptured = await ctx.injectorFor(handle).inject(
+    buildSlashInteraction({
+      commandName: 'queue',
+      guildId: handle.guildId,
+      guildName: brandName,
+      client: handle.client,
+      user: {
+        id: ctx.userId('a'),
+        username: ctx.userId('a'),
+        displayName: 'SET-B member',
+      },
+    }),
+  );
+  // Observe the FULL member-facing reply surface (content + embed text): the
+  // decline is contracted as a notice, not as a specific payload shape, and an
+  // embed-only decline must never be misreported as "no reply at all".
+  const surface = brandingSurface(declineCaptured);
+  const declineReply = declineCaptured.find('reply');
+  const declineEphemeral =
+    (declineReply?.payload as { ephemeral?: boolean } | undefined)?.ephemeral === true;
+  ctx.expect(declineReply !== undefined && declineEphemeral && surface.includes('switched off'), {
     assertionClass: 'Discord',
     channel: 'captured-reply',
-    promise: 'While music is disabled, a music command declines ephemerally rather than acting on the queue.',
-    observation: `/queue with music disabled replied "${truncate(declineText)}".`,
-    impact: 'A music command while disabled produced no decline reply at all.',
+    promise: 'While music is disabled, a music command declines ephemerally with the switched-off notice rather than acting on the queue.',
+    observation:
+      `/queue with music disabled replied (captured=${declineReply !== undefined}, ephemeral=${declineEphemeral}) ` +
+      `with surface "${truncate(surface)}".`,
+    impact: 'A music command while disabled produced no ephemeral switched-off decline (no reply, or a reply that is not the music-disabled notice).',
   });
 
-  // (3) BEHAVIOR-BUG FINDING: the catalog contracts a BRANDED, guild-named
-  //     `music-disabled` notice ("Music is currently switched off in {guild-name} —
-  //     an admin can flip it back on from the dashboard."). The real reply is the
-  //     generic stock string and names neither the guild brand — a white-label gap.
-  const surface = brandingSurface(declineCaptured);
+  // (3) White-label: the catalog `music-disabled` notice is BRANDED and
+  //     guild-named ("Music is currently switched off in {guild-name} — an admin
+  //     can flip it back on from the dashboard."), resolved through the brand kit
+  //     (store_brand_name falling back to the guild's own name). A stock unbranded
+  //     string here is a white-label regression.
   ctx.expect(surface.includes(brandName), {
     assertionClass: 'branding',
     channel: 'captured-reply',
     promise:
       'The music-disabled notice names the guild brand (catalog `music-disabled`: "Music is currently switched off in {guild-name} …"), not a stock SomniBot string.',
     observation:
-      `the disabled-command reply surface "${truncate(surface)}" does not contain the guild brand name "${brandName}" ` +
-      `(the real dispatcher returns the generic "❌ Music system is not enabled." fallback).`,
+      `the disabled-command reply surface "${truncate(surface)}" was checked for the guild brand name "${brandName}".`,
     impact:
-      'The music-disabled decline is an unbranded stock string with no guild name — the catalog’s branded, guild-named music-disabled notice is not implemented (a white-label gap).',
+      'The music-disabled decline does not name the guild brand — the catalog’s branded, guild-named music-disabled notice regressed to a stock string (a white-label gap).',
   });
 
   // (4) DB-observable: re-enabling toggles the flag back (the persisted queue object
@@ -803,15 +832,39 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     guildConfigOverrides: { music_default_volume: 111, music_auto_leave_minutes: 9 },
   });
 
-  // Baseline: a run-prefixed guild_config row exists to be swept.
+  // Seed the append-only audit row whose RETENTION the sweep must honor. Every
+  // music.* audit WRITER (dashboard config save, a Valkey outage, queue teardown)
+  // is behind a lane this bot-only harness gates, so without seeding the
+  // retention assertion is vacuous (before=0 proves nothing). The probe inserts
+  // ONE run-prefixed row shaped like the real `music.stopped` EVENT_TO_AUDIT
+  // mapping (mirrors the commerce-product-store CLEANUP baseline):
+  // retention-through-sweep is the promise under proof here — not the writers.
+  const { error: auditSeedErr } = await handle.supabase.from('audit_logs').insert({
+    guild_id: handle.guildId,
+    actor_type: 'user',
+    actor_id: ctx.userId('a'),
+    action: 'music.stopped',
+    category: 'music',
+    target_type: 'music_session',
+    target_id: `${ctx.runPrefix}cleanup-session`,
+    details: {
+      seeded_by: 'music-collaborative-queue/CLEANUP retention probe',
+      reason: 'command',
+    },
+  });
+
+  // Baseline: a run-prefixed guild_config row exists to be swept, and the seeded
+  // audit row is in place so retention is provable (before > 0, never vacuous).
   const cfgBefore = await guildConfigRowCount(handle);
   const auditBefore = await auditRowCount(handle);
-  ctx.expect(cfgBefore >= 1, {
+  ctx.expect(cfgBefore >= 1 && auditSeedErr === null && (auditBefore ?? 0) >= 1, {
     assertionClass: 'Discord',
     channel: 'db-observable',
-    promise: 'The scenario created a run-prefixed guild_config row (pre-cleanup baseline).',
-    observation: `pre-cleanup: guild_config rows=${cfgBefore}, audit rows=${auditBefore ?? 'unreadable'}.`,
-    impact: 'The cleanup scenario could not establish a run-prefixed config baseline.',
+    promise: 'The scenario created a run-prefixed guild_config row + one seeded append-only audit row (pre-cleanup baseline).',
+    observation:
+      `pre-cleanup: guild_config rows=${cfgBefore}, audit rows=${auditBefore ?? 'unreadable'}, ` +
+      `audit seed error=${auditSeedErr?.message ?? 'none'}.`,
+    impact: 'The cleanup scenario could not establish a run-prefixed config + audit baseline.',
   });
 
   // Prove the off-theme classes while rows still exist.
