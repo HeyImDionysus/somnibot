@@ -542,6 +542,20 @@ jobs:
           SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: e2e-live-disposable-guild
           SOMNIBOT_LOOPBACK_E2E_CONFIRMATION: I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE
           PAYPAL_ENV: sandbox
+      # Dashboard route-driving lane: drives the REAL Next.js route handlers
+      # in-process against the SAME local Supabase, with a REAL owner auth
+      # session (zero production auth edits — only next/headers is mocked). See
+      # packages/dashboard/src/__tests__/live/_session-harness.ts.
+      - name: Run dashboard live-stack E2E (real route handlers + real session)
+        run: pnpm --filter @somnibot/dashboard test:live -- --reporter=verbose
+        env:
+          NODE_ENV: test
+          SUPABASE_URL: http://127.0.0.1:54321
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+          SUPABASE_SECRET_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
+          SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+          VALKEY_URL: redis://localhost:6379
       - name: Stop Supabase
         if: always()
         run: cd packages && supabase stop 2>/dev/null || true
