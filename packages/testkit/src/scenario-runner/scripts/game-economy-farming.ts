@@ -940,13 +940,23 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     guildConfigOverrides: { economy_farming_enabled: true },
   });
   const afterRestart = await readPlot(second, userA, 2);
+  // The seeded planted_at anchor is compared as an INSTANT, not byte-wise:
+  // PostgREST renders a timestamptz as "…+00:00" (trimming trailing zero
+  // fractional seconds) while Date#toISOString() emits "…Z" — the same moment
+  // in different bytes, so a string compare against the seeded anchor would
+  // fail forever on a perfectly persisted row. Byte-for-byte persistence across
+  // the reboot is still proven by the snapshot comparisons below (both sides
+  // read through the same PostgREST representation).
+  const plantedAtPersisted =
+    typeof afterRestart?.planted_at === 'string' &&
+    new Date(afterRestart.planted_at).getTime() === new Date(plantedAt).getTime();
   ctx.expect(
     afterRestart?.crop_id === snapshot?.crop_id &&
       afterRestart?.planted_at === snapshot?.planted_at &&
       afterRestart?.watered_at === snapshot?.watered_at &&
       afterRestart?.fertilized === true &&
       afterRestart?.harvested === false &&
-      afterRestart?.planted_at === plantedAt,
+      plantedAtPersisted,
     {
       assertionClass: 'Discord',
       channel: 'db-observable',
@@ -954,7 +964,8 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
         'After a full stack restart the plot resumes byte-identical: crop, planted_at, watered_at, and the fertilizer flag all persist (no crop matures twice, no progress lost).',
       observation:
         `pre-restart crop=${snapshot?.crop_id}/planted=${snapshot?.planted_at}/watered=${snapshot?.watered_at}/fert=${snapshot?.fertilized}; ` +
-        `post-restart crop=${afterRestart?.crop_id}/planted=${afterRestart?.planted_at}/watered=${afterRestart?.watered_at}/fert=${afterRestart?.fertilized}/harvested=${afterRestart?.harvested}.`,
+        `post-restart crop=${afterRestart?.crop_id}/planted=${afterRestart?.planted_at}/watered=${afterRestart?.watered_at}/fert=${afterRestart?.fertilized}/harvested=${afterRestart?.harvested}; ` +
+        `seeded anchor=${plantedAt} instant-matches post-restart planted_at=${plantedAtPersisted}.`,
       impact: 'Farm plot state did not survive a restart — persisted crop/timers/fertilizer were lost or altered.',
     },
   );

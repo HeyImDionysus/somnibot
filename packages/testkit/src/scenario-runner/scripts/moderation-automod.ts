@@ -1194,14 +1194,22 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
  * the guild row), plus the 12 scenario scripts.
  *
  *   infractions.automod_rule_id → automod_rules(id): infractions swept BEFORE rules.
- *   audit_logs / alerts only FK guild(id): swept after, before guild_config + guild.
+ *   alerts only FK guild(id): swept after, before guild_config + guild.
+ *   audit_logs is deliberately EXCLUDED (the administration-audit convention):
+ *   audit rows are append-only by contract — the BEFORE DELETE trigger
+ *   prevent_audit_log_delete rejects every delete — so listing the table here
+ *   makes the sweep a guaranteed no-op AND makes the teardown residue counter
+ *   count rows that can never be removed. Concretely: every boot queues a
+ *   `bot.started` audit row that AuditService flushes on its 5s timer or on
+ *   stop(), and RESTART's mid-scenario first.cleanup() flushes it before
+ *   teardown counts — a false "residue" FAIL on both of RESTART's handles.
+ *   The residue check counts operational tables only.
  */
 export const moderationAutomodProof: DomainProof = {
   domainId: 'moderation-automod',
   guildScopedTables: [
     'infractions',
     'automod_rules',
-    'audit_logs',
     'alerts',
   ],
   scripts: {

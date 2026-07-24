@@ -192,6 +192,22 @@ export interface ConfigChangedData {
   section: string;
   changes: Record<string, unknown>;
   changedBy: string;
+  /**
+   * Values of the changed keys BEFORE the change was applied — the audit
+   * row's before_state. Emitters that know the prior values (e.g. the
+   * dashboard write APIs via the config_reload payload) should carry them;
+   * when absent the AuditService falls back to its own last-known
+   * guild_config snapshot for the changed keys.
+   */
+  before?: Record<string, unknown>;
+  /** Where the change originated (e.g. 'dashboard'); recorded in the audit details. */
+  source?: string;
+  /**
+   * Stable per-change identity (e.g. the bot_action_queue row id) used as the
+   * audit occurrence key so a redelivered config_reload cannot double-write
+   * the config.updated audit row.
+   */
+  occurrenceId?: string;
 }
 
 export interface ServerDeployedData {

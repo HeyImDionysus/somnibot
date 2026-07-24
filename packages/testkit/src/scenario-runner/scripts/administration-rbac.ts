@@ -29,12 +29,11 @@
  *     boot of the same guild id (RESTART); the sweep removes every run-prefixed
  *     row (CLEANUP).
  *
- * Behavior-bug discovery (NOT forced green): DEF records a FAIL because no
- * reachable runtime path seeds the five system dashboard roles for a
- * newly-provisioned guild — only a one-time historical migration seeds guilds
- * that existed at migration time, and it seeds Owner/Admin/Moderator/Viewer/
- * Support, not the catalog's owner/admin/moderator/support/finance. A guild
- * provisioned after that migration opens /settings/team to an empty role list.
+ * System-role seeding: an AFTER INSERT trigger on `guild`
+ * (seed_default_dashboard_roles) seeds the five contracted system roles
+ * (owner/admin/moderator/support/finance) for every provisioned guild — DEF
+ * asserts exactly those five, and every custom-role baseline below counts
+ * NON-system rows so the seeded five never skew a byte-stable baseline.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -339,11 +338,10 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     promise:
       'After first setup, dashboard_roles contains exactly the five seeded system roles (owner/admin/moderator/support/finance) for the run guild.',
     observation:
-      `a freshly-provisioned guild holds ${systemRoles} is_system role row(s) (expected 5). No runtime code path seeds ` +
-      `system roles on guild setup — only a one-time historical migration seeds pre-existing guilds, and it seeds ` +
-      `Owner/Admin/Moderator/Viewer/Support (not the contracted owner/admin/moderator/support/finance).`,
+      `a freshly-provisioned guild holds ${systemRoles} is_system role row(s) (expected 5, seeded by the ` +
+      `seed_default_dashboard_roles AFTER INSERT trigger on guild).`,
     impact:
-      'A guild provisioned after the historical seed migration has no dashboard system roles: the owner opens /settings/team to an empty role list, so the "five system roles seeded exactly once" contract is unmet.',
+      'A freshly-provisioned guild does not hold exactly the five contracted dashboard system roles: the owner opens /settings/team to a wrong role list, so the "five system roles seeded exactly once" contract is unmet.',
   });
 
   // Positive control for the RLS probe: a real run-prefixed custom role.
@@ -484,15 +482,18 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
   const maxPerms = Number(declaredDefault(ctx.domain, 'max-permissions-per-role') ?? 100);
 
-  // A valid control role exists and is the ONLY run-prefixed role for the guild;
-  // this is the DB-observable baseline that a rejected invalid POST must not disturb.
+  // A valid control role exists and is the ONLY custom (non-system) role for the
+  // guild; the guild-provision trigger also seeds the five system roles, so the
+  // DB-observable baseline a rejected invalid POST must not disturb is "exactly
+  // one non-system row" (counting all rows would count the seeded five).
   const control = await insertRole(handle, ctx, { suffix: 'valid-control', permissions: ['dashboard.view_audit'] });
-  const before = await guildRoleCount(handle);
+  const before = await guildRoleCount(handle, { isSystem: false });
   ctx.expect(control.id !== null && before === 1, {
     assertionClass: 'database-RLS',
     channel: 'db-observable',
-    promise: 'A valid role exists and is the only dashboard_roles row for the guild (byte-stable baseline).',
-    observation: `control insert id=${control.id ?? '(none)'}; guild dashboard_roles count=${before} (expected 1).`,
+    promise:
+      'A valid role exists and is the only custom (non-system) dashboard_roles row for the guild beside the five seeded system roles (byte-stable baseline).',
+    observation: `control insert id=${control.id ?? '(none)'}; guild non-system dashboard_roles count=${before} (expected 1).`,
     impact: 'Could not establish the pre-rejection baseline of valid roles.',
   });
 
@@ -530,14 +531,17 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
 async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
 
-  // Positive control + the DB-observable baseline the denied calls must not change.
+  // Positive control + the DB-observable baseline the denied calls must not
+  // change. The guild-provision trigger seeds the five system roles, so the
+  // baseline counts NON-system rows only (the one control role).
   const control = await insertRole(handle, ctx, { suffix: 'mod-role', permissions: ['dashboard.manage_moderation'] });
-  const before = await guildRoleCount(handle);
+  const before = await guildRoleCount(handle, { isSystem: false });
   ctx.expect(control.id !== null && before === 1, {
     assertionClass: 'database-RLS',
     channel: 'db-observable',
-    promise: 'The guild holds exactly the one seeded control role before any unauthorized call (baseline for "denied calls write nothing").',
-    observation: `control insert id=${control.id ?? '(none)'}; guild dashboard_roles count=${before} (expected 1).`,
+    promise:
+      'The guild holds exactly the one seeded control role beside the five system roles before any unauthorized call (baseline for "denied calls write nothing").',
+    observation: `control insert id=${control.id ?? '(none)'}; guild non-system dashboard_roles count=${before} (expected 1).`,
     impact: 'Could not establish the pre-denial baseline.',
   });
 
@@ -820,9 +824,16 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     impact: 'A concurrent create race produced duplicate role rows — the unique constraint did not serialize the writers.',
   });
 
+  // The RLS positive control must run while the winning role STILL EXISTS —
+  // part (b) below deletes it to prove ON DELETE CASCADE, after which a
+  // service-role read of it is null by design (not an RLS failure).
+  const roleId = c1.error === null ? c1.id : c2.error === null ? c2.id : null;
+  if (roleId) {
+    await proveRlsIsolation(ctx, handle, roleId);
+  }
+
   // (b) Referential integrity: an assignment for a role that is then deleted must
   //     leave NO dangling assignment (role_id … ON DELETE CASCADE).
-  const roleId = c1.error === null ? c1.id : c2.error === null ? c2.id : null;
   if (roleId) {
     const assign = await insertAssignment(handle, { discordId: userA, roleId });
     if (assign.error) {
@@ -847,9 +858,6 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     }
   }
 
-  if (roleId) {
-    await proveRlsIsolation(ctx, handle, roleId);
-  }
   ctx.gate(
     'owner-notification',
     'discord-readback',

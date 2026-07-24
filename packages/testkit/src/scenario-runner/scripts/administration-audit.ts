@@ -30,12 +30,14 @@
  * warn/role-change/config edit, the owner alert-channel readback, and the
  * dependency-outage (DEPFAIL) / transient-insert-fault (RETRY) fault lanes.
  *
- * Behavior-bug discovery (never forced green): three real divergences surface as
- * FAILs for the owner — (a) `config.changed` events carry no before-snapshot so
- * the `config.updated` audit row's diff is one-sided (before_state null); (b) the
- * catalog/`guild_config` 30-day retention minimum cannot take effect because
- * `scrub_expired_audit_logs` rejects any window under 60 days; (c) the AuditService
- * carries no occurrence/idempotency key, so a redelivered event double-writes.
+ * Behavior-bug history (wave-2 fixes, 2026-07-24): three real divergences this
+ * proof surfaced are now FIXED in the product and asserted as promises — (a) the
+ * AuditService keeps a guild_config before-snapshot (advanced per change) so the
+ * `config.updated` diff is two-sided even when the event carries no `before`;
+ * (b) the retention scrub floor was lowered 60 → 30 days to match the catalog
+ * minimum and guild_config's own CHECK (migration 20260724190000); (c) audit
+ * writes are occurrence-deduped (`occurrence_key` + unique index + ON CONFLICT
+ * DO NOTHING flush), so a redelivered event or re-flushed batch lands once.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -415,9 +417,9 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
       impact: 'The config change was recorded without the changed values — the audit trail loses what changed.',
     });
 
-    // audit (FINDING): the diff is one-sided. config.changed (ConfigChangedData:
-    // section/changes/changedBy) carries NO before-snapshot, so the mapping writes
-    // before_state=null — contradicting the "before/after diffs" tamper-evidence.
+    // audit: the diff is two-sided. When the event carries no `before`, the
+    // AuditService fills before_state from its guild_config snapshot (loaded at
+    // start, advanced per change) — the "before/after diffs" tamper-evidence.
     ctx.expect(cfg?.before_state != null, {
       assertionClass: 'audit',
       channel: 'audit-row',
@@ -777,7 +779,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     'audit',
     'audit-row',
     'The converged trail shows no duplicate or missing entries and preserves in-batch ordering.',
-    'requires the transient-insert-fault lane; NOTE: the AuditService re-queues the WHOLE batch with no per-entry idempotency key, so exactly-once relies on the batch INSERT being atomic (all-or-nothing) — a partial-commit fault would duplicate, a likely owner finding',
+    'requires the transient-insert-fault lane; NOTE: occurrence-keyed entries are now idempotent per entry (occurrence_key + ON CONFLICT DO NOTHING), so a re-flush after a post-commit error cannot duplicate them — keyless entries still rely on the batch INSERT being atomic',
   );
   ctx.gate(
     'owner-notification',
@@ -819,8 +821,9 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
     );
   } else {
     const rows = await readAuditRows(handle, guildId, { action: 'warn.issued', targetId });
-    // FINDING: the AuditService carries no occurrence/idempotency key and audit_logs
-    // has no uniqueness constraint on the occurrence — a redelivered event double-writes.
+    // Occurrence dedupe: the AuditService keys the row on the infractionId
+    // occurrence (in-queue dedupe + uq_audit_logs_guild_occurrence ON CONFLICT
+    // DO NOTHING), so the redelivered event lands exactly one row.
     ctx.expect(rows.length === 1, {
       assertionClass: 'replay-safety',
       channel: 'db-observable',
@@ -848,52 +851,105 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
 /** RESTART — buffered entries survive shutdown and history survives restart. */
 async function RESTART(ctx: ScenarioContext): Promise<void> {
   const guildId = ctx.scenarioGuildId('a');
+  const seededActions = ['warn.issued', 'mute.applied', 'config.updated'] as const;
 
   // Boot #1: record history (seed rows exactly as flush() writes), snapshot, shut down.
   const first = await ctx.bootGuild({ guildId, label: 'a' });
   await seedAuditRow(first, { actor_id: ctx.userId('mod'), target_id: ctx.userId('t1'), action: 'warn.issued', category: 'moderation' });
   await seedAuditRow(first, { actor_id: ctx.userId('mod'), target_id: ctx.userId('t2'), action: 'mute.applied', category: 'moderation' });
   await seedAuditRow(first, { actor_id: ctx.userId('owner'), action: 'config.updated', category: 'system', after_state: { changed: true } });
+
+  // Drain the REAL AuditService queue BEFORE snapshotting: the production init
+  // logs a `bot.started` lifecycle row on EVERY boot (guild-init →
+  // auditService.log), and shutdown's catalog-promised final flush lands that
+  // row asynchronously AFTER cleanup() returns. Snapshotting without draining
+  // made the boot-time entry surface post-restart as a phantom "duplicate"
+  // (the earlier exact-count-3 assertions failed against CORRECT product
+  // behavior). Forcing the real flush here makes boot #1's own entries part
+  // of the snapshot deterministically; boot #2's are drained symmetrically
+  // below so "new events append normally" is observed, not raced.
+  const drainedFirst = await flushAuditQueue(first);
   const snapshotIds = (await readAuditRows(first, guildId)).map((r) => r.id).sort();
   const snapCount = snapshotIds.length;
   await first.cleanup(); // simulate shutdown (rows persist in Supabase)
 
   // Boot #2: SAME guild id (restart). Audit history lives in Supabase → intact.
   const second = await ctx.bootGuild({ guildId, label: 'a' });
-  const afterIds = (await readAuditRows(second, guildId)).map((r) => r.id).sort();
+  const drainedSecond = await flushAuditQueue(second);
 
-  // database-RLS: no rows lost or duplicated across the restart boundary.
-  ctx.expect(afterIds.length === snapCount && snapCount === 3 && JSON.stringify(afterIds) === JSON.stringify(snapshotIds), {
-    assertionClass: 'database-RLS',
-    channel: 'db-observable',
-    promise: 'After a full stack restart the complete audit history is intact — no rows lost or duplicated across the restart boundary.',
-    observation: `pre-restart rows=${snapCount}, post-restart rows=${afterIds.length}; identical id set=${JSON.stringify(afterIds) === JSON.stringify(snapshotIds)}.`,
-    impact: 'Audit history did not survive the restart — persisted rows were lost, duplicated, or altered.',
-  });
+  if (!drainedFirst || !drainedSecond) {
+    ctx.gate(
+      'database-RLS',
+      'db-observable',
+      'After a full stack restart the complete audit history is intact — no rows lost or duplicated across the restart boundary.',
+      'a per-guild AuditService manager was not resolvable from a booted context, so the boot-time queues could not be drained deterministically around the restart',
+    );
+    ctx.gate('audit', 'audit-row', 'Pre- and post-restart entries form one continuous, ordered history.', 'audit queues not drainable this run');
+    ctx.gate('replay-safety', 'db-observable', 'The final flush is not repeated on startup.', 'audit queues not drainable this run');
+  } else {
+    const afterRows = await readAuditRows(second, guildId);
+    const afterIds = afterRows.map((r) => r.id).sort();
+    const survivors = snapshotIds.filter((id) => afterIds.includes(id));
+    const newRows = afterRows.filter((r) => !snapshotIds.includes(r.id));
+    // Any post-restart row repeating a pre-restart action would be a re-flush
+    // of already-persisted history; legitimate new rows are boot #2's own
+    // lifecycle events (bot.started) only.
+    const reflushedHistory = newRows.filter((r) => (seededActions as readonly string[]).includes(r.action));
+    const seededCounts = seededActions.map(
+      (action) => afterRows.filter((r) => r.action === action).length,
+    );
+    const botStartedRows = afterRows.filter((r) => r.action === 'bot.started').length;
 
-  // audit: pre- and post-restart entries form one continuous, ordered history.
-  const ordered = await second.supabase
-    .from('audit_logs')
-    .select(AUDIT_COLS)
-    .eq('guild_id', guildId)
-    .order('timestamp', { ascending: true });
-  const orderedRows = (ordered.data as AuditRow[] | null) ?? [];
-  ctx.expect(orderedRows.length === 3, {
-    assertionClass: 'audit',
-    channel: 'audit-row',
-    promise: 'Pre- and post-restart entries form one continuous, queryable, ordered history.',
-    observation: `ordered audit rows after restart = ${orderedRows.length} (expected 3).`,
-    impact: 'The audit history was not continuous/ordered after the restart.',
-  });
+    // database-RLS: no rows lost or duplicated across the restart boundary.
+    ctx.expect(
+      survivors.length === snapCount &&
+        snapCount >= 4 && // 3 seeded + boot #1's flushed bot.started
+        reflushedHistory.length === 0 &&
+        seededCounts.every((n) => n === 1),
+      {
+        assertionClass: 'database-RLS',
+        channel: 'db-observable',
+        promise:
+          'After a full stack restart the complete audit history is intact — every pre-restart row survives, none is re-written, and the only additions are the restart’s own lifecycle entries.',
+        observation:
+          `pre-restart rows=${snapCount}, surviving post-restart=${survivors.length}; ` +
+          `new rows repeating pre-restart actions=${reflushedHistory.length}; ` +
+          `seeded actions [${seededActions.join(', ')}] appear ${JSON.stringify(seededCounts)} time(s) (expected 1 each).`,
+        impact: 'Audit history did not survive the restart — persisted rows were lost, duplicated, or altered.',
+      },
+    );
 
-  // replay-safety: the final flush is not repeated on startup (no duplicate rows).
-  ctx.expect(afterIds.length === snapCount, {
-    assertionClass: 'replay-safety',
-    channel: 'db-observable',
-    promise: 'The final flush is not repeated on startup — restart adds no duplicate audit rows.',
-    observation: `row count unchanged across restart: ${snapCount} → ${afterIds.length}.`,
-    impact: 'The restart re-flushed already-persisted entries, duplicating audit rows.',
-  });
+    // audit: pre- and post-restart entries form one continuous, ordered history.
+    const ordered = await second.supabase
+      .from('audit_logs')
+      .select(AUDIT_COLS)
+      .eq('guild_id', guildId)
+      .order('timestamp', { ascending: true });
+    const orderedRows = (ordered.data as AuditRow[] | null) ?? [];
+    const orderedIds = orderedRows.map((r) => r.id);
+    const historyContinuous =
+      orderedRows.length === afterIds.length && snapshotIds.every((id) => orderedIds.includes(id));
+    ctx.expect(historyContinuous && orderedRows.filter((r) => (seededActions as readonly string[]).includes(r.action)).length === 3, {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: 'Pre- and post-restart entries form one continuous, queryable, ordered history.',
+      observation:
+        `ordered post-restart read=${orderedRows.length} rows containing all ${snapCount} pre-restart rows=${historyContinuous}; ` +
+        `seeded rows present=${orderedRows.filter((r) => (seededActions as readonly string[]).includes(r.action)).length} (expected 3).`,
+      impact: 'The audit history was not continuous/ordered after the restart.',
+    });
+
+    // replay-safety: the final flush is not repeated on startup. Each boot
+    // records exactly ONE bot.started lifecycle row — a re-flushed shutdown
+    // batch would surface as a third bot.started or a repeated seeded action.
+    ctx.expect(botStartedRows === 2 && reflushedHistory.length === 0, {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise: 'The final flush is not repeated on startup — restart adds no duplicate audit rows (exactly one bot.started per boot, no re-flushed history).',
+      observation: `bot.started rows across both boots=${botStartedRows} (expected 2); re-flushed pre-restart actions=${reflushedHistory.length} (expected 0).`,
+      impact: 'The restart re-flushed already-persisted entries, duplicating audit rows.',
+    });
+  }
 
   await proveAnonDenial(ctx, second, guildId);
   await proveNoOwnerAlert(ctx, second);

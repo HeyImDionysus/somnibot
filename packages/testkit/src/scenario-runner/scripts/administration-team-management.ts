@@ -18,19 +18,13 @@
  * cross-guild isolation, UNIQUE-constraint idempotency, restart-persistence and
  * cleanup properties are all proven live.
  *
- * Two divergences from the catalog's contracted intent are surfaced as FAILs
- * (owner findings — never softened to a pass or a gate), each grounded in a real
- * DB observation, both in DEF:
- *   1. The consent-based INVITATION model is unimplemented — there is no
- *      invitation table at all and `dashboard_user_roles` carries no
- *      pending/accepted/expiry lifecycle column; the only write path inserts a
- *      LIVE role assignment directly, contradicting `direct-assignment-enabled`
- *      (which defaults to false → consent required) and the whole
- *      invite → DM → accept → grant promise.
- *   2. The one implemented grant path (POST /api/rbac/users) is itself broken
- *      against the live schema: it omits the NOT NULL `user_id` and writes a
- *      Discord snowflake into the uuid `assigned_by` column, so the exact insert
- *      it performs errors — no team member can actually be added.
+ * DEF carries two probes that once surfaced FAIL findings and now pin the fixed
+ * behavior (never softened — they still FAIL if the product regresses):
+ *   1. The consent-based INVITATION model: probed live for an invitation entity
+ *      (`team_invitations` now exists) rather than assumed.
+ *   2. The grant path (POST /api/rbac/users): its EXACT insert shape is replayed
+ *      against the live schema (the reconciled schema accepts it — `user_id` is
+ *      backfill-nullable and `assigned_by` is text carrying the actor snowflake).
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -145,9 +139,10 @@ async function seedAssignment(
 
 /**
  * Reproduce the EXACT insert the production route (POST /api/rbac/users) performs:
- * `{ guild_id, discord_id, role_id, assigned_by: <discord snowflake> }` — with NO
- * user_id and a snowflake in the uuid `assigned_by` column. Returns whether it
- * succeeded plus the DB error, so DEF can prove the only add-member path is broken.
+ * `{ guild_id, discord_id, role_id, assigned_by: <discord snowflake> }` — no
+ * user_id (backfill-nullable) and the actor snowflake in the text `assigned_by`
+ * column. Returns whether it succeeded plus the DB error, so DEF proves the
+ * add-member path works against the live schema (and fails loudly on drift).
  */
 async function routeFaithfulInsert(
   handle: LiveClientHandle,
@@ -158,9 +153,9 @@ async function routeFaithfulInsert(
     guild_id: handle.guildId,
     discord_id: discordId,
     role_id: roleId,
-    // The route sets assigned_by = ctx.discordId (a Discord snowflake string);
-    // assigned_by is a uuid column, so this is an invalid-uuid write. user_id
-    // (NOT NULL) is omitted entirely, exactly as the route omits it.
+    // The route sets assigned_by = ctx.discordId (a Discord snowflake string,
+    // stored in the text assigned_by column) and omits user_id entirely
+    // (backfill-nullable), exactly as the route does.
     assigned_by: '100000000000000001',
   });
   return { ok: !error, err: (error as PgErr | null) ?? null };
@@ -399,9 +394,11 @@ function gateLiveGuildReadback(ctx: ScenarioContext): void {
 // ── The 12 scenario scripts ───────────────────────────────────────────────
 
 /**
- * DEF — the catalog's default invite → DM → accept → grant flow. Reality: no
- * invitation model exists and the sole grant path is broken; both surface as
- * FAILs. The assignment table's RLS/owner-alert properties still prove out.
+ * DEF — the catalog's default invite → DM → accept → grant flow. The invitation
+ * entity (team_invitations) and the route-shaped grant insert are both probed
+ * LIVE (they were FAIL findings before the model landed and the schema was
+ * reconciled; the probes stay to catch regressions). The assignment table's
+ * RLS/owner-alert properties prove out on a schema-valid seeded grant.
  */
 async function DEF(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a', economyEnabled: false });
@@ -417,7 +414,8 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     impact: 'Could not seed the dashboard role — the team-management proof setup is invalid.',
   });
 
-  // FINDING #1 — the consent/invitation model is unimplemented.
+  // The consent/invitation model exists live (a former FAIL finding — probed,
+  // never assumed; the probe stays to catch the model regressing away).
   const model = await probeInvitationModel(handle);
   ctx.expect(model.present, {
     assertionClass: 'Discord',
@@ -426,26 +424,38 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
       'A consent-based invitation precedes any grant: an invitation is created (pending) and the invitee must accept before permissions apply ' +
       `(direct-assignment-enabled defaults to ${JSON.stringify(directDefault)} → consent required).`,
     observation:
-      `no invitation entity exists — probed [${CANDIDATE_INVITE_TABLES.join(', ')}] → present: ` +
+      `probed invitation entities [${CANDIDATE_INVITE_TABLES.join(', ')}] → present: ` +
       `[${model.tables.join(', ') || 'none'}]; dashboard_user_roles lifecycle columns present: ` +
-      `[${model.columns.join(', ') || 'none'}]. The sole write path inserts a live role assignment directly.`,
+      `[${model.columns.join(', ') || 'none'}].`,
     impact:
       'The invitation/consent model from the catalog is unimplemented: there is no pending state, no DM/accept step, and no expiry/decline/revoke. Roles would be granted with no acceptance — direct-assignment-enabled=false is not honored.',
   });
 
-  // FINDING #2 — the only implemented grant path (POST /api/rbac/users) is broken.
+  // The implemented grant path (POST /api/rbac/users) records the grant: replay
+  // its EXACT insert shape against the live schema (a former FAIL finding — the
+  // probe stays to catch schema drift regressing the route).
   const route = await routeFaithfulInsert(handle, memberDiscord, roleId ?? '');
   ctx.expect(route.ok, {
     assertionClass: 'Discord',
     channel: 'db-observable',
     promise: 'The one implemented add-member path (POST /api/rbac/users) successfully records the role grant.',
     observation: route.ok
-      ? 'the route-coded insert unexpectedly succeeded (schema drift from the audited migrations).'
+      ? 'the exact insert the route performs succeeded against the live schema (backfill-nullable user_id; text assigned_by carrying the actor snowflake).'
       : `the exact insert the route performs failed: [${route.err?.code ?? '?'}] ${route.err?.message ?? ''} ` +
-        '(it omits the NOT NULL user_id and writes a Discord snowflake into the uuid assigned_by column).',
+        '(the route omits user_id and writes the actor’s Discord snowflake into assigned_by).',
     impact:
       'The only implemented path to grant a dashboard role errors against the live schema, so no team member can be added — team management is non-functional end-to-end.',
   });
+
+  // The route-shaped row above occupies UNIQUE(guild_id, discord_id, role_id).
+  // Clear it before seeding the identity-linked post-acceptance grant below —
+  // otherwise that seed hits 23505 and leaves NO row matching readAssignment's
+  // user_id filter, falsely tripping the RLS probe's positive control.
+  await handle.supabase
+    .from('dashboard_user_roles')
+    .delete()
+    .eq('guild_id', handle.guildId)
+    .eq('discord_id', memberDiscord);
 
   // Seed a SCHEMA-VALID assignment (the post-acceptance "grant" state) so the
   // off-theme classes have a real row to observe.

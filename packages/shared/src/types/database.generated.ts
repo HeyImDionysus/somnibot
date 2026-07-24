@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 185 migration files in packages/supabase/migrations/
+ * Source: 187 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1000,6 +1000,7 @@ export interface DbLicenseKey {
   failed_attempts: number;
   last_failed_at: string | null;
   commerce_required_order_status: string | null;
+  rotated_to_key_id: string | null;
 }
 
 export interface DbEntitlement {
@@ -1125,6 +1126,7 @@ export interface DbAuditLog {
   error_message: string | null;
   category: string;
   correlation_id: string | null;
+  occurrence_key: string | null;
 }
 
 export interface DbWebhookEvent {

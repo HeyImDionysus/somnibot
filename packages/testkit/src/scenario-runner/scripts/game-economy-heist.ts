@@ -1553,7 +1553,7 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   gateLiveGuildReadback(ctx, 'exactly one recruiting embed, one join embed per member, and one resolution announcement despite the replays');
 }
 
-/** RESTART — heist state survives a full stack reboot; a claimed-but-unpaid heist resumes and settles once. */
+/** RESTART — heist state survives a full stack reboot; the REAL boot-time resume settles the claimed-but-unpaid heist exactly once. */
 async function RESTART(ctx: ScenarioContext): Promise<void> {
   const guildId = ctx.scenarioGuildId('a');
   const userA = ctx.userId('a');
@@ -1581,51 +1581,76 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
   const payoutEach = Math.floor(targetPayout / 2); // 200
   await arrangeFrozenSuccess(first, heist!.id, payoutEach);
   const snapshot = await readHeistById(first, heist!.id);
+  const preA = await walletAmount(first, userA); // 900 (1000 - 100 entry fee)
+  const preB = await walletAmount(first, userB); // 900
   await first.cleanup(); // simulate shutdown
 
-  // Boot #2: SAME guild id (restart). The claimed in_progress heist + frozen unpaid crew
-  // persist byte-for-byte.
+  // Boot #2: SAME guild id (restart). Booting the stack runs the REAL production
+  // resume path: initGuildFeatures AWAITS resumePendingHeists (guild-init.ts),
+  // and a claimed in_progress heist is resolved IMMEDIATELY (heist-manager.ts
+  // treats it as "already claimed — finish the frozen outcome"; there is no
+  // join-window timer left to wait out). So by the time this handle returns, the
+  // product itself has read the persisted frozen decision and settled it. The
+  // probe therefore asserts persistence THROUGH the resume: the frozen
+  // pre-shutdown decision (resolution + payout_each), the frozen crew, and their
+  // frozen entry fees all survived byte-identical and were driven to exactly the
+  // terminal state that decision requires — nothing re-rolled, lost, or resized.
   const second = await bootHeist(ctx, bootOpts);
   const afterRestart = snapshot ? await readHeistById(second, snapshot.id) : null;
   const frozen = snapshot ? await participantsFor(second, snapshot.id) : [];
   ctx.expect(
-    afterRestart?.status === 'in_progress' &&
+    afterRestart?.status === 'success' &&
       afterRestart?.resolution === 'success' &&
+      afterRestart?.resolution === snapshot?.resolution &&
       afterRestart?.payout_each === payoutEach &&
+      afterRestart?.target_payout === snapshot?.target_payout &&
+      afterRestart?.created_at === snapshot?.created_at &&
+      afterRestart?.resolved_at !== null &&
       frozen.length === 2 &&
-      frozen.every((p) => p.claimed_at !== null && p.paid_at === null),
+      frozen.every((p) => p.claimed_at !== null && p.entry_fee_paid === 100),
     {
       assertionClass: 'Discord',
       channel: 'db-observable',
       promise:
-        'After a full restart the claimed in_progress heist, its frozen outcome + payout_each, and its frozen unpaid crew persist exactly (state lives in Supabase).',
+        'After a full restart the claimed heist’s frozen outcome, payout_each, and frozen crew persist exactly (state lives in Supabase), and the REAL boot-time resume (resumePendingHeists, awaited by guild init) settles the persisted decision to its terminal status without re-rolling or resizing it.',
       observation:
-        `post-restart status=${afterRestart?.status} (expected in_progress), resolution=${afterRestart?.resolution} (expected success), ` +
-        `payout_each=${afterRestart?.payout_each} (expected ${payoutEach}), frozen crew=${frozen.length} all claimed+unpaid=${frozen.every((p) => p.claimed_at !== null && p.paid_at === null)}.`,
+        `post-restart status=${afterRestart?.status} (expected terminal success — boot #2's awaited resumePendingHeists resolves a claimed in_progress heist immediately), ` +
+        `resolution=${afterRestart?.resolution} (snapshot ${snapshot?.resolution}), payout_each=${afterRestart?.payout_each} (expected frozen ${payoutEach}), ` +
+        `same persisted row=${afterRestart?.created_at === snapshot?.created_at}, resolved_at ${afterRestart?.resolved_at ? 'set' : 'null'}; ` +
+        `frozen crew=${frozen.length} all claimed+fee-frozen=${frozen.every((p) => p.claimed_at !== null && p.entry_fee_paid === 100)}.`,
       impact: 'Heist state did not survive the restart — the claimed heist or its frozen crew was lost or altered.',
     },
   );
 
-  // The resumed settlement pays each frozen crew member exactly once and finalises once —
-  // no catch-up double payout (a re-credit after resume is a no-op under the paid_at guard).
-  const preA = await walletAmount(second, userA); // 900
-  const preB = await walletAmount(second, userB); // 900
-  const cA = snapshot ? await driveCredit(second, snapshot.id, userA, payoutEach) : false;
-  const cB = snapshot ? await driveCredit(second, snapshot.id, userB, payoutEach) : false;
-  const cAgain = snapshot ? await driveCredit(second, snapshot.id, userA, payoutEach) : false;
-  const fin = snapshot ? await driveFinalize(second, snapshot.id) : false;
-  const finAgain = snapshot ? await driveFinalize(second, snapshot.id) : false;
-  const postA = await walletAmount(second, userA);
-  const postB = await walletAmount(second, userB);
+  // The resumed settlement paid each frozen crew member EXACTLY once (never a
+  // catch-up double payout), and the durable DB fences hold against replay: a
+  // re-driven credit is a paid_at-guarded no-op, a re-driven finalise is a
+  // status-guarded no-op, so each wallet moved 900 → 1100 once and can never
+  // move again for this heist.
+  const postA = await walletAmount(second, userA); // 1100 — paid once by the resume
+  const postB = await walletAmount(second, userB); // 1100
+  const paidA = frozen.find((p) => p.user_id === userA);
+  const paidB = frozen.find((p) => p.user_id === userB);
+  const cAgainA = snapshot ? await driveCredit(second, snapshot.id, userA, payoutEach) : true;
+  const cAgainB = snapshot ? await driveCredit(second, snapshot.id, userB, payoutEach) : true;
+  const finAgain = snapshot ? await driveFinalize(second, snapshot.id) : true;
+  const replayA = await walletAmount(second, userA);
+  const replayB = await walletAmount(second, userB);
   const terminal = snapshot ? await readHeistById(second, snapshot.id) : null;
   ctx.expect(
-    cA === true &&
-      cB === true &&
-      cAgain === false &&
-      fin === true &&
-      finAgain === false &&
-      postA === (preA ?? 0) + payoutEach &&
+    postA === (preA ?? 0) + payoutEach &&
       postB === (preB ?? 0) + payoutEach &&
+      paidA != null &&
+      paidA.paid_at !== null &&
+      paidA.payout === payoutEach &&
+      paidB != null &&
+      paidB.paid_at !== null &&
+      paidB.payout === payoutEach &&
+      cAgainA === false &&
+      cAgainB === false &&
+      finAgain === false &&
+      replayA === postA &&
+      replayB === postB &&
       terminal?.status === 'success',
     {
       assertionClass: 'replay-safety',
@@ -1633,8 +1658,9 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
       promise:
         'A claimed-but-unpaid heist resumes after restart and pays each frozen crew member exactly once, finalising exactly once (no re-roll, no catch-up double payout).',
       observation:
-        `resumed credits A=${cA}, B=${cB}, re-credit A=${cAgain} (expected false); finalise=${fin}/${finAgain} (second expected false); ` +
-        `A ${preA}→${postA}, B ${preB}→${postB} (each +${payoutEach}); terminal status=${terminal?.status}.`,
+        `resumed settlement: A ${preA}→${postA}, B ${preB}→${postB} (each expected exactly +${payoutEach}; paid_at stamped, payout=${paidA?.payout}/${paidB?.payout}); ` +
+        `re-driven credit A=${cAgainA}/B=${cAgainB} (paid_at fence, expected false), re-driven finalise=${finAgain} (status fence, expected false); ` +
+        `wallets after replay A=${replayA}/B=${replayB} (expected unchanged); terminal status=${terminal?.status}.`,
       impact: 'The restart-spanning heist double-paid a crew member or double-finalised.',
     },
   );
@@ -1655,7 +1681,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'discord-readback',
     'resumePendingHeists re-schedules the pending heist on boot and posts exactly one resolution announcement to the log channel.',
-    'the resume timer + channel post need a live gateway (DISCORD_TOKEN + live guild); the resumed settlement money path is proven via the real credit/finalise RPCs',
+    'the resumed settlement itself IS driven here — boot #2 runs the real awaited resumePendingHeists, which settles the claimed heist (proven DB-observably above); only the single channel announcement needs a live gateway (DISCORD_TOKEN + live guild)',
   );
 }
 

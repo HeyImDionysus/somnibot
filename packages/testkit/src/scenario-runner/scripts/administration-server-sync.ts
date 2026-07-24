@@ -838,23 +838,36 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
 
   const rowA = await readDesiredState(handleA, guildA);
   const rowB = await readDesiredState(handleB, guildB);
-  // A guild-B-scoped read of guild A's key returns nothing (distinct PKs, no leak).
-  const crossAinB = await readDesiredState(handleB, guildA);
+  // Leak probe: the store is ONE row keyed on guild_id, and the engine's scoping
+  // IS the `.eq('guild_id', <own guild>)` filter every sync read applies —
+  // handle.supabase is the SAME unscoped service-role client for both handles,
+  // so there is no ambient per-guild scope beyond that filter. The probe
+  // therefore reads EVERYTHING the guild-B scope returns and asserts it is
+  // exactly guild B's one clean row and zero rows of any other guild. (A probe
+  // that filters on guild A's key "via handle B" just reads guild A's row with
+  // the service role — null is impossible by construction, indicting the probe.)
+  const { data: bScopedData } = await handleB.supabase
+    .from('guild_desired_state')
+    .select('guild_id, drift_detected')
+    .eq('guild_id', guildB);
+  const bScopedRows = (bScopedData ?? []) as Array<{ guild_id: string; drift_detected: boolean }>;
+  const leakedRows = bScopedRows.filter((r) => r.guild_id !== guildB).length;
   ctx.expect(
     rowA?.guild_id === guildA &&
       rowB?.guild_id === guildB &&
       rowA?.drift_detected === true &&
       rowB?.drift_detected === false &&
-      crossAinB === null,
+      bScopedRows.length === 1 &&
+      leakedRows === 0,
     {
       assertionClass: 'database-RLS',
       channel: 'db-rls',
       promise:
-        'Each guild scope reads its OWN desired-state row and never the other’s: guild A → its drifting row, guild B → its clean row (distinct rows under distinct guild_ids); a guild-B-scoped read of guild A’s row returns nothing.',
+        'Each guild scope reads its OWN desired-state row and never the other’s: guild A → its drifting row, guild B → its clean row (distinct rows under distinct guild_ids); the guild-B-scoped read returns exactly guild B’s row and zero rows of any other guild.',
       observation:
         `guild A row drift_detected=${rowA?.drift_detected} under "${rowA?.guild_id}", ` +
         `guild B row drift_detected=${rowB?.drift_detected} under "${rowB?.guild_id}"; ` +
-        `guild-B-scoped read of guild A’s row = ${crossAinB === null ? 'none (isolated)' : 'LEAKED'}.`,
+        `the guild-B-scoped read returned ${bScopedRows.length} row(s), ${leakedRows} of them belonging to another guild (expected 1 / 0).`,
       impact: 'A guild-scoped desired-state read returned another guild’s row — the per-guild scoping that prevents cross-guild drift/repair is broken.',
     },
   );

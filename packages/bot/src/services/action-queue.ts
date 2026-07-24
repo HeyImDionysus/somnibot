@@ -1042,11 +1042,27 @@ async function handleConfigReload(
     };
   }
 
+  // Prior values of the changed keys, when the enqueuing writer captured them
+  // (audit before_state — the AuditService's own guild_config snapshot is the
+  // fallback for payloads that don't carry one).
+  const beforeValues =
+    payload.before !== null && typeof payload.before === 'object' && !Array.isArray(payload.before)
+      ? (payload.before as Record<string, unknown>)
+      : undefined;
+  // Stable per-change identity so a redelivered config_reload action cannot
+  // double-write the config.updated audit row (occurrence dedupe).
+  const occurrenceId =
+    typeof payload.occurrence_id === 'string' && payload.occurrence_id !== ''
+      ? payload.occurrence_id
+      : undefined;
+
   // Emit config.changed so the bot reloads
   eventBus.emit('config.changed', guild.id, {
     section: section ?? 'unknown',
     changes: changes ?? {},
     changedBy: changedBy ?? 'dashboard',
+    ...(beforeValues ? { before: beforeValues } : {}),
+    ...(occurrenceId ? { occurrenceId } : {}),
   });
 
   // If the dashboard attached an audit event, emit it on the event bus

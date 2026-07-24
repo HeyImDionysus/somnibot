@@ -9,10 +9,10 @@
  * previous retention window has already been purged.
  *
  * Audit-log floor: audit rows are anonymized (never deleted) on the
- * per-guild window via scrub_expired_audit_logs_all_guilds(), but the
- * anonymize window is clamped to a 60-day minimum. The 30-day minimum
- * below applies to non-audit data; a value of 30–59 still anonymizes
- * audit rows at 60 days.
+ * per-guild window via scrub_expired_audit_logs_all_guilds(). As of migration
+ * 20260724190000 the scrub floors at 30 days — matching this route's
+ * z.number().min(30) and the catalog retention-days minimum — so a 30–59 day
+ * setting anonymizes audit rows on that exact window.
  */
 import { type NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
