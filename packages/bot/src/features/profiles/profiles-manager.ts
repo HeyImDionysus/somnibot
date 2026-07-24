@@ -4,6 +4,7 @@
 import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
+import { writeAuditLog } from '../../services/audit.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Profiles');
@@ -249,6 +250,18 @@ export class ProfilesManager {
     const truncated = title.length > cfg.titleMaxLength;
     const finalTitle = truncated ? title.slice(0, cfg.titleMaxLength) : title;
     if (isContentBlocked(finalTitle, cfg.contentFilterMode)) {
+      // Catalog failure lane content-filter-rejected: audit the rejected attempt
+      // (profiles.content_rejected, success=false); the prior value stays put.
+      await writeAuditLog(this.supabase, {
+        guildId,
+        actorType: 'discord',
+        actorId: interaction.user.id,
+        action: 'profiles.content_rejected',
+        targetType: 'member',
+        targetId: interaction.user.id,
+        details: { field: 'title', mode: cfg.contentFilterMode, interactionId: interaction.id },
+        success: false,
+      });
       await interaction.reply({
         content: '❌ That title was blocked by the content filter. Please choose different wording; contact a moderator to appeal.',
         ephemeral: true,
@@ -260,6 +273,19 @@ export class ProfilesManager {
     await this.supabase.from('economy_profiles')
       .update({ title: finalTitle, updated_at: new Date().toISOString() })
       .eq('guild_id', guildId).eq('user_id', interaction.user.id);
+
+    // [community-profiles] Append-only audit row on the title save (the catalog
+    // contracts one audit row per member-profile state change). Written directly
+    // so it lands synchronously with the save, not on the batched event pipeline.
+    await writeAuditLog(this.supabase, {
+      guildId,
+      actorType: 'discord',
+      actorId: interaction.user.id,
+      action: 'profiles.title_updated',
+      targetType: 'member',
+      targetId: interaction.user.id,
+      details: { value: finalTitle, truncated, interactionId: interaction.id },
+    });
 
     this.eventBus.emit('profile.updated', guildId, {
       userId: interaction.user.id,
@@ -289,6 +315,18 @@ export class ProfilesManager {
     const truncated = bio.length > cfg.bioMaxLength;
     const finalBio = truncated ? bio.slice(0, cfg.bioMaxLength) : bio;
     if (isContentBlocked(finalBio, cfg.contentFilterMode)) {
+      // Catalog failure lane content-filter-rejected: audit the rejected attempt
+      // (profiles.content_rejected, success=false); the prior value stays put.
+      await writeAuditLog(this.supabase, {
+        guildId,
+        actorType: 'discord',
+        actorId: interaction.user.id,
+        action: 'profiles.content_rejected',
+        targetType: 'member',
+        targetId: interaction.user.id,
+        details: { field: 'bio', mode: cfg.contentFilterMode, interactionId: interaction.id },
+        success: false,
+      });
       await interaction.reply({
         content: '❌ That bio was blocked by the content filter. Please choose different wording; contact a moderator to appeal.',
         ephemeral: true,
@@ -300,6 +338,19 @@ export class ProfilesManager {
     await this.supabase.from('economy_profiles')
       .update({ bio: finalBio, updated_at: new Date().toISOString() })
       .eq('guild_id', guildId).eq('user_id', interaction.user.id);
+
+    // [community-profiles] Append-only audit row on the bio save (the catalog
+    // contracts one audit row per member-profile state change). Written directly
+    // so it lands synchronously with the save, not on the batched event pipeline.
+    await writeAuditLog(this.supabase, {
+      guildId,
+      actorType: 'discord',
+      actorId: interaction.user.id,
+      action: 'profiles.bio_updated',
+      targetType: 'member',
+      targetId: interaction.user.id,
+      details: { value: finalBio, truncated, interactionId: interaction.id },
+    });
 
     this.eventBus.emit('profile.updated', guildId, {
       userId: interaction.user.id,

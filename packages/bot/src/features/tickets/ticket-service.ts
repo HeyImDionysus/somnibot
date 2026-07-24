@@ -303,11 +303,15 @@ export async function claimTicket(
     return { success: false, error: `Ticket is already ${existing.status}.` };
   }
 
+  // Audit correctness: the EVENT_TO_AUDIT mapping for 'ticket.claimed' reads
+  // userDiscordId as BOTH the audit actor_id and afterState.claimedBy, so it
+  // must carry the CLAIMER (the acting staff member), not the ticket creator —
+  // emitting creator_id here recorded the wrong actor on every claim audit row.
   eventBus.emit('ticket.claimed', guildId, {
     ticketId: claimed.id,
     ticketNumber,
     channelId: claimed.channel_id,
-    userDiscordId: claimed.creator_id,
+    userDiscordId: claimedById,
     panelId: claimed.panel_id,
   });
 
@@ -436,12 +440,14 @@ export async function closeTicket(
     }
   }
 
-  // Fire event
+  // Fire event. userDiscordId stays the CREATOR (automations' {user} context);
+  // actorId carries the acting closer so the audit row names the right actor.
   eventBus.emit('ticket.closed', guild.id, {
     ticketId: ticket.id,
     ticketNumber,
     channelId: ticket.channel_id,
     userDiscordId: ticket.creator_id,
+    actorId: closedById,
     panelId: ticket.panel_id,
   });
 
@@ -518,11 +524,14 @@ export async function reopenTicket(
     }
   }
 
+  // userDiscordId = creator ({user} automations context); actorId = the acting
+  // reopener for the audit row (see ticket.closed above).
   eventBus.emit('ticket.reopened', guild.id, {
     ticketId: ticket.id,
     ticketNumber,
     channelId: ticket.channel_id,
     userDiscordId: ticket.creator_id,
+    actorId: reopenedById,
     panelId: ticket.panel_id,
   });
 

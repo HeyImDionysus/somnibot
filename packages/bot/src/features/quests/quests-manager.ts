@@ -188,10 +188,32 @@ export class QuestsManager {
       const tmpl = p.template as { action_type: string } | { action_type: string }[] | null;
       const actionMatch = Array.isArray(tmpl) ? tmpl[0]?.action_type : tmpl?.action_type;
       if (actionMatch === actionType) {
-        await Promise.resolve(this.supabase.rpc('economy_quest_increment_progress', {
-          p_id: p.id,
-          p_amount: amount,
-        })).catch((err: Error) => log.error('increment_progress failed:', err.message));
+        try {
+          const { data: incremented, error: incErr } = await this.supabase.rpc('economy_quest_increment_progress', {
+            p_id: p.id,
+            p_amount: amount,
+          });
+          if (incErr) {
+            log.error('increment_progress failed:', incErr.message);
+            continue;
+          }
+          // [game-economy-quests] The atomic RPC only updates (and returns) rows that
+          // were still incomplete, so completed=true in the result is a FRESH
+          // completion — land the append-only audit row for it via the platform bus.
+          const row = (Array.isArray(incremented) ? incremented[0] : incremented) as
+            | { id: string; new_progress: number; completed: boolean }
+            | undefined;
+          if (row?.completed) {
+            eventBus.emit('quest.completed', guildId, {
+              userId,
+              questId: p.id,
+              actionType,
+              progress: row.new_progress ?? 0,
+            });
+          }
+        } catch (err) {
+          log.error('increment_progress failed:', (err as Error)?.message ?? String(err));
+        }
       }
     }
   }
@@ -214,6 +236,7 @@ export class QuestsManager {
     // V49-M5: Shuffle and pick — use ON CONFLICT DO NOTHING to prevent
     // duplicate assignments from concurrent /quests calls.
     const shuffled = cryptoShuffle(templates).slice(0, count);
+    if (shuffled.length === 0) return; // daily cadence disabled (count 0)
     const today = new Date().toISOString().slice(0, 10);
     const rows = shuffled.map((t: any) => ({
       guild_id: guildId,
@@ -225,6 +248,9 @@ export class QuestsManager {
 
     await this.supabase.from('economy_quest_progress')
       .upsert(rows, { onConflict: 'guild_id,user_id,template_id,assigned_date', ignoreDuplicates: true });
+
+    // [game-economy-quests] Append-only audit evidence for the daily slate assignment.
+    eventBus.emit('quest.slate_assigned', guildId, { userId, questType: 'daily', count: rows.length });
   }
 
   /** Assign weekly quests — called on Monday or when user has no weekly quests this week. */
@@ -279,6 +305,9 @@ export class QuestsManager {
 
     await this.supabase.from('economy_quest_progress')
       .upsert(rows, { onConflict: 'guild_id,user_id,template_id,assigned_date', ignoreDuplicates: true });
+
+    // [game-economy-quests] Append-only audit evidence for the weekly slate assignment.
+    eventBus.emit('quest.slate_assigned', guildId, { userId, questType: 'weekly', count: rows.length });
   }
 
   /** Schedule weekly quest reset — runs every hour, resets on Monday 00:00 UTC. */

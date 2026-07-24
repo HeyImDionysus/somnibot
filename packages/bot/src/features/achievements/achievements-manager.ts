@@ -187,7 +187,7 @@ export class AchievementsManager {
       return;
     }
 
-    const result = data as { status?: string; new_level?: number; new_multiplier?: number; level?: number; net_worth?: number; max_level?: number };
+    const result = data as { status?: string; replayed?: boolean; new_level?: number; new_multiplier?: number; level?: number; net_worth?: number; max_level?: number };
     switch (result.status) {
       case 'level_too_low':
         await interaction.reply({ content: `❌ You need to be at least **level ${minLevel}** to prestige. You're level **${result.level ?? 0}**.`, ephemeral: true });
@@ -206,12 +206,19 @@ export class AchievementsManager {
     }
 
     // [game-economy-achievements-prestige] Append-only audit row on the prestige
-    // state change (wallet/bank reset + earning multiplier bump).
-    eventBus.emit('prestige.performed', guildId, {
-      userId,
-      newLevel: result.new_level ?? 0,
-      newMultiplier: result.new_multiplier ?? 0,
-    });
+    // state change (wallet/bank reset + earning multiplier bump). Emitted ONLY
+    // when this call actually applied the reset: the RPC returns
+    // status='prestiged' with replayed=true for a re-delivered interaction id
+    // (economy_prestige.last_request_id) whose reset already committed, and
+    // re-emitting there would append a second audit row for one logical
+    // prestige — the ledger must stay replay-idempotent like the DB state.
+    if (result.replayed !== true) {
+      eventBus.emit('prestige.performed', guildId, {
+        userId,
+        newLevel: result.new_level ?? 0,
+        newMultiplier: result.new_multiplier ?? 0,
+      });
+    }
 
     await interaction.reply({
       embeds: [new EmbedBuilder()

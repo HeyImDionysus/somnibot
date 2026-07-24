@@ -11,6 +11,7 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
+import { writeAuditLog } from '../../services/audit.js';
 import { createLogger } from '@somnibot/shared';
 import { renderTempChannelTemplate } from './templates.js';
 
@@ -504,6 +505,20 @@ export class TempChannelManager {
       const vc = this.guild.channels.cache.get(channelId);
       if (!vc) {
         await this.removeChannel(channelId);
+        // [community-temporary-channels] Append-only audit row per reconciled
+        // orphan. Written directly because start() runs during guild init
+        // BEFORE the per-guild AuditService attaches its event listener, so the
+        // temp_channel.orphan_reconciled emit below is never mapped to an
+        // audit_logs row on this startup path.
+        await writeAuditLog(this.supabase, {
+          guildId: this.guild.id,
+          actorType: 'system',
+          actorId: 'system',
+          action: 'temp_channel.orphan_reconciled',
+          targetType: 'channel',
+          targetId: channelId,
+          details: { ownerId: active.owner_id, reason: 'startup_reconciliation' },
+        });
         this.eventBus.emit('temp_channel.orphan_reconciled', this.guild.id, {
           channelId,
           ownerId: active.owner_id,

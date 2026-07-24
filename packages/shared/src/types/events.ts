@@ -74,7 +74,14 @@ export interface TicketEventData {
   ticketId: string;
   ticketNumber: number;
   channelId: string;
+  /** The ticket CREATOR — automations' `{user}` context (e.g. DM-on-close). */
   userDiscordId: string;
+  /**
+   * The ACTING user (closer/reopener) when different from the creator. Audit
+   * reads this for actor_id so a manager closing another member's ticket is
+   * audited as themselves, while `{user}` automations keep the creator.
+   */
+  actorId?: string;
   panelId: string;
 }
 
@@ -421,6 +428,8 @@ export interface PlatformEventMap {
   'sync.failed': { error: string; stage: string };
   'quest.claimed': { userId: string; questCount: number; currency: number; xp: number };
   'quest.claim_failed': { userId: string; questCount: number; currency: number; reason: string };
+  'quest.slate_assigned': { userId: string; questType: 'daily' | 'weekly'; count: number };
+  'quest.completed': { userId: string; questId: string; actionType: string; progress: number };
   'casino.bet_settled': { userId: string; game: string; net: number; loss: number };
   'achievement.unlocked': { userId: string; achievementId: string; name: string; rewardCurrency: number };
   'prestige.performed': { userId: string; newLevel: number; newMultiplier: number };

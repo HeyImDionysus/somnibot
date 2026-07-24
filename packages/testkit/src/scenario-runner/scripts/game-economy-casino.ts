@@ -30,9 +30,10 @@
  *
  * Behavior-bug discovery (never forced green): real divergences surface as FAILs
  * for the owner to adjudicate — notably the shipped guild_config casino defaults
- * contradicting the catalog's on-out-of-box conservative-caps promise (DEF), and
- * the casino bet path persisting no idempotency key / no append-only audit row
- * (surfaced where drivable, otherwise gated with the structural note).
+ * contradicting the catalog's on-out-of-box conservative-caps promise (DEF).
+ * The bet path now settles through the atomic, idempotent economy_resolve_bet
+ * RPC (durable request_id fence + casino_bet ledger row), so REPLAY proves the
+ * exactly-once behavior directly whenever the bet path is drivable.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -294,9 +295,12 @@ function brandingSurface(captured: CapturedResponse): string {
 /**
  * Prove a captured casino OUTCOME surface carries the owner-configured currency
  * branding — checked against the REAL captured embed. Only meaningful once the
- * bet path is drivable (Redis). The current GamesManager hardcodes "coins" and
- * generic game emoji, so this is expected to FAIL when driven — a real branding
- * finding, not something to soften.
+ * bet path is drivable (Redis), and only against a RESOLVED bet's outcome reply:
+ * refusal notices (max-bet / daily-cap / game-in-progress / already-processed)
+ * are currency-neutral by design and render no amount to brand, so passing one
+ * here would fail on the arrangement, not on a branding bug. The GamesManager
+ * renders guild_config.currency_name / currency_emoji on every outcome embed
+ * (currencyOf in games-manager.ts).
  */
 function proveBrandingFromBet(ctx: ScenarioContext, captured: CapturedResponse, econ: EconomyDisplay): void {
   const surface = brandingSurface(captured);
@@ -422,21 +426,21 @@ async function proveDailyLossRls(ctx: ScenarioContext, handle: LiveClientHandle,
 }
 
 /**
- * GATE the audit-row class. The casino writes NO append-only audit/ledger row:
- * economy_add_balance / economy_subtract_balance only mutate economy_wallets, and
- * GamesManager emits no audit_logs / economy_transactions row per bet. The
- * append-only-audit-per-state-change promise is only checkable against a DRIVEN
- * bet (Redis-gated) and is expected to FAIL once drivable — surfaced here as the
- * gate reason rather than hidden.
+ * GATE the audit-row class. The settled-bet path now writes a casino_bet
+ * economy_transactions ledger row atomically inside economy_resolve_bet and
+ * emits `casino.bet_settled` (EVENT_TO_AUDIT → audit_logs), but the audit_logs
+ * row lands via the ASYNC event-bus consumer — proving exactly-one-append-only
+ * row needs a driven bet (Redis) plus an audit-readback wait, deferred to a
+ * dedicated audit lane rather than asserted racily here.
  */
 function gateAudit(ctx: ScenarioContext): void {
   ctx.gate(
     'audit',
     'audit-row',
     'Every casino state change lands exactly one append-only audit row with actor, guild, and correlation id.',
-    `${LOCK_GATE}; additionally the GamesManager bet path writes no economy_transactions/audit_logs row ` +
-      '(economy_add_balance/economy_subtract_balance mutate only economy_wallets), so this class is expected to ' +
-      'FAIL once the bet path is drivable — flagged for owner adjudication',
+    `${LOCK_GATE}; once drivable, economy_resolve_bet writes the casino_bet economy_transactions ledger row ` +
+      'atomically with the settlement, but the audit_logs row lands via the async casino.bet_settled event-bus ' +
+      'consumer — the exactly-one-audit-row readback needs a settle-then-poll audit lane, deferred rather than raced here',
   );
 }
 
@@ -616,17 +620,26 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   expectControl(ctx, cfg, 'economy_blackjack_max_bet', 200, 'SET-A (blackjack cap 200)');
   expectControl(ctx, cfg, 'economy_daily_loss_limit', 1000, 'SET-A (daily-loss cap 1000)');
 
-  // Arrange a member most-of-the-way to the 1000 daily cap (DB-observable).
+  // Arrange the bankroll. The near-cap daily-loss standing is arranged AFTER the
+  // within-cap wager below: the daily cap is enforced on POTENTIAL loss BEFORE a
+  // bet runs (checkDailyLimit refuses when current + stake would pass the cap),
+  // so a 90-coin wager driven with 950 already lost would itself push the day to
+  // 1040 > 1000 and be CORRECTLY refused — the catalog's "/coinflip 90 resolves
+  // normally" is a member still clear of the cap, and its daily-cap promise is
+  // "a wager that WOULD PUSH the day past 1000 lost coins is refused".
   await seedWallet(handle, userA, 5000, 0);
-  await seedDailyLoss(handle, userA, 950);
-  const loss = await readDailyLoss(handle, userA);
-  ctx.expect(loss === 950, {
-    assertionClass: 'Discord',
-    channel: 'db-observable',
-    promise: 'The set-A daily-loss standing accumulates toward the 1000 cap in economy_daily_losses.',
-    observation: `seeded UTC-day loss total reads ${loss} (expected 950, i.e. 50 short of the 1000 cap).`,
-    impact: 'The daily-loss counter did not accumulate under the set-A cap.',
-  });
+
+  /** Assert the member stands at exactly 950 lost this UTC day (50 short of the cap). */
+  const proveLossStanding = async (): Promise<void> => {
+    const loss = await readDailyLoss(handle, userA);
+    ctx.expect(loss === 950, {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'The set-A daily-loss standing accumulates toward the 1000 cap in economy_daily_losses.',
+      observation: `seeded UTC-day loss total reads ${loss} (expected 950, i.e. 50 short of the 1000 cap).`,
+      impact: 'The daily-loss counter did not accumulate under the set-A cap.',
+    });
+  };
 
   // Enforcement (90 accepted; 150 & blackjack 201 refused; a wager past 1000 lost
   // hits the daily-cap reply) needs the Valkey lock — Redis-only.
@@ -657,6 +670,12 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
       observation: `reply="${truncate(replyContent(bjOver))}".`,
       impact: 'The set-A blackjack cap did not take live effect.',
     });
+    // NOW arrange exactly 950 lost today: the driven 90-coin wager may itself
+    // have recorded a 90 loss, so top up only the remainder via the real RPC
+    // (deterministic at 950 whether that coinflip won or lost).
+    const lossSoFar = await readDailyLoss(handle, userA);
+    if (lossSoFar < 950) await seedDailyLoss(handle, userA, 950 - lossSoFar);
+    await proveLossStanding();
     const cap = await ctx.runSlash(handle, { commandName: 'coinflip', userId: userA, options: { amount: 100 } });
     ctx.expect(replyContent(cap).includes('daily loss limit'), {
       assertionClass: 'Discord',
@@ -667,6 +686,9 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
     });
     proveBrandingFromBet(ctx, ok, econ);
   } else {
+    // Without Redis no bet can add losses — seed the full 950 standing directly.
+    await seedDailyLoss(handle, userA, 950);
+    await proveLossStanding();
     ctx.gate(
       'Discord',
       'redis-dependency',
@@ -794,6 +816,12 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
     'the rejected-config audit row is written by the dashboard save path (not reachable in a bot-only harness)',
   );
 
+  // Positive control for the anon-denial RLS probe below: seed a real,
+  // service-visible wallet row (mirrors DEPFAIL). Without it the probe's
+  // service-role leg reads nothing and the anon-denial proof is vacuously
+  // unprovable — the prior FAIL here was this missing arrangement, not an RLS
+  // hole (an anon REST read of economy_wallets is denied with SQLSTATE 42501).
+  await seedWallet(handle, userA, 1000, 0);
   await proveWalletRls(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
   gateBranding(ctx);
@@ -980,15 +1008,16 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
 
   if (ctx.capabilities.redis) {
     // Drive one /coinflip, snapshot wallet + daily-loss, then RE-DELIVER the same
-    // interaction id. The GamesManager persists no per-bet idempotency key, so a
-    // re-delivery runs a fresh, independent bet — this expect is expected to FAIL,
-    // surfacing the missing-idempotency finding.
+    // interaction id. The bet path fences replays twice over: the Valkey
+    // interaction-id claim refuses the re-delivery up front, and the durable
+    // economy_resolve_bet request_id key would return the first settlement even
+    // without it — so wallet and daily-loss must be byte-identical afterward.
     const betId = `${ctx.runPrefix}replay-bet`;
     const opts = { amount: 100 };
-    await ctx.runSlash(handle, { commandName: 'coinflip', userId: userA, options: opts, interactionId: betId });
+    const first = await ctx.runSlash(handle, { commandName: 'coinflip', userId: userA, options: opts, interactionId: betId });
     const walletAfterFirst = (await readWallet(handle, userA))?.wallet ?? -1;
     const lossAfterFirst = await readDailyLoss(handle, userA);
-    const replayCaptured = await ctx.runSlash(handle, { commandName: 'coinflip', userId: userA, options: opts, interactionId: betId });
+    await ctx.runSlash(handle, { commandName: 'coinflip', userId: userA, options: opts, interactionId: betId });
     const walletAfterReplay = (await readWallet(handle, userA))?.wallet ?? -1;
     const lossAfterReplay = await readDailyLoss(handle, userA);
     ctx.expect(walletAfterReplay === walletAfterFirst && lossAfterReplay === lossAfterFirst, {
@@ -1000,13 +1029,16 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
         '(exactly-once expects both unchanged).',
       impact: 'A re-delivered casino interaction double-applied — the casino bet path persists no idempotency key (double-charge / double daily-loss on replay).',
     });
-    proveBrandingFromBet(ctx, replayCaptured, econ);
+    // Branding is proven from the FIRST bet's outcome embed: the re-delivery is
+    // answered with a currency-neutral already-processed notice (a refusal, not
+    // an outcome surface), which renders no amount to brand.
+    proveBrandingFromBet(ctx, first, econ);
   } else {
     ctx.gate(
       'replay-safety',
       'db-observable',
       'Re-delivering a resolved casino bet leaves exactly one wallet mutation and one daily-loss increment.',
-      `${LOCK_GATE}; the GamesManager bet path also persists NO idempotency key (adjustBalance/economy_increment_daily_loss run unconditionally), so replay-safety is expected to FAIL once the bet path is drivable — flagged for owner adjudication`,
+      `${LOCK_GATE}; when drivable, the Valkey interaction-id claim plus the durable economy_resolve_bet request_id fence make the re-delivery a deduplicated no-op (proven in the Redis lane)`,
     );
     gateBranding(ctx);
   }
@@ -1111,7 +1143,10 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
       observation: `daily-loss Δ=${afterLoss - beforeLoss} (0 on a win, 100 on a loss; 200 would prove a bypass).`,
       impact: 'The daily-loss counter double-incremented under a race — the cap can be bypassed by racing two bets.',
     });
-    proveBrandingFromBet(ctx, c1, econ);
+    // Brand-check the ACCEPTED bet's outcome embed — which of the two racers won
+    // the lock is scheduling-dependent, and the loser's game-in-progress refusal
+    // is a currency-neutral notice with no amount to brand.
+    proveBrandingFromBet(ctx, replyEmbedData(c1) ? c1 : c2, econ);
   } else {
     ctx.gate(
       'Discord',

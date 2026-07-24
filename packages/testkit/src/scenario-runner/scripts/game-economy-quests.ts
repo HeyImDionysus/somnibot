@@ -10,27 +10,28 @@
  * every DB-observable / RLS / idempotency assertion drives those REAL RPCs and reads the
  * effect back. Nothing synthetic is asserted.
  *
- * ── The load-bearing harness boundary for THIS domain ───────────────────────────────
+ * ── The harness boundary for THIS domain ────────────────────────────────────────────
  * The two member-facing commands are SUBCOMMANDS: `/quests view` and `/quests claim`
- * (features/quests/commands.ts → `interaction.options.getSubcommand()`). The scenario
- * runner's `runSlash` (context.ts) builds the interaction WITHOUT a subcommand and
- * `RunSlashParams` carries no subcommand field, so neither subcommand can be dispatched
- * in-process. Every assertion that depends on the `/quests view|claim` reply/embed
- * (the branded quest board, the claim embed's coin/XP totals, the exact-count slate) is
- * therefore GATED with that precise reason — it is not fakeable here, and it is a real
- * "cannot drive now" boundary (a subcommand-capable injector or the live Discord
- * readback lane closes it). The bare `/quests` (no subcommand) IS dispatchable: with
- * quests disabled the manager is absent and the handler replies before any
- * `getSubcommand()`, so the disabled-master-switch reply is proven live (INVALID).
+ * (features/quests/commands.ts → `interaction.options.getSubcommand()`). Since the #331
+ * subcommand injector, `runSlash` supplies the subcommand, so BOTH are driven live
+ * in-process: the slate auto-assignment + branded board (view) and the scaled claim
+ * payout (claim). The bare `/quests` (no subcommand) remains the disabled-master-switch
+ * lane: with quests disabled the manager is absent and the handler replies before any
+ * `getSubcommand()` (INVALID). Only the live-guild Discord readback lane stays gated
+ * (DISCORD_TOKEN + live guild).
  *
- * Behavior-bug discovery (surfaced as FAILs, never softened):
- *   1. `economy_quest_reward_base` (catalog control "quest-reward-base", intended so
- *      "quest templates scale from" it) is referenced NOWHERE in the bot — seeded
- *      template rewards are fixed literals. Raising the base changes no payout. SET-A
- *      records the divergence as a FAIL.
- *   2. Quest state changes write NO append-only `audit_logs` row (the manager never
- *      calls AuditService and no DB trigger fills the gap), contradicting the catalog's
- *      per-action audit promise. Proven DB-observably as a FAIL in the lifecycle scenarios.
+ * Formerly-surfaced behavior bugs, both FIXED product-side (assertions kept honest):
+ *   1. `economy_quest_reward_base` (catalog control "quest-reward-base") is now a LIVE
+ *      multiplier: stored template rewards are base-100-relative seed literals and
+ *      QuestsManager.claimQuests scales each coin payout by base/100 at claim time.
+ *      SET-A drives the REAL /quests claim and proves the wallet credits the SCALED
+ *      amount (an inert base would pay the unscaled seed reward).
+ *   2. Quest state changes now land append-only `audit_logs` rows through the platform
+ *      bus: `quest.slate_assigned` (assignment), `quest.completed` (tracked progress
+ *      reaching target), `quest.claimed` / `quest.claim_failed` (claim + payout), each
+ *      mapped by the per-guild AuditService via EVENT_TO_AUDIT. The lifecycle scenarios
+ *      read the trail AFTER a driven product action (the raw-RPC arrangement calls
+ *      deliberately bypass the bot layer, so they leave no product audit trail).
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -213,6 +214,34 @@ async function startingBalance(handle: LiveClientHandle): Promise<number> {
   return Number((data as { economy_starting_balance?: number } | null)?.economy_starting_balance ?? 0);
 }
 
+/** Structural view of the per-guild AuditService — only the batch flush we drive. */
+interface AuditFlusher {
+  flush(): Promise<void>;
+}
+
+/**
+ * Resolve the REAL per-guild AuditService the production init wired via
+ * ctx.setManager('auditService') (guild-init.ts). Returns undefined when the booted
+ * context carries no such manager (→ caller GATEs rather than mis-read the table).
+ */
+function getAuditService(handle: LiveClientHandle): AuditFlusher | undefined {
+  return handle.client.router.getContextSync(handle.guildId)?.getManager<AuditFlusher>('auditService');
+}
+
+/**
+ * Let the platform event bus deliver the driven quest actions' emitted `quest.*`
+ * events to the AuditService's onAny listener (dispatched via setImmediate), then force
+ * its REAL batch flush() so the audit_logs rows land NOW instead of on the 5s timer.
+ * Returns false when the service is absent (→ caller GATEs, never mis-reads empty as a bug).
+ */
+async function flushAuditQueue(handle: LiveClientHandle): Promise<boolean> {
+  const svc = getAuditService(handle);
+  if (!svc) return false;
+  await new Promise((resolve) => setTimeout(resolve, 20)); // drain the onAny setImmediate listeners
+  await svc.flush();
+  return true;
+}
+
 /**
  * Count quests-attributable rows in the append-only audit_logs table. Returns null
  * (NOT 0) when the read errors, so a failed query can never masquerade as "no audit
@@ -367,12 +396,27 @@ async function proveRlsIsolation(ctx: ScenarioContext, handle: LiveClientHandle,
 }
 
 /**
- * Prove the catalog's audit promise DB-observably — and record the REAL divergence:
- * the QuestsManager writes no audit_logs row for any quest action (no AuditService
- * call, no DB trigger), so a quests-attributable audit read returns zero. This FAILs
- * (a finding for the owner), never softened to a pass or a gate.
+ * Prove the catalog's audit promise DB-observably. Quest state changes now write
+ * append-only audit_logs evidence through the platform bus: QuestsManager emits
+ * `quest.slate_assigned` (assignment via /quests view), `quest.completed` (tracked
+ * progress reaching target) and `quest.claimed` / `quest.claim_failed` (claim +
+ * payout), each mapped by the REAL per-guild AuditService via EVENT_TO_AUDIT. Callers
+ * invoke this AFTER the scenario has driven a real product quest action (the raw-RPC
+ * arrangement calls deliberately bypass the bot layer, so they leave no product audit
+ * trail); we force the AuditService's batch flush so the rows land deterministically
+ * instead of on its 5s timer. The assertion (rows > 0) is unchanged — never softened.
  */
 async function proveQuestAudit(ctx: ScenarioContext, handle: LiveClientHandle): Promise<void> {
+  const flushed = await flushAuditQueue(handle);
+  if (!flushed) {
+    ctx.gate(
+      'audit',
+      'audit-row',
+      'Every quests state change lands one append-only audit_logs row with actor, guild, and correlation id.',
+      'the per-guild AuditService manager was not resolvable from the booted context, so the live event→audit pipeline could not be flushed deterministically',
+    );
+    return;
+  }
   const rows = await questAuditCount(handle);
   if (rows === null) {
     ctx.gate(
@@ -389,8 +433,8 @@ async function proveQuestAudit(ctx: ScenarioContext, handle: LiveClientHandle): 
     promise:
       'Every quests state change (assignment, progress, claim, payout) lands exactly one append-only audit_logs row with actor id, guild id, and a correlation id.',
     observation:
-      `after driving real quest actions in this scenario, audit_logs holds ${rows} quests-attributable row(s) for the guild ` +
-      `(QuestsManager calls no AuditService and no DB trigger writes one).`,
+      `after driving real quest actions in this scenario and flushing the live event→audit pipeline, audit_logs holds ` +
+      `${rows} quests-attributable row(s) for the guild (QuestsManager quest.* emissions → EVENT_TO_AUDIT → append-only audit_logs).`,
     impact:
       'No audit trail exists for quest actions — claims, payouts and progress leave zero append-only audit_logs evidence, contradicting the domain audit promise.',
   });
@@ -428,7 +472,7 @@ function gateLiveGuildReadback(ctx: ScenarioContext): void {
     'Discord',
     'discord-readback',
     'The quest board (/quests view) and the claim embed (/quests claim) are observed working in the live test guild.',
-    'requires a live Discord gateway (DISCORD_TOKEN + live guild); the subcommand-routed /quests view|claim reply is also undrivable via the runner’s runSlash',
+    'requires a live Discord gateway (DISCORD_TOKEN + live guild); the in-process subcommand drives above prove the same paths against the captured surface',
   );
 }
 
@@ -633,16 +677,18 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     impact: 'A quest claim did not pay the exact template totals into the wallet.',
   });
 
-  // Off-theme classes.
-  await proveQuestAudit(ctx, handle);
+  // Off-theme classes. Audit is read AFTER the slate-sizing drive: the real
+  // /quests view assignment is the driven product action whose quest.slate_assigned
+  // emission lands the audit rows (the raw-RPC calls above bypass the bot layer).
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
   await proveSlateSizing(ctx, handle, dailyDefault, weeklyDefault);
+  await proveQuestAudit(ctx, handle);
   gateLiveGuildReadback(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
-/** SET-A — dashboard resize + raised reward base; surfaces the inert-reward-base divergence. */
+/** SET-A — dashboard resize + raised reward base; the base scales the REAL claim payout. */
 async function SET_A(ctx: ScenarioContext): Promise<void> {
   const raisedBase = 500;
   const handle = await ctx.bootGuild({
@@ -671,40 +717,54 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
     impact: 'A saved quests dashboard setting did not persist for the bot to read.',
   });
 
-  // FINDING: the catalog promises claim totals "scaled from the raised reward base",
-  // but economy_quest_reward_base is referenced NOWHERE in the bot — seeded template
-  // rewards are fixed literals. Prove DB-observably that raising the base to 500 leaves
-  // the 'Active Member' daily template's reward at its fixed seed value (100). FAIL.
+  // The quest-reward-base control is LIVE at the payout boundary: stored template
+  // rewards stay base-100-relative seed literals and QuestsManager.claimQuests scales
+  // each coin reward by economy_quest_reward_base/100 at claim time. Prove it by
+  // driving the REAL subcommand-routed /quests claim (the #331 injector) on a
+  // completed 'Active Member' quest (base-100 seed reward 100) and reading the wallet
+  // back: it must credit the SCALED amount (100 × 500/100 = 500), not the seed literal.
   const active = await templateByTitle(handle, 'Active Member');
-  ctx.expect(active !== null && active.reward_currency !== 100, {
-    assertionClass: 'Discord',
-    channel: 'db-observable',
-    promise: 'Raising quest-reward-base scales quest template rewards, so a claim pays amounts scaled from the raised base.',
-    observation:
-      `with economy_quest_reward_base=${raisedBase}, the 'Active Member' daily template still carries its fixed seed reward of ` +
-      `${active?.reward_currency} coins (unscaled — the base control is referenced nowhere in the bot).`,
-    impact: 'The quest-reward-base control is inert: raising it changes no payout, so the owner’s reward tuning has no effect.',
-  });
-
-  // The taxed/scaled claim STILL pays the fixed template total once (the claim path works).
+  const seedReward = active?.reward_currency ?? 0;
+  const scaledReward = Math.round((seedReward * raisedBase) / 100);
   const activePid = active ? await insertProgress(handle, userA, active.id, active.target_count, true) : null;
-  const claimed = await atomicClaim(handle, userA);
-  const coins = claimed.reduce((s, r) => s + (r.reward_currency ?? 0), 0);
-  if (coins > 0) await payout(handle, userA, coins);
+  await ctx.runSlash(handle, { commandName: 'quests', userId: userA, subcommand: 'claim' });
+  const claimedRow = activePid ? await readProgressById(handle, activePid) : null;
   const wallet = await readWallet(handle, userA);
   const start = await startingBalance(handle);
-  ctx.expect(Boolean(activePid) && claimed.length === 1 && wallet?.wallet === start + (active?.reward_currency ?? -1), {
+  ctx.expect(
+    Boolean(activePid) && claimedRow?.claimed === true && scaledReward !== seedReward && wallet?.wallet === start + scaledReward,
+    {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'Raising quest-reward-base scales quest payouts, so a claim pays amounts scaled from the raised base.',
+      observation:
+        `with economy_quest_reward_base=${raisedBase}, the real /quests claim on the base-100 'Active Member' template (seed reward ${seedReward}) ` +
+        `flipped claimed=${claimedRow?.claimed} and paid wallet=${wallet?.wallet} (expected ${start + scaledReward} = ${start} starting + ` +
+        `${scaledReward} scaled reward; an inert base would pay ${start + seedReward}).`,
+      impact: 'The quest-reward-base control is inert: raising it changes no payout, so the owner’s reward tuning has no effect.',
+    },
+  );
+
+  // The scaled claim pays exactly once under the resized config: a second real
+  // /quests claim finds nothing claimable and the wallet stays put.
+  await ctx.runSlash(handle, { commandName: 'quests', userId: userA, subcommand: 'claim' });
+  const walletAfterReplay = await readWallet(handle, userA);
+  ctx.expect(walletAfterReplay?.wallet === start + scaledReward, {
     assertionClass: 'Discord',
     channel: 'db-observable',
-    promise: 'A claim under the resized config still pays the completed quest’s template total exactly once (on top of the guild starting balance).',
-    observation: `claimed ${claimed.length} quest(s) for ${coins} coins; wallet=${wallet?.wallet} (expected ${start + (active?.reward_currency ?? 0)} = ${start} starting + ${active?.reward_currency} reward).`,
-    impact: 'The claim path stopped paying correctly under the resized config.',
+    promise: 'A claim under the resized config pays the scaled total exactly once (a re-run claims nothing further).',
+    observation:
+      `after a second /quests claim: wallet=${walletAfterReplay?.wallet} (expected unchanged ${start + scaledReward}; ` +
+      `a double-pay would read ${start + scaledReward * 2}).`,
+    impact: 'The claim path double-paid or drifted under the resized config.',
   });
 
-  await proveQuestAudit(ctx, handle);
+  // Audit is read AFTER the driven /quests claim + view: quest.claimed and
+  // quest.slate_assigned emissions are the product actions that land audit rows.
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
   await proveSlateSizing(ctx, handle, 1, 2);
+  await proveQuestAudit(ctx, handle);
   gateLiveGuildReadback(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -750,10 +810,13 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     impact: 'Disabling a cadence piece broke claiming of already-completed quests in the other cadence.',
   });
 
-  await proveQuestAudit(ctx, handle);
+  // Audit is read AFTER the slate-sizing drive (the weekly quest.slate_assigned
+  // emission from the real /quests view is the driven product action; the raw-RPC
+  // claim above bypasses the bot layer).
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
   await proveSlateSizing(ctx, handle, 0, 5);
+  await proveQuestAudit(ctx, handle);
   gateLiveGuildReadback(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -854,11 +917,13 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  // A ledger/audit-level check: b's claim wrote no audit row (the domain audit gap).
-  await proveQuestAudit(ctx, handle);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
   await proveBranding(ctx, handle);
+  // Audit is read AFTER the branding drive: the real /quests view's slate assignment
+  // is the driven product action that lands quest.slate_assigned audit rows (b's
+  // raw-RPC claim above deliberately bypasses the bot layer).
+  await proveQuestAudit(ctx, handle);
   // The non-admin dashboard save refusal is a dashboard session-auth lane.
   ctx.gate(
     'Discord',
@@ -926,7 +991,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     'audit',
     'audit-row',
     'The audit trail shows the reverted claim then a single successful retry payout — never zero-paid-but-marked-claimed and never double-paid.',
-    'requires the mid-claim fault-injection lane (and quest actions currently write no audit_logs row — see the DEF audit finding)',
+    'requires the mid-claim fault-injection lane (the quest.claim_failed → quest.claimed audit sequence exists product-side but only fires under the injected payout fault)',
   );
   ctx.gate(
     'replay-safety',
@@ -996,10 +1061,12 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
     'progress-event dedup lives in the message/activity event handlers (upstream of economy_quest_increment_progress, which carries no idempotency key); driving it needs the activity-event replay harness',
   );
 
-  await proveQuestAudit(ctx, handle);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
   await proveBranding(ctx, handle);
+  // Audit read after the branding drive (the driven /quests view assignment lands
+  // the quest.slate_assigned audit rows; the raw-RPC claims bypass the bot layer).
+  await proveQuestAudit(ctx, handle);
   gateLiveGuildReadback(ctx);
 }
 
@@ -1061,10 +1128,12 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     'the cadence runs on QuestsManager.scheduleWeeklyReset + assignment reached via /quests view (subcommand-routed); undrivable in-process',
   );
 
-  await proveQuestAudit(ctx, second);
   await proveRlsIsolation(ctx, second, userA);
   await proveNoOwnerAlert(ctx, second);
   await proveBranding(ctx, second);
+  // Audit read after the branding drive on the SECOND boot — the driven /quests view
+  // assignment lands quest.slate_assigned audit rows through the rebooted pipeline.
+  await proveQuestAudit(ctx, second);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
@@ -1139,10 +1208,12 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     impact: 'A first-of-cycle race created duplicate quest slate rows — the unique assignment key failed.',
   });
 
-  await proveQuestAudit(ctx, handle);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
   await proveBranding(ctx, handle);
+  // Audit read after the branding drive (the driven /quests view assignment lands
+  // the quest.slate_assigned audit rows; the raced raw-RPC calls bypass the bot layer).
+  await proveQuestAudit(ctx, handle);
   gateLiveGuildReadback(ctx);
 }
 
@@ -1223,9 +1294,12 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   );
   await proveRlsIsolation(ctx, handleA, userA);
 
-  await proveQuestAudit(ctx, handleB);
   await proveNoOwnerAlert(ctx, handleA);
   await proveBranding(ctx, handleA);
+  // Audit is read on guild A, where the branding drive above ran the real /quests
+  // view (guild B saw only raw-RPC arrangement calls, which bypass the bot layer and
+  // therefore leave no product audit trail by design).
+  await proveQuestAudit(ctx, handleA);
   gateLiveGuildReadback(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -1253,13 +1327,15 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
   });
 
   // Prove the off-theme classes while the rows still exist (before the sweep).
-  await proveQuestAudit(ctx, handle);
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
   // Drive the branded /quests view for a fresh member BEFORE the sweep — the auto-assigned
   // slate gives that member their own run-prefixed progress rows, so the zero-rows assertion
   // below also proves the sweep clears rows created via the live subcommand path.
   await proveBranding(ctx, handle);
+  // Audit read after the branding drive (audit_logs is retained, never swept): the
+  // driven /quests view assignment is the product action that lands the audit rows.
+  await proveQuestAudit(ctx, handle);
   const brandUser = ctx.userId('brand');
   const brandProgressBefore = await progressCount(handle, brandUser);
 
@@ -1292,7 +1368,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     'audit',
     'discord-readback',
     'Audit history is anonymized rather than deleted (operational rows deleted, audit_logs retained).',
-    'requires an audit_logs anonymization readback lane (and quest actions currently write no audit_logs row — see the DEF audit finding)',
+    'requires an audit_logs anonymization readback lane (the quest audit rows this scenario wrote are retained by the sweep, but anonymization itself is not drivable here)',
   );
   gateReplayDeferredTo(ctx, 'REPLAY');
 }

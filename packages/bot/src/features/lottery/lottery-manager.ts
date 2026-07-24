@@ -357,12 +357,22 @@ export class LotteryManager {
       return;
     }
 
+    // White-label currency branding (parity with the rest of the economy).
+    const currencyName = config.currency_name ?? 'Coins';
+    const currencyEmoji = config.currency_emoji ?? '🪙';
+
     const drawing = await this.getActiveDrawing(guildId);
     if (!drawing) {
+      // Between drawings the view still renders the guild's LIVE lottery state
+      // (configured schedule + branded ticket price), never a bare placeholder.
       await interaction.reply({
         embeds: [new EmbedBuilder()
           .setTitle('🎟️ Lottery')
-          .setDescription('No active lottery drawing. Buy a ticket to start one!')
+          .setDescription(
+            'No active lottery drawing — buy a ticket to start the next one!\n\n' +
+            `📅 Schedule: **${config.economy_lottery_schedule ?? 'weekly'}**\n` +
+            `💵 Ticket price: **${(config.economy_lottery_ticket_price ?? 100).toLocaleString()}** ${currencyName} ${currencyEmoji}`
+          )
           .setColor(0x5865F2)],
       });
       return;
@@ -375,8 +385,6 @@ export class LotteryManager {
       .limit(1000);
 
     const uniquePlayers = new Set((tickets ?? []).map((t: any) => t.user_id));
-    const currencyName = config.currency_name ?? 'Coins';
-    const currencyEmoji = config.currency_emoji ?? '🪙';
 
     await interaction.reply({
       embeds: [new EmbedBuilder()

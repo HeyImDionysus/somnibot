@@ -42,6 +42,7 @@ import { handleViewProfile, handleWarnUser, handleViewPurchases, handleCreateTic
 import { handleModalSubmit } from '../features/discord-ux/modal-handlers.js';
 import { handleAutocomplete } from '../features/discord-ux/autocomplete.js';
 import { handleHelpCategorySelect } from '../features/help/index.js';
+import { resolveBrandKit } from '../features/branding/brand-kit.js';
 
 // Feature handler imports — slash commands
 import { handleStoreCommand } from '../features/commerce/store-command.js';
@@ -393,14 +394,21 @@ async function handleSlashCommand(
       .eq('guild_id', guildId)
       .maybeSingle();
     if (musicFlagCfg?.music_enabled === false) {
-      // Catalog `music-disabled`: a branded, guild-named ephemeral embed notice.
+      // Catalog `music-disabled`: a branded, guild-named ephemeral embed notice
+      // rendered with the owner's white-label brand kit (configured brand name
+      // falling back to the guild's name, accent color, powered-by attribution)
+      // — never a stock SomniBot string.
+      const brandKit = await resolveBrandKit(client.supabase, guildId, { fallbackName: interaction.guild?.name });
       const disabledEmbed = new EmbedBuilder()
-        .setColor(0x00d4ff)
+        .setColor(brandKit.accentColor)
         .setTitle('🎵 Music is switched off')
         .setDescription(
-          `Music is currently switched off in **${interaction.guild?.name ?? 'this server'}** — ` +
+          `Music is currently switched off in **${brandKit.brandName}** — ` +
             'an admin can flip it back on from the dashboard.',
         );
+      if (brandKit.poweredByAttribution) {
+        disabledEmbed.setFooter({ text: brandKit.poweredByAttribution });
+      }
       await interaction.reply({ embeds: [disabledEmbed], ephemeral: true });
       return;
     }
