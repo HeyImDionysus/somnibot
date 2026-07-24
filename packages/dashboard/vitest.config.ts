@@ -3,8 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
-const configDir = path.dirname(fileURLToPath(import.meta.url));
-const useInProcessTypeScript = process.env.SOMNIBOT_VITEST_IN_PROCESS_TS === '1';
+export const configDir = path.dirname(fileURLToPath(import.meta.url));
+export const useInProcessTypeScript = process.env.SOMNIBOT_VITEST_IN_PROCESS_TS === '1';
 
 // Vite's SSR define pass invokes esbuild whenever it sees process.env. Express
 // the identical Node lookup with bracket notation in the restricted runner so
@@ -31,7 +31,7 @@ const preserveProcessEnvironment: ts.TransformerFactory<ts.SourceFile> = (contex
   return (sourceFile) => ts.visitNode(sourceFile, visit) as ts.SourceFile;
 };
 
-const inProcessTypeScriptPlugin = {
+export const inProcessTypeScriptPlugin = {
   name: 'somnibot:in-process-typescript',
   enforce: 'pre' as const,
   transform(source: string, id: string) {
@@ -69,7 +69,10 @@ export default defineConfig({
     environment: 'node',
     globals: true,
     include: ['src/__tests__/**/*.test.ts'],
-    exclude: ['src/__tests__/smoke/**'],
+    // Live lane (real-session dashboard-route driving vs local Supabase) runs in
+    // its own config (vitest.live.config.ts) inside the Live-Stack E2E job, not
+    // the plain Unit (Dashboard) job which has no Supabase.
+    exclude: ['src/__tests__/smoke/**', 'src/__tests__/live/**'],
     // V5 Audit §13.1: Coverage gate for dashboard — matches the CI threshold.
     coverage: {
       provider: 'v8',
