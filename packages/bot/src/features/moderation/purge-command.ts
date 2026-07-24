@@ -16,6 +16,8 @@ import {
   type Message,
 } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
+import type { SomniClient } from '../../client.js';
+import { writeAuditLog } from '../../services/audit.js';
 
 const log = createLogger('PurgeCmd');
 
@@ -45,8 +47,26 @@ export function buildPurgeCommand() {
 
 export async function handlePurgeCommand(
   interaction: ChatInputCommandInteraction,
+  client: SomniClient,
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
+
+  // Server-side authorization re-check (see handleWarnCommand). setDefaultMemberPermissions
+  // only hides the command in the UI — an admin per-command override (or a raw API call)
+  // still reaches this handler, and /purge bulk-deletes up to 100 messages. Re-verify the
+  // invoker's live Manage-Messages permission and audit the denied attempt.
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages)) {
+    await writeAuditLog(client.supabase, {
+      guildId: interaction.guildId!,
+      actorType: 'discord',
+      actorId: interaction.user.id,
+      action: 'moderation.purge.denied',
+      success: false,
+      details: { command: 'purge', reason: 'missing_permission', required: 'ManageMessages' },
+    });
+    await interaction.editReply('❌ You do not have permission to purge messages.');
+    return;
+  }
 
   const count = interaction.options.getInteger('count', true);
   const targetUser = interaction.options.getUser('user');
