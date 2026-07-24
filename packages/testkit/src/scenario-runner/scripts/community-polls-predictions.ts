@@ -3,29 +3,31 @@
  *
  * Binds this domain's 12 declarative catalog scenarios to concrete, real-stack proof
  * scripts driven against LOCAL Supabase. Every DB-observable / RLS / owner-alert
- * assertion runs NOW against the SAME production primitives the bot uses; the live
- * Discord reply surfaces are GATED — the exact honesty boundary the harness requires.
+ * assertion runs against the SAME production primitives the bot uses AND — since the
+ * loopback adapter can drive slash SUBCOMMANDS + COMPONENTS in-process (PR #331) — the
+ * member REPLY surfaces are driven through the REAL handlers and their captured replies
+ * asserted. Only the live-CHANNEL readback (posted-message pixels, brand-kit, in-place
+ * tally updates) and the fault-injection lanes remain GATED.
  *
- * ── Why the member REPLY side is GATED (same posture as game-economy-adventures) ──
- * Every entrypoint here is a slash SUBCOMMAND (`/poll create|close`,
- * `/predict create|bet|resolve`) and voting is a Discord BUTTON (`poll:{id}:{opt}`).
- * `ScenarioContext.runSlash` carries NO subcommand field and the injector builds a
- * subcommand-less interaction, so each handler's first line
- * `interaction.options.getSubcommand()` would throw before any work runs; there is
- * likewise no button-injection helper on the context. Driving the live embeds/tally
- * replies therefore CANNOT happen in this bot-only harness and is GATED — never faked.
+ * ── The member surfaces are now DRIVEN, not gated ──
+ * Every entrypoint is a slash SUBCOMMAND (`/poll create|close`, `/predict
+ * create|bet|resolve`) and voting is a Discord BUTTON (`poll:{id}:{opt}`).
+ * `ScenarioContext.runSlash` now carries `subcommand`, and `ctx.injectorFor(handle)`
+ * drives button interactions, so `proveMemberSurfaces` dispatches the REAL
+ * `handlePollCommand` / `handlePredictCommand` / `PollsManager.handlePollVote` and
+ * asserts their captured embeds/replies (poll board, vote confirmation, prediction
+ * board, bet confirmation, settle announcement, and — white-label — the owner-configured
+ * currency name). (The two create handlers call `interaction.fetchReply()` after their
+ * `reply()`; with no gateway that throws AFTER the reply + all DB writes land, and the
+ * dispatcher's own try/catch swallows it, so the captured reply + real rows are intact.)
  *
- * ── What IS proven NOW, non-vacuously ──
- * The handlers are thin orchestrations over primitives that ARE drivable directly
- * against local Supabase — the EXACT RPCs / constraint-guarded inserts / UPDATE gates
- * the bot itself runs:
- *   - poll rows + options land the same shape `createPoll` writes (status defaults to
- *     'active' via the DB default, the exact value the vote/close paths read);
+ * ── What IS proven, non-vacuously ──
+ *   - poll rows + options land the shape `createPoll` writes (status default 'active');
  *   - single-choice voting is the bot's own `poll_vote_switch_single` RPC (atomic
- *     replace-prior-vote, so a re-vote switches the member's choice);
+ *     replace-prior-vote) — driven directly AND through the real vote button;
  *   - `prediction_bets` UNIQUE(prediction_id,user_id) + CHECK(amount>0) are the exact
  *     gates `placeBet` relies on for dedupe and amount validation;
- *   - the ticket debit / pool increment / winner payout use the EXACT RPCs
+ *   - the debit / pool increment / winner payout use the EXACT RPCs
  *     `economy_subtract_balance` / `economy_increment_prediction_pool` /
  *     `economy_add_balance`;
  *   - settlement's exactly-once guarantee is the bot's own `predictions_resolve_atomic`
@@ -34,20 +36,21 @@
  *   - polls / predictions / prediction_bets are guild-scoped with anon REVOKEd by the
  *     RLS lockdown (service role sees the row an anon/second-guild client must not).
  *
- * ── Behavior bugs surfaced as DB-observable FAILs (never softened) ──
- *   1. /poll close is unsatisfiable: polls are created at status 'active' (DB default,
- *      and the polls CHECK only allows 'active'|'closed'), but `closePoll`'s atomic
- *      flip filters `... WHERE status = 'open'` — a value the constraint forbids — so
- *      the UPDATE matches zero rows and every close no-ops as "already closed" with no
- *      tally ever posted. Proven by running that exact UPDATE against a real poll.
- *   2. SET-A's raised minimum bet (100) has no implementation: guild_config has no
- *      `prediction_min_bet` column and `prediction_bets` has no floor beyond
- *      CHECK(amount>0), so a 50-coin bet persists. Proven by the column read erroring
- *      and the sub-minimum bet row inserting.
+ * ── Formerly-"bug" paths now proven FIXED (driven live, not re-implemented) ──
+ *   1. /poll close: DEF drives the REAL `/poll close`, which flips the poll open→closed
+ *      and posts the tally. (An earlier draft re-implemented the OLD buggy
+ *      `... WHERE status='open'` UPDATE and recorded a FAIL; V47-L2 fixed the handler to
+ *      gate on the real 'active' status, so driving it now PASSES.)
+ *   2. Raised minimum bet: the `prediction_bet_limits` migration added
+ *      `guild_config.prediction_min_bet` and `placeBet` enforces it, so SET-A boots with
+ *      `prediction_min_bet=100`, drives the REAL `/predict bet` for 50, and PROVES the
+ *      sub-minimum bet is rejected with no stake moved.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
 import type { LiveClientHandle } from '../../live-runner.js';
+import type { CapturedResponse } from '../../captured-response.js';
+import { buildButtonInteraction } from '../../interaction-builders.js';
 import type { DomainProof, ScenarioContext } from '../types.js';
 
 // ── Row shapes ────────────────────────────────────────────────────────────
@@ -117,7 +120,13 @@ function declaredDefault(domain: DomainContract, controlId: string): JsonValue |
  */
 async function bootPollsPredictions(
   ctx: ScenarioContext,
-  opts: { label?: string; guildId?: string; pollsEnabled?: boolean; predictionsEnabled?: boolean } = {},
+  opts: {
+    label?: string;
+    guildId?: string;
+    pollsEnabled?: boolean;
+    predictionsEnabled?: boolean;
+    configOverrides?: Record<string, unknown>;
+  } = {},
 ): Promise<LiveClientHandle> {
   return ctx.bootGuild({
     label: opts.label,
@@ -126,6 +135,7 @@ async function bootPollsPredictions(
     guildConfigOverrides: {
       polls_enabled: opts.pollsEnabled ?? true,
       predictions_enabled: opts.predictionsEnabled ?? true,
+      ...(opts.configOverrides ?? {}),
     },
   });
 }
@@ -250,22 +260,6 @@ async function pollVotesFor(
   if (userId) query = query.eq('user_id', userId);
   const { data } = await query.limit(1000);
   return (data as Array<{ option_id: string; user_id: string }> | null) ?? [];
-}
-
-/**
- * Run the EXACT atomic status flip `closePoll` runs after its creator check:
- * `UPDATE polls SET status='closed', closed_at=now() WHERE id=? AND status='open'`.
- * Returns how many rows it actually flipped (the bot treats 0 as "already closed").
- */
-async function attemptClose(handle: LiveClientHandle, pollId: string): Promise<number> {
-  const { data } = await handle.supabase
-    .from('polls')
-    .update({ status: 'closed', closed_at: new Date().toISOString() })
-    .eq('id', pollId)
-    .eq('status', 'open')
-    .select('id')
-    .limit(1000);
-  return ((data as Array<{ id: string }> | null) ?? []).length;
 }
 
 /** Insert a prediction + its options exactly as `createPrediction` does (status defaults to 'open'). */
@@ -545,48 +539,257 @@ async function proveRlsIsolation(ctx: ScenarioContext, handle: LiveClientHandle,
 }
 
 /**
- * The member surfaces (poll/prediction embeds, vote confirmations, settle announcement,
- * bet/close/resolve rejections) are all slash-SUBCOMMAND or Discord-BUTTON driven and
- * NOT injectable here (see header). Branding is GATED honestly rather than checked
- * against a synthetic string or the generic dispatcher error reply.
- */
-function gateBranding(ctx: ScenarioContext): void {
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'Member-facing poll/prediction surfaces (poll embed + tally, bet confirmation, settle announcement) show the owner brand name, colors, currency name, and voice preset with the powered-by-SomniBot attribution and zero stock-bot wording.',
-    'every entrypoint is a slash SUBCOMMAND and voting is a Discord BUTTON; ScenarioContext.runSlash carries no subcommand and the harness exposes no button injector, so no member-facing reply is produced to inspect (the embeds also hard-code "coins" rather than the configured currency — a reply-side finding only observable once a reply can be captured)',
-  );
-  ctx.gate(
-    'branding',
-    'discord-readback',
-    'The full white-label brand kit (colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on poll/prediction embeds.',
-    'requires an embed/message snapshot readback against the live brand kit (DISCORD_TOKEN + live guild)',
-  );
-}
-
-/**
  * PollsManager writes NO audit_logs row for any poll/prediction action, and the money
  * RPCs write only economy_wallets (no economy_transactions ledger). The append-only
  * operational evidence is `prediction_bets` (actor + guild + amount + idempotent payout
  * marker) — asserted directly where bets exist; the dedicated correlation-id audit_logs
- * lane is gated.
+ * lane is gated (a genuine architectural gap, NOT a harness limitation).
  */
 function gateAuditLog(ctx: ScenarioContext): void {
   ctx.gate(
     'audit',
     'discord-readback',
     'Every polls/predictions state change lands one append-only audit_logs row with actor, guild, and correlation id; anonymization (never deletion) is the only mutation.',
-    'PollsManager writes no audit_logs row and the money RPCs touch only economy_wallets (no economy_transactions ledger); the prediction_bets operational rows are the DB-observable evidence here',
+    'PollsManager writes no audit_logs row (no AuditService call, no DB trigger) and the money RPCs touch only economy_wallets (no economy_transactions ledger); the prediction_bets operational rows are the DB-observable evidence here',
   );
 }
 
-function gateLiveReply(ctx: ScenarioContext, promise: string): void {
+// ── Real-handler drive helpers (loopback slash-SUBCOMMAND + poll BUTTON) ────
+// Since PR #331 the loopback injector drives slash subcommands + components
+// in-process against the REAL handlers, so the member surfaces are driven live
+// (never faked) and their captured replies asserted.
+
+/** Captured-reply payload shape (string OR an embed-bearing object). */
+interface ReplyPayload {
+  content?: string;
+  embeds?: Array<{ data?: { title?: string; description?: string } }>;
+}
+
+async function runPoll(
+  ctx: ScenarioContext,
+  handle: LiveClientHandle,
+  subcommand: string,
+  userId: string,
+  options: Record<string, unknown>,
+): Promise<CapturedResponse> {
+  return ctx.runSlash(handle, { commandName: 'poll', userId, subcommand, options });
+}
+
+async function runPredict(
+  ctx: ScenarioContext,
+  handle: LiveClientHandle,
+  subcommand: string,
+  userId: string,
+  options: Record<string, unknown>,
+): Promise<CapturedResponse> {
+  return ctx.runSlash(handle, { commandName: 'predict', userId, subcommand, options });
+}
+
+/** Drive the REAL poll vote button (`poll:{id}:{opt}`) through the injector. */
+async function clickPollButton(
+  ctx: ScenarioContext,
+  handle: LiveClientHandle,
+  pollId: string,
+  optionId: string,
+  userId: string,
+): Promise<CapturedResponse> {
+  return ctx.injectorFor(handle).inject(
+    buildButtonInteraction({
+      customId: `poll:${pollId}:${optionId}`,
+      guildId: handle.guildId,
+      client: handle.client,
+      user: { id: userId, username: userId, displayName: userId },
+    }),
+  );
+}
+
+/** The last editReply/reply payload the handler produced (string OR embed object). */
+function lastReplyPayload(cap: CapturedResponse): ReplyPayload | string | undefined {
+  const edits = cap.allOf('editReply');
+  const reply = cap.allOf('reply');
+  return (edits[edits.length - 1] ?? reply[reply.length - 1])?.payload as ReplyPayload | string | undefined;
+}
+
+/** The text content of the last reply (for ephemeral content replies). */
+function replyText(cap: CapturedResponse): string {
+  const p = lastReplyPayload(cap);
+  if (typeof p === 'string') return p;
+  return String(p?.content ?? '');
+}
+
+/** The first embed's `.data` (title/description) of the last reply. */
+function replyEmbed(cap: CapturedResponse): { title?: string; description?: string } | undefined {
+  const p = lastReplyPayload(cap);
+  if (typeof p === 'string' || !p) return undefined;
+  return p.embeds?.[0]?.data;
+}
+
+async function pollByTitle(handle: LiveClientHandle, title: string): Promise<{ id: string } | null> {
+  const { data } = await handle.supabase
+    .from('polls')
+    .select('id')
+    .eq('guild_id', handle.guildId)
+    .eq('title', title)
+    .limit(1)
+    .maybeSingle();
+  return (data as { id: string } | null) ?? null;
+}
+
+async function predictionByTitle(handle: LiveClientHandle, title: string): Promise<{ id: string } | null> {
+  const { data } = await handle.supabase
+    .from('predictions')
+    .select('id')
+    .eq('guild_id', handle.guildId)
+    .eq('title', title)
+    .limit(1)
+    .maybeSingle();
+  return (data as { id: string } | null) ?? null;
+}
+
+async function pollOptionIds(handle: LiveClientHandle, pollId: string): Promise<string[]> {
+  const { data } = await handle.supabase
+    .from('poll_options')
+    .select('id, sort_order')
+    .eq('poll_id', pollId)
+    .order('sort_order')
+    .limit(1000);
+  return ((data as OptionRow[] | null) ?? []).map((o) => o.id);
+}
+
+async function countPollsByTitle(handle: LiveClientHandle, title: string): Promise<number> {
+  const { count } = await handle.supabase
+    .from('polls')
+    .select('*', { count: 'exact', head: true })
+    .eq('guild_id', handle.guildId)
+    .eq('title', title);
+  return count ?? 0;
+}
+
+/** Read the two guild_config fields the member surfaces branch on / brand with. */
+async function guildSurfaceConfig(
+  handle: LiveClientHandle,
+): Promise<{ predictionsEnabled: boolean; currency: string }> {
+  const { data } = await handle.supabase
+    .from('guild_config')
+    .select('predictions_enabled, currency_name')
+    .eq('guild_id', handle.guildId)
+    .maybeSingle();
+  const row = data as { predictions_enabled?: boolean; currency_name?: string } | null;
+  return { predictionsEnabled: row?.predictions_enabled ?? false, currency: row?.currency_name ?? 'coins' };
+}
+
+/**
+ * Drive the REAL member surfaces end-to-end for a fresh, isolated `surface` member and
+ * assert their captured replies live (replaces the former captured-reply/live-reply
+ * gates). Covers: the branded poll board (/poll create), a real vote button, and — when
+ * predictions are enabled — the branded prediction board, bet confirmation, and settle
+ * announcement, each carrying the owner-configured currency name (white-label). When
+ * predictions are OFF it proves /predict create declines gracefully while polls run.
+ * Only the live-CHANNEL readback (posted-message pixels / brand-kit / in-place tally
+ * updates) stays gated. Uses a run-prefixed `surface` user so it never collides with a
+ * scenario's own DB assertions.
+ */
+async function proveMemberSurfaces(ctx: ScenarioContext, handle: LiveClientHandle): Promise<void> {
+  const u = ctx.userId('surface');
+  const title = `${ctx.runPrefix}srf`;
+  const { predictionsEnabled, currency } = await guildSurfaceConfig(handle);
+
+  // Poll board — the REAL /poll create renders a branded embed with vote buttons.
+  const pollCap = await runPoll(ctx, handle, 'create', u, { title, options: 'Red,Green,Blue', multiple: false });
+  const pollEmbed = replyEmbed(pollCap);
+  ctx.expect(typeof pollEmbed?.title === 'string' && pollEmbed.title.includes(title), {
+    assertionClass: 'branding',
+    channel: 'captured-reply',
+    promise: 'The member-facing /poll create surface renders a branded poll embed (title + option list + vote buttons) in the owner voice.',
+    observation: `driving the REAL /poll create replied with an embed titled ${JSON.stringify(pollEmbed?.title)} (expected to include the poll title "${title}").`,
+    impact: 'The /poll create member surface did not render the branded poll embed.',
+  });
+
+  // Vote button — clicking poll:{id}:{opt} drives handlePollVote and confirms ephemerally.
+  const poll = await pollByTitle(handle, title);
+  const optIds = poll ? await pollOptionIds(handle, poll.id) : [];
+  const voteCap = poll && optIds[0] ? await clickPollButton(ctx, handle, poll.id, optIds[0]!, u) : null;
+  const voteText = voteCap ? replyText(voteCap) : '';
+  ctx.expect(voteText.toLowerCase().includes('vote'), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'Clicking a poll vote button drives the REAL handlePollVote, records the vote, and replies with an ephemeral confirmation.',
+    observation: `the poll:{id}:{opt} button reply was ${JSON.stringify(voteText)} (expected a vote confirmation).`,
+    impact: 'The poll vote button did not record and confirm the member vote.',
+  });
+
+  if (predictionsEnabled) {
+    // Prediction board — branded embed carrying the owner-configured currency name.
+    const createCap = await runPredict(ctx, handle, 'create', u, { title, options: 'Yes,No' });
+    const createEmbed = replyEmbed(createCap);
+    ctx.expect(
+      typeof createEmbed?.title === 'string' && createEmbed.title.includes(title) && (createEmbed.description ?? '').includes(currency),
+      {
+        assertionClass: 'branding',
+        channel: 'captured-reply',
+        promise: 'The /predict create surface renders a branded prediction embed showing the owner-configured currency name (white-label), not the stock fallback.',
+        observation: `/predict create embed titled ${JSON.stringify(createEmbed?.title)}; description mentions the configured currency "${currency}": ${(createEmbed?.description ?? '').includes(currency)}.`,
+        impact: 'The /predict create surface did not render the branded embed with the configured currency name.',
+      },
+    );
+
+    const pred = await predictionByTitle(handle, title);
+    if (pred) {
+      await seedWallet(handle, u, 100000);
+      // Bet confirmation — names the staked amount + new pool in the configured currency.
+      const betCap = await runPredict(ctx, handle, 'bet', u, { prediction_id: pred.id, option: 1, amount: 500 });
+      const betEmbed = replyEmbed(betCap);
+      ctx.expect(
+        typeof betEmbed?.title === 'string' && /bet placed/i.test(betEmbed.title) && (betEmbed.description ?? '').includes(currency),
+        {
+          assertionClass: 'Discord',
+          channel: 'captured-reply',
+          promise: 'A /predict bet replies with a branded bet-confirmation embed naming the staked amount + pool in the configured currency.',
+          observation: `/predict bet reply embed titled ${JSON.stringify(betEmbed?.title)}; mentions currency "${currency}": ${(betEmbed?.description ?? '').includes(currency)}.`,
+          impact: 'The /predict bet member surface did not render the branded bet confirmation.',
+        },
+      );
+
+      // Settle announcement — the creator's /predict resolve names the outcome + pool.
+      const resolveCap = await runPredict(ctx, handle, 'resolve', u, { prediction_id: pred.id, winner: 1 });
+      const resolveEmbed = replyEmbed(resolveCap);
+      ctx.expect(
+        typeof resolveEmbed?.title === 'string' && /resolved/i.test(resolveEmbed.title) && (resolveEmbed.description ?? '').includes(currency),
+        {
+          assertionClass: 'Discord',
+          channel: 'captured-reply',
+          promise: 'A creator /predict resolve replies with a branded settle announcement naming the winning outcome + pool in the configured currency.',
+          observation: `/predict resolve reply embed titled ${JSON.stringify(resolveEmbed?.title)}; mentions currency "${currency}": ${(resolveEmbed?.description ?? '').includes(currency)}.`,
+          impact: 'The /predict resolve settle announcement did not render in the branded owner voice.',
+        },
+      );
+    }
+  } else {
+    // Predictions disabled — /predict create declines gracefully in the owner voice.
+    const declineCap = await runPredict(ctx, handle, 'create', u, { title, options: 'Yes,No' });
+    const declineText = replyText(declineCap);
+    ctx.expect(declineText.toLowerCase().includes('not enabled'), {
+      assertionClass: 'branding',
+      channel: 'captured-reply',
+      promise: 'With predictions disabled, /predict create declines gracefully (feature-off notice) while the /poll create surface still renders its branded board.',
+      observation: `/predict create replied ${JSON.stringify(declineText)} (expected a "not enabled" notice).`,
+      impact: 'The predictions-disabled path did not surface the feature-off notice.',
+    });
+  }
+
+  // Residuals — the live CHANNEL readback still needs a real gateway; the in-process
+  // replies are proven above, so these are the honest remainder (not a harness excuse).
+  ctx.gate(
+    'branding',
+    'discord-readback',
+    'The full white-label brand kit (colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the poll/prediction embeds as rendered in the live guild.',
+    'requires an embed/message snapshot readback against the live brand kit (DISCORD_TOKEN + live guild); the in-process reply embeds + configured currency name are asserted via captured-reply above',
+  );
   ctx.gate(
     'Discord',
     'discord-readback',
-    promise,
-    'requires a live Discord gateway (DISCORD_TOKEN + live guild) plus slash-subcommand + poll-button injection the harness does not provide',
+    'The poll/prediction embeds are delivered to the live channel and the poll message’s per-option button tallies update in place as members vote.',
+    'requires a live Discord gateway (DISCORD_TOKEN + live guild) to read back the posted channel message; the in-process reply surfaces are proven via captured-reply above',
   );
 }
 
@@ -651,19 +854,27 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
       'Single-choice vote-switching failed: the member’s prior vote was not replaced by the new selection, so DEF’s contracted vote-switching does not occur.',
   });
 
-  // 4) FAIL — /poll close is unsatisfiable: the close primitive filters status='open' but polls are 'active'.
-  const flipped = await attemptClose(handle, poll.pollId);
+  // 4) /poll close — drive the REAL creator close (V47-L2 fixed the flip to gate on the
+  //    real 'active' status): it transitions the poll open→closed and posts the tally.
+  const closeCap = await runPoll(ctx, handle, 'close', userA, { poll_id: poll.pollId });
+  const closeEmbed = replyEmbed(closeCap);
   const afterClose = await readPoll(handle, poll.pollId);
-  ctx.expect(flipped === 1 && afterClose?.status === 'closed', {
-    assertionClass: 'Discord',
-    channel: 'db-observable',
-    promise: 'The creator’s /poll close transitions the poll open→closed and posts the final tally (state machine "close-poll").',
-    observation:
-      `closePoll’s atomic UPDATE (…WHERE status='open') flipped ${flipped} row(s) (expected 1); ` +
-      `poll status="${afterClose?.status}" (expected "closed"), closed_at=${afterClose?.closed_at ?? 'null'}.`,
-    impact:
-      '/poll close can never close a poll: polls are created at status "active" (DB default; the polls CHECK allows only "active"|"closed") but closePoll gates its flip on status="open", so the UPDATE matches zero rows and every close no-ops as "already closed" — no tally is ever posted.',
-  });
+  ctx.expect(
+    afterClose?.status === 'closed' &&
+      afterClose?.closed_at !== null &&
+      typeof closeEmbed?.title === 'string' &&
+      /poll closed/i.test(closeEmbed.title),
+    {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'The creator’s /poll close transitions the poll open→closed and posts the final tally (state machine "close-poll").',
+      observation:
+        `after driving the REAL /poll close as the creator: poll status="${afterClose?.status}" (expected "closed"), ` +
+        `closed_at=${afterClose?.closed_at ?? 'null'}; close reply embed titled ${JSON.stringify(closeEmbed?.title)} (expected a "Poll Closed" tally).`,
+      impact:
+        '/poll close did not flip the poll to closed and post the tally — a poll can never be closed (the close path’s status gate no longer matches the real "active" default).',
+    },
+  );
 
   // 5) Prediction created — one prediction (status "open") + its outcome options.
   const pred = await createPredictionRows(ctx, handle, userA, ['Yes', 'No']);
@@ -753,21 +964,22 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle, 'prediction_bets');
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveMemberSurfaces(ctx, handle);
   gateAuditLog(ctx);
-  gateLiveReply(
-    ctx,
-    'The poll message shows live button tallies and the settle announcement names the winning outcome, winner count, and pot in the owner voice.',
-  );
 }
 
-/** SET-A — multi-select behavior works, but the contracted raised minimum bet (100) is unimplemented. */
+/** SET-A — multi-select behavior works AND the raised minimum bet (100) is enforced live. */
 async function SET_A(ctx: ScenarioContext): Promise<void> {
   const minBetDefault = Number(declaredDefault(ctx.domain, 'prediction-min-bet')); // 1
   const raisedMin = 100; // SET-A's contracted raised minimum
-  const handle = await bootPollsPredictions(ctx, { label: 'a' });
+  // Boot with the raised minimum saved (the prediction_bet_limits migration added the
+  // column; placeBet enforces cfg.prediction_min_bet ?? 1 before touching the wallet).
+  const handle = await bootPollsPredictions(ctx, {
+    label: 'a',
+    configOverrides: { prediction_min_bet: raisedMin },
+  });
   const userA = ctx.userId('a');
-  const userB = ctx.userId('b');
+  const bettor = ctx.userId('bettor');
 
   // Multiple-selection behavior: an allow_multiple poll lets one member pick two options (both count).
   const poll = await createPollRows(ctx, handle, userA, ['A', 'B', 'C'], true);
@@ -783,43 +995,57 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
     impact: 'Multiple-selection voting did not record both of the member’s selections.',
   });
 
-  // FAIL — the raised minimum bet has no implementation backing.
-  const { error: colErr } = await handle.supabase
+  // The raised minimum persisted to guild_config — the value placeBet reads live.
+  const { data: cfg } = await handle.supabase
     .from('guild_config')
     .select('prediction_min_bet')
     .eq('guild_id', handle.guildId)
     .maybeSingle();
-  const columnAbsent = colErr !== null; // selecting a non-existent column errors
-  const pred = await createPredictionRows(ctx, handle, userA, ['Yes', 'No']);
-  await seedWallet(handle, userB, 1000);
-  const bet = await placeBet(handle, pred.predictionId, pred.optionIds[0]!, userB, 50); // below the raised 100 minimum
-  const wallet = await readWallet(handle, userB);
-  const belowMinAccepted = bet.betId !== null && wallet?.wallet === 950;
-  ctx.expect(!belowMinAccepted && !columnAbsent, {
-    assertionClass: 'Discord',
+  const savedMin = (cfg as { prediction_min_bet?: number } | null)?.prediction_min_bet;
+  ctx.expect(savedMin === raisedMin, {
+    assertionClass: 'database-RLS',
     channel: 'db-observable',
-    promise: `SET-A: with the minimum bet raised to ${raisedMin}, a ${50}-coin bet is rejected citing the minimum, and the setting is enforced from a saved guild_config value.`,
-    observation:
-      `guild_config.prediction_min_bet column ${columnAbsent ? 'does NOT exist' : 'exists'} (read error: ${colErr ? (colErr as { message?: string }).message : 'none'}); ` +
-      `a ${50}-coin bet ${belowMinAccepted ? `WAS accepted (bet row created, wallet ${wallet?.wallet})` : 'was rejected'}.`,
-    impact:
-      `The configurable minimum-bet floor is unimplemented: guild_config has no prediction_min_bet column and prediction_bets’ only amount guard is CHECK(amount>0) (catalog default min ${minBetDefault}), so a sub-minimum bet persists — SET-A’s contracted raised minimum of ${raisedMin} cannot take effect.`,
+    promise: `A dashboard save of the raised minimum bet (${raisedMin}) persists to guild_config and is what placeBet gates on live (no restart).`,
+    observation: `guild_config.prediction_min_bet=${savedMin} (expected ${raisedMin}; catalog default ${minBetDefault}).`,
+    impact: 'The raised minimum-bet setting did not persist / would not take live effect.',
   });
 
-  const betRow = await betsFor(handle, pred.predictionId, userB);
-  ctx.expect(betRow.length === 1 && betRow[0]?.amount === 50, {
+  // Drive the REAL /predict create + /predict bet: a sub-minimum (50) bet is REJECTED
+  // citing the minimum, with no bet row and no stake moved.
+  const title = `${ctx.runPrefix}minbet`;
+  await runPredict(ctx, handle, 'create', userA, { title, options: 'Yes,No' });
+  const pred = await predictionByTitle(handle, title);
+  await seedWallet(handle, bettor, 1000);
+  const rejectCap = pred ? await runPredict(ctx, handle, 'bet', bettor, { prediction_id: pred.id, option: 1, amount: 50 }) : null;
+  const rejectText = rejectCap ? replyText(rejectCap) : '';
+  const rejectRows = pred ? await betsFor(handle, pred.id, bettor) : [];
+  const walletAfterReject = await readWallet(handle, bettor);
+  ctx.expect(/minimum bet/i.test(rejectText) && rejectRows.length === 0 && walletAfterReject?.wallet === 1000, {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: `SET-A: with the minimum bet raised to ${raisedMin}, a 50-coin /predict bet is rejected citing the minimum, and no bet row or debit occurs.`,
+    observation:
+      `/predict bet(50) replied ${JSON.stringify(rejectText)} (expected a "Minimum bet" rejection); ` +
+      `bet rows for the bettor=${rejectRows.length} (expected 0); wallet=${walletAfterReject?.wallet} (untouched 1000).`,
+    impact: 'The configurable minimum-bet floor did not reject a sub-minimum bet — the owner’s raised minimum has no effect.',
+  });
+
+  // A bet AT/above the minimum is accepted and lands exactly one append-only ledger row.
+  const acceptCap = pred ? await runPredict(ctx, handle, 'bet', bettor, { prediction_id: pred.id, option: 1, amount: raisedMin }) : null;
+  const acceptEmbed = acceptCap ? replyEmbed(acceptCap) : undefined;
+  const acceptRows = pred ? await betsFor(handle, pred.id, bettor) : [];
+  ctx.expect(acceptRows.length === 1 && acceptRows[0]?.amount === raisedMin && typeof acceptEmbed?.title === 'string' && /bet placed/i.test(acceptEmbed.title), {
     assertionClass: 'audit',
     channel: 'audit-row',
-    promise: 'Each accepted bet lands exactly one append-only prediction_bets row with the staked amount.',
-    observation: `prediction_bets rows for the bettor=${betRow.length}, amount=${betRow[0]?.amount ?? '(none)'}.`,
-    impact: 'The accepted bet did not produce exactly one ledger row.',
+    promise: `A bet at the raised minimum (${raisedMin}) is accepted and lands exactly one append-only prediction_bets row with the staked amount.`,
+    observation: `prediction_bets rows for the bettor=${acceptRows.length}, amount=${acceptRows[0]?.amount ?? '(none)'} (expected ${raisedMin}); confirmation embed titled ${JSON.stringify(acceptEmbed?.title)}.`,
+    impact: 'A minimum-satisfying bet did not produce exactly one ledger row / branded confirmation.',
   });
 
   await proveRlsIsolation(ctx, handle, 'prediction_bets');
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveMemberSurfaces(ctx, handle);
   gateAuditLog(ctx);
-  gateLiveReply(ctx, 'The under-minimum bet gets a clear branded rejection and the multi-select tally renders both picks.');
   gateReplayDeferredTo(ctx, 'DEF / REPLAY / RACE');
 }
 
@@ -856,12 +1082,10 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle, 'polls');
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  // proveMemberSurfaces detects predictions-off and drives the REAL /predict create
+  // decline reply live while /poll create renders its branded board.
+  await proveMemberSurfaces(ctx, handle);
   gateAuditLog(ctx);
-  gateLiveReply(
-    ctx,
-    'With predictions_enabled off, /predict create declines gracefully in the owner’s voice while /poll create runs fully (the config gate is read by createPrediction/createPoll, which are subcommand-driven).',
-  );
   gateReplayDeferredTo(ctx, 'DEF / REPLAY / RACE');
 }
 
@@ -896,21 +1120,34 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
   await proveNoOwnerAlert(ctx, handle);
 
   // Poll option-count validation (1 option / 11 options) lives in createPoll's TypeScript
-  // guard (`options.length < 2 || > 10`) — there is NO DB constraint on poll_options count,
-  // so the reject path is only reachable through the subcommand handler (gated here).
-  ctx.gate(
-    'Discord',
-    'discord-readback',
-    `/poll create with 1 option or ${maxOptions + 1} options is rejected with "Polls need 2-10 options" and writes no poll/option rows.`,
-    `option-count validation is a createPoll TypeScript guard (2-${maxOptions}); poll_options carries no count CHECK, so the reject path is only reachable via the slash subcommand the harness cannot drive`,
-  );
+  // guard (`options.length < 2 || > 10`). Drive the REAL /poll create through the
+  // subcommand handler for both out-of-range counts and assert each is rejected with the
+  // "2-10 options" notice and writes NO poll row.
+  const oneTitle = `${ctx.runPrefix}one`;
+  const manyTitle = `${ctx.runPrefix}many`;
+  const oneCap = await runPoll(ctx, handle, 'create', userA, { title: oneTitle, options: 'OnlyOne', multiple: false });
+  const manyOpts = Array.from({ length: maxOptions + 1 }, (_, i) => `o${i}`).join(',');
+  const manyCap = await runPoll(ctx, handle, 'create', userA, { title: manyTitle, options: manyOpts, multiple: false });
+  const oneText = replyText(oneCap);
+  const manyText = replyText(manyCap);
+  const oneRows = await countPollsByTitle(handle, oneTitle);
+  const manyRows = await countPollsByTitle(handle, manyTitle);
+  ctx.expect(/2-10 options/i.test(oneText) && /2-10 options/i.test(manyText) && oneRows === 0 && manyRows === 0, {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: `/poll create with 1 option or ${maxOptions + 1} options is rejected with "Polls need 2-10 options" and writes no poll/option rows.`,
+    observation:
+      `1-option /poll create replied ${JSON.stringify(oneText)} (rows=${oneRows}); ` +
+      `${maxOptions + 1}-option /poll create replied ${JSON.stringify(manyText)} (rows=${manyRows}) — expected both rejected, zero rows.`,
+    impact: 'An out-of-range poll option count was accepted (or wrote a poll row) — the 2-10 validation guard did not hold.',
+  });
   ctx.gate(
     'audit',
     'discord-readback',
     'Each rejected input lands one audit row with its validation reason.',
-    'PollsManager writes no audit_logs row for rejected creates/bets; the reject paths are also subcommand-driven (not injectable here)',
+    'PollsManager writes no audit_logs row for rejected creates/bets (no AuditService call, no DB trigger) — the reject replies are now driven live above, but there is no audit lane to read',
   );
-  gateBranding(ctx);
+  await proveMemberSurfaces(ctx, handle);
   gateReplayDeferredTo(ctx, 'DEF / REPLAY / RACE');
 }
 
@@ -956,19 +1193,46 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
     },
   );
 
+  // Drive the REAL creator-only guards as a NON-creator (userB): /poll close and
+  // /predict resolve are both refused ("Only the creator…"), the poll stays active, the
+  // prediction stays open, and userC's escrowed bet stays unpaid.
+  const closeCap = await runPoll(ctx, handle, 'close', userB, { poll_id: poll.pollId });
+  const closeText = replyText(closeCap);
+  const pollAfterDenied = await readPoll(handle, poll.pollId);
+  ctx.expect(/only the poll creator/i.test(closeText) && pollAfterDenied?.status === 'active', {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'A non-creator’s /poll close is refused ("Only the poll creator can close it.") and the poll stays open.',
+    observation: `non-creator /poll close replied ${JSON.stringify(closeText)}; poll status="${pollAfterDenied?.status}" (expected still "active").`,
+    impact: 'A non-creator was able to close (or affect) another member’s poll — the creator-only close guard failed.',
+  });
+
+  const resolveCap = await runPredict(ctx, handle, 'resolve', userB, { prediction_id: pred.predictionId, winner: 1 });
+  const resolveText = replyText(resolveCap);
+  const predAfterDenied = await readPrediction(handle, pred.predictionId);
+  const cBetAfterDenied = await betsFor(handle, pred.predictionId, userC);
+  ctx.expect(
+    /only the creator/i.test(resolveText) && predAfterDenied?.status === 'open' && cBetAfterDenied[0]?.payout === null,
+    {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'A non-creator’s /predict resolve is refused ("Only the creator can resolve…"), the prediction stays open, and no bet is settled.',
+      observation:
+        `non-creator /predict resolve replied ${JSON.stringify(resolveText)}; prediction status="${predAfterDenied?.status}" (expected "open"); ` +
+        `bettor payout=${cBetAfterDenied[0]?.payout ?? 'null'} (expected unpaid).`,
+      impact: 'A non-creator settled a prediction — the creator-only resolve guard failed and bets moved without authority.',
+    },
+  );
+
   await proveRlsIsolation(ctx, handle, 'prediction_bets');
   await proveNoOwnerAlert(ctx, handle);
-  gateLiveReply(
-    ctx,
-    'run-member-b’s /poll close and /predict resolve are refused ephemerally ("Only the creator…"); the poll stays open and no settlement occurs.',
-  );
   ctx.gate(
     'audit',
     'discord-readback',
     'Each denied close/resolve attempt is audited with actor, target id, and reason permission-denied.',
-    'PollsManager writes no audit_logs row for denied attempts, and the creator-only guard runs inside the slash-subcommand handler (not injectable here)',
+    'PollsManager writes no audit_logs row for denied attempts (no AuditService call, no DB trigger); the creator-only guard is now driven live above and refuses the non-creator, but writes no audit row',
   );
-  gateBranding(ctx);
+  await proveMemberSurfaces(ctx, handle);
   gateReplayDeferredTo(ctx, 'DEF / REPLAY / RACE');
 }
 
@@ -1071,7 +1335,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'discord-readback',
     'With a transient fault injected after the first winner’s credit, the retry pays only the remaining winners and the settle announcement posts once with correct balances.',
-    'requires a mid-settlement fault-injection lane (fail economy_add_balance for one winner) plus slash-subcommand injection',
+    'requires a mid-settlement fault-injection lane (fail economy_add_balance for one winner) — the harness deliberately runs against a reachable, fault-free DB',
   );
   ctx.gate(
     'owner-notification',
@@ -1080,7 +1344,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     'requires the mid-settlement fault-injection lane plus owner alert channel readback',
   );
   await proveRlsIsolation(ctx, handle, 'prediction_bets');
-  gateBranding(ctx);
+  await proveMemberSurfaces(ctx, handle);
   gateAuditLog(ctx);
 }
 
@@ -1141,9 +1405,8 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle, 'prediction_bets');
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveMemberSurfaces(ctx, handle);
   gateAuditLog(ctx);
-  gateLiveReply(ctx, 'Exactly one settlement announcement exists and winners’ balances did not change on replay.');
 }
 
 /** RESTART — open predictions + escrowed stakes survive a stack reboot; post-restart settle pays correctly. */
@@ -1203,9 +1466,8 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, second, 'prediction_bets');
   await proveNoOwnerAlert(ctx, second);
-  gateBranding(ctx);
+  await proveMemberSurfaces(ctx, second);
   gateAuditLog(ctx);
-  gateLiveReply(ctx, 'Post-restart /predict resolve produces payouts matching the pre-restart stakes exactly.');
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
@@ -1271,9 +1533,8 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle, 'prediction_bets');
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveMemberSurfaces(ctx, handle);
   gateAuditLog(ctx);
-  gateLiveReply(ctx, 'One bet confirmation and one settlement announcement despite the concurrent actions.');
 }
 
 /** XGUILD — polls, predictions, and play-money balances are strictly per-guild. */
@@ -1353,9 +1614,8 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   );
   await proveRlsIsolation(ctx, handleB, 'prediction_bets');
   await proveNoOwnerAlert(ctx, handleA);
-  gateBranding(ctx);
+  await proveMemberSurfaces(ctx, handleA);
   gateAuditLog(ctx);
-  gateLiveReply(ctx, 'Guild B’s prediction and balances show no change when guild A settles.');
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
@@ -1385,9 +1645,12 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     impact: 'The cleanup scenario could not establish a baseline of run-prefixed rows.',
   });
 
-  // Prove the off-theme classes while the rows still exist (before the sweep).
+  // Prove the off-theme classes + drive the live member surfaces while the rows still
+  // exist (before the sweep): the surface rows proveMemberSurfaces creates are then swept
+  // alongside the scenario's own, strengthening the zero-leftovers check below.
   await proveRlsIsolation(ctx, handle, 'prediction_bets');
   await proveNoOwnerAlert(ctx, handle);
+  await proveMemberSurfaces(ctx, handle);
 
   // Run the sweep (the same one teardown uses) and verify ZERO run-prefixed rows remain.
   await ctx.sweepGuildRows(handle);
@@ -1407,7 +1670,6 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  gateBranding(ctx);
   ctx.gate(
     'Discord',
     'discord-readback',

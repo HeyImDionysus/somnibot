@@ -11,23 +11,30 @@
  * heist_reconcile_stranded_joins (refund a late-join that raced the claim) — reading
  * every row back to prove the effect DB-observably.
  *
- * Why the RPCs and NOT ctx.runSlash: /heist is a slash command with SUBCOMMANDS
- * (start / join / status; heist/commands.ts reads interaction.options.getSubcommand()),
- * and the runner's runSlash cannot supply a subcommand. The member-facing command
- * flows, the recruiting/join/resolution CHANNEL embeds, and the resolve pipeline —
- * which fires only on a live setTimeout(join_window_secs) the fast bot-only harness
- * cannot let elapse — are therefore GATED behind DISCORD_TOKEN + a live guild. The
- * substance those surfaces carry (entry-fee debits, per-participant frozen
- * entry_fee_paid, derived crew size + odds, the frozen outcome, per-member payout_each,
- * refunds, and idempotency under the paid_at / claimed_at / uniq-active guards) is
- * proven for real by driving the RPCs directly and reading the rows.
+ * Why still MOSTLY the RPCs, not only ctx.runSlash: /heist is a slash command with
+ * SUBCOMMANDS (start / join / status; heist/commands.ts reads
+ * interaction.options.getSubcommand()). Since PR #331 the runner's runSlash CAN drive a
+ * subcommand, so the member-facing surfaces ARE driven live where a captured reply/embed
+ * carries the substance (see proveBranding — /heist start's recruiting embed and /heist
+ * status's active-heist embed are driven through the REAL dispatcher and asserted). But
+ * the resolve pipeline still fires only on a live setTimeout(join_window_secs) the fast
+ * bot-only harness cannot let elapse, and the CSPRNG outcome roll is unseedable, so the
+ * money-model state machine is exercised through the SAME atomic RPCs the manager calls
+ * and the timer-driven resolution / channel announcements stay GATED behind
+ * DISCORD_TOKEN + a live guild. The substance those RPC paths carry (entry-fee debits,
+ * per-participant frozen entry_fee_paid, derived crew size + odds, the frozen outcome,
+ * per-member payout_each, refunds, and idempotency under the paid_at / claimed_at /
+ * uniq-active guards) is proven for real by driving the RPCs directly and reading rows.
  *
- * Because no member-facing reply/embed is captured in this RPC-driven harness, every
- * branding assertion GATEs honestly (there is nothing captured to inspect). A frozen
- * SUCCESS state (the state heist_claim_for_resolution leaves on a success roll) is
- * reproduced deterministically where a specific outcome is needed — the CSPRNG roll
- * inside the claim is unseedable — and the REAL credit/finalise RPCs then settle it,
- * exactly the way the lottery proof reproduces a claimed-but-unpaid drawing.
+ * The member-facing recruiting + status embeds are driven LIVE (runSlash subcommand) to
+ * prove the owner's configured white-label currency name/emoji reaches them
+ * (proveBranding); the remaining brand kit (brand name, colors, voice preset,
+ * powered-by-SomniBot attribution) is not on these embeds and stays a live
+ * Discord-readback lane. A frozen SUCCESS state (the state heist_claim_for_resolution
+ * leaves on a success roll) is reproduced deterministically where a specific outcome is
+ * needed — the CSPRNG roll inside the claim is unseedable — and the REAL credit/finalise
+ * RPCs then settle it, exactly the way the lottery proof reproduces a
+ * claimed-but-unpaid drawing.
  *
  * Behavior-bug discovery: where the REAL bot diverges from the catalog's contracted
  * intent the script records a FAIL (never a softened pass/gate). No divergence was
@@ -38,6 +45,7 @@
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
 import type { LiveClientHandle } from '../../live-runner.js';
+import type { CapturedResponse } from '../../captured-response.js';
 import type { DomainProof, ScenarioContext } from '../types.js';
 
 // ── Row shapes (typed reads — no `any` leaks) ─────────────────────────────
@@ -127,6 +135,9 @@ interface HeistBootOptions {
   minParticipants?: number;
   maxParticipants?: number;
   enabled?: boolean;
+  /** White-label currency name/emoji to persist on guild_config (currencyOf reads these). */
+  currencyName?: string;
+  currencyEmoji?: string;
 }
 
 /**
@@ -142,6 +153,8 @@ async function bootHeist(ctx: ScenarioContext, opts: HeistBootOptions = {}): Pro
     economyStartingBalance: 0,
     guildConfigOverrides: {
       economy_heist_enabled: opts.enabled ?? true,
+      ...(opts.currencyName !== undefined ? { currency_name: opts.currencyName } : {}),
+      ...(opts.currencyEmoji !== undefined ? { currency_emoji: opts.currencyEmoji } : {}),
       economy_heist_entry_fee: opts.entryFee ?? 100,
       economy_heist_base_payout: opts.basePayout ?? 500,
       economy_heist_success_base_pct: opts.successBase ?? 40,
@@ -496,24 +509,101 @@ async function proveNoOwnerAlert(ctx: ScenarioContext, handle: LiveClientHandle)
   );
 }
 
+// A distinctive white-label currency for the branding drive. The member-facing heist
+// embeds render currencyOf(config).cName/cEmoji (heist-manager.ts) in place of the
+// literal "Coins", so a brand guild configured with these exact non-default values makes
+// the assertion NON-VACUOUS: the embed showing "💎 … Doubloons" (and never the generic
+// 'Coins'/🪙 fallback) proves the configured currency actually reaches the surface.
+const BRAND_CURRENCY = { name: 'Doubloons', emoji: '💎' } as const;
+
+/** The embed .data (title/description) of the last reply/editReply a handler produced. */
+function replyEmbed(captured: CapturedResponse): { title?: string; description?: string } | undefined {
+  const edits = captured.allOf('editReply');
+  const reply = captured.allOf('reply');
+  const payload = (edits.at(-1) ?? reply.at(-1))?.payload as
+    | { embeds?: Array<{ data?: { title?: string; description?: string } }> }
+    | undefined;
+  return payload?.embeds?.[0]?.data;
+}
+
 /**
- * Branding is GATED for every heist scenario: /heist commands are slash SUBCOMMANDS the
- * runner's runSlash cannot drive, so no member-facing reply/embed is captured in this
- * RPC-driven harness — there is nothing real to inspect (never a hollow pass on a
- * synthetic string).
+ * Branding — DRIVE the member-facing /heist surfaces LIVE (PR #331 gave runSlash
+ * slash-SUBCOMMAND support) through the REAL dispatcher and assert the captured embeds
+ * carry the guild's configured white-label currency name + emoji. currencyOf(config) is
+ * what every heist embed renders instead of the literal "Coins" (heist-manager.ts), so a
+ * dedicated brand guild configured with a DISTINCTIVE currency (Doubloons/💎) makes this
+ * non-vacuous: /heist start's recruiting embed AND /heist status's active-heist embed
+ * showing that exact configured name+emoji — and NEVER the generic 'Coins'/🪙 fallback —
+ * prove the white-label currency reaches the member-facing surfaces for real.
+ *
+ * The brand guild is booted fresh (its own currency + crew) so the drive never collides
+ * with the scenario's active/terminal heist or its cooldown; it is swept + torn down with
+ * every other handle. The remaining brand kit BEYOND currency — the brand name, the
+ * (hardcoded 🏴‍☠️ / 0xFFA500) title emoji + color, the voice preset, and the
+ * powered-by-SomniBot attribution — is NOT on these embeds, so that pixel-level
+ * brand-kit match stays a live Discord-readback lane, gated honestly below.
  */
-function proveBrandingGated(ctx: ScenarioContext): void {
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'Member-facing heist surfaces (recruiting / join / status / resolution embeds) show the owner’s configured brand name, colors, and voice with the powered-by-SomniBot attribution and zero stock-bot wording.',
-    'the /heist commands are slash SUBCOMMANDS (start/join/status) that the runner’s runSlash cannot drive, so no member-facing reply/embed is captured in this bot-only RPC-driven harness — the heist substance is proven via the atomic RPCs the manager calls',
-  );
+async function proveBranding(ctx: ScenarioContext): Promise<void> {
+  const handle = await bootHeist(ctx, {
+    label: 'brand',
+    entryFee: 100,
+    basePayout: 500,
+    successBase: 40,
+    minParticipants: 2,
+    maxParticipants: 8,
+    currencyName: BRAND_CURRENCY.name,
+    currencyEmoji: BRAND_CURRENCY.emoji,
+  });
+  const starter = ctx.userId('brand-start');
+  const viewer = ctx.userId('brand-view');
+  await seedWallet(handle, starter, 1000);
+
+  const carriesBrandCurrency = (desc: string): boolean =>
+    desc.includes(BRAND_CURRENCY.name) &&
+    desc.includes(BRAND_CURRENCY.emoji) &&
+    !desc.includes('Coins') &&
+    !desc.includes('🪙');
+
+  // /heist start (subcommand) → the recruiting embed. Its payout + entry-fee lines render
+  // the configured currency (never the "Coins"/🪙 fallback). Driven LIVE through the REAL
+  // heist subcommand dispatcher (runSlash), reply captured in-process.
+  const startCap = await ctx.runSlash(handle, { commandName: 'heist', userId: starter, subcommand: 'start' });
+  const startEmbed = replyEmbed(startCap);
+  const startDesc = startEmbed?.description ?? '';
+  ctx.expect(carriesBrandCurrency(startDesc), {
+    assertionClass: 'branding',
+    channel: 'captured-reply',
+    promise:
+      'The member-facing /heist start recruiting embed renders the owner’s configured white-label currency name + emoji (never the generic Coins/🪙 fallback).',
+    observation:
+      `driving the REAL /heist start subcommand: recruiting embed title=${JSON.stringify(startEmbed?.title)}, ` +
+      `description=${JSON.stringify(startDesc)} (expected the configured "${BRAND_CURRENCY.emoji} … ${BRAND_CURRENCY.name}", not "🪙 … Coins").`,
+    impact: 'The recruiting embed did not carry the configured white-label currency — a member-facing branding regression.',
+  });
+
+  // /heist status (subcommand) → the active-heist embed. Same white-label currency on the
+  // potential-payout line, driven LIVE through the read-only status subcommand.
+  const statusCap = await ctx.runSlash(handle, { commandName: 'heist', userId: viewer, subcommand: 'status' });
+  const statusEmbed = replyEmbed(statusCap);
+  const statusDesc = statusEmbed?.description ?? '';
+  ctx.expect(carriesBrandCurrency(statusDesc), {
+    assertionClass: 'branding',
+    channel: 'captured-reply',
+    promise:
+      'The member-facing /heist status embed renders the owner’s configured white-label currency name + emoji (never the generic Coins/🪙 fallback).',
+    observation:
+      `driving the REAL /heist status subcommand: embed title=${JSON.stringify(statusEmbed?.title)}, ` +
+      `description=${JSON.stringify(statusDesc)} (expected the configured "${BRAND_CURRENCY.emoji} … ${BRAND_CURRENCY.name}").`,
+    impact: 'The /heist status embed did not carry the configured white-label currency — a member-facing branding regression.',
+  });
+
+  // The full brand kit BEYOND the configured currency (now proven live above) still needs
+  // the live brand-kit readback lane.
   ctx.gate(
     'branding',
     'discord-readback',
-    'The full white-label brand kit (brand name, configured currency name/emoji, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the heist embeds.',
-    'requires an embed snapshot compared against the live brand kit (DISCORD_TOKEN + live guild); the current heist embeds use hardcoded 🏴‍☠️/blurple styling and generic "coins" with no configured-currency name/emoji or powered-by attribution',
+    'The full white-label brand kit (brand name, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the heist embeds.',
+    'the configured currency name/emoji is now proven live on the captured /heist start recruiting + /heist status embeds; the rest of the brand kit is not on these embeds (hardcoded 🏴‍☠️ title emoji + 0xFFA500 color, no brand name, no powered-by-SomniBot attribution), so matching it against the owner brand kit needs an embed snapshot readback (DISCORD_TOKEN + live guild)',
   );
 }
 
@@ -742,7 +832,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  proveBrandingGated(ctx);
+  await proveBranding(ctx);
   gateLiveGuildReadback(ctx, 'the recruiting embed, one join embed per member, and exactly one success/failure resolution announcement');
   gateReplayDeferredTo(ctx, 'REPLAY / RESTART / RACE');
 }
@@ -863,7 +953,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  proveBrandingGated(ctx);
+  await proveBranding(ctx);
   gateLiveGuildReadback(ctx, 'the recruiting embed advertising the 1000-scaled payout at 55% base, and the branded cancellation announcement refunding each frozen 250');
   gateReplayDeferredTo(ctx, 'REPLAY / RESTART / RACE');
 }
@@ -1002,7 +1092,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  proveBrandingGated(ctx);
+  await proveBranding(ctx);
   ctx.gate(
     'Discord',
     'discord-readback',
@@ -1087,7 +1177,7 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  proveBrandingGated(ctx);
+  await proveBranding(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RESTART / RACE');
 }
 
@@ -1175,7 +1265,7 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  proveBrandingGated(ctx);
+  await proveBranding(ctx);
   // The non-admin dashboard save refusal is a dashboard session-auth + RLS lane.
   ctx.gate(
     'Discord',
@@ -1321,7 +1411,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle); // happy-so-far raises no alert
-  proveBrandingGated(ctx);
+  await proveBranding(ctx);
   // The start-insert fault refund branch, the injected payout fault, and the owner
   // settlement-retry alert need fault injection the harness deliberately omits.
   ctx.gate(
@@ -1459,7 +1549,7 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  proveBrandingGated(ctx);
+  await proveBranding(ctx);
   gateLiveGuildReadback(ctx, 'exactly one recruiting embed, one join embed per member, and one resolution announcement despite the replays');
 }
 
@@ -1560,7 +1650,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, second);
   await proveNoOwnerAlert(ctx, second);
-  proveBrandingGated(ctx);
+  await proveBranding(ctx);
   ctx.gate(
     'Discord',
     'discord-readback',
@@ -1670,7 +1760,7 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  proveBrandingGated(ctx);
+  await proveBranding(ctx);
   // The wall-clock join⇄resolve race through the dispatcher's refund branch needs concurrency
   // injection; the RPC-level row-lock + reconcile guards it relies on are proven above.
   ctx.gate(
@@ -1767,7 +1857,7 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   });
 
   await proveNoOwnerAlert(ctx, handleA);
-  proveBrandingGated(ctx);
+  await proveBranding(ctx);
   gateLiveGuildReadback(ctx, 'guild A /heist status identical before and after the guild B activity, and guild B’s independent resolution announcement');
   gateReplayDeferredTo(ctx, 'REPLAY / RESTART / RACE');
 }
@@ -1805,7 +1895,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
   // Prove the off-theme classes while the rows still exist (before the sweep removes them).
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  proveBrandingGated(ctx);
+  await proveBranding(ctx);
 
   // Run the sweep (the same one teardown uses) and verify ZERO run-prefixed rows remain.
   await ctx.sweepGuildRows(handle);

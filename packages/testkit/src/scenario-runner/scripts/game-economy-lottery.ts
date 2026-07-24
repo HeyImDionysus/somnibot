@@ -264,6 +264,64 @@ async function alertCount(handle: LiveClientHandle): Promise<number | null> {
   return count ?? 0;
 }
 
+// ── Live event→audit pipeline (the REAL per-guild AuditService) ────────────
+
+/** Structural view of the per-guild AuditService — only the batch flush we drive. */
+interface AuditFlusher {
+  flush(): Promise<void>;
+}
+
+/** The append-only audit_logs columns this proof reads. */
+interface AuditRow {
+  action: string | null;
+  category: string | null;
+  actor_type: string | null;
+  actor_id: string | null;
+  target_type: string | null;
+  target_id: string | null;
+  details: Record<string, unknown> | null;
+  guild_id: string | null;
+}
+
+/**
+ * Resolve the REAL per-guild AuditService the production init wired via
+ * ctx.setManager('auditService') (guild-init.ts). Returns undefined when the booted
+ * context carries no such manager (→ caller GATEs rather than mis-read the table).
+ */
+function getAuditService(handle: LiveClientHandle): AuditFlusher | undefined {
+  return handle.client.router.getContextSync(handle.guildId)?.getManager<AuditFlusher>('auditService');
+}
+
+/**
+ * Let the platform event bus deliver a driven buy's emitted `lottery.ticket_purchased`
+ * event to the AuditService's onAny listener (dispatched via setImmediate), then force
+ * its REAL batch flush() so the audit_logs row lands NOW instead of on the 5s timer.
+ * Returns false when the service is absent (→ caller GATEs, never mis-reads empty as a bug).
+ */
+async function flushAuditQueue(handle: LiveClientHandle): Promise<boolean> {
+  const svc = getAuditService(handle);
+  if (!svc) return false;
+  await new Promise((resolve) => setTimeout(resolve, 20)); // drain the onAny setImmediate listeners
+  await svc.flush();
+  return true;
+}
+
+/**
+ * Read the guild's lottery-attributable audit_logs rows (action prefixed 'lottery.').
+ * Returns null (NOT []) on a read error so a failed query can never masquerade as
+ * "no audit row written" (the caller GATEs instead of recording a false result).
+ */
+async function readLotteryAuditRows(handle: LiveClientHandle): Promise<AuditRow[] | null> {
+  const { data, error } = await handle.supabase
+    .from('audit_logs')
+    .select('action, category, actor_type, actor_id, target_type, target_id, details, guild_id')
+    .eq('guild_id', handle.guildId)
+    .limit(2000);
+  if (error) return null;
+  const rows = (data as AuditRow[] | null) ?? [];
+  return rows.filter((r) => (r.action ?? '').toLowerCase().startsWith('lottery.'));
+}
+
 // ── Captured-reply helpers ─────────────────────────────────────────────────
 
 function replyContent(captured: CapturedResponse): string {
@@ -375,7 +433,7 @@ function proveBranding(
     'branding',
     'discord-readback',
     'The full white-label brand kit (brand name, configured currency name/emoji, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit.',
-    'requires an embed snapshot compared against the live brand kit (DISCORD_TOKEN + live guild); the current lottery embeds use generic "coins"/💰/blurple styling with no configured-currency or powered-by attribution',
+    'requires an embed snapshot compared against the live brand kit (DISCORD_TOKEN + live guild): the lottery embeds already render the configured currency name/emoji, but the remaining brand-kit facets (brand name, embed colors — currently hardcoded blurple/gold, voice preset, powered-by-SomniBot attribution) can only be verified by reading the rendered embed back from a live guild',
   );
 }
 
@@ -586,13 +644,68 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   await proveNoOwnerAlert(ctx, handle);
   gateSchedulerDraw(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RETRY / RACE');
-  // The dedicated audit_logs correlation-id lane: the bot writes no audit_logs row
-  // for lottery actions (the ticket + drawing rows are the DB-observable record).
+  // The dedicated audit_logs lane IS live now: LotteryManager.buyTickets emits
+  // `lottery.ticket_purchased` on the platform bus for each genuinely-new (non-
+  // replayed) buy, and the REAL per-guild AuditService (started in guild-init) maps
+  // it via EVENT_TO_AUDIT and batch-inserts the audit_logs row. Drive the flush the
+  // 5s timer would otherwise do and read the two buy rows back DB-observably.
+  const auditFlushed = await flushAuditQueue(handle);
+  if (!auditFlushed) {
+    ctx.gate(
+      'audit',
+      'audit-row',
+      'Each accepted /lottery buy lands one append-only audit_logs row (lottery.ticket_purchased, category economy) carrying the buyer and the guild.',
+      'the per-guild AuditService manager was not resolvable from the booted context, so the live event→audit pipeline could not be flushed deterministically',
+    );
+  } else {
+    const auditRows = await readLotteryAuditRows(handle);
+    if (auditRows === null) {
+      ctx.gate(
+        'audit',
+        'audit-row',
+        'Each accepted /lottery buy lands one append-only audit_logs row (lottery.ticket_purchased, category economy) carrying the buyer and the guild.',
+        'the audit_logs read errored, so the audit trail cannot be evaluated (never recorded as a false result)',
+      );
+    } else {
+      const buyRows = auditRows.filter((r) => r.action === 'lottery.ticket_purchased');
+      const rowA = buyRows.find((r) => r.target_id === userA);
+      const rowB = buyRows.find((r) => r.target_id === userB);
+      ctx.expect(
+        buyRows.length === 2 &&
+          rowA !== undefined &&
+          rowB !== undefined &&
+          Number(rowA?.details?.count) === 3 &&
+          Number(rowB?.details?.count) === 2 &&
+          Number(rowA?.details?.totalCost) === 300 &&
+          Number(rowB?.details?.totalCost) === 200 &&
+          rowA?.category === 'economy' &&
+          rowA?.target_type === 'member' &&
+          rowA?.guild_id === handle.guildId,
+        {
+          assertionClass: 'audit',
+          channel: 'audit-row',
+          promise:
+            'Each accepted /lottery buy lands exactly one append-only audit_logs row (action lottery.ticket_purchased, category economy) carrying the buying member (target id), the guild, and the buy details (ticket count + cost).',
+          observation:
+            `after A buys 3 / B buys 2 and one audit flush: lottery audit rows=${buyRows.length} (expected 2); ` +
+            `A row present=${rowA !== undefined} count=${String(rowA?.details?.count)}/cost=${String(rowA?.details?.totalCost)}, ` +
+            `B row present=${rowB !== undefined} count=${String(rowB?.details?.count)}/cost=${String(rowB?.details?.totalCost)}, ` +
+            `category=${rowA?.category}, target_type=${rowA?.target_type}, guild=${rowA?.guild_id}.`,
+          impact:
+            'A /lottery buy did not leave its append-only audit_logs row — the buy money-path lacks the contracted audit trail.',
+        },
+      );
+    }
+  }
+  // Still gated: lottery.drawn is emitted only by the scheduler-run
+  // LotteryManager.drawWinner (this proof drives the atomic claim/award RPCs
+  // directly to prove their idempotency), and lottery audit rows carry no
+  // correlation id (no correlationId mapper in EVENT_TO_AUDIT).
   ctx.gate(
     'audit',
     'discord-readback',
-    'Each lottery action lands one audit_logs row with actor, guild, and a run-prefixed correlation id.',
-    'the bot writes no dedicated audit_logs row for lottery buys/draws; the append-only ticket + drawing rows are the DB-observable record here',
+    'The scheduled draw also lands a lottery.drawn audit row, and each lottery audit row carries a run-prefixed correlation id.',
+    'lottery.drawn is emitted only by the scheduler-run LotteryManager.drawWinner (this proof drives the atomic draw RPCs directly), and lottery audit mappings set no correlation id — both need the live scheduler / a correlation-id mapping',
   );
 }
 
@@ -1284,6 +1397,12 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
   await proveNoOwnerAlert(ctx, handle);
   proveBranding(ctx, await runLottery(ctx, handle, { sub: 'view', userId: userA }), 'weekly', 'schedule');
 
+  // The buy above emitted `lottery.ticket_purchased`; flush it to its audit_logs row
+  // BEFORE the sweep so the post-sweep read proves audit history is RETAINED (audit
+  // rows are intentionally NOT among the domain's swept tables).
+  const cleanupAuditFlushed = await flushAuditQueue(handle);
+  const auditBeforeSweep = cleanupAuditFlushed ? await readLotteryAuditRows(handle) : null;
+
   // Run the sweep (the same one teardown uses) and verify ZERO run-prefixed rows remain.
   await ctx.sweepGuildRows(handle);
   const ticketsAfter = await guildTicketCount(handle);
@@ -1303,13 +1422,39 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     impact: 'The cleanup sweep left run-prefixed lottery rows behind — the suite leaves residue.',
   });
 
-  // Audit history in the dedicated audit_logs table (anonymized-not-deleted), and
-  // the removal of channel winner/reset embeds, are separate lanes.
+  // Audit history is RETAINED, not deleted, by cleanup: the buy's append-only
+  // audit_logs row (flushed before the sweep) survives the sweep that cleared every
+  // operational ticket/drawing/wallet/alert row (audit_logs is deliberately not a
+  // swept table). Prove it DB-observably.
+  if (auditBeforeSweep === null) {
+    ctx.gate(
+      'audit',
+      'audit-row',
+      'Cleanup deletes the operational lottery rows but RETAINS the append-only audit_logs history.',
+      'the per-guild AuditService was not resolvable or the audit_logs read errored, so audit retention could not be evaluated',
+    );
+  } else {
+    const auditAfterSweep = await readLotteryAuditRows(handle);
+    const buyBefore = auditBeforeSweep.filter((r) => r.action === 'lottery.ticket_purchased').length;
+    const buyAfter = (auditAfterSweep ?? []).filter((r) => r.action === 'lottery.ticket_purchased').length;
+    ctx.expect(buyBefore >= 1 && auditAfterSweep !== null && buyAfter >= buyBefore, {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise:
+        'Cleanup deletes the operational lottery rows but RETAINS the append-only audit_logs history (audit rows are never swept — only anonymized in place).',
+      observation:
+        `lottery audit rows before sweep=${buyBefore} (expected ≥1), after sweep=${buyAfter} (expected ≥ before — retained).`,
+      impact:
+        'The cleanup sweep deleted append-only audit_logs history — the audit trail is not retained across cleanup.',
+    });
+  }
+  // Still gated: the in-place ANONYMIZATION of the retained rows (PII scrubbed, row
+  // kept) runs through the retention scrub on a 60-day+ window, out of reach here.
   ctx.gate(
     'audit',
     'discord-readback',
-    'Audit history is anonymized rather than deleted (operational rows deleted, audit_logs retained anonymized).',
-    'requires an audit_logs anonymization readback lane; the bot writes no lottery audit_logs row, so the operational ticket/drawing rows are the DB-observable evidence',
+    'The retained audit_logs rows are ANONYMIZED in place (PII scrubbed) rather than deleted.',
+    'in-place anonymization runs via the retention scrub (scrub_expired_audit_logs, hard 60-day floor); a fast harness cannot age rows past the window, so the anonymize-not-delete transform needs the retention-scrub lane',
   );
   ctx.gate(
     'Discord',
