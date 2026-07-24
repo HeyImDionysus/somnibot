@@ -7,26 +7,34 @@
  * bot reads; the live Discord round surfaces are GATED — the exact honesty
  * boundary the harness requires.
  *
- * ── Why this domain is MOSTLY GATED on the round/Discord side ──
+ * ── What is DRIVEN LIVE vs what stays a genuine residual (since PR #331) ──
  * The domain's only member entrypoint is `/trivia start` — a slash SUBCOMMAND —
- * and the whole round lifecycle is Discord-native + Valkey-native:
- *   - `ScenarioContext.runSlash` (see `RunSlashParams`) carries no subcommand
- *     field and the injector builds a subcommand-less interaction, so
- *     `handleTriviaCommand`'s first line `interaction.options.getSubcommand()`
- *     would throw before any round work runs (there is no button-injection helper
- *     either), so the question embed + four answer buttons + 20-second window
- *     cannot be driven here;
- *   - member answers are Discord BUTTON presses (`trivia:{channelId}:{i}`) locked
- *     in an in-memory `Map` — no button injector exists in this harness;
- *   - streaks live entirely in Valkey (`trivia:streak:{guildId}:{userId}`, 24h
- *     TTL) — `economy_trivia_sessions` was dropped in v53 (trivia is Valkey-backed),
- *     so the streak math + streak-scaled payout cannot run without a Redis;
- *   - the round is resolved by a `setTimeout` firing `endRound`, whose per-winner
- *     payout is `economy_add_balance` (mutates only `economy_wallets`, no ledger
- *     row) — the payout amount is computed in-memory from config × Valkey streak;
- *   - the owner-scheduled hosted cadence is UNIMPLEMENTED in this build (no
- *     scheduled-trivia guild_config columns and no scheduler in packages/bot/src),
- *     so SET-B's automatic rounds cannot be observed — flagged for owner review.
+ * and answers are Discord BUTTON presses (`trivia:{channelId}:{i}`). Since PR #331
+ * `ScenarioContext.runSlash` drives the subcommand and `ctx.injectorFor` drives the
+ * answer buttons in-process against the REAL handlers, so these ARE driven live now:
+ *   - `/trivia start` posts the question embed + four shuffled answer buttons; the
+ *     start-path only touches Valkey for the per-channel cooldown breather, which
+ *     `cooldownRemaining` SKIPS when the cooldown is 0 — so the round-drive guilds are
+ *     booted with `economy_trivia_cooldown_seconds: 0` to keep the drive Redis-free
+ *     (DEF alone keeps the catalog-default 30s cooldown, so its live drive is guarded
+ *     on Redis for the breather probe);
+ *   - a member answer is a BUTTON press into `handleAnswer`, whose per-member lock is
+ *     an in-memory `Map` (no Valkey): repeated presses lock exactly one answer, the
+ *     single-round-per-channel guard refuses a second `/trivia start` — both driven live;
+ *   - the hosted cadence is now IMPLEMENTED (`TriviaScheduleRunner` + the
+ *     `economy_trivia_schedule_*` guild_config columns), whose independent persistence
+ *     is proven DB-observably in SET-B.
+ * The genuine residuals that STAY gated:
+ *   - streaks live entirely in Valkey (`trivia:streak:{guildId}:{userId}`, 24h TTL,
+ *     `economy_trivia_sessions` dropped in v53), so the streak math + streak-scaled
+ *     payout cannot run without a Redis;
+ *   - the round is RESOLVED by a `setTimeout` firing `endRound` after 20s (no
+ *     accelerated clock here), whose per-winner payout is `economy_add_balance`
+ *     (mutates only `economy_wallets`, no ledger row) computed from config × Valkey
+ *     streak — so the results embed + payout + the `trivia.completed`→AuditService
+ *     audit row cannot be observed here;
+ *   - the hosted round POSTS via `channel.send` to a live `TextChannel` on a
+ *     minute-aligned timer (empty channel cache gateway-less) — needs DISCORD_TOKEN.
  *
  * ── What IS proven NOW, non-vacuously ──
  *   - dashboard config (base payout / streak bonus / hard multiplier / cooldown /
@@ -54,6 +62,7 @@ import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
 import type { LiveClientHandle } from '../../live-runner.js';
 import type { CapturedResponse } from '../../captured-response.js';
+import { buildButtonInteraction } from '../../interaction-builders.js';
 import type { DomainProof, ScenarioContext } from '../types.js';
 
 // ── Row shapes ────────────────────────────────────────────────────────────
@@ -345,47 +354,193 @@ async function proveRlsIsolation(ctx: ScenarioContext, handle: LiveClientHandle)
   });
 }
 
+interface RoundSurface {
+  title: string;
+  description: string;
+  buttonIds: string[];
+}
+
+/** Read the /trivia start question embed (title/description) + answer-button row
+ *  (customIds) from a captured reply. The reply payload is
+ *  `{ embeds: [EmbedBuilder{data}], components: [ActionRowBuilder{components:[ButtonBuilder{data}]}] }`. */
+function readRoundSurface(captured: CapturedResponse): RoundSurface {
+  const reply = captured.allOf('reply').at(-1)?.payload as
+    | {
+        embeds?: Array<{ data?: { title?: string; description?: string } }>;
+        components?: Array<{ components?: Array<{ data?: { custom_id?: string } }> }>;
+      }
+    | undefined;
+  const embed = reply?.embeds?.[0]?.data;
+  const row = reply?.components?.[0]?.components ?? [];
+  return {
+    title: String(embed?.title ?? ''),
+    description: String(embed?.description ?? ''),
+    buttonIds: row.map((b) => String(b?.data?.custom_id ?? '')),
+  };
+}
+
 /**
- * The only member surfaces are the /trivia start question embed + answer buttons +
- * results embed — none drivable here (see file header). Branding is GATED honestly
- * rather than checked against the unbranded dispatcher disabled reply (the sole
- * capturable surface, which carries no owner brand token to compare against here).
+ * Drive the REAL `/trivia start` subcommand (the #331 subcommand injector) and prove the
+ * member-facing round surface it posts: the branded question embed and the four tappable
+ * answer buttons whose customIds encode the channel (`trivia:{channelId}:{i}`) — the exact
+ * surface a member answers. The round-start path only touches Valkey for the per-channel
+ * cooldown breather, which `cooldownRemaining` SKIPS when the configured cooldown is 0 — so
+ * the caller boots the round-drive guild with `economy_trivia_cooldown_seconds: 0` to keep
+ * this Redis-free. The streak-scaled PAYOUT + results embed resolve in endRound on a
+ * 20-second setTimeout that reads Valkey streaks — a genuine residual GATED separately
+ * (gateResultsPayout / gatePayoutMath). Records the Discord (round surface) + branding
+ * (member surface) PASSes and returns the surface so a caller can drive answer presses.
  */
-function gateBranding(ctx: ScenarioContext): void {
+async function proveRoundSurface(
+  ctx: ScenarioContext,
+  handle: LiveClientHandle,
+  userId: string,
+): Promise<RoundSurface | null> {
+  const captured = await ctx.runSlash(handle, { commandName: 'trivia', userId, subcommand: 'start', options: {} });
+  const surface = readRoundSurface(captured);
+  const fourButtons =
+    surface.buttonIds.length === 4 && surface.buttonIds.every((id) => /^trivia:[^:]+:[0-3]$/.test(id));
+
+  ctx.expect(/trivia/i.test(surface.title) && fourButtons && /20 seconds/i.test(surface.description), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise:
+      'A REAL /trivia start posts the question embed with four shuffled answer buttons (customId trivia:{channelId}:{i}) and a 20-second answer window.',
+    observation:
+      `/trivia start replied with an embed titled "${truncate(surface.title, 40)}" and ${surface.buttonIds.length} answer button(s) ` +
+      `${JSON.stringify(surface.buttonIds)}; 20-second window text present=${/20 seconds/i.test(surface.description)}.`,
+    impact: 'The /trivia start round surface did not render the question embed with its four answer buttons.',
+  });
+
+  ctx.expect(surface.title.length > 0 && surface.description.length > 0 && fourButtons, {
+    assertionClass: 'branding',
+    channel: 'captured-reply',
+    promise:
+      'The /trivia start member surface renders as the owner question-board embed (branded question + four answer buttons), never a stock refusal.',
+    observation: `/trivia start question embed title="${truncate(surface.title, 40)}", answer buttons=${surface.buttonIds.length}.`,
+    impact: 'The /trivia start surface did not render the branded question board.',
+  });
+
+  return fourButtons ? surface : null;
+}
+
+/**
+ * Prove the in-memory per-member answer lock live: inject the SAME member's answer button
+ * twice through the REAL dispatcher → handleAnswer — the first press locks the answer, every
+ * later press returns the already-answered notice (round.answers is an in-memory Map keyed by
+ * user id; no Valkey, no timer). The streak-scaled per-winner PAYOUT idempotency stays a
+ * Valkey residual (gateStreakValkey).
+ */
+async function proveAnswerLock(
+  ctx: ScenarioContext,
+  handle: LiveClientHandle,
+  buttonId: string,
+  userId: string,
+): Promise<void> {
+  const injector = ctx.injectorFor(handle);
+  const press = (): Promise<CapturedResponse> =>
+    injector.inject(
+      buildButtonInteraction({
+        customId: buttonId,
+        guildId: handle.guildId,
+        client: handle.client,
+        user: { id: userId, username: userId, displayName: userId },
+      }),
+    );
+  const first = replyContent(await press());
+  const second = replyContent(await press());
+  ctx.expect(/locked in/i.test(first) && /already answered/i.test(second), {
+    assertionClass: 'replay-safety',
+    channel: 'captured-reply',
+    promise:
+      'A member’s repeated answer presses lock exactly one answer: the first press confirms the locked answer and every later press returns the already-answered notice (in-memory per-member answer lock — one effect per logical action).',
+    observation: `first press reply="${truncate(first, 50)}", repeated press reply="${truncate(second, 50)}".`,
+    impact: 'A member locked more than one answer — the per-member answer lock did not dedupe repeated presses.',
+  });
+}
+
+/**
+ * Drive a second `/trivia start` in the same channel (runSlash reuses the default channel id)
+ * and prove the single-round-per-channel refusal — the in-memory `activeRounds` guard — through
+ * the REAL dispatcher. Precondition: a round is already live in the guild (proveRoundSurface ran).
+ */
+async function proveSecondStartRefused(ctx: ScenarioContext, handle: LiveClientHandle, userId: string): Promise<void> {
+  const captured = await ctx.runSlash(handle, { commandName: 'trivia', userId, subcommand: 'start', options: {} });
+  const text = replyContent(captured);
+  ctx.expect(/already active/i.test(text), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise:
+      'A second /trivia start in a channel with a live round is refused with the round-already-active notice (single round per channel).',
+    observation: `the second /trivia start replied "${truncate(text, 60)}".`,
+    impact: 'A second concurrent /trivia start opened a duplicate round instead of being refused.',
+  });
+}
+
+/**
+ * DEF alone keeps the catalog-default 30s cooldown, whose breather probe (valkey.ttl) needs a
+ * Redis before /trivia start can post; when Redis is absent the branded round surface GATEs here
+ * (it is driven Redis-free in the cooldown-0 scenarios). Records the Discord + branding
+ * captured-reply gates with the honest Valkey-cooldown reason (never the stale injector reason).
+ */
+function gateRoundSurfaceCooldownRedis(ctx: ScenarioContext): void {
+  const reason =
+    'with the catalog-default 30s cooldown, /trivia start issues a Valkey breather probe (valkey.ttl) that ' +
+    'needs Redis before it posts; the branded question embed + four answer buttons are driven live Redis-free ' +
+    'in the cooldown-0 scenarios (SET-A / REPLAY / RACE / RESTART)';
   ctx.gate(
-    'branding',
+    'Discord',
     'captured-reply',
-    'Member-facing trivia surfaces (question embed, answer-locked confirmation, results embed) show the owner brand name, colors, and voice preset with the powered-by-SomniBot attribution and zero stock-bot wording.',
-    'the only entrypoint is /trivia start (a slash SUBCOMMAND) and answers are Discord buttons; runSlash carries no subcommand and the harness exposes no button injector, so no branded trivia embed is produced to inspect (the only capturable reply is the unbranded disabled-gate refusal)',
+    'A REAL /trivia start posts the question embed with four shuffled answer buttons and a 20-second answer window.',
+    reason,
   );
   ctx.gate(
     'branding',
-    'discord-readback',
-    'The full white-label brand kit (colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on trivia embeds.',
-    'requires an embed/message snapshot readback against the live brand kit (DISCORD_TOKEN + live guild)',
+    'captured-reply',
+    'The /trivia start member surface renders as the owner question-board embed.',
+    reason,
   );
 }
 
 /**
- * Trivia pays winners via `economy_add_balance` (mutates ONLY economy_wallets — no
- * economy_transactions ledger row) and `TriviaManager` writes no audit_logs row, so
- * there is no DB-observable audit row for a trivia action in this harness.
+ * The member-facing trivia surfaces are proven live (proveRoundSurface); the FULL white-label
+ * brand kit (owner brand name/colors, voice preset, powered-by-SomniBot attribution) is a
+ * pixel/snapshot match that stays a live-guild readback residual — the current /trivia embeds
+ * use generic "🧠 Trivia Time!"/blurple styling with no configured brand name or powered-by.
+ */
+function gateBrandKit(ctx: ScenarioContext): void {
+  ctx.gate(
+    'branding',
+    'discord-readback',
+    'The full white-label brand kit (owner brand name, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on trivia embeds.',
+    'requires an embed/message snapshot readback against the live brand kit (DISCORD_TOKEN + live guild); the current /trivia embeds use generic "🧠 Trivia Time!"/blurple styling with no configured brand name or powered-by attribution',
+  );
+}
+
+/**
+ * A trivia round IS audited: endRound emits `trivia.completed`, which the AuditService maps to
+ * an append-only audit_logs row (action 'trivia.completed', category 'economy'). But endRound
+ * fires only on the 20-second setTimeout (and its winner payout reads Valkey), and the harness
+ * has no accelerated clock, so no trivia audit row is written to observe here.
  */
 function gateAudit(ctx: ScenarioContext): void {
   ctx.gate(
     'audit',
     'audit-row',
-    'Every trivia state change lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation.',
-    'the trivia payout runs through economy_add_balance (mutates only economy_wallets — no economy_transactions ledger row) and TriviaManager writes no audit_logs row, so there is no DB-observable audit row to read in this harness',
+    'Every trivia round-completion lands one append-only audit row (actor, guild, correlation id) via the trivia.completed platform event.',
+    'the audit row is written in endRound via the trivia.completed → AuditService mapping, but endRound fires only on the 20-second setTimeout (no accelerated clock here), so no DB-observable trivia audit row exists to read',
   );
 }
 
-function gateLiveRound(ctx: ScenarioContext, promise: string): void {
+/** The results embed + streak-scaled winner payout resolve in endRound on a 20-second
+ *  setTimeout that reads Valkey streaks — no accelerated clock and no Redis here (the
+ *  /trivia start question embed + answer-button presses ARE driven live above). */
+function gateResultsPayout(ctx: ScenarioContext, promise: string): void {
   ctx.gate(
     'Discord',
-    'discord-readback',
+    'redis-dependency',
     promise,
-    'requires a live Discord gateway (DISCORD_TOKEN + live guild) plus /trivia-start subcommand injection, answer-button injection, and the 20-second window the harness does not provide',
+    'the results embed + streak-scaled payout are computed in endRound, fired by a 20-second setTimeout that reads the Valkey streak key (trivia:streak:{guildId}:{userId}); with no accelerated clock and no Redis the round cannot resolve here (the /trivia start question embed + answer-button presses ARE driven live)',
   );
 }
 
@@ -394,7 +549,7 @@ function gatePayoutMath(ctx: ScenarioContext, promise: string): void {
     'Discord',
     'redis-dependency',
     promise,
-    'the payout is computed in endRound as floor(base × difficulty/hard × (1 + streak×streakPct/100)) where the streak is a Valkey key (trivia:streak:*, 24h TTL); with no Redis and no drivable round (subcommand + buttons + 20s window) the streak-scaled payout cannot run',
+    'the payout is floor(base × difficulty/hard × (1 + streak×streakPct/100)) computed in endRound, where the streak is a Valkey key (trivia:streak:*, 24h TTL); endRound fires on a 20-second setTimeout and reads that Valkey streak, so with no Redis and no accelerated clock the streak-scaled payout cannot run (the /trivia start question embed + answer-button presses ARE driven live)',
   );
 }
 
@@ -403,7 +558,7 @@ function gateStreakValkey(ctx: ScenarioContext, promise: string): void {
     'replay-safety',
     'redis-dependency',
     promise,
-    'trivia streaks + winner payouts are keyed in Valkey and the in-memory answers Map (economy_trivia_sessions was dropped in v53); with no Redis and no button injector the per-answer / per-winner idempotency cannot be exercised DB-observably',
+    'trivia streaks + winner payouts are keyed in Valkey (economy_trivia_sessions was dropped in v53) and applied in endRound on a 20-second setTimeout; with no Redis and no accelerated clock the per-streak / per-winner-payout idempotency cannot be exercised (the in-memory per-answer lock IS driven live via button injection where relevant)',
   );
 }
 
@@ -481,9 +636,19 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  gateLiveRound(
+  // The branded question embed + four answer buttons are driven live via /trivia start.
+  // DEF keeps the catalog-default 30s cooldown, so the round-start path issues a Valkey
+  // breather probe (valkey.ttl) — the live drive is therefore guarded on Redis here; the
+  // cooldown-0 scenarios (SET-A / REPLAY / RACE / RESTART) drive the same surface Redis-free.
+  if (ctx.capabilities.redis) {
+    const surface = await proveRoundSurface(ctx, handle, ctx.userId('a'));
+    if (surface) await proveAnswerLock(ctx, handle, surface.buttonIds[0]!, ctx.userId('lock'));
+  } else {
+    gateRoundSurfaceCooldownRedis(ctx);
+  }
+  gateResultsPayout(
     ctx,
-    '/trivia start posts a built-in question embed with four shuffled answer buttons and a 20-second window, and the results embed lists the first-win winner paid exactly 55 play coins.',
+    '/trivia start’s results embed lists the first-win winner paid exactly 55 play coins.',
   );
   gatePayoutMath(
     ctx,
@@ -491,11 +656,11 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   );
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  gateBrandKit(ctx);
   gateAudit(ctx);
   gateStreakValkey(
     ctx,
-    'Repeated answer presses lock exactly one answer and each correct answerer is paid exactly once (one effect per logical action).',
+    'Each correct answerer is paid exactly once (one streak-scaled payout per winner).',
   );
 }
 
@@ -506,6 +671,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
     economyStartingBalance: 0,
     guildConfigOverrides: {
       economy_trivia_enabled: true,
+      economy_trivia_cooldown_seconds: 0, // skip the Valkey breather probe so the round drives Redis-free
       economy_trivia_base_payout: 200,
       economy_trivia_streak_multiplier_pct: 50,
       economy_trivia_hard_multiplier: 3,
@@ -548,17 +714,20 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
     impact: 'The dashboard-added custom question did not reach the pool the round-builder reads.',
   });
 
+  // The next round's branded question embed + answer buttons drive live under the saved config.
+  const surface = await proveRoundSurface(ctx, handle, ctx.userId('a'));
+  if (surface) await proveAnswerLock(ctx, handle, surface.buttonIds[0]!, ctx.userId('lock'));
   gatePayoutMath(
     ctx,
     'Under the new math a hard-question first win pays exactly 900 play coins (base 200 × 3 hard × 1.5 first-win streak from streak bonus 50%).',
   );
-  gateLiveRound(
+  gateResultsPayout(
     ctx,
-    'After the save the next round serves the run-prefixed custom question and the hard-difficulty results embed pays the winner exactly 900 play coins.',
+    'After the save the hard-difficulty results embed pays the winner exactly 900 play coins from the run-prefixed custom question pool.',
   );
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  gateBrandKit(ctx);
   gateAudit(ctx);
   gateStreakValkey(ctx, 'The new payout math applies exactly once per winner (no double credit under the raised numbers).');
 }
@@ -568,11 +737,21 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
  * the hosted cadence toggles independently.
  */
 async function SET_B(ctx: ScenarioContext): Promise<void> {
-  // Enabled guild: the command is exposed and the config records enabled=true.
+  // Enabled guild: the command is exposed and the config records enabled=true. The hosted
+  // cadence is configured (interval + channel) but its schedule switch is left OFF, so the
+  // TriviaScheduleRunner tick no-ops (no post, no alert) while its config still persists —
+  // proving the hosted-cadence settings toggle independently of the trivia master switch.
+  const scheduleChannelId = `${ctx.runPrefix}sched-chan`;
   const enabled = await ctx.bootGuild({
     label: 'a',
     economyStartingBalance: 0,
-    guildConfigOverrides: { economy_trivia_enabled: true },
+    guildConfigOverrides: {
+      economy_trivia_enabled: true,
+      economy_trivia_cooldown_seconds: 0, // skip the Valkey breather probe so the round drives Redis-free
+      economy_trivia_schedule_enabled: false,
+      economy_trivia_schedule_interval_minutes: 30,
+      economy_trivia_schedule_channel_id: scheduleChannelId,
+    },
   });
   const enabledCfg = await readTriviaConfig(enabled);
   ctx.expect(enabledCfg?.economy_trivia_enabled === true && enabled.commands.some((c) => c.name === 'trivia'), {
@@ -619,18 +798,55 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     impact: 'The /trivia command was exposed even though trivia was disabled.',
   });
 
-  // The owner-scheduled hosted cadence is UNIMPLEMENTED in this build: there are no
-  // scheduled-trivia guild_config columns and no scheduler in packages/bot/src, so it
-  // cannot be observed here — flagged for owner review, GATED (never faked green).
+  // The hosted cadence IS implemented now (TriviaScheduleRunner + the economy_trivia_schedule_*
+  // guild_config columns the runner reads). Prove DB-observably that the hosted-cadence config
+  // toggles independently of the master switch: with trivia (command) ON, the schedule switch is
+  // OFF while its interval + channel persist — the exact row TriviaScheduleRunner.loadConfig reads.
+  const { data: schedRow } = await enabled.supabase
+    .from('guild_config')
+    .select(
+      'economy_trivia_enabled, economy_trivia_schedule_enabled, economy_trivia_schedule_interval_minutes, economy_trivia_schedule_channel_id',
+    )
+    .eq('guild_id', enabled.guildId)
+    .maybeSingle();
+  const sched = schedRow as
+    | {
+        economy_trivia_enabled: boolean;
+        economy_trivia_schedule_enabled: boolean;
+        economy_trivia_schedule_interval_minutes: number;
+        economy_trivia_schedule_channel_id: string | null;
+      }
+    | null;
+  ctx.expect(
+    sched?.economy_trivia_enabled === true &&
+      sched?.economy_trivia_schedule_enabled === false &&
+      sched?.economy_trivia_schedule_interval_minutes === 30 &&
+      sched?.economy_trivia_schedule_channel_id === scheduleChannelId,
+    {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise:
+        'The hosted-cadence config (schedule switch, interval, channel) persists to guild_config independently of the trivia master switch — the exact columns the TriviaScheduleRunner reads; disabling the schedule leaves on-command /trivia enabled.',
+      observation:
+        `guild_config: trivia_enabled=${sched?.economy_trivia_enabled} (expected true), schedule_enabled=${sched?.economy_trivia_schedule_enabled} (expected false), ` +
+        `interval=${sched?.economy_trivia_schedule_interval_minutes} (expected 30), channel="${sched?.economy_trivia_schedule_channel_id}" (expected "${scheduleChannelId}").`,
+      impact: 'The hosted-cadence config did not persist independently of the master switch (the scheduled piece is not toggleable as contracted).',
+    },
+  );
+
+  // On-command trivia is untouched while the schedule is off: the branded question surface drives live.
+  await proveRoundSurface(ctx, enabled, ctx.userId('a'));
+
+  // The actual automatic POST still needs a live gateway + accelerated clock (GATED, corrected reason).
   ctx.gate(
     'Discord',
     'discord-readback',
-    'With a schedule channel configured, hosted rounds post automatically on the interval and resolve/pay normally; disabling the scheduled piece leaves on-command trivia untouched.',
-    'the hosted scheduled cadence is not implemented in this build (no scheduled-trivia guild_config columns, no trivia scheduler in packages/bot/src); it requires a live gateway + timer and is flagged as an intent gap for owner review',
+    'With the schedule switch on and a channel configured, hosted rounds post automatically on the interval and resolve/pay normally.',
+    'the hosted cadence IS implemented (TriviaScheduleRunner + economy_trivia_schedule_* guild_config columns, proven to persist above), but a hosted round posts via channel.send to a live TextChannel on a minute-aligned timer — guild.channels.cache is empty gateway-less, so it needs a live Discord gateway + an accelerated clock to observe the automatic post',
   );
   await proveRlsIsolation(ctx, enabled);
   await proveNoOwnerAlert(ctx, enabled);
-  gateBranding(ctx);
+  gateBrandKit(ctx);
   gateAudit(ctx);
   gateStreakValkey(ctx, 'Re-delivering a hosted round’s events yields no duplicate payouts.');
 }
@@ -642,6 +858,7 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
     economyStartingBalance: 0,
     guildConfigOverrides: {
       economy_trivia_enabled: true,
+      economy_trivia_cooldown_seconds: 0, // skip the Valkey breather probe so the round drives Redis-free
       economy_trivia_base_payout: 75,
       economy_trivia_hard_multiplier: 2,
     },
@@ -674,25 +891,58 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
     impact: 'A rejected config attempt disturbed the live trivia pool the bot reads.',
   });
 
-  // The REJECTION + its audit row are enforced in the dashboard's Zod layer;
-  // guild_config's trivia columns carry NO CHECK constraint, so the reject path is
-  // unreachable in a bot-only harness. GATE it honestly (never fake a rejection).
+  // The trivia config columns now carry DB CHECK constraints (migration 20260723180100:
+  // guild_config_trivia_base_payout_check ≥ 0, guild_config_trivia_hard_mult_check ≥ 1), so an
+  // invalid save is rejected AT THE DB — drive the reject path directly: a service-role write of
+  // a negative base payout / a hard multiplier below one is refused and the prior valid values
+  // are retained byte-for-byte.
+  const { error: negErr } = await handle.supabase
+    .from('guild_config')
+    .update({ economy_trivia_base_payout: -1 })
+    .eq('guild_id', handle.guildId);
+  const { error: hardErr } = await handle.supabase
+    .from('guild_config')
+    .update({ economy_trivia_hard_multiplier: 0 })
+    .eq('guild_id', handle.guildId);
+  const afterReject = await readTriviaConfig(handle);
+  ctx.expect(
+    negErr !== null &&
+      hardErr !== null &&
+      afterReject?.economy_trivia_base_payout === 75 &&
+      Number(afterReject?.economy_trivia_hard_multiplier) === 2,
+    {
+      assertionClass: 'database-RLS',
+      channel: 'db-observable',
+      promise:
+        'A negative base payout / a hard multiplier below one is rejected by the guild_config CHECK constraints and never persists; the prior valid values are retained byte-for-byte.',
+      observation:
+        `negative base_payout write rejected=${negErr !== null}, hard-multiplier-below-1 write rejected=${hardErr !== null}; ` +
+        `after both attempts: base_payout=${afterReject?.economy_trivia_base_payout} (expected 75), hard_multiplier=${afterReject?.economy_trivia_hard_multiplier} (expected 2).`,
+      impact: 'An invalid trivia config value persisted — the DB CHECK constraint did not reject the out-of-range write.',
+    },
+  );
+
+  // The DB rejects the value (proven above); the dashboard's owner-facing validation-error COPY
+  // (the Zod message) is the remaining surface — still a live-dashboard readback.
   ctx.gate(
     'Discord',
     'discord-readback',
-    'The dashboard trivia page surfaces a clear validation error for a negative base payout / a hard multiplier below one.',
-    'config validation lives in the dashboard (Zod) layer; economy_trivia_base_payout / economy_trivia_hard_multiplier carry no DB CHECK constraint, so a bot-only harness cannot drive the reject path',
+    'The dashboard trivia page surfaces a clear validation-error message for a negative base payout / a hard multiplier below one.',
+    'the DB-level rejection is proven above via the guild_config CHECK constraints; the owner-facing Zod validation-error COPY is rendered by the dashboard save path (not reachable in this bot-only harness)',
   );
   ctx.gate(
     'audit',
     'audit-row',
     'One audit row records the rejected trivia configuration attempt with the validation reason; no config-change audit row is written.',
-    'the rejected-config audit row is written by the dashboard save path (not reachable in a bot-only harness)',
+    'the rejected-config audit row is written by the dashboard save path (not reachable in a bot-only harness); the DB rejects the invalid value directly (proven above)',
   );
 
+  // Live behavior is unchanged after the rejected save: the next /trivia start still posts the
+  // branded question surface under the retained valid config.
+  await proveRoundSurface(ctx, handle, ctx.userId('a'));
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  gateBrandKit(ctx);
   gateStreakValkey(ctx, 'Re-running a round after the rejected save pays under the prior valid math exactly once.');
 }
 
@@ -701,7 +951,7 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({
     label: 'a',
     economyStartingBalance: 0,
-    guildConfigOverrides: { economy_trivia_enabled: true },
+    guildConfigOverrides: { economy_trivia_enabled: true, economy_trivia_cooldown_seconds: 0 },
   });
 
   // Baseline pool (an admin-curated question) + RLS positive control.
@@ -777,9 +1027,11 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
     'the denied-config audit row is written by the dashboard save path (not reachable in a bot-only harness)',
   );
 
+  // The admin-curated pool still drives the branded question surface (unmodified pool + math).
+  await proveRoundSurface(ctx, handle, ctx.userId('a'));
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  gateBrandKit(ctx);
   gateStreakValkey(ctx, 'A refused write leaves the pool and payout math byte-identical (no partial effect).');
 }
 
@@ -792,7 +1044,7 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'db-observable',
     'During the outage /trivia start replies with the branded trivia-unavailable template in the owner’s voice and no question embed posts; after restoration a full round resolves and pays with pre-outage streaks honored.',
-    'requires a Supabase/Valkey dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB) plus /trivia-start subcommand injection',
+    'requires a Supabase/Valkey dependency-outage fault-injection lane (the harness deliberately runs against a reachable DB); /trivia start itself is driven live in the happy-path scenarios',
   );
   ctx.gate(
     'owner-notification',
@@ -842,19 +1094,19 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'db-observable',
     'With a fault on the winner credit, the results embed lists the winner under the payout-failed notice (not as paid), and the operator retry credits exactly the computed payout once.',
-    'requires a mid-resolution fault-injection lane (fail economy_add_balance for a correct answerer at round end) plus subcommand + answer-button injection and the 20-second window',
+    'requires a mid-resolution fault-injection lane (fail economy_add_balance for a correct answerer at round end) plus the 20-second endRound window + Valkey; the /trivia start subcommand and answer-button presses ARE driven live in the happy-path scenarios',
   );
   ctx.gate(
     'replay-safety',
     'db-observable',
     'The flagged payout and its operator retry resolve under one idempotency key to exactly one play-money credit; the streak increment is applied once.',
-    'requires the mid-resolution fault-injection lane; note the current build has no persisted payout-retry queue or idempotency key on the trivia payout (flagged for owner review)',
+    'requires the mid-resolution fault-injection lane plus the 20-second endRound timer + Valkey; endRound now queues a bot_action_queue "trivia_payout_retry" job on the failed branch, but the payout itself carries no idempotency key and that branch is only reachable via the fault lane (flagged for owner review)',
   );
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'The owner receives exactly one reasoned payout-delayed alert for the flagged winner.',
-    'requires the fault lane plus owner alert channel readback; note endRound currently only logs the failed payout and flags it in the embed — it raises no owner alert and queues no operator retry (flagged for owner review)',
+    'requires the fault lane plus owner alert channel readback; endRound now writes a trivia_payout_failed row to the alerts table and queues a bot_action_queue retry on the failed branch, but that branch is only reachable via the mid-resolution fault lane + the 20-second endRound timer',
   );
   ctx.gate(
     'branding',
@@ -876,7 +1128,7 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({
     label: 'a',
     economyStartingBalance: 0,
-    guildConfigOverrides: { economy_trivia_enabled: true },
+    guildConfigOverrides: { economy_trivia_enabled: true, economy_trivia_cooldown_seconds: 0 },
   });
 
   // Seed a question so the RLS positive control + no-alert reads are real.
@@ -888,24 +1140,21 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
     difficulty: 'easy',
   });
 
-  // Trivia's replay guarantees are all Valkey/in-memory: the answer lock is
-  // `round.answers.has(userId)` on an in-memory Map, the streak is a Valkey key, and
-  // the winner payout has no persisted idempotency key (economy_trivia_sessions was
-  // dropped in v53). None is DB-observable in this harness, so replay-safety GATES.
-  ctx.gate(
-    'replay-safety',
-    'discord-readback',
-    'The second and later button presses return only the already-answered ephemeral notice, and the channel keeps exactly one question embed and one results embed for the round.',
-    'the answer-lock is an in-memory Map keyed by user id and the streak/payout are Valkey-native; with no button injector and no Redis these idempotency effects cannot be exercised here',
-  );
-  gateStreakValkey(ctx, 'Idempotency keys on the answer lock, streak update, and winner payout each show one applied effect; replayed deliveries are deduplicated no-ops.');
-  gateLiveRound(
+  // The per-member answer lock is an in-memory Map (round.answers) — drive it LIVE: a real
+  // /trivia start posts the question surface, then run-member-a's repeated button presses lock
+  // exactly one answer (first press confirms, every later press returns the already-answered notice).
+  const surface = await proveRoundSurface(ctx, handle, ctx.userId('a'));
+  if (surface) await proveAnswerLock(ctx, handle, surface.buttonIds[0]!, ctx.userId('a'));
+  // The channel keeping a single results embed + the streak/payout dedup resolve in endRound
+  // (20-second timer) and are Valkey-native — genuine residuals.
+  gateResultsPayout(
     ctx,
-    'run-member-a’s repeated button presses lock exactly one answer and re-delivering the recorded round events leaves the wallet, streak, and results embed byte-identical.',
+    'Re-delivering the recorded round events leaves the wallet, streak, and the single results embed byte-identical.',
   );
+  gateStreakValkey(ctx, 'The streak update and winner payout each apply exactly one effect; replayed deliveries are deduplicated no-ops.');
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  gateBrandKit(ctx);
   gateAudit(ctx);
 }
 
@@ -918,7 +1167,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     guildId,
     label: 'a',
     economyStartingBalance: 0,
-    guildConfigOverrides: { economy_trivia_enabled: true, economy_trivia_base_payout: 123 },
+    guildConfigOverrides: { economy_trivia_enabled: true, economy_trivia_cooldown_seconds: 0, economy_trivia_base_payout: 123 },
   });
   const q = await insertCustomQuestion(ctx, first, {
     question: 'Speed of light (km/s approx)?',
@@ -936,7 +1185,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     guildId,
     label: 'a',
     economyStartingBalance: 0,
-    guildConfigOverrides: { economy_trivia_enabled: true, economy_trivia_base_payout: 123 },
+    guildConfigOverrides: { economy_trivia_enabled: true, economy_trivia_cooldown_seconds: 0, economy_trivia_base_payout: 123 },
   });
   const afterRestart = await readTriviaConfig(second);
   const poolAfter = await readCustomQuestions(second);
@@ -955,18 +1204,16 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  // Streaks are Valkey (24h TTL) so their cross-restart continuation cannot be read
-  // here; in-memory active rounds are dropped on restart (so no stuck already-active
-  // refusal) — both are Valkey/in-memory + subcommand-driven and GATE.
-  ctx.gate(
-    'Discord',
-    'redis-dependency',
-    'Post-restart /trivia start opens a fresh round without a stuck round-already-active refusal, and the next win’s payout reflects the streak value persisted (in Valkey) before the restart.',
-    'active rounds are in-memory (dropped on restart) and streaks are Valkey-persisted; with no Redis and no subcommand injector neither the streak continuation nor the fresh-round path can be driven here',
-  );
+  // Post-restart the in-memory active rounds are gone, so /trivia start opens a FRESH round
+  // (no stuck round-already-active refusal) — driven live on the restarted guild, and the
+  // in-memory per-member answer lock still applies.
+  const surface = await proveRoundSurface(ctx, second, ctx.userId('a'));
+  if (surface) await proveAnswerLock(ctx, second, surface.buttonIds[0]!, ctx.userId('lock'));
+  // The streak persisted in Valkey (24h TTL) that a post-restart win would reflect is a residual.
+  gateResultsPayout(ctx, 'A post-restart win’s payout reflects the streak value persisted in Valkey before the restart.');
   await proveRlsIsolation(ctx, second);
   await proveNoOwnerAlert(ctx, second);
-  gateBranding(ctx);
+  gateBrandKit(ctx);
   gateAudit(ctx);
   gateStreakValkey(ctx, 'No post-restart double payout occurs for the interrupted round.');
 }
@@ -976,7 +1223,7 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({
     label: 'a',
     economyStartingBalance: 0,
-    guildConfigOverrides: { economy_trivia_enabled: true },
+    guildConfigOverrides: { economy_trivia_enabled: true, economy_trivia_cooldown_seconds: 0 },
   });
 
   // Seed a question so the RLS positive control + no-alert reads are real.
@@ -988,22 +1235,20 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     difficulty: 'easy',
   });
 
-  // Trivia's concurrency guards are process-local: the single-round-per-channel guard
-  // is an in-memory `activeRounds.has(channelId)` check and the one-answer-per-member
-  // guard is an in-memory Map — there is NO DB-level serialization (no unique index,
-  // economy_trivia_sessions was dropped in v53). So the start-race and answer-race
-  // cannot be exercised DB-observably here and GATE (the in-memory guard is also a
-  // note: it does not serialize across shards/restarts — flagged for owner review).
-  ctx.gate(
-    'Discord',
-    'discord-readback',
-    'Two simultaneous /trivia start invocations produce exactly one question embed and one branded already-active refusal; simultaneous answers each lock exactly once with every correct answerer paid once.',
-    'the single-round-per-channel and one-answer-per-member guards are process-local in-memory checks (no DB unique index); with no subcommand/button injector the race cannot be driven, and the in-memory guard does not serialize across shards (flagged for owner review)',
-  );
+  // The single-round-per-channel and one-answer-per-member guards are process-local in-memory
+  // checks — drive them LIVE: a first /trivia start posts one question surface, a SECOND start
+  // in the same channel is refused (round-already-active), and repeated presses lock one answer.
+  const surface = await proveRoundSurface(ctx, handle, ctx.userId('a'));
+  await proveSecondStartRefused(ctx, handle, ctx.userId('b'));
+  if (surface) await proveAnswerLock(ctx, handle, surface.buttonIds[0]!, ctx.userId('a'));
+  // Whether those guards serialize across shards, and paying each winner exactly once under the
+  // answer race, resolve in endRound (20-second timer + Valkey streak) — genuine residuals. The
+  // in-memory guard also does not serialize across shards/restarts (flagged for owner review).
+  gateResultsPayout(ctx, 'Under a simultaneous-answer race every correct answerer is paid exactly once (one streak-scaled payout per winner).');
   gateStreakValkey(ctx, 'Two deliveries of one answer / one round apply exactly one effect (one lock, one payout per winner).');
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  gateBrandKit(ctx);
   gateAudit(ctx);
 }
 
@@ -1015,12 +1260,12 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   const handleA = await ctx.bootGuild({
     guildId: guildA,
     economyStartingBalance: 0,
-    guildConfigOverrides: { economy_trivia_enabled: true, economy_trivia_base_payout: 100 },
+    guildConfigOverrides: { economy_trivia_enabled: true, economy_trivia_cooldown_seconds: 0, economy_trivia_base_payout: 100 },
   });
   const handleB = await ctx.bootGuild({
     guildId: guildB,
     economyStartingBalance: 0,
-    guildConfigOverrides: { economy_trivia_enabled: true, economy_trivia_base_payout: 25 },
+    guildConfigOverrides: { economy_trivia_enabled: true, economy_trivia_cooldown_seconds: 0, economy_trivia_base_payout: 25 },
   });
 
   // Each guild gets its OWN distinct custom question pack.
@@ -1095,18 +1340,16 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   });
   await proveRlsIsolation(ctx, handleA);
 
-  // Streaks are per-guild by Valkey key (trivia:streak:{guildId}:{userId}) but Valkey
-  // is not driven here, and the live round drawing only guild B's pack is subcommand-driven.
-  ctx.gate(
-    'Discord',
-    'redis-dependency',
-    'run-member-a’s streak, wallet, and question pool in guild A are unchanged by winning rounds in guild B; guild B’s rounds draw only guild B’s packs under guild B’s payout math.',
-    'streaks are per-guild Valkey keys (trivia:streak:{guildId}:{userId}) and the live round is subcommand-driven; with no Redis and no subcommand injector the per-guild streak/round cannot be driven (config + pack isolation is proven DB-observably above)',
-  );
+  // Each guild's on-command round posts its OWN branded question surface (config + pack isolation
+  // proven DB-observably above); drive guild A's live.
+  await proveRoundSurface(ctx, handleA, ctx.userId('a'));
+  // Per-guild streaks are Valkey keys (trivia:streak:{guildId}:{userId}) applied in endRound, and
+  // guild B's payout math (base 25) resolves there too — genuine residuals.
+  gateResultsPayout(ctx, 'Guild B’s rounds pay out under guild B’s payout math (base 25) and never touch guild A’s wallet or streak.');
   await proveNoOwnerAlert(ctx, handleA);
-  gateBranding(ctx);
+  gateBrandKit(ctx);
   gateAudit(ctx);
-  gateStreakValkey(ctx, 'Each guild’s streak keys and payouts evolve independently.');
+  gateStreakValkey(ctx, 'Each guild’s streak keys and per-winner payouts evolve independently (Valkey-keyed, applied in endRound).');
 }
 
 /** CLEANUP — the suite leaves no trace: run-prefixed rows removed and verified absent. */
@@ -1114,7 +1357,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({
     label: 'a',
     economyStartingBalance: 0,
-    guildConfigOverrides: { economy_trivia_enabled: true },
+    guildConfigOverrides: { economy_trivia_enabled: true, economy_trivia_cooldown_seconds: 0 },
   });
   const userA = ctx.userId('a');
 
@@ -1145,7 +1388,10 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     impact: 'The cleanup scenario could not establish a baseline of run-prefixed rows.',
   });
 
-  // Prove the off-theme classes while the rows still exist (before the sweep).
+  // Prove the off-theme classes while the rows still exist (before the sweep). The branded
+  // question surface drives live from the seeded pool (the round creates no DB rows, so the
+  // post-sweep zero-leftover count is unaffected).
+  await proveRoundSurface(ctx, handle, userA);
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
 
@@ -1162,7 +1408,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     impact: 'The cleanup sweep left run-prefixed trivia rows behind — the suite leaves residue.',
   });
 
-  gateBranding(ctx);
+  gateBrandKit(ctx);
   gateAudit(ctx);
   ctx.gate(
     'Discord',

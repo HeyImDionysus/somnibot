@@ -21,22 +21,27 @@
  *     the prestige record (level / multiplier / total_resets) and the reply embed are
  *     asserted live.
  *
- * Behavior-bug discovery (per packages/e2e/catalog/INTENT-DELTAS.md):
- *   - prestige() has NO persisted idempotency key, so re-delivering one /prestige
- *     interaction DOUBLE-APPLIES when the member stays eligible (net-worth floor 0).
- *     REPLAY drives this deterministically and records a FAIL — a real finding, never
- *     softened to green.
- *   - prestige() is non-atomic (eligibility read, then a separate record read/write,
- *     with no advisory lock). The UNIQUE(guild_id,user_id) constraint still prevents a
- *     duplicate prestige ROW under concurrency (RACE asserts that), but the surviving
- *     prestige_level is timing-dependent; RACE gates the exactly-one-increment facet
- *     with an explicit code-gap reason.
- *   - The prestige cap (catalog control prestige-max-level, default 10) is unimplemented
- *     in code and has no guild_config column; DEF gates that facet loudly.
+ * Current-state notes (post PR #331 loopback + the atomic-prestige RPC wave):
+ *   - prestige() now delegates to the economy_prestige_apply RPC, which is atomic
+ *     (a pg_advisory_xact_lock serializes the member) and idempotent (keyed on the
+ *     interaction id via economy_prestige.last_request_id). REPLAY drives one
+ *     interaction twice and PROVES the single-reset (1/1) contract live.
+ *   - Because the RPC serializes, two concurrent /prestige yield exactly one increment
+ *     and one net-worth refusal — RACE now asserts that deterministically (the
+ *     UNIQUE(guild_id,user_id) row guard still holds too).
+ *   - The prestige cap (catalog control prestige-max-level, default 10) IS implemented:
+ *     guild_config.economy_prestige_max_level threads into the RPC as p_max_level and a
+ *     capped member is refused with the branded prestige-capped reply — DEF drives it.
+ *   - /prestige and the passive badge unlock emit prestige.performed / achievement.unlocked
+ *     on the platform event bus; the per-guild AuditService maps each to an append-only
+ *     audit_logs row. The prestige.performed row is driven + asserted live (flushed in
+ *     process). REPLAY surfaces a real FINDING: the manager re-emits prestige.performed on
+ *     the idempotent replay (it never checks the RPC `replayed` flag), so the ledger
+ *     over-reports one logical prestige as two audit rows.
  *   - The passive milestone-unlock pipeline (checkAndUnlock) is wired into the message-XP
- *     path (messages_sent + level milestones); its DB-level exactly-once unlock+reward
- *     contract is proven directly, but the gateway activity events that TRIGGER it can't
- *     be delivered in this gateway-less bot-only harness, so the end-to-end facet is GATED.
+ *     path; its DB-level exactly-once unlock+reward contract is proven directly, but the
+ *     gateway activity events that TRIGGER it (and thus the achievement.unlocked audit row)
+ *     cannot be delivered in this gateway-less bot-only harness, so that facet stays GATED.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -230,6 +235,26 @@ async function prestigeCount(handle: LiveClientHandle, userId: string): Promise<
     .eq('guild_id', handle.guildId)
     .eq('user_id', userId);
   return count ?? 0;
+}
+
+/**
+ * Arrange a member ALREADY at a given prestige level (the service-role "arrange" the
+ * prestige RPC would have produced over prior resets). Used to drive the cap boundary:
+ * a member seeded at prestige-max-level is then refused by economy_prestige_apply.
+ */
+async function seedPrestige(
+  handle: LiveClientHandle,
+  userId: string,
+  level: number,
+  step: number,
+): Promise<void> {
+  await handle.supabase.from('economy_prestige').insert({
+    guild_id: handle.guildId,
+    user_id: userId,
+    prestige_level: level,
+    total_resets: level,
+    multiplier_pct: level * step,
+  });
 }
 
 /**
@@ -448,13 +473,14 @@ async function proveAnonDenied(
   });
 }
 
-/** No append-only audit ledger is emitted by the bot-only command path for this domain. */
+/**
+ * Residual audit gate for the config-audit lanes that are NOT bot-command-driven
+ * (the dashboard rejected/denied-config rows, the anonymization scrub). The /prestige
+ * state-change audit row IS driven + asserted live via provePrestigeAudit.
+ */
 function gateAudit(ctx: ScenarioContext, reason: string): void {
   ctx.gate('audit', 'audit-row', 'Every achievements-and-prestige state change lands exactly one append-only audit row with actor, guild, and correlation id.', reason);
 }
-
-const AUDIT_NO_LEDGER =
-  'the /badges and /prestige handlers write no dedicated append-only audit_logs row; the economy_prestige record is mutable state (upserted, total_resets incremented), not an append-only ledger — no audit ledger is emitted on the bot-only command path for this domain';
 
 /** The passive milestone-unlock + reward-payout path is undrivable here. */
 function gateMilestonePipeline(ctx: ScenarioContext, assertionClass: 'Discord' | 'audit' | 'replay-safety'): void {
@@ -482,6 +508,92 @@ function gateLiveGuildReadback(ctx: ScenarioContext): void {
     'The unlock/prestige embeds are observed working in the live test guild (channel embeds).',
     'requires a live Discord gateway (DISCORD_TOKEN + live guild) for channel/embed readback',
   );
+}
+
+// ── Live event→audit pipeline access ──────────────────────────────────────
+
+/** Structural view of the per-guild AuditService — only the batch flush we drive. */
+interface AuditFlusher {
+  flush(): Promise<void>;
+}
+
+/** The REAL per-guild AuditService the production init wired via ctx.setManager. */
+function getAuditService(handle: LiveClientHandle): AuditFlusher | undefined {
+  return handle.client.router.getContextSync(handle.guildId)?.getManager<AuditFlusher>('auditService');
+}
+
+/**
+ * Let the event bus deliver queued entries to the AuditService's onAny listener
+ * (dispatched via setImmediate), then force its REAL batch flush so the mapped row
+ * lands NOW instead of on the 5s timer. Returns false when the service is absent
+ * (→ caller GATEs rather than mis-read an empty table as a bug).
+ */
+async function flushAuditQueue(handle: LiveClientHandle): Promise<boolean> {
+  const svc = getAuditService(handle);
+  if (!svc) return false;
+  await new Promise((resolve) => setTimeout(resolve, 20)); // drain onAny listeners
+  await svc.flush();
+  return true;
+}
+
+/** Count prestige.performed audit rows for a guild (the mapped /prestige ledger row). */
+async function prestigeAuditCount(handle: LiveClientHandle, guildId: string = handle.guildId): Promise<number> {
+  const { count } = await handle.supabase
+    .from('audit_logs')
+    .select('*', { count: 'exact', head: true })
+    .eq('guild_id', guildId)
+    .eq('action', 'prestige.performed');
+  return count ?? 0;
+}
+
+/**
+ * Prove the driven /prestige state change lands EXACTLY `expected` append-only
+ * prestige.performed audit rows (real event → per-guild AuditService → audit_logs,
+ * flushed in-process). Gates honestly if the AuditService manager isn't resolvable.
+ */
+async function provePrestigeAudit(ctx: ScenarioContext, handle: LiveClientHandle, expected: number): Promise<void> {
+  const flushed = await flushAuditQueue(handle);
+  if (!flushed) {
+    ctx.gate(
+      'audit',
+      'audit-row',
+      'A successful /prestige writes exactly one append-only prestige.performed audit row (economy category, actor = the member, new level + multiplier).',
+      'the per-guild AuditService manager was not resolvable from the booted context, so the live event→audit pipeline could not be flushed deterministically this run',
+    );
+    return;
+  }
+  const rows = await prestigeAuditCount(handle);
+  ctx.expect(rows === expected, {
+    assertionClass: 'audit',
+    channel: 'audit-row',
+    promise:
+      'A successful /prestige writes exactly one append-only prestige.performed audit row (economy category, actor = the member, new level + multiplier in details).',
+    observation: `after driving ${expected} successful /prestige, audit_logs holds ${rows} prestige.performed row(s) under guild "${handle.guildId}" (expected ${expected}).`,
+    impact: 'The /prestige state change left no correctly-mapped append-only audit row — the prestige is untraceable in the audit trail.',
+  });
+}
+
+/**
+ * The passive badge-unlock (achievement.unlocked) audit row is emitted only by
+ * checkAndUnlock on the gateway-triggered message-XP path — undrivable here. Its
+ * append-only ledger facet stays GATED (the prestige.performed row IS proven live).
+ */
+function gateUnlockAudit(ctx: ScenarioContext): void {
+  ctx.gate(
+    'audit',
+    'audit-row',
+    'A passive milestone unlock lands exactly one append-only achievement.unlocked audit row (actor, badge, reward).',
+    'checkAndUnlock emits achievement.unlocked (mapped to audit_logs), but the gateway activity events (messages/xp) that TRIGGER it cannot be delivered in a gateway-less bot-only harness, so the unlock-audit row is not drivable here — the prestige.performed audit row is proven above',
+  );
+}
+
+/** Classify a captured /prestige reply: the success embed, the net-worth refusal, or other. */
+function prestigeOutcome(captured: CapturedResponse): 'prestiged' | 'net_worth' | 'other' {
+  const embed = replyEmbedData(captured);
+  const title = typeof embed?.title === 'string' ? embed.title : '';
+  if (title.includes('Prestige Level')) return 'prestiged';
+  if (/net worth/i.test(replyContent(captured))) return 'net_worth';
+  return 'other';
 }
 
 // ── Higher-level drivers shared by scenarios ──────────────────────────────
@@ -611,6 +723,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   const minNetWorth = Number(declaredDefault(ctx.domain, 'prestige-min-net-worth'));
   const step = Number(declaredDefault(ctx.domain, 'prestige-multiplier-step-pct'));
   const maxLevel = Number(declaredDefault(ctx.domain, 'prestige-max-level'));
+  const capLevel = Number.isFinite(maxLevel) ? maxLevel : 10;
 
   const handle = await ctx.bootGuild({
     label: 'a',
@@ -621,6 +734,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
       economy_prestige_min_level: minLevel,
       economy_prestige_min_net_worth: minNetWorth,
       economy_prestige_multiplier_pct: step,
+      economy_prestige_max_level: capLevel,
     },
   });
   const userA = ctx.userId('a');
@@ -674,17 +788,41 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   // The gateway message/xp events that TRIGGER the unlock are undrivable here.
   gateMilestonePipeline(ctx, 'Discord');
 
-  // The prestige cap is unimplemented AND unreachable at defaults (net worth resets below 1M).
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    `A member already at prestige-max-level (${maxLevel}) is refused with the branded prestige-capped message; the permanent multiplier is bounded by the owner-set cap.`,
-    `the prestige cap (control prestige-max-level, default ${maxLevel}) is UNIMPLEMENTED in code and has no guild_config column (INTENT-DELTAS [CONFLICT]); default thresholds also allow only a single prestige (the reset drops net worth below the ${minNetWorth} floor), so the cap boundary is unreachable here — flagged as a finding for the owner`,
+  // (4) The prestige cap is now enforced by economy_prestige_apply (p_max_level).
+  // Drive a fresh member seeded AT the cap (and otherwise fully eligible on level +
+  // net worth): the RPC's cap check fires before the reset, so /prestige is refused
+  // with the branded prestige-capped reply and NO further level/multiplier bump, and
+  // the wallet is NOT reset — the permanent multiplier stays bounded by the owner cap.
+  const cappedUser = `${ctx.runPrefix}capped-u`;
+  await seedPrestige(handle, cappedUser, capLevel, step);
+  await seedMemberLevel(handle, cappedUser, minLevel);
+  await seedWallet(handle, cappedUser, minNetWorth, 0);
+  const capReply = await ctx.runSlash(handle, { commandName: 'prestige', userId: cappedUser, displayName: `${ctx.runPrefix}capped` });
+  const capContent = replyContent(capReply);
+  const cappedRow = await readPrestige(handle, cappedUser);
+  const cappedWallet = await readWallet(handle, cappedUser);
+  ctx.expect(
+    capContent.includes('maximum prestige level') &&
+      capContent.includes(String(capLevel)) &&
+      cappedRow?.prestige_level === capLevel &&
+      cappedRow?.total_resets === capLevel &&
+      cappedWallet?.wallet === minNetWorth,
+    {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: `A member already at prestige-max-level (${capLevel}) is refused with the branded prestige-capped message; the level/multiplier are left unchanged and no reset occurs (the permanent multiplier is bounded by the owner-set cap).`,
+      observation:
+        `capped /prestige reply="${truncate(capContent)}" (expects "maximum prestige level" + ${capLevel}); ` +
+        `post-attempt prestige_level=${cappedRow?.prestige_level} (expected ${capLevel}, no bump), total_resets=${cappedRow?.total_resets} (unchanged at ${capLevel}); ` +
+        `wallet=${cappedWallet?.wallet} (expected ${minNetWorth}, not reset because the cap short-circuits before the wallet reset).`,
+      impact: 'The prestige cap did not bound the level/multiplier — a member could prestige past the owner-set ceiling (an unbounded permanent earning multiplier).',
+    },
   );
 
   await proveAnonDenied(ctx, handle, 'economy_prestige', (await readPrestige(handle, userA)) !== null, "the member's prestige record");
   await proveNoOwnerAlert(ctx, handle);
-  gateAudit(ctx, AUDIT_NO_LEDGER);
+  await provePrestigeAudit(ctx, handle, 1);
+  gateUnlockAudit(ctx);
   gateLiveGuildReadback(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -717,7 +855,8 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
 
   await proveAnonDenied(ctx, handle, 'economy_prestige', (await readPrestige(handle, userA)) !== null, "the member's prestige record");
   await proveNoOwnerAlert(ctx, handle);
-  gateAudit(ctx, AUDIT_NO_LEDGER);
+  await provePrestigeAudit(ctx, handle, 1);
+  gateUnlockAudit(ctx);
   gateLiveGuildReadback(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -994,8 +1133,10 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   await seedWallet(handle, userA, 100, 0);
 
   // Deliver the SAME /prestige interaction id twice (sequentially). With a net-worth floor
-  // of 0 the member stays eligible after the first reset, so a NON-idempotent prestige
-  // applies a SECOND time. The contract promises exactly one reset per logical action.
+  // of 0 the member stays eligible after the first reset, so a NON-idempotent prestige would
+  // apply a SECOND time. economy_prestige_apply now anchors idempotency on the interaction id
+  // (economy_prestige.last_request_id): the second delivery is recognised as a replay and
+  // returns the SAME level/multiplier without a second reset — exactly one reset per action.
   const prestigeId = `${ctx.runPrefix}prestige-int`;
   await ctx.runSlash(handle, { commandName: 'prestige', userId: userA, interactionId: prestigeId, displayName: `${ctx.runPrefix}prestiger` });
   await ctx.runSlash(handle, { commandName: 'prestige', userId: userA, interactionId: prestigeId, displayName: `${ctx.runPrefix}prestiger` });
@@ -1004,12 +1145,12 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
     assertionClass: 'replay-safety',
     channel: 'db-observable',
     promise:
-      'Re-delivering one /prestige interaction leaves exactly one reset: persisted idempotency keeps prestige_level at 1 and total_resets at 1.',
+      'Re-delivering one /prestige interaction leaves exactly one reset: persisted idempotency (last_request_id) keeps prestige_level at 1 and total_resets at 1.',
     observation:
       `after TWO deliveries of one /prestige interaction id: prestige_level=${row?.prestige_level}, total_resets=${row?.total_resets} ` +
-      `(exactly-once reads 1/1; a double-apply reads 2/2). prestige() persists NO idempotency key (INTENT-DELTAS [GAP]).`,
+      `(exactly-once reads 1/1; a double-apply would read 2/2). economy_prestige_apply keys idempotency on economy_prestige.last_request_id.`,
     impact:
-      'A re-delivered identical /prestige DOUBLE-APPLIED — prestige has no idempotency key, so a retried/duplicated interaction resets the wallet and bumps the multiplier twice (a real replay-safety defect on the money path).',
+      'A re-delivered identical /prestige DOUBLE-APPLIED — a regression in the RPC idempotency key would reset the wallet and bump the multiplier twice from one command (a replay-safety defect on the money path).',
   });
 
   // The badge-unlock replay facet (one badge row / one reward per re-delivered milestone)
@@ -1023,7 +1164,33 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
 
   await proveAnonDenied(ctx, handle, 'economy_prestige', row !== null, "the member's prestige record");
   await proveNoOwnerAlert(ctx, handle);
-  gateAudit(ctx, AUDIT_NO_LEDGER);
+
+  // Audit replay-safety (FINDING): the DB reset is idempotent above, but the manager emits
+  // prestige.performed on EVERY 'prestiged' RPC status — it never checks the `replayed`
+  // flag — so both deliveries of the one interaction append a prestige.performed row. The
+  // append-only ledger over-reports one logical prestige as two rows. Driven + asserted live.
+  const flushedReplay = await flushAuditQueue(handle);
+  if (!flushedReplay) {
+    ctx.gate(
+      'audit',
+      'audit-row',
+      'Re-delivering one /prestige leaves exactly one append-only prestige.performed audit row.',
+      'the per-guild AuditService manager was not resolvable from the booted context, so the audit pipeline could not be flushed this run',
+    );
+  } else {
+    const replayAuditRows = await prestigeAuditCount(handle);
+    ctx.expect(replayAuditRows === 1, {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise:
+        'Re-delivering one /prestige interaction leaves exactly one append-only prestige.performed audit row (the ledger is replay-idempotent, matching the single persisted reset).',
+      observation:
+        `after TWO deliveries of one /prestige interaction id, audit_logs holds ${replayAuditRows} prestige.performed row(s) (expected 1; the DB reset stayed idempotent at 1/1 above).`,
+      impact:
+        'The audit ledger is not replay-idempotent: the manager re-emits prestige.performed on the idempotent replay (it never checks the RPC `replayed` flag), so a re-delivered interaction appends a second prestige.performed row for a single logical prestige — the trail over-reports resets.',
+    });
+  }
+  gateUnlockAudit(ctx);
   gateLiveGuildReadback(ctx);
 }
 
@@ -1048,6 +1215,9 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
   await ctx.runSlash(first, { commandName: 'prestige', userId: userA, displayName: `${ctx.runPrefix}prestiger` });
   const snapshot = await readPrestige(first, userA);
   const unlocksBefore = await userAchievementCount(first, userA);
+  // Force the prestige.performed audit row to land BEFORE the shutdown so we can prove it
+  // survives the restart (audit_logs is not swept between boots).
+  const auditFlushedRestart = await flushAuditQueue(first);
   await first.cleanup(); // simulate shutdown (dispose only — NOT a sweep)
 
   // Boot #2: SAME guild id (restart). Badge + prestige state must be identical.
@@ -1089,7 +1259,27 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
 
   await proveAnonDenied(ctx, second, 'economy_prestige', afterRestart !== null, "the member's prestige record");
   await proveNoOwnerAlert(ctx, second);
-  gateAudit(ctx, AUDIT_NO_LEDGER);
+
+  // The append-only prestige.performed audit row written pre-restart is still present after
+  // the restart (audit_logs lives in Supabase and is not swept between boots).
+  if (!auditFlushedRestart) {
+    ctx.gate(
+      'audit',
+      'audit-row',
+      'The append-only prestige.performed audit row survives a full stack restart.',
+      'the per-guild AuditService manager was not resolvable from the pre-restart context, so the audit pipeline could not be flushed before the restart this run',
+    );
+  } else {
+    const auditAfter = await prestigeAuditCount(second);
+    ctx.expect(auditAfter === 1, {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: 'The prestige.performed audit row written before the restart is still present afterwards (append-only audit_logs is not swept between boots).',
+      observation: `post-restart audit_logs holds ${auditAfter} prestige.performed row(s) for the guild (expected 1, written pre-restart).`,
+      impact: 'The prestige audit row did not survive the restart — the append-only trail lost a recorded state change.',
+    });
+  }
+  gateUnlockAudit(ctx);
 }
 
 /** RACE — concurrent /prestige never creates a duplicate prestige record (UNIQUE guard). */
@@ -1111,7 +1301,7 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
   await seedWallet(handle, userA, 1000, 0);
 
   // Two simultaneous /prestige confirmations (distinct interaction ids — two real clicks).
-  await Promise.all([
+  const [capRace1, capRace2] = await Promise.all([
     ctx.runSlash(handle, { commandName: 'prestige', userId: userA, interactionId: `${ctx.runPrefix}race-1`, displayName: `${ctx.runPrefix}prestiger` }),
     ctx.runSlash(handle, { commandName: 'prestige', userId: userA, interactionId: `${ctx.runPrefix}race-2`, displayName: `${ctx.runPrefix}prestiger` }),
   ]);
@@ -1128,19 +1318,30 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     impact: 'Concurrent /prestige created duplicate prestige records — the UNIQUE guard failed.',
   });
 
-  // Exactly-one-increment is NOT deterministically observable: prestige() is non-atomic.
-  ctx.gate(
-    'Discord',
-    'db-observable',
-    'Two simultaneous /prestige yield exactly one increment and one refusal (the surviving prestige_level is exactly one step).',
-    'prestige() is non-atomic — eligibility is read before the prestige-record read/write with no advisory lock or idempotency key (INTENT-DELTAS [GAP]); the surviving prestige_level under true concurrency is timing-dependent (1 or 2), so exactly-one-increment cannot be asserted deterministically in-process — surfaced as a concurrency finding for the owner',
-  );
+  // Exactly-one-increment IS now deterministic: economy_prestige_apply serializes the member
+  // with a pg_advisory_xact_lock, so the two confirmations run one-after-another. The first
+  // prestiges (level 0→1) and resets the wallet to 0; the second then reads net worth 0 <
+  // the 1,000 floor and is refused. Exactly one increment, exactly one net-worth refusal.
+  const outcomes = [prestigeOutcome(capRace1), prestigeOutcome(capRace2)];
+  const prestiged = outcomes.filter((o) => o === 'prestiged').length;
+  const refused = outcomes.filter((o) => o === 'net_worth').length;
+  ctx.expect(row?.prestige_level === 1 && row?.total_resets === 1 && prestiged === 1 && refused === 1, {
+    assertionClass: 'Discord',
+    channel: 'db-observable',
+    promise:
+      'Two simultaneous /prestige yield exactly one increment and one refusal: the surviving prestige_level is exactly one step and the loser is refused for insufficient net worth.',
+    observation:
+      `after two concurrent /prestige: prestige_level=${row?.prestige_level} (expected 1), total_resets=${row?.total_resets} (expected 1); ` +
+      `captured replies → prestiged=${prestiged}, net-worth-refused=${refused} (expected 1 and 1); outcomes=[${outcomes.join(', ')}].`,
+    impact: 'Concurrent /prestige advanced the level past one step or resolved both the same way — the advisory-lock serialization in economy_prestige_apply failed.',
+  });
   // Concurrent milestone crossing → exactly one badge row: undrivable (no milestone trigger).
   gateMilestonePipeline(ctx, 'replay-safety');
 
   await proveAnonDenied(ctx, handle, 'economy_prestige', row !== null, "the member's prestige record");
   await proveNoOwnerAlert(ctx, handle);
-  gateAudit(ctx, AUDIT_NO_LEDGER);
+  await provePrestigeAudit(ctx, handle, 1);
+  gateUnlockAudit(ctx);
   gatePrestigeBranding(ctx);
 }
 
@@ -1223,7 +1424,30 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   // Branding surface from guild B's /badges.
   await proveBadgesView(ctx, handleB, userA, await seedDefsForGuildB(ctx, handleB), { visibleUnlocked: false });
 
-  gateAudit(ctx, 'this cross-guild isolation scenario writes no append-only audit ledger; per-guild scoping is proven via distinct guild_id-scoped rows above');
+  // Per-guild audit scoping: each guild's successful /prestige lands exactly one
+  // prestige.performed audit row under ITS OWN guild_id (the per-guild AuditService
+  // filters the shared event bus by guild_id, so no cross-guild bleed into the trail).
+  const flushedXA = await flushAuditQueue(handleA);
+  const flushedXB = await flushAuditQueue(handleB);
+  if (!flushedXA || !flushedXB) {
+    ctx.gate(
+      'audit',
+      'audit-row',
+      "Each guild's /prestige lands exactly one prestige.performed audit row scoped to that guild.",
+      'the per-guild AuditService manager was not resolvable for one of the booted guilds, so the live event→audit pipeline could not be flushed deterministically this run',
+    );
+  } else {
+    const auditA = await prestigeAuditCount(handleA, guildA);
+    const auditB = await prestigeAuditCount(handleB, guildB);
+    ctx.expect(auditA === 1 && auditB === 1, {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: "Each guild's /prestige writes exactly one prestige.performed audit row under that guild's id — the audit trail is strictly per-guild.",
+      observation: `prestige.performed rows: guild A=${auditA} under "${guildA}", guild B=${auditB} under "${guildB}" (each expected 1; the per-guild AuditService writes only its own guild's events).`,
+      impact: "A guild's prestige produced no audit row, or a guild's audit trail bled another guild's prestige — per-guild audit scoping broke.",
+    });
+  }
+  gateUnlockAudit(ctx);
   await proveNoOwnerAlert(ctx, handleA);
   gateLiveGuildReadback(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');

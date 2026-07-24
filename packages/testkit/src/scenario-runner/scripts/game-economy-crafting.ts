@@ -620,12 +620,18 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     impact: 'Could not arrange the RLS positive-control row.',
   });
 
-  ctx.gate(
-    'audit',
-    'db-observable',
-    'A disabled-crafting path writes no craft ledger row.',
-    'crafting is disabled so no /craft action (and no ledger row) is produced; audit-row evidence is proven where crafting is enabled and a craft runs (Valkey-gated)',
-  );
+  // A disabled /craft (driven above) must leave ZERO craft ledger rows — a real
+  // DB-observable absence assertion (no Valkey needed: the disabled dispatcher
+  // fallback never reaches the ledger insert). The POSITIVE audit-row proof (a
+  // craft DOES write exactly one row) still rides the Valkey-gated craft in DEF.
+  const disabledCraftTx = await craftTxns(handle, userA);
+  ctx.expect(disabledCraftTx.length === 0, {
+    assertionClass: 'audit',
+    channel: 'db-observable',
+    promise: 'A disabled-crafting path writes no craft ledger row.',
+    observation: `after a disabled /craft, economy_transactions "craft" rows for the actor=${disabledCraftTx.length} (expected 0).`,
+    impact: 'A disabled-crafting path wrote a craft ledger row — a phantom audit trail with no real craft.',
+  });
   await proveRlsIsolation(ctx, handle, 'economy_items');
   await proveNoOwnerAlert(ctx, handle);
   gateBrandKit(ctx, recipesCaptured, 'crafting-disabled reply');

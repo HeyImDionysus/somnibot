@@ -4,22 +4,25 @@
  * Binds the shop-&-market domain's 12 declarative catalog scenarios to concrete,
  * real-stack proof scripts driven through the REAL production dispatcher against
  * LOCAL Supabase. Every DB-observable / captured-reply / audit-row / RLS assertion
- * runs NOW; anything needing a real Discord effect, a PayPal/dashboard lane, a
- * fault-injection lane, or a `/market` SUBCOMMAND is GATED — never faked.
+ * — including the full /market list|browse|buy|cancel subcommand lifecycle — runs
+ * NOW; anything needing a real Discord effect, a PayPal/dashboard lane, or a
+ * fault-injection lane is GATED — never faked.
  *
- * ── The two trading surfaces have very different drivability here ──
+ * ── Both trading surfaces are fully drivable here (since PR #331) ──
  *   • The server SHOP (/shop, /buy, /sell) is dispatched as TOP-LEVEL slash
  *     commands, so the sanctioned `ctx.runSlash` helper drives them end-to-end:
  *     their real wallet debit/credit, inventory upsert, stock decrement and
  *     economy_transactions ledger rows are asserted live.
  *   • The player MARKET (/market list|browse|buy|my-listings|cancel) is a
- *     SUBCOMMAND command. `RunSlashParams` exposes no subcommand field and the
- *     dispatcher's market handler branches on `interaction.options.getSubcommand()`
- *     first, so the bot-only harness cannot drive a market mutation — those
- *     assertions GATE with that exact reason. The ONE market surface that IS
- *     drivable is the market-DISABLED reply: when economy_market_enabled is off
- *     the MarketManager is never wired, and the dispatcher replies "market not
- *     enabled" BEFORE any getSubcommand() call — a real captured reply.
+ *     SUBCOMMAND command. `RunSlashParams` now carries `subcommand`, so
+ *     `ctx.runSlash(handle, { commandName: 'market', subcommand: 'list', ... })`
+ *     builds a ChatInput interaction whose `interaction.options.getSubcommand()`
+ *     returns the branch the REAL MarketManager dispatches on — the listing/browse/
+ *     buy/cancel mutations, their atomic RPC effects (escrow decrement, buyer debit,
+ *     seller net-of-fee credit, inventory delivery, market_buy/market_sale ledger
+ *     rows) and their captured embeds are all asserted live. The market-DISABLED
+ *     reply (manager never wired when economy_market_enabled is off) is still a
+ *     real captured reply too.
  *
  * Behavior-bug discovery: where the REAL bot diverges from the catalog's
  * contracted intent AND that divergence is observable here, the script records a
@@ -207,8 +210,9 @@ async function txns(
   return (data as TxnRow[] | null) ?? [];
 }
 
-/** Seed a market listing row directly (arrangement only — the /market list command
- *  cannot be driven here; see the module header). Returns the listing id. */
+/** Seed a market listing row directly (a fast arrangement shortcut when a scenario
+ *  only needs an existing listing to buy/cancel against; scenarios that PROVE the
+ *  listing path itself drive /market list live). Returns the listing id. */
 async function seedListing(
   handle: LiveClientHandle,
   sellerId: string,
@@ -254,6 +258,62 @@ async function listingCount(handle: LiveClientHandle): Promise<number> {
   return count ?? 0;
 }
 
+/** Active listings a seller currently holds for one item (0 when none). */
+async function sellerItemListingCount(
+  handle: LiveClientHandle,
+  sellerId: string,
+  itemId: string,
+): Promise<number> {
+  const { count } = await handle.supabase
+    .from('economy_market_listings')
+    .select('*', { count: 'exact', head: true })
+    .eq('guild_id', handle.guildId)
+    .eq('seller_id', sellerId)
+    .eq('item_id', itemId)
+    .eq('status', 'active');
+  return count ?? 0;
+}
+
+interface SellerListingRow {
+  id: string;
+  item_id: string;
+  remaining: number;
+  price_per_unit: number;
+  status: string;
+  expires_at: string;
+}
+
+/** The seller's most-recently-created listing (the one a driven /market list made). */
+async function readSellerListing(
+  handle: LiveClientHandle,
+  sellerId: string,
+): Promise<SellerListingRow | null> {
+  const { data } = await handle.supabase
+    .from('economy_market_listings')
+    .select('id, item_id, remaining, price_per_unit, status, expires_at')
+    .eq('guild_id', handle.guildId)
+    .eq('seller_id', sellerId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return (data as SellerListingRow | null) ?? null;
+}
+
+/** Give a member `qty` of an item via the REAL inventory upsert RPC (arrangement). */
+async function giveInventory(
+  handle: LiveClientHandle,
+  userId: string,
+  itemId: string,
+  qty: number,
+): Promise<void> {
+  await handle.supabase.rpc('economy_upsert_inventory', {
+    p_guild_id: handle.guildId,
+    p_user_id: userId,
+    p_item_id: itemId,
+    p_quantity: qty,
+  });
+}
+
 async function guildConfig(
   handle: LiveClientHandle,
 ): Promise<Record<string, unknown> | null> {
@@ -293,6 +353,29 @@ function replyEmbedData(captured: CapturedResponse): Record<string, unknown> | u
   const reply = captured.find('reply');
   const payload = reply?.payload as { embeds?: Array<{ data?: Record<string, unknown> }> } | undefined;
   return payload?.embeds?.[0]?.data;
+}
+
+/**
+ * The last response payload a handler produced, editReply-first. The /market
+ * handler defers then editReplies (deferReply → editReply), so its embeds land in
+ * `editReply`, not `reply`; this reader prefers the last editReply and falls back
+ * to the last reply so both lifecycles are covered.
+ */
+function lastPayload(captured: CapturedResponse): unknown {
+  const edits = captured.allOf('editReply');
+  const reply = captured.allOf('reply');
+  return (edits[edits.length - 1] ?? reply[reply.length - 1])?.payload;
+}
+
+/** The embed `.data` of the last editReply/reply (undefined when none). */
+function lastEmbedData(captured: CapturedResponse): Record<string, unknown> | undefined {
+  const payload = lastPayload(captured) as { embeds?: Array<{ data?: Record<string, unknown> }> } | undefined;
+  return payload?.embeds?.[0]?.data;
+}
+
+/** The description string of the last editReply/reply embed (empty when none). */
+function lastEmbedDescription(captured: CapturedResponse): string {
+  return String((lastEmbedData(captured) ?? {}).description ?? '');
 }
 
 function truncate(text: string, max = 90): string {
@@ -470,26 +553,6 @@ async function proveAnonDenied(
 
 // ── Gating helpers (honest boundaries) ────────────────────────────────────
 
-/**
- * The load-bearing gate for this domain: the sanctioned `ctx.runSlash` builds a
- * ChatInput interaction with NO subcommand, and the market dispatch reads
- * `interaction.options.getSubcommand()` before doing anything, so a `/market`
- * mutation cannot be driven in this bot-only harness.
- */
-function gateMarketSubcommand(
-  ctx: ScenarioContext,
-  assertionClass: Parameters<ScenarioContext['gate']>[0],
-  channel: Parameters<ScenarioContext['gate']>[1],
-  promise: string,
-): void {
-  ctx.gate(
-    assertionClass,
-    channel,
-    promise,
-    'undrivable here — /market list|browse|buy|my-listings|cancel are SUBCOMMANDs and RunSlashParams exposes no subcommand field, so the dispatcher (which branches on interaction.options.getSubcommand()) cannot be reached through ctx.runSlash',
-  );
-}
-
 function gateLiveGuildReadback(ctx: ScenarioContext): void {
   ctx.gate(
     'Discord',
@@ -508,15 +571,22 @@ function gateReplayDeferredTo(ctx: ScenarioContext, where: string): void {
   );
 }
 
-/** Market-buy audit has NO ledger row in the bot (economy_add/subtract_balance
- *  write no economy_transactions row and no audit_logs row); the anonymized
- *  correlation-id audit lane is not reachable here. */
+/**
+ * The dedicated append-only audit_logs correlation-id row for a market state
+ * change is a genuine residual here. A driven /market buy DOES write synchronous
+ * economy_transactions market_buy/market_sale ledger rows (asserted wherever a buy
+ * is driven), but the anonymized audit_logs row is emitted on the eventBus and
+ * persisted by AuditService's 5-second BUFFERED flush (eventBus.onAny → in-memory
+ * queue → setInterval flush), so it is not synchronously observable in this
+ * in-process harness; /market list and /market cancel additionally write no
+ * economy_transactions ledger row at all.
+ */
 function gateMarketAudit(ctx: ScenarioContext): void {
   ctx.gate(
     'audit',
     'discord-readback',
     'Each market state change lands exactly one append-only audit row with actor/guild/correlation-id; audit history is anonymized not deleted.',
-    'market buy/list/cancel write no economy_transactions ledger row and no audit_logs row in this build; the anonymized correlation-id audit lane needs the dedicated audit_logs readback (not driven here)',
+    "the anonymized audit_logs correlation-id row is written by AuditService's 5-second buffered flush (eventBus.onAny → queue → setInterval), so it is not synchronously observable in this in-process harness (the market buy's economy_transactions ledger rows ARE asserted where a buy is driven)",
   );
 }
 
@@ -632,7 +702,8 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   await proveNoOwnerAlert(ctx, handle);
   gateLiveGuildReadback(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
-  // Market mutations are undrivable here (subcommand); market audit lane gated too.
+  // The player market is OFF by default in DEF, so no market mutation is exercised
+  // here (SET-A / REPLAY / RACE drive the market live); only the audit_logs lane gates.
   gateMarketAudit(ctx);
 }
 
@@ -709,24 +780,146 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
     impact: 'The shop purchase did not produce its ledger row.',
   });
 
-  // The actual fee/expiry BEHAVIOR requires driving /market list + /market buy.
-  gateMarketSubcommand(
-    ctx,
-    'Discord',
-    'captured-reply',
-    'A /market list creates a 3-day listing, /market browse shows it, and a /market buy deducts exactly the 10% fee crediting the seller the remainder.',
+  // ── The full player-market lifecycle, driven live via /market subcommands ──
+  // Fresh seller/buyer (not userA) so the shop path above never interferes.
+  const seller = ctx.userId('seller');
+  const buyer = ctx.userId('buyer');
+  const marketItemId = await seedItem(handle, { name: `${ctx.runPrefix}gem`, price: 0, sellPrice: 0, tradeable: true });
+  if (marketItemId) await giveInventory(handle, seller, marketItemId, 5);
+  await seedWallet(handle, seller, 0, 0);
+  await seedWallet(handle, buyer, 5000, 0);
+
+  // 1) /market list escrows 3 of the seller's 5 gems into a 3-day listing at 100/ea.
+  const listCap = await ctx.runSlash(handle, {
+    commandName: 'market',
+    userId: seller,
+    subcommand: 'list',
+    options: { item: `${ctx.runPrefix}gem`, quantity: 3, price: 100 },
+  });
+  const listing = await readSellerListing(handle, seller);
+  const sellerInvAfterList = marketItemId ? await inventoryQty(handle, seller, marketItemId) : -1;
+  const listDesc = lastEmbedDescription(listCap);
+  const expiresMs = listing ? new Date(listing.expires_at).getTime() - Date.now() : 0;
+  const threeDaysMs = 3 * 24 * 60 * 60 * 1000;
+  const expiryOk = Math.abs(expiresMs - threeDaysMs) < 12 * 60 * 60 * 1000; // within ±12h of 3 days
+  ctx.expect(
+    listing?.status === 'active' &&
+      listing?.remaining === 3 &&
+      listing?.price_per_unit === 100 &&
+      sellerInvAfterList === 2 &&
+      expiryOk &&
+      String(lastEmbedData(listCap)?.title ?? '').includes('Listed'),
+    {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise:
+        'A /market list creates a listing at the listed price, escrows the quantity out of inventory, and sets the configured listing-days=3 expiry.',
+      observation:
+        `listing status=${listing?.status}/remaining=${listing?.remaining}/price=${listing?.price_per_unit}, ` +
+        `seller inventory 5→${sellerInvAfterList} (expected 2), expires in ~${Math.round(expiresMs / 3.6e6)}h (expected ~72h), ` +
+        `reply="${truncate(listDesc)}".`,
+      impact: 'The /market list path did not escrow the item into a correctly-priced, 3-day listing.',
+    },
   );
-  gateMarketSubcommand(
-    ctx,
-    'replay-safety',
-    'db-observable',
-    'The market buy applies exactly one debit / one net-of-fee seller credit under its idempotency key.',
+
+  // 2) /market browse surfaces the freshly-listed item.
+  const browseCap = await ctx.runSlash(handle, { commandName: 'market', userId: buyer, subcommand: 'browse', options: {} });
+  const browseDesc = lastEmbedDescription(browseCap);
+  ctx.expect(browseDesc.includes(`${ctx.runPrefix}gem`), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: '/market browse lists the active player-market listing.',
+    observation: `/market browse embed = "${truncate(browseDesc)}".`,
+    impact: '/market browse did not surface the active listing.',
+  });
+
+  // 3) /market buy of 2 units deducts EXACTLY the 10% fee, crediting the seller the remainder.
+  //    total = 100*2 = 200, fee = floor(200 * 10%) = 20, seller earns 180.
+  const buyReq = `${ctx.runPrefix}mkt-buy-int`;
+  const buyCap = await ctx.runSlash(handle, {
+    commandName: 'market',
+    userId: buyer,
+    subcommand: 'buy',
+    interactionId: buyReq,
+    options: { listing: (listing?.id ?? '').slice(0, 8), quantity: 2 },
+  });
+  const buyerWallet = await readWallet(handle, buyer);
+  const sellerWallet = await readWallet(handle, seller);
+  const listingAfterBuy = await readSellerListing(handle, seller);
+  const buyerOwned = marketItemId ? await inventoryQty(handle, buyer, marketItemId) : 0;
+  const buyDesc = lastEmbedDescription(buyCap);
+  ctx.expect(
+    buyerWallet?.wallet === 5000 - 200 &&
+      sellerWallet?.wallet === 180 &&
+      listingAfterBuy?.remaining === 1 &&
+      buyerOwned === 2 &&
+      String(lastEmbedData(buyCap)?.title ?? '').includes('Purchase'),
+    {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise:
+        'A /market buy debits the buyer the full price and credits the seller the price net of exactly the 10% market fee; the listing decrements and the buyer receives the items.',
+      observation:
+        `buyer wallet 5000→${buyerWallet?.wallet} (expected 4800), seller wallet 0→${sellerWallet?.wallet} ` +
+        `(expected 180 = 200−20 fee), listing remaining=${listingAfterBuy?.remaining} (expected 1), ` +
+        `buyer inventory=${buyerOwned} (expected 2), reply="${truncate(buyDesc)}".`,
+      impact: 'The /market buy did not move money net-of-fee, decrement the listing, or deliver the items.',
+    },
+  );
+
+  // Market ledger: the settle wrote one market_buy (buyer debit) + one market_sale (seller credit).
+  const mktBuyTxn = await txns(handle, buyer, 'market_buy');
+  const mktSaleTxn = await txns(handle, seller, 'market_sale');
+  ctx.expect(
+    mktBuyTxn.length === 1 && mktBuyTxn[0]!.amount === -200 && mktSaleTxn.length === 1 && mktSaleTxn[0]!.amount === 180,
+    {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: 'A market purchase lands exactly one market_buy ledger row (buyer debit) and one market_sale row (seller net-of-fee credit).',
+      observation:
+        `market_buy rows=${mktBuyTxn.length}(amount ${mktBuyTxn[0]?.amount}), market_sale rows=${mktSaleTxn.length}(amount ${mktSaleTxn[0]?.amount}).`,
+      impact: 'A market purchase did not produce exactly one correct buyer/seller ledger row pair.',
+    },
+  );
+
+  // 4) Re-deliver the SAME /market buy interaction id: the idempotency key (request_id
+  //    on the market_buy ledger row) makes it a proven no-op — one debit, one credit.
+  await ctx.runSlash(handle, {
+    commandName: 'market',
+    userId: buyer,
+    subcommand: 'buy',
+    interactionId: buyReq,
+    options: { listing: (listing?.id ?? '').slice(0, 8), quantity: 2 },
+  });
+  const buyerWalletReplay = await readWallet(handle, buyer);
+  const sellerWalletReplay = await readWallet(handle, seller);
+  const listingReplay = await readSellerListing(handle, seller);
+  const buyerOwnedReplay = marketItemId ? await inventoryQty(handle, buyer, marketItemId) : 0;
+  const mktBuyReplay = await txns(handle, buyer, 'market_buy');
+  ctx.expect(
+    buyerWalletReplay?.wallet === 4800 &&
+      sellerWalletReplay?.wallet === 180 &&
+      listingReplay?.remaining === 1 &&
+      buyerOwnedReplay === 2 &&
+      mktBuyReplay.length === 1,
+    {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise: 'A re-delivered /market buy applies exactly one debit / one net-of-fee seller credit under its idempotency key (no double settlement).',
+      observation:
+        `after TWO deliveries of one /market buy interaction id: buyer wallet=${buyerWalletReplay?.wallet} (expects 4800), ` +
+        `seller wallet=${sellerWalletReplay?.wallet} (expects 180), listing remaining=${listingReplay?.remaining} (expects 1), ` +
+        `buyer inventory=${buyerOwnedReplay} (expects 2), market_buy ledger rows=${mktBuyReplay.length} (expects 1).`,
+      impact: 'A re-delivered /market buy double-settled — the interaction-id idempotency key did not hold.',
+    },
   );
 
   proveBranding(ctx, buyCaptured, econ);
   await proveAnonDenied(ctx, handle, 'economy_wallets', await walletServiceCount(handle, userA), 'wallet row');
+  await proveAnonDenied(ctx, handle, 'economy_market_listings', await listingCount(handle), "member's market listing");
   await proveNoOwnerAlert(ctx, handle);
   gateLiveGuildReadback(ctx);
+  gateMarketAudit(ctx);
 }
 
 /** SET-B — the two surfaces toggle independently: market OFF, shop ON (and shop's master switch). */
@@ -865,22 +1058,42 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
     impact: 'A rejected config attempt disturbed live bot behavior.',
   });
 
-  // The anti-laundering rejection itself is a /market list mutation — undrivable
-  // here (subcommand). NOTE: the current bot listing path (MarketManager.listItem
-  // + economy_market_atomic_create_listing) never inspects economy_items.tradeable,
-  // so this wall appears UNENFORCED; that divergence is flagged for the owner but
-  // cannot be OBSERVED through this harness, so it is gated (never faked as a pass).
-  gateMarketSubcommand(
-    ctx,
-    'Discord',
-    'captured-reply',
-    'A /market list on a commerce-granted, non-tradeable item is refused (branded commerce-item-rejected), item stays in inventory, no listing row created.',
+  // The anti-laundering wall, driven live: a /market list on the commerce-granted,
+  // NON-tradeable item is refused (MarketManager.listItem rejects tradeable=false
+  // before any decrement, and economy_market_atomic_create_listing re-checks as
+  // defense-in-depth), the item stays in inventory, and no listing row is created.
+  const listRejectCap = await ctx.runSlash(handle, {
+    commandName: 'market',
+    userId: userA,
+    subcommand: 'list',
+    options: { item: `${ctx.runPrefix}commerce-skin`, quantity: 1, price: 100 },
+  });
+  const heldAfter = commerceItemId ? await inventoryQty(handle, userA, commerceItemId) : -1;
+  const rejectDesc = lastEmbedDescription(listRejectCap);
+  const listingsAfter = await listingCount(handle);
+  ctx.expect(
+    rejectDesc.toLowerCase().includes('cannot be traded') && heldAfter === 1 && listingsAfter === 0,
+    {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise:
+        'A /market list on a commerce-granted, non-tradeable item is refused (branded), the item stays in inventory, and no listing row is created.',
+      observation:
+        `/market list reply="${truncate(rejectDesc)}" (expected a "cannot be traded" refusal), ` +
+        `item held after=${heldAfter} (expected 1 unchanged), market listings=${listingsAfter} (expected 0).`,
+      impact: 'The anti-laundering wall did not refuse a non-tradeable item, or the refusal moved/listed the item.',
+    },
   );
+
+  // The blocked listing writes NO economy_transactions ledger row (rejected before
+  // any RPC/eventBus emit) — the DB-observable half of "no listing/config-change row"
+  // is proven above (listingsAfter === 0). The anonymized audit_logs correlation-id
+  // row + the dashboard rejected-config lane remain a genuine residual.
   ctx.gate(
     'audit',
     'discord-readback',
     'One audit row records the blocked commerce-item listing and the rejected market config with their reasons; no listing row and no config-change audit row is written.',
-    'the blocked-listing / rejected-config audit rows are written by the (undrivable) /market list path and the dashboard save path',
+    "the no-listing-row half is proven live (listingCount stays 0); the anonymized audit_logs correlation-id row is AuditService's 5s-buffered flush and the rejected-config audit is a dashboard-lane row — neither is synchronously observable here",
   );
 
   proveBranding(ctx, shopCaptured, econ);
@@ -914,21 +1127,67 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
     impact: "Could not arrange member-A's listing — the authorization proof setup is invalid.",
   });
 
-  // The atomic cancel RPC is keyed to the invoking seller id, so a member-B cancel
-  // can never mutate A's row — but the proof requires driving /market cancel, a
-  // subcommand, so the end-to-end refusal is gated (the RPC keying is real code).
-  gateMarketSubcommand(
-    ctx,
-    'Discord',
-    'captured-reply',
-    "member-B's /market cancel against member-A's listing is refused and A's listing is byte-identical afterward.",
+  // Driven live: member-B's /market cancel against member-A's listing is refused
+  // (the bot resolves the listing under `seller_id = invoker`, so B never matches
+  // A's row) and A's listing is byte-identical afterward.
+  const userB = ctx.userId('b');
+  const cancelCap = await ctx.runSlash(handle, {
+    commandName: 'market',
+    userId: userB,
+    subcommand: 'cancel',
+    options: { listing: (listingId ?? '').slice(0, 8) },
+  });
+  const listingAfterCancel = listingId ? await readListing(handle, listingId) : null;
+  const cancelDesc = lastEmbedDescription(cancelCap);
+  ctx.expect(
+    cancelDesc.toLowerCase().includes('not found') &&
+      listingAfterCancel?.seller_id === userA &&
+      listingAfterCancel?.status === 'active' &&
+      listingAfterCancel?.remaining === 3,
+    {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: "member-B's /market cancel against member-A's listing is refused and A's listing is byte-identical afterward.",
+      observation:
+        `/market cancel (by B) reply="${truncate(cancelDesc)}" (expected "not found"); ` +
+        `A's listing after: seller=${listingAfterCancel?.seller_id}/status=${listingAfterCancel?.status}/remaining=${listingAfterCancel?.remaining} ` +
+        `(expected ${userA}/active/3).`,
+      impact: "A member-B cancel mutated or ended member-A's listing — cross-member authorization on cancel is broken.",
+    },
   );
-  gateMarketSubcommand(
-    ctx,
-    'Discord',
-    'captured-reply',
-    'A member holding a commerce-granted item is refused (branded) when trying to /market list it.',
+
+  // Driven live: a member holding a commerce-granted (non-tradeable) item is refused
+  // (branded) when trying to /market list it, and it never reaches the market.
+  const boundItemId = await seedItem(handle, {
+    name: `${ctx.runPrefix}bound-relic`,
+    price: 0,
+    sellPrice: 0,
+    tradeable: false,
+    category: 'Cosmetics',
+  });
+  if (boundItemId) await giveInventory(handle, userA, boundItemId, 1);
+  const boundListCap = await ctx.runSlash(handle, {
+    commandName: 'market',
+    userId: userA,
+    subcommand: 'list',
+    options: { item: `${ctx.runPrefix}bound-relic`, quantity: 1, price: 100 },
+  });
+  const boundHeldAfter = boundItemId ? await inventoryQty(handle, userA, boundItemId) : -1;
+  const boundListings = boundItemId ? await sellerItemListingCount(handle, userA, boundItemId) : -1;
+  const boundDesc = lastEmbedDescription(boundListCap);
+  ctx.expect(
+    boundDesc.toLowerCase().includes('cannot be traded') && boundHeldAfter === 1 && boundListings === 0,
+    {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'A member holding a commerce-granted (non-tradeable) item is refused (branded) when trying to /market list it.',
+      observation:
+        `/market list (non-tradeable) reply="${truncate(boundDesc)}" (expected "cannot be traded"); ` +
+        `item held after=${boundHeldAfter} (expected 1), listings for it=${boundListings} (expected 0).`,
+      impact: 'A commerce-granted non-tradeable item could be listed on the player market — the anti-laundering wall is not enforced.',
+    },
   );
+
   ctx.gate(
     'Discord',
     'discord-readback',
@@ -939,7 +1198,7 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
     'audit',
     'discord-readback',
     'An audit row records the denied cancel, the blocked commerce-item listing, and the denied config save, each with reason permission-denied.',
-    'those denial audit rows are written by the (undrivable) /market cancel/list paths and the dashboard save path',
+    "the denied cancel + blocked-listing paths return early (no economy_transactions row); the anonymized audit_logs correlation-id row is AuditService's 5s-buffered flush and the denied-config audit is a dashboard-lane row — none synchronously observable here",
   );
 
   // RLS is the DB-observable spine of this scenario: A's listing is service-role
@@ -999,38 +1258,40 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
 /** RETRY — a market purchase whose seller-payout/delivery step fails converges safely. */
 async function RETRY(ctx: ScenarioContext): Promise<void> {
   // The refund/claw-back branch triggers only when the seller credit or buyer
-  // inventory-delivery step FAILS mid-purchase — a fault that requires injection at
-  // the wallet/inventory RPC boundary AND driving /market buy (a subcommand). Both
-  // are absent here, so GATE the fault-dependent proof; never fabricate a failure.
+  // inventory-delivery step FAILS mid-purchase. The /market buy path is now fully
+  // drivable via ctx.runSlash (see SET-A / REPLAY / RACE), but economy_market_settle_buy
+  // settles the whole purchase in ONE atomic transaction, so its partial-failure /
+  // refund branch cannot be reached without a mid-RPC fault-injection lane. GATE the
+  // fault-dependent proof honestly; never fabricate a failure.
   ctx.gate(
     'Discord',
     'db-observable',
     'After the injected payout fault, the buyer is refunded once and the listing remaining is restored; a clean retry buys exactly once (one debit, one net-of-fee seller credit, one item).',
-    'requires a mid-/market-buy fault-injection lane AND the /market buy subcommand (undrivable via ctx.runSlash)',
+    'requires a mid-purchase fault-injection lane inside the atomic economy_market_settle_buy transaction to reach the refund/claw-back branch (the /market buy command itself is drivable)',
   );
   ctx.gate(
     'replay-safety',
     'db-observable',
     'The refund and the subsequent successful purchase each apply under their own idempotency key (debit, refund, debit — never a double).',
-    'requires the mid-/market-buy fault-injection lane and the /market buy subcommand',
+    'requires the mid-settle fault-injection lane to reach the refund branch (idempotency of the clean /market buy is proven directly in SET-A / REPLAY)',
   );
   ctx.gate(
     'audit',
     'audit-row',
     'The ledger shows the buyer debit, the refund, then the successful purchase — never a double debit or double seller payout.',
-    'requires the mid-/market-buy fault-injection lane and the /market buy subcommand',
+    'requires the mid-settle fault-injection lane to produce the refund ledger row',
   );
   ctx.gate(
     'branding',
     'captured-reply',
     'The buyer sees the branded purchase-refunded confirmation.',
-    'requires the mid-/market-buy fault-injection lane to reach the refund branch',
+    'requires the mid-settle fault-injection lane to reach the refund branch',
   );
   ctx.gate(
     'database-RLS',
     'db-rls',
     'The refund touches only the buyer’s guild-scoped wallet.',
-    'requires the mid-/market-buy fault-injection lane and the /market buy subcommand',
+    'requires the mid-settle fault-injection lane to reach the refund branch',
   );
   ctx.gate(
     'owner-notification',
@@ -1040,7 +1301,8 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
   );
 }
 
-/** REPLAY — re-delivering a shop /buy must not double-charge (market buy is subcommand-gated). */
+/** REPLAY — re-delivering a shop /buy double-charges (idempotency gap, FAIL finding);
+ *  a re-delivered /market buy is idempotent (driven live in a market-enabled sibling guild). */
 async function REPLAY(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({
     label: 'a',
@@ -1077,19 +1339,60 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
       'A re-delivered identical shop /buy double-charged and double-delivered — EconomyManager.buyItem has no persisted idempotency key on the interaction id (a money-path idempotency gap).',
   });
 
-  // The market-buy replay leg needs the /market buy subcommand — undrivable here.
-  gateMarketSubcommand(
-    ctx,
-    'replay-safety',
-    'db-observable',
-    'Re-delivering a /market buy leaves exactly one market sale (idempotency keys on buyer debit, seller payout, inventory upsert, listing decrement).',
+  // The market-buy replay leg, driven live in a market-enabled sibling guild.
+  // economy_market_settle_buy is keyed on the interaction id (request_id anchored to
+  // the buyer's market_buy ledger row), so a re-delivered /market buy is a proven
+  // no-op — unlike the shop /buy above, which has the idempotency gap.
+  const mkt = await ctx.bootGuild({
+    label: 'm',
+    economyStartingBalance: 0,
+    currencyName: 'Doubloons',
+    currencyEmoji: '🔶',
+    guildConfigOverrides: { economy_market_enabled: true, economy_market_fee_pct: 10 },
+  });
+  const mSeller = ctx.userId('mseller');
+  const mBuyer = ctx.userId('mbuyer');
+  const mItemId = await seedItem(mkt, { name: `${ctx.runPrefix}mkt-potion`, price: 0, sellPrice: 0, tradeable: true });
+  const mListingId = mItemId ? await seedListing(mkt, mSeller, mItemId, `${ctx.runPrefix}mkt-potion`, 2, 100) : null;
+  await seedWallet(mkt, mSeller, 0, 0);
+  await seedWallet(mkt, mBuyer, 1000, 0);
+
+  const mktBuyId = `${ctx.runPrefix}mkt-buy-int`;
+  const mktBuyOpts = { listing: (mListingId ?? '').slice(0, 8), quantity: 1 };
+  await ctx.runSlash(mkt, { commandName: 'market', userId: mBuyer, subcommand: 'buy', options: mktBuyOpts, interactionId: mktBuyId });
+  await ctx.runSlash(mkt, { commandName: 'market', userId: mBuyer, subcommand: 'buy', options: mktBuyOpts, interactionId: mktBuyId });
+  const mBuyerWallet = await readWallet(mkt, mBuyer);
+  const mSellerWallet = await readWallet(mkt, mSeller);
+  const mListingAfter = mListingId ? await readListing(mkt, mListingId) : null;
+  const mBuyerOwned = mItemId ? await inventoryQty(mkt, mBuyer, mItemId) : 0;
+  const mBuyTxn = await txns(mkt, mBuyer, 'market_buy');
+  const mSaleTxn = await txns(mkt, mSeller, 'market_sale');
+  // total = 100, fee = floor(100 * 10%) = 10, seller earns 90.
+  ctx.expect(
+    mBuyerWallet?.wallet === 900 &&
+      mSellerWallet?.wallet === 90 &&
+      mListingAfter?.remaining === 1 &&
+      mBuyerOwned === 1 &&
+      mBuyTxn.length === 1 &&
+      mSaleTxn.length === 1,
+    {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise: 'Re-delivering a /market buy leaves exactly one market sale (one buyer debit, one net-of-fee seller credit, one listing decrement, one delivery).',
+      observation:
+        `after TWO deliveries of one /market buy interaction id: buyer wallet=${mBuyerWallet?.wallet} (expects 900), ` +
+        `seller wallet=${mSellerWallet?.wallet} (expects 90), listing remaining=${mListingAfter?.remaining} (expects 1), ` +
+        `buyer inventory=${mBuyerOwned} (expects 1), market_buy rows=${mBuyTxn.length}/market_sale rows=${mSaleTxn.length} (expects 1/1).`,
+      impact: 'A re-delivered /market buy double-settled — the request-id idempotency key on economy_market_settle_buy did not hold.',
+    },
   );
-  ctx.gate(
-    'audit',
-    'audit-row',
-    'A replayed market buy writes exactly one set of ledger effects.',
-    'the market buy path is undrivable here (subcommand) and writes no economy_transactions row',
-  );
+  ctx.expect(mBuyTxn.length === 1 && mSaleTxn.length === 1, {
+    assertionClass: 'audit',
+    channel: 'audit-row',
+    promise: 'A replayed market buy writes exactly one set of ledger effects (one market_buy, one market_sale).',
+    observation: `after the replay: market_buy rows=${mBuyTxn.length}, market_sale rows=${mSaleTxn.length} (expected 1/1).`,
+    impact: 'A replayed market buy wrote duplicate ledger rows — the idempotent settle did not dedupe.',
+  });
 
   proveBranding(ctx, first, econ);
   await proveAnonDenied(ctx, handle, 'economy_wallets', await walletServiceCount(handle, userA), 'wallet row');
@@ -1226,13 +1529,63 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     impact: 'A concurrent /buy produced no reply.',
   });
 
-  // Concurrent /market list + /market buy safety needs the market subcommands.
-  gateMarketSubcommand(
-    ctx,
-    'replay-safety',
-    'db-observable',
-    'Two simultaneous /market buy of a listing’s last unit settle exactly once, and two simultaneous /market list of one stack cannot oversell.',
+  // ── Concurrent /market buy of a listing's last unit settles exactly once ──
+  // A one-unit listing; two DIFFERENT buyers race. economy_market_settle_buy locks
+  // the listing FOR UPDATE, so exactly one buyer wins and the other sees "unavailable".
+  const mSeller = ctx.userId('mseller');
+  const mBuyer1 = ctx.userId('mb1');
+  const mBuyer2 = ctx.userId('mb2');
+  const lastItemId = await seedItem(handle, { name: `${ctx.runPrefix}mlast`, price: 0, sellPrice: 0, tradeable: true });
+  const lastListingId = lastItemId ? await seedListing(handle, mSeller, lastItemId, `${ctx.runPrefix}mlast`, 1, price) : null;
+  await seedWallet(handle, mSeller, 0, 0);
+  await seedWallet(handle, mBuyer1, 1000, 0);
+  await seedWallet(handle, mBuyer2, 1000, 0);
+  const [mc1, mc2] = await Promise.all([
+    ctx.runSlash(handle, { commandName: 'market', userId: mBuyer1, subcommand: 'buy', options: { listing: (lastListingId ?? '').slice(0, 8), quantity: 1 } }),
+    ctx.runSlash(handle, { commandName: 'market', userId: mBuyer2, subcommand: 'buy', options: { listing: (lastListingId ?? '').slice(0, 8), quantity: 1 } }),
+  ]);
+  const lastListingAfter = lastListingId ? await readListing(handle, lastListingId) : null;
+  const mOwned1 = lastItemId ? await inventoryQty(handle, mBuyer1, lastItemId) : 0;
+  const mOwned2 = lastItemId ? await inventoryQty(handle, mBuyer2, lastItemId) : 0;
+  const mSaleTxns = await txns(handle, mSeller, 'market_sale');
+  ctx.expect(
+    lastListingAfter?.remaining === 0 &&
+      lastListingAfter?.status === 'sold' &&
+      mOwned1 + mOwned2 === 1 &&
+      mSaleTxns.length === 1 &&
+      Boolean(lastEmbedDescription(mc1) || lastEmbedDescription(mc2)),
+    {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise: "Two simultaneous /market buy of a listing's last unit settle exactly once (no oversell): the listing empties to sold, one buyer receives the item, one market_sale row.",
+      observation:
+        `listing remaining=${lastListingAfter?.remaining}/status=${lastListingAfter?.status} (expected 0/sold); ` +
+        `items delivered B1=${mOwned1}+B2=${mOwned2} (expected sum 1); market_sale rows=${mSaleTxns.length} (expected 1).`,
+      impact: 'A concurrent last-unit /market buy oversold — the FOR UPDATE listing lock did not serialize the race.',
+    },
   );
+
+  // ── Two simultaneous /market list of one stack cannot oversell ──
+  // The seller holds ONE unit; two concurrent /market list of quantity 1 race.
+  // economy_market_atomic_create_listing locks the inventory row FOR UPDATE, so only
+  // one listing is created and the loser sees insufficient inventory.
+  const stackSeller = ctx.userId('stackseller');
+  const stackItemId = await seedItem(handle, { name: `${ctx.runPrefix}mstack`, price: 0, sellPrice: 0, tradeable: true });
+  if (stackItemId) await giveInventory(handle, stackSeller, stackItemId, 1);
+  await Promise.all([
+    ctx.runSlash(handle, { commandName: 'market', userId: stackSeller, subcommand: 'list', options: { item: `${ctx.runPrefix}mstack`, quantity: 1, price } }),
+    ctx.runSlash(handle, { commandName: 'market', userId: stackSeller, subcommand: 'list', options: { item: `${ctx.runPrefix}mstack`, quantity: 1, price } }),
+  ]);
+  const stackListings = stackItemId ? await sellerItemListingCount(handle, stackSeller, stackItemId) : -1;
+  const stackInv = stackItemId ? await inventoryQty(handle, stackSeller, stackItemId) : -1;
+  ctx.expect(stackListings === 1 && stackInv === 0, {
+    assertionClass: 'replay-safety',
+    channel: 'db-observable',
+    promise: 'Two simultaneous /market list of a one-unit stack create exactly one listing (no oversell of escrowed items).',
+    observation: `active listings for the stack=${stackListings} (expected 1); seller inventory after=${stackInv} (expected 0).`,
+    impact: 'A concurrent double-list escrowed the same unit twice — the FOR UPDATE inventory lock did not serialize the listings.',
+  });
+
   gateMarketAudit(ctx);
 
   proveBranding(ctx, replyContent(c1) || replyEmbedData(c1) ? c1 : c2, econ);

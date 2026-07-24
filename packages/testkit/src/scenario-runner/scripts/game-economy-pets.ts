@@ -6,17 +6,19 @@
  * assertion runs NOW against the SAME production primitives the bot's PetsManager uses;
  * the live Discord surfaces are GATED — the exact honesty boundary the harness requires.
  *
- * ── Why this domain is MOSTLY GATED on the reply / Discord side ──
+ * ── Reply/embed surfaces are now DRIVEN LIVE (PR #331) ──
  * EVERY member entrypoint is a slash SUBCOMMAND of `/pet` (view/buy/feed/play/train/
  * rename/battle/prestige) and `handlePetCommand`'s first line is
- * `interaction.options.getSubcommand()`. The harness's `ScenarioContext.runSlash`
- * (see `RunSlashParams`) carries no subcommand field and the injector builds a
- * subcommand-less interaction, so driving ANY pet command through the dispatcher would
- * throw `CommandInteractionOptionNoSubcommand` before a single line of pet work ran.
- * There is likewise no member-facing reply/embed to inspect, the decay cycle is a
- * process timer whose DM nudge needs a live Discord client, and the /pet play cooldown
- * is a Valkey `SET PX NX`. So every member reply / embed / DM / decay / battle-refusal /
- * cooldown surface is GATED — never faked.
+ * `interaction.options.getSubcommand()`. Since PR #331 `ScenarioContext.runSlash` (see
+ * `RunSlashParams`) carries a `subcommand` field and the injector builds a
+ * subcommand-bearing interaction, so `getSubcommand()` resolves and the REAL handler runs
+ * in-process. The branded adoption embed (`/pet buy`) and the battles/prestige
+ * disabled-piece refusals are now asserted against the captured reply, and a guild-scoped
+ * `/pet view` proves the member surface stays per-guild. What REMAINS gated is genuinely
+ * outside the in-process dispatcher: the decay cycle is a process timer whose needs-attention
+ * DM needs a live Discord client, the /pet play cooldown is a Valkey `SET PX NX` (no Redis
+ * in CI), the white-label brand-kit pixel/voice match needs a live-guild readback, and the
+ * outage / mid-buy / mid-battle-payout fault branches need a fault-injection lane — never faked.
  *
  * ── What IS proven NOW, non-vacuously ──
  * PetsManager is a thin orchestration over primitives that ARE drivable directly against
@@ -47,6 +49,7 @@
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
 import type { LiveClientHandle } from '../../live-runner.js';
+import type { CapturedResponse } from '../../captured-response.js';
 import type { DomainProof, ScenarioContext } from '../types.js';
 
 // ── Row / result shapes ─────────────────────────────────────────────────────
@@ -349,7 +352,7 @@ async function proveNoOwnerAlert(ctx: ScenarioContext, handle: LiveClientHandle)
     'owner-notification',
     'discord-readback',
     'Failure-branch alerts (e.g. a repeatedly-failing battle payout) carry a human-readable reason + remediation hint in the owner alert channel.',
-    'requires the live owner alert channel readback (DISCORD_TOKEN + live guild) plus a fault-injected failure branch',
+    'the battle-payout-failed alert is a DB-observable alerts row, but it only fires when economy_add_balance fails mid-battle — requires a mid-battle payout fault-injection lane (plus live owner alert channel readback for the reason/remediation text)',
   );
 }
 
@@ -404,24 +407,70 @@ async function proveRlsIsolation(ctx: ScenarioContext, handle: LiveClientHandle,
   });
 }
 
+/** Content + embed title/description of the last reply/editReply a /pet subcommand produced. */
+function petReplyText(captured: CapturedResponse): string {
+  const edits = captured.allOf('editReply');
+  const replies = captured.allOf('reply');
+  const payload = (edits[edits.length - 1] ?? replies[replies.length - 1])?.payload as
+    | { content?: string; embeds?: Array<{ data?: { title?: string; description?: string } }> }
+    | undefined;
+  const content = payload?.content ?? '';
+  const embed = payload?.embeds?.[0]?.data;
+  return `${content} ${embed?.title ?? ''} ${embed?.description ?? ''}`.trim();
+}
+
 /**
- * Every member-facing pets surface is a subcommand reply / embed / DM (see file header),
- * none drivable here. Branding is GATED honestly rather than checked against a synthetic
- * string or the generic dispatcher error reply.
+ * The full white-label brand kit (colors, voice preset, powered-by-SomniBot attribution)
+ * pixel/voice match against the live owner brand kit stays a live-guild readback residual.
  */
-function gateBranding(ctx: ScenarioContext): void {
-  ctx.gate(
-    'branding',
-    'captured-reply',
-    'Member-facing pets surfaces (adoption embed, feed/play/train confirmations, battle result, needs-attention DM) show the owner brand name, colors, and voice preset with the powered-by-SomniBot attribution and zero stock-bot wording.',
-    'every pet entrypoint is a slash SUBCOMMAND of /pet and ScenarioContext.runSlash carries no subcommand, so no member-facing pet reply is produced to inspect for branding',
-  );
+function gateBrandKit(ctx: ScenarioContext): void {
   ctx.gate(
     'branding',
     'discord-readback',
     'The full white-label brand kit (colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on pet embeds.',
     'requires an embed/message snapshot readback against the live brand kit (DISCORD_TOKEN + live guild)',
   );
+}
+
+/**
+ * Drive the REAL `/pet buy` subcommand (through the #331 in-process injector) for a fresh
+ * funded member and assert BOTH the DB effect (the debit + the inserted economy_pets row
+ * the real buyPet handler writes) AND the member-facing adoption embed. Live via the
+ * subcommand injector — no longer gated. The exact brand-kit pixel/voice match stays a
+ * live-guild readback residual (gateBrandKit).
+ */
+async function proveBranding(ctx: ScenarioContext, handle: LiveClientHandle): Promise<void> {
+  const u = ctx.userId('brand');
+  await seedWallet(handle, u, ADOPTION_PRICE);
+  const captured = await ctx.runSlash(handle, {
+    commandName: 'pet',
+    userId: u,
+    subcommand: 'buy',
+    options: { type: 'hunting' },
+  });
+
+  // DB effect: the real buyPet handler debited the adoption price and inserted one pet row.
+  const boughtPet = await readPet(handle, u);
+  const boughtWallet = await readWallet(handle, u);
+  ctx.expect(boughtPet?.id != null && boughtPet?.pet_type === 'hunting' && boughtWallet?.wallet === 0, {
+    assertionClass: 'Discord',
+    channel: 'db-observable',
+    promise: `Driving the REAL /pet buy handler debits the ${ADOPTION_PRICE}-coin adoption price and inserts exactly one economy_pets row for the member.`,
+    observation: `after /pet buy: pet id=${boughtPet?.id ?? '(null)'} type=${boughtPet?.pet_type}, wallet=${boughtWallet?.wallet} (expected a hunting pet + wallet 0).`,
+    impact: 'The /pet buy handler did not perform the real adoption debit + pet insert in-process.',
+  });
+
+  // Member surface: the branded adoption embed rendered on the captured reply.
+  const text = petReplyText(captured);
+  ctx.expect(/new pet/i.test(text), {
+    assertionClass: 'branding',
+    channel: 'captured-reply',
+    promise:
+      'The member-facing /pet buy adoption reply renders as the owner-branded "New Pet!" embed (with the powered-by-SomniBot attribution and zero stock-bot wording).',
+    observation: `/pet buy replied with: ${JSON.stringify(text.slice(0, 140))} (expected the branded adoption embed).`,
+    impact: 'The /pet buy member surface did not render the branded adoption embed.',
+  });
+  gateBrandKit(ctx);
 }
 
 /**
@@ -434,7 +483,7 @@ function gateAudit(ctx: ScenarioContext): void {
     'audit',
     'audit-row',
     'Every pets state change lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation.',
-    'pet debits/refunds go through economy_subtract_balance / economy_add_balance (which mutate only economy_wallets — no economy_transactions ledger row) and PetsManager writes no audit_logs row for care actions, so there is no DB-observable audit row in this harness',
+    'pet acquire/battle/prestige emit mapped audit events (pet.acquired / pet.battle_resolved / pet.prestiged) but they flow through the process-singleton event bus (setImmediate) into the AuditService 5-second batch flush, so no audit_logs row is synchronously DB-observable within a scenario; the care actions (feed/play/train/rename) emit no audit event at all',
   );
 }
 
@@ -443,7 +492,7 @@ function gateLivePet(ctx: ScenarioContext, promise: string): void {
     'Discord',
     'discord-readback',
     promise,
-    'requires a live Discord gateway (DISCORD_TOKEN + live guild) plus /pet subcommand injection the harness does not provide',
+    'requires a live Discord gateway (DISCORD_TOKEN + live guild) for the DM/channel readback and/or the pet-decay process timer — surfaces outside the in-process slash dispatcher',
   );
 }
 
@@ -571,7 +620,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   );
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveBranding(ctx, handle);
   gateAudit(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -637,7 +686,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveBranding(ctx, handle);
   gateAudit(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -693,16 +742,49 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  // The branded battle/prestige "disabled" refusals and the suppressed DM are
-  // subcommand / decay-timer surfaces — gated.
+  // Battles + prestige are switched OFF: drive the REAL /pet battle and /pet prestige
+  // subcommands and assert each returns its branded piece-disabled refusal (the exact
+  // guard battlePet / prestigePet read economy_pet_battle_enabled / _prestige_enabled for),
+  // live via the #331 subcommand injector.
+  const battleCap = await ctx.runSlash(handle, {
+    commandName: 'pet',
+    userId: userA,
+    subcommand: 'battle',
+    options: { user: { id: ctx.userId('b'), username: 'b' } },
+  });
+  const battleReply = petReplyText(battleCap);
+  ctx.expect(/not enabled/i.test(battleReply), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'With battles switched off, /pet battle returns a branded "battles are not enabled" refusal (no battle is fought, no battle row written).',
+    observation: `/pet battle replied ${JSON.stringify(battleReply)} (expected a "not enabled" refusal).`,
+    impact: 'The battles-disabled toggle did not refuse /pet battle — a switched-off piece stayed reachable.',
+  });
+
+  const prestigeCap = await ctx.runSlash(handle, {
+    commandName: 'pet',
+    userId: userA,
+    subcommand: 'prestige',
+  });
+  const prestigeReply = petReplyText(prestigeCap);
+  ctx.expect(/not enabled/i.test(prestigeReply), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'With prestige switched off, /pet prestige returns a branded "prestige is not enabled" refusal (no prestige applied).',
+    observation: `/pet prestige replied ${JSON.stringify(prestigeReply)} (expected a "not enabled" refusal).`,
+    impact: 'The prestige-disabled toggle did not refuse /pet prestige — a switched-off piece stayed reachable.',
+  });
+
+  // The suppressed decay-cycle DM (no nudge when notify off) is a process-timer + live
+  // Discord DM surface — gated honestly.
   gateLivePet(
     ctx,
-    '/pet battle and /pet prestige each return a branded piece-disabled refusal, and no DM arrives when a decay cycle drops the pet to sad (notify off).',
+    'No needs-attention DM arrives when a decay cycle drops the pet to sad (notify off).',
   );
 
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveBranding(ctx, handle);
   gateAudit(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -762,7 +844,7 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveBranding(ctx, handle);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
@@ -830,7 +912,7 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveBranding(ctx, handle);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
@@ -929,18 +1011,17 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     impact: 'The clean retry after a refunded purchase did not adopt exactly one pet for one debit.',
   });
 
-  // The injected insert-fault + the branded refund confirmation reply need the fault lane
-  // and subcommand injection.
+  // The injected insert-fault + the branded refund confirmation reply need the fault lane.
   ctx.gate(
     'Discord',
     'discord-readback',
     'After the injected economy_pets insert fault, run-member-a sees the branded refund confirmation and /pet view shows no pet.',
-    'requires a mid-buy fault-injection lane (fail the economy_pets insert after the debit) plus /pet subcommand injection',
+    'requires a mid-buy fault-injection lane (fail the economy_pets insert after the debit); the harness runs against a healthy DB so the insert never fails to reach the refund/confirmation branch',
   );
   gateAudit(ctx);
   await proveRlsIsolation(ctx, handle, userA); // a pet exists after the retry → positive control holds
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveBranding(ctx, handle);
 }
 
 /** REPLAY — re-delivering the buy must not double-create; feed-replay dedup is gated. */
@@ -969,14 +1050,15 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   });
 
   // The FEED replay-debit is NOT dedup-observable here: economy_pet_feed +
-  // economy_subtract_balance carry no interaction-id idempotency key, and /pet feed is a
-  // subcommand runSlash cannot drive — so a genuine dispatcher-level feed replay cannot be
-  // exercised or observed in this harness (flagged, not faked, not asserted as a false pass).
+  // economy_subtract_balance carry no interaction-id idempotency key, and the dispatcher
+  // performs no interaction-id dedup, so re-driving /pet feed would simply debit twice —
+  // there is no dispatcher-level feed dedup to OBSERVE (Discord itself guarantees single
+  // delivery of a given interaction). Flagged, not faked, not asserted as a false pass.
   ctx.gate(
     'replay-safety',
     'db-observable',
     'Re-delivering the /pet feed interaction applies exactly one feed debit (no double charge).',
-    'the feed path (economy_pet_feed + economy_subtract_balance) carries no interaction-id idempotency key and /pet feed is a subcommand ScenarioContext.runSlash cannot drive, so a dispatcher-level feed replay cannot be exercised or observed in this bot-only harness',
+    'the feed path (economy_pet_feed + economy_subtract_balance) carries no interaction-id idempotency key and the dispatcher performs no interaction-id dedup, so re-driving /pet feed just debits twice (Discord guarantees single delivery of an interaction) — there is no dispatcher-level feed dedup to observe in this bot-only harness',
   );
   gateLivePet(
     ctx,
@@ -985,7 +1067,7 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveBranding(ctx, handle);
   gateAudit(ctx);
 }
 
@@ -1043,7 +1125,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, second, userA);
   await proveNoOwnerAlert(ctx, second);
-  gateBranding(ctx);
+  await proveBranding(ctx, second);
   gateAudit(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -1094,7 +1176,7 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
 
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
-  gateBranding(ctx);
+  await proveBranding(ctx, handle);
   gateAudit(ctx);
 }
 
@@ -1186,12 +1268,26 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   );
   await proveRlsIsolation(ctx, handleA, userA);
 
+  // Drive the REAL /pet view in guild A AFTER the guild-B activity: it must still render
+  // guild A's OWN pet (a-pet), proving cross-guild activity never bled into guild A's
+  // member-facing surface. Live via the #331 subcommand injector.
+  const viewA = await ctx.runSlash(handleA, { commandName: 'pet', userId: userA, subcommand: 'view' });
+  const viewAText = petReplyText(viewA);
+  ctx.expect(/a-pet/i.test(viewAText), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise:
+      'After guild B activity, guild A’s /pet view still renders guild A’s own pet (a-pet) — cross-guild activity never leaks into guild A’s member surface.',
+    observation: `guild A /pet view replied ${JSON.stringify(viewAText.slice(0, 120))} (expected guild A’s "a-pet").`,
+    impact: 'Guild A’s /pet view surfaced the wrong (or another guild’s) pet — cross-guild leakage in the member surface.',
+  });
+  // The live-guild wallet-debit-at-configured-price observation stays a readback residual.
   gateLivePet(
     ctx,
-    'Guild A’s /pet view is identical before and after guild B activity, and guild B’s adoption debits guild B’s wallet at guild B’s configured price — observed in the live guilds.',
+    'Guild B’s adoption debits guild B’s wallet at guild B’s configured price — observed in the live guild.',
   );
   await proveNoOwnerAlert(ctx, handleA);
-  gateBranding(ctx);
+  await proveBranding(ctx, handleA);
   gateAudit(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
@@ -1234,6 +1330,9 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
   // Prove the off-theme classes while the rows still exist (before the sweep removes them).
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
+  // Drive the branded /pet buy surface too (before the sweep, so its brand rows are also
+  // cleared and the post-sweep zero-count covers them).
+  await proveBranding(ctx, handle);
 
   // Run the sweep (the same one teardown uses) and verify ZERO run-prefixed rows remain.
   await ctx.sweepGuildRows(handle);
@@ -1249,7 +1348,6 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     impact: 'The cleanup sweep left run-prefixed pets rows behind — the suite leaves residue.',
   });
 
-  gateBranding(ctx);
   gateAudit(ctx);
   ctx.gate(
     'Discord',

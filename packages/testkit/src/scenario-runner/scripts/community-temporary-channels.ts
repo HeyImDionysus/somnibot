@@ -16,10 +16,14 @@
  *     limit, grace-timer, or control effect can be observed.
  *   - `/voice` is a subcommand command; the ownership/precondition checks read
  *     `guild.members.cache.get(user).voice.channelId` + `manager.isTempChannel`.
- *     The gateway-less synthetic guild returns an empty members cache, and the
- *     scenario runner's `runSlash` supplies no subcommand — so the only cleanly
- *     reachable `/voice` reply is the config-gate refusal ("Temp channels are not
- *     enabled"), captured as real dispatcher evidence.
+ *     Since PR #331 `runSlash` drives the SUBCOMMAND in-process, so `/voice <control>`
+ *     now routes to the REAL handler on an enabled guild — but the gateway-less
+ *     synthetic guild exposes an empty members cache (no voice state), so the handler
+ *     takes its "must be in a temporary voice channel" precondition branch. That
+ *     refusal (driven on an enabled guild) and the config-gate refusal ("Temp
+ *     channels are not enabled", disabled guild) are BOTH captured live as real
+ *     dispatcher evidence; the owner-vs-non-owner ownership branch + control EFFECTS
+ *     still need a live voice state + real room and stay gated.
  *
  * What DOES run for real against local Supabase:
  *   - `temp_channel_hubs` / `active_temp_channels` are guild-scoped tables. Their
@@ -262,6 +266,39 @@ async function proveNoOwnerAlert(ctx: ScenarioContext, handle: LiveClientHandle)
 }
 
 /**
+ * Drive the REAL `/voice <control>` subcommand on an ENABLED guild and assert the
+ * production dispatcher routes it and the handler refuses cleanly when the invoker
+ * is not in a temporary voice channel. Since PR #331 the loopback adapter drives
+ * slash SUBCOMMANDS in-process, so `/voice lock` reaches `handleTempChannelCommand`
+ * for real (previously `runSlash` supplied no subcommand and the enabled `/voice`
+ * path was undrivable). The gateway-less synthetic guild's members cache exposes no
+ * voice state, so `guild.members.cache.get(user)?.voice?.channelId` is undefined and
+ * the handler takes its "must be in a temporary voice channel" precondition branch —
+ * a real captured reply proving the control command is wired and guards access (it
+ * neither crashes on the subcommand nor acts without a temp-channel context). The
+ * owner-vs-non-owner OWNERSHIP branch + control effects still need a live voice state
+ * and stay gated separately.
+ */
+async function proveVoiceControlGuard(
+  ctx: ScenarioContext,
+  handle: LiveClientHandle,
+  userId: string,
+  sub = 'lock',
+): Promise<void> {
+  const cap = await ctx.runSlash(handle, { commandName: 'voice', userId, subcommand: sub });
+  const text = replyText(cap);
+  ctx.expect(text.length > 0 && /temporary voice channel/i.test(text), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise:
+      'The real production dispatcher routes /voice <control> to the temp-channel handler on an enabled guild, which refuses cleanly when the invoker is not in a temporary voice channel (never crashing on the subcommand and never acting without a temp-channel context).',
+    observation: `/voice ${sub} from a member with no temp-channel voice state replied "${truncate(text)}".`,
+    impact:
+      'The /voice control subcommand was not dispatched by the real handler, or did not enforce the in-a-temp-channel precondition — the control command is unrouted or would act without an owned room.',
+  });
+}
+
+/**
  * Branding always GATEs for this domain: the member-facing surfaces the catalog
  * brands (the `room-created` note posted in the new room's text chat, the
  * `control-applied` /voice ephemeral) are only produced when a real room is
@@ -348,6 +385,12 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
 
   await proveRls(ctx, handle, 'temp_channel_hubs');
   await proveNoOwnerAlert(ctx, handle);
+
+  // (c) The enabled-guild `/voice` control now routes to the REAL handler
+  //     in-process (subcommand-driven) and refuses cleanly for a member with no
+  //     temp-channel voice state — the config-gate refusal in (a) proves the
+  //     disabled branch, this proves the enabled dispatch + precondition guard.
+  await proveVoiceControlGuard(ctx, handle, ctx.userId('a'));
 
   // Gateway-bound facets of the DEF promise.
   gateLiveGuild(
@@ -504,9 +547,17 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   await proveRls(ctx, handle, 'active_temp_channels');
   await proveNoOwnerAlert(ctx, handle);
 
-  // The friendly non-owner denial ephemeral (and the untouched channel
-  // permissions) require a live voice state + real room; runSlash also supplies no
-  // subcommand, so the /voice ownership branch is unreachable gateway-less.
+  // The attacker's /voice control now routes to the REAL handler in-process
+  // (subcommand-driven) and is refused: with no voice state pointing at the room,
+  // the non-owner never reaches a control effect — a live captured refusal that
+  // proves the control command is wired and guards access before the ownership check.
+  await proveVoiceControlGuard(ctx, handle, attackerId);
+
+  // The /voice <control> subcommand routes in-process (proven above); reaching the
+  // OWNERSHIP branch specifically — the friendly denial pointing to /voice claim,
+  // plus the untouched channel permissions — still needs a live voice state pointing
+  // at a real temp room (the synthetic guild's members cache exposes none), so that
+  // owner-vs-non-owner facet stays gateway-gated.
   gateLiveGuild(
     ctx,
     "run-member-b's /voice lock on run-member-a's occupied room gets the friendly denial pointing to /voice claim; the room's permissions are unchanged.",
