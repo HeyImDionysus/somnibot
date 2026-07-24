@@ -3,6 +3,7 @@
  */
 import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Profiles');
@@ -67,8 +68,11 @@ export class ProfilesManager {
   private processedWrites = new Map<string, number>();
   private static readonly WRITE_DEDUP_TTL_MS = 10 * 60_000;
 
-  constructor(supabase: SupabaseClient) {
+  private eventBus: PlatformEventBus;
+
+  constructor(supabase: SupabaseClient, eventBus: PlatformEventBus = defaultEventBus) {
     this.supabase = supabase;
+    this.eventBus = eventBus;
   }
 
   clearCache(): void { this.cache.clear(); this.configCache.clear(); this.processedWrites.clear(); }
@@ -257,6 +261,13 @@ export class ProfilesManager {
       .update({ title: finalTitle, updated_at: new Date().toISOString() })
       .eq('guild_id', guildId).eq('user_id', interaction.user.id);
 
+    this.eventBus.emit('profile.updated', guildId, {
+      userId: interaction.user.id,
+      field: 'title',
+      value: finalTitle,
+      truncated,
+    });
+
     await interaction.reply({
       content: truncated
         ? `✅ Title set (truncated to the ${cfg.titleMaxLength}-char limit): **${finalTitle}**`
@@ -289,6 +300,13 @@ export class ProfilesManager {
     await this.supabase.from('economy_profiles')
       .update({ bio: finalBio, updated_at: new Date().toISOString() })
       .eq('guild_id', guildId).eq('user_id', interaction.user.id);
+
+    this.eventBus.emit('profile.updated', guildId, {
+      userId: interaction.user.id,
+      field: 'bio',
+      value: finalBio,
+      truncated,
+    });
 
     await interaction.reply({
       content: truncated ? `✅ Bio updated (truncated to the ${cfg.bioMaxLength}-char limit).` : '✅ Bio updated!',

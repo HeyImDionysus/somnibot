@@ -12,6 +12,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { invalidateCsrfCookies } from '@/lib/api/csrf';
 import { dbError } from '@/lib/api/response';
 import { loadTeamConfig, writeTeamAudit } from '@/lib/team-invitations';
+import { writeRbacAudit, raiseEscalationBlockedAlert } from '@/lib/rbac-audit';
 
 const rbacUserAssign = z.object({
   discord_id: z.string().regex(/^\d{17,20}$/, 'Must be a Discord snowflake ID'),
@@ -88,6 +89,22 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Role not found' }, { status: 404 });
     }
     if (targetRole.is_system) {
+      await writeRbacAudit(admin, {
+        guildId: ctx.guildId,
+        actorId: ctx.discordId,
+        action: 'rbac.role_assign_denied',
+        targetType: 'member',
+        targetId: body.discord_id,
+        details: { reason: 'system_role', roleId: body.role_id },
+        success: false,
+      });
+      await raiseEscalationBlockedAlert(admin, {
+        guildId: ctx.guildId,
+        actorId: ctx.discordId,
+        attemptedAction: 'assign system role',
+        targetRoleId: body.role_id,
+        reason: 'system roles cannot be assigned via the dashboard',
+      });
       return NextResponse.json({ error: 'Cannot assign system roles' }, { status: 403 });
     }
 
@@ -108,6 +125,27 @@ export async function POST(request: NextRequest) {
       );
 
       if (targetRole.priority > assignerMaxPriority) {
+        await writeRbacAudit(admin, {
+          guildId: ctx.guildId,
+          actorId: ctx.discordId,
+          action: 'rbac.role_assign_denied',
+          targetType: 'member',
+          targetId: body.discord_id,
+          details: {
+            reason: 'priority_escalation',
+            roleId: body.role_id,
+            targetPriority: targetRole.priority,
+            assignerMaxPriority,
+          },
+          success: false,
+        });
+        await raiseEscalationBlockedAlert(admin, {
+          guildId: ctx.guildId,
+          actorId: ctx.discordId,
+          attemptedAction: 'assign higher-priority role',
+          targetRoleId: body.role_id,
+          reason: `target priority ${targetRole.priority} exceeds assigner max ${assignerMaxPriority}`,
+        });
         return NextResponse.json(
           { error: 'Cannot assign a role with higher priority than your own' },
           { status: 403 },
@@ -229,6 +267,20 @@ export async function POST(request: NextRequest) {
       targetId: body.discord_id,
       details: { role_id: body.role_id, direct: true },
     });
+    // Owner alert: a live dashboard-role grant is a security-relevant privilege
+    // change the owner should see (grant/revoke parity).
+    try {
+      await admin.from('alerts').insert({
+        guild_id: ctx.guildId,
+        alert_type: 'team_role_granted',
+        severity: 'warning',
+        title: 'Dashboard team access granted',
+        message: `${ctx.discordId} directly assigned a dashboard role to ${body.discord_id}.`,
+        metadata: { actor_id: ctx.discordId, target_id: body.discord_id, role_id: body.role_id },
+      });
+    } catch {
+      // owner-alert mirror is best-effort
+    }
 
     // V9 Audit §1.P2: Invalidate CSRF tokens after privilege change.
     // Clearing the cookies forces a re-fetch of /api/csrf, which re-derives
@@ -256,13 +308,41 @@ export async function DELETE(request: NextRequest) {
 
     const admin = createAdminSupabase();
 
-    const { error } = await admin
+    const { data: removed, error } = await admin
       .from('dashboard_user_roles')
       .delete()
       .eq('id', assignmentId)
-      .eq('guild_id', ctx.guildId);
+      .eq('guild_id', ctx.guildId)
+      .select('discord_id, role_id')
+      .maybeSingle();
 
     if (error) return dbError(error, 'rbac/users');
+
+    // Audit the revoke (previously the DELETE path wrote no audit_logs row) and
+    // page the owner — a team member losing dashboard access is a
+    // security-relevant privilege change.
+    const revoked = (removed ?? null) as { discord_id?: string; role_id?: string } | null;
+    await writeTeamAudit(admin, {
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      action: 'team.role_revoked',
+      targetId: revoked?.discord_id ?? null,
+      details: { assignment_id: assignmentId, role_id: revoked?.role_id ?? null },
+    });
+    if (revoked?.discord_id) {
+      try {
+        await admin.from('alerts').insert({
+          guild_id: ctx.guildId,
+          alert_type: 'team_role_revoked',
+          severity: 'warning',
+          title: 'Dashboard team access revoked',
+          message: `${ctx.discordId} revoked a dashboard role from ${revoked.discord_id}.`,
+          metadata: { actor_id: ctx.discordId, target_id: revoked.discord_id, role_id: revoked.role_id },
+        });
+      } catch {
+        // owner-alert mirror is best-effort
+      }
+    }
 
     // V9 Audit §1.P2: Invalidate CSRF tokens after privilege change. Clears both
     // the current and rotation `prev` cookie so a stale tab cannot keep passing

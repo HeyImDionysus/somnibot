@@ -50,7 +50,7 @@ export async function PUT(req: NextRequest) {
 
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
+  const { guildId, discordId } = auth.ctx;
 
   const supabase = createAdminSupabase();
   const parsed = await parseBody(req, schemas.music.config);
@@ -90,6 +90,19 @@ export async function PUT(req: NextRequest) {
   if (typeof priority_voting_enabled === 'boolean') updates.priority_voting_enabled = priority_voting_enabled;
 
   if (Object.keys(updates).length === 0) {
+    // [music-collaborative-queue] Audit the rejected config save so a bad/no-op
+    // write attempt is observable in the append-only trail.
+    await supabase.from('audit_logs').insert({
+      guild_id: guildId,
+      actor_type: 'dashboard',
+      actor_id: discordId,
+      action: 'music.config_rejected',
+      category: 'music',
+      target_type: 'guild_config',
+      target_id: guildId,
+      details: { reason: 'no_valid_fields' },
+      success: false,
+    });
     return NextResponse.json(
       { success: false, error: 'No valid fields to update' },
       { status: 400 },
@@ -105,6 +118,20 @@ export async function PUT(req: NextRequest) {
   if (error) {
     return dbError(error, 'music');
   }
+
+  // [music-collaborative-queue] Audit the accepted music config change so the
+  // save (actor + fields) is durably recorded.
+  await supabase.from('audit_logs').insert({
+    guild_id: guildId,
+    actor_type: 'dashboard',
+    actor_id: discordId,
+    action: 'music.config_updated',
+    category: 'music',
+    target_type: 'guild_config',
+    target_id: guildId,
+    details: { fields: Object.keys(updates).filter((k) => k !== 'updated_at') },
+    success: true,
+  });
 
   await notifyBot('music');
 

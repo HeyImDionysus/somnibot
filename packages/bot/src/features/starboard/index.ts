@@ -18,9 +18,45 @@ import {
   type PartialUser,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Starboard');
+
+/**
+ * Raise exactly one owner alert when the configured starboard channel is gone
+ * (deleted or invisible), so the degraded state is visible instead of silent.
+ * Deduplicated on the open (unresolved) alert for this channel.
+ */
+async function raiseStarboardChannelMissingAlert(
+  supabase: SupabaseClient,
+  guildId: string,
+  channelId: string,
+): Promise<void> {
+  try {
+    const { data: existing } = await supabase
+      .from('alerts')
+      .select('id')
+      .eq('guild_id', guildId)
+      .eq('alert_type', 'starboard_channel_missing')
+      .eq('resolved', false)
+      .maybeSingle();
+    if (existing) return;
+
+    await supabase.from('alerts').insert({
+      guild_id: guildId,
+      alert_type: 'starboard_channel_missing',
+      severity: 'warning',
+      title: 'Starboard channel is missing',
+      message:
+        `The configured starboard channel (<#${channelId}>) could not be found — it may have been deleted ` +
+        `or I lost access. Starred messages are not being posted. Set a valid starboard channel to restore it.`,
+      metadata: { channel_id: channelId },
+    });
+  } catch (alertErr) {
+    log.error('Failed to write starboard channel-missing alert:', { error: String(alertErr) });
+  }
+}
 
 interface StarboardConfig {
   starboard_enabled: boolean;
@@ -69,6 +105,7 @@ export async function handleStarboardReaction(
   user: User | PartialUser,
   supabase: SupabaseClient,
   guildId: string,
+  eventBus: PlatformEventBus = defaultEventBus,
 ): Promise<void> {
   // Ensure full reaction and message data
   if (reaction.partial) {
@@ -116,7 +153,12 @@ export async function handleStarboardReaction(
 
   const guild = message.guild as Guild;
   const starboardChannel = guild.channels.cache.get(config.starboard_channel_id) as TextChannel | undefined;
-  if (!starboardChannel) return;
+  if (!starboardChannel) {
+    // Degraded-state contract: the starboard channel was deleted or is
+    // inaccessible. Surface it to the owner instead of returning silently.
+    await raiseStarboardChannelMissingAlert(supabase, guildId, config.starboard_channel_id);
+    return;
+  }
 
   // Check if we already have a starboard entry
   const { data: existing } = await supabase
@@ -186,6 +228,15 @@ export async function handleStarboardReaction(
           author_id: message.author?.id ?? 'unknown',
         });
       }
+
+      // Audit the state change: a message crossed the threshold and was posted.
+      eventBus.emit('starboard.post_created', guildId, {
+        sourceMessageId: message.id,
+        sourceChannelId: message.channel.id,
+        starboardMessageId: sbMsg.id,
+        authorId: message.author?.id ?? 'unknown',
+        starCount,
+      });
     } catch (err) {
       log.error('Failed to post to starboard channel:', { error: String(err) });
     }

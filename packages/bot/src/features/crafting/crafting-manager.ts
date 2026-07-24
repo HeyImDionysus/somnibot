@@ -12,6 +12,7 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { walletBalance, joinProp } from '../../utils/db-helpers.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Crafting');
 
@@ -247,6 +248,15 @@ export class CraftingManager {
           p_quantity: c.qty,
         })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
       }
+      // [game-economy-crafting] Owner alert + audit on the degradation branch
+      // (output-grant RPC failed after materials were consumed then refunded).
+      await this.raiseCraftDegradedAlert(userId, recipe.name)
+        .catch((e: unknown) => { log.warn('crafting degraded alert failed:', (e as Error)?.message ?? e); });
+      eventBus.emit('craft.failed', this.guild.id, {
+        userId,
+        recipeName: recipe.name,
+        reason: 'output_grant_failed',
+      });
       return {
         embed: new EmbedBuilder()
           .setDescription('❌ Failed to add crafted item to your inventory. Your materials have been refunded.')
@@ -270,6 +280,14 @@ export class CraftingManager {
 
     // Quest progress
     getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'craft').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+
+    // [game-economy-crafting] Append-only audit row for the successful craft
+    // state change (materials consumed → output granted).
+    eventBus.emit('craft.completed', this.guild.id, {
+      userId,
+      recipeName: recipe.name,
+      outputQty: recipe.output_qty,
+    });
 
     return {
       embed: new EmbedBuilder()
@@ -419,6 +437,22 @@ export class CraftingManager {
       return false;
     }
     return true;
+  }
+
+  /**
+   * [game-economy-crafting] Raise a degradation owner alert when the output-grant
+   * RPC fails after materials were consumed (and then refunded). Best effort —
+   * a failed alert never blocks the craft flow.
+   */
+  private async raiseCraftDegradedAlert(userId: string, recipeName: string): Promise<void> {
+    await this.supabase.from('alerts').insert({
+      guild_id: this.guild.id,
+      alert_type: 'crafting_degraded',
+      severity: 'warning',
+      title: 'Crafting degraded',
+      message: `Crafting "${recipeName}" failed to grant its output for ${userId}; materials were refunded.`,
+      metadata: { user_id: userId, recipe_name: recipeName },
+    });
   }
 
   private formatTime(seconds: number): string {

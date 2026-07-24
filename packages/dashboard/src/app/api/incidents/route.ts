@@ -10,8 +10,51 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
+
+/**
+ * Map an incident severity onto the alerts table's CHECK vocabulary
+ * ('info' | 'warning' | 'critical'). 'outage' has no alert equivalent, so it
+ * escalates to 'critical'.
+ */
+function toAlertSeverity(severity: string): 'info' | 'warning' | 'critical' {
+  if (severity === 'info' || severity === 'warning' || severity === 'critical') return severity;
+  return 'critical'; // 'outage'
+}
+
+/**
+ * Mirror a manual incident to the owner-facing surfaces: an append-only
+ * audit_logs row plus (on open) a row in the alerts table the owner dashboard
+ * reads. Never throws — observability must not break the incident write.
+ */
+async function mirrorIncidentToOwner(
+  admin: SupabaseClient,
+  args: {
+    guildId: string;
+    actorId: string;
+    action: 'incident.created' | 'incident.updated' | 'incident.resolved';
+    incidentId: string;
+    details: Record<string, unknown>;
+  },
+): Promise<void> {
+  try {
+    await admin.from('audit_logs').insert({
+      guild_id: args.guildId,
+      actor_type: 'dashboard',
+      actor_id: args.actorId,
+      action: args.action,
+      category: 'incidents',
+      target_type: 'incident',
+      target_id: args.incidentId,
+      details: args.details,
+      success: true,
+    });
+  } catch {
+    // audit write is best-effort
+  }
+}
 
 const incidentCreate = z.object({
   title: z.string().min(1).max(256).trim(),
@@ -137,6 +180,34 @@ export async function POST(request: NextRequest) {
       metadata: { severity: body.severity || 'warning', source: body.source || 'manual' },
     });
 
+    // Mirror to the owner: append-only audit trail + an owner-facing alert row.
+    // Previously a manual incident create/update/resolve was invisible to the
+    // owner surfaces (no audit_logs, no alert).
+    await mirrorIncidentToOwner(admin, {
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      action: 'incident.created',
+      incidentId: incident.id,
+      details: {
+        incident_number: nextNumber,
+        title: body.title,
+        severity: body.severity || 'warning',
+        source: body.source || 'manual',
+      },
+    });
+    try {
+      await admin.from('alerts').insert({
+        guild_id: ctx.guildId,
+        alert_type: 'incident_reported',
+        severity: toAlertSeverity(body.severity || 'warning'),
+        title: `Incident #${nextNumber}: ${body.title}`,
+        message: body.description || `A ${body.severity || 'warning'} incident was reported.`,
+        metadata: { incident_id: incident.id, incident_number: nextNumber, source: body.source || 'manual' },
+      });
+    } catch {
+      // owner-alert mirror is best-effort
+    }
+
     return NextResponse.json({ success: true, data: incident });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
@@ -202,6 +273,30 @@ export async function PATCH(request: NextRequest) {
       message: body.note || body.message || `Status changed to ${body.status || 'updated'}`,
       metadata: eventMeta,
     });
+
+    // Mirror the update/resolution to the owner: audit_logs always; on
+    // resolution, close out the owner-facing alert opened at creation.
+    const resolved = body.status === 'resolved';
+    await mirrorIncidentToOwner(admin, {
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      action: resolved ? 'incident.resolved' : 'incident.updated',
+      incidentId: body.id,
+      details: { status: body.status, severity: body.severity, ...eventMeta },
+    });
+    if (resolved) {
+      try {
+        await admin
+          .from('alerts')
+          .update({ resolved: true, resolved_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+          .eq('guild_id', ctx.guildId)
+          .eq('alert_type', 'incident_reported')
+          .eq('metadata->>incident_id', body.id)
+          .eq('resolved', false);
+      } catch {
+        // best-effort alert resolution
+      }
+    }
 
     return NextResponse.json({ success: true, data });
   } catch (e) {

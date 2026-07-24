@@ -9,6 +9,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { writeCommerceAudit } from '@/lib/commerce-audit';
 
 const sessionIdSchema = z.string().uuid('Session ID must be a valid UUID');
 
@@ -18,7 +19,7 @@ export async function DELETE(
 ) {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
+  const { guildId, discordId } = auth.ctx;
 
   const { id: rawId } = await params;
   const parsed = sessionIdSchema.safeParse(rawId);
@@ -57,6 +58,17 @@ export async function DELETE(
   if (error) {
     return dbError(error, 'license/sessions');
   }
+
+  // Append-only audit: owner remotely revoked a device session.
+  await writeCommerceAudit(supabase, {
+    guildId,
+    actorType: 'user',
+    actorId: discordId,
+    action: 'license.session_revoked',
+    targetType: 'license_session',
+    targetId: sessionId,
+    details: { reason: 'admin_revoked' },
+  });
 
   return NextResponse.json({ success: true });
 }

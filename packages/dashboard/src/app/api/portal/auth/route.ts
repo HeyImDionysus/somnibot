@@ -18,6 +18,7 @@ import { rateLimits } from '@/lib/api/rate-limit';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { dbError, apiServerError } from '@/lib/api/response';
+import { writeCommerceAudit } from '@/lib/commerce-audit';
 
 const portalAuthSchema = z.object({
   action: z.literal('login'),
@@ -119,6 +120,16 @@ export async function POST(request: NextRequest) {
       // Exchange code for verified Discord identity
       const discordUser = await exchangeCodeForUser(code, redirectUri);
       if (!discordUser) {
+        // Auditable refusal: OAuth exchange / identity lookup failed.
+        await writeCommerceAudit(admin, {
+          guildId: body.guild_id,
+          actorType: 'user',
+          actorId: 'unknown',
+          action: 'portal.login_denied',
+          targetType: 'portal_session',
+          details: { reason: 'discord_auth_failed', ipAddress: clientIp },
+          success: false,
+        });
         return NextResponse.json(
           { error: 'Discord authentication failed. Please try again.' },
           { status: 401 },
@@ -136,6 +147,16 @@ export async function POST(request: NextRequest) {
         .maybeSingle();
 
       if (!customer) {
+        // Auditable refusal: verified identity is not a customer in this guild.
+        await writeCommerceAudit(admin, {
+          guildId: body.guild_id,
+          actorType: 'user',
+          actorId: discordUser.id,
+          action: 'portal.login_denied',
+          targetType: 'portal_session',
+          details: { reason: 'no_account', discordId: discordUser.id, ipAddress: clientIp },
+          success: false,
+        });
         return NextResponse.json(
           { error: "No account found for this Discord user in this server's store." },
           { status: 404 },
@@ -184,6 +205,17 @@ export async function POST(request: NextRequest) {
         });
 
       if (error) return dbError(error, 'portal/auth');
+
+      // Auditable state change: a portal session was issued for this buyer.
+      await writeCommerceAudit(admin, {
+        guildId: customer.guild_id,
+        actorType: 'user',
+        actorId: discordUser.id,
+        action: 'portal.login_succeeded',
+        targetType: 'portal_session',
+        targetId: customer.id,
+        details: { discordId: discordUser.id, customerId: customer.id, ipAddress: clientIp },
+      });
 
       return NextResponse.json({
         success: true,

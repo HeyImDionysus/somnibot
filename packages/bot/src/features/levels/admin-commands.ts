@@ -121,6 +121,15 @@ export async function handleXpAdminCommand(
         break;
       }
 
+      client.eventBus.emit('xp.admin_adjusted', guildId, {
+        actorId: interaction.user.id,
+        targetId: targetUser.id,
+        operation: 'add',
+        amount,
+        newXp: result.new_xp as number,
+        newLevel: result.new_level as number,
+      });
+
       await interaction.editReply(
         `✅ Added **${amount.toLocaleString()} XP** to <@${targetUser.id}>. New total: **${(result.new_xp as number).toLocaleString()} XP** (Level ${result.new_level}).`,
       );
@@ -148,6 +157,15 @@ export async function handleXpAdminCommand(
       // Ensure XP doesn't go below 0 (RPC may handle this, but recalculate display)
       const newXp = Math.max(0, result.new_xp as number);
       const newLevel = result.new_level as number;
+
+      client.eventBus.emit('xp.admin_adjusted', guildId, {
+        actorId: interaction.user.id,
+        targetId: targetUser.id,
+        operation: 'remove',
+        amount,
+        newXp,
+        newLevel,
+      });
 
       await interaction.editReply(
         `✅ Removed **${amount.toLocaleString()} XP** from <@${targetUser.id}>. New total: **${newXp.toLocaleString()} XP** (Level ${newLevel}).`,
@@ -177,6 +195,15 @@ export async function handleXpAdminCommand(
         break;
       }
 
+      client.eventBus.emit('xp.admin_adjusted', guildId, {
+        actorId: interaction.user.id,
+        targetId: targetUser.id,
+        operation: 'set',
+        amount,
+        newXp: amount,
+        newLevel,
+      });
+
       await interaction.editReply(
         `✅ Set <@${targetUser.id}>'s XP to **${amount.toLocaleString()}** (Level ${newLevel}).`,
       );
@@ -203,6 +230,15 @@ export async function handleXpAdminCommand(
         await interaction.editReply('❌ Failed to reset XP. Please try again.');
         break;
       }
+
+      client.eventBus.emit('xp.admin_adjusted', guildId, {
+        actorId: interaction.user.id,
+        targetId: targetUser.id,
+        operation: 'reset',
+        amount: 0,
+        newXp: 0,
+        newLevel: 0,
+      });
 
       await interaction.editReply(`✅ Reset <@${targetUser.id}>'s XP to zero.`);
       break;

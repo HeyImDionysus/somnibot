@@ -47,6 +47,14 @@ interface MusicConfig {
   priorityVotingEnabled: boolean;    // a DJ's skip vote carries immediately
 }
 
+/** How a skip was resolved — recorded on the music.skipped audit event so the
+ *  fairness arbitration (DJ force / listener vote / self / DJ priority) is
+ *  observable in the append-only audit trail. */
+export type SkipMethod = 'dj_force' | 'vote' | 'self' | 'priority';
+
+/** Why playback was stopped and the queue torn down — recorded on music.stopped. */
+export type StopReason = 'command' | 'auto_leave' | 'inactivity' | 'connection_lost';
+
 const DEFAULT_CONFIG: MusicConfig = {
   defaultVolume: 50,
   maxQueueLength: 500,
@@ -227,6 +235,40 @@ export class MusicPlayerManager {
     return false;
   }
 
+  // ── Audit helpers ───────────────────────────────────────
+
+  /**
+   * [music-player-fairness] Record a denied fairness-gated control (a DJ-only
+   * action attempted by a non-DJ, or a queue move a member isn't allowed to
+   * make) on the append-only audit trail so enforcement is observable.
+   */
+  auditPermissionDenied(userId: string, action: string): void {
+    this.eventBus.emit('music.denied', this.guild.id, { userId, action });
+  }
+
+  /**
+   * [music-collaborative-queue] Store-outage lane: when the Valkey-backed queue
+   * store is unreachable, emit an audit event and persist a durable owner alert
+   * so an operator can see that playback is degraded. Best-effort — a failed
+   * alert insert never masks the original failure.
+   */
+  private async raiseStoreOutageAlert(userId: string, operation: string, err: unknown): Promise<void> {
+    const message = err instanceof Error ? err.message : String(err);
+    this.eventBus.emit('music.store_outage', this.guild.id, { userId, operation, error: message });
+    try {
+      await this.supabase.from('alerts').insert({
+        guild_id: this.guild.id,
+        alert_type: 'music_store_outage',
+        severity: 'warning',
+        title: 'Music queue store unavailable',
+        message: `The music queue store could not be reached during "${operation}". Playback is degraded until it recovers.`,
+        metadata: { user_id: userId, operation, error: message },
+      });
+    } catch (alertErr) {
+      log.warn('Failed to raise music store-outage alert:', (alertErr as Error)?.message ?? alertErr);
+    }
+  }
+
   // ── Core Playback ───────────────────────────────────────
 
   /** Search and play a track. Returns the queue entry or error message. */
@@ -236,22 +278,43 @@ export class MusicPlayerManager {
     voiceChannel: VoiceBasedChannel,
     textChannel: TextChannel,
   ): Promise<{ success: boolean; message?: string; entry?: QueueEntry; count?: number; playlistName?: string }> {
-    // Get or create queue
-    let queue = await this.queueManager.getQueue(this.guild.id);
-    const isNewQueue = !queue;
+    // Get or create queue. [music-collaborative-queue] The queue lives in the
+    // Valkey store; if that store is unreachable, raise a durable owner alert
+    // (store-outage lane) instead of letting the request fail silently.
+    let existingQueue: GuildQueue | null;
+    try {
+      existingQueue = await this.queueManager.getQueue(this.guild.id);
+    } catch (err) {
+      await this.raiseStoreOutageAlert(userId, 'load_queue', err);
+      return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
+    }
 
-    if (!queue) {
+    const isNewQueue = !existingQueue;
+    let queue: GuildQueue;
+    if (existingQueue) {
+      queue = existingQueue;
+    } else {
       queue = this.queueManager.createQueue(
         this.guild.id,
         voiceChannel.id,
         textChannel.id,
         this.config.defaultVolume,
       );
-      await this.queueManager.saveQueue(queue);
+      try {
+        await this.queueManager.saveQueue(queue);
+      } catch (err) {
+        await this.raiseStoreOutageAlert(userId, 'save_queue', err);
+        return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
+      }
     }
 
-    // Check queue size limit
+    // Check queue size limit — [music-collaborative-queue] capacity lane.
     if (queue.entries.length >= this.config.maxQueueLength) {
+      this.eventBus.emit('music.capacity_rejected', this.guild.id, {
+        userId,
+        reason: 'queue_full',
+        limit: this.config.maxQueueLength,
+      });
       return { success: false, message: `Queue is full (max ${this.config.maxQueueLength} tracks)` };
     }
 
@@ -259,6 +322,11 @@ export class MusicPlayerManager {
     const userQueueCount = queue.entries.filter((e) => e.requestedBy === userId).length;
     const MAX_PER_USER = 50;
     if (userQueueCount >= MAX_PER_USER) {
+      this.eventBus.emit('music.capacity_rejected', this.guild.id, {
+        userId,
+        reason: 'user_limit',
+        limit: MAX_PER_USER,
+      });
       return { success: false, message: `You've reached the per-user limit of ${MAX_PER_USER} queued tracks` };
     }
 
@@ -364,14 +432,35 @@ export class MusicPlayerManager {
     };
   }
 
-  /** Skip the current track. */
-  async skip(guildId: string): Promise<{ success: boolean; message: string }> {
+  /**
+   * Skip the current track. `context` carries the actor + fairness path so the
+   * skip can be audited; all skip entry points (DJ force, vote threshold, self,
+   * DJ priority) funnel through here so a single emit covers every skip.
+   */
+  async skip(
+    guildId: string,
+    context: { userId?: string; method?: SkipMethod } = {},
+  ): Promise<{ success: boolean; message: string }> {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, message: 'Nothing is playing' };
 
     await this.queueManager.clearVoteSkip(guildId);
 
+    // Capture the track being skipped for the audit trail before we advance.
+    const skipped = await this.queueManager.getCurrentTrack(guildId);
+
     const { track, queueEnded } = await this.queueManager.nextTrack(guildId);
+
+    // [music-player-fairness] Audit the skip outcome — proves which fairness
+    // path resolved the skip and who invoked it.
+    this.eventBus.emit('music.skipped', this.guild.id, {
+      userId: context.userId,
+      method: context.method ?? 'dj_force',
+      title: skipped?.title ?? 'Unknown',
+      author: skipped?.author ?? 'Unknown',
+      requestedBy: skipped?.requestedBy ?? 'unknown',
+      queueEnded: queueEnded || !track,
+    });
 
     if (queueEnded || !track) {
       await player.stopTrack();
@@ -397,14 +486,14 @@ export class MusicPlayerManager {
     // Self-skip: when enabled, the requester of the current track skips it
     // outright (no vote) — it's their own song.
     if (this.config.selfSkipEnabled && current && current.requestedBy === userId) {
-      return this.skip(guildId);
+      return this.skip(guildId, { userId, method: 'self' });
     }
 
     // Priority voting: when enabled AND a DJ role is actually configured, a DJ's
     // skip vote carries immediately. (Without a DJ role, isDJ() is true for
     // everyone, so there is no privileged group — fall through to a normal vote.)
     if (this.config.priorityVotingEnabled && this.config.djRoleId && (await this.isDJ(userId))) {
-      return this.skip(guildId);
+      return this.skip(guildId, { userId, method: 'priority' });
     }
 
     if (await this.queueManager.hasVotedSkip(guildId, userId)) {
@@ -420,7 +509,7 @@ export class MusicPlayerManager {
     const votes = await this.queueManager.addVoteSkip(guildId, userId);
 
     if (votes >= required) {
-      return this.skip(guildId);
+      return this.skip(guildId, { userId, method: 'vote' });
     }
 
     return {
@@ -429,9 +518,15 @@ export class MusicPlayerManager {
     };
   }
 
-  /** Stop playback and clear the queue. */
-  async stop(guildId: string): Promise<{ success: boolean; message: string }> {
+  /** Stop playback and clear the queue. `context` records who/what tore the
+   *  shared queue down so the lifecycle transition is auditable. */
+  async stop(
+    guildId: string,
+    context: { userId?: string; reason?: StopReason } = {},
+  ): Promise<{ success: boolean; message: string }> {
     const player = this.shoukaku.players.get(guildId);
+    // Snapshot the queue depth before teardown for the audit details.
+    const queueBeforeStop = await this.queueManager.getQueue(guildId);
     if (player) {
       await player.stopTrack();
       await this.shoukaku.leaveVoiceChannel(guildId);
@@ -439,6 +534,15 @@ export class MusicPlayerManager {
 
     await this.queueManager.destroyQueue(guildId);
     this.clearTimers(guildId);
+
+    // [music-collaborative-queue] Audit the queue teardown /
+    // [music-player-fairness] lifecycle stop so the shared session's end is
+    // observable, including automatic (empty-channel / inactivity) teardowns.
+    this.eventBus.emit('music.stopped', this.guild.id, {
+      userId: context.userId,
+      reason: context.reason ?? 'command',
+      trackCount: queueBeforeStop?.entries.length ?? 0,
+    });
 
     return { success: true, message: '⏹️ Stopped playback and cleared the queue' };
   }
@@ -583,9 +687,11 @@ export class MusicPlayerManager {
 
     if (!(await this.isDJ(userId))) {
       if (!this.config.requesterMoveEnabled) {
+        this.auditPermissionDenied(userId, 'move');
         return { success: false, message: 'Only a DJ can move tracks here.' };
       }
       if (entry.requestedBy !== userId) {
+        this.auditPermissionDenied(userId, 'move');
         return { success: false, message: 'You can only move tracks you requested.' };
       }
     }
@@ -723,14 +829,14 @@ export class MusicPlayerManager {
     switch (buttonId) {
       case 'music:pause_resume': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) return { message: '❌ You need the DJ role to do that' };
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:pause_resume'); return { message: '❌ You need the DJ role to do that' }; }
         const result = await this.togglePause(guildId);
         return { message: result.message };
       }
       case 'music:skip': {
         const isDj = await this.isDJ(userId);
         if (isDj) {
-          const result = await this.skip(guildId);
+          const result = await this.skip(guildId, { userId, method: 'dj_force' });
           return { message: result.message };
         }
         const result = await this.voteSkip(guildId, userId);
@@ -738,32 +844,32 @@ export class MusicPlayerManager {
       }
       case 'music:stop': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) return { message: '❌ You need the DJ role to stop playback' };
-        const result = await this.stop(guildId);
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:stop'); return { message: '❌ You need the DJ role to stop playback' }; }
+        const result = await this.stop(guildId, { userId, reason: 'command' });
         return { message: result.message };
       }
       case 'music:shuffle': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) return { message: '❌ You need the DJ role to shuffle' };
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:shuffle'); return { message: '❌ You need the DJ role to shuffle' }; }
         const result = await this.shuffle(guildId);
         return { message: result.message };
       }
       case 'music:loop': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) return { message: '❌ You need the DJ role to change loop mode' };
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:loop'); return { message: '❌ You need the DJ role to change loop mode' }; }
         const result = await this.cycleLoopMode(guildId);
         return { message: result.message };
       }
       // V53 Phase 3 (3.6): Volume buttons
       case 'music:vol_down': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) return { message: '❌ You need the DJ role to change volume' };
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:vol_down'); return { message: '❌ You need the DJ role to change volume' }; }
         const result = await this.setVolume(guildId, Math.max(0, (await this.queueManager.getQueue(guildId))?.volume ?? 50) - 10);
         return { message: result.message };
       }
       case 'music:vol_up': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) return { message: '❌ You need the DJ role to change volume' };
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:vol_up'); return { message: '❌ You need the DJ role to change volume' }; }
         const result = await this.setVolume(guildId, Math.min(100, ((await this.queueManager.getQueue(guildId))?.volume ?? 50) + 10));
         return { message: result.message };
       }
@@ -984,6 +1090,13 @@ export class MusicPlayerManager {
 
       // All reconnect attempts failed — clean up
       log.error('Failed to reconnect after 3 attempts — destroying queue');
+      // [music-collaborative-queue] Audit the involuntary teardown so a lost
+      // voice connection that drops the shared queue is observable.
+      this.eventBus.emit('music.stopped', this.guild.id, {
+        userId: undefined,
+        reason: 'connection_lost',
+        trackCount: queue.entries.length,
+      });
       await this.queueManager.destroyQueue(this.guild.id);
       this.clearTimers(this.guild.id);
     });
@@ -998,7 +1111,7 @@ export class MusicPlayerManager {
       setTimeout(async () => {
         try {
           log.info(`Auto-leaving voice in guild ${guildId} (empty channel timeout)`);
-          await this.stop(guildId);
+          await this.stop(guildId, { reason: 'auto_leave' });
         } catch (err) {
           log.error(`Auto-leave error for guild ${guildId}:`, err);
         }
@@ -1021,7 +1134,7 @@ export class MusicPlayerManager {
       setTimeout(async () => {
         try {
           log.info(`Auto-destroying player in guild ${guildId} (inactivity timeout)`);
-          await this.stop(guildId);
+          await this.stop(guildId, { reason: 'inactivity' });
         } catch (err) {
           log.error(`Inactivity auto-stop error for guild ${guildId}:`, err);
         }

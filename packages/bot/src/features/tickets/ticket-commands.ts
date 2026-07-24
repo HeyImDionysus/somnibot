@@ -93,7 +93,7 @@ export async function handleTicketCommand(
       const reason = interaction.options.getString('reason') || undefined;
 
       // Generate transcript before closing
-      const transcriptResult = await generateTranscript(guild, ticket, client.supabase);
+      const transcriptResult = await generateTranscript(guild, ticket, client.supabase, client.eventBus);
       if (!transcriptResult.success) {
         log.warn('Transcript generation failed during close:', transcriptResult.error);
       }
@@ -156,7 +156,7 @@ export async function handleTicketCommand(
 
     case 'transcript': {
       await interaction.deferReply({ ephemeral: true });
-      const result = await generateTranscript(guild, ticket, client.supabase);
+      const result = await generateTranscript(guild, ticket, client.supabase, client.eventBus);
 
       if (!result.success) {
         await interaction.editReply(`❌ ${result.error}`);

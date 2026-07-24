@@ -13,6 +13,7 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { walletBalance, joinProp } from '../../utils/db-helpers.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Farming');
 
@@ -347,6 +348,15 @@ export class FarmingManager {
           .update({ harvested: false })
           .eq('id', plot.id);
       }
+      // [game-economy-farming] Owner alert + audit on the payout-revert failure
+      // branch so the reverted harvest is operator-visible.
+      await this.raiseFarmPayoutAlert(userId, totalEarnings)
+        .catch((e: unknown) => { log.warn('farming payout alert failed:', (e as Error)?.message ?? e); });
+      eventBus.emit('farm.payout_failed', this.guild.id, {
+        userId,
+        amount: totalEarnings,
+        cropCount: harvested.length,
+      });
       return {
         embed: new EmbedBuilder()
           .setDescription('❌ Harvest payout failed — your crops have been restored. Try again later.')
@@ -368,6 +378,14 @@ export class FarmingManager {
 
     // Quest progress — count each harvested crop
     getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'farm', harvested.length).catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+
+    // [game-economy-farming] Append-only audit row for the harvest state change
+    // (crops paid out to the wallet).
+    eventBus.emit('farm.harvested', this.guild.id, {
+      userId,
+      cropCount: harvested.length,
+      earnings: totalEarnings,
+    });
 
     return {
       embed: new EmbedBuilder()
@@ -566,6 +584,22 @@ export class FarmingManager {
       return false;
     }
     return true;
+  }
+
+  /**
+   * [game-economy-farming] Raise a payout-revert owner alert when a harvest
+   * credit fails and the crops are restored, so an operator knows the failure
+   * happened. Best effort — a failed alert never blocks the harvest flow.
+   */
+  private async raiseFarmPayoutAlert(userId: string, amount: number): Promise<void> {
+    await this.supabase.from('alerts').insert({
+      guild_id: this.guild.id,
+      alert_type: 'farming_payout_reverted',
+      severity: 'warning',
+      title: 'Farming payout reverted',
+      message: `A farm harvest payout of ${amount} failed for ${userId}; the crops were restored for retry.`,
+      metadata: { user_id: userId, amount },
+    });
   }
 
   // V49-L2: Return success/failure so callers can handle payout errors

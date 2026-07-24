@@ -18,6 +18,7 @@ import type { DbGuildConfig, TriviaDifficulty } from '@somnibot/shared';
 import type { Redis } from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Trivia');
 
@@ -389,6 +390,7 @@ export class TriviaManager {
     // was only logged, but the embed still showed the user as a winner).
     const winners: Array<{ userId: string; paid: boolean }> = [];
     const losers: string[] = [];
+    let totalPaid = 0;
 
     for (const [userId, choice] of round.answers) {
       if (choice === round.correctIndex) {
@@ -403,7 +405,25 @@ export class TriviaManager {
           p_user_id: userId,
           p_amount: payout,
         });
-        if (triviaPayErr) log.error(`Failed to pay ${userId}:`, triviaPayErr.message);
+        if (triviaPayErr) {
+          log.error(`Failed to pay ${userId}:`, triviaPayErr.message);
+          // [game-economy-trivia] Owner alert + operator-retry queue + audit on the
+          // failed-winner-payout branch so the owed winner is not silently lost.
+          await this.raiseTriviaPayoutAlert(guildId, userId, payout)
+            .catch((e: unknown) => { log.warn('trivia payout alert failed:', (e as Error)?.message ?? e); });
+          await Promise.resolve(this.supabase.from('bot_action_queue').insert({
+            guild_id: guildId,
+            action: 'trivia_payout_retry',
+            payload: { user_id: userId, amount: payout, reason: 'trivia_payout_failed', original_error: triviaPayErr.message },
+            status: 'pending',
+          })).catch((e: unknown) => { log.warn('trivia payout retry-queue failed:', (e as Error)?.message ?? e); });
+          eventBus.emit('trivia.payout_failed', guildId, {
+            userId,
+            amount: payout,
+          });
+        } else {
+          totalPaid += payout;
+        }
         winners.push({ userId, paid: !triviaPayErr });
         getQuestsManager(guildId)?.trackProgress(guildId, userId, 'trivia').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
       } else {
@@ -414,6 +434,16 @@ export class TriviaManager {
 
     const paidWinners = winners.filter((w) => w.paid);
     const failedWinners = winners.filter((w) => !w.paid);
+
+    // [game-economy-trivia] Append-only audit row for the round-completed state
+    // change (winners paid, total payout, participation).
+    eventBus.emit('trivia.completed', guildId, {
+      channelId,
+      answers: round.answers.size,
+      winners: winners.length,
+      paidWinners: paidWinners.length,
+      totalPayout: totalPaid,
+    });
 
     const labels = ['🅰️', '🅱️', '🅲', '🅳'];
     let resultText =
@@ -441,5 +471,21 @@ export class TriviaManager {
     } catch {
       // the reply/message may have been deleted or expired
     }
+  }
+
+  /**
+   * [game-economy-trivia] Raise a payout-failed owner alert when a correct
+   * answer's reward credit fails, so an operator knows a winner is still owed
+   * their prize (a retry job is queued in bot_action_queue). Best effort.
+   */
+  private async raiseTriviaPayoutAlert(guildId: string, userId: string, amount: number): Promise<void> {
+    await this.supabase.from('alerts').insert({
+      guild_id: guildId,
+      alert_type: 'trivia_payout_failed',
+      severity: 'warning',
+      title: 'Trivia payout failed',
+      message: `A trivia reward of ${amount} failed to credit ${userId}. A retry has been queued.`,
+      metadata: { user_id: userId, amount },
+    });
   }
 }

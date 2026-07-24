@@ -142,11 +142,17 @@ describe('PUT /api/music', () => {
   it('returns 400 when no valid fields provided', async () => {
     mockAuthSuccess();
     (parseBody as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, data: {} });
+    // The route now writes a music.config_rejected audit row on the reject path.
+    const chain = { insert: vi.fn().mockResolvedValue({ error: null }) };
+    mockFrom.mockReturnValue(chain);
 
     const res = await PUT(makePutRequest() as never);
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toContain('No valid fields');
+    expect(chain.insert).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'music.config_rejected', success: false }),
+    );
   });
 
   it('clamps volume to 0-150 range', async () => {
@@ -158,6 +164,7 @@ describe('PUT /api/music', () => {
 
     const chain = {
       upsert: vi.fn().mockResolvedValue({ error: null }),
+      insert: vi.fn().mockResolvedValue({ error: null }),
     };
     mockFrom.mockReturnValue(chain);
 
@@ -177,6 +184,7 @@ describe('PUT /api/music', () => {
 
     const chain = {
       upsert: vi.fn().mockResolvedValue({ error: null }),
+      insert: vi.fn().mockResolvedValue({ error: null }),
     };
     mockFrom.mockReturnValue(chain);
 
@@ -184,6 +192,10 @@ describe('PUT /api/music', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.success).toBe(true);
+    // The accepted save is audited (music.config_updated).
+    expect(chain.insert).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'music.config_updated', success: true }),
+    );
   });
 
   // ── Out-of-range timers are REJECTED, not silently clamped ──

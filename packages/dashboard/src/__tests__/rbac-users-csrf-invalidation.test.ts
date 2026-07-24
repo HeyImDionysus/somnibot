@@ -183,14 +183,17 @@ describe('DELETE /api/rbac/users — CSRF invalidation on role removal', () => {
       isOwner: true,
     });
     // Route calls: admin.from(...).delete().eq('id', ...).eq('guild_id', ...)
-    // The SECOND .eq() is terminal and must resolve { error: null }.
-    let eqCall = 0;
+    //   .select('discord_id, role_id').maybeSingle() → the revoked row, then a
+    // best-effort audit + owner-alert insert. Provide a full chain.
     const deleteChain: Record<string, ReturnType<typeof vi.fn>> = {
       delete: vi.fn().mockReturnThis(),
-      eq: vi.fn().mockImplementation(() => {
-        eqCall++;
-        return eqCall >= 2 ? Promise.resolve({ error: null }) : deleteChain;
+      eq: vi.fn().mockReturnThis(),
+      select: vi.fn().mockReturnThis(),
+      maybeSingle: vi.fn().mockResolvedValue({
+        data: { discord_id: '222222222222222222', role_id: '00000000-0000-0000-0000-000000000001' },
+        error: null,
       }),
+      insert: vi.fn().mockResolvedValue({ error: null }),
     };
     mockSupabase.from.mockReturnValue(deleteChain);
 

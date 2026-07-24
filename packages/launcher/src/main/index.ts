@@ -10,7 +10,8 @@ import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { getConfig, saveConfig, buildEnvVars, type LauncherConfig } from './config-store.js';
+import { getConfig, saveConfig, buildEnvVars, setKeychainFallbackListener, type LauncherConfig } from './config-store.js';
+import { writeLauncherAuditLog, resolveLauncherGuildId, type LauncherAuditEntry } from './audit-log.js';
 import {
   REGULAR_LOCAL_OPERATOR_DASHBOARD_URL,
   getLauncherLocalStartBlocker,
@@ -78,6 +79,23 @@ let sessionToken: string | null = null;
 let lastStartedPayPalConfig: PayPalRuntimeConfig | null = null;
 const activeVpsDeployment = new VpsDeploymentRunGate();
 const MASKED_SECRET = '••••••••';
+
+/**
+ * [infrastructure-launcher] Fire-and-forget durable audit for launcher-side
+ * lifecycle/security operations. Resolves the current Supabase creds + target
+ * guild from config at call time and writes an audit_logs row (best-effort).
+ */
+function recordLauncherAudit(entry: LauncherAuditEntry): void {
+  const cfg = getConfig();
+  void writeLauncherAuditLog(
+    {
+      supabaseUrl: cfg.supabaseUrl,
+      supabaseSecretKey: cfg.supabaseSecretKey,
+      guildId: resolveLauncherGuildId(cfg),
+    },
+    entry,
+  );
+}
 const DASHBOARD_SETUP_SNAPSHOT_CACHE_MS = 5_000;
 let dashboardSetupSnapshotCache: {
   loadedAt: number;
@@ -1191,6 +1209,7 @@ function registerIpcHandlers(): void {
       }),
       createCommandRunner: createVpsCommandRunner,
       runGate: activeVpsDeployment,
+      recordAudit: recordLauncherAudit,
     });
   });
 
@@ -1337,6 +1356,19 @@ app.whenReady().then(async () => {
   // Phase 6: Clean up stale processes from a previous crash
   cleanupStaleProcesses();
 
+  // [infrastructure-launcher] Persist a durable audit row if the OS keychain is
+  // unavailable and credentials fall back to plaintext storage.
+  setKeychainFallbackListener(() => {
+    recordLauncherAudit({
+      action: 'launcher.keychain.unavailable',
+      category: 'security',
+      targetType: 'credential_store',
+      details: { fallback: 'plaintext', platform: process.platform },
+      success: false,
+      errorMessage: 'OS keychain (safeStorage) unavailable — sensitive credentials stored in plaintext.',
+    });
+  });
+
   registerIpcHandlers();
   await createWindow();
 
@@ -1348,7 +1380,7 @@ app.whenReady().then(async () => {
   });
 
   // Auto-updater — must await so IPC handlers are registered before renderer calls them
-  await initUpdater();
+  await initUpdater({ recordAudit: recordLauncherAudit });
 });
 
 // Second instance: focus the existing window

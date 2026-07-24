@@ -23,6 +23,7 @@ import {
   type MessageActionRowComponentBuilder,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('ButtonRoles');
@@ -57,6 +58,7 @@ const STYLE_MAP: Record<string, ButtonStyle> = {
 export async function handleButtonRoleInteraction(
   interaction: ButtonInteraction,
   supabase: SupabaseClient,
+  eventBus: PlatformEventBus = defaultEventBus,
 ): Promise<boolean> {
   const customId = interaction.customId;
   if (!customId.startsWith('btnrole:')) return false;
@@ -132,6 +134,12 @@ export async function handleButtonRoleInteraction(
   try {
     if (hasRole) {
       await member.roles.remove(roleId, 'Button role toggle');
+      eventBus.emit('role.lost', guild.id, {
+        discordId: member.id,
+        roleId,
+        roleName: guild.roles.cache.get(roleId)?.name ?? roleId,
+        source: 'bot',
+      });
       await interaction.reply({
         content: `✅ Removed <@&${roleId}>.`,
         ephemeral: true,
@@ -152,12 +160,28 @@ export async function handleButtonRoleInteraction(
             .map((e) => e.role_id)
             .filter((rid) => member.roles.cache.has(rid));
           for (const rid of rolesToRemove) {
-            await member.roles.remove(rid, 'Button role exclusive group swap').catch((e: unknown) => { log.warn('Role operation failed:', (e as Error)?.message ?? e); });
+            const removed = await member.roles.remove(rid, 'Button role exclusive group swap')
+              .then(() => true)
+              .catch((e: unknown) => { log.warn('Role operation failed:', (e as Error)?.message ?? e); return false; });
+            if (removed) {
+              eventBus.emit('role.lost', guild.id, {
+                discordId: member.id,
+                roleId: rid,
+                roleName: guild.roles.cache.get(rid)?.name ?? rid,
+                source: 'bot',
+              });
+            }
           }
         }
       }
 
       await member.roles.add(roleId, 'Button role toggle');
+      eventBus.emit('role.gained', guild.id, {
+        discordId: member.id,
+        roleId,
+        roleName: guild.roles.cache.get(roleId)?.name ?? roleId,
+        source: 'bot',
+      });
       await interaction.reply({
         content: `✅ Added <@&${roleId}>.`,
         ephemeral: true,

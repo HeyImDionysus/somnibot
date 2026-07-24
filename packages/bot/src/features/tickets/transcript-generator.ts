@@ -11,9 +11,44 @@ import type { TextChannel, Message, Collection, Snowflake, Guild, AttachmentBuil
 import { AttachmentBuilder as DiscordAttachmentBuilder } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbTicket, DbTicketPanel } from '@somnibot/shared';
+import type { PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Transcript');
+
+/**
+ * Report a transcript-generation failure: raise an owner alert (alerts table)
+ * and emit a 'ticket.transcript_failed' audit event. Previously these branches
+ * only log.error'd and returned an error string, so a failed transcript (DB
+ * outage, fetch error) was invisible to the owner and left no audit trail.
+ */
+async function reportTranscriptFailure(
+  supabase: SupabaseClient,
+  eventBus: PlatformEventBus | undefined,
+  guildId: string,
+  ticket: DbTicket,
+  errorMessage: string,
+): Promise<void> {
+  eventBus?.emit('ticket.transcript_failed', guildId, {
+    ticketId: ticket.id,
+    ticketNumber: ticket.ticket_number,
+    error: errorMessage,
+  });
+  try {
+    await supabase.from('alerts').insert({
+      guild_id: guildId,
+      alert_type: 'ticket_transcript_failed',
+      severity: 'warning',
+      title: 'Ticket transcript could not be generated',
+      message:
+        `The transcript for ticket #${ticket.ticket_number} could not be generated/saved: ${errorMessage}. ` +
+        `The conversation record may be missing.`,
+      metadata: { ticket_id: ticket.id, ticket_number: ticket.ticket_number, error: errorMessage },
+    });
+  } catch (alertErr) {
+    log.error('Failed to write transcript-failure alert:', { error: String(alertErr) });
+  }
+}
 
 interface TranscriptMessage {
   author: {
@@ -324,6 +359,7 @@ export async function generateTranscript(
   guild: Guild,
   ticket: DbTicket,
   supabase: SupabaseClient,
+  eventBus?: PlatformEventBus,
 ): Promise<{ success: boolean; html?: string; error?: string }> {
   if (!ticket.channel_id) {
     return { success: false, error: 'Ticket has no channel.' };
@@ -352,6 +388,7 @@ export async function generateTranscript(
 
     if (dbError) {
       log.error('Failed to save transcript:', dbError.message);
+      await reportTranscriptFailure(supabase, eventBus, guild.id, ticket, dbError.message);
       return { success: false, error: 'Failed to save transcript.' };
     }
 
@@ -401,6 +438,7 @@ export async function generateTranscript(
     return { success: true, html };
   } catch (err) {
     log.error('Transcript generation failed:', { error: String(err) });
+    await reportTranscriptFailure(supabase, eventBus, guild.id, ticket, String(err));
     return { success: false, error: 'Transcript generation failed.' };
   }
 }

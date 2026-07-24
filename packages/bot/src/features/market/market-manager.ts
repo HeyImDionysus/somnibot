@@ -12,6 +12,7 @@ import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Market');
 
@@ -203,6 +204,15 @@ export class MarketManager {
         .setDescription(`❌ You don't have enough **${itemName}** in your inventory.`)
         .setColor(0xff0000);
     }
+
+    // [game-economy-shop-market] Append-only audit row for the listing state change.
+    eventBus.emit('market.listed', this.guild.id, {
+      sellerId: userId,
+      listingId: result.listing.id,
+      itemName: invEntry.economy_items.name,
+      quantity,
+      pricePerUnit,
+    });
 
     return new EmbedBuilder()
       .setTitle('📦 Item Listed!')
@@ -401,6 +411,17 @@ export class MarketManager {
     // Quest progress — only on a genuinely new (non-replayed) trade.
     if (!result.replayed) {
       getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'market_trade').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+      // [game-economy-shop-market] Append-only audit row for the buy state change
+      // (only a genuinely-new, non-replayed settlement moves money/inventory).
+      eventBus.emit('market.bought', this.guild.id, {
+        buyerId: userId,
+        sellerId: listing.seller_id,
+        listingId: listing.id,
+        itemName: result.item_name ?? listing.item_name,
+        quantity: buyQty,
+        totalCost,
+        fee,
+      });
     }
 
     // V5 Audit §4.2: Inform user when fewer items were purchased than requested
@@ -524,6 +545,14 @@ export class MarketManager {
         )
         .setColor(0xff9800);
     }
+
+    // [game-economy-shop-market] Append-only audit row for the cancel state change.
+    eventBus.emit('market.cancelled', this.guild.id, {
+      sellerId: userId,
+      listingId: row.id,
+      itemName: row.item_name,
+      quantity: row.remaining,
+    });
 
     return new EmbedBuilder()
       .setTitle('🗑️ Listing Cancelled')

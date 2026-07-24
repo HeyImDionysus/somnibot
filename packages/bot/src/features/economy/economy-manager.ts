@@ -14,6 +14,7 @@ import type Valkey from 'iovalkey';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { randomInt } from 'node:crypto';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Economy');
 
@@ -511,6 +512,16 @@ export class EconomyManager {
     // Credit wallet — V50-L2: handle null (RPC failure)
     const updated = await this.creditWallet(userId, totalAmount);
     if (!updated) {
+      // [game-economy-wallet-rewards] Outage lane: the reward credit RPC failed.
+      // Raise an owner alert + append-only audit event so the dropped reward is
+      // observable (the cooldown slot was already claimed for this window).
+      await this.raiseRewardOutageAlert(userId, type, totalAmount)
+        .catch((e: unknown) => { log.warn('reward outage alert failed', { detail: (e as Error)?.message ?? e }); });
+      eventBus.emit('economy.reward_failed', this.guild.id, {
+        userId,
+        rewardType: type,
+        amount: totalAmount,
+      });
       const wallet = await this.getOrCreateWallet(userId);
       return { success: false, amount: 0, balance: wallet, message: `❌ Failed to credit your ${type} reward. Please try again.` };
     }
@@ -545,6 +556,15 @@ export class EconomyManager {
 
     // Log
     await this.logEconomyEvent(userId, `${type} claim`, totalAmount);
+
+    // [game-economy-wallet-rewards] Central append-only audit row for the timed
+    // reward-amount lane (daily/weekly/monthly claim credited).
+    eventBus.emit('economy.reward_claimed', this.guild.id, {
+      userId,
+      rewardType: type,
+      amount: totalAmount,
+      streak: currentStreak,
+    });
 
     let msg = `${cfg.currency_emoji} You claimed your **${type}** reward: **+${totalAmount.toLocaleString()} ${cfg.currency_name}**`;
     if (streakBonus > 0) {
@@ -1343,6 +1363,22 @@ export class EconomyManager {
     } catch (err) {
       log.error('Failed to record transaction (exception)', { detail: err });
     }
+  }
+
+  /**
+   * [game-economy-wallet-rewards] Raise an owner alert when a timed-reward credit
+   * fails (outage lane), so an operator knows a member's daily/weekly/monthly
+   * reward was dropped for this window. Best effort — never blocks the claim flow.
+   */
+  private async raiseRewardOutageAlert(userId: string, type: string, amount: number): Promise<void> {
+    await this.supabase.from('alerts').insert({
+      guild_id: this.guild.id,
+      alert_type: 'economy_reward_outage',
+      severity: 'warning',
+      title: 'Economy reward credit failed',
+      message: `A ${type} reward of ${amount} failed to credit ${userId}. The claim cooldown was consumed for this window.`,
+      metadata: { user_id: userId, reward_type: type, amount },
+    });
   }
 
   private async logEconomyEvent(userId: string, action: string, amount: number): Promise<void> {

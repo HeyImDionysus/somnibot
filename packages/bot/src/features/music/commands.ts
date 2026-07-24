@@ -295,7 +295,7 @@ async function handleSkip(
   const isDj = await musicPlayer.isDJ(interaction.user.id);
 
   if (isDj) {
-    const result = await musicPlayer.skip(guildId);
+    const result = await musicPlayer.skip(guildId, { userId: interaction.user.id, method: 'dj_force' });
     await interaction.reply({
       embeds: [buildMusicInfoEmbed(result.message)],
     });
@@ -316,6 +316,7 @@ async function handleStop(
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
+    musicPlayer.auditPermissionDenied(interaction.user.id, 'stop');
     await interaction.reply({
       embeds: [buildMusicErrorEmbed('You need the DJ role to stop playback')],
       ephemeral: true,
@@ -323,7 +324,7 @@ async function handleStop(
     return;
   }
 
-  const result = await musicPlayer.stop(guildId);
+  const result = await musicPlayer.stop(guildId, { userId: interaction.user.id, reason: 'command' });
   await interaction.reply({
     embeds: [buildMusicInfoEmbed(result.message)],
   });
@@ -384,6 +385,7 @@ async function handleVolume(
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
+    musicPlayer.auditPermissionDenied(interaction.user.id, 'volume');
     await interaction.reply({
       embeds: [buildMusicErrorEmbed('You need the DJ role to change the volume')],
       ephemeral: true,
@@ -407,6 +409,7 @@ async function handleLoop(
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
+    musicPlayer.auditPermissionDenied(interaction.user.id, 'loop');
     await interaction.reply({
       embeds: [buildMusicErrorEmbed('You need the DJ role to change the loop mode')],
       ephemeral: true,
@@ -428,6 +431,7 @@ async function handleShuffle(
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
+    musicPlayer.auditPermissionDenied(interaction.user.id, 'shuffle');
     await interaction.reply({
       embeds: [buildMusicErrorEmbed('You need the DJ role to shuffle the queue')],
       ephemeral: true,
@@ -450,6 +454,7 @@ async function handleSeek(
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
+    musicPlayer.auditPermissionDenied(interaction.user.id, 'seek');
     await interaction.reply({
       embeds: [buildMusicErrorEmbed('You need the DJ role to seek')],
       ephemeral: true,
@@ -483,6 +488,7 @@ async function handleRemove(
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
+    musicPlayer.auditPermissionDenied(interaction.user.id, 'remove');
     await interaction.reply({
       embeds: [buildMusicErrorEmbed('You need the DJ role to remove tracks')],
       ephemeral: true,
@@ -527,6 +533,7 @@ async function handlePause(
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
+    musicPlayer.auditPermissionDenied(interaction.user.id, 'pause');
     await interaction.reply({
       embeds: [buildMusicErrorEmbed('You need the DJ role to pause/resume')],
       ephemeral: true,
@@ -549,6 +556,7 @@ async function handleFilter(
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
+    musicPlayer.auditPermissionDenied(interaction.user.id, 'filter');
     await interaction.reply({
       embeds: [buildMusicErrorEmbed('You need the DJ role to change filters')],
       ephemeral: true,

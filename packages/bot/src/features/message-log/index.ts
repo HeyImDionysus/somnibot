@@ -34,6 +34,88 @@ const CONFIG_TTL = 60_000;
 // capture), and a disabled guild could transiently inherit an enabled config.
 const _configCache = new Map<string, { config: MessageLogConfig; time: number }>();
 
+// Last config we emitted an audit event for, per guild. Kept SEPARATE from the
+// TTL cache (which invalidateMessageLogCache clears) so we can diff a freshly
+// re-read config against the previously-audited one and emit exactly one
+// 'message_log.config_updated' audit row per real change (observability-gap:
+// message-log config changes wrote no audit_logs row).
+const _lastAuditedConfig = new Map<string, MessageLogConfig>();
+
+// Throttle for the DEPFAIL degradation alert/audit so a persistently-down DB
+// doesn't emit an alert on every message event.
+const DEGRADED_NOTIFY_TTL = 5 * 60_000;
+const _degradedNotified = new Map<string, number>();
+
+/** Shallow value-equality for the audited config fields. */
+function configsEqual(a: MessageLogConfig, b: MessageLogConfig): boolean {
+  return (
+    a.message_log_enabled === b.message_log_enabled &&
+    a.message_log_channel_id === b.message_log_channel_id &&
+    a.message_log_edits_enabled === b.message_log_edits_enabled &&
+    a.message_log_deletes_enabled === b.message_log_deletes_enabled &&
+    a.message_log_ignored_channel_ids.join(',') === b.message_log_ignored_channel_ids.join(',')
+  );
+}
+
+/**
+ * Append-only audit: emit 'message_log.config_updated' the first time a
+ * freshly-read config differs from the previously-audited one. The first load
+ * for a guild only seeds the baseline (no emit). AuditService maps the event to
+ * a moderation audit_logs row carrying guild + before/after diff.
+ */
+function maybeAuditConfigChange(client: SomniClient, guildId: string, config: MessageLogConfig): void {
+  const prev = _lastAuditedConfig.get(guildId);
+  _lastAuditedConfig.set(guildId, config);
+  if (!prev || configsEqual(prev, config)) return;
+
+  const changed: Record<string, unknown> = {};
+  for (const key of Object.keys(config) as (keyof MessageLogConfig)[]) {
+    if (JSON.stringify(prev[key]) !== JSON.stringify(config[key])) {
+      changed[key] = config[key];
+    }
+  }
+
+  client.eventBus.emit('message_log.config_updated', guildId, {
+    changedBy: 'dashboard',
+    before: { ...prev },
+    after: { ...config },
+    changes: changed,
+  });
+}
+
+/**
+ * DEPFAIL degradation: the guild_config read failed, so message logging silently
+ * falls back to disabled. Raise a throttled owner alert (alerts table) and emit
+ * a 'message_log.degraded' audit event so the outage is DB-observable instead of
+ * invisible.
+ */
+async function notifyMessageLogDegraded(client: SomniClient, guildId: string, errorMessage: string): Promise<void> {
+  const now = Date.now();
+  const last = _degradedNotified.get(guildId);
+  if (last && now - last < DEGRADED_NOTIFY_TTL) return;
+  _degradedNotified.set(guildId, now);
+
+  client.eventBus.emit('message_log.degraded', guildId, {
+    error: errorMessage,
+    reason: 'config_fetch_failed',
+  });
+
+  try {
+    await client.supabase.from('alerts').insert({
+      guild_id: guildId,
+      alert_type: 'message_log_degraded',
+      severity: 'warning',
+      title: 'Message logging degraded',
+      message:
+        `The message-log config could not be read from the database (${errorMessage}). ` +
+        `Edit/delete logging is disabled until the database recovers.`,
+      metadata: { error: errorMessage, reason: 'config_fetch_failed' },
+    });
+  } catch (alertErr) {
+    log.error('Failed to write message-log degraded alert:', { error: String(alertErr) });
+  }
+}
+
 export async function loadConfig(client: SomniClient, guildId: string): Promise<MessageLogConfig> {
   const now = Date.now();
   const cached = _configCache.get(guildId);
@@ -41,11 +123,28 @@ export async function loadConfig(client: SomniClient, guildId: string): Promise<
     return cached.config;
   }
 
-  const { data } = await client.supabase
+  const { data, error } = await client.supabase
     .from('guild_config')
     .select('message_log_enabled, message_log_channel_id, message_log_edits_enabled, message_log_deletes_enabled, message_log_ignored_channel_ids')
     .eq('guild_id', guildId)
     .maybeSingle();
+
+  if (error) {
+    // DEPFAIL: config unknown — surface the degradation, then return safe
+    // defaults WITHOUT caching or drift-auditing (we must not treat an unknown
+    // config as a real 'changed to disabled' transition).
+    await notifyMessageLogDegraded(client, guildId, error.message);
+    return {
+      message_log_enabled: false,
+      message_log_channel_id: null,
+      message_log_edits_enabled: true,
+      message_log_deletes_enabled: true,
+      message_log_ignored_channel_ids: [],
+    };
+  }
+
+  // Successful read — clear any prior degradation throttle for this guild.
+  _degradedNotified.delete(guildId);
 
   const config: MessageLogConfig = {
     message_log_enabled: data?.message_log_enabled ?? false,
@@ -58,6 +157,8 @@ export async function loadConfig(client: SomniClient, guildId: string): Promise<
       ? (data.message_log_ignored_channel_ids as string[])
       : [],
   };
+  // Emit an audit event when the persisted config actually changed.
+  maybeAuditConfigChange(client, guildId, config);
   _configCache.set(guildId, { config, time: now });
   return config;
 }
@@ -216,10 +317,14 @@ export async function logMessageDelete(
  */
 export function invalidateMessageLogCache(guildId?: string): void {
   if (guildId) {
+    // Only clear the TTL cache — keep _lastAuditedConfig so the next reload can
+    // diff against the previously-audited config and emit the config-change row.
     _configCache.delete(guildId);
   } else {
-    // Full reset (e.g. tests) clears the per-event dedupe set too.
+    // Full reset (e.g. tests) clears the per-event dedupe set + audit baselines.
     _configCache.clear();
     _sentDedupe.clear();
+    _lastAuditedConfig.clear();
+    _degradedNotified.clear();
   }
 }

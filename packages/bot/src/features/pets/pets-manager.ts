@@ -17,6 +17,7 @@ import type { DbGuildConfig } from '@somnibot/shared';
 import type { Redis } from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Pets');
 
@@ -283,6 +284,13 @@ export class PetsManager {
       return;
     }
 
+    // [game-economy-pets] Append-only audit row for the pet-acquired state change.
+    eventBus.emit('pet.acquired', guildId, {
+      userId,
+      petType,
+      price,
+    });
+
     await interaction.reply({
       embeds: [new EmbedBuilder()
         .setTitle(`${info.emoji} New Pet!`)
@@ -491,7 +499,23 @@ export class PetsManager {
     });
     // V49-L3: Surface payout failure to the user instead of silently swallowing
     const payoutWarning = payoutErr ? '\n⚠️ *Reward payout failed — contact an admin.*' : '';
-    if (payoutErr) log.error('battlePet payout failed:', payoutErr.message);
+    if (payoutErr) {
+      log.error('battlePet payout failed:', payoutErr.message);
+      // [game-economy-pets] Owner alert + operator-retry queue + audit on the
+      // battle-payout-failure branch (catalog battle-payout-failed contract).
+      await this.raiseBattlePayoutAlert(guildId, battleWinnerId, reward)
+        .catch((e: unknown) => { log.warn('pet battle payout alert failed:', (e as Error)?.message ?? e); });
+      await Promise.resolve(this.supabase.from('bot_action_queue').insert({
+        guild_id: guildId,
+        action: 'pet_battle_payout_retry',
+        payload: { user_id: battleWinnerId, amount: reward, reason: 'battle_payout_failed', original_error: payoutErr.message },
+        status: 'pending',
+      })).catch((e: unknown) => { log.warn('pet battle payout retry-queue failed:', (e as Error)?.message ?? e); });
+      eventBus.emit('pet.battle_payout_failed', guildId, {
+        winnerId: battleWinnerId,
+        reward,
+      });
+    }
 
     // XP for both — atomic increment via RPC (prevents TOCTOU race on stale xp value)
     for (const uid of [interaction.user.id, opponent.id]) {
@@ -499,6 +523,16 @@ export class PetsManager {
         p_guild_id: guildId, p_user_id: uid, p_xp: 10,
       })).catch((err: Error) => log.error('pet XP increment failed:', err.message));
     }
+
+    // [game-economy-pets] Append-only audit row for the battle-resolved state
+    // change (winner decided, reward credited or flagged failed).
+    eventBus.emit('pet.battle_resolved', guildId, {
+      challengerId: interaction.user.id,
+      defenderId: opponent.id,
+      winnerId: battleWinnerId,
+      reward,
+      payoutFailed: !!payoutErr,
+    });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
@@ -510,6 +544,22 @@ export class PetsManager {
           payoutWarning
         )
         .setColor(iWin ? 0x57F287 : 0xED4245)],
+    });
+  }
+
+  /**
+   * [game-economy-pets] Raise a battle-payout-failed owner alert when a pet-battle
+   * reward credit fails, so an operator knows a winner is still owed their reward
+   * (a retry job is queued in bot_action_queue). Best effort — never blocks play.
+   */
+  private async raiseBattlePayoutAlert(guildId: string, userId: string, reward: number): Promise<void> {
+    await this.supabase.from('alerts').insert({
+      guild_id: guildId,
+      alert_type: 'pet_battle_payout_failed',
+      severity: 'warning',
+      title: 'Pet battle payout failed',
+      message: `A pet-battle reward of ${reward} failed to credit ${userId}. A retry has been queued.`,
+      metadata: { user_id: userId, reward },
     });
   }
 
@@ -539,6 +589,12 @@ export class PetsManager {
     }
 
     const pr = prestigeResult[0] as { new_prestige: number };
+
+    // [game-economy-pets] Append-only audit row for the pet-prestige state change.
+    eventBus.emit('pet.prestiged', guildId, {
+      userId: interaction.user.id,
+      newPrestige: pr.new_prestige,
+    });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()

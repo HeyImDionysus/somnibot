@@ -13,6 +13,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { DbCustomCommand } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('CommandEngine');
 
@@ -129,6 +130,7 @@ export async function handleCustomCommand(
         : [...member.roles.cache.keys()];
       const hasAllowedRole = cmd.allowed_roles.some((r: string) => memberRoles.includes(r));
       if (!hasAllowedRole) {
+        emitDenied(cmd, interaction, guild.id, 'missing_allowed_role');
         await interaction.reply({ content: `❌ You do not have permission to use /${cmd.name} on ${guild.name}.`, ephemeral: true });
         return true;
       }
@@ -144,6 +146,7 @@ export async function handleCustomCommand(
         : [...member.roles.cache.keys()];
       const hasDeniedRole = cmd.denied_roles.some((r: string) => memberRoles.includes(r));
       if (hasDeniedRole) {
+        emitDenied(cmd, interaction, guild.id, 'denied_role');
         await interaction.reply({ content: `❌ You do not have permission to use /${cmd.name} on ${guild.name}.`, ephemeral: true });
         return true;
       }
@@ -152,11 +155,13 @@ export async function handleCustomCommand(
 
   // Check channel restrictions
   if (cmd.allowed_channels.length > 0 && !cmd.allowed_channels.includes(interaction.channelId)) {
+    emitDenied(cmd, interaction, guild.id, 'channel_not_allowed');
     await interaction.reply({ content: `❌ /${cmd.name} can't be used in this channel.`, ephemeral: true });
     return true;
   }
 
   if (cmd.denied_channels.length > 0 && cmd.denied_channels.includes(interaction.channelId)) {
+    emitDenied(cmd, interaction, guild.id, 'channel_denied');
     await interaction.reply({ content: `❌ /${cmd.name} can't be used in this channel.`, ephemeral: true });
     return true;
   }
@@ -280,7 +285,35 @@ export async function handleCustomCommand(
     await interaction.reply({ content: '✅ Command executed.', ephemeral: true });
   }
 
+  // Audit the successful invocation (append-only trail via AuditService).
+  eventBus.emit('custom_command.invoked', guild.id, {
+    commandId: cmd.id,
+    commandName: cmd.name,
+    userId: interaction.user.id,
+    channelId: interaction.channelId,
+    actionCount: actions.length,
+  });
+
   return true;
+}
+
+/**
+ * Emit a denied-invocation audit event for a permission/channel gate. Fire-and-
+ * forget: audit logging must never block or fail the interaction response.
+ */
+function emitDenied(
+  cmd: DbCustomCommand,
+  interaction: ChatInputCommandInteraction,
+  guildId: string,
+  reason: 'missing_allowed_role' | 'denied_role' | 'channel_not_allowed' | 'channel_denied',
+): void {
+  eventBus.emit('custom_command.denied', guildId, {
+    commandId: cmd.id,
+    commandName: cmd.name,
+    userId: interaction.user.id,
+    channelId: interaction.channelId,
+    reason,
+  });
 }
 
 /**

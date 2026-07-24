@@ -17,6 +17,7 @@ import type { DbGuildConfig } from '@somnibot/shared';
 import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Heist');
 
@@ -121,6 +122,14 @@ export class HeistManager {
     if (attempt > HeistManager.MAX_RETRY_ATTEMPTS) {
       log.error(`Heist ${heistId} still in_progress after ${HeistManager.MAX_RETRY_ATTEMPTS} in-process retries — leaving for next restart's resume`);
       this.retryAttempts.delete(heistId);
+      // [game-economy-heist] Settlement/retry exhausted — raise an owner alert
+      // (catalog ownerNotification:true) and an append-only audit event so a
+      // stranded heist that could not settle is operator-visible.
+      void this.raiseSettlementFailedAlert(guildId, heistId);
+      eventBus.emit('heist.settlement_failed', guildId, {
+        heistId,
+        attempts: HeistManager.MAX_RETRY_ATTEMPTS,
+      });
       return;
     }
     this.retryAttempts.set(heistId, attempt);
@@ -136,6 +145,27 @@ export class HeistManager {
     // Do not keep the event loop alive solely for a retry.
     if (typeof timer.unref === 'function') timer.unref();
     this.retryTimers.set(heistId, timer);
+  }
+
+  /**
+   * [game-economy-heist] Raise a settlement-failed owner alert when a heist could
+   * not be settled after all in-process retries were exhausted, so the stranded
+   * heist (left for the next restart's resume) is operator-visible. Best effort —
+   * a failed alert never blocks or throws in the retry path.
+   */
+  private async raiseSettlementFailedAlert(guildId: string, heistId: string): Promise<void> {
+    try {
+      await this.supabase.from('alerts').insert({
+        guild_id: guildId,
+        alert_type: 'heist_settlement_failed',
+        severity: 'critical',
+        title: 'Heist settlement failed',
+        message: `Heist ${heistId} could not be settled after ${HeistManager.MAX_RETRY_ATTEMPTS} retries. It is left in_progress for the next restart's resume.`,
+        metadata: { heist_id: heistId, attempts: HeistManager.MAX_RETRY_ATTEMPTS },
+      });
+    } catch (err) {
+      log.warn('heist settlement-failed alert failed:', (err as Error)?.message ?? err);
+    }
   }
 
   /** Cancel any pending in-process retry and drop its attempt counter. */
@@ -327,6 +357,16 @@ export class HeistManager {
       return;
     }
 
+    // [game-economy-heist] Append-only audit row for the heist start state change
+    // (initiator charged, crew recruiting).
+    eventBus.emit('heist.started', guildId, {
+      heistId,
+      userId,
+      targetName: target.name,
+      basePayout,
+      entryFee,
+    });
+
     // Schedule resolution
     const timer = setTimeout(async () => {
       try {
@@ -471,6 +511,15 @@ export class HeistManager {
     const displayChance = result?.success_chance
       ?? Math.max(0, Math.min(95, baseChance + (actualCount - 1) * 7));
     const joinedRole = result?.role ?? role;
+
+    // [game-economy-heist] Append-only audit row for the join state change
+    // (member charged the entry fee and added to the crew).
+    eventBus.emit('heist.joined', guildId, {
+      heistId: heist.id,
+      userId,
+      memberCount: actualCount,
+      role: joinedRole,
+    });
 
     getQuestsManager(guildId)?.trackProgress(guildId, userId, 'heist').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
@@ -810,6 +859,15 @@ export class HeistManager {
       }
       this.clearRetryState(heistId); // terminal cancel — drop any retry bookkeeping
 
+      // [game-economy-heist] Append-only audit row for the resolve (cancelled +
+      // refund) state change.
+      eventBus.emit('heist.resolved', guildId, {
+        heistId,
+        outcome: 'cancelled',
+        participantCount: participants.length,
+        payoutEach: 0,
+      });
+
       const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
       if (channel) {
         await channel.send({
@@ -884,6 +942,15 @@ export class HeistManager {
       }
       this.clearRetryState(heistId); // terminal success — drop any retry bookkeeping
 
+      // [game-economy-heist] Append-only audit row for the resolve (success +
+      // per-crew payout) state change.
+      eventBus.emit('heist.resolved', guildId, {
+        heistId,
+        outcome: 'success',
+        participantCount: participants.length,
+        payoutEach: perPerson,
+      });
+
       // We only reach here once every credit succeeded (the failedPayouts guard
       // above returns early otherwise), so every crew member is paid.
       const crewList = partList
@@ -924,6 +991,15 @@ export class HeistManager {
       return;  // another resolver already finalised — no re-notify
     }
     this.clearRetryState(heistId); // terminal failure — drop any retry bookkeeping
+
+    // [game-economy-heist] Append-only audit row for the resolve (failed —
+    // entry fees forfeit) state change.
+    eventBus.emit('heist.resolved', guildId, {
+      heistId,
+      outcome: 'failed',
+      participantCount: participants.length,
+      payoutEach: 0,
+    });
 
     const story = randomPick(FAIL_STORIES);
     const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;

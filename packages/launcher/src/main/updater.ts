@@ -21,9 +21,18 @@
  */
 
 import { BrowserWindow, ipcMain } from 'electron';
+import { type LauncherAuditEntry } from './audit-log.js';
 
 /** Whether a downloaded update is staged and ready to install. */
 let updateReady = false;
+
+/** [infrastructure-launcher] Optional durable-audit sink for update lifecycle
+ *  security events (download staged, install triggered). */
+export interface UpdaterOptions {
+  recordAudit?: (entry: LauncherAuditEntry) => void;
+}
+
+let auditSink: ((entry: LauncherAuditEntry) => void) | undefined;
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -45,7 +54,8 @@ function broadcast(channel: string, payload: unknown): void {
  * Initialise the auto-updater, wire up all events and IPC handlers.
  * Safe to call in dev — no-ops gracefully when electron-updater cannot resolve.
  */
-export async function initUpdater(): Promise<void> {
+export async function initUpdater(options: UpdaterOptions = {}): Promise<void> {
+  auditSink = options.recordAudit;
   // Dynamic import — electron-updater may fail in dev or when not bundled
   let mod: typeof import('electron-updater');
   try {
@@ -106,8 +116,17 @@ async function initUpdaterWithModule(mod: typeof import('electron-updater')): Pr
     });
   });
 
-  autoUpdater.on('update-downloaded', () => {
+  autoUpdater.on('update-downloaded', (info) => {
     updateReady = true;
+    // [infrastructure-launcher] Audit that a signed update is staged locally.
+    auditSink?.({
+      action: 'launcher.update.downloaded',
+      category: 'security',
+      targetType: 'app_update',
+      targetId: (info as { version?: string })?.version,
+      details: { version: (info as { version?: string })?.version ?? null },
+      success: true,
+    });
     broadcast('updater:downloaded', {});
   });
 
@@ -137,6 +156,16 @@ async function initUpdaterWithModule(mod: typeof import('electron-updater')): Pr
 
   ipcMain.handle('updater:install', () => {
     if (updateReady) {
+      // [infrastructure-launcher] Audit the operator-triggered update install
+      // (a security-relevant lifecycle operation) before we quit and replace
+      // the running binary.
+      auditSink?.({
+        action: 'launcher.update.install',
+        category: 'security',
+        targetType: 'app_update',
+        details: { trigger: 'operator' },
+        success: true,
+      });
       // isSilent = false (show installer), isForceRunAfter = true (relaunch app)
       autoUpdater.quitAndInstall(false, true);
     }

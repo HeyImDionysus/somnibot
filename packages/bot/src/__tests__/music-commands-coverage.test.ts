@@ -58,6 +58,7 @@ function mp(overrides: any = {}) {
     applyFilter: vi.fn().mockResolvedValue({ success: true, message: 'Filter applied' }),
     applyCustomSpeed: vi.fn().mockResolvedValue({ success: true, message: 'Speed set' }),
     isDJ: vi.fn().mockResolvedValue(true),
+    auditPermissionDenied: vi.fn(),
     getPlayerPosition: vi.fn().mockReturnValue(45000),
     getCurrentTrack: vi.fn().mockReturnValue({ title: 'S' }),
     getActiveFilters: vi.fn().mockReturnValue([]),
@@ -141,7 +142,7 @@ describe('handleMusicCommand', () => {
     const p = mp();
     const i = mi('skip');
     await handleMusicCommand(i as any, p as any);
-    expect(p.skip).toHaveBeenCalledWith('g1');
+    expect(p.skip).toHaveBeenCalledWith('g1', expect.objectContaining({ userId: 'u1', method: 'dj_force' }));
   });
 
   it('skip — non-DJ vote skip', async () => {
@@ -156,7 +157,7 @@ describe('handleMusicCommand', () => {
     const p = mp();
     const i = mi('stop');
     await handleMusicCommand(i as any, p as any);
-    expect(p.stop).toHaveBeenCalledWith('g1');
+    expect(p.stop).toHaveBeenCalledWith('g1', expect.objectContaining({ userId: 'u1', reason: 'command' }));
   });
 
   it('stop — non-DJ denied', async () => {

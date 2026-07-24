@@ -165,6 +165,7 @@ vi.mock('../services/guild-snapshot.js', () => ({
 
 vi.mock('../services/event-bus.js', () => ({
   PlatformEventBus: class { emit = vi.fn(); on = vi.fn(); onAny = vi.fn(); offAny = vi.fn(); removeAllListeners = vi.fn(); },
+  eventBus: { emit: vi.fn(), on: vi.fn(), off: vi.fn(), onAny: vi.fn() },
 }));
 
 vi.mock('../services/commerce-fulfillment.js', () => ({

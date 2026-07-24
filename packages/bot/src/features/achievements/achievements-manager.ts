@@ -5,6 +5,7 @@ import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Achievements');
 
@@ -135,6 +136,15 @@ export class AchievementsManager {
         if (rewardErr) log.error(`Failed to award ${def.reward_currency} to ${userId}:`, rewardErr.message);
       }
 
+      // [game-economy-achievements-prestige] Append-only audit row on the badge
+      // unlock state change (catalog contracts one per state change).
+      eventBus.emit('achievement.unlocked', guildId, {
+        userId,
+        achievementId: def.id as string,
+        name: def.name as string,
+        rewardCurrency: (def.reward_currency as number) ?? 0,
+      });
+
       return def.name;
     }
     return null;
@@ -194,6 +204,14 @@ export class AchievementsManager {
         await interaction.reply({ content: '❌ Could not prestige right now — please try again.', ephemeral: true });
         return;
     }
+
+    // [game-economy-achievements-prestige] Append-only audit row on the prestige
+    // state change (wallet/bank reset + earning multiplier bump).
+    eventBus.emit('prestige.performed', guildId, {
+      userId,
+      newLevel: result.new_level ?? 0,
+      newMultiplier: result.new_multiplier ?? 0,
+    });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()

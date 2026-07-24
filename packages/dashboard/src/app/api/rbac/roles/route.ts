@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { writeRbacAudit, raiseEscalationBlockedAlert } from '@/lib/rbac-audit';
 
 const rbacRoleCreate = z.object({
   name: z.string().min(1).max(100).trim(),
@@ -76,6 +77,15 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (error) return dbError(error, 'rbac/roles');
+
+    await writeRbacAudit(admin, {
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      action: 'rbac.role_created',
+      targetId: (data as { id?: string })?.id ?? null,
+      details: { name: body.name, permissions: body.permissions || [], priority: body.priority || 10 },
+    });
+
     return NextResponse.json({ success: true, data });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
@@ -106,6 +116,24 @@ export async function PATCH(request: NextRequest) {
         .single();
 
       if (existing?.is_system) {
+        // Editing a system role would let a manage_team holder widen the
+        // baseline permission model — a privilege-escalation attempt. Audit it
+        // and page the owner.
+        await writeRbacAudit(admin, {
+          guildId: ctx.guildId,
+          actorId: ctx.discordId,
+          action: 'rbac.role_update_denied',
+          targetId: body.id,
+          details: { reason: 'system_role_immutable', roleName: existing.name },
+          success: false,
+        });
+        await raiseEscalationBlockedAlert(admin, {
+          guildId: ctx.guildId,
+          actorId: ctx.discordId,
+          attemptedAction: 'modify system role',
+          targetRoleId: body.id,
+          reason: `system role "${existing.name}" is immutable`,
+        });
         return NextResponse.json(
           { error: `Cannot modify system role "${existing.name}"` },
           { status: 403 },
@@ -129,6 +157,15 @@ export async function PATCH(request: NextRequest) {
       .single();
 
     if (error) return dbError(error, 'rbac/roles');
+
+    await writeRbacAudit(admin, {
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      action: 'rbac.role_updated',
+      targetId: body.id,
+      details: { changes: updates },
+    });
+
     return NextResponse.json({ success: true, data });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
@@ -156,6 +193,21 @@ export async function DELETE(request: NextRequest) {
       .single();
 
     if (existing?.is_system) {
+      await writeRbacAudit(admin, {
+        guildId: ctx.guildId,
+        actorId: ctx.discordId,
+        action: 'rbac.role_delete_denied',
+        targetId: roleId,
+        details: { reason: 'system_role_immutable' },
+        success: false,
+      });
+      await raiseEscalationBlockedAlert(admin, {
+        guildId: ctx.guildId,
+        actorId: ctx.discordId,
+        attemptedAction: 'delete system role',
+        targetRoleId: roleId,
+        reason: 'system roles cannot be deleted',
+      });
       return NextResponse.json({ error: 'Cannot delete system roles' }, { status: 403 });
     }
 
@@ -166,6 +218,15 @@ export async function DELETE(request: NextRequest) {
       .eq('guild_id', ctx.guildId);
 
     if (error) return dbError(error, 'rbac/roles');
+
+    await writeRbacAudit(admin, {
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      action: 'rbac.role_deleted',
+      targetId: roleId,
+      details: {},
+    });
+
     return NextResponse.json({ success: true });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';

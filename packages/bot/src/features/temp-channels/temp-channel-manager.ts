@@ -10,6 +10,7 @@ import {
   type GuildMember,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 import { renderTempChannelTemplate } from './templates.js';
 
@@ -53,6 +54,7 @@ export class TempChannelManager {
   constructor(
     private guild: Guild,
     private supabase: SupabaseClient,
+    private eventBus: PlatformEventBus = defaultEventBus,
   ) {}
 
   async start(): Promise<void> {
@@ -204,6 +206,14 @@ export class TempChannelManager {
       await this.supabase.from('active_temp_channels').insert(record);
       this.activeChannels.set(vc.id, record);
 
+      this.eventBus.emit('temp_channel.created', this.guild.id, {
+        channelId: vc.id,
+        textChannelId,
+        hubId: hub.id,
+        hubChannelId: hub.hub_channel_id,
+        ownerId: member.id,
+      });
+
       // Move the member to the new channel
       await member.voice.setChannel(vc);
 
@@ -216,6 +226,12 @@ export class TempChannelManager {
       // Room creation failed after retries — do not fail silently. Notify the
       // member and raise exactly one owner alert so the outage is visible.
       log.error('Failed to create temp channel:', { error: String(err) });
+      this.eventBus.emit('temp_channel.creation_failed', this.guild.id, {
+        hubId: hub.id,
+        hubChannelId: hub.hub_channel_id,
+        memberId: member.id,
+        error: String(err),
+      });
       await this.notifyCreationFailure(member, hub, err);
     } finally {
       this.inFlightJoins.delete(joinKey);
@@ -330,8 +346,12 @@ export class TempChannelManager {
 
     const vc = this.guild.channels.cache.get(channelId) as VoiceChannel | undefined;
     if (!vc) {
-      // Channel already gone — clean up record
+      // Channel already gone — clean up the stale record (reconciliation).
       await this.removeChannel(channelId);
+      this.eventBus.emit('temp_channel.orphan_reconciled', this.guild.id, {
+        channelId,
+        ownerId: active.owner_id,
+      });
       return;
     }
 
@@ -379,6 +399,8 @@ export class TempChannelManager {
     const active = this.activeChannels.get(channelId);
     if (!active) return;
 
+    const ownerId = active.owner_id;
+
     try {
       const vc = this.guild.channels.cache.get(channelId);
       if (vc) await vc.delete('Temp channel empty');
@@ -396,6 +418,11 @@ export class TempChannelManager {
     }
 
     await this.removeChannel(channelId);
+    this.eventBus.emit('temp_channel.deleted', this.guild.id, {
+      channelId,
+      ownerId,
+      reason: 'empty',
+    });
     log.info(`Deleted temp channel ${channelId}`);
   }
 
@@ -431,6 +458,12 @@ export class TempChannelManager {
       .from('active_temp_channels')
       .update({ owner_id: newOwnerId })
       .eq('channel_id', channelId);
+
+    this.eventBus.emit('temp_channel.claimed', this.guild.id, {
+      channelId,
+      previousOwnerId: oldOwnerId,
+      newOwnerId,
+    });
   }
 
   /**
@@ -467,10 +500,14 @@ export class TempChannelManager {
 
   private async cleanupOrphans(): Promise<void> {
     // Remove DB records for channels that no longer exist in Discord
-    for (const [channelId] of this.activeChannels) {
+    for (const [channelId, active] of this.activeChannels) {
       const vc = this.guild.channels.cache.get(channelId);
       if (!vc) {
         await this.removeChannel(channelId);
+        this.eventBus.emit('temp_channel.orphan_reconciled', this.guild.id, {
+          channelId,
+          ownerId: active.owner_id,
+        });
       }
     }
   }
