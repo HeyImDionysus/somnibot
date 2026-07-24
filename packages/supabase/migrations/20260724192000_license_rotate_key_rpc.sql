@@ -33,7 +33,7 @@
 --     entitlement→license identity FK still forces the identical commerce
 --     tuple on top of the lineage check.
 --   * license_rotate_key(...) is the atomic production primitive (mirrors
---     license_validate_device: FOR UPDATE + SECURITY DEFINER): it revokes the
+--     license_validate_device: FOR UPDATE + definer security): it revokes the
 --     old key FIRST (the terminal-transition trigger drains its live sessions
 --     in the same transaction), mints the hash-only successor for the same
 --     commerce tuple, moves the entitlement binding, and audits key.rotated
