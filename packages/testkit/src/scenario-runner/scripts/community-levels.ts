@@ -334,6 +334,73 @@ function gateMessageVoiceAccrual(ctx: ScenarioContext, detail: string): void {
   );
 }
 
+/**
+ * Drive REAL message-XP accrual through a synthetic `messageCreate` (the exported
+ * gateway handler `handleMessageCreateEvent`) — the earning path that fires ONLY
+ * on a gateway event, never a slash command. It claims a Valkey SET-NX anti-spam
+ * cooldown, so it GATES honestly when no local Redis is present. When present it
+ * proves BOTH facets of the out-of-the-box promise:
+ *   (1) a qualifying message accrues XP within [xp_min, xp_max] and increments
+ *       total_messages, and
+ *   (2) a second message inside the cooldown window earns nothing (the SET-NX
+ *       single-claim anti-spam fence).
+ * The range check (not an exact value) keeps this deterministic despite the
+ * per-message randomXp roll — no casino-style flakiness.
+ */
+async function proveMessageXpAccrual(
+  ctx: ScenarioContext,
+  handle: LiveClientHandle,
+  opts: { xpMin: number; xpMax: number },
+): Promise<void> {
+  if (!ctx.capabilities.redis) {
+    ctx.gate(
+      'Discord',
+      'redis-dependency',
+      `Chatting earns ${opts.xpMin}-${opts.xpMax} XP/message under the anti-spam cooldown; a second message inside the window earns nothing.`,
+      'the message-XP path claims its anti-spam cooldown with a Valkey SET NX; no local Redis/Valkey is reachable (start Valkey to drive this leg)',
+    );
+    return;
+  }
+
+  const chatter = ctx.userId('chatter');
+
+  // (1) First qualifying message → XP accrues in range; total_messages = 1.
+  await ctx.runMessageCreate(handle, { userId: chatter });
+  const afterFirst = await readMemberLevel(handle, chatter);
+  const first = afterFirst?.xp ?? -1;
+  ctx.expect(
+    afterFirst != null && first >= opts.xpMin && first <= opts.xpMax && afterFirst.total_messages === 1,
+    {
+      assertionClass: 'Discord',
+      channel: 'redis-dependency',
+      promise:
+        'A qualifying gateway message accrues XP within the configured per-message range via the REAL messageCreate pipeline (processMessageXp → increment_member_xp) and increments total_messages.',
+      observation:
+        `after one driven messageCreate: member_levels xp=${afterFirst?.xp} (expected ${opts.xpMin}..${opts.xpMax}), ` +
+        `total_messages=${afterFirst?.total_messages} (expected 1).`,
+      impact:
+        'A qualifying gateway message did not accrue XP in range — the message-XP earning path is broken (no XP is ever earned by chatting).',
+    },
+  );
+
+  // (2) Second message inside the cooldown window → SET-NX blocks it, XP frozen.
+  await ctx.runMessageCreate(handle, { userId: chatter });
+  const afterSecond = await readMemberLevel(handle, chatter);
+  ctx.expect(
+    afterSecond?.xp === first && afterSecond?.total_messages === 1,
+    {
+      assertionClass: 'replay-safety',
+      channel: 'redis-dependency',
+      promise:
+        'A second message inside the cooldown window earns no additional XP (the Valkey SET-NX single-claim anti-spam fence).',
+      observation:
+        `after a second immediate messageCreate: xp=${afterSecond?.xp} (expected unchanged ${first}), ` +
+        `total_messages=${afterSecond?.total_messages} (expected 1).`,
+      impact: 'A second rapid message accrued extra XP — the anti-spam cooldown does not single-claim (XP farming by message spam).',
+    },
+  );
+}
+
 function gateAudit(ctx: ScenarioContext, reason: string): void {
   ctx.gate('audit', 'audit-row', 'Every levels state change lands exactly one append-only audit row with actor, guild, and correlation id.', reason);
 }
@@ -519,11 +586,15 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
       '(p_guild_id,p_member_id,p_xp_gain,p_username,p_avatar) — every message, voice, and /xp-add XP write fails, so no XP is ever earned.',
   });
 
-  // The full message/voice ACCRUAL semantics (15-25 per message under a 60s
-  // cooldown, 10 per 5-min voice interval) need a gateway event driver + Valkey.
-  gateMessageVoiceAccrual(
-    ctx,
-    'Out of the box, chatting earns 15-25 XP/message under a 60s cooldown (a 4th message inside the window earns nothing) and voice earns 10 XP/5-min interval.',
+  // Message ACCRUAL is now DRIVEN for real through the exported messageCreate
+  // gateway handler (redis-gated: it claims a Valkey SET-NX cooldown). Voice
+  // accrual still needs a voiceStateUpdate driver — a later gateway slice.
+  await proveMessageXpAccrual(ctx, handle, { xpMin, xpMax });
+  ctx.gate(
+    'Discord',
+    'redis-dependency',
+    'Voice earns voice_xp_per_interval XP per voice_xp_interval_minutes interval of connected time.',
+    'the voice-XP path fires on gateway voiceStateUpdate events (a voiceStateUpdate driver is a later gateway slice) and claims a Valkey interval slot',
   );
   // /rank view + /xp add|remove|set|reset are subcommand-routed — driven live now.
   await proveRankView(ctx, handle, userA);
@@ -720,29 +791,45 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   await seedMemberLevel(handle, userA, { xp: 300, level: 3, totalMessages: 15 });
   const before = await readMemberLevel(handle, userA);
 
-  // The /xp deny is TWO facets, both un-drivable / unimplemented in this harness:
-  //  (1) Discord hides /xp from non-managers via setDefaultMemberPermissions
-  //      (a gateway-side gate — no readback here), and
-  //  (2) /xp is a SUBCOMMAND command that runSlash cannot supply a subcommand
-  //      selector for; moreover the handler (handleXpAdminCommand) performs NO
-  //      in-handler Manage-Guild re-check and writes NO denied-attempt audit row,
-  //      so the catalog's "handler re-checks + audits the denial" is not
-  //      observable here. GATE honestly (do not fabricate a denial or a FAIL that
-  //      cannot be driven; see the domain concerns for the code-level gap).
-  ctx.gate(
-    'Discord',
-    'discord-readback',
-    'run-member-b invoking /xp add is refused with an ephemeral denial in the owner’s voice; the target’s XP is unchanged.',
-    'runSlash cannot supply a subcommand selector to drive /xp add, and the deny relies on Discord’s setDefaultMemberPermissions gate; the handler performs no in-handler Manage-Guild re-check',
-  );
-  ctx.gate(
-    'audit',
-    'audit-row',
-    'An audit row records the denied /xp attempt with actor, target, and reason permission-denied.',
-    'the /xp handler writes no audit row for a denied attempt and /xp is not drivable via runSlash (no subcommand selector)',
-  );
+  // DRIVE the real deny: member B WITHOUT Manage-Guild (memberPermissions.has→false)
+  // invokes `/xp add` on member A. handleXpAdminCommand performs an in-handler
+  // Manage-Guild RE-CHECK (defense-in-depth beyond Discord's setDefaultMemberPermissions
+  // gate) — it must refuse the attempt, leave the target's XP untouched, and write
+  // a `levels.xp_admin.denied` audit row. All three are asserted for real.
+  const unprivileged = { id: userB, roles: [], permissions: { has: () => false } };
+  const targetOpt = { id: userA, username: userA, displayAvatarURL: () => 'https://cdn.example/avatar.png' };
+  const denied = await ctx.runSlash(handle, {
+    commandName: 'xp',
+    userId: userB,
+    member: unprivileged,
+    subcommand: 'add',
+    options: { user: targetOpt, amount: 100 },
+  });
+  const denialText = replyContent(denied);
+  ctx.expect(denialText.includes('Manage Server') || denialText.includes('🚫'), {
+    assertionClass: 'Discord',
+    channel: 'captured-reply',
+    promise: 'run-member-b invoking /xp add is refused with an ephemeral permission denial (the handler’s Manage-Guild re-check).',
+    observation: `/xp add as an unprivileged member replied "${truncate(denialText)}" (expected a Manage-Server denial).`,
+    impact: 'The /xp handler did not refuse an unprivileged member — server-side authorization re-check is missing (XP-mutation privilege escalation).',
+  });
 
-  // The target total is observably untouched by this (undrivable) attempt.
+  // An append-only audit row records the denied attempt (actor = member B, denied path).
+  const { data: denialAudits } = await handle.supabase
+    .from('audit_logs')
+    .select('action, actor_id, success')
+    .eq('guild_id', handle.guildId)
+    .eq('action', 'levels.xp_admin.denied');
+  const auditRows = (denialAudits as Array<{ action: string; actor_id: string; success: boolean }> | null) ?? [];
+  ctx.expect(auditRows.length >= 1 && auditRows.some((r) => r.actor_id === userB && r.success === false), {
+    assertionClass: 'audit',
+    channel: 'audit-row',
+    promise: 'An audit row records the denied /xp attempt with actor id and success=false.',
+    observation: `audit_logs holds ${auditRows.length} levels.xp_admin.denied row(s); actor_ids=[${auditRows.map((r) => r.actor_id).join(', ')}] (expected one for ${userB}).`,
+    impact: 'The denied /xp attempt left no audit trail — a privileged-command refusal went unrecorded.',
+  });
+
+  // The target total is observably untouched by the denied attempt.
   const after = await readMemberLevel(handle, userA);
   ctx.expect(after?.xp === before?.xp && after?.xp === 300, {
     assertionClass: 'database-RLS',

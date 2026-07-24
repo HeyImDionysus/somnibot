@@ -11,6 +11,16 @@
  */
 
 import { Events } from 'discord.js';
+import type {
+  GuildMember,
+  PartialGuildMember,
+  Message,
+  MessageReaction,
+  PartialMessageReaction,
+  User,
+  PartialUser,
+  VoiceState,
+} from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 import type { SomniClient } from '../client.js';
 import type { EscalationStep } from '@somnibot/shared';
@@ -611,6 +621,267 @@ export async function sweepExpiredTempRoleGrants(
   log.info('Temp role sweep complete', { removed, preserved });
 }
 
+// ── Exported gateway-event handlers (V-audit: mirror handleInteraction) ──
+// Each inline gateway pipeline is extracted into an awaitable exported
+// function so registerEvents() delegates to it AND the loopback testkit can
+// drive the exact production path with a synthetic payload. Behavior is
+// byte-for-byte preserved — the only change is that the setup-verification
+// gate reads client.setupVerificationMode directly instead of via the
+// registerEvents() closure.
+
+export async function handleGuildMemberAddEvent(member: GuildMember, client: SomniClient): Promise<void> {
+  if (client.setupVerificationMode === true) return;
+  try {
+    const blocked = await processAntiRaid(member.guild, member, client.supabase, client.eventBus);
+    if (!blocked) await handleMemberJoin(client, member);
+  } catch (err) {
+    log.error('guildMemberAdd handler error:', { error: String(err) });
+  }
+}
+
+export async function handleGuildMemberRemoveEvent(member: GuildMember | PartialGuildMember, client: SomniClient): Promise<void> {
+  if (client.setupVerificationMode === true) return;
+  try { await handleMemberLeave(client, member); }
+  catch (err) { log.error('guildMemberRemove handler error:', { error: String(err) }); }
+}
+
+export async function handleMessageCreateEvent(message: Message, client: SomniClient): Promise<void> {
+  if (client.setupVerificationMode === true) return;
+  if (message.author.bot) return;
+  if (!message.guild) return;
+
+  // Auto-mod pipeline
+  try {
+    const modConfig = await loadModConfig(client, message.guild.id);
+    // Master switch: when automod is disabled, run nothing (no scan, no action).
+    if (modConfig.automodEnabled) {
+      const handled = await processMessage(client, message, modConfig);
+      if (handled) return;
+    }
+  } catch (err) {
+    log.error('Auto-mod error:', { error: String(err) });
+  }
+
+  // Automation engine
+  const messageEvent = {
+    type: 'message.sent' as const,
+    guildId: message.guild!.id,
+    timestamp: Date.now(),
+    data: {
+      discordId: message.author.id,
+      username: message.author.username,
+      channelId: message.channel.id,
+      messageId: message.id,
+      content: message.content,
+    },
+  };
+
+  // V10 Audit §6.P3a — use GuildRouter context instead of casting the client
+  const guildCtx = client.router?.getContextSync(message.guild!.id);
+  const engine = guildCtx?.getManager<import('../features/automations/automation-engine.js').AutomationEngine>('automationEngine');
+  if (engine) {
+    engine.processMessageEvent(messageEvent, message).catch((err) => {
+      log.error('Automation message processing error:', { error: String(err) });
+    });
+  }
+
+  // XP processing
+  try {
+    const xpResult = await processMessageXp(message, client.supabase, client.valkey, message.guild!.id);
+    if (xpResult.leveledUp && xpResult.newLevel != null && xpResult.oldLevel != null && xpResult.newXp != null) {
+      const guild = message.guild;
+      if (guild) {
+        await handleLevelUp(guild, client.supabase, client.eventBus, message.author.id, xpResult.oldLevel, xpResult.newLevel, xpResult.newXp);
+      }
+    }
+
+    // Achievements: passive milestones (messages sent + level) unlock badges.
+    // checkAndUnlock is idempotent, so a re-fire past the same threshold is a
+    // no-op. Only runs on an actual XP grant (rate-limited), not every message.
+    if (xpResult.granted) {
+      const achMgr = guildCtx?.getManager<AchievementsManager>('achievements');
+      if (achMgr) {
+        const gId = message.guild!.id;
+        const uId = message.author.id;
+        const checks: Array<Promise<string | null>> = [];
+        if (typeof xpResult.totalMessages === 'number') {
+          checks.push(achMgr.checkAndUnlock(gId, uId, 'messages_sent', xpResult.totalMessages));
+        }
+        if (xpResult.leveledUp && xpResult.newLevel != null) {
+          checks.push(achMgr.checkAndUnlock(gId, uId, 'level', xpResult.newLevel));
+        }
+        if (checks.length > 0) {
+          const unlocked = (await Promise.all(checks)).filter((n): n is string => Boolean(n));
+          const channel = message.channel;
+          if (unlocked.length > 0 && channel.isTextBased() && 'send' in channel) {
+            for (const name of unlocked) {
+              channel.send({ content: `🏆 <@${uId}> unlocked the **${name}** achievement!` })
+                .catch((e: unknown) => { log.warn('achievement announce failed:', (e as Error)?.message ?? e); });
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    log.error('XP processing error:', { error: String(err) });
+  }
+
+  // Economy chat income
+  try {
+    const econMgr = guildCtx?.getManager<EconomyManager>('economy');
+    if (econMgr) await econMgr.processChatIncome(message.author.id, message.channelId);
+  } catch (err) {
+    log.error('Economy chat income error:', { error: String(err) });
+  }
+
+  // Quest progress: 'chat' activity
+  try {
+    const qMgr = guildCtx?.getManager<QuestsManager>('quests');
+    if (qMgr) qMgr.trackProgress(message.guild!.id, message.author.id, 'chat').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+  } catch {
+    // Ignore quest tracking errors
+  }
+}
+
+export async function handleMessageReactionAddEvent(
+  reaction: MessageReaction | PartialMessageReaction,
+  user: User | PartialUser,
+  client: SomniClient,
+): Promise<void> {
+  if (client.setupVerificationMode === true) return;
+  if (user.bot) return;
+  const message = reaction.message;
+  if (!message.guild) return;
+
+  const guild = message.guild;
+  if (guild) {
+    try {
+      const handled = await handleReactionAdd(reaction, user, guild, client.supabase, client.valkey, client.eventBus);
+      if (handled) return;
+    } catch (err) {
+      log.error('Reaction role add error:', { error: String(err) });
+    }
+  }
+
+  // Automation event
+  const reactionEvent = {
+    type: 'reaction.added' as const,
+    guildId: message.guild!.id,
+    timestamp: Date.now(),
+    data: {
+      discordId: user.id,
+      username: user.username ?? user.id,
+      emoji: reaction.emoji.name ?? reaction.emoji.toString(),
+      emojiId: reaction.emoji.id,
+      channelId: message.channel.id,
+      messageId: message.id,
+    },
+  };
+
+  const fullMessage = reaction.message.partial
+    ? await reaction.message.fetch().catch(() => null)
+    : reaction.message;
+
+  if (fullMessage) {
+    const reactionCtx = client.router?.getContextSync(message.guild!.id);
+    const engine = reactionCtx?.getManager<import('../features/automations/automation-engine.js').AutomationEngine>('automationEngine');
+    if (engine) {
+      engine.processReactionEvent(reactionEvent, fullMessage).catch((err) => {
+        log.error('Automation reaction processing error:', { error: String(err) });
+      });
+    }
+  }
+
+  client.eventBus.emit('reaction.added', reaction.message.guild!.id, reactionEvent.data);
+
+  // Starboard
+  try {
+    await handleStarboardReaction(reaction, user, client.supabase, reaction.message.guild!.id);
+  } catch (err) {
+    log.error('Starboard reaction error:', { error: String(err) });
+  }
+}
+
+export async function handleMessageReactionRemoveEvent(
+  reaction: MessageReaction | PartialMessageReaction,
+  user: User | PartialUser,
+  client: SomniClient,
+): Promise<void> {
+  if (client.setupVerificationMode === true) return;
+  if (user.bot) return;
+  const message = reaction.message;
+  if (!message.guild) return;
+  const guild = message.guild;
+  if (guild) {
+    try {
+      await handleReactionRemove(reaction, user, guild, client.supabase, client.valkey, client.eventBus);
+    } catch (err) {
+      log.error('Reaction role remove error:', { error: String(err) });
+    }
+  }
+  client.eventBus.emit('reaction.removed', message.guild.id, {
+    discordId: user.id,
+    username: user.username ?? user.id,
+    emoji: reaction.emoji.name ?? reaction.emoji.toString(),
+    emojiId: reaction.emoji.id,
+    channelId: message.channel.id,
+    messageId: message.id,
+  });
+}
+
+export async function handleVoiceStateUpdateEvent(oldState: VoiceState, newState: VoiceState, client: SomniClient): Promise<void> {
+  if (client.setupVerificationMode === true) return;
+  const member = newState.member ?? oldState.member;
+  if (!member || member.user.bot) return;
+
+  // Voice XP
+  onVoiceStateUpdate(oldState, newState);
+
+  // Music auto-pause/leave
+  const voiceCtx = client.router?.getContextSync(newState.guild.id);
+  const musicPlayer = voiceCtx?.getManager<MusicPlayerManager>('musicPlayer');
+  if (musicPlayer) {
+    const affectedChannelId = oldState.channelId ?? newState.channelId;
+    if (affectedChannelId) {
+      musicPlayer.handleVoiceStateChange(affectedChannelId).catch((err) => {
+        log.error('Music voice state handler error:', { error: String(err) });
+      });
+    }
+  }
+
+  // Temp channels
+  const tempMgr = voiceCtx?.getManager<TempChannelManager>('tempChannelManager');
+  if (tempMgr) {
+    handleVoiceStateForTempChannels(oldState, newState, tempMgr).catch((err) => {
+      log.error('Temp channel voice handler error:', { error: String(err) });
+    });
+  }
+
+  // Event bus emissions
+  if (!oldState.channelId && newState.channelId) {
+    client.eventBus.emit('voice.joined', newState.guild.id, {
+      discordId: member.id, username: member.user.username,
+      channelId: newState.channelId, channelName: newState.channel?.name ?? '',
+    });
+  }
+  if (oldState.channelId && !newState.channelId) {
+    client.eventBus.emit('voice.left', oldState.guild.id, {
+      discordId: member.id, username: member.user.username,
+      channelId: oldState.channelId, channelName: oldState.channel?.name ?? '',
+    });
+  }
+  if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
+    client.eventBus.emit('voice.left', oldState.guild.id, {
+      discordId: member.id, username: member.user.username,
+      channelId: oldState.channelId, channelName: oldState.channel?.name ?? '',
+    });
+    client.eventBus.emit('voice.joined', newState.guild.id, {
+      discordId: member.id, username: member.user.username,
+      channelId: newState.channelId, channelName: newState.channel?.name ?? '',
+    });
+  }
+}
+
 export function registerEvents(client: SomniClient): void {
   // ── Safety nets ──
   registerProcessSafetyNets();
@@ -634,21 +905,9 @@ export function registerEvents(client: SomniClient): void {
   });
 
   // ── Guild Member Events ──
-  client.on('guildMemberAdd', async (member) => {
-    if (gatedForVerification()) return;
-    try {
-      const blocked = await processAntiRaid(member.guild, member, client.supabase, client.eventBus);
-      if (!blocked) await handleMemberJoin(client, member);
-    } catch (err) {
-      log.error('guildMemberAdd handler error:', { error: String(err) });
-    }
-  });
+  client.on('guildMemberAdd', (member) => { void handleGuildMemberAddEvent(member, client); });
 
-  client.on('guildMemberRemove', async (member) => {
-    if (gatedForVerification()) return;
-    try { await handleMemberLeave(client, member); }
-    catch (err) { log.error('guildMemberRemove handler error:', { error: String(err) }); }
-  });
+  client.on('guildMemberRemove', (member) => { void handleGuildMemberRemoveEvent(member, client); });
 
   client.on('guildMemberUpdate', async (oldMember, newMember) => {
     if (gatedForVerification()) return;
@@ -698,182 +957,12 @@ export function registerEvents(client: SomniClient): void {
   });
 
   // ── Message Events ──
-  client.on('messageCreate', async (message) => {
-    if (gatedForVerification()) return;
-    if (message.author.bot) return;
-    if (!message.guild) return;
-
-    // Auto-mod pipeline
-    try {
-      const modConfig = await loadModConfig(client, message.guild.id);
-      // Master switch: when automod is disabled, run nothing (no scan, no action).
-      if (modConfig.automodEnabled) {
-        const handled = await processMessage(client, message, modConfig);
-        if (handled) return;
-      }
-    } catch (err) {
-      log.error('Auto-mod error:', { error: String(err) });
-    }
-
-    // Automation engine
-    const messageEvent = {
-      type: 'message.sent' as const,
-      guildId: message.guild!.id,
-      timestamp: Date.now(),
-      data: {
-        discordId: message.author.id,
-        username: message.author.username,
-        channelId: message.channel.id,
-        messageId: message.id,
-        content: message.content,
-      },
-    };
-
-    // V10 Audit §6.P3a — use GuildRouter context instead of casting the client
-    const guildCtx = client.router?.getContextSync(message.guild!.id);
-    const engine = guildCtx?.getManager<import('../features/automations/automation-engine.js').AutomationEngine>('automationEngine');
-    if (engine) {
-      engine.processMessageEvent(messageEvent, message).catch((err) => {
-        log.error('Automation message processing error:', { error: String(err) });
-      });
-    }
-
-    // XP processing
-    try {
-      const xpResult = await processMessageXp(message, client.supabase, client.valkey, message.guild!.id);
-      if (xpResult.leveledUp && xpResult.newLevel != null && xpResult.oldLevel != null && xpResult.newXp != null) {
-        const guild = message.guild;
-        if (guild) {
-          await handleLevelUp(guild, client.supabase, client.eventBus, message.author.id, xpResult.oldLevel, xpResult.newLevel, xpResult.newXp);
-        }
-      }
-
-      // Achievements: passive milestones (messages sent + level) unlock badges.
-      // checkAndUnlock is idempotent, so a re-fire past the same threshold is a
-      // no-op. Only runs on an actual XP grant (rate-limited), not every message.
-      if (xpResult.granted) {
-        const achMgr = guildCtx?.getManager<AchievementsManager>('achievements');
-        if (achMgr) {
-          const gId = message.guild!.id;
-          const uId = message.author.id;
-          const checks: Array<Promise<string | null>> = [];
-          if (typeof xpResult.totalMessages === 'number') {
-            checks.push(achMgr.checkAndUnlock(gId, uId, 'messages_sent', xpResult.totalMessages));
-          }
-          if (xpResult.leveledUp && xpResult.newLevel != null) {
-            checks.push(achMgr.checkAndUnlock(gId, uId, 'level', xpResult.newLevel));
-          }
-          if (checks.length > 0) {
-            const unlocked = (await Promise.all(checks)).filter((n): n is string => Boolean(n));
-            const channel = message.channel;
-            if (unlocked.length > 0 && channel.isTextBased() && 'send' in channel) {
-              for (const name of unlocked) {
-                channel.send({ content: `🏆 <@${uId}> unlocked the **${name}** achievement!` })
-                  .catch((e: unknown) => { log.warn('achievement announce failed:', (e as Error)?.message ?? e); });
-              }
-            }
-          }
-        }
-      }
-    } catch (err) {
-      log.error('XP processing error:', { error: String(err) });
-    }
-
-    // Economy chat income
-    try {
-      const econMgr = guildCtx?.getManager<EconomyManager>('economy');
-      if (econMgr) await econMgr.processChatIncome(message.author.id, message.channelId);
-    } catch (err) {
-      log.error('Economy chat income error:', { error: String(err) });
-    }
-
-    // Quest progress: 'chat' activity
-    try {
-      const qMgr = guildCtx?.getManager<QuestsManager>('quests');
-      if (qMgr) qMgr.trackProgress(message.guild!.id, message.author.id, 'chat').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
-    } catch {
-      // Ignore quest tracking errors
-    }
-  });
+  client.on('messageCreate', (message) => { void handleMessageCreateEvent(message, client); });
 
   // ── Reaction Events ──
-  client.on('messageReactionAdd', async (reaction, user) => {
-    if (gatedForVerification()) return;
-    if (user.bot) return;
-    const message = reaction.message;
-    if (!message.guild) return;
+  client.on('messageReactionAdd', (reaction, user) => { void handleMessageReactionAddEvent(reaction, user, client); });
 
-    const guild = message.guild;
-    if (guild) {
-      try {
-        const handled = await handleReactionAdd(reaction, user, guild, client.supabase, client.valkey, client.eventBus);
-        if (handled) return;
-      } catch (err) {
-        log.error('Reaction role add error:', { error: String(err) });
-      }
-    }
-
-    // Automation event
-    const reactionEvent = {
-      type: 'reaction.added' as const,
-      guildId: message.guild!.id,
-      timestamp: Date.now(),
-      data: {
-        discordId: user.id,
-        username: user.username ?? user.id,
-        emoji: reaction.emoji.name ?? reaction.emoji.toString(),
-        emojiId: reaction.emoji.id,
-        channelId: message.channel.id,
-        messageId: message.id,
-      },
-    };
-
-    const fullMessage = reaction.message.partial
-      ? await reaction.message.fetch().catch(() => null)
-      : reaction.message;
-
-    if (fullMessage) {
-      const reactionCtx = client.router?.getContextSync(message.guild!.id);
-      const engine = reactionCtx?.getManager<import('../features/automations/automation-engine.js').AutomationEngine>('automationEngine');
-      if (engine) {
-        engine.processReactionEvent(reactionEvent, fullMessage).catch((err) => {
-          log.error('Automation reaction processing error:', { error: String(err) });
-        });
-      }
-    }
-
-    client.eventBus.emit('reaction.added', reaction.message.guild!.id, reactionEvent.data);
-
-    // Starboard
-    try {
-      await handleStarboardReaction(reaction, user, client.supabase, reaction.message.guild!.id);
-    } catch (err) {
-      log.error('Starboard reaction error:', { error: String(err) });
-    }
-  });
-
-  client.on('messageReactionRemove', async (reaction, user) => {
-    if (gatedForVerification()) return;
-    if (user.bot) return;
-    const message = reaction.message;
-    if (!message.guild) return;
-    const guild = message.guild;
-    if (guild) {
-      try {
-        await handleReactionRemove(reaction, user, guild, client.supabase, client.valkey, client.eventBus);
-      } catch (err) {
-        log.error('Reaction role remove error:', { error: String(err) });
-      }
-    }
-    client.eventBus.emit('reaction.removed', message.guild.id, {
-      discordId: user.id,
-      username: user.username ?? user.id,
-      emoji: reaction.emoji.name ?? reaction.emoji.toString(),
-      emojiId: reaction.emoji.id,
-      channelId: message.channel.id,
-      messageId: message.id,
-    });
-  });
+  client.on('messageReactionRemove', (reaction, user) => { void handleMessageReactionRemoveEvent(reaction, user, client); });
 
   // ── Message Edit/Delete Logging ──
   client.on('messageUpdate', async (oldMessage, newMessage) => {
@@ -889,58 +978,7 @@ export function registerEvents(client: SomniClient): void {
   });
 
   // ── Voice State Events ──
-  client.on('voiceStateUpdate', async (oldState, newState) => {
-    if (gatedForVerification()) return;
-    const member = newState.member ?? oldState.member;
-    if (!member || member.user.bot) return;
-
-    // Voice XP
-    onVoiceStateUpdate(oldState, newState);
-
-    // Music auto-pause/leave
-    const voiceCtx = client.router?.getContextSync(newState.guild.id);
-    const musicPlayer = voiceCtx?.getManager<MusicPlayerManager>('musicPlayer');
-    if (musicPlayer) {
-      const affectedChannelId = oldState.channelId ?? newState.channelId;
-      if (affectedChannelId) {
-        musicPlayer.handleVoiceStateChange(affectedChannelId).catch((err) => {
-          log.error('Music voice state handler error:', { error: String(err) });
-        });
-      }
-    }
-
-    // Temp channels
-    const tempMgr = voiceCtx?.getManager<TempChannelManager>('tempChannelManager');
-    if (tempMgr) {
-      handleVoiceStateForTempChannels(oldState, newState, tempMgr).catch((err) => {
-        log.error('Temp channel voice handler error:', { error: String(err) });
-      });
-    }
-
-    // Event bus emissions
-    if (!oldState.channelId && newState.channelId) {
-      client.eventBus.emit('voice.joined', newState.guild.id, {
-        discordId: member.id, username: member.user.username,
-        channelId: newState.channelId, channelName: newState.channel?.name ?? '',
-      });
-    }
-    if (oldState.channelId && !newState.channelId) {
-      client.eventBus.emit('voice.left', oldState.guild.id, {
-        discordId: member.id, username: member.user.username,
-        channelId: oldState.channelId, channelName: oldState.channel?.name ?? '',
-      });
-    }
-    if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
-      client.eventBus.emit('voice.left', oldState.guild.id, {
-        discordId: member.id, username: member.user.username,
-        channelId: oldState.channelId, channelName: oldState.channel?.name ?? '',
-      });
-      client.eventBus.emit('voice.joined', newState.guild.id, {
-        discordId: member.id, username: member.user.username,
-        channelId: newState.channelId, channelName: newState.channel?.name ?? '',
-      });
-    }
-  });
+  client.on('voiceStateUpdate', (oldState, newState) => { void handleVoiceStateUpdateEvent(oldState, newState, client); });
 
   // ── Interaction Handler (V5 Audit §6.P3a — delegated to interaction-handler.ts) ──
   client.on('interactionCreate', (interaction) => handleInteraction(interaction, client));

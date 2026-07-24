@@ -21,6 +21,7 @@ import type {
 import type { LiveClientHandle, BootstrapLiveOptions } from '../live-runner.js';
 import type { CapturedResponse } from '../captured-response.js';
 import type { SyntheticInteraction } from '../interaction-builders.js';
+import type { SyntheticMessage } from '../gateway-builders.js';
 
 /**
  * A capability-token-bound injector: the scenario context mints and holds the
@@ -173,6 +174,20 @@ export interface ScenarioContext {
   ): Promise<CapturedResponse>;
 
   /**
+   * Drive a synthetic `messageCreate` gateway event through the REAL exported
+   * `handleMessageCreateEvent` and resolve once the whole pipeline (auto-mod,
+   * automation, XP accrual, achievements, economy, quests) has settled. Every DB
+   * effect is real; the returned message's `sent` array captures any
+   * announcement `channel.send` the pipeline made. Un-gates the message-XP /
+   * chat-income / achievements-announce earning paths that fire only on a
+   * gateway messageCreate (never a slash command).
+   */
+  runMessageCreate(
+    handle: LiveClientHandle,
+    params: RunMessageParams,
+  ): Promise<SyntheticMessage>;
+
+  /**
    * Delete every run-prefixed / scenario-guild-scoped row for a booted handle's
    * guild across the domain's tables (and its guild_config + guild rows). Used by
    * the CLEANUP scenario to prove the sweep leaves zero leftovers; also run by the
@@ -233,6 +248,22 @@ export interface RunSlashParams {
   readonly subcommand?: string;
   /** Subcommand group, for grouped subcommands (`/group sub`). */
   readonly subcommandGroup?: string;
+}
+
+/** Parameters for driving one synthetic `messageCreate` gateway event. */
+export interface RunMessageParams {
+  /** Author's Discord id (run-prefixed by the caller for sweepable isolation). */
+  readonly userId: string;
+  /** Author username (defaults to the userId). */
+  readonly username?: string;
+  /** Channel the message was sent in (drives the XP channel allow/deny check). */
+  readonly channelId?: string;
+  /** Message text (defaults to a benign non-empty string). */
+  readonly content?: string;
+  /** Role ids the author holds (drives no-XP-role suppression + XP multipliers). */
+  readonly memberRoleIds?: string[];
+  /** Override the message id (used to prove replay: same id twice). */
+  readonly messageId?: string;
 }
 
 /** A single scenario's proof: given the live context, produce assertions. */

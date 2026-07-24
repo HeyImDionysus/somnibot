@@ -87,6 +87,16 @@ export interface SyntheticInteraction {
   channelId: string | null;
   user: SyntheticUser;
   member: unknown;
+  /**
+   * The acting member's guild permissions, as discord.js surfaces them on
+   * `interaction.memberPermissions` (a `PermissionsBitField` with `.has()`).
+   * Handlers that perform an in-handler authorization RE-CHECK read this (not
+   * `member.permissions`), so it must be populated for an authed-admin drive to
+   * take the success path rather than the deny branch. Derived from the member's
+   * own `permissions` when present; otherwise a permissive default (most drives
+   * act as an authorized user — explicit deny tests pass a denying member).
+   */
+  memberPermissions: { has(flag: unknown): boolean };
   message: { id: string } | null;
   client: unknown;
 
@@ -142,6 +152,12 @@ export interface BaseInteractionParams {
   messageId?: string;
   /** The SomniClient (or a stub). Defaults to `{}`. */
   client?: unknown;
+  /**
+   * Override the acting member's `interaction.memberPermissions`. When omitted it
+   * is derived from `member.permissions` (or a permissive default) — see the
+   * field docs on {@link SyntheticInteraction.memberPermissions}.
+   */
+  memberPermissions?: { has(flag: unknown): boolean };
   /** Share an existing recorder instead of creating a fresh one. */
   response?: CapturedResponse;
   /** Override the interaction id (defaults to a generated value). */
@@ -206,6 +222,20 @@ function makeBase(params: BaseInteractionParams, trueGuards: GuardName[]): Synth
   const emptyOptions = makeOptions({});
   const emptyFields = makeFields({});
 
+  const member = params.member ?? { id: user.id, permissions: { has: () => true } };
+  // discord.js populates interaction.memberPermissions from the acting member's
+  // guild permissions; handlers that re-check authorization read it. Mirror the
+  // member's own `permissions` when present so a denying member (an explicit
+  // UNAUTH drive) still denies; otherwise default-allow (a normal authed drive).
+  const memberPerms = (): { has(flag: unknown): boolean } => {
+    if (params.memberPermissions) return params.memberPermissions;
+    const p = (member as { permissions?: unknown }).permissions;
+    if (p && typeof p === 'object' && 'has' in p && typeof (p as { has: unknown }).has === 'function') {
+      return p as { has(flag: unknown): boolean };
+    }
+    return { has: () => true };
+  };
+
   const base: SyntheticInteraction = {
     id: params.id ?? nextId('interaction'),
     applicationId: 'app-synthetic',
@@ -217,7 +247,8 @@ function makeBase(params: BaseInteractionParams, trueGuards: GuardName[]): Synth
     guildId: params.guildId ?? DEFAULT_GUILD_ID,
     channelId: params.channelId ?? DEFAULT_CHANNEL_ID,
     user,
-    member: params.member ?? { id: user.id, permissions: { has: () => true } },
+    member,
+    memberPermissions: memberPerms(),
     message: { id: params.messageId ?? nextId('message') },
     client: params.client ?? {},
 
