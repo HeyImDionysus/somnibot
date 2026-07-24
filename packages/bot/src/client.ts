@@ -126,7 +126,11 @@ export class SomniClient extends Client {
         moveOnDisconnect: false,
         resume: true,
         resumeTimeout: 30,
-        reconnectTries: 5,
+        // 5 tries x 5s gave only 25s of tolerance — shorter than a routine
+        // Lavalink restart/upgrade, after which Shoukaku gave up permanently
+        // and music stayed dead until the whole BOT was restarted (observed
+        // live). 60 x 5s rides out a ~5 minute outage and self-heals instead.
+        reconnectTries: 60,
         reconnectInterval: 5000,
       },
     );
