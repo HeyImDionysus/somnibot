@@ -19,6 +19,7 @@ export type {
   BootGuildOptions,
   ScenarioContext,
   RunSlashParams,
+  RunMessageParams,
   ScenarioScript,
   DomainScriptMap,
   DomainProof,

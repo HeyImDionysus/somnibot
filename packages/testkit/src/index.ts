@@ -63,6 +63,25 @@ export {
 } from './inject.js';
 
 export {
+  buildSyntheticMessage,
+  type SyntheticMessage,
+  type SyntheticMessageAuthor,
+  type SyntheticMessageMember,
+  type SyntheticMessageChannel,
+  type SyntheticMessageGuild,
+  type GatewaySend,
+  type BuildMessageParams,
+} from './gateway-builders.js';
+
+export {
+  createGatewayInjector,
+  GatewayInjectorAuthError,
+  type GatewayInjector,
+  type CreateGatewayInjectorOptions,
+  type GatewayInjectOptions,
+} from './gateway-inject.js';
+
+export {
   bootstrapLiveClient,
   LiveRunnerError,
   type BootstrapLiveOptions,
@@ -92,6 +111,7 @@ export {
   type BootGuildOptions,
   type ScenarioContext,
   type RunSlashParams,
+  type RunMessageParams,
   type ScenarioScript,
   type DomainScriptMap,
   type DomainProof,

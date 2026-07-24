@@ -12,8 +12,10 @@ import { ASSERTION_CLASSES, type AssertionClass, type DomainContract, type Scena
 
 import { bootstrapLiveClient, type LiveClientHandle } from '../live-runner.js';
 import { createInteractionInjector } from '../inject.js';
+import { createGatewayInjector, type GatewayInjector } from '../gateway-inject.js';
 import { mintCapabilityToken } from '../capability.js';
 import { buildSlashInteraction, type OptionValue } from '../interaction-builders.js';
+import { buildSyntheticMessage, type SyntheticMessage } from '../gateway-builders.js';
 import type { CapturedResponse } from '../captured-response.js';
 import type {
   AssertionRecord,
@@ -22,6 +24,7 @@ import type {
   Capabilities,
   ClassEvidence,
   ObservationChannel,
+  RunMessageParams,
   RunSlashParams,
   ScenarioContext,
   ScenarioEvidence,
@@ -42,6 +45,7 @@ export class ScenarioContextImpl implements ScenarioContext {
   private readonly handles: LiveClientHandle[] = [];
   private readonly guildIds = new Set<string>();
   private readonly injectors = new Map<LiveClientHandle, BoundInjector>();
+  private readonly gatewayInjectors = new Map<LiveClientHandle, { injector: GatewayInjector; authToken: ReturnType<typeof mintCapabilityToken> }>();
 
   constructor(args: {
     domain: DomainContract;
@@ -118,6 +122,32 @@ export class ScenarioContextImpl implements ScenarioContext {
       subcommandGroup: params.subcommandGroup,
     });
     return injector.inject(interaction);
+  }
+
+  /** Lazily build (and cache) a token-bound gateway injector for a handle. */
+  private gatewayFor(handle: LiveClientHandle): { injector: GatewayInjector; authToken: ReturnType<typeof mintCapabilityToken> } {
+    const existing = this.gatewayInjectors.get(handle);
+    if (existing) return existing;
+    const authToken = mintCapabilityToken();
+    const injector = createGatewayInjector(handle.client, { authToken });
+    const bound = { injector, authToken };
+    this.gatewayInjectors.set(handle, bound);
+    return bound;
+  }
+
+  async runMessageCreate(handle: LiveClientHandle, params: RunMessageParams): Promise<SyntheticMessage> {
+    const { injector, authToken } = this.gatewayFor(handle);
+    const message = buildSyntheticMessage({
+      guildId: handle.guildId,
+      userId: params.userId,
+      username: params.username,
+      channelId: params.channelId,
+      content: params.content,
+      memberRoleIds: params.memberRoleIds,
+      id: params.messageId,
+    });
+    await injector.injectMessageCreate(message, { authToken });
+    return message;
   }
 
   record(record: AssertionRecord): void {
