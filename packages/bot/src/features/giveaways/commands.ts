@@ -131,7 +131,7 @@ export async function handleGiveawayCommand(
         const id = interaction.options.getString('id', true);
         const count = interaction.options.getInteger('count') ?? undefined;
         await interaction.deferReply({ ephemeral: true });
-        const winners = await manager.reroll(id, count);
+        const winners = await manager.reroll(id, count, interaction.user.id);
         await interaction.editReply({
           content: winners.length > 0
             ? `🎊 Rerolled! New winners: ${winners.map((w) => `<@${w}>`).join(', ')}`
@@ -143,7 +143,7 @@ export async function handleGiveawayCommand(
       case 'pause': {
         const id = interaction.options.getString('id', true);
         await interaction.deferReply({ ephemeral: true });
-        const paused = await manager.pauseGiveaway(id);
+        const paused = await manager.pauseGiveaway(id, interaction.user.id);
         await interaction.editReply(
           paused
             ? '⏸️ Giveaway paused. Entries are blocked until resumed.'
@@ -155,7 +155,7 @@ export async function handleGiveawayCommand(
       case 'resume': {
         const id = interaction.options.getString('id', true);
         await interaction.deferReply({ ephemeral: true });
-        const resumed = await manager.resumeGiveaway(id);
+        const resumed = await manager.resumeGiveaway(id, interaction.user.id);
         await interaction.editReply(
           resumed
             ? '▶️ Giveaway resumed! Entries are open again.'

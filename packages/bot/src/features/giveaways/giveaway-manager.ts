@@ -157,6 +157,18 @@ export class GiveawayManager {
 
     if (error || !data) {
       log.error('Create error:', error?.message);
+      // Audit + owner alert for the failure branch (contracted giveaway-alert).
+      this.eventBus.emit('giveaway.failed', this.guild.id, {
+        giveawayId: null,
+        stage: 'create',
+        actorId: options.creatorId,
+        error: error?.message ?? 'unknown',
+      });
+      await this.raiseGiveawayAlert(
+        'create',
+        `A giveaway ("${options.prize}") could not be created: ${error?.message ?? 'unknown error'}.`,
+        { channel_id: options.channelId, creator_id: options.creatorId },
+      );
       return null;
     }
 
@@ -178,7 +190,41 @@ export class GiveawayManager {
       giveaway.message_id = msg.id;
     }
 
+    this.eventBus.emit('giveaway.started', this.guild.id, {
+      giveawayId: giveaway.id,
+      prize: giveaway.prize,
+      winnerCount: giveaway.winner_count,
+      channelId: giveaway.channel_id,
+      creatorId: giveaway.created_by,
+      endsAt: giveaway.ends_at,
+      requiredRoleId: giveaway.required_role_id,
+      requiredLevel: giveaway.required_level,
+    });
+
     return giveaway;
+  }
+
+  /**
+   * Raise exactly one owner alert for a giveaway failure branch. Best effort —
+   * a failed alert insert never blocks the giveaway flow.
+   */
+  private async raiseGiveawayAlert(
+    stage: string,
+    message: string,
+    metadata: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await this.supabase.from('alerts').insert({
+        guild_id: this.guild.id,
+        alert_type: 'giveaway_failed',
+        severity: 'warning',
+        title: 'Giveaway action failed',
+        message,
+        metadata: { stage, ...metadata },
+      });
+    } catch (alertErr) {
+      log.error('Failed to write giveaway alert:', { error: String(alertErr) });
+    }
   }
 
   /**
@@ -249,12 +295,29 @@ export class GiveawayManager {
 
       if (!updated || !Array.isArray(updated) || updated.length === 0) {
         log.error('giveaway_remove_entry RPC not found or no match — run migrations');
+        this.eventBus.emit('giveaway.failed', this.guild.id, {
+          giveawayId,
+          stage: 'entry',
+          actorId: userId,
+          error: 'giveaway_remove_entry RPC not found or no match',
+        });
+        await this.raiseGiveawayAlert(
+          'entry',
+          `A member could not withdraw from giveaway ${giveawayId} — the giveaway_remove_entry RPC is missing. Run migrations.`,
+          { giveaway_id: giveawayId, user_id: userId },
+        );
         await interaction.reply({ content: '❌ Internal error — please try again.', ephemeral: true });
         return true;
       }
       const newEntries: string[] = updated[0].entries ?? [];
 
       await this.updateGiveawayMessage({ ...giveaway, entries: newEntries });
+      this.eventBus.emit('giveaway.entered', this.guild.id, {
+        giveawayId,
+        userId,
+        withdrawn: true,
+        entryCount: newEntries.length,
+      });
       await interaction.reply({ content: '🚪 You have withdrawn from the giveaway.', ephemeral: true });
       return true;
     }
@@ -268,12 +331,29 @@ export class GiveawayManager {
 
     if (!updated || !Array.isArray(updated) || updated.length === 0) {
       log.error('giveaway_add_entry RPC not found or no match — run migrations');
+      this.eventBus.emit('giveaway.failed', this.guild.id, {
+        giveawayId,
+        stage: 'entry',
+        actorId: userId,
+        error: 'giveaway_add_entry RPC not found or no match',
+      });
+      await this.raiseGiveawayAlert(
+        'entry',
+        `A member could not enter giveaway ${giveawayId} — the giveaway_add_entry RPC is missing. Run migrations.`,
+        { giveaway_id: giveawayId, user_id: userId },
+      );
       await interaction.reply({ content: '❌ Internal error — please try again.', ephemeral: true });
       return true;
     }
     const newEntries: string[] = updated[0].entries ?? [];
 
     await this.updateGiveawayMessage({ ...giveaway, entries: newEntries });
+    this.eventBus.emit('giveaway.entered', this.guild.id, {
+      giveawayId,
+      userId,
+      withdrawn: false,
+      entryCount: newEntries.length,
+    });
     await interaction.reply({ content: '🎉 You have entered the giveaway! Click again to withdraw.', ephemeral: true });
     return true;
   }
@@ -299,7 +379,7 @@ export class GiveawayManager {
   /**
    * Pause an active giveaway — entries blocked, timer stops.
    */
-  async pauseGiveaway(giveawayId: string): Promise<boolean> {
+  async pauseGiveaway(giveawayId: string, actorId?: string): Promise<boolean> {
     const { data } = await this.supabase
       .from('giveaways')
       .select('*')
@@ -320,6 +400,12 @@ export class GiveawayManager {
     const pausedGiveaway = { ...giveaway, status: 'paused' as const };
     await this.updateGiveawayMessage(pausedGiveaway);
 
+    this.eventBus.emit('giveaway.paused', this.guild.id, {
+      giveawayId,
+      prize: giveaway.prize,
+      actorId: actorId ?? null,
+    });
+
     log.info(`Paused "${giveaway.prize}"`);
     return true;
   }
@@ -327,7 +413,7 @@ export class GiveawayManager {
   /**
    * Resume a paused giveaway — recalculates end time based on remaining duration.
    */
-  async resumeGiveaway(giveawayId: string): Promise<boolean> {
+  async resumeGiveaway(giveawayId: string, actorId?: string): Promise<boolean> {
     const { data } = await this.supabase
       .from('giveaways')
       .select('*')
@@ -359,6 +445,13 @@ export class GiveawayManager {
     };
     await this.updateGiveawayMessage(resumedGiveaway);
 
+    this.eventBus.emit('giveaway.resumed', this.guild.id, {
+      giveawayId,
+      prize: giveaway.prize,
+      actorId: actorId ?? null,
+      endsAt: resumedGiveaway.ends_at,
+    });
+
     log.info(`Resumed "${giveaway.prize}"`);
     return true;
   }
@@ -366,7 +459,7 @@ export class GiveawayManager {
   /**
    * Reroll winners for an ended giveaway.
    */
-  async reroll(giveawayId: string, count?: number): Promise<string[]> {
+  async reroll(giveawayId: string, count?: number, actorId?: string): Promise<string[]> {
     const { data } = await this.supabase
       .from('giveaways')
       .select('*')
@@ -394,6 +487,17 @@ export class GiveawayManager {
 
     if (rerollErr || !rerolled || (Array.isArray(rerolled) && rerolled.length === 0)) {
       log.error('giveaway_atomic_reroll failed:', rerollErr?.message);
+      this.eventBus.emit('giveaway.failed', this.guild.id, {
+        giveawayId,
+        stage: 'reroll',
+        actorId: actorId ?? null,
+        error: rerollErr?.message ?? 'giveaway_atomic_reroll returned no rows',
+      });
+      await this.raiseGiveawayAlert(
+        'reroll',
+        `A reroll for giveaway ${giveawayId} ("${giveaway.prize}") failed: ${rerollErr?.message ?? 'no rows updated'}.`,
+        { giveaway_id: giveawayId },
+      );
       return [];
     }
 
@@ -405,6 +509,13 @@ export class GiveawayManager {
         content: `🎊 **Giveaway Reroll** — New winner${newWinners.length > 1 ? 's' : ''}: ${winnerMentions || 'No eligible entries'}`,
       });
     }
+
+    this.eventBus.emit('giveaway.rerolled', this.guild.id, {
+      giveawayId,
+      prize: giveaway.prize,
+      winnerIds: newWinners,
+      actorId: actorId ?? null,
+    });
 
     return newWinners;
   }

@@ -28,6 +28,11 @@ let insertedSession: Record<string, unknown> | null = null;
 function makeAdmin() {
   return {
     from: (table: string) => {
+      if (table === 'audit_logs') {
+        // Append-only audit writer — a separate table; must not clobber
+        // insertedSession (the portal_sessions insert we assert on).
+        return { insert: async () => ({ error: null }) };
+      }
       if (table === 'customers') {
         let guild = '';
         const chain: any = {

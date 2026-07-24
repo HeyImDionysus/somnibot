@@ -27,6 +27,44 @@ import { resolveBrandKit } from '../branding/brand-kit.js';
 
 const log = createLogger('Tickets');
 
+// ── Failure observability ────────────────────────────────
+
+/**
+ * Report a ticket-creation failure: raise an owner alert (alerts table — DB
+ * observable) and emit a 'ticket.create_failed' audit event. Previously these
+ * branches only log.error'd and returned an error string, so a broken ticket
+ * panel (missing perms, DB outage) was invisible to the server owner and left
+ * no audit trail.
+ */
+async function reportTicketCreateFailure(
+  supabase: SupabaseClient,
+  eventBus: PlatformEventBus,
+  guildId: string,
+  input: { userDiscordId: string; panelId: string; ticketNumber?: number; stage: string; error: string },
+): Promise<void> {
+  eventBus.emit('ticket.create_failed', guildId, {
+    userDiscordId: input.userDiscordId,
+    panelId: input.panelId,
+    ticketNumber: input.ticketNumber,
+    stage: input.stage,
+    error: input.error,
+  });
+  try {
+    await supabase.from('alerts').insert({
+      guild_id: guildId,
+      alert_type: 'ticket_create_failed',
+      severity: 'warning',
+      title: 'Ticket could not be created',
+      message:
+        `A member tried to open a ticket but creation failed at the ${input.stage} stage: ${input.error}. ` +
+        `Check the bot's Manage Channels permission and the panel's category configuration.`,
+      metadata: { panel_id: input.panelId, member_id: input.userDiscordId, stage: input.stage, error: input.error },
+    });
+  } catch (alertErr) {
+    log.error('Failed to write ticket-create alert:', { error: String(alertErr) });
+  }
+}
+
 // ── Ticket Number ────────────────────────────────────────
 
 async function getNextTicketNumber(supabase: SupabaseClient, guildId: string): Promise<number> {
@@ -137,6 +175,13 @@ export async function createTicket(
     });
   } catch (err) {
     log.error('Failed to create ticket channel:', { error: String(err) });
+    await reportTicketCreateFailure(supabase, eventBus, guild.id, {
+      userDiscordId: member.id,
+      panelId: panel.id,
+      ticketNumber,
+      stage: 'channel_create',
+      error: String(err),
+    });
     return { error: 'Failed to create ticket channel. Check bot permissions.' };
   }
 
@@ -199,6 +244,13 @@ export async function createTicket(
     log.error('Failed to save ticket:', dbError?.message);
     // Clean up the channel
     await channel.delete().catch(() => { /* channel may already be deleted */ });
+    await reportTicketCreateFailure(supabase, eventBus, guild.id, {
+      userDiscordId: member.id,
+      panelId: panel.id,
+      ticketNumber,
+      stage: 'db_save',
+      error: dbError?.message ?? 'unknown',
+    });
     return { error: 'Failed to save ticket to database.' };
   }
 

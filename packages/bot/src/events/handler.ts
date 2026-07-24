@@ -637,7 +637,7 @@ export function registerEvents(client: SomniClient): void {
   client.on('guildMemberAdd', async (member) => {
     if (gatedForVerification()) return;
     try {
-      const blocked = await processAntiRaid(member.guild, member, client.supabase);
+      const blocked = await processAntiRaid(member.guild, member, client.supabase, client.eventBus);
       if (!blocked) await handleMemberJoin(client, member);
     } catch (err) {
       log.error('guildMemberAdd handler error:', { error: String(err) });

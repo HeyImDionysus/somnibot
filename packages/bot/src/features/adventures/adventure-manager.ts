@@ -25,6 +25,7 @@ import type {
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Adventures');
 
@@ -643,6 +644,16 @@ export class AdventureManager {
 
     const sessionId = (session as Record<string, unknown> | null)?.id as string | null;
 
+    // [game-economy-adventures] Append-only audit row for the adventure start
+    // state change (ticket charged, session opened).
+    eventBus.emit('adventure.started', this.guild.id, {
+      userId,
+      adventureId: adventure.id,
+      adventureName: adventure.name,
+      ticketCost: config.economy_adventure_ticket_cost,
+      sessionId,
+    });
+
     // Build embed + buttons
     const { embed, row } = this.buildSceneEmbed(adventure, scene, sessionId, 0);
     return { embed, row, sessionId };
@@ -882,6 +893,15 @@ export class AdventureManager {
           .from('economy_adventure_sessions')
           .update({ status: 'payout_failed' })
           .eq('id', session.id);
+        // [game-economy-adventures] Owner alert + audit on the payout-failure
+        // branch so the stranded (payout_failed) session is operator-visible.
+        await this.raisePayoutFailedAlert(session.user_id, session.id, currency)
+          .catch((e: unknown) => { log.warn('adventure payout alert failed:', (e as Error)?.message ?? e); });
+        eventBus.emit('adventure.payout_failed', this.guild.id, {
+          userId: session.user_id,
+          sessionId: session.id,
+          amount: currency,
+        });
       }
     }
 
@@ -919,5 +939,31 @@ export class AdventureManager {
 
     // Quest progress — count completed adventures
     getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, session.user_id, 'adventure').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+
+    // [game-economy-adventures] Append-only audit row for the adventure end
+    // state change (economy movement: currency + loot delivered).
+    eventBus.emit('adventure.completed', this.guild.id, {
+      userId: session.user_id,
+      sessionId: session.id,
+      status,
+      currency,
+      lootCount: loot.length,
+    });
+  }
+
+  /**
+   * [game-economy-adventures] Raise a payout-failed owner alert so an operator
+   * knows a finished adventure could not credit its coin reward (the session is
+   * marked payout_failed for retry). Best effort — never blocks the flow.
+   */
+  private async raisePayoutFailedAlert(userId: string, sessionId: string, amount: number): Promise<void> {
+    await this.supabase.from('alerts').insert({
+      guild_id: this.guild.id,
+      alert_type: 'adventure_payout_failed',
+      severity: 'warning',
+      title: 'Adventure payout failed',
+      message: `An adventure reward of ${amount} could not be credited to ${userId}. The session is marked payout_failed for retry.`,
+      metadata: { user_id: userId, session_id: sessionId, amount },
+    });
   }
 }

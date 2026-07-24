@@ -1,4 +1,5 @@
 import { type LauncherConfig } from './config-store.js';
+import { type LauncherAuditEntry } from './audit-log.js';
 import { type VpsDeploymentApprovalDecision } from './vps-deployment-approval.js';
 import {
   runVpsDeployment,
@@ -22,6 +23,13 @@ export interface VpsDeploymentRunRuntime {
   confirmApproval: (plan: VpsDeploymentPlan) => Promise<VpsDeploymentApprovalDecision>;
   createCommandRunner: () => VpsDeploymentCommandRunner;
   runGate: VpsDeploymentRunGate;
+  /**
+   * [infrastructure-launcher] Optional sink for durable audit entries. Records
+   * the operator approval decision and the deployment execution outcome (the
+   * "VPS remote execute" + "approval decisions" security operations). Only live
+   * (non dry-run) runs, which actually touch the remote host, are audited.
+   */
+  recordAudit?: (entry: LauncherAuditEntry) => void;
 }
 
 function rendererApproval(request: VpsDeploymentRunRequest | undefined): VpsDeploymentApprovalDecision {
@@ -69,7 +77,25 @@ export async function handleVpsDeploymentRunRequest(
       ? await runtime.confirmApproval(plan)
       : rendererApproval(request);
 
-    return runVpsDeployment({
+    // [infrastructure-launcher] Audit the operator's approval decision for a
+    // live run — an approved or denied VPS deployment is a security-relevant
+    // event that must be durably observable.
+    if (liveRequested) {
+      runtime.recordAudit?.({
+        action: 'launcher.vps_deployment.approval_decision',
+        category: 'security',
+        targetType: 'vps_deployment',
+        targetId: plan.target?.sshTarget ?? undefined,
+        details: {
+          sshTarget: plan.target?.sshTarget ?? null,
+          publicBaseUrl: plan.target?.publicBaseUrl ?? null,
+          approvedCommandCount: approval.approvedCommandIds.length,
+        },
+        success: approval.operatorApproved,
+      });
+    }
+
+    const result = await runVpsDeployment({
       plan,
       operatorApproved: approval.operatorApproved,
       approvedCommandIds: approval.approvedCommandIds,
@@ -77,6 +103,27 @@ export async function handleVpsDeploymentRunRequest(
       cancelRequested: Boolean(request?.cancelRequested),
       ...(liveRequested && approval.operatorApproved ? { commandRunner: runtime.createCommandRunner() } : {}),
     });
+
+    // [infrastructure-launcher] Audit the remote-execution outcome for live
+    // runs (VPS remote execute). Dry-runs never touch the host, so they are
+    // not recorded.
+    if (liveRequested && approval.operatorApproved) {
+      runtime.recordAudit?.({
+        action: 'launcher.vps_deployment.executed',
+        category: 'security',
+        targetType: 'vps_deployment',
+        targetId: plan.target?.sshTarget ?? undefined,
+        details: {
+          sshTarget: plan.target?.sshTarget ?? null,
+          state: result.state,
+          planStatus: result.planStatus,
+          commandCount: plan.commands.length,
+        },
+        success: result.state === 'success',
+      });
+    }
+
+    return result;
   };
 
   if (!liveRequested) {

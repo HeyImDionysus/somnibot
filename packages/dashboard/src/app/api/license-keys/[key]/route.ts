@@ -11,6 +11,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { writeCommerceAudit } from '@/lib/commerce-audit';
 
 export async function GET(
   _req: NextRequest,
@@ -73,7 +74,7 @@ export async function PUT(
 
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
+  const { guildId, discordId } = auth.ctx;
 
   const { key: keyId } = await params;
   const supabase = createAdminSupabase();
@@ -106,12 +107,13 @@ export async function PUT(
     return NextResponse.json({ success: false, error: 'License key not found' }, { status: 404 });
   }
 
+  let sessionsRevoked = 0;
   if (status === 'revoked') {
     updateData.revoked_at = new Date().toISOString();
     updateData.revocation_reason = revocation_reason ?? 'Admin revocation';
 
     // Also deactivate sessions
-    await supabase
+    const { data: revokedSessions } = await supabase
       .from('license_sessions')
       .update({
         active: false,
@@ -119,7 +121,9 @@ export async function PUT(
         deactivation_reason: 'admin_revoked',
       })
       .eq('license_key_id', keyId)
-      .eq('active', true);
+      .eq('active', true)
+      .select('id');
+    sessionsRevoked = revokedSessions?.length ?? 0;
   }
 
   const { data, error } = await supabase
@@ -133,6 +137,23 @@ export async function PUT(
   if (error) {
     return dbError(error, 'license-keys');
   }
+
+  // Append-only audit: license-key status change (revoke/suspend/reactivate).
+  // Previously only /license activate was audited — revocation and the cascade
+  // of device-session deactivations left no durable trail.
+  await writeCommerceAudit(supabase, {
+    guildId,
+    actorType: 'user',
+    actorId: discordId,
+    action: status === 'revoked' ? 'license.revoked' : 'license.status_changed',
+    targetType: 'license_key',
+    targetId: keyId,
+    details: {
+      status,
+      revocationReason: status === 'revoked' ? (revocation_reason ?? 'Admin revocation') : undefined,
+      sessionsRevoked,
+    },
+  });
 
   return NextResponse.json({ success: true, data });
 }

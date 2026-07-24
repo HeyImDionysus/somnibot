@@ -14,6 +14,7 @@ import type { LootSourceType, LootRarity } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Gathering');
 
@@ -291,6 +292,16 @@ export class GatheringManager {
       // instead of silently swallowing the error (coins would be lost).
       const credited = await this.addToWallet(userId, totalValue);
       if (!credited) {
+        // [game-economy-gathering] Owner alert + audit when a gather payout fails
+        // AFTER the roll (durability consumed, cooldown set) so the lost credit is
+        // operator-visible.
+        await this.raiseGatherPayoutAlert(userId, totalValue, sourceType)
+          .catch((e: unknown) => { log.warn('gathering payout alert failed:', (e as Error)?.message ?? e); });
+        eventBus.emit('gather.payout_failed', this.guild.id, {
+          userId,
+          sourceType,
+          amount: totalValue,
+        });
         return {
           embed: new EmbedBuilder()
             .setDescription('❌ Wallet credit failed — please try again or contact an admin.')
@@ -332,6 +343,16 @@ export class GatheringManager {
 
     // Quest progress
     getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'gather').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+
+    // [game-economy-gathering] Append-only audit row for the gather state change
+    // (loot granted to inventory or sold for currency).
+    eventBus.emit('gather.completed', this.guild.id, {
+      userId,
+      sourceType,
+      itemName: picked.item_name,
+      quantity,
+      value: totalValue,
+    });
 
     return {
       embed,
@@ -435,6 +456,22 @@ export class GatheringManager {
       return false;
     }
     return true;
+  }
+
+  /**
+   * [game-economy-gathering] Raise a payout-degraded owner alert when a gather
+   * sell credit fails after the roll, so an operator knows the member rolled loot
+   * but the currency credit was lost. Best effort — never blocks the flow.
+   */
+  private async raiseGatherPayoutAlert(userId: string, amount: number, sourceType: LootSourceType): Promise<void> {
+    await this.supabase.from('alerts').insert({
+      guild_id: this.guild.id,
+      alert_type: 'gathering_payout_failed',
+      severity: 'warning',
+      title: 'Gathering payout failed',
+      message: `A ${sourceType} payout of ${amount} failed to credit ${userId} after the roll.`,
+      metadata: { user_id: userId, amount, source_type: sourceType },
+    });
   }
 
   private weightedRandom(entries: LootEntry[]): LootEntry {

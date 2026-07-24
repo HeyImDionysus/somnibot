@@ -16,6 +16,7 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
+import type { PlatformEventBus } from '../../services/event-bus.js';
 
 const log = createLogger('AlertManager');
 
@@ -60,10 +61,20 @@ export class AlertManager {
   private supabase: SupabaseClient;
   private thresholds: AlertThresholds;
   private activeAlerts: Set<string> = new Set();
+  // Optional platform event bus — when present, alert lifecycle transitions
+  // (raised / resolved, incl. dependency-down) are mirrored to the append-only
+  // audit_logs trail via AuditService. Optional so the manager still works in
+  // isolation (e.g. unit fixtures) without an event bus.
+  private eventBus?: PlatformEventBus;
 
-  constructor(supabase: SupabaseClient, thresholds?: Partial<AlertThresholds>) {
+  constructor(
+    supabase: SupabaseClient,
+    thresholds?: Partial<AlertThresholds>,
+    eventBus?: PlatformEventBus,
+  ) {
     this.supabase = supabase;
     this.thresholds = { ...DEFAULT_THRESHOLDS, ...thresholds };
+    this.eventBus = eventBus;
   }
 
   /**
@@ -166,6 +177,17 @@ export class AlertManager {
           if (insertErr && (insertErr as { code?: string }).code !== '23505') {
             throw insertErr;
           }
+          // Only THIS evaluation's fresh insert (no error) mirrors an
+          // alert.raised audit event — a 23505 means a concurrent evaluation
+          // already opened it and emitted, so we must not double-audit.
+          if (!insertErr) {
+            this.eventBus?.emit('diagnostics.alert_raised', alert.guild_id, {
+              alertType: alert.alert_type,
+              severity: alert.severity,
+              title: alert.title,
+              message: alert.message,
+            });
+          }
           // Read back the id of the now-open alert (whether this evaluation
           // inserted it or lost the 23505 race to a concurrent one) so the
           // linked incident below binds to the single canonical alert row.
@@ -207,6 +229,11 @@ export class AlertManager {
           .eq('resolved', false);
 
         this.activeAlerts.delete(alertType);
+
+        // Mirror the auto-resolution to the append-only audit trail.
+        this.eventBus?.emit('diagnostics.alert_resolved', snapshot.guild_id, {
+          alertType,
+        });
       } catch (err) {
         log.error(`Failed to resolve alert ${alertType}:`, err);
       }

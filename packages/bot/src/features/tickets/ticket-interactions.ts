@@ -280,7 +280,7 @@ async function handleTicketClose(
 
   if (ticket.status === 'open' || ticket.status === 'claimed') {
     // Generate transcript before closing
-    await generateTranscript(guild, ticket, client.supabase);
+    await generateTranscript(guild, ticket, client.supabase, client.eventBus);
   }
 
   const result = await closeTicket(
@@ -383,7 +383,7 @@ async function handleTicketTranscript(
     return;
   }
 
-  const result = await generateTranscript(guild, ticket, client.supabase);
+  const result = await generateTranscript(guild, ticket, client.supabase, client.eventBus);
 
   if (!result.success) {
     await interaction.editReply(`❌ ${result.error}`);

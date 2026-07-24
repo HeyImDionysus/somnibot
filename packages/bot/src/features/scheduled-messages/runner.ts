@@ -10,6 +10,7 @@ import {
   type TextChannel,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('ScheduledRunner');
@@ -147,6 +148,7 @@ export class ScheduledMessageRunner {
   constructor(
     private guild: Guild,
     private supabase: SupabaseClient,
+    private eventBus: PlatformEventBus = defaultEventBus,
   ) {}
 
   async start(): Promise<void> {
@@ -322,6 +324,13 @@ export class ScheduledMessageRunner {
       return;
     }
 
+    this.eventBus.emit('scheduled_message.sent', this.guild.id, {
+      scheduleId: schedule.id,
+      name: schedule.name,
+      channelId: schedule.channel_id,
+      currentSends: schedule.current_sends + 1,
+    });
+
     log.info(`Sent "${schedule.name}" to #${channel.name}`);
   }
 
@@ -371,6 +380,13 @@ export class ScheduledMessageRunner {
       // Another instance already recorded the failure — do not double-alert.
       return;
     }
+
+    this.eventBus.emit('scheduled_message.delivery_failed', this.guild.id, {
+      scheduleId: schedule.id,
+      name: schedule.name,
+      channelId: schedule.channel_id,
+      reason,
+    });
 
     const channel = this.guild.channels.cache.get(schedule.channel_id);
     const channelName =

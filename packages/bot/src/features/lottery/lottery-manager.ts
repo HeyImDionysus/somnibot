@@ -10,6 +10,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Lottery');
 
@@ -326,6 +327,14 @@ export class LotteryManager {
     // Quest progress is not idempotent — credit it only on the first application.
     if (!result.replayed) {
       getQuestsManager(guildId)?.trackProgress(guildId, userId, 'lottery', count).catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+      // [game-economy-lottery] Append-only audit row for the ticket-purchase
+      // state change (only a genuinely-new, non-replayed buy charges + issues).
+      eventBus.emit('lottery.ticket_purchased', guildId, {
+        userId,
+        count,
+        totalCost,
+        jackpot: result.jackpot ?? drawing.jackpot + totalCost,
+      });
     }
 
     await interaction.reply({
@@ -457,6 +466,14 @@ export class LotteryManager {
     );
     if (awardErr) {
       log.error(`Failed to award lottery jackpot for ${drawing.id} (stored winner will be retried next tick):`, awardErr.message);
+      // [game-economy-lottery] Owner draw-degraded alert + audit on jackpot-payout
+      // failure so the stuck (unpaid, will-retry) drawing is operator-visible.
+      await this.raiseDrawDegradedAlert(guildId, drawing.id)
+        .catch((e: unknown) => { log.warn('lottery draw-degraded alert failed:', (e as Error)?.message ?? e); });
+      eventBus.emit('lottery.payout_failed', guildId, {
+        drawingId: drawing.id,
+        reason: awardErr.message,
+      });
       return null;
     }
     const awardedRow = Array.isArray(awarded) ? awarded[0] : awarded;
@@ -465,10 +482,36 @@ export class LotteryManager {
       return null;
     }
 
+    // [game-economy-lottery] Append-only audit row for the draw state change
+    // (winner selected + jackpot paid). Only the call that performed the payout
+    // reaches here (awardedRow non-null), so this never double-audits.
+    eventBus.emit('lottery.drawn', guildId, {
+      drawingId: drawing.id,
+      winnerId: awardedRow.winner_user_id,
+      jackpot: awardedRow.jackpot ?? 0,
+      winningNumber: awardedRow.winning_number,
+    });
+
     return {
       winnerId: awardedRow.winner_user_id,
       jackpot: awardedRow.jackpot ?? 0,
       winningNumber: awardedRow.winning_number,
     };
+  }
+
+  /**
+   * [game-economy-lottery] Raise a draw-degraded owner alert when the jackpot
+   * payout RPC fails so an operator knows a stored winner is still owed their
+   * prize (the draw is retried next tick). Best effort — never blocks the draw.
+   */
+  private async raiseDrawDegradedAlert(guildId: string, drawingId: string): Promise<void> {
+    await this.supabase.from('alerts').insert({
+      guild_id: guildId,
+      alert_type: 'lottery_draw_degraded',
+      severity: 'warning',
+      title: 'Lottery jackpot payout degraded',
+      message: `The jackpot payout for drawing ${drawingId} failed. The stored winner will be retried on the next draw tick.`,
+      metadata: { drawing_id: drawingId },
+    });
   }
 }

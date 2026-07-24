@@ -15,6 +15,7 @@ import { randomPick, randomFloat } from '../../utils/random.js';
 import { joinProp } from '../../utils/db-helpers.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Fishing');
 
@@ -425,7 +426,24 @@ export class FishingManager {
       // Raise a payout-degraded owner alert so the unpaid catch is visible.
       await this.raisePayoutDegradedAlert(userId, price)
         .catch((e: unknown) => { log.warn('payout-degraded alert failed:', (e as Error)?.message ?? e); });
+      // [game-economy-fishing] Audit the failed auto-sell so the unpaid catch is
+      // an append-only observable event, not just a warning log.
+      eventBus.emit('fishing.payout_failed', this.guild.id, {
+        userId,
+        species: picked.name,
+        amount: price,
+      });
     }
+
+    // [game-economy-fishing] Append-only audit row for the catch state change
+    // (records the catch + whether the auto-sell credit landed).
+    eventBus.emit('fishing.catch', this.guild.id, {
+      userId,
+      species: picked.name,
+      rarity: picked.rarity,
+      price,
+      paid,
+    });
 
     return { species: picked, weight, price, paid };
   }

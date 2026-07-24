@@ -10,6 +10,7 @@ import {
   type VoiceChannel,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('StatsManager');
@@ -34,6 +35,7 @@ export class StatsChannelManager {
     private guild: Guild,
     private supabase: SupabaseClient,
     intervalMinutes: number = 10,
+    private eventBus: PlatformEventBus = defaultEventBus,
   ) {
     this.intervalMs = intervalMinutes * 60_000;
   }
@@ -98,9 +100,21 @@ export class StatsChannelManager {
 
         if (config.channel_id) {
           const channel = this.guild.channels.cache.get(config.channel_id) as VoiceChannel | undefined;
-          if (channel) {
-            await channel.setName(newName);
+          if (!channel) {
+            // The counter channel was deleted. Raise an owner alert and do NOT
+            // advance last_value — otherwise the deletion is silent and the
+            // counter would skip this value once the channel is recreated.
+            await this.raiseChannelDeletedAlert(config);
+            continue;
           }
+          await channel.setName(newName);
+          this.eventBus.emit('stats_channel.updated', this.guild.id, {
+            statChannelId: config.id,
+            channelId: config.channel_id,
+            statType: config.stat_type,
+            value,
+            created: false,
+          });
         } else {
           // Create the voice channel if it doesn't exist yet
           const configObj = config.stat_config ?? {};
@@ -127,6 +141,14 @@ export class StatsChannelManager {
             .from('stats_channels')
             .update({ channel_id: channel.id })
             .eq('id', config.id);
+
+          this.eventBus.emit('stats_channel.updated', this.guild.id, {
+            statChannelId: config.id,
+            channelId: channel.id,
+            statType: config.stat_type,
+            value,
+            created: true,
+          });
         }
 
         // Update last value
@@ -138,6 +160,46 @@ export class StatsChannelManager {
       } catch (err) {
         log.error(`Failed to update ${config.stat_type}:`, err);
       }
+    }
+  }
+
+  /**
+   * Raise exactly one owner alert when a stats counter channel has been deleted,
+   * so the degraded counter is visible instead of silently frozen. Deduplicated
+   * on the open (unresolved) alert for this specific stats channel.
+   */
+  private async raiseChannelDeletedAlert(config: StatsChannelConfig): Promise<void> {
+    if (!config.channel_id) return;
+    try {
+      const { data: openAlerts } = await this.supabase
+        .from('alerts')
+        .select('id, metadata')
+        .eq('guild_id', this.guild.id)
+        .eq('alert_type', 'stats_channel_deleted')
+        .eq('resolved', false)
+        .limit(1000);
+      const already = (openAlerts ?? []).some(
+        (a: { metadata?: { stats_channel_id?: string } | null }) =>
+          a.metadata?.stats_channel_id === config.id,
+      );
+      if (already) return;
+
+      await this.supabase.from('alerts').insert({
+        guild_id: this.guild.id,
+        alert_type: 'stats_channel_deleted',
+        severity: 'warning',
+        title: 'Stats counter channel was deleted',
+        message:
+          `The "${config.stat_type}" stats counter channel (${config.channel_id}) no longer exists. ` +
+          `Its value has stopped updating. Recreate the counter from the dashboard to restore it.`,
+        metadata: {
+          stats_channel_id: config.id,
+          channel_id: config.channel_id,
+          stat_type: config.stat_type,
+        },
+      });
+    } catch (alertErr) {
+      log.error('Failed to write stats-channel deleted alert:', { error: String(alertErr) });
     }
   }
 

@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { randomIntRange, randomChance, cryptoShuffle, randomPick } from '../../utils/random.js';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Games');
 
@@ -174,6 +175,15 @@ export class GamesManager {
     });
     if (error) { log.error('economy_resolve_bet failed:', error.message); return false; }
     if ((data as { status?: string } | null)?.status === 'insufficient_funds') return false;
+
+    // [game-economy-casino] Append-only audit row per settled bet — mirrors the
+    // casino_bet ledger row the RPC writes so every state change is observable.
+    eventBus.emit('casino.bet_settled', guildId, {
+      userId,
+      game,
+      net,
+      loss: net < 0 ? -net : 0,
+    });
 
     // Track quest progress for any gamble action (win or loss).
     getQuestsManager(guildId)?.trackProgress(guildId, userId, 'gamble').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });

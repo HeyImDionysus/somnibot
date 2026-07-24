@@ -40,6 +40,7 @@ export class DiagnosticsService {
     this.alertManager = new AlertManager(
       supabase,
       typeof guildIdOrAlertThresholds === 'string' ? alertThresholds : guildIdOrAlertThresholds,
+      client.eventBus,
     );
     this.startedAt = Date.now();
   }
@@ -166,6 +167,12 @@ export class DiagnosticsService {
 
       if (error) {
         log.error('Failed to write snapshot:', error.message);
+        // Snapshot write failure is a diagnostics-observability gap the owner
+        // must be able to see after the fact — mirror it to the audit trail.
+        this.client.eventBus.emit('diagnostics.snapshot_failed', this.guildId, {
+          stage: 'write',
+          error: error.message,
+        });
       }
 
       // Evaluate alert thresholds
@@ -181,6 +188,12 @@ export class DiagnosticsService {
       await this.writeHealthMetrics(valkeyConnected);
     } catch (err) {
       log.error('Snapshot error:', { error: String(err) });
+      // A thrown snapshot cycle (collection/threshold error) is also an
+      // observability gap — surface it to the audit trail.
+      this.client.eventBus.emit('diagnostics.snapshot_failed', this.guildId, {
+        stage: 'collect',
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

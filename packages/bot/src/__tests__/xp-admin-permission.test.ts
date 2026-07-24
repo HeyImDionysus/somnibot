@@ -51,7 +51,8 @@ function makeClient() {
     tables.push(table);
     return { insert, upsert };
   });
-  return { supabase: { from, rpc } as any, _insert: insert, _rpc: rpc, _tables: tables };
+  const emit = vi.fn();
+  return { supabase: { from, rpc } as any, eventBus: { emit } as any, _insert: insert, _rpc: rpc, _emit: emit, _tables: tables };
 }
 
 describe('handleXpAdminCommand — Manage-Guild re-check', () => {
@@ -85,5 +86,10 @@ describe('handleXpAdminCommand — Manage-Guild re-check', () => {
 
     expect(client._rpc).toHaveBeenCalledWith('increment_member_xp', expect.any(Object));
     expect(client._tables).not.toContain('audit_logs');
+    // The successful mutation emits an append-only audit event.
+    expect(client._emit).toHaveBeenCalledWith(
+      'xp.admin_adjusted', 'g1',
+      expect.objectContaining({ operation: 'add', targetId: 'target1', actorId: 'actor1' }),
+    );
   });
 });

@@ -6,6 +6,7 @@ import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
+import { eventBus } from '../../services/event-bus.js';
 
 const log = createLogger('Quests');
 
@@ -133,6 +134,14 @@ export class QuestsManager {
       });
       if (payoutErr) {
         log.error('claimQuests payout failed — reverting claimed status:', payoutErr.message);
+        // [game-economy-quests] Audit the denied/failed claim so the reverted
+        // payout leaves a durable append-only record.
+        eventBus.emit('quest.claim_failed', guildId, {
+          userId,
+          questCount: claimed.length,
+          currency: totalCurrency,
+          reason: payoutErr.message,
+        });
         // Revert: un-claim the quests so the user can retry
         for (const row of claimed) {
           await Promise.resolve(this.supabase.from('economy_quest_progress')
@@ -146,6 +155,14 @@ export class QuestsManager {
         return;
       }
     }
+
+    // [game-economy-quests] Append-only audit row for the claim state change.
+    eventBus.emit('quest.claimed', guildId, {
+      userId,
+      questCount: claimed.length,
+      currency: totalCurrency,
+      xp: totalXp,
+    });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()

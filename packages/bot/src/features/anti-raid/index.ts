@@ -20,6 +20,7 @@ import {
   type TextChannel,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type { PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 import { randomUUID } from 'node:crypto';
 import { getValkey } from '../../services/valkey.js';
@@ -217,6 +218,34 @@ async function logRaidEvent(
 }
 
 /**
+ * Persist an anti-raid failure-branch owner alert to the `alerts` table.
+ * Failure branches previously only surfaced as a mod-log embed / log.warn, so
+ * a raid-containment failure (missing permission, kick/ban error) was never
+ * durably recorded for the owner. Best-effort — never throws into the join path.
+ */
+async function raiseAntiRaidAlert(
+  supabase: SupabaseClient,
+  guildId: string,
+  alertType: string,
+  title: string,
+  message: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await supabase.from('alerts').insert({
+      guild_id: guildId,
+      alert_type: alertType,
+      severity: 'warning',
+      title,
+      message,
+      metadata,
+    });
+  } catch (alertErr) {
+    log.error('Failed to write anti-raid alert:', { error: String(alertErr) });
+  }
+}
+
+/**
  * Record a join in the Valkey sliding window and return the count.
  * V5 Audit §14.6 — Falls back to in-memory tracking if Valkey is unavailable.
  */
@@ -297,6 +326,7 @@ export async function processAntiRaid(
   guild: Guild,
   member: GuildMember,
   supabase: SupabaseClient,
+  eventBus?: PlatformEventBus,
 ): Promise<boolean> {
   const config = await loadConfig(supabase, guild.id);
   if (!config.anti_raid_enabled) return false;
@@ -318,9 +348,29 @@ export async function processAntiRaid(
         .setTimestamp();
 
       await logRaidEvent(guild, config, embed);
+      // Audit: account-age containment (a kick of a too-new account).
+      eventBus?.emit('anti_raid.contained', guild.id, {
+        action: 'account_age',
+        userId: member.id,
+        username: member.user.tag,
+        reason: `Account age ${Math.floor(accountAgeDays)}d < ${config.anti_raid_account_age_days}d minimum`,
+      });
       return true;
     } catch (err) {
       log.error('Failed to kick young account:', { error: String(err) });
+      eventBus?.emit('anti_raid.action_failed', guild.id, {
+        action: 'account_age',
+        userId: member.id,
+        error: String(err),
+      });
+      await raiseAntiRaidAlert(
+        supabase,
+        guild.id,
+        'anti_raid_action_failed',
+        'Anti-raid could not kick a too-new account',
+        `Anti-raid tried to kick <@${member.id}> (${member.user.tag}) for failing the account-age check but the kick failed: ${String(err)}. Check the bot's Kick Members permission and role position.`,
+        { action: 'account_age', member_id: member.id, error: String(err) },
+      );
     }
   }
 
@@ -336,7 +386,7 @@ export async function processAntiRaid(
   // Runs in background via setImmediate so it doesn't block the join handler.
   if (!raidActive && config.anti_raid_action === 'ban' && config.anti_raid_auto_unban) {
     setImmediate(() => {
-      processRaidUnbans(guild, config).catch((err) => {
+      processRaidUnbans(guild, config, eventBus).catch((err) => {
         log.error('Background raid unban failed', { error: (err as Error)?.message ?? err });
       });
     });
@@ -353,13 +403,18 @@ export async function processAntiRaid(
         if (!isNaN(level) && guild.verificationLevel !== level) {
           await guild.setVerificationLevel(level, 'Anti-raid lockdown ended: restoring verification level');
           log.info(`Lockdown ended: restored verification to ${level} for guild ${guild.id}`);
+          // Audit: restoration of the pre-lockdown verification level.
+          eventBus?.emit('anti_raid.restored', guild.id, {
+            restorationType: 'verification',
+            count: 1,
+          });
         }
         await valkey.del(prevLevelKey).catch((err) => {
           log.debug('Failed to delete anti-raid prev level key', { key: prevLevelKey, error: String(err) });
         });
 
         // Restore invites that were paused (stored before deletion) during lockdown
-        await restoreLockdownInvites(guild, config).catch((err) => {
+        await restoreLockdownInvites(guild, config, eventBus).catch((err) => {
           log.error('Failed to restore lockdown invites:', { error: String(err) });
         });
       }
@@ -382,6 +437,13 @@ export async function processAntiRaid(
       .setTimestamp();
 
     await logRaidEvent(guild, config, embed);
+    // Audit: raid detection (threshold crossed → raid mode activated).
+    eventBus?.emit('anti_raid.detected', guild.id, {
+      joinCount,
+      threshold: config.anti_raid_join_threshold,
+      windowSeconds: config.anti_raid_join_window_seconds,
+      action: config.anti_raid_action,
+    });
   }
 
   // 3. If raid mode is active, take action on this member
@@ -410,6 +472,13 @@ export async function processAntiRaid(
           .setTimestamp();
 
         await logRaidEvent(guild, config, embed);
+        // Audit: containment of an individual member during active raid mode.
+        eventBus?.emit('anti_raid.contained', guild.id, {
+          action,
+          userId: member.id,
+          username: member.user.tag,
+          reason: 'Join flood detected — active raid mode',
+        });
         return true;
       }
 
@@ -432,6 +501,20 @@ export async function processAntiRaid(
             )
             .setTimestamp();
           await logRaidEvent(guild, config, embed);
+          // Failure branch: lockdown could not run — durably alert the owner.
+          eventBus?.emit('anti_raid.action_failed', guild.id, {
+            action: 'lockdown',
+            error: 'missing_manage_guild_permission',
+          });
+          await raiseAntiRaidAlert(
+            supabase,
+            guild.id,
+            'anti_raid_lockdown_failed',
+            'Anti-raid lockdown failed — missing permission',
+            'A raid was detected but lockdown could not activate: the bot lacks the **Manage Server** permission. ' +
+              'Grant it, or switch the anti-raid action to `kick` or `ban`.',
+            { action: 'lockdown', error: 'missing_manage_guild_permission' },
+          );
           return true;
         }
 
@@ -506,12 +589,45 @@ export async function processAntiRaid(
             .setTimestamp();
 
           await logRaidEvent(guild, config, embed);
+          // Audit: server-level containment (lockdown activated).
+          eventBus?.emit('anti_raid.contained', guild.id, {
+            action: 'lockdown',
+            reason: 'Join flood detected — verification raised to Very High',
+            invitesPaused: pausedCount,
+          });
         } catch (err) {
           log.error('Failed to activate lockdown:', { error: String(err) });
+          eventBus?.emit('anti_raid.action_failed', guild.id, {
+            action: 'lockdown',
+            error: String(err),
+          });
+          await raiseAntiRaidAlert(
+            supabase,
+            guild.id,
+            'anti_raid_lockdown_failed',
+            'Anti-raid lockdown failed',
+            `A raid was detected but lockdown could not be fully activated: ${String(err)}. ` +
+              'Check the bot\'s Manage Server permission and verification-level settings.',
+            { action: 'lockdown', error: String(err) },
+          );
         }
       }
     } catch (err) {
       log.error(`Failed to ${config.anti_raid_action} during raid:`, err);
+      eventBus?.emit('anti_raid.action_failed', guild.id, {
+        action: config.anti_raid_action,
+        userId: member.id,
+        error: String(err),
+      });
+      await raiseAntiRaidAlert(
+        supabase,
+        guild.id,
+        'anti_raid_action_failed',
+        `Anti-raid ${config.anti_raid_action} failed during a raid`,
+        `Anti-raid tried to ${config.anti_raid_action} <@${member.id}> (${member.user.tag}) during an active raid but the action failed: ${String(err)}. ` +
+          'Check the bot\'s moderation permissions and role position.',
+        { action: config.anti_raid_action, member_id: member.id, error: String(err) },
+      );
     }
   }
 
@@ -523,7 +639,7 @@ export async function processAntiRaid(
  * Recreates invites in the same channels with the same settings. Codes will
  * be new — Discord doesn't allow specifying invite codes.
  */
-async function restoreLockdownInvites(guild: Guild, config: AntiRaidConfig): Promise<void> {
+async function restoreLockdownInvites(guild: Guild, config: AntiRaidConfig, eventBus?: PlatformEventBus): Promise<void> {
   let storedRaw: string | null = null;
   try {
     const valkey = getValkey();
@@ -579,6 +695,11 @@ async function restoreLockdownInvites(guild: Guild, config: AntiRaidConfig): Pro
       .setTimestamp();
 
     await logRaidEvent(guild, config, embed);
+    // Audit: restoration of invites paused during lockdown.
+    eventBus?.emit('anti_raid.restored', guild.id, {
+      restorationType: 'invites',
+      count: restored,
+    });
   }
 }
 
@@ -607,7 +728,7 @@ async function trackRaidBan(guildId: string, userId: string): Promise<void> {
  * V5 Audit §8.2: Unban users who were auto-banned during a raid.
  * Called when raid mode expires. Best-effort — logs failures but doesn't throw.
  */
-async function processRaidUnbans(guild: Guild, config: AntiRaidConfig): Promise<void> {
+async function processRaidUnbans(guild: Guild, config: AntiRaidConfig, eventBus?: PlatformEventBus): Promise<void> {
   let userIds: string[] = [];
   try {
     const valkey = getValkey();
@@ -649,6 +770,11 @@ async function processRaidUnbans(guild: Guild, config: AntiRaidConfig): Promise<
       .setTimestamp();
 
     await logRaidEvent(guild, config, embed);
+    // Audit: restoration of members auto-banned during the raid.
+    eventBus?.emit('anti_raid.restored', guild.id, {
+      restorationType: 'unban',
+      count: unbanned,
+    });
   }
 }
 

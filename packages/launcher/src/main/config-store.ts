@@ -136,6 +136,19 @@ const SENSITIVE_KEYS: ReadonlySet<keyof LauncherConfig> = new Set([
 // V5 Audit §10.5 — Track whether we've already warned about safeStorage
 let _safeStorageWarned = false;
 
+/**
+ * [infrastructure-launcher] Keychain-failure audit hook. When the OS keychain
+ * (safeStorage) is unavailable and we fall back to plaintext credential
+ * storage, we notify this listener (once) so the main process can write a
+ * durable audit_logs row — a plaintext-credential fallback is a security-
+ * relevant degradation that must be observable, not just a console warning.
+ */
+let _keychainFallbackListener: (() => void) | undefined;
+
+export function setKeychainFallbackListener(listener: () => void): void {
+  _keychainFallbackListener = listener;
+}
+
 function encryptSensitive(value: string): string {
   if (!value) return '';
   try {
@@ -154,6 +167,12 @@ function encryptSensitive(value: string): string {
       'On Linux, install a keyring daemon (gnome-keyring, kwallet, or keepassxc) ' +
       'to enable encrypted credential storage.',
     );
+    // Fire the durable-audit hook once per process for the degradation.
+    try {
+      _keychainFallbackListener?.();
+    } catch {
+      // Audit is best-effort — never let it break credential storage.
+    }
   }
   return value;
 }

@@ -215,6 +215,19 @@ export async function handleWarnCommand(
   const escalationChain = Array.isArray(config?.escalation_chain) ? config.escalation_chain : [];
   const nextAction = getEscalationAction(escalationChain, activeCount);
 
+  // Append-only audit trail: a manual /warn is an auditable moderation state
+  // change. `moderation.action` (above) is consumed by owner-notifications and
+  // is NOT audit-mapped, so without this emit the warning left no audit_logs
+  // row. AuditService maps 'infraction.created' → the 'warn.issued' row.
+  client.eventBus.emit('infraction.created', interaction.guildId!, {
+    infractionId: infraction.id,
+    userId: member.id,
+    moderatorId: interaction.user.id,
+    type: 'warn',
+    reason,
+    totalInfractions: activeCount,
+  });
+
   // DM the user — white-label: brand the member-facing embed with the owner
   // brand kit (color + subtle powered-by attribution) instead of the hardcoded
   // SomniBot palette.
@@ -338,6 +351,16 @@ export async function handleMuteCommand(
     infractionId: infraction?.id,
   });
 
+  // Append-only audit trail: `moderation.action` is not audit-mapped, so a
+  // manual /mute previously left no audit_logs row. AuditService maps
+  // 'member.muted' → the 'mute.applied' row (same event auto-mod/escalation emit).
+  client.eventBus.emit('member.muted', interaction.guildId!, {
+    discordId: member.id,
+    moderatorId: interaction.user.id,
+    reason,
+    durationMinutes: duration,
+  });
+
   // DM the user — white-label brand kit color + attribution (see handleWarnCommand).
   try {
     const brandKit = await resolveBrandKit(client.supabase, interaction.guildId!, { fallbackName: guild.name });
@@ -445,6 +468,15 @@ export async function handleKickCommand(
   // Emit event
   client.eventBus.emit('moderation.action', interaction.guildId!, {
     action: 'kick',
+    discordId: member.id,
+    moderatorId: interaction.user.id,
+    reason,
+  });
+
+  // Append-only audit trail: `moderation.action` is not audit-mapped, so a
+  // manual /kick previously left no audit_logs row. AuditService maps
+  // 'member.kicked' → the 'kick.executed' row.
+  client.eventBus.emit('member.kicked', interaction.guildId!, {
     discordId: member.id,
     moderatorId: interaction.user.id,
     reason,
@@ -579,6 +611,15 @@ export async function handleBanCommand(
     reason,
   });
 
+  // Append-only audit trail: `moderation.action` is not audit-mapped, so a
+  // manual /ban previously left no audit_logs row. AuditService maps
+  // 'member.banned' → the 'ban.executed' row.
+  client.eventBus.emit('member.banned', interaction.guildId!, {
+    discordId: member.id,
+    moderatorId: interaction.user.id,
+    reason,
+  });
+
   // Mod log
   await postModLogEntry(client, {
     action: 'ban',
@@ -625,6 +666,16 @@ export async function handlePardonCommand(
     await interaction.editReply('❌ Infraction not found or already pardoned.');
     return;
   }
+
+  // Append-only audit trail: a pardon is a moderation *reversal* — the one
+  // moderation state change that had no audit-mapped event at all. AuditService
+  // maps 'infraction.pardoned' → the 'infraction.pardoned' row.
+  client.eventBus.emit('infraction.pardoned', interaction.guildId!, {
+    infractionId,
+    userId: infraction?.member_id ?? 'unknown',
+    moderatorId: interaction.user.id,
+    reason,
+  });
 
   // Load config for mod log
   const { data: config } = await client.supabase

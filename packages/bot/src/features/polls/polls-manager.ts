@@ -12,6 +12,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Polls');
@@ -42,10 +43,12 @@ export function invalidatePollsCache(guildId?: string): void {
 
 export class PollsManager {
   private supabase: SupabaseClient;
+  private eventBus: PlatformEventBus;
   private configCache = new Map<string, DbGuildConfig>();
 
-  constructor(supabase: SupabaseClient) {
+  constructor(supabase: SupabaseClient, eventBus: PlatformEventBus = defaultEventBus) {
     this.supabase = supabase;
+    this.eventBus = eventBus;
   }
 
   clearCache(): void { this.configCache.clear(); }
@@ -147,6 +150,15 @@ export class PollsManager {
       .from('polls')
       .update({ message_id: reply.id })
       .eq('id', poll.id);
+
+    this.eventBus.emit('poll.created', guildId, {
+      pollId: poll.id,
+      title,
+      optionCount: options.length,
+      allowMultiple,
+      creatorId: interaction.user.id,
+      channelId: interaction.channelId,
+    });
   }
 
   async handlePollVote(buttonInteraction: ButtonInteraction): Promise<void> {
@@ -266,6 +278,12 @@ export class PollsManager {
       return;
     }
 
+    this.eventBus.emit('poll.closed', poll.guild_id ?? interaction.guildId!, {
+      pollId,
+      title: poll.title,
+      actorId: interaction.user.id,
+    });
+
     // Get results
     const { data: options } = await this.supabase
       .from('poll_options')
@@ -366,6 +384,14 @@ export class PollsManager {
       .from('predictions')
       .update({ message_id: reply.id })
       .eq('id', prediction.id);
+
+    this.eventBus.emit('prediction.created', guildId, {
+      predictionId: prediction.id,
+      title,
+      optionCount: options.length,
+      creatorId: interaction.user.id,
+      channelId: interaction.channelId,
+    });
   }
 
   async placeBet(
@@ -519,6 +545,14 @@ export class PollsManager {
       return;
     }
 
+    this.eventBus.emit('prediction.bet_placed', guildId, {
+      predictionId,
+      userId,
+      optionId: options[optionIndex].id,
+      amount,
+      newPool: (newPool ?? prediction.total_pool + amount) as number,
+    });
+
     await interaction.reply({
       embeds: [new EmbedBuilder()
         .setTitle('🔮 Bet Placed!')
@@ -660,6 +694,16 @@ export class PollsManager {
     const summaryLine = winningBets.length === 0
       ? `🔁 No bets on the winning outcome — pool refunded to **${refundedCount}** bettor(s).`
       : `🏆 Winners: **${payoutCount}** player(s)`;
+
+    this.eventBus.emit('prediction.resolved', guildId, {
+      predictionId,
+      title: prediction.title,
+      winningOptionId: winningOption.id,
+      totalPool: finalTotalPool,
+      payoutCount,
+      refundedCount,
+      actorId: interaction.user.id,
+    });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()

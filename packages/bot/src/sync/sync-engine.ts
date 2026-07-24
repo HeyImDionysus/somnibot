@@ -36,6 +36,7 @@ export async function runSyncCycle(
   config: SyncConfig,
 ): Promise<SyncResult> {
   const timestamp = new Date().toISOString();
+  const startedAt = Date.now();
 
   // 1. Get desired state from Supabase
   const { data: desiredData } = await supabase
@@ -193,6 +194,16 @@ export async function runSyncCycle(
     });
   }
 
+  // 11. Emit sync.completed so each periodic reconcile cycle lands an
+  //     append-only audit_logs row (previously the sync.completed audit
+  //     mapping was dead — nothing ever emitted it).
+  eventBus.emit('sync.completed', guild.id, {
+    driftItemsFound: driftItems.length,
+    itemsRepaired: repaired,
+    itemsAccepted: driftItems.filter(d => d.suggestedAction === 'accept').length,
+    duration: Date.now() - startedAt,
+  });
+
   return { driftItems, repaired, timestamp };
 }
 
@@ -241,6 +252,12 @@ export function startSyncScheduler(
       }
     } catch (err) {
       log.error('Cycle error:', { error: String(err) });
+      // A failed reconcile cycle must leave a durable audit_logs row, not just a
+      // transient log line — mirror it via the sync.failed audit mapping.
+      eventBus.emit('sync.failed', guild.id, {
+        error: err instanceof Error ? err.message : String(err),
+        stage: 'cycle',
+      });
     } finally {
       running = false;
     }

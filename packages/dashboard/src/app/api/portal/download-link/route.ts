@@ -16,6 +16,7 @@ import { parseBody } from '@/lib/api/validation';
 import { generateSignedDownloadUrl } from '@/lib/api/signed-url';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { isEntitlementAccessLive } from '@somnibot/shared';
+import { writeCommerceAudit } from '@/lib/commerce-audit';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -79,6 +80,17 @@ export async function POST(request: NextRequest) {
       .in('status', ['active', 'grace_period']);
 
     if (!entitlements?.some((e) => isEntitlementAccessLive(e))) {
+      // Auditable refusal: buyer requested a download they are not entitled to.
+      await writeCommerceAudit(admin, {
+        guildId: session.guild_id,
+        actorType: 'user',
+        actorId: session.customer_id,
+        action: 'portal.download_denied',
+        targetType: 'product',
+        targetId: productId,
+        details: { reason: 'no_entitlement', customerId: session.customer_id, fileId },
+        success: false,
+      });
       return NextResponse.json({ error: 'No active entitlement for this product' }, { status: 403 });
     }
 
@@ -100,6 +112,17 @@ export async function POST(request: NextRequest) {
       fileId,
       customerId: session.customer_id,
       guildId: session.guild_id,
+    });
+
+    // Auditable state change: a signed download link was issued to the buyer.
+    await writeCommerceAudit(admin, {
+      guildId: session.guild_id,
+      actorType: 'user',
+      actorId: session.customer_id,
+      action: 'portal.download_link_issued',
+      targetType: 'product_file',
+      targetId: fileId,
+      details: { customerId: session.customer_id, productId, fileId },
     });
 
     return NextResponse.json({ url });
