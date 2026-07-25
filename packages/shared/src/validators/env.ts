@@ -45,6 +45,9 @@ export const BotEnvSchema = z.object({
 
   // ─── Valkey (local/VPS stack) ───
   VALKEY_URL: z.string().default('redis://127.0.0.1:6379'),
+  // Used by docker-compose to enable --requirepass; the client applies it when
+  // VALKEY_URL carries no password of its own, so the two cannot disagree.
+  VALKEY_PASSWORD: z.string().optional().default(''),
 
   // ─── PayPal (optional — only needed if commerce is enabled) ───
   PAYPAL_CLIENT_ID: z.string().optional().default(''),
