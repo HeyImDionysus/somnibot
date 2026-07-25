@@ -189,6 +189,10 @@ export async function storeCredentials(
     // Supabase Management
     supabase_access_token: 'SUPABASE_ACCESS_TOKEN',
     supabase_db_url: 'SUPABASE_DB_URL',
+    // Fetched during the Database step. The dashboard is spawned as a child of
+    // this process, so putting it in env here means the next dashboard start
+    // picks it up without the operator editing anything.
+    supabase_publishable_key: 'NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY',
     // Deployment
     dashboard_url: 'DASHBOARD_URL',
   };
