@@ -104,7 +104,7 @@ describe('loadLevelConfig', () => {
   it('loads config from supabase with defaults', async () => {
     const supabase = makeSupabase({ guild_config: { data: null, error: null } });
     const config = await loadLevelConfig(supabase as any, 'g1');
-    expect(config.levels_enabled).toBe(false);
+    expect(config.levels_enabled).toBe(true);
     expect(config.xp_min).toBe(15);
     expect(config.xp_max).toBe(25);
     expect(config.xp_cooldown_seconds).toBe(60);

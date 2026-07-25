@@ -11,10 +11,10 @@
 | `SUPABASE_SECRET_KEY` | Supabase Dashboard → Settings → API | 1. Rotate in Supabase dashboard 2. Update `.env` / launcher 3. Restart all services |
 | `SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_ANON_KEY` | Supabase Dashboard → Settings → API | 1. Copy new anon/publishable key 2. Update every configured bot/server `.env` alias; if both aliases exist, update both 3. Restart services that read server env |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase Dashboard → Settings → API | 1. Copy the same anon/publishable key 2. Update dashboard `.env`, launcher, hosting env vars, and dashboard build env 3. Rebuild/redeploy dashboard |
-| `NEXTAUTH_SECRET` | Self-generated (`openssl rand -hex 32`) | 1. Generate new secret 2. Update `.env` 3. Restart dashboard (sessions invalidated) |
-| `CSRF_SECRET` | Self-generated (`openssl rand -hex 32`) | 1. Generate new secret 2. Update `.env` 3. Restart dashboard |
-| `WEBHOOK_REPLAY_SECRET` | Self-generated (`openssl rand -hex 32`) | 1. Generate new secret 2. Update `.env` / hosting env vars 3. Restart dashboard |
-| `DOWNLOAD_SIGNING_SECRET` | Self-generated (`openssl rand -hex 32`) | 1. Generate new secret 2. Update `.env` 3. Restart dashboard (existing signed URLs invalidated) |
+| `NEXTAUTH_SECRET` | Self-generated (`node scripts/gen-secret.mjs`) | 1. Generate new secret 2. Update `.env` 3. Restart dashboard (sessions invalidated) |
+| `CSRF_SECRET` | Self-generated (`node scripts/gen-secret.mjs`) | 1. Generate new secret 2. Update `.env` 3. Restart dashboard |
+| `WEBHOOK_REPLAY_SECRET` | Self-generated (`node scripts/gen-secret.mjs`) | 1. Generate new secret 2. Update `.env` / hosting env vars 3. Restart dashboard |
+| `DOWNLOAD_SIGNING_SECRET` | Self-generated (`node scripts/gen-secret.mjs`) | 1. Generate new secret 2. Update `.env` 3. Restart dashboard (existing signed URLs invalidated) |
 | `PAYPAL_CLIENT_ID` | PayPal Developer Dashboard | 1. Create new REST app or rotate credentials 2. Update `.env` 3. Restart dashboard |
 | `PAYPAL_CLIENT_SECRET` | PayPal Developer Dashboard | Same as PAYPAL_CLIENT_ID |
 | `PAYPAL_WEBHOOK_ID` | PayPal Developer Dashboard → Webhooks | Only changes if you recreate the webhook endpoint |
@@ -52,10 +52,10 @@ If you suspect any credential has been compromised, rotate **all** secrets:
 ### 3. Application Secrets
 ```bash
 # Generate new secrets
-openssl rand -hex 32  # → NEXTAUTH_SECRET
-openssl rand -hex 32  # → CSRF_SECRET
-openssl rand -hex 32  # → WEBHOOK_REPLAY_SECRET
-openssl rand -hex 32  # → DOWNLOAD_SIGNING_SECRET
+node scripts/gen-secret.mjs  # → NEXTAUTH_SECRET
+node scripts/gen-secret.mjs  # → CSRF_SECRET
+node scripts/gen-secret.mjs  # → WEBHOOK_REPLAY_SECRET
+node scripts/gen-secret.mjs  # → DOWNLOAD_SIGNING_SECRET
 ```
 
 ### 4. PayPal (if applicable)

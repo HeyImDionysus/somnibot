@@ -156,13 +156,13 @@ DASHBOARD_URL=<local-operator-dashboard-url>
 SOMNIBOT_PUBLIC_CALLBACK_BASE_URL=<public-callback-base>
 NEXT_PUBLIC_APP_URL=<public-callback-base>
 HEALTH_PORT=3001
-CSRF_SECRET=<openssl rand -hex 32>
-NEXTAUTH_SECRET=<openssl rand -hex 32>
-WEBHOOK_REPLAY_SECRET=<openssl rand -hex 32>
+CSRF_SECRET=<node scripts/gen-secret.mjs>
+NEXTAUTH_SECRET=<node scripts/gen-secret.mjs>
+WEBHOOK_REPLAY_SECRET=<node scripts/gen-secret.mjs>
 VALKEY_URL=redis://127.0.0.1:6379
 LAVALINK_HOST=localhost
 LAVALINK_PORT=2333
-LAVALINK_PASSWORD=<openssl rand -hex 16>
+LAVALINK_PASSWORD=<node scripts/gen-secret.mjs 16>
 PAYPAL_WEBHOOK_URL=<public-callback-base>/api/paypal/webhook
 ```
 
@@ -212,16 +212,16 @@ SOMNIBOT_PUBLIC_CALLBACK_BASE_URL=https://somnibot.example.com
 NODE_ENV=production
 HEALTH_PORT=3001
 
-CSRF_SECRET=<openssl rand -hex 32>
-NEXTAUTH_SECRET=<openssl rand -hex 32>
-WEBHOOK_REPLAY_SECRET=<openssl rand -hex 32>
+CSRF_SECRET=<node scripts/gen-secret.mjs>
+NEXTAUTH_SECRET=<node scripts/gen-secret.mjs>
+WEBHOOK_REPLAY_SECRET=<node scripts/gen-secret.mjs>
 
-VALKEY_PASSWORD=<openssl rand -hex 16>
+VALKEY_PASSWORD=<node scripts/gen-secret.mjs 16>
 VALKEY_URL=redis://:<same-valkey-password>@valkey:6379
 
 LAVALINK_HOST=lavalink
 LAVALINK_PORT=2333
-LAVALINK_PASSWORD=<openssl rand -hex 16>
+LAVALINK_PASSWORD=<node scripts/gen-secret.mjs 16>
 
 PAYPAL_WEBHOOK_URL=https://somnibot.example.com/api/paypal/webhook
 ```

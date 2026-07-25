@@ -44,12 +44,20 @@ plugins:
     allowDirectPlaylistIds: true
     clients:
       - MUSIC
+      - ANDROID_VR
       - WEB
-      - ANDROID_TESTSUITE
+      - WEBEMBEDDED
       - TVHTML5EMBEDDED
     oauth:
-      enabled: true
-      # Set via environment or replace with your refresh token
+      # OFF by default: with `enabled: true` and no refreshToken the plugin
+      # polls Google for a token it will never get and logs a 400 every few
+      # seconds forever. Playback works fine without it via the clients above.
+      # To enable: set `enabled: true`, restart, then read the device code from
+      # `docker logs somni-lavalink` ("go to https://www.google.com/device and
+      # enter code XXX-XXX-XXX"), authorise it, and paste the refresh token the
+      # plugin then logs into `refreshToken` below. OAuth mainly helps with
+      # age-restricted tracks and YouTube bot-detection.
+      enabled: false
       # refreshToken: ""
 
 logging:

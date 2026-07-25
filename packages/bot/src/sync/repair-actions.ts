@@ -12,6 +12,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DriftItem } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
 import { writeAuditLog } from '../services/audit.js';
+import { recordAdminChange, undoByDeleting } from '../services/admin-changes.js';
 
 const log = createLogger('RepairActions');
 
@@ -282,17 +283,47 @@ export async function repairDriftItem(
       case 'EXTRA_RESOURCE': {
         // Extra resource — "repair" means delete it
         if (driftItem.entityDiscordId) {
+          // Capture what it was before it stops existing: this is the one
+          // repair that destroys something the owner may have made by hand,
+          // and afterwards there is nothing left to describe it with.
+          let deletedName: string | null = null;
           if (driftItem.entityType === 'role') {
             const role = guild.roles.cache.get(driftItem.entityDiscordId);
             if (role && !role.managed) {
+              deletedName = role.name;
               await role.delete('SomniBot repair — removing extra resource');
             }
           } else {
             const channel = guild.channels.cache.get(driftItem.entityDiscordId);
             if (channel) {
+              deletedName = channel.name;
               await channel.delete('SomniBot repair — removing extra resource');
             }
           }
+
+          if (deletedName !== null) {
+            await recordAdminChange(supabase, {
+              guildId: guild.id,
+              actorId: 'sync-engine',
+              action: `drift_repair.${driftItem.entityType}_deleted`,
+              targetType: driftItem.entityType,
+              targetId: driftItem.entityDiscordId,
+              description:
+                `Drift repair deleted the ${driftItem.entityType} "${deletedName}" `
+                + 'because it was not part of the server template.',
+              before: { name: deletedName, discord_id: driftItem.entityDiscordId },
+              after: null,
+              blastRadius: 'critical',
+              // Deliberately no undo. Recreating it would produce a different
+              // Discord id, and for a channel every message in it is already
+              // gone — an "undo" button here would be a lie.
+              undoReason:
+                driftItem.entityType === 'role'
+                  ? 'recreating the role would assign a new ID and no member would regain it'
+                  : 'the channel and its message history no longer exist',
+            });
+          }
+
           await removeDriftFromDb(supabase, guild.id, driftItem);
           return { success: true };
         }
@@ -1060,6 +1091,21 @@ async function recreateResource(
         discord_id: newRole.id,
       }, { onConflict: 'guild_id,entity_type,template_key' });
 
+    await recordAdminChange(supabase, {
+      guildId: guild.id,
+      actorId: 'sync-engine',
+      action: 'drift_repair.role_recreated',
+      targetType: 'role',
+      targetId: newRole.id,
+      description: `Drift repair recreated the missing role "${newRole.name}".`,
+      before: null,
+      after: { name: newRole.name, discord_id: newRole.id },
+      blastRadius: 'medium',
+      // Safe to reverse: the role did not exist a moment ago, so deleting it
+      // destroys nothing that was not already gone.
+      undo: undoByDeleting('role', newRole.id),
+    });
+
     await removeDriftFromDb(supabase, guild.id, driftItem);
     return { success: true };
   }
@@ -1098,6 +1144,19 @@ async function recreateResource(
         template_key: templateKey,
         discord_id: newChannel.id,
       }, { onConflict: 'guild_id,entity_type,template_key' });
+
+    await recordAdminChange(supabase, {
+      guildId: guild.id,
+      actorId: 'sync-engine',
+      action: `drift_repair.${entityType}_recreated`,
+      targetType: entityType,
+      targetId: newChannel.id,
+      description: `Drift repair recreated the missing ${entityType} "${newChannel.name}".`,
+      before: null,
+      after: { name: newChannel.name, discord_id: newChannel.id },
+      blastRadius: 'high',
+      undo: undoByDeleting(entityType === 'category' ? 'category' : 'channel', newChannel.id),
+    });
 
     await removeDriftFromDb(supabase, guild.id, driftItem);
     return { success: true };

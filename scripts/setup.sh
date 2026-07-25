@@ -59,6 +59,9 @@ if [[ ! -f .env ]]; then
   echo "→ Creating .env from .env.example..."
   cp .env.example .env
   echo "  ✅ Created .env"
+  # Random values are not a decision the operator makes, and openssl is not
+  # available on every supported platform. Fill them in here.
+  node "$REPO_ROOT/scripts/fill-generated-secrets.mjs" .env
   echo ""
   echo "  ⚠️  IMPORTANT: Open .env in a text editor and fill in your values."
   echo "     At minimum you need:"
@@ -70,9 +73,6 @@ if [[ ! -f .env ]]; then
   echo "       NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"
   echo "       DASHBOARD_URL — local/operator dashboard URL"
   echo "       SOMNIBOT_PUBLIC_CALLBACK_BASE_URL and NEXT_PUBLIC_APP_URL — public callback base"
-  echo "       CSRF_SECRET, NEXTAUTH_SECRET, and WEBHOOK_REPLAY_SECRET"
-  echo "         — generate each with: openssl rand -hex 32"
-  echo "       LAVALINK_PASSWORD — generate with: openssl rand -hex 16"
   echo "       PAYPAL_WEBHOOK_URL — set to <public-callback-base>/api/paypal/webhook if using PayPal"
   echo ""
   echo "     The .env file is at: $REPO_ROOT/.env"

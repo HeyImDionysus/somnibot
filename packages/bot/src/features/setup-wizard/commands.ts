@@ -25,6 +25,7 @@ import {
   buildStepComponents,
   buildStepModal,
   buildCompletionEmbed,
+  type DashboardProbe,
 } from './steps.js';
 import {
   loadProgress,
@@ -91,46 +92,66 @@ export async function handleSetupCommand(
   const configuredSet = new Set(progress.configured);
   const allConfigured = WIZARD_STEPS.every((s) => configuredSet.has(s.id));
 
-  // If everything is already configured, show status + reconfigure option
-  if (allConfigured) {
-    const statusLines = WIZARD_STEPS.map(
-      (s) => `✅ **${s.title}** — connected`,
-    ).join('\n');
+  // ALWAYS open on an overview of every step.
+  //
+  // This used to jump straight to the first *unconfigured* step, which meant
+  // any step whose values already existed in instance_settings was silently
+  // skipped — and config-loader seeds instance_settings from .env, so an
+  // operator with a populated .env was marched past steps they had never seen
+  // and could not review or change. A setup wizard must never hide a step it
+  // has decided is done on the operator's behalf; show the state and let them
+  // choose.
+  // Probes the saved dashboard URL rather than trusting that "we stored a value"
+  // means "it works" — a green check next to an unreachable dashboard is the
+  // single most misleading thing this screen can say.
+  const statusLines = buildStatusLines(configuredSet, await probeDashboard(configuredSet));
 
-    const embed = new EmbedBuilder()
-      .setColor(SOMNI_PALETTE.HOT_PINK)
-      .setTitle('🔧 Setup — All Services Connected')
-      .setDescription(`${statusLines}\n\nEverything is configured! Select a service below to reconfigure it.`);
+  const embed = new EmbedBuilder()
+    .setColor(SOMNI_PALETTE.HOT_PINK)
+    .setTitle(allConfigured ? '🔧 Setup — All Services Connected' : '🔧 Setup')
+    .setDescription(
+      `${statusLines}\n\n`
+      + (allConfigured
+        ? 'Everything is configured. Pick any service below to review or change it.'
+        : 'Pick any service below to configure it — including ones already marked '
+          + 'configured, if you want to check or change what is stored.'),
+    );
 
-    const selectMenu = new StringSelectMenuBuilder()
-      .setCustomId('setup:reconfigure')
-      .setPlaceholder('Select a service to reconfigure...')
-      .addOptions(
-        WIZARD_STEPS.map((s) => ({
-          label: s.title,
-          value: s.id,
-          emoji: s.emoji,
-          description: `Reconfigure ${s.title} credentials`,
-        })),
-      );
+  const selectMenu = new StringSelectMenuBuilder()
+    .setCustomId('setup:reconfigure')
+    .setPlaceholder('Select a service to configure...')
+    .addOptions(
+      WIZARD_STEPS.map((s) => ({
+        label: s.title,
+        value: s.id,
+        emoji: s.emoji,
+        description: configuredSet.has(s.id)
+          ? `Review or change ${s.title}`
+          : `Set up ${s.title}`,
+      })),
+    );
 
-    const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu);
+  const rows: ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>[] = [
+    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu),
+  ];
 
-    await interaction.editReply({ embeds: [embed], components: [row] });
-    return;
-  }
-
-  // Find next unconfigured step and show it
+  // Keep the guided path available: continue from the first step still to do.
+  // Guard on `next?.step` rather than `next`: a sentinel return value (e.g. -1)
+  // is truthy and would blow up on property access.
   const next = getNextStep(progress);
-  if (!next) {
-    // All done (shouldn't reach here due to check above, but just in case)
-    await interaction.editReply({ embeds: [buildCompletionEmbed(configuredSet)] });
-    return;
+  if (next?.step) {
+    rows.push(
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`setup:${next.step.id}:goto`)
+          .setLabel(`Continue — ${next.step.title}`)
+          .setEmoji('➡️')
+          .setStyle(ButtonStyle.Primary),
+      ),
+    );
   }
 
-  const embed = buildStepEmbed(next.step, next.index, WIZARD_STEPS.length);
-  const components = buildStepComponents(next.step);
-  await interaction.editReply({ embeds: [embed], components });
+  await interaction.editReply({ embeds: [embed], components: rows });
 }
 
 /* ------------------------------------------------------------------ */
@@ -162,6 +183,76 @@ export async function handleSetupButton(
     // Show the modal
     const modal = buildStepModal(step);
     await interaction.showModal(modal);
+    return;
+  }
+
+  // Turn on a Tailscale Funnel and store the public URL it produces, so the
+  // operator gets a working HTTPS callback address without leaving Discord.
+  if (action === 'tailscale') {
+    await interaction.deferUpdate();
+    const { enableFunnel } = await import('./tailscale.js');
+    const info = await enableFunnel();
+
+    if (info.state === 'funnel-active' && info.publicUrl) {
+      // Persist it exactly as if it had been typed into the step's field, so
+      // the normal verification + Supabase auth wiring runs too.
+      const values = { dashboard_url: info.publicUrl };
+      const failure = await step.verify(values);
+      if (!failure) {
+        await storeCredentials(client.supabase, step, values);
+        const progress = await loadProgress(client.supabase);
+        if (!progress.configured.includes(step.id)) progress.configured.push(step.id);
+        await saveProgress(client.supabase, progress);
+
+        await interaction.editReply({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(0x23a559)
+              .setTitle('✅ Tailscale Funnel is on')
+              .setDescription(
+                `Your dashboard is now reachable at:\n\`${info.publicUrl}\`\n\n`
+                + `${step.successNote?.(values) ?? ''}`,
+              ),
+          ],
+          components: buildOverviewComponents(progress),
+        });
+        return;
+      }
+      await interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(SOMNI_PALETTE.ORANGE)
+            .setTitle('⚠️ Funnel started, but the URL did not verify')
+            .setDescription(`\`${info.publicUrl}\`\n\n${failure}`),
+        ],
+        components: buildStepComponents(step),
+      });
+      return;
+    }
+
+    await interaction.editReply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(SOMNI_PALETTE.ORANGE)
+          .setTitle('Tailscale is not ready yet')
+          .setDescription(
+            info.detail
+            ?? 'Could not start a Tailscale Funnel. Set a public HTTPS URL manually instead.',
+          ),
+      ],
+      components: buildStepComponents(step),
+    });
+    return;
+  }
+
+  // "Continue" from the overview: open this step's instructions.
+  if (action === 'goto') {
+    await interaction.deferUpdate();
+    const index = WIZARD_STEPS.findIndex((s) => s.id === stepId);
+    await interaction.editReply({
+      embeds: [buildStepEmbed(step, index, WIZARD_STEPS.length)],
+      components: buildStepComponents(step),
+    });
     return;
   }
 
@@ -244,16 +335,35 @@ export async function handleSetupModal(
   await saveProgress(client.supabase, progress);
 
   // Quick success acknowledgment, then advance
+  // A step may have follow-up the operator genuinely has to do by hand; show
+  // it here, where it is actionable, rather than in the pre-step instructions.
+  const note = step.successNote?.(values) ?? null;
+
+  const configuredSet = new Set(progress.configured);
+  const remaining = WIZARD_STEPS.filter((s) => !configuredSet.has(s.id));
+
   const successEmbed = new EmbedBuilder()
     .setColor(0x23a559) // Discord green
     .setTitle(`✅ ${step.title} — Connected!`)
-    .setDescription('Credentials verified and stored. Moving on...');
+    .setDescription(
+      [
+        'Credentials verified and stored.',
+        note ? `\n${note}` : '',
+        remaining.length > 0
+          ? `\n**Still to set up:** ${remaining.map((s) => s.title).join(', ')}`
+          : '\nEverything is configured.',
+        '\nTake your time — pick the next service below when you are ready.',
+      ].filter(Boolean).join('\n'),
+    );
 
-  await interaction.editReply({ embeds: [successEmbed], components: [] });
-
-  // Brief pause so the user sees the success message, then advance
-  await new Promise((r) => setTimeout(r, 1500));
-  await advanceToNextStep(interaction, client, progress);
+  // No auto-advance and no timer: the success screen (which may carry a
+  // follow-up action) stays put until the operator chooses what to do next.
+  // Previously this slept and then rendered the next step, so anything shown
+  // here scrolled past before it could be read.
+  await interaction.editReply({
+    embeds: [successEmbed],
+    components: buildOverviewComponents(progress),
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -296,37 +406,119 @@ export async function handleReconfigureSelect(
 /*  Internal: advance to next step or show completion                   */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Live status line for each step.
+ *
+ * "Configured" previously meant only "a value is stored", so the dashboard step
+ * showed a green tick while the dashboard itself was not running and its URL
+ * led nowhere — the operator was told everything was fine and then found a dead
+ * link. Where a stored value can actually be checked, check it, and say plainly
+ * when it is not working.
+ */
+/**
+ * Ask the saved dashboard URL whether anything is actually there.
+ *
+ * `live: null` means we did not check (no URL saved, or the step is not done
+ * yet) — which is different from "checked and it is down".
+ */
+export async function probeDashboard(configuredSet: Set<string>): Promise<DashboardProbe> {
+  const url = process.env.DASHBOARD_URL?.trim().replace(/\/$/, '') || null;
+  if (!url || !configuredSet.has('deployment')) return { url, live: null };
+
+  try {
+    const res = await fetch(url, {
+      method: 'HEAD',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(5000),
+    });
+    return { url, live: res.status > 0 };
+  } catch {
+    return { url, live: false };
+  }
+}
+
+function buildStatusLines(configuredSet: Set<string>, probe: DashboardProbe): string {
+  return WIZARD_STEPS.map((s) => {
+    if (!configuredSet.has(s.id)) {
+      return `⬜ ${s.emoji} **${s.title}** — not configured yet`;
+    }
+    if (s.id === 'deployment' && probe.live === false) {
+      return `⚠️ ${s.emoji} **${s.title}** — saved, but nothing is answering at `
+        + `\`${probe.url}\`. Start the dashboard (see the step for how).`;
+    }
+    return `✅ ${s.emoji} **${s.title}** — configured`;
+  }).join('\n');
+}
+
+/**
+ * The step picker: current status plus controls to open any step.
+ *
+ * Shared by `/setup` and by the screen shown after a step completes, so the
+ * operator always lands somewhere they can read and choose from — never inside
+ * a step they did not pick.
+ */
+export function buildOverviewComponents(
+  progress: WizardProgress,
+): ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>[] {
+  const configuredSet = new Set(progress.configured);
+
+  const selectMenu = new StringSelectMenuBuilder()
+    .setCustomId('setup:reconfigure')
+    .setPlaceholder('Select a service to configure...')
+    .addOptions(
+      WIZARD_STEPS.map((s) => ({
+        label: s.title,
+        value: s.id,
+        emoji: s.emoji,
+        description: configuredSet.has(s.id) ? `Review or change ${s.title}` : `Set up ${s.title}`,
+      })),
+    );
+
+  const rows: ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>[] = [
+    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu),
+  ];
+
+  const next = getNextStep(progress);
+  if (next?.step) {
+    rows.push(
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`setup:${next.step.id}:goto`)
+          .setLabel(`Continue — ${next.step.title}`)
+          .setEmoji('➡️')
+          .setStyle(ButtonStyle.Primary),
+      ),
+    );
+  }
+
+  return rows;
+}
+
 async function advanceToNextStep(
   interaction: ButtonInteraction | ModalSubmitInteraction,
   client: SomniClient,
   progress: WizardProgress,
 ): Promise<void> {
-  const next = getNextStep(progress);
+  // Deliberately does NOT jump into the next step's form.
+  //
+  // It used to render the next step immediately (on a timer), so finishing one
+  // step catapulted the operator into an unrelated one — e.g. saving a
+  // dashboard URL dumped them straight into PayPal webhook configuration,
+  // faster than the previous screen could be read. Land on the picker instead
+  // and let them choose when to continue.
+  const configuredSet = new Set(progress.configured);
+  const allConfigured = WIZARD_STEPS.every((s) => configuredSet.has(s.id));
 
-  if (!next) {
-    // All steps done — show completion
-    const configuredSet = new Set(progress.configured);
-    const embed = buildCompletionEmbed(configuredSet);
-
-    // Add a reconfigure option after completion too
-    const selectMenu = new StringSelectMenuBuilder()
-      .setCustomId('setup:reconfigure')
-      .setPlaceholder('Reconfigure a service...')
-      .addOptions(
-        WIZARD_STEPS.map((s) => ({
-          label: s.title,
-          value: s.id,
-          emoji: s.emoji,
-          description: `Reconfigure ${s.title} credentials`,
-        })),
+  const probe = await probeDashboard(configuredSet);
+  const embed = allConfigured
+    ? buildCompletionEmbed(configuredSet, probe)
+    : new EmbedBuilder()
+      .setColor(SOMNI_PALETTE.HOT_PINK)
+      .setTitle('🔧 Setup')
+      .setDescription(
+        `${buildStatusLines(configuredSet, probe)}\n\n`
+        + 'Pick a service below when you are ready to continue.',
       );
 
-    const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu);
-    await interaction.editReply({ embeds: [embed], components: [row] });
-    return;
-  }
-
-  const embed = buildStepEmbed(next.step, next.index, WIZARD_STEPS.length);
-  const components = buildStepComponents(next.step);
-  await interaction.editReply({ embeds: [embed], components });
+  await interaction.editReply({ embeds: [embed], components: buildOverviewComponents(progress) });
 }

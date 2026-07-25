@@ -99,21 +99,40 @@ export class SomniClient extends Client {
     this.supabase = getSupabase();
     this.valkey = getValkey();
 
-    // Initialize Shoukaku (Lavalink connector)
+    // Initialize Shoukaku (Lavalink connector).
+    // Music is OPTIONAL: Shoukaku rejects a node whose `auth` is empty
+    // ("auth was not found from the given options"), and that rejection during
+    // construction took down the whole boot — so an instance without Lavalink
+    // configured could never start, even though every non-music feature works
+    // fine without it. Register the node only when a password is actually set;
+    // otherwise start with no nodes. Music commands then report no available
+    // node, and diagnostics shows Lavalink as deliberately unconfigured rather
+    // than down — lavalink_down is reserved for a node that was configured and
+    // then failed, which is the case an operator actually needs to act on.
+    const lavalinkNodes = env.LAVALINK_PASSWORD
+      ? [
+          {
+            name: 'main',
+            url: `${env.LAVALINK_HOST}:${env.LAVALINK_PORT}`,
+            auth: env.LAVALINK_PASSWORD,
+          },
+        ]
+      : [];
+    if (lavalinkNodes.length === 0) {
+      log.warn('LAVALINK_PASSWORD not set — music playback disabled (all other features unaffected)');
+    }
     this.shoukaku = new Shoukaku(
       new Connectors.DiscordJS(this),
-      [
-        {
-          name: 'main',
-          url: `${env.LAVALINK_HOST}:${env.LAVALINK_PORT}`,
-          auth: env.LAVALINK_PASSWORD,
-        },
-      ],
+      lavalinkNodes,
       {
         moveOnDisconnect: false,
         resume: true,
         resumeTimeout: 30,
-        reconnectTries: 5,
+        // 5 tries x 5s gave only 25s of tolerance — shorter than a routine
+        // Lavalink restart/upgrade, after which Shoukaku gave up permanently
+        // and music stayed dead until the whole BOT was restarted (observed
+        // live). 60 x 5s rides out a ~5 minute outage and self-heals instead.
+        reconnectTries: 60,
         reconnectInterval: 5000,
       },
     );

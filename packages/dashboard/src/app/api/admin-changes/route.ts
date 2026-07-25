@@ -9,7 +9,11 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
-import { validateUndoPayload } from '@/lib/api/undo-allowlist';
+import {
+  validateUndoPayload,
+  isDiscordUndo,
+  validateDiscordUndo,
+} from '@/lib/api/undo-allowlist';
 
 const undoChangeSchema = z.object({
   action: z.literal('undo'),
@@ -85,7 +89,31 @@ export async function POST(request: NextRequest) {
     // and never trust the payload's own table/column names. A present-but-off-
     // list payload is rejected here, before any DB write.
     const undo = change.undo_payload;
-    if (undo !== null && undo !== undefined) {
+
+    // Discord-side undo. The row-update path below reverses a database edit; it
+    // cannot delete a role or recreate a channel, so changes the BOT made to
+    // Discord carry an inverse queue action instead. Enqueue it and let the
+    // bot's existing create/delete/update handlers do the work.
+    //
+    // guild_id comes from the authenticated session, never the stored payload,
+    // so a tampered row cannot aim queued work at another guild.
+    if (isDiscordUndo(undo)) {
+      const discord = validateDiscordUndo(undo);
+      if (!discord.ok) {
+        return NextResponse.json(
+          { error: `Undo blocked: ${discord.reason}` },
+          { status: 400 },
+        );
+      }
+
+      const { error: enqueueError } = await admin.from('bot_action_queue').insert({
+        guild_id: ctx.guildId,
+        action: discord.action,
+        payload: discord.payload as never,
+        status: 'pending',
+      });
+      if (enqueueError) return dbError(enqueueError, 'admin-changes');
+    } else if (undo !== null && undo !== undefined) {
       const validation = validateUndoPayload(undo, { guildId: ctx.guildId });
       if (!validation.ok) {
         return NextResponse.json(

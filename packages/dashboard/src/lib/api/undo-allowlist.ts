@@ -963,3 +963,92 @@ export function validateUndoPayload(
     },
   };
 }
+
+/* ------------------------------------------------------------------ */
+/*  Discord-side undo                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Queue actions undo may enqueue to reverse a Discord mutation.
+ *
+ * The database undo path above replays a row update, which cannot delete a
+ * role or recreate a channel. Bot-recorded changes therefore carry a
+ * `{ kind: "discord", action, payload }` undo that is executed by enqueuing the
+ * inverse action on bot_action_queue.
+ *
+ * Same threat model as the table allowlist: the payload is read back from a
+ * database row, so a tampered row must not be able to make undo run arbitrary
+ * bot work (fulfilment, bulk DMs, role grants). Only the structural inverses
+ * below are accepted, and only with the payload keys they need.
+ */
+const DISCORD_UNDO_ACTIONS = new Map<string, ReadonlySet<string>>([
+  // Keys are exactly what the bot's queue handlers read (action-queue.ts):
+  // roleId / channelId / categoryId, never a generic discord_id.
+  ["create_role", new Set(["name", "color", "permissions", "hoist", "mentionable"])],
+  ["delete_role", new Set(["roleId"])],
+  ["update_role", new Set(["roleId", "name", "color", "permissions", "hoist", "mentionable"])],
+  ["create_channel", new Set(["name", "type", "parentId", "topic", "nsfw", "slowmode"])],
+  ["delete_channel", new Set(["channelId"])],
+  ["update_channel", new Set(["channelId", "name", "topic", "nsfw", "slowmode", "parentId"])],
+  ["create_category", new Set(["name"])],
+  ["delete_category", new Set(["categoryId"])],
+]);
+
+export type DiscordUndoValidation =
+  | { ok: true; action: string; payload: Record<string, unknown> }
+  | { ok: false; reason: string };
+
+/** True when this payload is a Discord-side undo rather than a row update. */
+export function isDiscordUndo(payload: unknown): boolean {
+  return isPlainObject(payload) && (payload as Record<string, unknown>).kind === "discord";
+}
+
+/**
+ * Validate a Discord-side undo before it is enqueued.
+ *
+ * Deliberately does NOT read a guild id from the payload — the caller supplies
+ * it from the authenticated session, so a tampered row cannot enqueue work
+ * against another tenant's guild.
+ */
+export function validateDiscordUndo(payload: unknown): DiscordUndoValidation {
+  if (!isPlainObject(payload)) {
+    return { ok: false, reason: "undo payload is not an object" };
+  }
+
+  const { action, payload: actionPayload } = payload as Record<string, unknown>;
+
+  if (typeof action !== "string") {
+    return { ok: false, reason: "undo payload action is not a string" };
+  }
+  const allowedKeys = DISCORD_UNDO_ACTIONS.get(action);
+  if (!allowedKeys) {
+    return { ok: false, reason: `action "${action}" is not a reversible Discord action` };
+  }
+  if (!isPlainObject(actionPayload)) {
+    return { ok: false, reason: "undo payload action payload is not an object" };
+  }
+
+  for (const key of Object.keys(actionPayload)) {
+    if (!allowedKeys.has(key)) {
+      return {
+        ok: false,
+        reason: `field "${key}" is not permitted for undo action "${action}"`,
+      };
+    }
+  }
+
+  // A delete with no target would be rejected by the handler, but catching it
+  // here keeps a useless row out of the queue.
+  // Each delete carries exactly one id field, named for its entity.
+  const DELETE_ID_FIELD: Record<string, string> = {
+    delete_role: "roleId",
+    delete_channel: "channelId",
+    delete_category: "categoryId",
+  };
+  const idField = DELETE_ID_FIELD[action];
+  if (idField && !actionPayload[idField]) {
+    return { ok: false, reason: `undo action "${action}" has no target id` };
+  }
+
+  return { ok: true, action, payload: actionPayload as Record<string, unknown> };
+}

@@ -15,6 +15,7 @@
 import type { SomniClient } from '../client.js';
 import { deployServerState, type DeployOptions, type DeployResult } from './deployer.js';
 import { writeAuditLog, writeAuditBatch } from '../services/audit.js';
+import { recordAdminChange, undoByDeleting } from '../services/admin-changes.js';
 import { writeGuildSnapshot } from '../services/guild-snapshot.js';
 import type { DesiredState, DesiredRole, DesiredChannel, DesiredCategory } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
@@ -312,6 +313,36 @@ async function executeDeployDirect(
           ? result.errors.map((e) => `${e.entityName}: ${e.error}`).join('; ')
           : undefined,
     });
+
+    // Record each created object as its own admin change.
+    //
+    // The audit row above says "deploy.completed, 14 actions", which is a
+    // receipt, not an explanation: it does not tell the owner WHICH roles and
+    // channels appeared in their server, and offers no way to reverse them.
+    // One row per object gives the Admin Changes page something readable and,
+    // because we know the id of everything we created, a genuine undo.
+    for (const action of result.actions) {
+      if (action.action !== 'create' || !action.success || !action.discordId) continue;
+      if (action.entityType !== 'role'
+        && action.entityType !== 'channel'
+        && action.entityType !== 'category') continue;
+
+      await recordAdminChange(client.supabase, {
+        guildId,
+        actorId: 'deployer',
+        action: `server_deploy.${action.entityType}_created`,
+        targetType: action.entityType,
+        targetId: action.discordId,
+        description: `Server setup created the ${action.entityType} "${action.entityName}".`,
+        // It did not exist before, so there is no prior state to show.
+        before: null,
+        after: { name: action.entityName, discord_id: action.discordId },
+        // Deleting a channel the bot just made destroys nothing of the
+        // operator's, but it is still structural — worth a confirmation.
+        blastRadius: action.entityType === 'role' ? 'medium' : 'high',
+        undo: undoByDeleting(action.entityType, action.discordId),
+      });
+    }
 
     // Write live state snapshot after deployment so dashboard sees the result immediately
     try {

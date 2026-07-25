@@ -23,6 +23,7 @@ import { GuildRouter } from './guild-router.js';
 import { runMigrations } from './services/migration-runner.js';
 import { initGuildFeatures, registerGuildCommands, destroyGuildServices } from './guild-init.js';
 import { startHealthServer, setAwaitingSetup } from './services/health-server.js';
+import { startDashboardSupervisor, stopDashboardSupervisor } from './services/dashboard-supervisor.js';
 import { HeartbeatService } from './services/heartbeat.js';
 import { evaluateSetupGate, createBootstrapSupabase } from './services/setup-gate.js';
 import {
@@ -136,6 +137,14 @@ async function main(): Promise<void> {
     // The listening health server keeps the event loop alive so the process
     // idles (reporting awaiting_setup) until credentials arrive.
     startHealthServer(null);
+
+    // This branch is precisely the one that waits for the DASHBOARD to supply
+    // the missing Discord token, so it is the branch that most needs the
+    // dashboard running. Starting it only on the configured-boot path meant a
+    // first-time launch with just Supabase credentials idled forever behind a
+    // dashboard the operator had to start themselves — the gap the supervisor
+    // exists to close.
+    await startDashboardSupervisor();
 
     // ── Transition-out: await_credentials (codex round-4 finding #2) ──
     // Do NOT idle forever. The dashboard's verify-discord step writes
@@ -252,6 +261,14 @@ async function main(): Promise<void> {
 
   // 5.5. Start health check HTTP server (V5 audit remediation — Finding 9.1)
   startHealthServer(client);
+
+  // 5.6. Bring the web dashboard up alongside the bot. Setup configures a
+  // dashboard URL (and points Supabase auth + PayPal callbacks at it), so the
+  // dashboard needs to actually be running there — expecting the operator to
+  // start a second process by hand is not workable when the bot lives on a VPS
+  // and they are looking at it from a phone. No-ops when something is already
+  // serving the port or when a container orchestrator owns that lifecycle.
+  void startDashboardSupervisor();
 
   // 6. Post-ready initialization
   client.once(Events.ClientReady, async () => {
@@ -394,6 +411,7 @@ async function main(): Promise<void> {
     stopSetupCompletionWatcher();
     stopAwaitingSetupWatcher();
     stopLauncherIpcHeartbeat();
+    await stopDashboardSupervisor();
     await shutdownBot({ signal, client, botLevelServices, dependencies: { log } });
   };
 
