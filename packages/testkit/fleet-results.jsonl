@@ -37,7 +37,7 @@
 {"id":"administration-audit","pass":50,"gated":34,"fail":0,"findings":[],"errored":[]}
 {"id":"administration-automations","pass":42,"gated":42,"fail":0,"findings":[],"errored":[]}
 {"id":"administration-custom-commands","pass":51,"gated":33,"fail":0,"findings":[],"errored":[]}
-{"id":"administration-diagnostics","pass":32,"gated":52,"fail":0,"findings":[],"errored":[]}
+{"id":"administration-diagnostics","pass":31,"gated":52,"fail":1,"findings":[{"scenario":"DEPFAIL","class":"cleanup","impact":"Run-prefixed rows survived the cleanup sweep — the suite leaves residue in the disposable database."}],"errored":[]}
 {"id":"administration-incidents","pass":40,"gated":44,"fail":0,"findings":[],"errored":[]}
 {"id":"administration-rbac","pass":36,"gated":48,"fail":0,"findings":[],"errored":[]}
 {"id":"administration-server-sync","pass":39,"gated":45,"fail":0,"findings":[],"errored":[]}

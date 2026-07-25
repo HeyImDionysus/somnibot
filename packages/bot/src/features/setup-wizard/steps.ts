@@ -388,6 +388,24 @@ const paypalStep: WizardStep = {
 };
 
 /**
+ * Which PayPal API host to talk to.
+ *
+ * The mode chosen in the wizard wins over `PAYPAL_API_BASE`. The stock
+ * `.env.example` pins that variable to the sandbox host, so letting it take
+ * precedence meant a live setup authenticated live credentials against sandbox,
+ * failed, and returned silently — leaving the webhook pointed at the previous
+ * dashboard URL with no indication anything went wrong. `PAYPAL_API_BASE` is
+ * still honoured when no explicit mode has been recorded.
+ */
+function paypalApiBase(values?: Record<string, string>): string {
+  const mode = (values?.paypal_sandbox ?? process.env.PAYPAL_SANDBOX ?? '').trim().toLowerCase();
+  if (mode) {
+    return mode === 'false' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
+  }
+  return process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com';
+}
+
+/**
  * Move the PayPal webhook to follow a changed dashboard URL.
  *
  * The callback address is derived from the dashboard URL, so changing the
@@ -404,10 +422,7 @@ async function repointPayPalWebhook(
   const clientSecret = process.env.PAYPAL_CLIENT_SECRET;
   if (!clientId || !clientSecret) return;
 
-  const apiBase = process.env.PAYPAL_API_BASE
-    || (process.env.PAYPAL_SANDBOX === 'false'
-      ? 'https://api-m.paypal.com'
-      : 'https://api-m.sandbox.paypal.com');
+  const apiBase = paypalApiBase(values);
   const target = `${dashboardUrl.replace(/\/$/, '')}/api/paypal/webhook`;
   if (!/^https:\/\//i.test(target)) return; // PayPal only accepts public HTTPS
 
@@ -480,10 +495,21 @@ async function repointPayPalWebhook(
  * has not been done), the URL is still saved and this is skipped rather than
  * failing the step.
  */
-async function configureSupabaseAuth(dashboardUrl: string): Promise<string | null> {
-  const token = process.env.SUPABASE_ACCESS_TOKEN;
+async function configureSupabaseAuth(
+  dashboardUrl: string,
+  accessToken?: string,
+): Promise<string | null> {
+  // Accepts the token explicitly because the Database step calls this during
+  // its own verify(), before storeCredentials() has put it into process.env.
+  const token = accessToken || process.env.SUPABASE_ACCESS_TOKEN;
   const ref = /https:\/\/([a-z0-9]+)\.supabase\.co/i.exec(process.env.SUPABASE_URL ?? '')?.[1];
-  if (!token || !ref) return null;
+  if (!ref) return null;
+  if (!token) {
+    // Steps can be completed in any order, so Hosting may legitimately run
+    // first. Say so rather than silently reporting a fully wired setup.
+    return 'Saved the URL. Sign-in redirects will be wired up automatically when '
+      + 'you finish the **Database Setup** step.';
+  }
 
   const base = dashboardUrl.replace(/\/$/, '');
   const authUrl = `https://api.supabase.com/v1/projects/${ref}/config/auth`;
@@ -632,8 +658,14 @@ const deploymentStep: WizardStep = {
 
     // Wire Supabase auth to this URL (redirect allow-list + Discord provider)
     // instead of printing instructions and hoping the operator does it.
-    const authProblem = await configureSupabaseAuth(url);
-    if (authProblem) return authProblem;
+    //
+    // Returning this message used to ABORT the step — so a note that opened
+    // with "Saved the URL, but..." was shown at the exact moment the URL was
+    // not saved, and the operator had to redo a step that had actually
+    // succeeded. Auth wiring is a follow-on action, not the thing being
+    // verified: record it as a warning and let the URL persist.
+    const authNote = await configureSupabaseAuth(url);
+    if (authNote) values.__auth_note = authNote;
 
     // Move the PayPal webhook to the new address. Without this, changing the
     // dashboard URL silently left PayPal delivering payment events to the old
@@ -664,6 +696,9 @@ const deploymentStep: WizardStep = {
         + 'if the dashboard is not started yet — but sign-in and payment '
         + 'callbacks will not work until it is reachable at that address.',
       );
+    }
+    if (values.__auth_note) {
+      lines.push('', `⚠️ ${values.__auth_note}`);
     }
     if (ref) {
       lines.push(
@@ -913,8 +948,31 @@ const supabaseManagementStep: WizardStep = {
     // Only when a fallback connection string was actually supplied: prove it
     // connects. Validating URL shape alone used to accept strings that could
     // never work — most commonly Supabase's IPv6-only "Direct connection" URI.
-    return dbUrl ? verifyDatabaseConnection(dbUrl) : null;
+    if (dbUrl) {
+      const dbError = await verifyDatabaseConnection(dbUrl);
+      if (dbError) return dbError;
+    }
+
+    // Steps can be done in any order. If Hosting ran first it had no access
+    // token and skipped the Supabase auth wiring, and nothing else revisits it
+    // — so setup could report every step green while dashboard sign-in stayed
+    // broken. Now that a working token exists, do that deferred wiring here.
+    const savedDashboardUrl = process.env.DASHBOARD_URL?.trim();
+    if (savedDashboardUrl) {
+      // A warning, never a failure: the token itself is already proven, and
+      // refusing to store it because a follow-on API call struggled would make
+      // the operator redo a step that worked.
+      const note = await configureSupabaseAuth(savedDashboardUrl, token);
+      if (note) values.__auth_note = note;
+    }
+
+    return null;
   },
+  successNote: (values) => (
+    values.__auth_note
+      ? `⚠️ ${values.__auth_note}`
+      : 'The bot can now create and update its own database tables.'
+  ),
   enableFlag: null,
 };
 

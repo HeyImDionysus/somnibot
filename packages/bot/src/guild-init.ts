@@ -184,7 +184,8 @@ export async function initGuildFeatures(
   }
 
   // ── Pre-fetch guild config (single query) ──
-  const { data: guildCfg } = await supabase
+  // eslint-disable-next-line prefer-const -- reassigned below when we create the row
+  let { data: guildCfg } = await supabase
     .from('guild_config')
     .select('*')
     .eq('guild_id', guildId)
@@ -207,6 +208,11 @@ export async function initGuildFeatures(
       .single();
 
     if (created) {
+      // Everything below this point reads `guildCfg`, not ctx.config. Setting
+      // only the latter left the rest of init running against null fallbacks,
+      // so a freshly joined guild skipped every service whose flag defaults on
+      // (the economy block and its subfeatures) until the next restart.
+      guildCfg = created;
       ctx.config = created;
       guildLog.info('Guild config created with catalog defaults');
     } else {

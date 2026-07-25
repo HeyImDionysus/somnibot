@@ -43,6 +43,26 @@ let stopping = false;
 let restartDelay = RESTART_DELAY_MS;
 let healthyTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * Which port the dashboard should listen on.
+ *
+ * `PORT` alone is deliberately NOT used: the health server resolves
+ * `HEALTH_PORT ?? PORT ?? 3001` and binds first, so on a hosted platform that
+ * sets only `PORT` the supervisor would probe that port, find the health
+ * server's response, conclude a dashboard was already running, and never start
+ * one. `PORT` is only taken when `HEALTH_PORT` is set — i.e. when the health
+ * server has been pointed elsewhere and `PORT` is genuinely free.
+ */
+function resolveDashboardPort(): number {
+  const explicit = Number(process.env.DASHBOARD_PORT);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+
+  const shared = Number(process.env.PORT);
+  if (process.env.HEALTH_PORT && Number.isFinite(shared) && shared > 0) return shared;
+
+  return 3000;
+}
+
 /** Running inside a container image? Compose/K8s runs the dashboard separately. */
 function inContainer(): boolean {
   return existsSync('/.dockerenv') || process.env.SOMNIBOT_IN_CONTAINER === 'true';
@@ -66,18 +86,46 @@ async function portInUse(port: number): Promise<boolean> {
  * Locate the built standalone dashboard server, walking up from this file so it
  * works from `dist/` in a checkout and from an installed layout alike.
  */
-function findDashboardServer(): string | null {
+function findDashboardServer(): { serverPath: string; repoRoot: string } | null {
   let dir = path.dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 8; i += 1) {
     const candidate = path.join(
       dir, 'packages', 'dashboard', '.next', 'standalone', 'packages', 'dashboard', 'server.js',
     );
-    if (existsSync(candidate)) return candidate;
+    if (existsSync(candidate)) return { serverPath: candidate, repoRoot: dir };
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
   return null;
+}
+
+/**
+ * Copy `.next/static` and `public` into the standalone runtime directory.
+ *
+ * `next build` leaves both outside it, so starting server.js directly serves
+ * HTML whose CSS and client JavaScript 404 — a dashboard that loads and is
+ * unusable, which is worse than one that plainly does not start. The package's
+ * own `start` script runs this same script first for exactly this reason.
+ */
+async function prepareStandaloneAssets(repoRoot: string): Promise<boolean> {
+  const script = path.join(repoRoot, 'scripts', 'prepare-dashboard-standalone.mjs');
+  if (!existsSync(script)) return true; // packaged layouts ship assets in place
+
+  return new Promise((resolve) => {
+    const proc = spawn(process.execPath, [script], {
+      cwd: repoRoot,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
+    });
+    let stderr = '';
+    proc.stderr?.on('data', (buf: Buffer) => { stderr += buf.toString(); });
+    proc.once('error', () => resolve(false));
+    proc.once('exit', (code) => {
+      if (code !== 0 && stderr.trim()) log.warn(stderr.trim().slice(0, 300));
+      resolve(code === 0);
+    });
+  });
 }
 
 function launch(serverPath: string, port: number): void {
@@ -143,16 +191,15 @@ export async function startDashboardSupervisor(
       return;
     }
 
-    const port = options.port
-      ?? Number(process.env.DASHBOARD_PORT || process.env.PORT || 3000);
+    const port = options.port ?? resolveDashboardPort();
 
     if (await portInUse(port)) {
       log.info(`Dashboard already running on port ${port} — not starting another`);
       return;
     }
 
-    const serverPath = findDashboardServer();
-    if (!serverPath) {
+    const found = findDashboardServer();
+    if (!found) {
       log.warn(
         'Dashboard is not built, so it cannot be started automatically. '
         + 'Run `pnpm --filter @somnibot/dashboard build` (or use docker-compose.prod.yml) '
@@ -161,8 +208,18 @@ export async function startDashboardSupervisor(
       return;
     }
 
+    if (!await prepareStandaloneAssets(found.repoRoot)) {
+      // Starting anyway would serve a page whose stylesheet and scripts 404,
+      // which looks like a broken dashboard rather than an unbuilt one.
+      log.warn(
+        'Dashboard static assets could not be staged, so it was not started. '
+        + 'Run `pnpm --filter @somnibot/dashboard build` to rebuild it.',
+      );
+      return;
+    }
+
     stopping = false;
-    launch(serverPath, port);
+    launch(found.serverPath, port);
   } catch (err) {
     // Never let dashboard supervision take the bot down.
     log.error('Could not start the dashboard', { error: String(err) });

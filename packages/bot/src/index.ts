@@ -138,6 +138,14 @@ async function main(): Promise<void> {
     // idles (reporting awaiting_setup) until credentials arrive.
     startHealthServer(null);
 
+    // This branch is precisely the one that waits for the DASHBOARD to supply
+    // the missing Discord token, so it is the branch that most needs the
+    // dashboard running. Starting it only on the configured-boot path meant a
+    // first-time launch with just Supabase credentials idled forever behind a
+    // dashboard the operator had to start themselves — the gap the supervisor
+    // exists to close.
+    await startDashboardSupervisor();
+
     // ── Transition-out: await_credentials (codex round-4 finding #2) ──
     // Do NOT idle forever. The dashboard's verify-discord step writes
     // `discord_bot_token` to instance_settings while this process is running;
