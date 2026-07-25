@@ -75,7 +75,35 @@ trap cleanup EXIT INT TERM
 
 # ─── Step 1: Start Docker services (Lavalink + Valkey) ───────
 echo "→ Starting Docker services (Lavalink + Valkey)..."
-docker compose up -d
+
+# Report what Docker actually said. This used to run `docker compose up -d`
+# without checking the result and then print "✅ Lavalink starting" either way,
+# so a failed start was announced as a success and the operator only found out
+# later, from music not working.
+compose_output="$(docker compose up -d 2>&1)"
+compose_status=$?
+
+if [[ $compose_status -ne 0 ]]; then
+  echo "  ❌ Docker could not start the services:"
+  echo "$compose_output" | sed 's/^/     /'
+
+  # The most common real cause, and the least obvious: container_name is pinned
+  # in docker-compose.yml, so a second checkout of the repo collides with the
+  # containers the first one created. "Check Docker Desktop is running" sent
+  # people looking in entirely the wrong place.
+  if echo "$compose_output" | grep -qi "container name .* is already in use"; then
+    conflicting="$(echo "$compose_output" | grep -oiE '/somni-[a-z-]+' | head -1 | tr -d '/')"
+    owner="$(docker inspect "$conflicting" \
+      --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null)"
+    echo ""
+    echo "  This is a name clash, not a Docker problem. '$conflicting' already"
+    echo "  exists${owner:+, created by the checkout at: $owner}."
+    echo ""
+    echo "  Either start SomniBot from that directory, or free the name with:"
+    echo "      docker rm -f $conflicting"
+  fi
+  exit 1
+fi
 
 echo "  ✅ Lavalink starting on port 2333"
 echo "  ✅ Valkey starting on port 6379"
