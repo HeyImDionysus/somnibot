@@ -23,6 +23,7 @@ import { GuildRouter } from './guild-router.js';
 import { runMigrations } from './services/migration-runner.js';
 import { initGuildFeatures, registerGuildCommands, destroyGuildServices } from './guild-init.js';
 import { startHealthServer, setAwaitingSetup } from './services/health-server.js';
+import { startDashboardSupervisor, stopDashboardSupervisor } from './services/dashboard-supervisor.js';
 import { HeartbeatService } from './services/heartbeat.js';
 import { evaluateSetupGate, createBootstrapSupabase } from './services/setup-gate.js';
 import {
@@ -253,6 +254,14 @@ async function main(): Promise<void> {
   // 5.5. Start health check HTTP server (V5 audit remediation — Finding 9.1)
   startHealthServer(client);
 
+  // 5.6. Bring the web dashboard up alongside the bot. Setup configures a
+  // dashboard URL (and points Supabase auth + PayPal callbacks at it), so the
+  // dashboard needs to actually be running there — expecting the operator to
+  // start a second process by hand is not workable when the bot lives on a VPS
+  // and they are looking at it from a phone. No-ops when something is already
+  // serving the port or when a container orchestrator owns that lifecycle.
+  void startDashboardSupervisor();
+
   // 6. Post-ready initialization
   client.once(Events.ClientReady, async () => {
     log.info('Discord ready — initializing systems...');
@@ -394,6 +403,7 @@ async function main(): Promise<void> {
     stopSetupCompletionWatcher();
     stopAwaitingSetupWatcher();
     stopLauncherIpcHeartbeat();
+    await stopDashboardSupervisor();
     await shutdownBot({ signal, client, botLevelServices, dependencies: { log } });
   };
 
