@@ -293,10 +293,36 @@ export async function runMigrations(): Promise<MigrationResult> {
     const existing = appliedMap.get(file);
 
     if (existing) {
-      // Already applied — check for checksum drift
+      // Already applied — check for checksum drift.
+      //
+      // Stored checksums are a mix of historical formats: before hashing was
+      // content-based, the hash depended on the line endings of whichever
+      // checkout applied the migration, so one database can hold CRLF-derived
+      // hashes (applied from Windows) next to LF-derived ones (applied from
+      // WSL/CI). Normalising the CURRENT side alone therefore flipped the
+      // false-positive around: a Windows-recorded history suddenly reported
+      // every file as drifted. Seen live: "188 file(s) changed after being
+      // applied" on a database nobody had touched.
+      //
+      // So on mismatch, check whether the stored value is one of the legacy
+      // encodings of this exact content. If it is, the file has NOT changed —
+      // quietly upgrade the record to the canonical hash so this resolves
+      // itself once per database. Only content that matches no encoding of
+      // itself is real drift, which keeps the warning meaning what it says.
       if (existing.checksum !== checksum) {
-        log.warn(`️  Checksum drift: ${file} (applied: ${existing.checksum.slice(0, 8)}… current: ${checksum.slice(0, 8)}…)`);
-        result.checksumDrift.push(file);
+        const legacyHashes = [
+          createHash('sha256').update(sql, 'utf-8').digest('hex'),
+          createHash('sha256').update(sql.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n'), 'utf-8').digest('hex'),
+        ];
+        // Only for records of successful applies — the upsert would otherwise
+        // flip a failed migration's success flag to true.
+        if (existing.success && legacyHashes.includes(existing.checksum)) {
+          await recordMigration(supabaseUrl, serviceRoleKey, file, checksum, 0, true);
+          log.info(`Checksum record upgraded to canonical form: ${file}`);
+        } else {
+          log.warn(`️  Checksum drift: ${file} (applied: ${existing.checksum.slice(0, 8)}… current: ${checksum.slice(0, 8)}…)`);
+          result.checksumDrift.push(file);
+        }
       }
       result.skipped.push(file);
       continue;
