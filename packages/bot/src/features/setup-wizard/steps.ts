@@ -448,7 +448,7 @@ async function fetchPublishableKey(
  * dashboard URL with no indication anything went wrong. `PAYPAL_API_BASE` is
  * still honoured when no explicit mode has been recorded.
  */
-function paypalApiBase(values?: Record<string, string>): string {
+export function paypalApiBase(values?: Record<string, string>): string {
   const mode = (values?.paypal_sandbox ?? process.env.PAYPAL_SANDBOX ?? '').trim().toLowerCase();
   if (mode) {
     return mode === 'false' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';

@@ -18,13 +18,14 @@ import {
   StringSelectMenuBuilder,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
-import { SOMNI_PALETTE } from '@somnibot/shared';
+import { SOMNI_PALETTE, createLogger } from '@somnibot/shared';
 import {
   WIZARD_STEPS,
   buildStepEmbed,
   buildStepComponents,
   buildStepModal,
   buildCompletionEmbed,
+  paypalApiBase,
   type DashboardProbe,
 } from './steps.js';
 import {
@@ -37,6 +38,11 @@ import {
   type WizardProgress,
 } from './wizard-engine.js';
 
+// Every wizard interaction is logged (never credential values). The operator
+// reports "setup is broken" from what they SEE; without these lines there was
+// nothing on our side to line their report up against.
+const log = createLogger('SetupWizard');
+
 /* ------------------------------------------------------------------ */
 /*  Slash command builder                                               */
 /* ------------------------------------------------------------------ */
@@ -44,7 +50,7 @@ import {
 export function buildSetupCommand() {
   return new SlashCommandBuilder()
     .setName('setup')
-    .setDescription('Walk through setting up optional services (PayPal, Lavalink, etc.)')
+    .setDescription('Set up SomniBot — database, hosting and payments, guided step by step')
     .setDMPermission(false);
 }
 
@@ -92,6 +98,12 @@ export async function handleSetupCommand(
   const configuredSet = new Set(progress.configured);
   const allConfigured = WIZARD_STEPS.every((s) => configuredSet.has(s.id));
 
+  log.info('/setup opened', {
+    user: interaction.user.id,
+    configured: [...configuredSet].join(','),
+    allConfigured,
+  });
+
   // ALWAYS open on an overview of every step.
   //
   // This used to jump straight to the first *unconfigured* step, which meant
@@ -104,7 +116,7 @@ export async function handleSetupCommand(
   // Probes the saved dashboard URL rather than trusting that "we stored a value"
   // means "it works" — a green check next to an unreachable dashboard is the
   // single most misleading thing this screen can say.
-  const statusLines = buildStatusLines(configuredSet, await probeDashboard(configuredSet));
+  const statusLines = buildStatusLines(configuredSet, await probeLiveStatus(configuredSet));
 
   const embed = new EmbedBuilder()
     .setColor(SOMNI_PALETTE.HOT_PINK)
@@ -175,9 +187,12 @@ export async function handleSetupButton(
 
   const step = WIZARD_STEPS.find((s) => s.id === stepId);
   if (!step) {
+    log.warn('Button for unknown step', { customId: interaction.customId });
     await interaction.reply({ content: '❌ Unknown setup step.', ephemeral: true });
     return;
   }
+
+  log.info('Button pressed', { step: step.id, action });
 
   if (action === 'credentials') {
     // Show the modal
@@ -192,13 +207,19 @@ export async function handleSetupButton(
     await interaction.deferUpdate();
     const { enableFunnel } = await import('./tailscale.js');
     const info = await enableFunnel();
+    log.info('Tailscale funnel attempt', {
+      state: info.state,
+      publicUrl: info.publicUrl ?? 'none',
+      detail: info.detail?.slice(0, 150) ?? 'none',
+    });
 
     if (info.state === 'funnel-active' && info.publicUrl) {
       // Persist it exactly as if it had been typed into the step's field, so
       // the normal verification + Supabase auth wiring runs too.
-      const values = { dashboard_url: info.publicUrl };
+      const values: Record<string, string> = { dashboard_url: info.publicUrl };
       const failure = await step.verify(values);
       if (!failure) {
+        log.info('Funnel URL verified and stored', { step: step.id, url: info.publicUrl });
         await storeCredentials(client.supabase, step, values);
         const progress = await loadProgress(client.supabase);
         if (!progress.configured.includes(step.id)) progress.configured.push(step.id);
@@ -305,6 +326,9 @@ export async function handleSetupModal(
   // Verify credentials
   const error = await step.verify(values);
   if (error) {
+    // The exact text the operator is looking at, so a report of "it failed"
+    // maps to a line here instead of a guessing game.
+    log.warn('Step verification FAILED', { step: step.id, shown: error.slice(0, 200) });
     // Show error embed with retry button (same step)
     const errorEmbed = new EmbedBuilder()
       .setColor(SOMNI_PALETTE.ORANGE)
@@ -317,7 +341,17 @@ export async function handleSetupModal(
     return;
   }
 
+  log.info('Step verified and stored', {
+    step: step.id,
+    warnings: [values.__auth_note, values.__paypal_note, values.__unreachable]
+      .filter(Boolean).join(' | ') || 'none',
+  });
   // Store credentials in instance_settings + process.env
+  log.info('Step verified and stored', {
+    step: step.id,
+    warnings: [values.__auth_note, values.__paypal_note, values.__unreachable]
+      .filter(Boolean).join(' | ') || 'none',
+  });
   await storeCredentials(client.supabase, step, values);
 
   // Enable feature flag if applicable
@@ -437,16 +471,99 @@ export async function probeDashboard(configuredSet: Set<string>): Promise<Dashbo
   }
 }
 
-function buildStatusLines(configuredSet: Set<string>, probe: DashboardProbe): string {
+/**
+ * Per-step liveness. `true` = proven working just now, `false` = the service
+ * REJECTED the stored credential, `null` = not checked (step unconfigured, or
+ * the probe was inconclusive — e.g. a network blip, which must not be reported
+ * as broken credentials).
+ */
+export interface LiveStatus {
+  dashboard: DashboardProbe;
+  supabase: boolean | null;
+  paypal: boolean | null;
+}
+
+/** Does the stored Supabase access token still work? */
+async function probeSupabaseToken(configuredSet: Set<string>): Promise<boolean | null> {
+  const token = process.env.SUPABASE_ACCESS_TOKEN;
+  if (!token || !configuredSet.has('supabase_mgmt')) return null;
+  try {
+    const res = await fetch('https://api.supabase.com/v1/projects', {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (res.ok) return true;
+    if (res.status === 401 || res.status === 403) return false;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Do the stored PayPal credentials still authenticate? */
+async function probePayPalCreds(configuredSet: Set<string>): Promise<boolean | null> {
+  const clientId = process.env.PAYPAL_CLIENT_ID;
+  const clientSecret = process.env.PAYPAL_CLIENT_SECRET;
+  if (!clientId || !clientSecret || !configuredSet.has('paypal')) return null;
+  try {
+    const res = await fetch(`${paypalApiBase()}/v1/oauth2/token`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'grant_type=client_credentials',
+      signal: AbortSignal.timeout(5000),
+    });
+    if (res.ok) return true;
+    if (res.status === 401) return false;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Probe everything the overview is about to make claims about, in parallel. */
+export async function probeLiveStatus(configuredSet: Set<string>): Promise<LiveStatus> {
+  const [dashboard, supabase, paypal] = await Promise.all([
+    probeDashboard(configuredSet),
+    probeSupabaseToken(configuredSet),
+    probePayPalCreds(configuredSet),
+  ]);
+  return { dashboard, supabase, paypal };
+}
+
+/**
+ * One line per step, and the line must be earned: "working" only appears when
+ * the probe just succeeded, and a stored-but-rejected credential is called out
+ * rather than sitting behind the same green as everything else. A checkmark
+ * that only means "a value was saved" is the exact lie this screen used to
+ * tell.
+ */
+function buildStatusLines(configuredSet: Set<string>, live: LiveStatus): string {
   return WIZARD_STEPS.map((s) => {
     if (!configuredSet.has(s.id)) {
       return `⬜ ${s.emoji} **${s.title}** — not configured yet`;
     }
-    if (s.id === 'deployment' && probe.live === false) {
+    if (s.id === 'deployment' && live.dashboard.live === false) {
       return `⚠️ ${s.emoji} **${s.title}** — saved, but nothing is answering at `
-        + `\`${probe.url}\`. Start the dashboard (see the step for how).`;
+        + `\`${live.dashboard.url}\`. Start the dashboard (see the step for how).`;
     }
-    return `✅ ${s.emoji} **${s.title}** — configured`;
+    if (s.id === 'supabase_mgmt' && live.supabase === false) {
+      return `⚠️ ${s.emoji} **${s.title}** — saved, but Supabase rejected the stored `
+        + 'access token. Open this step and paste a fresh `sbp_` token.';
+    }
+    if (s.id === 'paypal' && live.paypal === false) {
+      return `⚠️ ${s.emoji} **${s.title}** — saved, but PayPal rejected the stored `
+        + 'credentials. Open this step and re-enter them.';
+    }
+    const proven =
+      (s.id === 'deployment' && live.dashboard.live === true)
+      || (s.id === 'supabase_mgmt' && live.supabase === true)
+      || (s.id === 'paypal' && live.paypal === true);
+    return proven
+      ? `✅ ${s.emoji} **${s.title}** — working (checked just now)`
+      : `✅ ${s.emoji} **${s.title}** — configured`;
   }).join('\n');
 }
 
@@ -509,14 +626,14 @@ async function advanceToNextStep(
   const configuredSet = new Set(progress.configured);
   const allConfigured = WIZARD_STEPS.every((s) => configuredSet.has(s.id));
 
-  const probe = await probeDashboard(configuredSet);
+  const live = await probeLiveStatus(configuredSet);
   const embed = allConfigured
-    ? buildCompletionEmbed(configuredSet, probe)
+    ? buildCompletionEmbed(configuredSet, live.dashboard)
     : new EmbedBuilder()
       .setColor(SOMNI_PALETTE.HOT_PINK)
       .setTitle('🔧 Setup')
       .setDescription(
-        `${buildStatusLines(configuredSet, probe)}\n\n`
+        `${buildStatusLines(configuredSet, live)}\n\n`
         + 'Pick a service below when you are ready to continue.',
       );
 
