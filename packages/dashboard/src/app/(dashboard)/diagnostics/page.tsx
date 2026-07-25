@@ -100,10 +100,11 @@ function formatDate(ts: string | null): string {
   });
 }
 
-function StatusDot({ ok }: { ok: boolean }) {
-  return (
-    <span className={`inline-block h-2.5 w-2.5 rounded-full ${ok ? 'bg-green-500' : 'bg-red-500'}`} />
-  );
+function StatusDot({ ok, muted = false }: { ok: boolean; muted?: boolean }) {
+  // `muted` is for subsystems that are switched off on purpose. Red would read
+  // as "this is broken, go fix it" when nothing is wrong at all.
+  const color = muted ? 'bg-discord-text-muted' : ok ? 'bg-green-500' : 'bg-red-500';
+  return <span className={`inline-block h-2.5 w-2.5 rounded-full ${color}`} />;
 }
 
 /**
@@ -459,12 +460,19 @@ export default function DiagnosticsPage() {
         {/* Lavalink */}
         <div className="rounded-lg bg-discord-bg-secondary p-4">
           <div className="flex items-center gap-2 mb-3">
-            <StatusDot ok={(diag?.lavalink.nodes ?? []).some((n) => n.connected)} />
+            {/* A node stays registered while it reconnects, so "no nodes at all"
+                means music was never configured — not that it went down. */}
+            <StatusDot
+              ok={(diag?.lavalink.nodes ?? []).some((n) => n.connected)}
+              muted={(diag?.lavalink.nodes ?? []).length === 0}
+            />
             <h3 className="text-sm font-semibold text-discord-text-primary">Lavalink</h3>
           </div>
           <div className="space-y-1.5 text-sm">
             {(diag?.lavalink.nodes ?? []).length === 0 ? (
-              <p className="text-discord-text-muted">No nodes configured</p>
+              <p className="text-discord-text-muted">
+                Music not configured — set a Lavalink password to enable it.
+              </p>
             ) : (
               diag?.lavalink.nodes.map((node) => (
                 <div key={node.name} className="flex justify-between">

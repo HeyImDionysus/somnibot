@@ -105,8 +105,10 @@ export class SomniClient extends Client {
     // construction took down the whole boot — so an instance without Lavalink
     // configured could never start, even though every non-music feature works
     // fine without it. Register the node only when a password is actually set;
-    // otherwise start with no nodes (music commands then report no available
-    // node, and the existing lavalink_down alerting covers the degraded state).
+    // otherwise start with no nodes. Music commands then report no available
+    // node, and diagnostics shows Lavalink as deliberately unconfigured rather
+    // than down — lavalink_down is reserved for a node that was configured and
+    // then failed, which is the case an operator actually needs to act on.
     const lavalinkNodes = env.LAVALINK_PASSWORD
       ? [
           {

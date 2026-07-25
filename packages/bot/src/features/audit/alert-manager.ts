@@ -119,7 +119,12 @@ export class AlertManager {
       });
     }
 
-    // 4. All Lavalink nodes down
+    // 4. All Lavalink nodes down.
+    // The length check is deliberate, not a guard against an empty array: a node
+    // stays in Shoukaku's map while it retries, so a configured-but-unreachable
+    // Lavalink still shows up here as connected:false and does alert. Zero nodes
+    // only happens when no LAVALINK_PASSWORD was set, i.e. music was switched
+    // off on purpose — paging someone about a feature they declined is noise.
     if (snapshot.lavalink_nodes.length > 0 && snapshot.lavalink_nodes.every((n) => !n.connected)) {
       alerts.push({
         guild_id: snapshot.guild_id,
