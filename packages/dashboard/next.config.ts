@@ -1,8 +1,33 @@
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { NextConfig } from 'next';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Load the monorepo root .env before baking browser config.
+//
+// The browser cannot read process.env, so the login page's Supabase client
+// depends entirely on the SOMNIBOT_BUILD_* values inlined below at build time.
+// But `next build` only loads .env from THIS package directory, and the
+// project keeps its .env at the repo root — so a dashboard built from a normal
+// checkout inlined empty strings. Everything then looked fine (pages served,
+// server-side auth worked via runtime env) until someone pressed "Sign in with
+// Discord", whose client had no Supabase URL and silently did nothing.
+//
+// Real environment always wins: values already present in process.env (CI,
+// hosted platforms, docker) are never overridden by the file.
+try {
+  const rootEnv = readFileSync(path.join(__dirname, '../../.env'), 'utf8');
+  for (const line of rootEnv.split(/\r?\n/)) {
+    const match = /^([A-Z0-9_]+)=(.*)$/.exec(line);
+    if (match && process.env[match[1]] === undefined) {
+      process.env[match[1]] = match[2];
+    }
+  }
+} catch {
+  // No root .env (CI, hosted) — the real environment is the source of truth.
+}
 
 const nextConfig: NextConfig = {
   env: {
