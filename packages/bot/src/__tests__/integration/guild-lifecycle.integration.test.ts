@@ -49,7 +49,11 @@ describe('Guild lifecycle', () => {
     expect(data).toBeDefined();
     expect(data!.guild_id).toBe(TEST_GUILD_ID);
     expect(data!.onboarding_enabled).toBe(true);
-    expect(data!.levels_enabled).toBe(false);
+    // levels_enabled defaults ON as of 20260724200000_ship_on_defaults_catalog_parity:
+    // the catalog contracts XP/levels (and quests, achievements, heist, polls,
+    // temp channels, …) as enabled out of the box, but guild_config still
+    // shipped them false — so a brand-new server had XP silently switched off.
+    expect(data!.levels_enabled).toBe(true);
     expect(data!.music_enabled).toBe(true);
   });
 
