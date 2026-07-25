@@ -982,14 +982,16 @@ export function validateUndoPayload(
  * below are accepted, and only with the payload keys they need.
  */
 const DISCORD_UNDO_ACTIONS = new Map<string, ReadonlySet<string>>([
-  ["create_role", new Set(["name", "color", "permissions", "hoist", "mentionable", "position"])],
-  ["delete_role", new Set(["discord_id", "id"])],
-  ["update_role", new Set(["discord_id", "id", "name", "color", "permissions", "hoist", "mentionable", "position"])],
-  ["create_channel", new Set(["name", "type", "parent_id", "topic", "nsfw", "position"])],
-  ["delete_channel", new Set(["discord_id", "id"])],
-  ["update_channel", new Set(["discord_id", "id", "name", "topic", "nsfw", "parent_id", "position"])],
-  ["create_category", new Set(["name", "position"])],
-  ["delete_category", new Set(["discord_id", "id"])],
+  // Keys are exactly what the bot's queue handlers read (action-queue.ts):
+  // roleId / channelId / categoryId, never a generic discord_id.
+  ["create_role", new Set(["name", "color", "permissions", "hoist", "mentionable"])],
+  ["delete_role", new Set(["roleId"])],
+  ["update_role", new Set(["roleId", "name", "color", "permissions", "hoist", "mentionable"])],
+  ["create_channel", new Set(["name", "type", "parentId", "topic", "nsfw", "slowmode"])],
+  ["delete_channel", new Set(["channelId"])],
+  ["update_channel", new Set(["channelId", "name", "topic", "nsfw", "slowmode", "parentId"])],
+  ["create_category", new Set(["name"])],
+  ["delete_category", new Set(["categoryId"])],
 ]);
 
 export type DiscordUndoValidation =
@@ -1037,7 +1039,14 @@ export function validateDiscordUndo(payload: unknown): DiscordUndoValidation {
 
   // A delete with no target would be rejected by the handler, but catching it
   // here keeps a useless row out of the queue.
-  if (action.startsWith("delete_") && !actionPayload.discord_id && !actionPayload.id) {
+  // Each delete carries exactly one id field, named for its entity.
+  const DELETE_ID_FIELD: Record<string, string> = {
+    delete_role: "roleId",
+    delete_channel: "channelId",
+    delete_category: "categoryId",
+  };
+  const idField = DELETE_ID_FIELD[action];
+  if (idField && !actionPayload[idField]) {
     return { ok: false, reason: `undo action "${action}" has no target id` };
   }
 

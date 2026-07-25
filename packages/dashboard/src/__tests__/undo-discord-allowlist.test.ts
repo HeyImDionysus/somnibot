@@ -22,13 +22,13 @@ describe('validateDiscordUndo', () => {
     const result = validateDiscordUndo({
       kind: 'discord',
       action: 'delete_role',
-      payload: { discord_id: '555', id: '555' },
+      payload: { roleId: '555' },
     });
 
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.action).toBe('delete_role');
-      expect(result.payload).toEqual({ discord_id: '555', id: '555' });
+      expect(result.payload).toEqual({ roleId: '555' });
     }
   });
 
@@ -45,7 +45,7 @@ describe('validateDiscordUndo', () => {
     const result = validateDiscordUndo({
       kind: 'discord',
       action: 'delete_role',
-      payload: { discord_id: '555', guild_id: 'someone-elses-guild' },
+      payload: { roleId: '555', guild_id: 'someone-elses-guild' },
     });
 
     expect(result.ok).toBe(false);

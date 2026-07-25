@@ -266,6 +266,24 @@ export class ScenarioContextImpl implements ScenarioContext {
    */
   async teardown(): Promise<void> {
     for (const handle of this.handles) {
+      // Stop the guild's services BEFORE sweeping.
+      //
+      // handle.cleanup() runs the real destroyGuildServices, which clears the
+      // snapshot timer, the action-queue listener and every other per-guild
+      // service. Sweeping first left all of those running: they could write a
+      // fresh run-prefixed row in the window between the delete and the count,
+      // and the cleanup proof then failed intermittently — only under full-fleet
+      // load, where the timing shifts enough for a background write to land.
+      //
+      // Disposal is safe to do first: it destroys the Discord client and leaves
+      // handle.supabase (stateless HTTP) usable for the sweep, and deliberately
+      // leaves the shared Valkey socket and realtime channels alone.
+      try {
+        await handle.cleanup();
+      } catch {
+        /* best-effort dispose */
+      }
+
       let leftovers: number | null = null;
       try {
         await sweepGuild(handle, [...this.guildScopedTables]);
@@ -285,11 +303,6 @@ export class ScenarioContextImpl implements ScenarioContext {
           impact:
             'Run-prefixed rows survived the cleanup sweep — the suite leaves residue in the disposable database.',
         });
-      }
-      try {
-        await handle.cleanup();
-      } catch {
-        /* best-effort dispose */
       }
     }
   }

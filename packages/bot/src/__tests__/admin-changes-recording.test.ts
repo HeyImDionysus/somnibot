@@ -48,7 +48,7 @@ describe('recordAdminChange', () => {
     expect(row.undo_payload).toEqual({
       kind: 'discord',
       action: 'delete_role',
-      payload: { discord_id: '555', id: '555' },
+      payload: { roleId: '555' },
     });
   });
 
@@ -114,7 +114,7 @@ describe('recordAdminChange', () => {
     expect(undo).toEqual({
       kind: 'discord',
       action: 'update_role',
-      payload: { discord_id: '900', id: '900', name: 'Old Name', hoist: false },
+      payload: { roleId: '900', name: 'Old Name', hoist: false },
     });
   });
 

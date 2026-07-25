@@ -441,7 +441,17 @@ async function repointPayPalWebhook(
     if (!accessToken) return;
 
     const previousId = process.env.PAYPAL_WEBHOOK_ID;
-    await ensurePayPalWebhook(apiBase, accessToken, target, values);
+
+    // Discarding this used to mean the Hosting step reported success — and its
+    // note claimed "payment callbacks now point here" — while PayPal had
+    // rejected the change and kept delivering purchases to the previous host.
+    // A silently stale payment webhook is about the worst thing to be wrong
+    // about, so surface it.
+    const webhookProblem = await ensurePayPalWebhook(apiBase, accessToken, target, values);
+    if (webhookProblem) {
+      values.__paypal_note = webhookProblem;
+      return;
+    }
 
     // Remove the webhook we were previously using, so repeatedly changing the
     // dashboard URL does not leave a trail of dead webhooks delivering to hosts
@@ -699,6 +709,13 @@ const deploymentStep: WizardStep = {
     }
     if (values.__auth_note) {
       lines.push('', `⚠️ ${values.__auth_note}`);
+    }
+    if (values.__paypal_note) {
+      lines.push(
+        '',
+        `⚠️ PayPal webhook was NOT moved: ${values.__paypal_note} Payment events `
+        + 'will keep going to the previous address until this is resolved.',
+      );
     }
     if (ref) {
       lines.push(

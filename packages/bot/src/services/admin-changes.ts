@@ -158,10 +158,19 @@ export function undoByDeleting(
   kind: 'role' | 'channel' | 'category',
   discordId: string,
 ): DiscordUndo {
-  const action = kind === 'role'
-    ? 'delete_role'
-    : kind === 'channel' ? 'delete_channel' : 'delete_category';
-  return { kind: 'discord', action, payload: { discord_id: discordId, id: discordId } };
+  // Field names must match what the queue handlers actually read —
+  // handleDeleteRole/Channel/Category take roleId/channelId/categoryId and
+  // reject anything else with "Missing <id>". A generic discord_id would have
+  // produced an undo that always failed, which is the precise failure this
+  // module exists to prevent.
+  switch (kind) {
+    case 'role':
+      return { kind: 'discord', action: 'delete_role', payload: { roleId: discordId } };
+    case 'channel':
+      return { kind: 'discord', action: 'delete_channel', payload: { channelId: discordId } };
+    case 'category':
+      return { kind: 'discord', action: 'delete_category', payload: { categoryId: discordId } };
+  }
 }
 
 /**
@@ -175,9 +184,9 @@ export function undoByRestoring(
   discordId: string,
   before: Record<string, unknown>,
 ): DiscordUndo {
-  return {
-    kind: 'discord',
-    action: kind === 'role' ? 'update_role' : 'update_channel',
-    payload: { discord_id: discordId, id: discordId, ...before },
-  };
+  // handleUpdateRole reads roleId + name/color/hoist/mentionable/permissions;
+  // handleUpdateChannel reads channelId + name/topic/nsfw/slowmode/parentId.
+  return kind === 'role'
+    ? { kind: 'discord', action: 'update_role', payload: { roleId: discordId, ...before } }
+    : { kind: 'discord', action: 'update_channel', payload: { channelId: discordId, ...before } };
 }
