@@ -20,8 +20,18 @@ import { createLogger } from '@somnibot/shared';
 const execFileAsync = promisify(execFile);
 const log = createLogger('TailscaleSetup');
 
-/** Where the dashboard listens locally; the funnel forwards to this. */
-const DEFAULT_DASHBOARD_TARGET = 'http://127.0.0.1:3000';
+/**
+ * Where the dashboard listens locally; the funnel forwards to this.
+ *
+ * Read at call time from the same env the dashboard supervisor uses to choose
+ * its port. Hardcoding 3000 meant that on any other port — the launcher's local
+ * profile uses 3456 — the funnel would publish successfully, report success,
+ * and point the public sign-in and PayPal callback URLs at nothing.
+ */
+function dashboardTarget(): string {
+  const port = Number(process.env.DASHBOARD_PORT || process.env.PORT || 3000);
+  return `http://127.0.0.1:${port}`;
+}
 
 /** Windows installs Tailscale outside PATH more often than not. */
 const CANDIDATE_BINARIES = [
@@ -120,7 +130,7 @@ export async function detectTailscale(): Promise<TailscaleInfo> {
  * Safe to call when one is already active — Tailscale treats it as idempotent.
  */
 export async function enableFunnel(
-  target = DEFAULT_DASHBOARD_TARGET,
+  target = dashboardTarget(),
 ): Promise<TailscaleInfo> {
   const info = await detectTailscale();
   if (info.state === 'not-installed' || info.state === 'logged-out') return info;

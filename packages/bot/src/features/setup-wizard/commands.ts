@@ -25,6 +25,7 @@ import {
   buildStepComponents,
   buildStepModal,
   buildCompletionEmbed,
+  type DashboardProbe,
 } from './steps.js';
 import {
   loadProgress,
@@ -100,11 +101,10 @@ export async function handleSetupCommand(
   // and could not review or change. A setup wizard must never hide a step it
   // has decided is done on the operator's behalf; show the state and let them
   // choose.
-  const statusLines = WIZARD_STEPS.map((s) =>
-    configuredSet.has(s.id)
-      ? `✅ ${s.emoji} **${s.title}** — configured`
-      : `⬜ ${s.emoji} **${s.title}** — not configured yet`,
-  ).join('\n');
+  // Probes the saved dashboard URL rather than trusting that "we stored a value"
+  // means "it works" — a green check next to an unreachable dashboard is the
+  // single most misleading thing this screen can say.
+  const statusLines = buildStatusLines(configuredSet, await probeDashboard(configuredSet));
 
   const embed = new EmbedBuilder()
     .setColor(SOMNI_PALETTE.HOT_PINK)
@@ -415,30 +415,36 @@ export async function handleReconfigureSelect(
  * link. Where a stored value can actually be checked, check it, and say plainly
  * when it is not working.
  */
-async function buildStatusLines(configuredSet: Set<string>): Promise<string> {
-  const dashboardUrl = process.env.DASHBOARD_URL?.trim().replace(/\/$/, '');
-  let dashboardLive: boolean | null = null;
+/**
+ * Ask the saved dashboard URL whether anything is actually there.
+ *
+ * `live: null` means we did not check (no URL saved, or the step is not done
+ * yet) — which is different from "checked and it is down".
+ */
+export async function probeDashboard(configuredSet: Set<string>): Promise<DashboardProbe> {
+  const url = process.env.DASHBOARD_URL?.trim().replace(/\/$/, '') || null;
+  if (!url || !configuredSet.has('deployment')) return { url, live: null };
 
-  if (dashboardUrl && configuredSet.has('deployment')) {
-    try {
-      const res = await fetch(dashboardUrl, {
-        method: 'HEAD',
-        redirect: 'manual',
-        signal: AbortSignal.timeout(5000),
-      });
-      dashboardLive = res.status > 0;
-    } catch {
-      dashboardLive = false;
-    }
+  try {
+    const res = await fetch(url, {
+      method: 'HEAD',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(5000),
+    });
+    return { url, live: res.status > 0 };
+  } catch {
+    return { url, live: false };
   }
+}
 
+function buildStatusLines(configuredSet: Set<string>, probe: DashboardProbe): string {
   return WIZARD_STEPS.map((s) => {
     if (!configuredSet.has(s.id)) {
       return `⬜ ${s.emoji} **${s.title}** — not configured yet`;
     }
-    if (s.id === 'deployment' && dashboardLive === false) {
+    if (s.id === 'deployment' && probe.live === false) {
       return `⚠️ ${s.emoji} **${s.title}** — saved, but nothing is answering at `
-        + `\`${dashboardUrl}\`. Start the dashboard (see the step for how).`;
+        + `\`${probe.url}\`. Start the dashboard (see the step for how).`;
     }
     return `✅ ${s.emoji} **${s.title}** — configured`;
   }).join('\n');
@@ -503,17 +509,15 @@ async function advanceToNextStep(
   const configuredSet = new Set(progress.configured);
   const allConfigured = WIZARD_STEPS.every((s) => configuredSet.has(s.id));
 
+  const probe = await probeDashboard(configuredSet);
   const embed = allConfigured
-    ? buildCompletionEmbed(configuredSet)
+    ? buildCompletionEmbed(configuredSet, probe)
     : new EmbedBuilder()
       .setColor(SOMNI_PALETTE.HOT_PINK)
       .setTitle('🔧 Setup')
       .setDescription(
-        `${WIZARD_STEPS.map((s) =>
-          configuredSet.has(s.id)
-            ? `✅ ${s.emoji} **${s.title}** — configured`
-            : `⬜ ${s.emoji} **${s.title}** — not configured yet`,
-        ).join('\n')}\n\nPick a service below when you are ready to continue.`,
+        `${buildStatusLines(configuredSet, probe)}\n\n`
+        + 'Pick a service below when you are ready to continue.',
       );
 
   await interaction.editReply({ embeds: [embed], components: buildOverviewComponents(progress) });

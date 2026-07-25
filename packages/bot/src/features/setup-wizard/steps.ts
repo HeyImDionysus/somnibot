@@ -486,14 +486,40 @@ async function configureSupabaseAuth(dashboardUrl: string): Promise<string | nul
   if (!token || !ref) return null;
 
   const base = dashboardUrl.replace(/\/$/, '');
+  const authUrl = `https://api.supabase.com/v1/projects/${ref}/config/auth`;
+  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
   // Keep localhost alongside the public URL so local sign-in keeps working
   // when the operator is running the dashboard on their own machine.
-  const allow = new Set([`${base}/api/auth/callback`, 'http://localhost:3000/api/auth/callback']);
+  const localPort = Number(process.env.DASHBOARD_PORT || process.env.PORT || 3000);
+  const wanted = [
+    `${base}/api/auth/callback`,
+    `http://localhost:${localPort}/api/auth/callback`,
+  ];
 
-  const body: Record<string, unknown> = {
-    site_url: base,
-    uri_allow_list: [...allow].join(','),
-  };
+  // PATCH replaces uri_allow_list wholesale, so it has to be read and appended
+  // to. Sending only our own callbacks would delete every other redirect on the
+  // project — preview deployments, a mobile app, an unrelated site — and break
+  // their sign-in. If we cannot read the current list we leave the field alone
+  // entirely rather than risk clobbering it.
+  let mergedAllowList: string | null = null;
+  try {
+    const current = await fetch(authUrl, { headers, signal: AbortSignal.timeout(15000) });
+    if (current.ok) {
+      const cfg = (await current.json()) as Record<string, unknown>;
+      const raw = cfg.uri_allow_list ?? cfg.URI_ALLOW_LIST;
+      const entries = typeof raw === 'string'
+        ? raw.split(',').map((e) => e.trim()).filter(Boolean)
+        : [];
+      for (const url of wanted) if (!entries.includes(url)) entries.push(url);
+      mergedAllowList = entries.join(',');
+    }
+  } catch {
+    // handled below by leaving the allow-list untouched
+  }
+
+  const body: Record<string, unknown> = { site_url: base };
+  if (mergedAllowList !== null) body.uri_allow_list = mergedAllowList;
   // Dashboard sign-in is Discord OAuth through Supabase, so enable the provider
   // with this bot's application credentials when we have them.
   if (process.env.DISCORD_APPLICATION_ID && process.env.DISCORD_CLIENT_SECRET) {
@@ -503,9 +529,9 @@ async function configureSupabaseAuth(dashboardUrl: string): Promise<string | nul
   }
 
   try {
-    const res = await fetch(`https://api.supabase.com/v1/projects/${ref}/config/auth`, {
+    const res = await fetch(authUrl, {
       method: 'PATCH',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15000),
     });
@@ -514,6 +540,12 @@ async function configureSupabaseAuth(dashboardUrl: string): Promise<string | nul
     }
   } catch {
     return 'Saved the URL, but could not reach Supabase to update auth settings.';
+  }
+
+  if (mergedAllowList === null) {
+    return 'Saved the URL, but could not read the existing Supabase redirect list, '
+      + 'so it was left untouched to avoid deleting other entries. Add '
+      + `\`${wanted[0]}\` under Authentication → URL Configuration.`;
   }
   return null;
 }
@@ -974,19 +1006,42 @@ export function buildStepModal(step: WizardStep): ModalBuilder {
   return modal;
 }
 
-export function buildCompletionEmbed(configuredIds: Set<string>): EmbedBuilder {
+/** Result of checking whether the saved dashboard URL actually serves anything. */
+export interface DashboardProbe {
+  url: string | null;
+  /** `null` when we did not check — not the same as "checked and down". */
+  live: boolean | null;
+}
+
+export function buildCompletionEmbed(
+  configuredIds: Set<string>,
+  probe: DashboardProbe = { url: null, live: null },
+): EmbedBuilder {
+  const dashboardDown = probe.live === false;
+
   const lines = WIZARD_STEPS.map((s) => {
-    const status = configuredIds.has(s.id) ? '✅' : '⏭️ skipped';
-    return `${s.emoji} **${s.title}** — ${status}`;
+    if (!configuredIds.has(s.id)) return `${s.emoji} **${s.title}** — ⏭️ skipped`;
+    if (s.id === 'deployment' && dashboardDown) {
+      return `${s.emoji} **${s.title}** — ⚠️ saved, but not responding`;
+    }
+    return `${s.emoji} **${s.title}** — ✅`;
   }).join('\n');
 
+  // "Setup Complete" over a dashboard that does not answer is the exact
+  // false-positive this screen used to produce: every step green, and the link
+  // it sends the operator to is dead.
   return new EmbedBuilder()
     .setColor(SOMNI_PALETTE.HOT_PINK)
-    .setTitle('🎉 Setup Complete!')
+    .setTitle(dashboardDown ? '⚠️ Setup Saved — Dashboard Unreachable' : '🎉 Setup Complete!')
     .setDescription(
       `${lines}\n\n` +
-      'All external services are configured. Head to the **dashboard** to enable and ' +
-      'configure features — moderation, levels, welcome, tickets, commerce, music, and everything else.\n\n' +
-      'Run `/setup` again anytime to reconfigure any service.',
+      (dashboardDown
+        ? `Every service is configured, but nothing is answering at \`${probe.url}\`, `
+          + 'so the dashboard will not load yet. The bot starts it automatically when it '
+          + 'is built — if this persists, open the **Hosting** step to recheck the URL.\n\n'
+        : 'All external services are configured. Head to the **dashboard** to enable and '
+          + 'configure features — moderation, levels, welcome, tickets, commerce, music, '
+          + 'and everything else.\n\n')
+      + 'Run `/setup` again anytime to reconfigure any service.',
     );
 }

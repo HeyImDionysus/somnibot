@@ -28,6 +28,8 @@ const log = createLogger('Dashboard');
 
 const RESTART_DELAY_MS = 5_000;
 const MAX_RESTART_DELAY_MS = 60_000;
+/** How long the dashboard must stay up before we call the start healthy. */
+const HEALTHY_UPTIME_MS = 30_000;
 
 export interface DashboardSupervisorOptions {
   /** Port the dashboard should listen on. Defaults to PORT/3000. */
@@ -39,6 +41,7 @@ export interface DashboardSupervisorOptions {
 let child: ChildProcess | null = null;
 let stopping = false;
 let restartDelay = RESTART_DELAY_MS;
+let healthyTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Running inside a container image? Compose/K8s runs the dashboard separately. */
 function inContainer(): boolean {
@@ -99,12 +102,21 @@ function launch(serverPath: string, port: number): void {
   });
 
   child.once('spawn', () => {
-    restartDelay = RESTART_DELAY_MS; // healthy start resets backoff
     log.info(`Dashboard started on port ${port}`);
+    // Backoff resets on a process that *stayed* up, not one the OS merely
+    // managed to launch. A dashboard that exits immediately emits 'spawn' every
+    // attempt, so resetting here pinned the delay at 5s forever and turned a
+    // persistent startup failure into an endless tight restart loop.
+    healthyTimer = setTimeout(() => {
+      restartDelay = RESTART_DELAY_MS;
+    }, HEALTHY_UPTIME_MS);
+    healthyTimer.unref?.();
   });
 
   child.once('exit', (code, signal) => {
     child = null;
+    // Died before it earned a reset — cancel the pending one.
+    if (healthyTimer) { clearTimeout(healthyTimer); healthyTimer = null; }
     if (stopping) return;
     log.warn(`Dashboard exited (code=${code ?? 'null'} signal=${signal ?? 'none'}) — restarting in ${restartDelay / 1000}s`);
     setTimeout(() => {
@@ -160,6 +172,7 @@ export async function startDashboardSupervisor(
 /** Stop the supervised dashboard (called from the bot's shutdown path). */
 export async function stopDashboardSupervisor(): Promise<void> {
   stopping = true;
+  if (healthyTimer) { clearTimeout(healthyTimer); healthyTimer = null; }
   const proc = child;
   child = null;
   if (!proc || proc.exitCode !== null) return;

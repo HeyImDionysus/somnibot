@@ -57,6 +57,31 @@ const CONFIG_TTL = 60_000;
 const MAX_CACHE_ENTRIES = 200;
 
 const _levelConfigCache = new Map<string, CacheEntry<LevelConfig>>();
+
+/**
+ * What we serve when the config read fails and we have nothing cached: awarding
+ * no XP is recoverable, awarding it to a guild that opted out is not.
+ *
+ * Built on call rather than at module scope so importing this file does not
+ * require LEVEL_CONFIG to be resolvable yet.
+ */
+function disabledLevelConfig(): LevelConfig {
+  return {
+    levels_enabled: false,
+    xp_min: LEVEL_CONFIG.DEFAULT_MIN_XP,
+    xp_max: LEVEL_CONFIG.DEFAULT_MAX_XP,
+    xp_cooldown_seconds: LEVEL_CONFIG.DEFAULT_COOLDOWN_SECONDS,
+    voice_xp_enabled: false,
+    voice_xp_per_interval: LEVEL_CONFIG.DEFAULT_VOICE_XP_PER_INTERVAL,
+    voice_xp_interval_minutes: LEVEL_CONFIG.DEFAULT_VOICE_INTERVAL_MINUTES,
+    xp_multiplier_mode: 'highest',
+    xp_channel_mode: 'blacklist',
+    xp_channel_list: [],
+    level_up_channel_id: null,
+    level_up_message: null,
+    no_xp_role_id: null,
+  };
+}
 const _multiplierCache = new Map<string, CacheEntry<XpMultiplier[]>>();
 const _rewardCache = new Map<string, CacheEntry<LevelReward[]>>();
 
@@ -81,13 +106,25 @@ export async function loadLevelConfig(
     return cached.data;
   }
 
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('guild_config')
     .select(
       'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, no_xp_role_id',
     )
     .eq('guild_id', guildId)
     .maybeSingle();
+
+  // A failed read also yields `data === null`, which is indistinguishable from
+  // "no row" at the `??` site — so a timeout would silently apply the enabled-
+  // by-default values and award XP in a guild that deliberately turned levels
+  // off. Defaults are for a confirmed absent row only; on a read error keep
+  // serving the last known config, or stay off until we can actually ask.
+  // Neither branch is cached, so XP resumes the moment a read succeeds rather
+  // than staying wrong for the rest of the TTL.
+  if (error) {
+    if (cached) return cached.data; // stale, but it is the guild's real config
+    return disabledLevelConfig();
+  }
 
   const config: LevelConfig = {
     // Ship enabled by default (matches the column defaults and the catalog).
