@@ -76,9 +76,9 @@ DASHBOARD_URL=https://staging.yourdomain.com
 NEXT_PUBLIC_APP_URL=https://staging.yourdomain.com
 NEXT_PUBLIC_SUPABASE_URL=https://staging-xxx.supabase.co
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=staging_anon_key
-CSRF_SECRET=generate_with_openssl_rand_hex_32
-NEXTAUTH_SECRET=generate_with_openssl_rand_hex_32
-WEBHOOK_REPLAY_SECRET=generate_with_openssl_rand_hex_32
+CSRF_SECRET=generate_with_node_scripts_gen-secret_mjs
+NEXTAUTH_SECRET=generate_with_node_scripts_gen-secret_mjs
+WEBHOOK_REPLAY_SECRET=generate_with_node_scripts_gen-secret_mjs
 
 # Valkey
 VALKEY_URL=redis://staging-valkey:6379

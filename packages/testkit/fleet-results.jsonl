@@ -16,3 +16,17 @@
 {"id":"game-economy-fishing","pass":50,"gated":34,"fail":0,"findings":[],"errored":[]}
 {"id":"game-economy-gathering","pass":46,"gated":38,"fail":0,"findings":[],"errored":[]}
 {"id":"game-economy-heist","pass":72,"gated":12,"fail":0,"findings":[],"errored":[]}
+{"id":"game-economy-lottery","pass":73,"gated":11,"fail":0,"findings":[],"errored":[]}
+{"id":"game-economy-pets","pass":63,"gated":21,"fail":0,"findings":[],"errored":[]}
+{"id":"game-economy-quests","pass":56,"gated":28,"fail":0,"findings":[],"errored":[]}
+{"id":"game-economy-shop-market","pass":64,"gated":20,"fail":0,"findings":[],"errored":[]}
+{"id":"game-economy-trivia","pass":61,"gated":23,"fail":0,"findings":[],"errored":[]}
+{"id":"game-economy-wallet-rewards","pass":64,"gated":20,"fail":0,"findings":[],"errored":[]}
+{"id":"moderation-anti-raid","pass":44,"gated":40,"fail":0,"findings":[],"errored":[]}
+{"id":"moderation-automod","pass":48,"gated":36,"fail":0,"findings":[],"errored":[]}
+{"id":"moderation-infractions-appeals","pass":48,"gated":36,"fail":0,"findings":[],"errored":[]}
+{"id":"moderation-message-logging","pass":35,"gated":49,"fail":0,"findings":[],"errored":[]}
+{"id":"moderation-tickets-transcripts","pass":50,"gated":34,"fail":0,"findings":[],"errored":[]}
+{"id":"music-collaborative-queue","pass":37,"gated":47,"fail":0,"findings":[],"errored":[]}
+{"id":"music-player-fairness","pass":35,"gated":49,"fail":0,"findings":[],"errored":[]}
+{"id":"commerce-fraud","pass":44,"gated":40,"fail":0,"findings":[],"errored":[]}

@@ -81,6 +81,9 @@ echo [2/5] Checking environment file...
 if not exist .env (
     copy .env.example .env >nul
     echo   [OK] Created .env from .env.example
+    REM Windows has no openssl, so telling the operator to run it was a dead
+    REM end. These values are just random bytes; generate them with Node.
+    node "%~dp0fill-generated-secrets.mjs" .env
     echo.
     echo   !! IMPORTANT: Open .env in a text editor and fill in your values.
     echo      At minimum you need:
@@ -89,9 +92,6 @@ if not exist .env (
     echo        NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
     echo        DASHBOARD_URL ^(local/operator dashboard URL^)
     echo        SOMNIBOT_PUBLIC_CALLBACK_BASE_URL, NEXT_PUBLIC_APP_URL ^(public callback base^)
-    echo        CSRF_SECRET, NEXTAUTH_SECRET, WEBHOOK_REPLAY_SECRET
-    echo        ^(generate each with: openssl rand -hex 32^)
-    echo        LAVALINK_PASSWORD ^(generate with: openssl rand -hex 16^)
     echo        PAYPAL_WEBHOOK_URL ^(^<public-callback-base^>/api/paypal/webhook if using PayPal^)
     echo.
 ) else (

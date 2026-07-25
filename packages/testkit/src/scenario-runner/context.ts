@@ -284,12 +284,28 @@ export class ScenarioContextImpl implements ScenarioContext {
         /* best-effort dispose */
       }
 
+      // Sweep until the guild stays empty, not just until one delete has run.
+      //
+      // The dependency-outage scenarios sever Supabase on purpose, so the
+      // diagnostics and alert writers buffer and FLUSH ON RECONNECT — that
+      // buffering is the behaviour those scenarios exist to prove. The flush
+      // lands after `restoreAllFaults()`, which is after teardown begins, so a
+      // single sweep could delete everything and still be followed by two late
+      // rows (observed: alerts, health_metrics, bot_diagnostics).
+      //
+      // Converging is not the same as ignoring: if rows keep reappearing after
+      // several rounds, the count is still reported and the assertion fails.
       let leftovers: number | null = null;
-      try {
-        await sweepGuild(handle, [...this.guildScopedTables]);
-        leftovers = await countGuildRows(handle, [...this.guildScopedTables]);
-      } catch {
-        // Best-effort — a sweep failure must not mask a recorded result.
+      for (let round = 0; round < 3; round += 1) {
+        try {
+          await sweepGuild(handle, [...this.guildScopedTables]);
+          leftovers = await countGuildRows(handle, [...this.guildScopedTables]);
+        } catch {
+          // Best-effort — a sweep failure must not mask a recorded result.
+          break;
+        }
+        if (leftovers === null || leftovers === 0) break;
+        await new Promise((resolve) => { setTimeout(resolve, 400); });
       }
       if (leftovers !== null) {
         this.expect(leftovers === 0, {
