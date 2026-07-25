@@ -90,11 +90,14 @@ export async function loadLevelConfig(
     .maybeSingle();
 
   const config: LevelConfig = {
-    levels_enabled: data?.levels_enabled ?? false,
+    // Ship enabled by default (matches the column defaults and the catalog).
+    // guild-init creates the config row on join, so this only applies before
+    // that lands; it must agree with the schema either way.
+    levels_enabled: data?.levels_enabled ?? true,
     xp_min: data?.xp_min ?? LEVEL_CONFIG.DEFAULT_MIN_XP,
     xp_max: data?.xp_max ?? LEVEL_CONFIG.DEFAULT_MAX_XP,
     xp_cooldown_seconds: data?.xp_cooldown_seconds ?? LEVEL_CONFIG.DEFAULT_COOLDOWN_SECONDS,
-    voice_xp_enabled: data?.voice_xp_enabled ?? false,
+    voice_xp_enabled: data?.voice_xp_enabled ?? true,
     voice_xp_per_interval: data?.voice_xp_per_interval ?? LEVEL_CONFIG.DEFAULT_VOICE_XP_PER_INTERVAL,
     voice_xp_interval_minutes: data?.voice_xp_interval_minutes ?? LEVEL_CONFIG.DEFAULT_VOICE_INTERVAL_MINUTES,
     xp_multiplier_mode: data?.xp_multiplier_mode ?? 'highest',

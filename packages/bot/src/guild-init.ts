@@ -193,6 +193,28 @@ export async function initGuildFeatures(
   if (guildCfg) {
     ctx.config = guildCfg;
     guildLog.info('Guild config loaded (1 query)');
+  } else {
+    // No row yet: the wizard is what normally creates one, so a guild that has
+    // not run /setup had no config at all. Every caller then fell back to its
+    // own hardcoded default, which is a second place for defaults to live and
+    // duly drifted from the column defaults (levels shipped ON in the schema
+    // but OFF in loadLevelConfig's fallback). Create the row on join instead,
+    // so the column defaults are the single source of truth.
+    const { data: created, error } = await supabase
+      .from('guild_config')
+      .insert({ guild_id: guildId })
+      .select()
+      .single();
+
+    if (created) {
+      ctx.config = created;
+      guildLog.info('Guild config created with catalog defaults');
+    } else {
+      // Most likely the guild row is missing (bot member unavailable above, so
+      // the FK has nothing to point at). Not fatal — callers still have their
+      // fallbacks, and the next init will retry.
+      guildLog.warn('Could not create guild config', { error: error?.message });
+    }
   }
 
   // ── Snapshots + Action Queue ──
