@@ -216,14 +216,37 @@ export async function writeGuildSnapshot(
           id: o.id,
           title: o.title,
           description: o.description,
-          roles: o.roles.map((r) => r.id),
-          channels: o.channels.map((c) => c.id),
+          // An onboarding option keeps referencing a role or channel after it
+          // is deleted, and the resolved collection then holds undefined for
+          // that entry. Reading .id off it threw, which aborted the whole
+          // onboarding snapshot — so one stale reference silently removed
+          // onboarding from the dashboard entirely.
+          roles: [...o.roles.values()].filter(Boolean).map((r) => r.id),
+          channels: [...o.channels.values()].filter(Boolean).map((c) => c.id),
         })),
       }));
     }
   } catch (err) {
-    // Guild may not have onboarding configured — that's expected and fine
-    log.debug('Onboarding fetch skipped (not configured or no access)', { error: String(err) });
+    // Only a guild without onboarding (or without access to it) is routine.
+    // Anything else is our bug, and reporting it as "not configured" is how it
+    // stayed invisible: the cause was asserted rather than observed.
+    const message = err instanceof Error ? err.message : String(err);
+    // Discord answering "no onboarding" or "no access" is routine. An error
+    // thrown by our own mapping code is not, and must not wear the same label.
+    //
+    // Discriminated on shape rather than `instanceof DiscordAPIError`: a REST
+    // error always carries a numeric Discord error code, whereas a TypeError
+    // from our own mapping carries none. That also survives a monorepo ending
+    // up with two copies of discord.js, where instanceof quietly stops working.
+    const code = (err as { code?: unknown } | null)?.code;
+    const fromDiscord = typeof code === 'number'
+      || (typeof code === 'string' && /^\d+$/.test(code));
+
+    if (fromDiscord) {
+      log.debug('Onboarding not available for this guild', { code: String(code) });
+    } else {
+      log.warn('Onboarding snapshot failed — dashboard will show no onboarding', { error: message });
+    }
   }
 
   // ── Members (for MemberPicker and useDiscordNames in dashboard) ──
