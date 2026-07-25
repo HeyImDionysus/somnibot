@@ -68,12 +68,30 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-docker compose up -d
+REM Show what Docker actually said. "Check Docker Desktop is running" was
+REM printed for every compose failure, including a container-name clash with
+REM another checkout of the repo -- which sent operators looking at Docker
+REM Desktop while it was running perfectly well.
+docker compose up -d 2>"%TEMP%\somni-compose-err.txt"
 if %errorlevel% neq 0 (
-    echo [X] Failed to start Docker services. Check Docker Desktop is running.
+    echo [X] Docker could not start the services:
+    type "%TEMP%\somni-compose-err.txt"
+    findstr /i /c:"is already in use" "%TEMP%\somni-compose-err.txt" >nul 2>&1
+    if not errorlevel 1 (
+        echo.
+        echo   This is a name clash, not a Docker problem. container_name is
+        echo   pinned in docker-compose.yml, so a second checkout of the repo
+        echo   collides with the containers the first one created.
+        echo.
+        echo   Either start SomniBot from that other directory, or free the
+        echo   names with:
+        echo       docker rm -f somni-lavalink somni-valkey
+    )
+    del "%TEMP%\somni-compose-err.txt" >nul 2>&1
     pause
     exit /b 1
 )
+del "%TEMP%\somni-compose-err.txt" >nul 2>&1
 echo   [OK] Docker services started
 echo.
 

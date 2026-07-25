@@ -400,6 +400,45 @@ const paypalStep: WizardStep = {
 };
 
 /**
+ * Fetch the project's publishable (anon) key with the access token we were just
+ * given, and record it for the dashboard.
+ *
+ * Dashboard sign-in needs this key, and the operator used to be told to go and
+ * copy it out of Supabase by hand — a second, similar-looking key that nothing
+ * validated, right after they had already been warned not to paste the other
+ * two. The Management API hands it over for the same token that proves the
+ * project, so there is no reason to ask.
+ *
+ * Best-effort: setup must not fail because this lookup did, since the key can
+ * still be supplied by env.
+ */
+async function fetchPublishableKey(
+  token: string,
+  projectRef: string,
+  values: Record<string, string>,
+): Promise<void> {
+  try {
+    const res = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/api-keys`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return;
+
+    const keys = (await res.json()) as Array<{ name?: string; type?: string; api_key?: string }>;
+    if (!Array.isArray(keys)) return;
+
+    // Prefer the modern publishable key; fall back to the legacy anon JWT for
+    // projects that have not been migrated.
+    const publishable = keys.find((k) => k.type === 'publishable')
+      ?? keys.find((k) => k.name === 'anon');
+
+    if (publishable?.api_key) values.supabase_publishable_key = publishable.api_key;
+  } catch {
+    // Leave it unset — env can still provide it.
+  }
+}
+
+/**
  * Which PayPal API host to talk to.
  *
  * The mode chosen in the wizard wins over `PAYPAL_API_BASE`. The stock
@@ -882,6 +921,11 @@ const supabaseManagementStep: WizardStep = {
   ],
   fieldToSettingsKey: {
     supabase_access_token: 'supabase_access_token',
+    // Not typed by the operator — fetched from the Management API below and
+    // written back into `values` so storeCredentials persists it. The dashboard
+    // needs it to sign anyone in, and asking for it by hand was making people
+    // hunt through Supabase for a second key they had no way to validate.
+    supabase_publishable_key: 'supabase_publishable_key',
   },
   verify: async (values) => {
     const token = values.supabase_access_token?.trim();
@@ -969,6 +1013,10 @@ const supabaseManagementStep: WizardStep = {
             + 'account that owns this project.'
           );
         }
+
+        // The token is proven against this project — use it to collect the key
+        // the dashboard needs, rather than sending the operator back to Supabase.
+        await fetchPublishableKey(token, projectRef, values);
       }
     } catch (err) {
       return `Could not reach Supabase Management API. Check your internet connection.\n\`${String(err)}\``;

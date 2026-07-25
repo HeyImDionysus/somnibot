@@ -37,8 +37,26 @@ interface AppliedMigration {
 
 // ── Helpers ─────────────────────────────────────────────────
 
+/**
+ * Checksum a migration by its CONTENT, not its bytes on this particular disk.
+ *
+ * Git checks these files out with CRLF on Windows and LF elsewhere, so hashing
+ * raw bytes made the checksum platform-dependent: a migration applied from a
+ * Linux container or WSL recorded one hash, and the same untouched file read
+ * from a Windows clone produced another. Every Windows operator was greeted
+ * with "N file(s) changed after being applied — review manually" for files
+ * nobody had edited.
+ *
+ * That is worse than noise. This warning exists to catch a migration being
+ * altered after the fact; one that fires constantly on a clean checkout trains
+ * people to ignore the real thing.
+ *
+ * Normalising to LF also matches what is already stored: existing databases
+ * recorded the LF hash, so they keep verifying without a reset.
+ */
 function sha256(content: string): string {
-  return createHash('sha256').update(content, 'utf-8').digest('hex');
+  const normalized = content.replace(/\r\n/g, '\n');
+  return createHash('sha256').update(normalized, 'utf-8').digest('hex');
 }
 
 /**
