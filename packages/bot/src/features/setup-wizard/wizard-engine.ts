@@ -90,6 +90,14 @@ export function getNextStep(progress: WizardProgress): { step: WizardStep; index
 }
 
 /**
+ * Settings keys a step must ALSO have before it counts as configured, even
+ * though the operator never types them — the wizard generates them.
+ */
+const REQUIRED_PROVISIONED_KEYS: Record<string, readonly string[]> = {
+  paypal: ['paypal_webhook_id'],
+};
+
+/**
  * Check which services already have credentials stored in instance_settings.
  * Returns step IDs that are already configured (regardless of wizard progress).
  */
@@ -123,6 +131,13 @@ export async function detectConfigured(supabase: SupabaseClient): Promise<Set<st
       .map((field) => step.fieldToSettingsKey[field.customId])
       .filter((key): key is string => Boolean(key));
     if (required.length > 0 && required.every((k) => filledKeys.has(k))) {
+      // Some keys are proof of work the wizard does on the operator's behalf
+      // rather than fields they type, so requiring only the typed fields is not
+      // enough. PayPal is the case that matters: an install seeded from .env has
+      // a client id and secret but no webhook, and calling that "configured"
+      // let the operator finish setup with payment events going nowhere.
+      const provisioned = REQUIRED_PROVISIONED_KEYS[step.id];
+      if (provisioned && !provisioned.every((k) => filledKeys.has(k))) continue;
       configured.add(step.id);
     }
   }

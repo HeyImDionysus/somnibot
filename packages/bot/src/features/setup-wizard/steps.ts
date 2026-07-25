@@ -155,7 +155,19 @@ async function ensurePayPalWebhook(
     });
     if (listRes.ok) {
       const body = (await listRes.json()) as { webhooks?: PayPalWebhook[] };
-      const norm = (u: string) => u.replace(/\/$/, '').toLowerCase();
+      // Scheme and host are case-insensitive; the PATH is not. Lowercasing the
+      // whole URL could equate two genuinely different endpoints and make us
+      // adopt — and then rewrite the event subscriptions of — somebody else's
+      // webhook. Normalise only the parts that are actually case-insensitive.
+      const norm = (u: string) => {
+        const trimmed = u.replace(/\/$/, '');
+        try {
+          const parsed = new URL(trimmed);
+          return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${parsed.pathname.replace(/\/$/, '')}`;
+        } catch {
+          return trimmed;
+        }
+      };
       existing = (body.webhooks ?? []).find((w) => norm(w.url ?? '') === norm(targetUrl));
     }
   } catch {
@@ -997,10 +1009,17 @@ const supabaseManagementStep: WizardStep = {
 /*  Ordered step array                                                 */
 /* ------------------------------------------------------------------ */
 
+// Hosting before PayPal, deliberately.
+//
+// PayPal's webhook target is derived from the dashboard URL, so its verifier
+// needs DASHBOARD_URL to exist. With PayPal second, a fresh install following
+// the wizard's own guided order hit PayPal, got told to go and do Hosting
+// first, and dead-ended — the ordered path only worked for someone who already
+// knew to skip ahead. Order the steps by what depends on what.
 export const WIZARD_STEPS: WizardStep[] = [
   supabaseManagementStep,
-  paypalStep,
   deploymentStep,
+  paypalStep,
 ];
 
 /* ------------------------------------------------------------------ */

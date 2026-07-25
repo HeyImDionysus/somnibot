@@ -53,7 +53,7 @@ let healthyTimer: ReturnType<typeof setTimeout> | null = null;
  * one. `PORT` is only taken when `HEALTH_PORT` is set — i.e. when the health
  * server has been pointed elsewhere and `PORT` is genuinely free.
  */
-function resolveDashboardPort(): number {
+export function resolveDashboardPort(): number {
   const explicit = Number(process.env.DASHBOARD_PORT);
   if (Number.isFinite(explicit) && explicit > 0) return explicit;
 

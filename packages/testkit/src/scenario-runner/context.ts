@@ -322,16 +322,41 @@ export async function sweepGuild(
   const guildId = handle.guildId;
   const tables = [...guildScopedTables, ...ALWAYS_SWEPT_GUILD_TABLES];
   for (const table of tables) {
-    try {
-      await supabase.from(table).delete().eq('guild_id', guildId);
-    } catch {
-      /* best-effort */
-    }
+    await deleteWithRetry(() => supabase.from(table).delete().eq('guild_id', guildId));
   }
-  try {
-    await supabase.from('guild').delete().eq('id', guildId);
-  } catch {
-    /* best-effort */
+  await deleteWithRetry(() => supabase.from('guild').delete().eq('id', guildId));
+}
+
+/**
+ * Run one sweep delete, actually noticing when it fails.
+ *
+ * PostgREST calls do not throw on a database error — they resolve with an
+ * `{ error }` field — so the previous try/catch caught network throws only and
+ * a rejected DELETE passed for success. That made the sweep silently partial,
+ * and the DEPFAIL scenarios were where it showed: they sever Supabase through
+ * the fault proxy, and `restoreAllFaults()` re-listens on the proxy port just
+ * before teardown. Under full-fleet load the first deletes could land while the
+ * restored proxy was still coming up, get discarded, and then the count — run a
+ * moment later against a working connection — reported residue. The result was
+ * a cleanup failure that appeared only in the fleet and never in isolation.
+ *
+ * Checking the error and retrying briefly makes leftovers mean what the
+ * assertion claims: the sweep genuinely does not remove what it created.
+ */
+async function deleteWithRetry(
+  run: () => PromiseLike<{ error: unknown }>,
+  attempts = 4,
+): Promise<void> {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const { error } = await run();
+      if (!error) return;
+    } catch {
+      // Network-level throw — same handling as a returned error.
+    }
+    if (attempt < attempts) {
+      await new Promise((resolve) => { setTimeout(resolve, 150 * attempt); });
+    }
   }
 }
 
@@ -343,19 +368,25 @@ export async function sweepGuild(
 export async function countGuildRows(
   handle: LiveClientHandle,
   guildScopedTables: readonly string[],
-): Promise<number> {
+): Promise<number | null> {
   const supabase = handle.supabase;
   const guildId = handle.guildId;
   let total = 0;
   for (const table of guildScopedTables) {
     try {
-      const { count } = await supabase
+      const { count, error } = await supabase
         .from(table)
         .select('*', { count: 'exact', head: true })
         .eq('guild_id', guildId);
+      // A table we could not read proves nothing. Counting it as 0 turned an
+      // unreadable database into "zero leftovers" — a cleanup PASS recorded
+      // precisely when cleanliness could not be observed. Report inconclusive
+      // instead; the caller skips the assertion rather than banking a false
+      // clean.
+      if (error) return null;
       total += count ?? 0;
     } catch {
-      /* best-effort */
+      return null;
     }
   }
   return total;

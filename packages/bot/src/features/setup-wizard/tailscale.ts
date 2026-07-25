@@ -16,6 +16,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createLogger } from '@somnibot/shared';
+import { resolveDashboardPort } from '../../services/dashboard-supervisor.js';
 
 const execFileAsync = promisify(execFile);
 const log = createLogger('TailscaleSetup');
@@ -29,8 +30,11 @@ const log = createLogger('TailscaleSetup');
  * and point the public sign-in and PayPal callback URLs at nothing.
  */
 function dashboardTarget(): string {
-  const port = Number(process.env.DASHBOARD_PORT || process.env.PORT || 3000);
-  return `http://127.0.0.1:${port}`;
+  // Same resolution the supervisor uses, imported rather than re-derived: two
+  // copies of this rule drifted apart once already (PORT is only the dashboard's
+  // when HEALTH_PORT has moved the health server off it), and a funnel pointed
+  // at a port nothing serves looks exactly like success.
+  return `http://127.0.0.1:${resolveDashboardPort()}`;
 }
 
 /** Windows installs Tailscale outside PATH more often than not. */
@@ -134,7 +138,15 @@ export async function enableFunnel(
 ): Promise<TailscaleInfo> {
   const info = await detectTailscale();
   if (info.state === 'not-installed' || info.state === 'logged-out') return info;
-  if (info.state === 'funnel-active' && info.publicUrl) return info;
+
+  // Deliberately NOT short-circuiting on an already-active funnel.
+  //
+  // detectTailscale calls a funnel "active" whenever `funnel status` mentions
+  // any https URL — including one this machine runs for a completely unrelated
+  // application, or for an older dashboard port. Returning that URL meant setup
+  // stored it, pointed Supabase redirects and the PayPal webhook at it, and
+  // reported success while the dashboard was not exposed at all. Re-running the
+  // command is idempotent, so just assert the target we actually want.
 
   const bin = await findBinary();
   if (!bin) return { state: 'not-installed' };
