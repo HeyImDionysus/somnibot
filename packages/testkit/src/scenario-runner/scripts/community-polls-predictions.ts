@@ -25,11 +25,18 @@
  *   - poll rows + options land the shape `createPoll` writes (status default 'active');
  *   - single-choice voting is the bot's own `poll_vote_switch_single` RPC (atomic
  *     replace-prior-vote) — driven directly AND through the real vote button;
- *   - `prediction_bets` UNIQUE(prediction_id,user_id) + CHECK(amount>0) are the exact
- *     gates `placeBet` relies on for dedupe and amount validation;
- *   - the debit / pool increment / winner payout use the EXACT RPCs
- *     `economy_subtract_balance` / `economy_increment_prediction_pool` /
- *     `economy_add_balance`;
+ *   - the money path is the bot's OWN 2026-07-26 ledger flow: the debit settles FIRST
+ *     through `economy_prediction_settle` (wallet delta + economy_transactions
+ *     prediction_bet row in ONE call, replay-fenced on request_id = the
+ *     client-generated bet id), the bet row + pool increment land through
+ *     `prediction_place_bet` (atomic open-check + insert + increment; a refused fence
+ *     is compensated with the keyed refund exactly as the bot does), and settlement
+ *     credits flow through the same settle RPC keyed on the bet id;
+ *   - every wallet movement is ALSO asserted against its economy_transactions ledger
+ *     row (type prediction_bet / prediction_payout / prediction_refund with
+ *     metadata.request_id = the bet id) — the #58 prediction-ledger gap, proven closed;
+ *   - `prediction_bets` UNIQUE(prediction_id,user_id) + CHECK(amount>0) remain the DB
+ *     backstops behind `prediction_place_bet`'s 'duplicate' fence and amount validation;
  *   - settlement's exactly-once guarantee is the bot's own `predictions_resolve_atomic`
  *     (atomic open→resolved flip returning the locked pool; a re-call returns nothing);
  *   - the per-bet `payout` marker is the idempotent settlement marker the catalog names;
@@ -46,6 +53,8 @@
  *      `prediction_min_bet=100`, drives the REAL `/predict bet` for 50, and PROVES the
  *      sub-minimum bet is rejected with no stake moved.
  */
+import { randomUUID } from 'node:crypto';
+
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
 import type { LiveClientHandle } from '../../live-runner.js';
@@ -106,6 +115,30 @@ interface PredictionHandle {
 
 /** A minimal PostgREST error surface (code + message) for insert/RPC results. */
 type PgErr = { code?: string; message?: string } | null;
+
+/** The jsonb result of the bot's `economy_prediction_settle` money RPC. */
+interface SettleResult {
+  status?: string;
+  replayed?: boolean;
+  amount?: number;
+  wallet_balance?: number;
+  existing_type?: string;
+}
+
+/** The jsonb result of the bot's `prediction_place_bet` closed-state fence RPC. */
+interface PlaceResult {
+  status?: string;
+  replayed?: boolean;
+  new_pool?: number;
+}
+
+/** One economy_transactions prediction ledger row (the #58 ledger-gap fix). */
+interface TxnRow {
+  type: string;
+  amount: number;
+  balance_after: number;
+  metadata: { request_id?: string } | null;
+}
 
 // ── Small live-stack helpers ──────────────────────────────────────────────
 
@@ -320,10 +353,60 @@ async function betsFor(
 }
 
 /**
- * Reproduce `placeBet`'s exact ordered primitives: insert the bet FIRST (so the
- * UNIQUE(prediction_id,user_id) constraint is the authoritative gate), then debit via
- * `economy_subtract_balance`, then bump the pool via `economy_increment_prediction_pool`.
- * Surfaces each step's error so a caller can assert the exact-once money movement.
+ * The EXACT ledger settle RPC the bot's money path runs: applies the signed wallet
+ * delta AND writes the economy_transactions row in ONE serializable call, replay-fenced
+ * on (guild, user, metadata request_id).
+ */
+async function settleRpc(
+  handle: LiveClientHandle,
+  userId: string,
+  amount: number,
+  type: 'prediction_bet' | 'prediction_payout' | 'prediction_refund',
+  requestId: string,
+  description: string,
+): Promise<{ result: SettleResult | null; error: PgErr }> {
+  const { data, error } = await handle.supabase.rpc('economy_prediction_settle', {
+    p_guild_id: handle.guildId,
+    p_user_id: userId,
+    p_amount: amount,
+    p_type: type,
+    p_request_id: requestId,
+    p_description: description,
+  });
+  return { result: (data as SettleResult | null) ?? null, error: (error as PgErr) ?? null };
+}
+
+/** A member's guild-scoped prediction ledger rows (economy_transactions). */
+async function predictionTxns(
+  handle: LiveClientHandle,
+  userId: string,
+  type?: 'prediction_bet' | 'prediction_payout' | 'prediction_refund',
+): Promise<TxnRow[]> {
+  let query = handle.supabase
+    .from('economy_transactions')
+    .select('type, amount, balance_after, metadata')
+    .eq('guild_id', handle.guildId)
+    .eq('user_id', userId)
+    .in('type', ['prediction_bet', 'prediction_payout', 'prediction_refund']);
+  if (type) query = query.eq('type', type);
+  const { data } = await query.limit(1000);
+  return (data as TxnRow[] | null) ?? [];
+}
+
+/** metadata->>request_id of a ledger row (undefined-safe for observation strings). */
+function txnRequestId(txn: TxnRow | undefined): string | undefined {
+  return txn?.metadata?.request_id;
+}
+
+/**
+ * Reproduce `placeBet`'s exact ordered money primitives (the 2026-07-26 debit-first
+ * flow): (1) settle the DEBIT through `economy_prediction_settle` (type prediction_bet,
+ * request_id = the client-generated bet id — wallet delta + economy_transactions ledger
+ * row land atomically), then (2) land the bet row + pool increment through
+ * `prediction_place_bet` (atomic open-check + insert + increment under the same row
+ * lock resolve takes). A refused fence ('duplicate' / 'closed' / 'not_found') is
+ * compensated with the keyed refund exactly as the bot does. Surfaces each step's
+ * outcome so a caller can assert the exact-once money movement AND its ledger rows.
  */
 async function placeBet(
   handle: LiveClientHandle,
@@ -331,36 +414,83 @@ async function placeBet(
   optionId: string,
   userId: string,
   amount: number,
-): Promise<{ betId: string | null; insertErr: PgErr; debitErr: PgErr; newPool: number | null }> {
-  const { data: bet, error: insertErr } = await handle.supabase
-    .from('prediction_bets')
-    .insert({
-      prediction_id: predictionId,
-      option_id: optionId,
-      guild_id: handle.guildId,
-      user_id: userId,
-      amount,
-    })
-    .select('id')
-    .single();
-  const betId = (bet as { id: string } | null)?.id ?? null;
-  if (insertErr || !betId) {
-    return { betId: null, insertErr: (insertErr as PgErr) ?? null, debitErr: null, newPool: null };
+): Promise<{
+  betId: string;
+  status: 'placed' | 'insufficient_funds' | 'debit-failed' | 'duplicate' | 'closed' | 'place-failed';
+  debitErr: PgErr;
+  placeErr: PgErr;
+  refunded: boolean;
+  newPool: number | null;
+}> {
+  const betId = randomUUID();
+  const { result: debit, error: debitErr } = await settleRpc(
+    handle,
+    userId,
+    -amount,
+    'prediction_bet',
+    betId,
+    `Prediction bet (${predictionId})`,
+  );
+  if (debitErr) {
+    return { betId, status: 'debit-failed', debitErr, placeErr: null, refunded: false, newPool: null };
   }
-  const { error: debitErr } = await handle.supabase.rpc('economy_subtract_balance', {
+  if (debit?.status === 'insufficient_funds') {
+    return { betId, status: 'insufficient_funds', debitErr: null, placeErr: null, refunded: false, newPool: null };
+  }
+  if (debit?.status !== 'settled') {
+    return { betId, status: 'debit-failed', debitErr: null, placeErr: null, refunded: false, newPool: null };
+  }
+
+  const { data: placeData, error: placeErr } = await handle.supabase.rpc('prediction_place_bet', {
+    p_bet_id: betId,
+    p_prediction_id: predictionId,
+    p_option_id: optionId,
     p_guild_id: handle.guildId,
     p_user_id: userId,
     p_amount: amount,
   });
-  if (debitErr) {
+  const placed = (placeData as PlaceResult | null) ?? null;
+
+  // Keyed compensation for the settled debit (same request id — replay-safe and
+  // mutually exclusive with a payout for this bet), mirroring the bot's refundBetDebit.
+  const refundDebit = async (why: string): Promise<boolean> => {
+    const { result } = await settleRpc(
+      handle,
+      userId,
+      amount,
+      'prediction_refund',
+      betId,
+      `Prediction bet refund — ${why} (${predictionId})`,
+    );
+    return result?.status === 'settled';
+  };
+
+  if (placeErr) {
+    const refunded = await refundDebit('bet insert unconfirmed');
     await handle.supabase.from('prediction_bets').delete().eq('id', betId);
-    return { betId: null, insertErr: null, debitErr: (debitErr as PgErr) ?? null, newPool: null };
+    return { betId, status: 'place-failed', debitErr: null, placeErr: (placeErr as PgErr) ?? null, refunded, newPool: null };
   }
-  const { data: pool } = await handle.supabase.rpc('economy_increment_prediction_pool', {
-    p_prediction_id: predictionId,
-    p_amount: amount,
-  });
-  return { betId, insertErr: null, debitErr: null, newPool: typeof pool === 'number' ? pool : null };
+  if (placed?.status === 'duplicate') {
+    const refunded = await refundDebit('duplicate bet');
+    return { betId, status: 'duplicate', debitErr: null, placeErr: null, refunded, newPool: null };
+  }
+  if (placed?.status === 'closed' || placed?.status === 'not_found') {
+    const refunded = await refundDebit('prediction closed before bet landed');
+    return { betId, status: 'closed', debitErr: null, placeErr: null, refunded, newPool: null };
+  }
+  if (placed?.status !== 'inserted') {
+    const refunded = await refundDebit('unexpected place_bet status');
+    await handle.supabase.from('prediction_bets').delete().eq('id', betId);
+    return { betId, status: 'place-failed', debitErr: null, placeErr: null, refunded, newPool: null };
+  }
+  return {
+    betId,
+    status: 'placed',
+    debitErr: null,
+    placeErr: null,
+    refunded: false,
+    newPool: typeof placed.new_pool === 'number' ? placed.new_pool : null,
+  };
 }
 
 /** The bot's own atomic, idempotent settle flip. Returns the locked pool, or null when it settled nothing. */
@@ -379,23 +509,37 @@ async function resolveAtomic(
 }
 
 /**
- * Pay one winning bet its share via the EXACT `economy_add_balance` RPC, then stamp the
- * per-bet idempotent `payout` marker — the same two steps `resolvePrediction` performs.
- * Skips a bet whose marker is already set (the bot's `if (bet.payout != null) continue`).
+ * Settle ONE bet's credit via the EXACT `economy_prediction_settle` RPC the bot's
+ * settlement loop (`settleResolvedBets`) runs — request_id = the bet id, the credit
+ * fence — then stamp the per-bet `payout` marker only on a FRESH settle, exactly as the
+ * bot does: a marker-set bet is skipped up front, a `replayed` settle moved no money
+ * now (and rewrites no marker), and a `conflicting_settlement` is a clean skip.
  */
-async function payWinner(handle: LiveClientHandle, bet: BetRow, share: number): Promise<PgErr> {
-  if (bet.payout !== null) return null; // already paid — the idempotent skip
-  const { error } = await handle.supabase.rpc('economy_add_balance', {
-    p_guild_id: handle.guildId,
-    p_user_id: bet.user_id,
-    p_amount: share,
-  });
-  if (error) return (error as PgErr) ?? null;
-  await handle.supabase.from('prediction_bets').update({ payout: share }).eq('id', bet.id);
-  return null;
+async function settleOneBet(
+  handle: LiveClientHandle,
+  bet: BetRow,
+  creditAmount: number,
+  type: 'prediction_payout' | 'prediction_refund',
+  predictionId: string,
+): Promise<{ fresh: boolean; result: SettleResult | null; error: PgErr }> {
+  if (bet.payout !== null) return { fresh: false, result: null, error: null }; // marker skip
+  const { result, error } = await settleRpc(
+    handle,
+    bet.user_id,
+    creditAmount,
+    type,
+    bet.id,
+    type === 'prediction_payout' ? `Prediction payout (${predictionId})` : `Prediction refund (${predictionId})`,
+  );
+  if (error || result?.status !== 'settled' || result.replayed === true) {
+    return { fresh: false, result, error };
+  }
+  await handle.supabase.from('prediction_bets').update({ payout: creditAmount }).eq('id', bet.id);
+  return { fresh: true, result, error: null };
 }
 
-/** Settle a resolved prediction proportionally through the exact payout RPC (mirrors resolvePrediction's loop). */
+/** Settle a resolved prediction proportionally through the exact keyed settle RPC
+ * (mirrors settleResolvedBets' winner loop: floor share, marker skip, keyed credit). */
 async function settleProportional(
   handle: LiveClientHandle,
   predictionId: string,
@@ -406,7 +550,7 @@ async function settleProportional(
   const winnerPool = winners.reduce((s, b) => s + b.amount, 0);
   for (const bet of winners) {
     const share = winnerPool > 0 ? Math.floor((finalPool * bet.amount) / winnerPool) : 0;
-    await payWinner(handle, bet, share);
+    await settleOneBet(handle, bet, share, 'prediction_payout', predictionId);
   }
 }
 
@@ -543,18 +687,20 @@ async function proveRlsIsolation(ctx: ScenarioContext, handle: LiveClientHandle,
 }
 
 /**
- * PollsManager writes NO audit_logs row for any poll/prediction action, and the money
- * RPCs write only economy_wallets (no economy_transactions ledger). The append-only
- * operational evidence is `prediction_bets` (actor + guild + amount + idempotent payout
- * marker) — asserted directly where bets exist; the dedicated correlation-id audit_logs
- * lane is gated (a genuine architectural gap, NOT a harness limitation).
+ * PollsManager writes NO audit_logs row for any poll/prediction action. The MONEY path
+ * now DOES write the economy_transactions prediction ledger (economy_prediction_settle
+ * lands prediction_bet / prediction_payout / prediction_refund rows keyed on the bet
+ * id), and those rows are asserted live in the money lanes alongside `prediction_bets`
+ * (actor + guild + amount + idempotent payout marker). Only the dedicated
+ * correlation-id audit_logs lane remains gated (a genuine architectural gap, NOT a
+ * harness limitation).
  */
 function gateAuditLog(ctx: ScenarioContext): void {
   ctx.gate(
     'audit',
     'discord-readback',
     'Every polls/predictions state change lands one append-only audit_logs row with actor, guild, and correlation id; anonymization (never deletion) is the only mutation.',
-    'PollsManager writes no audit_logs row (no AuditService call, no DB trigger) and the money RPCs touch only economy_wallets (no economy_transactions ledger); the prediction_bets operational rows are the DB-observable evidence here',
+    'PollsManager still writes no audit_logs row (no AuditService call, no DB trigger); the money path now lands economy_transactions prediction_bet/payout/refund ledger rows (asserted live in the money lanes) and prediction_bets remains the per-bet operational evidence, but the dedicated correlation-id audit_logs lane is unbuilt',
   );
 }
 
@@ -891,33 +1037,69 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     impact: 'Prediction creation did not persist an open prediction with its options.',
   });
 
-  // 6) Bets — three members stake through the EXACT RPCs; balances debited, pool bumped.
+  // 6) Bets — three members stake through the EXACT money primitives the bot runs
+  //    (economy_prediction_settle debit-first, then prediction_place_bet's fence).
   await seedWallet(handle, userB, 1000);
   await seedWallet(handle, userC, 1000);
   await seedWallet(handle, userD, 1000);
   const yes = pred.optionIds[0]!;
   const no = pred.optionIds[1]!;
-  await placeBet(handle, pred.predictionId, yes, userB, 100);
-  await placeBet(handle, pred.predictionId, yes, userC, 200);
-  await placeBet(handle, pred.predictionId, no, userD, 300);
+  const betB = await placeBet(handle, pred.predictionId, yes, userB, 100);
+  const betC = await placeBet(handle, pred.predictionId, yes, userC, 200);
+  const betD = await placeBet(handle, pred.predictionId, no, userD, 300);
   const wB = await readWallet(handle, userB);
   const wC = await readWallet(handle, userC);
   const wD = await readWallet(handle, userD);
   const poolRow = await readPrediction(handle, pred.predictionId);
   ctx.expect(
-    wB?.wallet === 900 && wC?.wallet === 800 && wD?.wallet === 700 && poolRow?.total_pool === 600,
+    betB.status === 'placed' &&
+      betC.status === 'placed' &&
+      betD.status === 'placed' &&
+      wB?.wallet === 900 &&
+      wC?.wallet === 800 &&
+      wD?.wallet === 700 &&
+      poolRow?.total_pool === 600,
     {
       assertionClass: 'Discord',
       channel: 'db-observable',
-      promise: 'Each accepted bet debits its stake once (economy_subtract_balance) and escrows it into the pool (economy_increment_prediction_pool).',
+      promise: 'Each accepted bet settles its debit exactly once (economy_prediction_settle, debit-first) and escrows the stake into the pool through prediction_place_bet’s atomic open-check + insert + pool increment.',
       observation:
+        `bet statuses B/C/D=${betB.status}/${betC.status}/${betD.status} (all "placed"); ` +
         `wallets after bets: B=${wB?.wallet} (900), C=${wC?.wallet} (800), D=${wD?.wallet} (700); ` +
         `escrowed pool=${poolRow?.total_pool} (expected 100+200+300=600).`,
       impact: 'A bet did not debit its stake exactly once or did not escrow it into the pool.',
     },
   );
 
-  // 7) Settlement — proportional exactly-once via the bot's own atomic resolve + payout RPC.
+  // 6b) The LEDGER — every debit landed ONE economy_transactions prediction_bet row,
+  //     amount = -stake, keyed on its bet id (the #58 prediction-ledger gap, closed).
+  const bDebits = await predictionTxns(handle, userB, 'prediction_bet');
+  const cDebits = await predictionTxns(handle, userC, 'prediction_bet');
+  const dDebits = await predictionTxns(handle, userD, 'prediction_bet');
+  ctx.expect(
+    bDebits.length === 1 &&
+      bDebits[0]?.amount === -100 &&
+      txnRequestId(bDebits[0]) === betB.betId &&
+      cDebits.length === 1 &&
+      cDebits[0]?.amount === -200 &&
+      txnRequestId(cDebits[0]) === betC.betId &&
+      dDebits.length === 1 &&
+      dDebits[0]?.amount === -300 &&
+      txnRequestId(dDebits[0]) === betD.betId,
+    {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: 'Every bet debit writes exactly one economy_transactions ledger row (type prediction_bet, amount = -stake, metadata.request_id = the bet id) — prediction money is no longer invisible to /mydata exports and the analytics ledger.',
+      observation:
+        `prediction_bet ledger rows: B=${bDebits.length} (amount ${bDebits[0]?.amount}, keyed=${txnRequestId(bDebits[0]) === betB.betId}), ` +
+        `C=${cDebits.length} (amount ${cDebits[0]?.amount}, keyed=${txnRequestId(cDebits[0]) === betC.betId}), ` +
+        `D=${dDebits.length} (amount ${dDebits[0]?.amount}, keyed=${txnRequestId(dDebits[0]) === betD.betId}) — expected exactly one each, request_id = bet id.`,
+      impact: 'A bet debit moved wallet money without its economy_transactions ledger row (or with a mis-keyed one) — the prediction ledger under-reports stakes.',
+    },
+  );
+
+  // 7) Settlement — proportional exactly-once via the bot's own atomic resolve + the
+  //    keyed economy_prediction_settle credits.
   const resolved = await resolveAtomic(handle, pred.predictionId, yes);
   await settleProportional(handle, pred.predictionId, yes, resolved.pool ?? 0);
   const wBs = await readWallet(handle, userB);
@@ -933,7 +1115,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     {
       assertionClass: 'Discord',
       channel: 'db-observable',
-      promise: 'Resolve flips the prediction to settled and pays each winner its proportional pot share exactly once (losers keep nothing).',
+      promise: 'Resolve flips the prediction to settled and pays each winner its proportional pot share exactly once through economy_prediction_settle (losers keep nothing).',
       observation:
         `status="${predResolved?.status}" (resolved), locked pool=${resolved.pool} (600); ` +
         `winner wallets B=${wBs?.wallet} (900+200 share=1100), C=${wCs?.wallet} (800+400 share=1200); loser D=${wDs?.wallet} (unchanged 700).`,
@@ -941,7 +1123,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  // 8) Audit — prediction_bets is the append-only ledger; winner markers set, loser null, pot conserved.
+  // 8) Audit — prediction_bets markers set for winners, null for the loser, pot conserved.
   const finalBets = await betsFor(handle, pred.predictionId);
   const bPay = finalBets.find((b) => b.user_id === userB)?.payout ?? null;
   const cPay = finalBets.find((b) => b.user_id === userC)?.payout ?? null;
@@ -955,15 +1137,49 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     impact: 'A bet ledger row was missing, mis-marked, or the payouts did not reconcile to the pot.',
   });
 
-  // 9) Replay-safety — the atomic settle is idempotent: a re-delivered resolve settles nothing.
+  // 8b) The settlement LEDGER — each winner's credit landed ONE prediction_payout row
+  //     keyed on its bet id; the loser has NO credit row; ledger payouts = the pot.
+  const bPayTx = await predictionTxns(handle, userB, 'prediction_payout');
+  const cPayTx = await predictionTxns(handle, userC, 'prediction_payout');
+  const dCreditTx = (await predictionTxns(handle, userD)).filter((t) => t.type !== 'prediction_bet');
+  const ledgerPaid = (bPayTx[0]?.amount ?? 0) + (cPayTx[0]?.amount ?? 0);
+  ctx.expect(
+    bPayTx.length === 1 &&
+      bPayTx[0]?.amount === 200 &&
+      txnRequestId(bPayTx[0]) === betB.betId &&
+      cPayTx.length === 1 &&
+      cPayTx[0]?.amount === 400 &&
+      txnRequestId(cPayTx[0]) === betC.betId &&
+      dCreditTx.length === 0 &&
+      ledgerPaid === 600,
+    {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: 'Each winner’s payout writes exactly one economy_transactions ledger row (type prediction_payout, metadata.request_id = the bet id) whose amounts reconcile to the pot; the loser gets no credit row.',
+      observation:
+        `prediction_payout ledger rows: B=${bPayTx.length} (amount ${bPayTx[0]?.amount}, keyed=${txnRequestId(bPayTx[0]) === betB.betId}), ` +
+        `C=${cPayTx.length} (amount ${cPayTx[0]?.amount}, keyed=${txnRequestId(cPayTx[0]) === betC.betId}); loser credit rows=${dCreditTx.length} (0); ` +
+        `ledger paid total=${ledgerPaid} (expected =pool 600).`,
+      impact: 'A settlement credit moved wallet money without its keyed prediction_payout ledger row (or the ledger did not reconcile to the pot).',
+    },
+  );
+
+  // 9) Replay-safety — a re-delivered resolve + re-driven settlement loop move nothing:
+  //    predictions_resolve_atomic returns no pool, marker-set bets are skipped, and the
+  //    LEDGER shows exactly one payout row of record per winner.
   const reResolve = await resolveAtomic(handle, pred.predictionId, yes);
+  const storedPool = (await readPrediction(handle, pred.predictionId))?.total_pool ?? 0;
+  await settleProportional(handle, pred.predictionId, yes, storedPool); // the bot's re-drive path
   const wBReplay = await readWallet(handle, userB);
-  ctx.expect(reResolve.pool === null && wBReplay?.wallet === 1100, {
+  const bPayTxReplay = await predictionTxns(handle, userB, 'prediction_payout');
+  ctx.expect(reResolve.pool === null && wBReplay?.wallet === 1100 && bPayTxReplay.length === 1, {
     assertionClass: 'replay-safety',
     channel: 'db-observable',
-    promise: 'Re-delivering the resolve never double-pays: predictions_resolve_atomic settles exactly once (a second call returns no pool and moves no balance).',
-    observation: `second predictions_resolve_atomic returned pool=${reResolve.pool} (expected none); winner wallet after replay=${wBReplay?.wallet} (unchanged 1100).`,
-    impact: 'A re-delivered resolve re-settled the prediction — winners would be double-paid.',
+    promise: 'Re-delivering the resolve never double-pays: predictions_resolve_atomic settles exactly once, and re-driving the settlement loop leaves exactly one prediction_payout ledger row per winner (the economy_prediction_settle replay fence).',
+    observation:
+      `second predictions_resolve_atomic returned pool=${reResolve.pool} (expected none); winner wallet after replayed settle loop=${wBReplay?.wallet} (unchanged 1100); ` +
+      `prediction_payout ledger rows for the winner=${bPayTxReplay.length} (expected exactly 1).`,
+    impact: 'A re-delivered resolve re-settled the prediction — winners would be double-paid (or the ledger recorded a duplicate payout).',
   });
 
   await proveRlsIsolation(ctx, handle, 'prediction_bets');
@@ -1023,28 +1239,47 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   const rejectCap = pred ? await runPredict(ctx, handle, 'bet', bettor, { prediction_id: pred.id, option: 1, amount: 50 }) : null;
   const rejectText = rejectCap ? replyText(rejectCap) : '';
   const rejectRows = pred ? await betsFor(handle, pred.id, bettor) : [];
+  const rejectTx = await predictionTxns(handle, bettor);
   const walletAfterReject = await readWallet(handle, bettor);
-  ctx.expect(/minimum bet/i.test(rejectText) && rejectRows.length === 0 && walletAfterReject?.wallet === 1000, {
-    assertionClass: 'Discord',
-    channel: 'captured-reply',
-    promise: `SET-A: with the minimum bet raised to ${raisedMin}, a 50-coin /predict bet is rejected citing the minimum, and no bet row or debit occurs.`,
-    observation:
-      `/predict bet(50) replied ${JSON.stringify(rejectText)} (expected a "Minimum bet" rejection); ` +
-      `bet rows for the bettor=${rejectRows.length} (expected 0); wallet=${walletAfterReject?.wallet} (untouched 1000).`,
-    impact: 'The configurable minimum-bet floor did not reject a sub-minimum bet — the owner’s raised minimum has no effect.',
-  });
+  ctx.expect(
+    /minimum bet/i.test(rejectText) && rejectRows.length === 0 && rejectTx.length === 0 && walletAfterReject?.wallet === 1000,
+    {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: `SET-A: with the minimum bet raised to ${raisedMin}, a 50-coin /predict bet is rejected citing the minimum, and no bet row, ledger row, or debit occurs.`,
+      observation:
+        `/predict bet(50) replied ${JSON.stringify(rejectText)} (expected a "Minimum bet" rejection); ` +
+        `bet rows for the bettor=${rejectRows.length} (expected 0); prediction ledger rows=${rejectTx.length} (expected 0); wallet=${walletAfterReject?.wallet} (untouched 1000).`,
+      impact: 'The configurable minimum-bet floor did not reject a sub-minimum bet — the owner’s raised minimum has no effect.',
+    },
+  );
 
-  // A bet AT/above the minimum is accepted and lands exactly one append-only ledger row.
+  // A bet AT/above the minimum is accepted through the REAL handler and lands exactly
+  // one prediction_bets row PLUS its keyed economy_transactions prediction_bet ledger
+  // row — the driven proof that the product's debit-first ledger wiring is live.
   const acceptCap = pred ? await runPredict(ctx, handle, 'bet', bettor, { prediction_id: pred.id, option: 1, amount: raisedMin }) : null;
   const acceptEmbed = acceptCap ? replyEmbed(acceptCap) : undefined;
   const acceptRows = pred ? await betsFor(handle, pred.id, bettor) : [];
-  ctx.expect(acceptRows.length === 1 && acceptRows[0]?.amount === raisedMin && typeof acceptEmbed?.title === 'string' && /bet placed/i.test(acceptEmbed.title), {
-    assertionClass: 'audit',
-    channel: 'audit-row',
-    promise: `A bet at the raised minimum (${raisedMin}) is accepted and lands exactly one append-only prediction_bets row with the staked amount.`,
-    observation: `prediction_bets rows for the bettor=${acceptRows.length}, amount=${acceptRows[0]?.amount ?? '(none)'} (expected ${raisedMin}); confirmation embed titled ${JSON.stringify(acceptEmbed?.title)}.`,
-    impact: 'A minimum-satisfying bet did not produce exactly one ledger row / branded confirmation.',
-  });
+  const acceptTx = await predictionTxns(handle, bettor, 'prediction_bet');
+  ctx.expect(
+    acceptRows.length === 1 &&
+      acceptRows[0]?.amount === raisedMin &&
+      acceptTx.length === 1 &&
+      acceptTx[0]?.amount === -raisedMin &&
+      txnRequestId(acceptTx[0]) === acceptRows[0]?.id &&
+      typeof acceptEmbed?.title === 'string' &&
+      /bet placed/i.test(acceptEmbed.title),
+    {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: `A bet at the raised minimum (${raisedMin}) driven through the REAL /predict bet lands exactly one prediction_bets row AND exactly one economy_transactions prediction_bet ledger row (amount = -${raisedMin}, request_id = the bet id).`,
+      observation:
+        `prediction_bets rows for the bettor=${acceptRows.length}, amount=${acceptRows[0]?.amount ?? '(none)'} (expected ${raisedMin}); ` +
+        `prediction_bet ledger rows=${acceptTx.length} (amount ${acceptTx[0]?.amount ?? '(none)'}, keyed to bet id=${txnRequestId(acceptTx[0]) === acceptRows[0]?.id}); ` +
+        `confirmation embed titled ${JSON.stringify(acceptEmbed?.title)}.`,
+      impact: 'A minimum-satisfying bet did not produce exactly one bet row + one keyed ledger row / branded confirmation — the product’s ledger wiring is broken.',
+    },
+  );
 
   await proveRlsIsolation(ctx, handle, 'prediction_bets');
   await proveNoOwnerAlert(ctx, handle);
@@ -1100,22 +1335,47 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
   const userA = ctx.userId('a');
   const userB = ctx.userId('b');
 
-  // A zero-amount bet never persists — prediction_bets CHECK(amount > 0) is the authoritative gate.
+  // A zero-amount bet never persists — every layer of the money path rejects it
+  // independently: economy_prediction_settle's sign fence (a prediction_bet debit must
+  // be negative), prediction_place_bet's amount>0 guard, and the prediction_bets
+  // CHECK(amount>0) backstop for a raw insert. No ledger row, no bet row, no movement.
   const pred = await createPredictionRows(ctx, handle, userA, ['Yes', 'No']);
   await seedWallet(handle, userB, 1000);
-  const zeroBet = await placeBet(handle, pred.predictionId, pred.optionIds[0]!, userB, 0);
+  const zeroDebit = await settleRpc(handle, userB, 0, 'prediction_bet', randomUUID(), 'zero-amount bet probe');
+  const { error: zeroPlaceErr } = await handle.supabase.rpc('prediction_place_bet', {
+    p_bet_id: randomUUID(),
+    p_prediction_id: pred.predictionId,
+    p_option_id: pred.optionIds[0]!,
+    p_guild_id: handle.guildId,
+    p_user_id: userB,
+    p_amount: 0,
+  });
+  const { error: zeroInsertErr } = await handle.supabase.from('prediction_bets').insert({
+    prediction_id: pred.predictionId,
+    option_id: pred.optionIds[0]!,
+    guild_id: handle.guildId,
+    user_id: userB,
+    amount: 0,
+  });
   const betRows = await betsFor(handle, pred.predictionId, userB);
+  const zeroTx = await predictionTxns(handle, userB);
   const wallet = await readWallet(handle, userB);
   ctx.expect(
-    zeroBet.betId === null && zeroBet.insertErr?.code === '23514' && betRows.length === 0 && wallet?.wallet === 1000,
+    zeroDebit.error !== null &&
+      zeroPlaceErr !== null &&
+      (zeroInsertErr as PgErr)?.code === '23514' &&
+      betRows.length === 0 &&
+      zeroTx.length === 0 &&
+      wallet?.wallet === 1000,
     {
       assertionClass: 'Discord',
       channel: 'db-observable',
-      promise: 'A zero-amount bet is rejected atomically: no prediction_bets row is written and no balance moves.',
+      promise: 'A zero-amount bet is rejected at every money layer: the settle RPC’s sign fence, prediction_place_bet’s amount>0 guard, and the prediction_bets CHECK — no bet row, no ledger row, no balance movement.',
       observation:
-        `zero-amount insert error code=${zeroBet.insertErr?.code ?? '(none)'} (expected 23514 check_violation); ` +
-        `bet rows=${betRows.length} (expected 0); wallet=${wallet?.wallet} (expected untouched 1000).`,
-      impact: 'A zero-amount bet persisted or debited the wallet — the amount>0 guard did not hold.',
+        `zero-amount economy_prediction_settle errored=${zeroDebit.error !== null}; prediction_place_bet errored=${zeroPlaceErr !== null}; ` +
+        `raw insert error code=${(zeroInsertErr as PgErr)?.code ?? '(none)'} (expected 23514 check_violation); ` +
+        `bet rows=${betRows.length} (expected 0); ledger rows=${zeroTx.length} (expected 0); wallet=${wallet?.wallet} (expected untouched 1000).`,
+      impact: 'A zero-amount bet persisted, wrote a ledger row, or moved balance — an amount>0 guard did not hold.',
     },
   );
 
@@ -1215,15 +1475,19 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   const resolveText = replyText(resolveCap);
   const predAfterDenied = await readPrediction(handle, pred.predictionId);
   const cBetAfterDenied = await betsFor(handle, pred.predictionId, userC);
+  const cCreditTx = (await predictionTxns(handle, userC)).filter((t) => t.type !== 'prediction_bet');
   ctx.expect(
-    /only the creator/i.test(resolveText) && predAfterDenied?.status === 'open' && cBetAfterDenied[0]?.payout === null,
+    /only the creator/i.test(resolveText) &&
+      predAfterDenied?.status === 'open' &&
+      cBetAfterDenied[0]?.payout === null &&
+      cCreditTx.length === 0,
     {
       assertionClass: 'Discord',
       channel: 'captured-reply',
-      promise: 'A non-creator’s /predict resolve is refused ("Only the creator can resolve…"), the prediction stays open, and no bet is settled.',
+      promise: 'A non-creator’s /predict resolve is refused ("Only the creator can resolve…"), the prediction stays open, and no bet is settled — the bettor’s ledger shows the escrowed debit and NO payout/refund credit.',
       observation:
         `non-creator /predict resolve replied ${JSON.stringify(resolveText)}; prediction status="${predAfterDenied?.status}" (expected "open"); ` +
-        `bettor payout=${cBetAfterDenied[0]?.payout ?? 'null'} (expected unpaid).`,
+        `bettor payout=${cBetAfterDenied[0]?.payout ?? 'null'} (expected unpaid); bettor credit ledger rows=${cCreditTx.length} (expected 0).`,
       impact: 'A non-creator settled a prediction — the creator-only resolve guard failed and bets moved without authority.',
     },
   );
@@ -1300,19 +1564,21 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     const walletAfterOutage = await readWallet(handle, bettor);
     const betsAfterOutage = await betsFor(handle, pred.predictionId, bettor);
     const predAfterOutage = await readPrediction(handle, pred.predictionId);
+    const txAfterOutage = await predictionTxns(handle, bettor);
     ctx.expect(
       walletAfterOutage?.wallet === 1000 &&
         betsAfterOutage.length === 0 &&
+        txAfterOutage.length === 0 &&
         predAfterOutage?.total_pool === 0 &&
         predAfterOutage?.status === 'open',
       {
         assertionClass: 'replay-safety',
         channel: 'db-observable',
-        promise: 'A bet that could not be recorded debits nothing: after restoration the balance shows no debit, no bet row exists, and the pool is untouched (no phantom stakes).',
+        promise: 'A bet that could not be recorded debits nothing: after restoration the balance shows no debit, no bet row exists, the ledger holds zero prediction rows, and the pool is untouched (no phantom stakes).',
         observation:
           `post-restore: bettor wallet=${walletAfterOutage?.wallet} (expected untouched 1000), bet rows=${betsAfterOutage.length} (expected 0), ` +
-          `pool=${predAfterOutage?.total_pool} (expected 0), prediction status="${predAfterOutage?.status}" (expected "open").`,
-        impact: 'The outage window produced phantom or partial money movement (a debit without a bet row, a ghost bet, or a corrupted pool).',
+          `prediction ledger rows=${txAfterOutage.length} (expected 0), pool=${predAfterOutage?.total_pool} (expected 0), prediction status="${predAfterOutage?.status}" (expected "open").`,
+        impact: 'The outage window produced phantom or partial money movement (a debit without a bet row, an orphaned ledger row, a ghost bet, or a corrupted pool).',
       },
     );
 
@@ -1341,17 +1607,25 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
       },
     );
 
-    // (5) Append-only evidence for the post-recovery bet: exactly one
-    //     guild-scoped prediction_bets ledger row with the staked amount.
+    // (5) Append-only evidence for the post-recovery bet: exactly one guild-scoped
+    //     prediction_bets row AND exactly one keyed economy_transactions ledger row.
     const freshBets = await betsFor(handle, pred.predictionId, bettor);
+    const freshTx = await predictionTxns(handle, bettor, 'prediction_bet');
     ctx.expect(
-      freshBets.length === 1 && freshBets[0]?.amount === 100 && freshBets[0]?.guild_id === handle.guildId,
+      freshBets.length === 1 &&
+        freshBets[0]?.amount === 100 &&
+        freshBets[0]?.guild_id === handle.guildId &&
+        freshTx.length === 1 &&
+        freshTx[0]?.amount === -100 &&
+        txnRequestId(freshTx[0]) === freshBets[0]?.id,
       {
         assertionClass: 'audit',
         channel: 'audit-row',
-        promise: 'The post-recovery bet lands exactly one append-only prediction_bets row (actor + guild + amount) — the domain’s durable ledger evidence.',
-        observation: `prediction_bets rows for the bettor=${freshBets.length} (expected 1), amount=${freshBets[0]?.amount ?? '(none)'} under guild "${freshBets[0]?.guild_id ?? '(none)'}".`,
-        impact: 'The post-recovery bet did not land exactly one ledger row — the outage cycle corrupted the append-only bet record.',
+        promise: 'The post-recovery bet lands exactly one append-only prediction_bets row (actor + guild + amount) plus exactly one economy_transactions prediction_bet ledger row keyed on the bet id — the domain’s durable ledger evidence.',
+        observation:
+          `prediction_bets rows for the bettor=${freshBets.length} (expected 1), amount=${freshBets[0]?.amount ?? '(none)'} under guild "${freshBets[0]?.guild_id ?? '(none)'}"; ` +
+          `prediction_bet ledger rows=${freshTx.length} (expected 1), amount=${freshTx[0]?.amount ?? '(none)'}, keyed to bet id=${txnRequestId(freshTx[0]) === freshBets[0]?.id}.`,
+        impact: 'The post-recovery bet did not land exactly one bet row + one keyed ledger row — the outage cycle corrupted the append-only money record.',
       },
     );
 
@@ -1418,12 +1692,13 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
 
   // Pay winner B, mark it; then a "retry" pass (as after a transient fault mid-settlement)
   // re-scans all winning bets: B is skipped (payout marker set), C is credited — the exact
-  // idempotent per-bet convergence the catalog contracts ("bets already marked paid are skipped").
+  // idempotent per-bet convergence the catalog contracts ("bets already marked paid are
+  // skipped"), now running through the keyed economy_prediction_settle credits.
   const betsAfterFirst = (await betsFor(handle, pred.predictionId)).filter((b) => b.option_id === yes);
   const bBet = betsAfterFirst.find((b) => b.user_id === userB)!;
-  await payWinner(handle, bBet, share);
+  await settleOneBet(handle, bBet, share, 'prediction_payout', pred.predictionId);
   const retryWinners = (await betsFor(handle, pred.predictionId)).filter((b) => b.option_id === yes);
-  for (const bet of retryWinners) await payWinner(handle, bet, share); // B skipped (already marked), C paid
+  for (const bet of retryWinners) await settleOneBet(handle, bet, share, 'prediction_payout', pred.predictionId); // B skipped (already marked), C paid
 
   const wB = await readWallet(handle, userB);
   const wC = await readWallet(handle, userC);
@@ -1440,22 +1715,55 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     impact: 'A winner was double-credited on retry, or an unpaid winner was skipped — settlement did not converge to exactly-once.',
   });
 
+  const bPayTx = await predictionTxns(handle, userB, 'prediction_payout');
+  const cPayTx = await predictionTxns(handle, userC, 'prediction_payout');
   const paidTotal = (bPay ?? 0) + (cPay ?? 0);
-  ctx.expect(paidTotal === (resolved.pool ?? 0), {
-    assertionClass: 'audit',
-    channel: 'audit-row',
-    promise: 'Per-bet payout markers reconcile to the pot after retry (totals conserve).',
-    observation: `sum of payout markers=${paidTotal} (expected =pool ${resolved.pool}).`,
-    impact: 'The settled payouts did not reconcile to the pot after the retry pass.',
-  });
+  const ledgerPaidTotal = (bPayTx[0]?.amount ?? 0) + (cPayTx[0]?.amount ?? 0);
+  ctx.expect(
+    paidTotal === (resolved.pool ?? 0) && bPayTx.length === 1 && cPayTx.length === 1 && ledgerPaidTotal === (resolved.pool ?? 0),
+    {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: 'Per-bet payout markers AND the economy_transactions prediction_payout ledger rows reconcile to the pot after retry (exactly one keyed credit row per winner; totals conserve).',
+      observation:
+        `sum of payout markers=${paidTotal} (expected =pool ${resolved.pool}); ` +
+        `prediction_payout ledger rows B=${bPayTx.length}, C=${cPayTx.length} (expected 1 each); ledger sum=${ledgerPaidTotal} (expected =pool ${resolved.pool}).`,
+      impact: 'The settled payouts (markers or ledger rows) did not reconcile to the pot after the retry pass.',
+    },
+  );
 
-  // The actual transient FAULT injection (economy_add_balance failing mid-settlement) and the
-  // owner "settlement needs attention" alert are behind a fault lane + live channel readback.
+  // The marker is only a fast-path cache — the DURABLE fence is the ledger row. Simulate
+  // the crash path where a payout landed but the marker write was lost: re-drive B's
+  // credit DIRECTLY through economy_prediction_settle (bypassing the marker skip) with
+  // the same request key. It must replay — no fresh money, no second ledger row.
+  const markerLostProbe = await settleRpc(handle, userB, share, 'prediction_payout', bBet.id, `Prediction payout (${pred.predictionId})`);
+  const wBProbe = await readWallet(handle, userB);
+  const bPayTxProbe = await predictionTxns(handle, userB, 'prediction_payout');
+  ctx.expect(
+    markerLostProbe.error === null &&
+      markerLostProbe.result?.status === 'settled' &&
+      markerLostProbe.result?.replayed === true &&
+      wBProbe?.wallet === 1000 &&
+      bPayTxProbe.length === 1,
+    {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise: 'Even with the payout marker bypassed (the lost-marker crash path), re-driving a winner’s credit through economy_prediction_settle replays: status settled/replayed=true, no wallet movement, and still exactly one prediction_payout ledger row.',
+      observation:
+        `direct re-settle of B’s payout returned status=${markerLostProbe.result?.status ?? '(err)'} replayed=${markerLostProbe.result?.replayed ?? '(none)'}; ` +
+        `B wallet=${wBProbe?.wallet} (unchanged 1000); prediction_payout ledger rows=${bPayTxProbe.length} (still exactly 1).`,
+      impact: 'The ledger replay fence failed — a re-driven credit whose marker was lost would double-pay the winner.',
+    },
+  );
+
+  // The actual transient FAULT injection (economy_prediction_settle failing mid-settlement)
+  // and the owner "settlement needs attention" alert are behind a fault lane + live
+  // channel readback.
   ctx.gate(
     'Discord',
     'discord-readback',
     'With a transient fault injected after the first winner’s credit, the retry pays only the remaining winners and the settle announcement posts once with correct balances.',
-    'requires a mid-settlement fault-injection lane (fail economy_add_balance for one winner) — the harness deliberately runs against a reachable, fault-free DB',
+    'requires a mid-settlement fault-injection lane (fail economy_prediction_settle for one winner) — the harness deliberately runs against a reachable, fault-free DB',
   );
   ctx.gate(
     'owner-notification',
@@ -1490,11 +1798,15 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   const bBetBefore = (await betsFor(handle, pred.predictionId, userB))[0];
 
   // Re-deliver the resolve: predictions_resolve_atomic returns nothing (already resolved),
-  // and settling again is a no-op because the winning bet's payout marker is already set.
+  // and settling again is a no-op — the marker skips it, and underneath the marker the
+  // economy_prediction_settle replay fence (one keyed prediction_payout row of record)
+  // makes a double-credit impossible.
   const replay = await resolveAtomic(handle, pred.predictionId, yes);
   await settleProportional(handle, pred.predictionId, yes, replay.pool ?? 0);
   const wAfter = await readWallet(handle, userB);
   const bBetAfter = (await betsFor(handle, pred.predictionId, userB))[0];
+  const bBetTxAfter = await predictionTxns(handle, userB, 'prediction_bet');
+  const bPayTxAfter = await predictionTxns(handle, userB, 'prediction_payout');
 
   ctx.expect(
     first.pool === 200 &&
@@ -1502,15 +1814,41 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
       wBefore?.wallet === 1100 &&
       wAfter?.wallet === 1100 &&
       bBetBefore?.payout === 200 &&
-      bBetAfter?.payout === 200,
+      bBetAfter?.payout === 200 &&
+      bBetTxAfter.length === 1 &&
+      bPayTxAfter.length === 1 &&
+      bPayTxAfter[0]?.amount === 200,
     {
       assertionClass: 'replay-safety',
       channel: 'db-observable',
-      promise: 'Replays never double-pay: re-delivering the resolve leaves every balance and payout marker byte-identical (persisted per-bet marker + atomic settle = one effect per logical action).',
+      promise: 'Replays never double-pay: re-delivering the resolve leaves every balance, payout marker, AND the economy_transactions ledger byte-identical — exactly one prediction_bet and one prediction_payout row of record for the winner.',
       observation:
         `first resolve pool=${first.pool} (200); replayed resolve pool=${replay.pool} (none — already resolved); ` +
-        `winner wallet ${wBefore?.wallet}→${wAfter?.wallet} (unchanged 1100); payout marker ${bBetBefore?.payout}→${bBetAfter?.payout} (unchanged 200).`,
+        `winner wallet ${wBefore?.wallet}→${wAfter?.wallet} (unchanged 1100); payout marker ${bBetBefore?.payout}→${bBetAfter?.payout} (unchanged 200); ` +
+        `ledger rows: prediction_bet=${bBetTxAfter.length} (1), prediction_payout=${bPayTxAfter.length} (1, amount ${bPayTxAfter[0]?.amount}).`,
       impact: 'A re-delivered resolve re-settled — winners would be double-paid (an idempotency regression on the money path).',
+    },
+  );
+
+  // The credit fence is ONE keyspace for payout + refund: a stale refund attempt for an
+  // already-paid bet (the refund-vs-payout race, e.g. a late placeBet compensation) is
+  // refused as 'conflicting_settlement' — never a double credit, never a raw 23505.
+  const lateRefund = await settleRpc(handle, userB, 100, 'prediction_refund', bBetAfter?.id ?? '', 'late refund probe (conflicting settlement)');
+  const wConflict = await readWallet(handle, userB);
+  const bRefundTx = await predictionTxns(handle, userB, 'prediction_refund');
+  ctx.expect(
+    lateRefund.error === null &&
+      lateRefund.result?.status === 'conflicting_settlement' &&
+      wConflict?.wallet === 1100 &&
+      bRefundTx.length === 0,
+    {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise: 'A bet is settled EITHER as a payout OR as a refund, never both: a late refund keyed on an already-paid bet returns conflicting_settlement and moves no money (the shared credit keyspace fence).',
+      observation:
+        `late prediction_refund on the paid bet returned status=${lateRefund.result?.status ?? '(err)'} (expected conflicting_settlement); ` +
+        `winner wallet=${wConflict?.wallet} (unchanged 1100); prediction_refund ledger rows=${bRefundTx.length} (expected 0).`,
+      impact: 'A paid bet accepted a second settlement as a refund — the payout/refund exclusion fence failed and the member was double-credited.',
     },
   );
 
@@ -1570,19 +1908,34 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  // Post-restart settlement pays the winner correctly via the same atomic resolve + payout RPCs.
+  // Post-restart settlement pays the winner correctly via the same atomic resolve + the
+  // keyed settle credits; the pre-restart debit ledger rows and the post-restart payout
+  // row form one continuous per-bet ledger across the reboot.
   const resolved = await resolveAtomic(second, pred.predictionId, yes);
   await settleProportional(second, pred.predictionId, yes, resolved.pool ?? 0);
   const wB = await readWallet(second, userB);
   const wC = await readWallet(second, userC);
   const predResolved = await readPrediction(second, pred.predictionId);
-  ctx.expect(predResolved?.status === 'resolved' && wB?.wallet === 1100 && wC?.wallet === 900, {
-    assertionClass: 'audit',
-    channel: 'audit-row',
-    promise: 'Post-restart resolve settles the pre-restart stakes exactly: the winner is paid its proportional share once, the loser keeps nothing.',
-    observation: `post-restart resolve: status="${predResolved?.status}" (resolved); winner B wallet=${wB?.wallet} (900+200=1100), loser C wallet=${wC?.wallet} (900).`,
-    impact: 'Post-restart settlement did not pay the pre-restart stakes correctly.',
-  });
+  const bBetTx = await predictionTxns(second, userB, 'prediction_bet');
+  const bPayTx = await predictionTxns(second, userB, 'prediction_payout');
+  ctx.expect(
+    predResolved?.status === 'resolved' &&
+      wB?.wallet === 1100 &&
+      wC?.wallet === 900 &&
+      bBetTx.length === 1 &&
+      bBetTx[0]?.amount === -100 &&
+      bPayTx.length === 1 &&
+      bPayTx[0]?.amount === 200,
+    {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: 'Post-restart resolve settles the pre-restart stakes exactly: the winner is paid its proportional share once, the loser keeps nothing, and the winner’s ledger spans the reboot (one pre-restart prediction_bet row + one post-restart prediction_payout row).',
+      observation:
+        `post-restart resolve: status="${predResolved?.status}" (resolved); winner B wallet=${wB?.wallet} (900+200=1100), loser C wallet=${wC?.wallet} (900); ` +
+        `winner ledger: prediction_bet rows=${bBetTx.length} (amount ${bBetTx[0]?.amount}), prediction_payout rows=${bPayTx.length} (amount ${bPayTx[0]?.amount}).`,
+      impact: 'Post-restart settlement did not pay the pre-restart stakes correctly (or the per-bet ledger lost rows across the reboot).',
+    },
+  );
 
   await proveRlsIsolation(ctx, second, 'prediction_bets');
   await proveNoOwnerAlert(ctx, second);
@@ -1604,23 +1957,43 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
   const yes = pred.optionIds[0]!;
   const no = pred.optionIds[1]!;
 
-  // (a) Double-clicked bet: two simultaneous bets from the SAME member race the
-  //     UNIQUE(prediction_id,user_id) constraint — exactly one row wins, exactly one debit.
+  // (a) Double-clicked bet: two simultaneous debit-first bets from the SAME member.
+  //     Both debits settle (distinct request ids), then prediction_place_bet's row lock
+  //     serializes the race: one inserts, the other is fenced 'duplicate' and its debit
+  //     handed back through the keyed refund — net exactly one stake, one bet row.
   const [r1, r2] = await Promise.all([
     placeBet(handle, pred.predictionId, yes, userB, 100),
     placeBet(handle, pred.predictionId, yes, userB, 100),
   ]);
-  const wins = [r1, r2].filter((r) => r.betId !== null).length;
-  const rejects = [r1, r2].filter((r) => r.insertErr?.code === '23505').length;
+  const raceWins = [r1, r2].filter((r) => r.status === 'placed');
+  const raceDupes = [r1, r2].filter((r) => r.status === 'duplicate');
   const bBets = await betsFor(handle, pred.predictionId, userB);
   const wB = await readWallet(handle, userB);
-  ctx.expect(wins === 1 && rejects === 1 && bBets.length === 1 && wB?.wallet === 900, {
-    assertionClass: 'Discord',
-    channel: 'db-observable',
-    promise: 'A rapid double-click on bet yields exactly one bet row and one debit (the UNIQUE(prediction_id,user_id) index serializes the race).',
-    observation: `concurrent bets: winners=${wins}, 23505-rejections=${rejects}; bet rows for the member=${bBets.length} (1); wallet=${wB?.wallet} (debited once → 900).`,
-    impact: 'A double-clicked bet created duplicate bet rows or double-debited the member.',
-  });
+  const bDebitTx = await predictionTxns(handle, userB, 'prediction_bet');
+  const bRefundTx = await predictionTxns(handle, userB, 'prediction_refund');
+  const netStake = [...bDebitTx, ...bRefundTx].reduce((s, t) => s + t.amount, 0);
+  ctx.expect(
+    raceWins.length === 1 &&
+      raceDupes.length === 1 &&
+      raceDupes[0]?.refunded === true &&
+      bBets.length === 1 &&
+      bBets[0]?.id === raceWins[0]?.betId &&
+      wB?.wallet === 900 &&
+      bDebitTx.length === 2 &&
+      bRefundTx.length === 1 &&
+      txnRequestId(bRefundTx[0]) === raceDupes[0]?.betId &&
+      netStake === -100,
+    {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'A rapid double-click on bet nets exactly one bet row and one stake: the losing attempt is fenced as duplicate by prediction_place_bet and its debit refunded through its own request key (ledger: two prediction_bet debits + one keyed prediction_refund, net -100).',
+      observation:
+        `concurrent bets: placed=${raceWins.length}, duplicate-fenced=${raceDupes.length} (refunded=${raceDupes[0]?.refunded ?? false}); ` +
+        `bet rows for the member=${bBets.length} (1, id = the placed attempt's bet id: ${bBets[0]?.id === raceWins[0]?.betId}); wallet=${wB?.wallet} (net one debit → 900); ` +
+        `ledger: prediction_bet rows=${bDebitTx.length} (2 attempts), prediction_refund rows=${bRefundTx.length} (1, keyed to the losing attempt: ${txnRequestId(bRefundTx[0]) === raceDupes[0]?.betId}), net=${netStake} (expected -100).`,
+      impact: 'A double-clicked bet double-charged the member (an unrefunded losing debit), duplicated bet rows, or mis-keyed the refund.',
+    },
+  );
 
   // (b) Two simultaneous resolves settle exactly once: predictions_resolve_atomic’s
   //     FOR UPDATE lock lets exactly one call flip open→resolved and return the pool.
@@ -1643,13 +2016,23 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
   });
 
   const finalBets = await betsFor(handle, pred.predictionId, userB);
-  ctx.expect(finalBets.length === 1 && finalBets[0]?.payout === 200, {
-    assertionClass: 'audit',
-    channel: 'audit-row',
-    promise: 'The raced bet + settle leave exactly one prediction_bets row with a single payout marker.',
-    observation: `bet rows for the winner=${finalBets.length} (1), payout marker=${finalBets[0]?.payout ?? '(none)'} (200 once).`,
-    impact: 'A raced bet/settle wrote a duplicate ledger row or double payout marker.',
-  });
+  const bPayTxRace = await predictionTxns(handle, userB, 'prediction_payout');
+  ctx.expect(
+    finalBets.length === 1 &&
+      finalBets[0]?.payout === 200 &&
+      bPayTxRace.length === 1 &&
+      bPayTxRace[0]?.amount === 200 &&
+      txnRequestId(bPayTxRace[0]) === finalBets[0]?.id,
+    {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: 'The raced bet + settle leave exactly one prediction_bets row with a single payout marker and exactly one keyed prediction_payout economy_transactions row.',
+      observation:
+        `bet rows for the winner=${finalBets.length} (1), payout marker=${finalBets[0]?.payout ?? '(none)'} (200 once); ` +
+        `prediction_payout ledger rows=${bPayTxRace.length} (1, amount ${bPayTxRace[0]?.amount}, keyed to the bet id: ${txnRequestId(bPayTxRace[0]) === finalBets[0]?.id}).`,
+      impact: 'A raced bet/settle wrote a duplicate ledger row or double payout marker.',
+    },
+  );
 
   await proveRlsIsolation(ctx, handle, 'prediction_bets');
   await proveNoOwnerAlert(ctx, handle);
@@ -1716,20 +2099,27 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
     .maybeSingle();
   const bRow = bScoped as { guild_id: string; amount: number; payout: number | null } | null;
   const aRow = aScoped as { guild_id: string; amount: number; payout: number | null } | null;
+  const bLedgerB = await predictionTxns(handleB, userB); // guild-B-scoped ledger
+  const aPayLedger = await predictionTxns(handleA, userB, 'prediction_payout'); // guild-A-scoped ledger
   ctx.expect(
     bRow?.guild_id === guildB &&
       bRow?.amount === 100 &&
       bRow?.payout === null &&
       aRow?.guild_id === guildA &&
-      aRow?.payout === 100,
+      aRow?.payout === 100 &&
+      bLedgerB.length === 1 &&
+      bLedgerB[0]?.type === 'prediction_bet' &&
+      aPayLedger.length === 1 &&
+      aPayLedger[0]?.amount === 100,
     {
       assertionClass: 'database-RLS',
       channel: 'db-rls',
-      promise: 'Each guild scope reads its OWN prediction_bets row and never the other’s: guild B → its unpaid 100-coin bet, guild A → its settled bet (payout marker set).',
+      promise: 'Each guild scope reads its OWN prediction_bets row and ledger and never the other’s: guild B → its unpaid 100-coin bet with only its debit ledger row, guild A → its settled bet (payout marker + one guild-A prediction_payout ledger row).',
       observation:
         `guild-B-scoped bet under "${bRow?.guild_id}" amount=${bRow?.amount} payout=${bRow?.payout} (unpaid); ` +
-        `guild-A-scoped bet under "${aRow?.guild_id}" payout=${aRow?.payout} (settled) — distinct rows under distinct guild_ids.`,
-      impact: 'A guild-scoped read returned the other guild’s bet row — cross-guild leakage.',
+        `guild-A-scoped bet under "${aRow?.guild_id}" payout=${aRow?.payout} (settled); ` +
+        `guild-B ledger rows=${bLedgerB.length} (1, type ${bLedgerB[0]?.type ?? '(none)'} — no credit leaked in); guild-A payout ledger rows=${aPayLedger.length} (1, amount ${aPayLedger[0]?.amount}).`,
+      impact: 'A guild-scoped read returned the other guild’s bet or ledger row — cross-guild leakage.',
     },
   );
   await proveRlsIsolation(ctx, handleB, 'prediction_bets');
@@ -1757,13 +2147,17 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
   const betsBefore = await serviceRowCount(handle, 'prediction_bets');
   const votesBefore = (await pollVotesFor(handle, poll.pollId)).length;
   const walletsBefore = await walletCount(handle, userB);
-  ctx.expect(pollsBefore >= 1 && predsBefore >= 1 && betsBefore >= 1 && votesBefore >= 1 && walletsBefore >= 1, {
-    assertionClass: 'Discord',
-    channel: 'db-observable',
-    promise: 'The scenario created run-prefixed poll, vote, prediction, bet, and wallet rows (pre-cleanup baseline).',
-    observation: `pre-cleanup: polls=${pollsBefore}, predictions=${predsBefore}, bets=${betsBefore}, votes=${votesBefore}, wallets=${walletsBefore}.`,
-    impact: 'The cleanup scenario could not establish a baseline of run-prefixed rows.',
-  });
+  const txnsBefore = await serviceRowCount(handle, 'economy_transactions');
+  ctx.expect(
+    pollsBefore >= 1 && predsBefore >= 1 && betsBefore >= 1 && votesBefore >= 1 && walletsBefore >= 1 && txnsBefore >= 1,
+    {
+      assertionClass: 'Discord',
+      channel: 'db-observable',
+      promise: 'The scenario created run-prefixed poll, vote, prediction, bet, wallet, and prediction-ledger rows (pre-cleanup baseline).',
+      observation: `pre-cleanup: polls=${pollsBefore}, predictions=${predsBefore}, bets=${betsBefore}, votes=${votesBefore}, wallets=${walletsBefore}, ledger txns=${txnsBefore}.`,
+      impact: 'The cleanup scenario could not establish a baseline of run-prefixed rows.',
+    },
+  );
 
   // Prove the off-theme classes + drive the live member surfaces while the rows still
   // exist (before the sweep): the surface rows proveMemberSurfaces creates are then swept
@@ -1779,13 +2173,14 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
   const betsAfter = await serviceRowCount(handle, 'prediction_bets');
   const votesAfter = (await pollVotesFor(handle, poll.pollId)).length; // cascade-deleted with the poll
   const walletsAfter = await walletCount(handle, userB);
+  const txnsAfter = await serviceRowCount(handle, 'economy_transactions');
   ctx.expect(
-    pollsAfter === 0 && predsAfter === 0 && betsAfter === 0 && votesAfter === 0 && walletsAfter === 0,
+    pollsAfter === 0 && predsAfter === 0 && betsAfter === 0 && votesAfter === 0 && walletsAfter === 0 && txnsAfter === 0,
     {
       assertionClass: 'cleanup',
       channel: 'db-observable',
-      promise: 'Run-prefixed poll, vote (cascaded), prediction, bet, and wallet rows are deleted; a final sweep finds zero run-prefixed polls/predictions resources.',
-      observation: `post-sweep: polls=${pollsAfter}, predictions=${predsAfter}, bets=${betsAfter}, votes=${votesAfter}, wallets=${walletsAfter}.`,
+      promise: 'Run-prefixed poll, vote (cascaded), prediction, bet, wallet, and prediction-ledger rows are deleted; a final sweep finds zero run-prefixed polls/predictions resources.',
+      observation: `post-sweep: polls=${pollsAfter}, predictions=${predsAfter}, bets=${betsAfter}, votes=${votesAfter}, wallets=${walletsAfter}, ledger txns=${txnsAfter}.`,
       impact: 'The cleanup sweep left run-prefixed rows behind — the suite leaves residue.',
     },
   );
@@ -1824,6 +2219,7 @@ export const communityPollsPredictionsProof: DomainProof = {
     'prediction_bets',
     'predictions',
     'polls',
+    'economy_transactions', // the prediction_bet/payout/refund ledger this domain now writes
     'economy_wallets',
     'alerts',
   ],
