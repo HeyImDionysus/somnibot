@@ -94,6 +94,7 @@ export async function GET(req: NextRequest) {
       .eq('guild_id', guildId)
       .is('left_at', null)
       .order('joined_at', { ascending: false })
+      .order('discord_id', { ascending: true })
       .range(offset, offset + limit - 1);
 
     if (searchFilter) query = query.or(searchFilter);

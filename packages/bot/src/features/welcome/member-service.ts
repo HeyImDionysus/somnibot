@@ -443,6 +443,7 @@ export async function backfillMembers(
   // rest of the sweep, and only rows PostgREST actually inserted are counted
   // (ignoreDuplicates makes rows.length a lie whenever a duplicate slips in).
   const MAX_CHUNK_ATTEMPTS = 5;
+  const insertedIds = new Set<string>();
   for (let i = 0; i < missing.length; i += CHUNK) {
     const chunkMembers = missing.slice(i, i + CHUNK);
 
@@ -468,6 +469,7 @@ export async function backfillMembers(
 
       if (!error) {
         inserted += (data ?? []).length;
+        for (const r of data ?? []) insertedIds.add(r.discord_id as string);
         break;
       }
 
@@ -510,7 +512,10 @@ export async function backfillMembers(
       if ((data ?? []).length < READ_PAGE) break;
     }
 
-    const resurrected = missing.filter((m) => lateErased.has(m.id) && !erased.has(m.id)).map((m) => m.id);
+    // Only rows THIS run actually inserted: a live rejoin's fresh row (its
+    // guildMemberAdd cleared the marker first) must never be swept, and a
+    // dropped chunk's members must not decrement the inserted count.
+    const resurrected = [...insertedIds].filter((id) => lateErased.has(id));
     if (resurrected.length > 0) {
       const { error } = await supabase
         .from('members')

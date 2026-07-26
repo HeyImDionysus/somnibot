@@ -402,9 +402,11 @@ export class CraftingManager {
       if (existing && existing.length > 0) {
         itemId = (existing[0] as { id: string }).id;
       } else {
-        // Create the output item. ON CONFLICT DO NOTHING: the economy_items
-        // (guild_id, lower(name)) uniqueness index turns a concurrent
-        // duplicate into a silent no-op (no row returned) instead of an error.
+        // Create the output item. NOTE: PostgREST's ignoreDuplicates targets
+        // the PRIMARY KEY only, so a concurrent duplicate NAME raises 23505
+        // on the (guild_id, lower(name)) index rather than silently no-oping
+        // — that path falls through to the re-lookup below so the recipe
+        // still links the race winner's row.
         const { data: created, error: createdErr } = await this.supabase
           .from('economy_items')
           .upsert({
@@ -421,7 +423,7 @@ export class CraftingManager {
           }, { ignoreDuplicates: true })
           .select('id')
           .maybeSingle();
-        if (createdErr) {
+        if (createdErr && createdErr.code !== '23505') {
           throw new Error(`output item create for "${r.output_name}" failed: ${createdErr.message}`);
         }
 

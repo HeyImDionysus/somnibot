@@ -171,9 +171,10 @@ async function seedIfEmpty(
   }
   if ((count ?? 0) > 0) return; // operator content exists — never touch it
 
-  // Upsert with ON CONFLICT DO NOTHING (no conflict target) so the catalog
-  // uniqueness indexes (e.g. economy_items (guild_id, lower(name))) turn a
-  // concurrent double-seed into a no-op instead of a hard failure.
+  // NOTE: PostgREST's ignoreDuplicates targets the PRIMARY KEY only — a
+  // concurrent double-seed hitting a catalog name index raises 23505, which
+  // surfaces (throw below) as a loud degraded warmup; the next boot's gate
+  // then sees the winner's rows and skips. Loud-then-converge, not silent.
   const { error } = await supabase
     .from(table)
     .upsert(rows.map((r) => ({ ...r, guild_id: guildId })), { ignoreDuplicates: true });
@@ -231,15 +232,18 @@ async function reconcileStarterItems(supabase: SupabaseClient, guildId: string):
     if (row === undefined) continue;
     const { id: _unused, ...fields } = item as Record<string, unknown> & { id?: unknown };
     void _unused;
-    const { error } = await supabase
+    const { data: upgraded, error } = await supabase
       .from('economy_items')
       .update(fields)
       .eq('guild_id', guildId)
       .eq('id', row.id)
       .eq('price', 0)
-      .is('use_effect', null);
+      .is('use_effect', null)
+      .select('id');
     if (error) failures.push(`upgrade ${item.name}: ${error.message}`);
-    else log.info(`Upgraded crafting output shell '${item.name}' to the starter shop item`);
+    else if ((upgraded ?? []).length > 0) {
+      log.info(`Upgraded crafting output shell '${item.name}' to the starter shop item`);
+    }
   }
   if (failures.length > 0) {
     throw new Error(`starter item reconcile failed: ${failures.join('; ')}`);

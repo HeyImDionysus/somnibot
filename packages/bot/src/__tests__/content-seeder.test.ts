@@ -42,9 +42,13 @@ function makeSupabase(
       update: vi.fn((payload: Record<string, unknown>) => {
         const entry = { payload, filters: [] as Array<[string, unknown[]]> };
         (updates[table] ??= []).push(entry);
+        const matchedId = () =>
+          (entry.filters.find(([m, a]) => m === 'eq' && (a as unknown[])[0] === 'id')?.[1] as unknown[])?.[1];
         const chain: Record<string, unknown> = {
+          // .select() after update resolves the affected rows (CAS check).
+          select: () => chain,
           then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
-            Promise.resolve({ error: null }).then(resolve, reject),
+            Promise.resolve({ data: [{ id: matchedId() ?? 'row' }], error: null }).then(resolve, reject),
         };
         for (const m of ['eq', 'is', 'in']) {
           chain[m] = (...args: unknown[]) => {
