@@ -1084,11 +1084,6 @@ describe('service modules deep', () => {
     expect(mod).toBeDefined();
   });
 
-  it('embed-theme imports', async () => {
-    const mod = await import('../services/embed-theme.js');
-    expect(mod).toBeDefined();
-  });
-
   it('cross-feature-bridge imports', async () => {
     const mod = await import('../services/cross-feature-bridge.js');
     expect(mod).toBeDefined();

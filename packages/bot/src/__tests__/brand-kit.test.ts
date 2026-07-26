@@ -41,11 +41,21 @@ vi.mock('discord.js', () => {
   };
 });
 
-import { resolveBrandKit, defaultBrandKit } from '../features/branding/brand-kit.js';
+import {
+  resolveBrandKit,
+  defaultBrandKit,
+  invalidateBrandKitCache,
+} from '../features/branding/brand-kit.js';
 import { postPanel } from '../features/tickets/panel-manager.js';
 
 const DEFAULT_PRIMARY = 0xff1493;
 const DEFAULT_ACCENT = 0x00d4ff;
+
+// resolveBrandKit caches the guild_config row per guild (30s TTL); every test
+// here uses guild 'g1' with a fresh supabase mock, so clear between tests.
+beforeEach(() => {
+  invalidateBrandKitCache();
+});
 
 // ── resolveBrandKit ─────────────────────────────────────────────────────────
 
@@ -70,6 +80,8 @@ describe('resolveBrandKit', () => {
       accentColor: DEFAULT_ACCENT,
       voicePreset: 'default',
       poweredByAttribution: 'Powered by SomniBot',
+      currencyName: 'Coins',
+      currencyEmoji: '🪙',
     });
   });
 
@@ -100,6 +112,8 @@ describe('resolveBrandKit', () => {
       accentColor: 0x445566,
       voicePreset: 'professional',
       poweredByAttribution: 'Powered by SomniBot',
+      currencyName: 'Coins',
+      currencyEmoji: '🪙',
     });
   });
 

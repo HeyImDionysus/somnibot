@@ -95,6 +95,7 @@ const navigation: NavGroup[] = [
       { label: 'Channels', href: '/channels', icon: MessageSquare, requires: 'discord' },
       { label: 'Onboarding', href: '/onboarding', icon: Users, requires: 'discord' },
       { label: 'Welcome & Goodbye', href: '/welcome', icon: Sparkles, requires: 'discord' },
+      { label: 'Branding', href: '/branding', icon: Palette, requires: 'discord' },
       { label: 'Members', href: '/members', icon: Users, requires: 'discord' },
       { label: 'Sync', href: '/sync', icon: Zap, requires: 'discord' },
     ],

@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => ({
   invalidateAchievementsCache: vi.fn(),
   invalidateProfilesCache: vi.fn(),
   invalidateHeistCache: vi.fn(),
+  invalidateBrandKitCache: vi.fn(),
 }));
 
 // Mock all feature modules that config-watcher imports for invalidation
@@ -57,6 +58,7 @@ vi.mock('../features/quests/index.js', () => ({ invalidateQuestsCache: mocks.inv
 vi.mock('../features/achievements/index.js', () => ({ invalidateAchievementsCache: mocks.invalidateAchievementsCache }));
 vi.mock('../features/profiles/index.js', () => ({ invalidateProfilesCache: mocks.invalidateProfilesCache }));
 vi.mock('../features/heist/index.js', () => ({ invalidateHeistCache: mocks.invalidateHeistCache }));
+vi.mock('../features/branding/index.js', () => ({ invalidateBrandKitCache: mocks.invalidateBrandKitCache }));
 
 // Mock the remaining features that reloadXxx methods may call
 vi.mock('../features/moderation/index.js', () => ({ reloadModerationConfig: vi.fn() }));
@@ -154,12 +156,24 @@ describe('ConfigWatcher', () => {
     expect(mocks.invalidateHeistCache).toHaveBeenCalled();
   });
 
+  it('invalidates the brand kit cache on section=branding', async () => {
+    await configHandler({ guildId: 'guild-1', data: { section: 'branding', changedBy: 'user1' } });
+    expect(mocks.invalidateBrandKitCache).toHaveBeenCalledWith('guild-1');
+    // branding is a targeted invalidation — not an economy-wide sweep
+    expect(mocks.invalidateEconomyCache).not.toHaveBeenCalled();
+  });
+
+  it('invalidates the brand kit cache as part of the full reload (settings/all)', async () => {
+    await configHandler({ guildId: 'guild-1', data: { section: 'all', changedBy: 'user1' } });
+    expect(mocks.invalidateBrandKitCache).toHaveBeenCalledWith('guild-1');
+  });
+
   // Every switch-case section should be handled without errors
   for (const section of [
     'moderation', 'levels', 'welcome', 'commerce', 'music', 'tickets',
     'automations', 'onboarding', 'reaction-roles', 'giveaways', 'temp-channels',
     'scheduled-messages', 'custom-commands', 'stats-channels', 'embeds',
-    'settings', 'economy', 'all',
+    'settings', 'economy', 'branding', 'all',
   ]) {
     it(`handles section=${section} without throwing`, async () => {
       await configHandler({ guildId: 'guild-1', data: { section, changedBy: 'user1' } });
