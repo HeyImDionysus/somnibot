@@ -207,6 +207,7 @@ async function executeDeployDirect(
     actorType: 'bot',
     actorId: 'deployer',
     action: 'deploy.started',
+    category: 'sync',
     details: {
       deployId,
       roleCount: desiredState.roles.length,
@@ -301,6 +302,7 @@ async function executeDeployDirect(
       actorType: 'bot',
       actorId: 'deployer',
       action: result.success ? 'deploy.completed' : 'deploy.failed',
+      category: 'sync',
       details: {
         deployId,
         duration: result.duration,
@@ -388,6 +390,7 @@ async function executeDeployDirect(
       actorType: 'bot',
       actorId: 'deployer',
       action: 'deploy.fatal',
+      category: 'sync',
       details: { deployId },
       success: false,
       errorMessage: errMsg,

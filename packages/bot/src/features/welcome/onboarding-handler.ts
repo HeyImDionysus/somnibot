@@ -149,6 +149,7 @@ export async function handleMemberJoin(
       actorType: 'bot',
       actorId: 'onboarding',
       action: 'member.returning_welcome',
+      category: 'members',
       targetType: 'member',
       targetId: member.id,
       details: {
@@ -212,6 +213,7 @@ export async function handleMemberUpdate(
           actorType: 'bot',
           actorId: 'onboarding',
           action: 'member.onboarding_completed',
+          category: 'members',
           targetType: 'member',
           targetId: newMember.id,
           details: { username: newMember.user.tag },
@@ -289,6 +291,7 @@ export async function handleMemberLeave(
     actorType: 'bot',
     actorId: 'onboarding',
     action: 'member.left',
+    category: 'members',
     targetType: 'member',
     targetId: member.id,
     details: { username: member.user?.tag ?? 'Unknown' },

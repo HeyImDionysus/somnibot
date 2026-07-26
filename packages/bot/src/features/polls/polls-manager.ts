@@ -546,11 +546,20 @@ export class PollsManager {
       return;
     }
 
-    // Deduct balance — bet is already locked in.
-    const { error: debitErr } = await this.supabase.rpc('economy_subtract_balance', {
-      p_guild_id: guildId, p_user_id: userId, p_amount: amount,
+    // Deduct balance — bet is already locked in. economy_prediction_settle
+    // (#58 ledger gap) applies the debit AND writes the prediction_bet
+    // economy_transactions row atomically, keyed on the bet row id so a
+    // redelivered interaction cannot double-debit.
+    const { data: debitRes, error: debitErr } = await this.supabase.rpc('economy_prediction_settle', {
+      p_guild_id: guildId,
+      p_user_id: userId,
+      p_amount: -amount,
+      p_type: 'prediction_bet',
+      p_request_id: insertedBet.id,
+      p_description: `Prediction bet (${predictionId})`,
     });
-    if (debitErr) {
+    const debitStatus = (debitRes as { status?: string } | null)?.status;
+    if (debitErr || debitStatus !== 'settled') {
       // Roll back the bet so we don't credit the user with a free bet.
       await this.supabase
         .from('prediction_bets')
@@ -573,9 +582,16 @@ export class PollsManager {
       log.error('economy_increment_prediction_pool failed:', poolErr.message);
       // Compensate: re-credit and delete the bet so we don't keep a
       // ghost bet that resolvePrediction will try to pay out of a pool
-      // that doesn't include it.
-      const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
-        p_guild_id: guildId, p_user_id: userId, p_amount: amount,
+      // that doesn't include it. Routed through economy_prediction_settle
+      // so the ledger shows the refund next to the bet debit it reverses
+      // (same request_id, type prediction_refund — idempotent on retry).
+      const { error: refundErr } = await this.supabase.rpc('economy_prediction_settle', {
+        p_guild_id: guildId,
+        p_user_id: userId,
+        p_amount: amount,
+        p_type: 'prediction_refund',
+        p_request_id: insertedBet.id,
+        p_description: `Prediction bet refund — pool update failed (${predictionId})`,
       });
       if (refundErr) {
         log.error('CRITICAL: pool RPC failed AND refund failed — manual reconcile required', {
@@ -700,8 +716,16 @@ export class PollsManager {
     if (winningBets.length === 0) {
       for (const bet of allBetsArr) {
         if (bet.payout != null) continue;
-        const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
-          p_guild_id: guildId, p_user_id: bet.user_id, p_amount: bet.amount,
+        // economy_prediction_settle credits the stake back AND writes the
+        // prediction_refund ledger row atomically (request_id = bet id, so a
+        // re-run resolve loop after a crash cannot double-refund).
+        const { error: refundErr } = await this.supabase.rpc('economy_prediction_settle', {
+          p_guild_id: guildId,
+          p_user_id: bet.user_id,
+          p_amount: bet.amount,
+          p_type: 'prediction_refund',
+          p_request_id: bet.id,
+          p_description: `Prediction refund — no winning bets (${predictionId})`,
         });
         if (refundErr) {
           log.error(`Failed to refund bettor ${bet.user_id} after zero-winner resolve:`, refundErr.message);
@@ -723,8 +747,16 @@ export class PollsManager {
         const share = totalWinnerPool > 0 ? bet.amount / totalWinnerPool : 0;
         const payout = Math.floor(finalTotalPool * share);
 
-        const { error: payoutErr } = await this.supabase.rpc('economy_add_balance', {
-          p_guild_id: guildId, p_user_id: bet.user_id, p_amount: payout,
+        // economy_prediction_settle credits the winnings AND writes the
+        // prediction_payout ledger row atomically (request_id = bet id, so a
+        // re-run resolve loop after a crash cannot double-pay).
+        const { error: payoutErr } = await this.supabase.rpc('economy_prediction_settle', {
+          p_guild_id: guildId,
+          p_user_id: bet.user_id,
+          p_amount: payout,
+          p_type: 'prediction_payout',
+          p_request_id: bet.id,
+          p_description: `Prediction payout (${predictionId})`,
         });
         if (payoutErr) {
           log.error(`Failed to pay prediction winner ${bet.user_id}:`, payoutErr.message);

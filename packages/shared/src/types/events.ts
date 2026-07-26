@@ -489,6 +489,8 @@ export interface PlatformEventMap {
   'giveaway.resumed': { giveawayId: string; prize: string; actorId: string | null; endsAt: string };
   'giveaway.rerolled': { giveawayId: string; prize: string; winnerIds: string[]; actorId: string | null };
   'giveaway.failed': { giveawayId: string | null; stage: 'create' | 'entry' | 'reroll'; actorId: string | null; error: string };
+  /** Entry attempts are hot (button clicks) — audited via the batched event rail only. */
+  'giveaway.entry_denied': { giveawayId: string; userId: string; reason: 'role_gate' | 'level_gate' | 'already_entered'; requiredRoleId?: string | null; requiredLevel?: number | null; userLevel?: number };
   'xp.admin_adjusted': { actorId: string; targetId: string; operation: 'add' | 'remove' | 'set' | 'reset'; amount: number; newXp: number; newLevel: number };
   'profile.updated': { userId: string; field: 'title' | 'bio'; value: string; truncated: boolean };
   'starboard.post_created': { sourceMessageId: string; sourceChannelId: string; starboardMessageId: string; authorId: string; starCount: number };
@@ -498,6 +500,8 @@ export interface PlatformEventMap {
   'temp_channel.deleted': { channelId: string; ownerId: string; reason: string };
   'temp_channel.creation_failed': { hubId: string; hubChannelId: string; memberId: string; error: string };
   'temp_channel.orphan_reconciled': { channelId: string; ownerId: string };
+  /** One event for the whole /voice owner-control surface (lock/unlock/limit/name/permit/deny/ban). */
+  'temp_channel.settings_changed': { channelId: string; actorId: string; op: 'lock' | 'unlock' | 'limit' | 'name' | 'permit' | 'deny' | 'ban'; targetUserId?: string; value?: string | number; before?: Record<string, unknown>; after?: Record<string, unknown> };
   'scheduled_message.sent': { scheduleId: string; name: string; channelId: string; currentSends: number };
   'scheduled_message.delivery_failed': { scheduleId: string; name: string; channelId: string; reason: string };
   'poll.created': { pollId: string; title: string; optionCount: number; allowMultiple: boolean; creatorId: string; channelId: string };

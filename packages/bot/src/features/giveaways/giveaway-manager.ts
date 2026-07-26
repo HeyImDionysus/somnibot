@@ -261,6 +261,14 @@ export class GiveawayManager {
     }
 
     if (giveaway.required_role_id && !member.roles.cache.has(giveaway.required_role_id)) {
+      // [#57] Entry attempts are hot (button clicks) — the denial is audited
+      // via the batched event rail, never a direct audit write.
+      this.eventBus.emit('giveaway.entry_denied', this.guild.id, {
+        giveawayId,
+        userId,
+        reason: 'role_gate',
+        requiredRoleId: giveaway.required_role_id,
+      });
       await interaction.reply({
         content: `❌ You need the <@&${giveaway.required_role_id}> role to enter this giveaway.`,
         ephemeral: true,
@@ -278,6 +286,13 @@ export class GiveawayManager {
 
       const userLevel = levelData?.level ?? 0;
       if (userLevel < giveaway.required_level) {
+        this.eventBus.emit('giveaway.entry_denied', this.guild.id, {
+          giveawayId,
+          userId,
+          reason: 'level_gate',
+          requiredLevel: giveaway.required_level,
+          userLevel,
+        });
         await interaction.reply({
           content: `❌ You need to be level ${giveaway.required_level} or higher to enter. Your current level: ${userLevel}.`,
           ephemeral: true,

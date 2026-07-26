@@ -326,6 +326,7 @@ async function auditDenied(
     actorType: 'discord',
     actorId: interaction.user.id,
     action: 'custom_commands.invoke_denied',
+    category: 'custom_commands',
     targetType: 'custom_command',
     targetId: cmd.id,
     success: false,
