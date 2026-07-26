@@ -33,6 +33,16 @@ export class GuildContext {
   public readonly eventBus: PlatformEventBus;
   public config: GuildConfig = {};
 
+  /**
+   * Init work that runs in the background (roster backfill, content warmup,
+   * starter seeding). Production boot never awaits it — a large member fetch
+   * must not delay readiness — but the E2E harness MUST: these are real
+   * database writes, and letting them land mid-scenario raced the cleanup
+   * sweep (residue failures) and fault-window assertions (catalog rows
+   * appearing during a simulated outage). Settled, never rejects.
+   */
+  public backgroundInit: Promise<void> | null = null;
+
   /** Per-guild feature managers stored loosely — typed access via getManager() */
   private managers = new Map<string, unknown>();
 

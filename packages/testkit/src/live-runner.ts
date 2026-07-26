@@ -363,7 +363,20 @@ export async function bootstrapLiveClient(
   //    lookup the production dispatcher performs — resolves the manager IFF the
   //    real gate wired it.
   try {
-    await router.getContext(guildId);
+    const bootedCtx = await router.getContext(guildId);
+    // Init fires real background writes (roster backfill, content warmup,
+    // starter seeding) that production deliberately does not await. Scenarios
+    // MUST: those writes landing mid-scenario raced the cleanup sweep
+    // (residue failures) and fault-window assertions (catalog rows appearing
+    // during a simulated outage). Bounded so a hung write cannot wedge boot —
+    // the promise is allSettled-based and never rejects.
+    const backgroundInit = (bootedCtx as { backgroundInit?: Promise<void> | null }).backgroundInit;
+    if (backgroundInit) {
+      await Promise.race([
+        backgroundInit,
+        new Promise((resolve) => { setTimeout(resolve, 30_000).unref?.(); }),
+      ]);
+    }
   } catch (err) {
     await disposeRouter(router, client);
     await disposeClient(client);
