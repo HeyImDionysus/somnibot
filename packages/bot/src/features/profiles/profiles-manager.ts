@@ -5,7 +5,14 @@ import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { writeAuditLog } from '../../services/audit.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import {
+  BRAND_KIT_COLUMNS,
+  brandKitFromConfig,
+  defaultBrandKit,
+  resolveBrandKit,
+  type BrandKit,
+} from '../branding/brand-kit.js';
+import { applyBrand } from '../branding/branded-embed.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Profiles');
@@ -37,6 +44,8 @@ interface ProfileConfig {
   profileVisibility: 'everyone' | 'members-after-onboarding';
   contentFilterMode: 'lenient' | 'strict';
   showGameStats: boolean;
+  /** White-label brand kit projected from the same cached guild_config row. */
+  brandKit: BrandKit;
 }
 
 const DEFAULT_PROFILE_CONFIG: ProfileConfig = {
@@ -46,6 +55,7 @@ const DEFAULT_PROFILE_CONFIG: ProfileConfig = {
   profileVisibility: 'everyone',
   contentFilterMode: 'lenient',
   showGameStats: true,
+  brandKit: defaultBrandKit(),
 };
 
 // Content filter word lists. Lenient blocks only clear violations; strict adds
@@ -104,7 +114,7 @@ export class ProfilesManager {
 
     const { data } = await this.supabase
       .from('guild_config')
-      .select('profiles_enabled, title_max_length, bio_max_length, profile_visibility, content_filter_mode, show_game_stats')
+      .select(`profiles_enabled, title_max_length, bio_max_length, profile_visibility, content_filter_mode, show_game_stats, ${BRAND_KIT_COLUMNS}`)
       .eq('guild_id', guildId)
       .maybeSingle();
 
@@ -116,6 +126,7 @@ export class ProfilesManager {
           profileVisibility: data.profile_visibility === 'members-after-onboarding' ? 'members-after-onboarding' : 'everyone',
           contentFilterMode: data.content_filter_mode === 'strict' ? 'strict' : 'lenient',
           showGameStats: data.show_game_stats ?? DEFAULT_PROFILE_CONFIG.showGameStats,
+          brandKit: brandKitFromConfig(data, undefined),
         }
       : { ...DEFAULT_PROFILE_CONFIG };
     this.configCache.set(guildId, { data: cfg, time: now });
@@ -239,10 +250,13 @@ export class ProfilesManager {
     const bank = wallet?.bank ?? 0;
     const netWorth = balance + bank;
 
-    const embed = new EmbedBuilder()
-      .setTitle(`${profile?.title ? `${profile.title} ` : ''}${target.username}`)
-      .setThumbnail(target.displayAvatarURL())
-      .setColor(0x5865F2);
+    const embed = applyBrand(
+      new EmbedBuilder()
+        .setTitle(`${profile?.title ? `${profile.title} ` : ''}${target.username}`)
+        .setThumbnail(target.displayAvatarURL()),
+      cfg.brandKit,
+      { intent: 'info' },
+    );
 
     if (profile?.bio) embed.setDescription(profile.bio);
 

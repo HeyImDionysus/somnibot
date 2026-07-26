@@ -27,7 +27,15 @@ import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import { eventBus } from '../../services/event-bus.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import {
+  BRAND_KIT_COLUMNS,
+  brandKitFromConfig,
+  defaultBrandKit,
+  resolveBrandKit,
+  type BrandKit,
+} from '../branding/brand-kit.js';
+import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
+import { voice } from '../branding/voice.js';
 
 const log = createLogger('Adventures');
 
@@ -38,6 +46,8 @@ interface AdventureConfig {
   economy_adventure_daily_limit: number;
   economy_adventure_ticket_cost: number;
   economy_adventure_max_scenes: number;
+  /** White-label brand kit projected from the same cached guild_config row. */
+  brandKit: BrandKit;
 }
 
 interface Adventure {
@@ -442,14 +452,16 @@ export class AdventureManager {
     if (this.configCache) return { config: this.configCache, unavailable: false };
     const { data, error } = await this.supabase
       .from('guild_config')
-      .select('economy_adventures_enabled, economy_adventure_daily_limit, economy_adventure_ticket_cost, economy_adventure_max_scenes')
+      .select(`economy_adventures_enabled, economy_adventure_daily_limit, economy_adventure_ticket_cost, economy_adventure_max_scenes, ${BRAND_KIT_COLUMNS}`)
       .eq('guild_id', this.guild.id)
       .single();
-    const config: AdventureConfig = data ?? {
-      economy_adventures_enabled: false,
-      economy_adventure_daily_limit: 3,
-      economy_adventure_ticket_cost: 100,
-      economy_adventure_max_scenes: 10,
+    const row = (data ?? null) as (Record<string, unknown> | null);
+    const config: AdventureConfig = {
+      economy_adventures_enabled: (row?.economy_adventures_enabled as boolean | undefined) ?? false,
+      economy_adventure_daily_limit: (row?.economy_adventure_daily_limit as number | undefined) ?? 3,
+      economy_adventure_ticket_cost: (row?.economy_adventure_ticket_cost as number | undefined) ?? 100,
+      economy_adventure_max_scenes: (row?.economy_adventure_max_scenes as number | undefined) ?? 10,
+      brandKit: brandKitFromConfig(row, this.guild.name),
     };
     if (error && error.code !== 'PGRST116') {
       return { config, unavailable: true };
@@ -531,10 +543,13 @@ export class AdventureManager {
     const brandKit = await resolveBrandKit(this.supabase, this.guild.id, {
       fallbackName: this.guild.name,
     }).catch(() => null);
+    const kit = brandKit ?? defaultBrandKit(this.guild.name);
     const name = brandKit?.brandName ?? this.guild.name ?? 'this server';
-    return new EmbedBuilder()
-      .setDescription(`⚠️ ${name}'s adventures are temporarily unavailable — please try again in a moment. ${detail}`)
-      .setColor(0xffa500);
+    return brandedEmbed(kit, {
+      intent: 'warning',
+      description:
+        `${voice(kit.voicePreset, 'unavailable', { brand: name, feature: 'adventures' })} ${detail}`,
+    });
   }
 
   /** Best-effort ticket refund for start paths that abort after the debit. */
@@ -629,7 +644,10 @@ export class AdventureManager {
     }
     if (!config.economy_adventures_enabled) {
       return {
-        embed: new EmbedBuilder().setDescription('🚫 Adventures are not enabled.').setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: '🚫 Adventures are not enabled.',
+        }),
         row: null,
         sessionId: null,
       };
@@ -656,9 +674,10 @@ export class AdventureManager {
 
     if ((count ?? 0) >= config.economy_adventure_daily_limit) {
       return {
-        embed: new EmbedBuilder()
-          .setDescription(`⏳ You've used all **${config.economy_adventure_daily_limit}** adventures today. Come back tomorrow!`)
-          .setColor(0xffaa00),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'warning',
+          description: `⏳ You've used all **${config.economy_adventure_daily_limit}** adventures today. Come back tomorrow!`,
+        }),
         row: null,
         sessionId: null,
       };
@@ -683,9 +702,10 @@ export class AdventureManager {
 
     if (active && active.length > 0) {
       return {
-        embed: new EmbedBuilder()
-          .setDescription('⚠️ You already have an active adventure! Finish it first.')
-          .setColor(0xffaa00),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'warning',
+          description: '⚠️ You already have an active adventure! Finish it first.',
+        }),
         row: null,
         sessionId: null,
       };
@@ -711,9 +731,10 @@ export class AdventureManager {
           };
         }
         return {
-          embed: new EmbedBuilder()
-            .setDescription(`💰 Adventures cost **${config.economy_adventure_ticket_cost}** coins. You don't have enough!`)
-            .setColor(0xff0000),
+          embed: brandedEmbed(config.brandKit, {
+            intent: 'danger',
+            description: `💰 Adventures cost **${config.economy_adventure_ticket_cost}** ${config.brandKit.currencyName}. You don't have enough!`,
+          }),
           row: null,
           sessionId: null,
         };
@@ -762,7 +783,10 @@ export class AdventureManager {
       // adventure must not eat the member's play coins.
       await this.refundTicket(userId, config.economy_adventure_ticket_cost);
       return {
-        embed: new EmbedBuilder().setDescription('❌ Adventure has no scenes configured. Your ticket has been refunded.').setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: '❌ Adventure has no scenes configured. Your ticket has been refunded.',
+        }),
         row: null,
         sessionId: null,
       };
@@ -802,11 +826,12 @@ export class AdventureManager {
       // Duplicate key → another concurrent command won the race
       const isDupe = sessErr.code === '23505' || sessErr.message?.includes('duplicate');
       return {
-        embed: new EmbedBuilder()
-          .setDescription(isDupe
+        embed: brandedEmbed(config.brandKit, {
+          intent: isDupe ? 'warning' : 'danger',
+          description: isDupe
             ? '⚠️ You already have an active adventure! Finish it first.'
-            : '❌ Failed to start adventure — your coins have been refunded.')
-          .setColor(isDupe ? 0xffaa00 : 0xff0000),
+            : `❌ Failed to start adventure — your ${config.brandKit.currencyName} have been refunded.`,
+        }),
         row: null,
         sessionId: null,
       };
@@ -825,7 +850,7 @@ export class AdventureManager {
     });
 
     // Build embed + buttons
-    const { embed, row } = this.buildSceneEmbed(adventure, scene, sessionId, 0);
+    const { embed, row } = this.buildSceneEmbed(adventure, scene, sessionId, 0, config.brandKit);
     return { embed, row, sessionId };
   }
 
@@ -836,6 +861,8 @@ export class AdventureManager {
     sessionId: string,
     choiceIndex: number,
   ): Promise<void> {
+    // Brand kit off the same cached config row the start path uses.
+    const kit = (await this.getConfig()).brandKit;
     const { data: session } = await this.supabase
       .from('economy_adventure_sessions')
       .select('*')
@@ -894,10 +921,11 @@ export class AdventureManager {
     if (choice.next_scene_index === null) {
       // End adventure — same as ending scene
       await this.endSession(sess, 'completed', lootCollected, currencyCollected);
-      const embed = new EmbedBuilder()
-        .setTitle('🏁 Adventure Complete!')
-        .setDescription(this.buildRewardsSummary(lootCollected, currencyCollected))
-        .setColor(0x4caf50);
+      const embed = brandedEmbed(kit, {
+        intent: 'primary',
+        title: '🏁 Adventure Complete!',
+        description: this.buildRewardsSummary(lootCollected, currencyCollected),
+      });
       await interaction.update({ embeds: [embed], components: [] });
       return;
     }
@@ -911,10 +939,11 @@ export class AdventureManager {
 
     if (!nextScene) {
       await this.endSession(sess, 'completed', lootCollected, currencyCollected);
-      const embed = new EmbedBuilder()
-        .setTitle('🏁 Adventure Complete!')
-        .setDescription(this.buildRewardsSummary(lootCollected, currencyCollected))
-        .setColor(0x4caf50);
+      const embed = brandedEmbed(kit, {
+        intent: 'primary',
+        title: '🏁 Adventure Complete!',
+        description: this.buildRewardsSummary(lootCollected, currencyCollected),
+      });
       await interaction.update({ embeds: [embed], components: [] });
       return;
     }
@@ -983,7 +1012,7 @@ export class AdventureManager {
       .single();
 
     const adv = advData as Adventure;
-    const { embed, row } = this.buildSceneEmbed(adv, next, sessionId, lootCollected.length);
+    const { embed, row } = this.buildSceneEmbed(adv, next, sessionId, lootCollected.length, kit);
 
     const updatePayload: { embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] } = { embeds: [embed], components: [] };
     if (row) updatePayload.components = [row];
@@ -997,12 +1026,16 @@ export class AdventureManager {
     scene: Scene,
     sessionId: string | null,
     lootCount: number,
+    kit: BrandKit,
   ): { embed: EmbedBuilder; row: ActionRowBuilder<ButtonBuilder> | null } {
-    const embed = new EmbedBuilder()
-      .setTitle(`${adventure.emoji} ${adventure.name}`)
-      .setDescription(scene.text)
-      .setColor(0x7c4dff)
-      .setFooter({ text: `Scene ${scene.scene_index + 1} • Items collected: ${lootCount}` });
+    const embed = applyBrand(
+      new EmbedBuilder()
+        .setTitle(`${adventure.emoji} ${adventure.name}`)
+        .setDescription(scene.text)
+        .setFooter({ text: `Scene ${scene.scene_index + 1} • Items collected: ${lootCount}` }),
+      kit,
+      { intent: 'primary' },
+    );
 
     if (scene.choices.length === 0) {
       return { embed, row: null };

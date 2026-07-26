@@ -4,7 +4,8 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('@somnibot/shared', () => ({
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => {
     const logger: any = {
       info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
@@ -12,7 +13,6 @@ vi.mock('@somnibot/shared', () => ({
     };
     return logger;
   },
-  SOMNI_PALETTE: { primary: 0x5865f2, success: 0x57f287, danger: 0xed4245, warning: 0xfee75c },
 }));
 
 vi.mock('discord.js', async () => {

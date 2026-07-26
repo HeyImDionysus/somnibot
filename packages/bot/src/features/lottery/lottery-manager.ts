@@ -5,14 +5,16 @@
  * ('daily'|'weekly'|'12h'|'6h') and runs drawWinner() + announce on interval.
  * No entries = pot resets (per design decision).
  */
-import { EmbedBuilder, type ChatInputCommandInteraction, type Client, type TextChannel } from 'discord.js';
+import { type ChatInputCommandInteraction, type Client, type TextChannel } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert, resolveOwnerAlert } from '../../services/alert-service.js';
 import { eventBus } from '../../services/event-bus.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import { resolveBrandKit, brandKitFromConfig } from '../branding/brand-kit.js';
+import { brandedEmbed } from '../branding/branded-embed.js';
+import { voice } from '../branding/voice.js';
 
 const log = createLogger('Lottery');
 
@@ -132,6 +134,7 @@ export class LotteryManager {
     const selected = pending ?? await this.getPendingDrawing(guildId);
     if (!selected) return;
 
+    const kit = brandKitFromConfig(config, this.client?.guilds?.cache?.get(guildId)?.name);
     const result = await this.drawWinner(guildId, selected);
 
     const logChannelId = config.economy_log_channel_id;
@@ -145,15 +148,15 @@ export class LotteryManager {
         const currencyName = config.currency_name ?? 'Coins';
         const currencyEmoji = config.currency_emoji ?? '🪙';
         await channel.send({
-          embeds: [new EmbedBuilder()
-            .setTitle('🎟️ Lottery Drawing Results!')
-            .setDescription(
+          embeds: [brandedEmbed(kit, {
+            intent: 'warning',
+            title: '🎟️ Lottery Drawing Results!',
+            description:
               `🎉 <@${result.winnerId}> won the lottery!\n\n` +
               `${currencyEmoji} Jackpot: **${result.jackpot.toLocaleString()}** ${currencyName}\n` +
               `🎫 Winning ticket: #${result.winningNumber}\n\n` +
-              `A new lottery has started — buy tickets with \`/lottery buy\`!`
-            )
-            .setColor(0xF1C40F)],
+              `A new lottery has started — buy tickets with \`/lottery buy\`!`,
+          })],
         });
       }
     } else {
@@ -193,13 +196,13 @@ export class LotteryManager {
 
       if (channel) {
         await channel.send({
-          embeds: [new EmbedBuilder()
-            .setTitle('🎟️ Lottery Reset')
-            .setDescription(
+          embeds: [brandedEmbed(kit, {
+            intent: 'info',
+            title: '🎟️ Lottery Reset',
+            description:
               'No one entered this lottery drawing. The pot has been reset.\n' +
-              'Buy tickets with `/lottery buy` to start the next one!'
-            )
-            .setColor(0x95A5A6)],
+              'Buy tickets with `/lottery buy` to start the next one!',
+          })],
         });
       }
     }
@@ -239,7 +242,7 @@ export class LotteryManager {
       fallbackName: interaction.guild?.name,
     }).catch(() => null);
     const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
-    const content = `⚠️ ${name}'s lottery is temporarily unavailable — please try again in a moment.${suffix}`;
+    const content = `${voice(brandKit?.voicePreset ?? 'default', 'unavailable', { brand: name, feature: 'lottery' })}${suffix}`;
     if (interaction.deferred || interaction.replied) {
       await interaction.editReply({ content }).catch(() => {});
     } else {
@@ -315,8 +318,9 @@ export class LotteryManager {
       await this.replyLotteryUnavailable(interaction, ' Nothing was charged.');
       return;
     }
+    const kit = brandKitFromConfig(config, interaction.guild?.name);
     if (!config?.economy_lottery_enabled) {
-      await interaction.reply({ content: '❌ Lottery is not enabled on this server.', ephemeral: true });
+      await interaction.reply({ content: voice(kit.voicePreset, 'disabled', { feature: 'Lottery' }), ephemeral: true });
       return;
     }
 
@@ -394,13 +398,13 @@ export class LotteryManager {
     }
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle('🎟️ Lottery Tickets Purchased!')
-        .setDescription(
+      embeds: [brandedEmbed(kit, {
+        intent: 'info',
+        title: '🎟️ Lottery Tickets Purchased!',
+        description:
           `You bought **${count}** ticket(s) for **${totalCost.toLocaleString()}** ${currencyName}.\n` +
-          `Current jackpot: **${(result.jackpot ?? drawing.jackpot + totalCost).toLocaleString()}** ${currencyName} ${currencyEmoji}`
-        )
-        .setColor(0x5865F2)],
+          `Current jackpot: **${(result.jackpot ?? drawing.jackpot + totalCost).toLocaleString()}** ${currencyName} ${currencyEmoji}`,
+      })],
     });
   }
 
@@ -413,8 +417,9 @@ export class LotteryManager {
       await this.replyLotteryUnavailable(interaction);
       return;
     }
+    const kit = brandKitFromConfig(config, interaction.guild?.name);
     if (!config?.economy_lottery_enabled) {
-      await interaction.reply({ content: '❌ Lottery is not enabled on this server.', ephemeral: true });
+      await interaction.reply({ content: voice(kit.voicePreset, 'disabled', { feature: 'Lottery' }), ephemeral: true });
       return;
     }
 
@@ -433,14 +438,14 @@ export class LotteryManager {
       // Between drawings the view still renders the guild's LIVE lottery state
       // (configured schedule + branded ticket price), never a bare placeholder.
       await interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setTitle('🎟️ Lottery')
-          .setDescription(
+        embeds: [brandedEmbed(kit, {
+          intent: 'info',
+          title: '🎟️ Lottery',
+          description:
             'No active lottery drawing — buy a ticket to start the next one!\n\n' +
             `📅 Schedule: **${config.economy_lottery_schedule ?? 'weekly'}**\n` +
-            `💵 Ticket price: **${(config.economy_lottery_ticket_price ?? 100).toLocaleString()}** ${currencyName} ${currencyEmoji}`
-          )
-          .setColor(0x5865F2)],
+            `💵 Ticket price: **${(config.economy_lottery_ticket_price ?? 100).toLocaleString()}** ${currencyName} ${currencyEmoji}`,
+        })],
       });
       return;
     }
@@ -460,16 +465,16 @@ export class LotteryManager {
     const uniquePlayers = new Set((tickets ?? []).map((t: any) => t.user_id));
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle('🎟️ Current Lottery')
-        .setDescription(
+      embeds: [brandedEmbed(kit, {
+        intent: 'info',
+        title: '🎟️ Current Lottery',
+        description:
           `${currencyEmoji} Jackpot: **${(drawing.jackpot ?? 0).toLocaleString()}** ${currencyName}\n` +
           `🎫 Tickets sold: **${(tickets ?? []).length}**\n` +
           `👥 Players: **${uniquePlayers.size}**\n` +
           `📅 Schedule: **${config.economy_lottery_schedule ?? 'weekly'}**\n` +
-          `💵 Ticket price: **${(config.economy_lottery_ticket_price ?? 100).toLocaleString()}** ${currencyName}`
-        )
-        .setColor(0x5865F2)],
+          `💵 Ticket price: **${(config.economy_lottery_ticket_price ?? 100).toLocaleString()}** ${currencyName}`,
+      })],
     });
   }
 

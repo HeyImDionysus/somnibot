@@ -85,6 +85,24 @@ describe('intent colors', () => {
     expect(brandedEmbed(kit, { intent: 'danger' }).data.color).toBe(DISCORD_RED);
   });
 
+  it('keepColor preserves a SEMANTIC color while still branding the footer', () => {
+    // Fish/gathering rarity tiers: the hue IS the rarity, so the brand must not
+    // overwrite it — but the embed still carries the attribution.
+    const rarityGold = 0xffd700;
+    const embed = new EmbedBuilder().setColor(rarityGold).setFooter({ text: 'Using Iron Rod' });
+
+    applyBrand(embed, customKit(), { keepColor: true });
+
+    expect(embed.data.color).toBe(rarityGold);
+    expect(embed.data.footer?.text).toBe('Using Iron Rod • Powered by SomniBot');
+  });
+
+  it('without keepColor the intent color overwrites a semantic color', () => {
+    const embed = new EmbedBuilder().setColor(0xffd700);
+    applyBrand(embed, customKit(), { intent: 'info' });
+    expect(embed.data.color).toBe(0x00ced1);
+  });
+
   it('sets title and description verbatim', () => {
     const embed = brandedEmbed(customKit(), {
       title: '🎉 Winner!',

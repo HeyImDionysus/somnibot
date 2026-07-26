@@ -9,7 +9,8 @@ vi.mock('discord.js', () => ({
   ActivityType: { Watching: 3, Listening: 2, Playing: 0, Custom: 4 },
 }));
 
-vi.mock('@somnibot/shared', () => ({
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => ({
     info: vi.fn(),
     warn: vi.fn(),

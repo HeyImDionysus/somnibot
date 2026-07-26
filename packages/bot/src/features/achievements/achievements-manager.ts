@@ -7,6 +7,8 @@ import type { DbGuildConfig } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
 import { eventBus } from '../../services/event-bus.js';
 import { handleLevelUp } from '../levels/level-announcer.js';
+import { brandKitFromConfig } from '../branding/brand-kit.js';
+import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
 
 const log = createLogger('Achievements');
 
@@ -101,12 +103,16 @@ export class AchievementsManager {
       return `${unlocked ? '✅' : '⬜'} ${d.badge_emoji} **${d.name}** — ${d.description}`;
     });
 
+    const kit = brandKitFromConfig(await this.getConfig(guildId), interaction.guild?.name);
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle('🏆 Achievements')
-        .setDescription(lines.join('\n') || 'No achievements configured yet.')
-        .setColor(0xF1C40F)
-        .setFooter({ text: `${unlockedIds.size}/${(allDefs ?? []).length} unlocked` })],
+      embeds: [applyBrand(
+        new EmbedBuilder()
+          .setTitle('🏆 Achievements')
+          .setDescription(lines.join('\n') || 'No achievements configured yet.')
+          .setFooter({ text: `${unlockedIds.size}/${(allDefs ?? []).length} unlocked` }),
+        kit,
+        { intent: 'warning' },
+      )],
     });
   }
 
@@ -277,15 +283,15 @@ export class AchievementsManager {
     }
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle(`⭐ Prestige Level ${result.new_level}!`)
-        .setDescription(
+      embeds: [brandedEmbed(brandKitFromConfig(config, interaction.guild?.name), {
+        intent: 'warning',
+        title: `⭐ Prestige Level ${result.new_level}!`,
+        description:
           `You\'ve prestiged! Your wallet and bank have been reset.\n\n` +
           `✅ *Kept:* Inventory, pets, achievements, streaks\n` +
           `🔄 *Reset:* Wallet, bank\n` +
-          `📈 *New earning multiplier:* +**${result.new_multiplier}%**`
-        )
-        .setColor(0xF1C40F)],
+          `📈 *New earning multiplier:* +**${result.new_multiplier}%**`,
+      })],
     });
   }
 }

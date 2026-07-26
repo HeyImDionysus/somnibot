@@ -15,7 +15,15 @@ import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import {
+  BRAND_KIT_COLUMNS,
+  brandKitFromConfig,
+  defaultBrandKit,
+  resolveBrandKit,
+  type BrandKit,
+} from '../branding/brand-kit.js';
+import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
+import { voice } from '../branding/voice.js';
 
 const log = createLogger('Farming');
 
@@ -26,6 +34,8 @@ export interface FarmingConfig {
   economy_farm_grid_size: number;
   economy_farming_wilt_enabled: boolean;
   economy_fertilizer_time_reduction_pct: number;
+  /** White-label brand kit projected from the same cached guild_config row. */
+  brandKit: BrandKit;
 }
 
 interface Crop {
@@ -93,7 +103,7 @@ export class FarmingManager {
 
     const { data } = await this.supabase
       .from('guild_config')
-      .select('economy_farming_enabled, economy_farm_grid_size, economy_farming_wilt_enabled, economy_fertilizer_time_reduction_pct')
+      .select(`economy_farming_enabled, economy_farm_grid_size, economy_farming_wilt_enabled, economy_fertilizer_time_reduction_pct, ${BRAND_KIT_COLUMNS}`)
       .eq('guild_id', this.guild.id)
       .maybeSingle();
 
@@ -102,6 +112,7 @@ export class FarmingManager {
       economy_farm_grid_size: data?.economy_farm_grid_size ?? 9,
       economy_farming_wilt_enabled: data?.economy_farming_wilt_enabled ?? true,
       economy_fertilizer_time_reduction_pct: data?.economy_fertilizer_time_reduction_pct ?? 50,
+      brandKit: brandKitFromConfig(data ?? null, this.guild.name),
     };
     this.configCacheTime = now;
     return this.configCache;
@@ -112,7 +123,12 @@ export class FarmingManager {
   async viewFarm(userId: string): Promise<{ embed: EmbedBuilder }> {
     const config = await this.getConfig();
     if (!config.economy_farming_enabled) {
-      return { embed: new EmbedBuilder().setDescription('❌ Farming is not enabled on this server.').setColor(0xff0000) };
+      return {
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: voice(config.brandKit.voicePreset, 'disabled', { feature: 'Farming' }),
+        }),
+      };
     }
 
     // [game-economy-farming DEPFAIL] A failed plot/crop read (database
@@ -155,16 +171,19 @@ export class FarmingManager {
       statusLines.push(`Plot ${plot.plot_index + 1}: ${crop.emoji} ${crop.name} — ${status === 'ready' ? '✅ Ready!' : status === 'wilted' ? '🥀 Wilted!' : timeInfo}`);
     }
 
-    const embed = new EmbedBuilder()
-      .setTitle('🌾 Your Farm')
-      .setDescription(
-        lines.join('\n') +
-        '\n\n' +
-        (statusLines.length > 0 ? statusLines.join('\n') : '_All plots empty — use `/farm plant <crop>` to get started!_'),
-      )
-      .setColor(0x4caf50)
-      .setFooter({ text: `${plots.filter((p) => p.crop_id && !p.harvested).length}/${config.economy_farm_grid_size} plots in use` })
-      .setTimestamp();
+    const embed = applyBrand(
+      new EmbedBuilder()
+        .setTitle('🌾 Your Farm')
+        .setDescription(
+          lines.join('\n') +
+          '\n\n' +
+          (statusLines.length > 0 ? statusLines.join('\n') : '_All plots empty — use `/farm plant <crop>` to get started!_'),
+        )
+        .setFooter({ text: `${plots.filter((p) => p.crop_id && !p.harvested).length}/${config.economy_farm_grid_size} plots in use` })
+        .setTimestamp(),
+      config.brandKit,
+      { intent: 'primary' },
+    );
 
     return { embed };
   }
@@ -174,7 +193,12 @@ export class FarmingManager {
   async plant(userId: string, cropName: string): Promise<{ embed: EmbedBuilder }> {
     const config = await this.getConfig();
     if (!config.economy_farming_enabled) {
-      return { embed: new EmbedBuilder().setDescription('❌ Farming is not enabled on this server.').setColor(0xff0000) };
+      return {
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: voice(config.brandKit.voicePreset, 'disabled', { feature: 'Farming' }),
+        }),
+      };
     }
 
     // [game-economy-farming DEPFAIL] A failed crop-catalog read must NOT
@@ -198,9 +222,10 @@ export class FarmingManager {
     if (!crop) {
       const available = crops.map((c) => `${c.emoji} ${c.name}`).join(', ');
       return {
-        embed: new EmbedBuilder()
-          .setDescription(`❌ Unknown crop "**${cropName}**".\n\nAvailable: ${available}`)
-          .setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: `❌ Unknown crop "**${cropName}**".\n\nAvailable: ${available}`,
+        }),
       };
     }
 
@@ -214,9 +239,10 @@ export class FarmingManager {
 
     if (emptyIndex === -1) {
       return {
-        embed: new EmbedBuilder()
-          .setDescription('❌ All your farm plots are occupied! Harvest or wait for crops to wilt.')
-          .setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: '❌ All your farm plots are occupied! Harvest or wait for crops to wilt.',
+        }),
       };
     }
 
@@ -225,9 +251,10 @@ export class FarmingManager {
       const hasSeed = await this.checkAndConsumeSeed(userId, crop.seed_item_id);
       if (!hasSeed) {
         return {
-          embed: new EmbedBuilder()
-            .setDescription(`❌ You don't have any **${crop.name} Seeds**! Buy them from the shop.`)
-            .setColor(0xff0000),
+          embed: brandedEmbed(config.brandKit, {
+            intent: 'danger',
+            description: `❌ You don't have any **${crop.name} Seeds**! Buy them from the shop.`,
+          }),
         };
       }
     }
@@ -245,16 +272,19 @@ export class FarmingManager {
     }, { onConflict: 'guild_id,user_id,plot_index' });
 
     return {
-      embed: new EmbedBuilder()
-        .setTitle(`${crop.emoji} Planted!`)
-        .setDescription(
-          `You planted **${crop.name}** in plot ${emptyIndex + 1}.\n\n` +
-          `⏱️ Growth time: **${this.formatTime(crop.grow_seconds)}**\n` +
-          `💧 Water with \`/farm water\` to keep it healthy!\n` +
-          `🌿 Use fertilizer to cut grow time by ${config.economy_fertilizer_time_reduction_pct}%`,
-        )
-        .setColor(0x4caf50)
-        .setTimestamp(),
+      embed: applyBrand(
+        new EmbedBuilder()
+          .setTitle(`${crop.emoji} Planted!`)
+          .setDescription(
+            `You planted **${crop.name}** in plot ${emptyIndex + 1}.\n\n` +
+            `⏱️ Growth time: **${this.formatTime(crop.grow_seconds)}**\n` +
+            `💧 Water with \`/farm water\` to keep it healthy!\n` +
+            `🌿 Use fertilizer to cut grow time by ${config.economy_fertilizer_time_reduction_pct}%`,
+          )
+          .setTimestamp(),
+        config.brandKit,
+        { intent: 'primary' },
+      ),
     };
   }
 
@@ -263,7 +293,12 @@ export class FarmingManager {
   async water(userId: string): Promise<{ embed: EmbedBuilder }> {
     const config = await this.getConfig();
     if (!config.economy_farming_enabled) {
-      return { embed: new EmbedBuilder().setDescription('❌ Farming is not enabled on this server.').setColor(0xff0000) };
+      return {
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: voice(config.brandKit.voicePreset, 'disabled', { feature: 'Farming' }),
+        }),
+      };
     }
 
     const plots = await this.getPlots(userId);
@@ -276,9 +311,19 @@ export class FarmingManager {
     if (needsWater.length === 0) {
       const growing = plots.filter((p) => p.crop_id && !p.harvested);
       if (growing.length === 0) {
-        return { embed: new EmbedBuilder().setDescription('❌ You have no crops planted!').setColor(0xff0000) };
+        return {
+          embed: brandedEmbed(config.brandKit, {
+            intent: 'danger',
+            description: '❌ You have no crops planted!',
+          }),
+        };
       }
-      return { embed: new EmbedBuilder().setDescription('💧 All your crops are already watered!').setColor(0x2196f3) };
+      return {
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'info',
+          description: '💧 All your crops are already watered!',
+        }),
+      };
     }
 
     // Water all unwatered plots
@@ -290,11 +335,14 @@ export class FarmingManager {
     }
 
     return {
-      embed: new EmbedBuilder()
-        .setTitle('💧 Watered!')
-        .setDescription(`You watered **${needsWater.length}** plot${needsWater.length > 1 ? 's' : ''}. Your crops are growing!`)
-        .setColor(0x2196f3)
-        .setTimestamp(),
+      embed: applyBrand(
+        new EmbedBuilder()
+          .setTitle('💧 Watered!')
+          .setDescription(`You watered **${needsWater.length}** plot${needsWater.length > 1 ? 's' : ''}. Your crops are growing!`)
+          .setTimestamp(),
+        config.brandKit,
+        { intent: 'info' },
+      ),
     };
   }
 
@@ -303,7 +351,12 @@ export class FarmingManager {
   async harvest(userId: string): Promise<{ embed: EmbedBuilder }> {
     const config = await this.getConfig();
     if (!config.economy_farming_enabled) {
-      return { embed: new EmbedBuilder().setDescription('❌ Farming is not enabled on this server.').setColor(0xff0000) };
+      return {
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: voice(config.brandKit.voicePreset, 'disabled', { feature: 'Farming' }),
+        }),
+      };
     }
 
     // [game-economy-farming DEPFAIL] A failed plot/crop read must NOT surface
@@ -322,7 +375,12 @@ export class FarmingManager {
     });
 
     if (readyPlots.length === 0) {
-      return { embed: new EmbedBuilder().setDescription('❌ No crops ready to harvest!').setColor(0xff0000) };
+      return {
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: '❌ No crops ready to harvest!',
+        }),
+      };
     }
 
     // Atomically transition ONLY the ready plots that are still un-harvested and
@@ -351,7 +409,12 @@ export class FarmingManager {
 
     if (harvested.length === 0) {
       // A concurrent /farm harvest already claimed every ready plot.
-      return { embed: new EmbedBuilder().setDescription('❌ No crops ready to harvest!').setColor(0xff0000) };
+      return {
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: '❌ No crops ready to harvest!',
+        }),
+      };
     }
 
     // Calculate earnings and return seeds
@@ -390,9 +453,10 @@ export class FarmingManager {
         cropCount: harvested.length,
       });
       return {
-        embed: new EmbedBuilder()
-          .setDescription('❌ Harvest payout failed — your crops have been restored. Try again later.')
-          .setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: '❌ Harvest payout failed — your crops have been restored. Try again later.',
+        }),
       };
     }
 
@@ -420,14 +484,17 @@ export class FarmingManager {
     });
 
     return {
-      embed: new EmbedBuilder()
-        .setTitle('🌾 Harvest Complete!')
-        .setDescription(
-          harvestLines.join('\n') +
-          `\n\n💰 Total earnings: **${totalEarnings.toLocaleString()}** coins`,
-        )
-        .setColor(0x4caf50)
-        .setTimestamp(),
+      embed: applyBrand(
+        new EmbedBuilder()
+          .setTitle('🌾 Harvest Complete!')
+          .setDescription(
+            harvestLines.join('\n') +
+            `\n\n💰 Total earnings: **${totalEarnings.toLocaleString()}** ${config.brandKit.currencyName}`,
+          )
+          .setTimestamp(),
+        config.brandKit,
+        { intent: 'primary' },
+      ),
     };
   }
 
@@ -436,12 +503,22 @@ export class FarmingManager {
   async fertilize(userId: string, plotNum: number): Promise<{ embed: EmbedBuilder }> {
     const config = await this.getConfig();
     if (!config.economy_farming_enabled) {
-      return { embed: new EmbedBuilder().setDescription('❌ Farming is not enabled on this server.').setColor(0xff0000) };
+      return {
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: voice(config.brandKit.voicePreset, 'disabled', { feature: 'Farming' }),
+        }),
+      };
     }
 
     const plotIndex = plotNum - 1;
     if (plotIndex < 0 || plotIndex >= config.economy_farm_grid_size) {
-      return { embed: new EmbedBuilder().setDescription(`❌ Invalid plot number. Use 1-${config.economy_farm_grid_size}.`).setColor(0xff0000) };
+      return {
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: `❌ Invalid plot number. Use 1-${config.economy_farm_grid_size}.`,
+        }),
+      };
     }
 
     const plots = await this.getPlots(userId);
@@ -452,20 +529,31 @@ export class FarmingManager {
     const plot = plots.find((p) => p.plot_index === plotIndex);
 
     if (!plot || !plot.crop_id || plot.harvested) {
-      return { embed: new EmbedBuilder().setDescription('❌ That plot is empty!').setColor(0xff0000) };
+      return {
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: '❌ That plot is empty!',
+        }),
+      };
     }
 
     if (plot.fertilized) {
-      return { embed: new EmbedBuilder().setDescription('❌ That plot is already fertilized!').setColor(0xffa500) };
+      return {
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'warning',
+          description: '❌ That plot is already fertilized!',
+        }),
+      };
     }
 
     // Check for fertilizer in inventory
     const hasFertilizer = await this.checkAndConsumeFertilizer(userId);
     if (!hasFertilizer) {
       return {
-        embed: new EmbedBuilder()
-          .setDescription('❌ You don\'t have any **Fertilizer**! Craft it or buy from the shop.')
-          .setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: '❌ You don\'t have any **Fertilizer**! Craft it or buy from the shop.',
+        }),
       };
     }
 
@@ -474,11 +562,14 @@ export class FarmingManager {
       .eq('id', plot.id);
 
     return {
-      embed: new EmbedBuilder()
-        .setTitle('🌿 Fertilized!')
-        .setDescription(`Plot ${plotNum} has been fertilized! Growth time reduced by **${config.economy_fertilizer_time_reduction_pct}%**.`)
-        .setColor(0x4caf50)
-        .setTimestamp(),
+      embed: applyBrand(
+        new EmbedBuilder()
+          .setTitle('🌿 Fertilized!')
+          .setDescription(`Plot ${plotNum} has been fertilized! Growth time reduced by **${config.economy_fertilizer_time_reduction_pct}%**.`)
+          .setTimestamp(),
+        config.brandKit,
+        { intent: 'primary' },
+      ),
     };
   }
 
@@ -533,10 +624,14 @@ export class FarmingManager {
     const brandKit = await resolveBrandKit(this.supabase, this.guild.id, {
       fallbackName: this.guild.name,
     }).catch(() => null);
+    const kit = brandKit ?? defaultBrandKit(this.guild.name);
     const name = brandKit?.brandName ?? this.guild.name ?? 'this server';
-    return new EmbedBuilder()
-      .setDescription(`⚠️ ${name}'s farm is temporarily unavailable — please try again in a moment. Your plots and coins are untouched.`)
-      .setColor(0xffa500);
+    return brandedEmbed(kit, {
+      intent: 'warning',
+      description:
+        `${voice(kit.voicePreset, 'unavailable', { brand: name, feature: 'farm' })}` +
+        ` Your plots and ${kit.currencyName} are untouched.`,
+    });
   }
 
   private async seedDefaultCrops(): Promise<void> {

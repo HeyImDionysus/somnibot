@@ -4,7 +4,7 @@
  */
 import { randomPick, cryptoShuffle } from '../../utils/random.js';
 import {
-  EmbedBuilder,
+  type EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
@@ -21,7 +21,8 @@ import { randomUUID } from 'node:crypto';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { eventBus } from '../../services/event-bus.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import { resolveBrandKit, brandKitFromConfig, type BrandKit } from '../branding/brand-kit.js';
+import { brandedEmbed } from '../branding/branded-embed.js';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('Trivia');
@@ -230,6 +231,7 @@ export class TriviaManager {
    * hosted rounds.
    */
   private buildRoundSurface(
+    kit: BrandKit,
     channelId: string,
     question: TriviaQuestion,
     hosted: boolean,
@@ -238,14 +240,14 @@ export class TriviaManager {
     const correctIndex = allAnswers.indexOf(question.correct);
 
     const labels = ['🅰️', '🅱️', '🅲', '🅳'];
-    const embed = new EmbedBuilder()
-      .setTitle(hosted ? '🎉 Hosted Trivia!' : '🧠 Trivia Time!')
-      .setDescription(
+    const embed = brandedEmbed(kit, {
+      intent: 'info',
+      title: hosted ? '🎉 Hosted Trivia!' : '🧠 Trivia Time!',
+      description:
         `**${question.question}**\n\n` +
         allAnswers.map((a, i) => `${labels[i]} ${a}`).join('\n') +
-        `\n\n*Difficulty: ${question.difficulty.toUpperCase()} • Category: ${question.category}*\n*You have 20 seconds to answer!*`
-      )
-      .setColor(0x5865F2);
+        `\n\n*Difficulty: ${question.difficulty.toUpperCase()} • Category: ${question.category}*\n*You have 20 seconds to answer!*`,
+    });
 
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       allAnswers.map((_, i) =>
@@ -312,7 +314,8 @@ export class TriviaManager {
       await this.replyTriviaUnavailable(interaction);
       return;
     }
-    const { embed, row, correctIndex, shuffled } = this.buildRoundSurface(channelId, question, false);
+    const kit = brandKitFromConfig(config, interaction.guild?.name);
+    const { embed, row, correctIndex, shuffled } = this.buildRoundSurface(kit, channelId, question, false);
 
     await interaction.reply({ embeds: [embed], components: [row] });
 
@@ -361,7 +364,8 @@ export class TriviaManager {
     // The pool could not be read (outage) — skip this hosted tick; the next
     // scheduled tick retries against a healthy database.
     if (!question) return { started: false, reason: 'question_pool_unavailable' };
-    const { embed, row, correctIndex, shuffled } = this.buildRoundSurface(channelId, question, true);
+    const kit = brandKitFromConfig(config, guild.name);
+    const { embed, row, correctIndex, shuffled } = this.buildRoundSurface(kit, channelId, question, true);
 
     let edit: RoundEditor;
     try {
@@ -516,10 +520,11 @@ export class TriviaManager {
     }
     resultText += round.answers.size === 0 ? '💤 Nobody answered...' : `📊 ${round.answers.size} player(s) answered`;
 
-    const embed = new EmbedBuilder()
-      .setTitle('🧠 Trivia Results!')
-      .setDescription(resultText)
-      .setColor(winners.length > 0 ? 0x57F287 : 0xED4245);
+    const embed = brandedEmbed(brandKitFromConfig(config, round.guild?.name), {
+      intent: winners.length > 0 ? 'primary' : 'danger',
+      title: '🧠 Trivia Results!',
+      description: resultText,
+    });
 
     try {
       await round.edit({ embeds: [embed], components: [] });

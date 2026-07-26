@@ -14,7 +14,8 @@ const mockLog = vi.hoisted(() => ({
   error: vi.fn(),
   debug: vi.fn(),
 }));
-vi.mock('@somnibot/shared', () => ({
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => mockLog,
 }));
 

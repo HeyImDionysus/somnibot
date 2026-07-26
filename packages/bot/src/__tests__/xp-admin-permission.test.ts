@@ -12,7 +12,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Note: no calculateLevel mock — since the level-curve-parity fix, the /xp
 // admin handler never computes a level in TS; the set_member_xp RPC is the
 // single writer of member_levels.level semantics.
-vi.mock('@somnibot/shared', () => ({
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
 }));
 

@@ -12,9 +12,9 @@ import {
   mockValkey, mockEventBus, MockCollection,
 } from './helpers/discord-mocks.js';
 
-vi.mock('@somnibot/shared', () => ({
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-  SOMNI_PALETTE: { PRIMARY: 0x5865F2, SUCCESS: 0x57F287, ERROR: 0xED4245, WARN: 0xFEE75C },
   LEVEL_CONFIG: { DEFAULT_MIN_XP: 15, DEFAULT_MAX_XP: 25 },
   calculateLevel: vi.fn(() => ({ level: 1, xp: 0, xpForNext: 100 })),
   randomXp: vi.fn(() => 20),

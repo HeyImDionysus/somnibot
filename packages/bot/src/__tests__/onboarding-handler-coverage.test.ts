@@ -10,7 +10,8 @@ vi.mock('discord.js', () => ({
   GuildMemberFlags: { CompletedOnboarding: 1 << 0 },
 }));
 
-vi.mock('@somnibot/shared', () => ({
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => ({
     info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
   }),

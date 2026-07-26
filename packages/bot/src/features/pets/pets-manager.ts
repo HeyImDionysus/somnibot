@@ -19,7 +19,8 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import { eventBus } from '../../services/event-bus.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import { resolveBrandKit, brandKitFromConfig } from '../branding/brand-kit.js';
+import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
 
 const log = createLogger('Pets');
 
@@ -154,6 +155,7 @@ export class PetsManager {
       );
 
       // Notify owners whose pets transitioned from happy to sad/sick
+      const decayKit = brandKitFromConfig(config, this.client?.guilds?.cache?.get(guildId)?.name);
       for (const u of petUpdates) {
         if (shouldNotify && this.client && u.oldStatus === 'happy' && (u.status === 'sad' || u.status === 'sick')) {
           try {
@@ -161,15 +163,15 @@ export class PetsManager {
             if (user) {
               const emoji = u.status === 'sick' ? '🤒' : '😢';
               await user.send({
-                embeds: [new EmbedBuilder()
-                  .setTitle(`${emoji} ${u.name} needs attention!`)
-                  .setDescription(
+                embeds: [brandedEmbed(decayKit, {
+                  intent: u.status === 'sick' ? 'danger' : 'warning',
+                  title: `${emoji} ${u.name} needs attention!`,
+                  description:
                     `Your pet is feeling **${u.status}**!\n\n` +
                     `🍖 Hunger: **${u.hunger}/100**\n` +
                     `😄 Happiness: **${u.happiness}/100**\n\n` +
-                    `Use \`/pet feed\` and \`/pet play\` to cheer them up!`
-                  )
-                  .setColor(u.status === 'sick' ? 0xED4245 : 0xFEE75C)],
+                    `Use \`/pet feed\` and \`/pet play\` to cheer them up!`,
+                })],
               }).catch(() => { /* DM may be disabled */ }); // Ignore DM failures (user may have DMs disabled)
             }
           } catch {
@@ -271,25 +273,29 @@ export class PetsManager {
 
     const info = PET_TYPES[pet.pet_type] ?? { emoji: '🐾', desc: 'Unknown' };
     const statusEmoji = pet.status === 'happy' ? '😊' : pet.status === 'sad' ? '😢' : '😐';
+    const kit = brandKitFromConfig(await this.getConfig(interaction.guildId!), interaction.guild?.name);
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle(`${info.emoji} ${pet.name}`)
-        .setDescription(`*${info.desc}*`)
-        .addFields(
-          { name: 'Level', value: `${pet.level}/${MAX_LEVEL} (${pet.xp} XP)`, inline: true },
-          { name: 'Prestige', value: `⭐ ${pet.prestige}`, inline: true },
-          { name: 'Status', value: `${statusEmoji} ${pet.status}`, inline: true },
-          { name: '❤️ Health', value: `${pet.health}`, inline: true },
-          { name: '⚔️ Attack', value: `${pet.attack}`, inline: true },
-          { name: '🛡️ Defense', value: `${pet.defense}`, inline: true },
-          { name: '💨 Speed', value: `${pet.speed}`, inline: true },
-          { name: '🍖 Hunger', value: `${pet.hunger}/100`, inline: true },
-          { name: '😄 Happiness', value: `${pet.happiness}/100`, inline: true },
-          { name: '⚡ Energy', value: `${pet.energy}/100`, inline: true },
-        )
-        .setColor(pet.status === 'happy' ? 0x57F287 : 0xED4245)
-        .setFooter({ text: `Type: ${pet.pet_type} • Owner: ${target.username}` })],
+      embeds: [applyBrand(
+        new EmbedBuilder()
+          .setTitle(`${info.emoji} ${pet.name}`)
+          .setDescription(`*${info.desc}*`)
+          .addFields(
+            { name: 'Level', value: `${pet.level}/${MAX_LEVEL} (${pet.xp} XP)`, inline: true },
+            { name: 'Prestige', value: `⭐ ${pet.prestige}`, inline: true },
+            { name: 'Status', value: `${statusEmoji} ${pet.status}`, inline: true },
+            { name: '❤️ Health', value: `${pet.health}`, inline: true },
+            { name: '⚔️ Attack', value: `${pet.attack}`, inline: true },
+            { name: '🛡️ Defense', value: `${pet.defense}`, inline: true },
+            { name: '💨 Speed', value: `${pet.speed}`, inline: true },
+            { name: '🍖 Hunger', value: `${pet.hunger}/100`, inline: true },
+            { name: '😄 Happiness', value: `${pet.happiness}/100`, inline: true },
+            { name: '⚡ Energy', value: `${pet.energy}/100`, inline: true },
+          )
+          .setFooter({ text: `Type: ${pet.pet_type} • Owner: ${target.username}` }),
+        kit,
+        { intent: pet.status === 'happy' ? 'primary' : 'danger' },
+      )],
     });
   }
 
@@ -365,10 +371,11 @@ export class PetsManager {
     });
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle(`${info.emoji} New Pet!`)
-        .setDescription(`You bought a **${petType}** pet for **${price.toLocaleString()}** coins!\nUse \`/pet rename\` to name it.`)
-        .setColor(0x57F287)],
+      embeds: [brandedEmbed(brandKitFromConfig(await this.getConfig(guildId), interaction.guild?.name), {
+        intent: 'primary',
+        title: `${info.emoji} New Pet!`,
+        description: `You bought a **${petType}** pet for **${price.toLocaleString()}** coins!\nUse \`/pet rename\` to name it.`,
+      })],
     });
   }
 
@@ -431,10 +438,11 @@ export class PetsManager {
     getQuestsManager(guildId)?.trackProgress(guildId, interaction.user.id, 'pet_feed').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle('🍖 Pet Fed!')
-        .setDescription(`${pet.name} ate happily! Hunger: ${fr.old_hunger} → ${fr.new_hunger}/100\nCost: **${cost}** coins`)
-        .setColor(0x57F287)],
+      embeds: [brandedEmbed(brandKitFromConfig(config, interaction.guild?.name), {
+        intent: 'primary',
+        title: '🍖 Pet Fed!',
+        description: `${pet.name} ate happily! Hunger: ${fr.old_hunger} → ${fr.new_hunger}/100\nCost: **${cost}** coins`,
+      })],
     });
   }
 
@@ -469,10 +477,11 @@ export class PetsManager {
     }
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle('🎾 Playtime!')
-        .setDescription(`${pet.name} loved playing! Happiness: ${pr.old_happiness} → ${pr.new_happiness}/100`)
-        .setColor(0x57F287)],
+      embeds: [brandedEmbed(brandKitFromConfig(await this.getConfig(guildId), interaction.guild?.name), {
+        intent: 'primary',
+        title: '🎾 Playtime!',
+        description: `${pet.name} loved playing! Happiness: ${pr.old_happiness} → ${pr.new_happiness}/100`,
+      })],
     });
   }
 
@@ -544,7 +553,7 @@ export class PetsManager {
     getQuestsManager(guildId)?.trackProgress(guildId, interaction.user.id, 'pet_train').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
-      embeds: [new EmbedBuilder().setTitle('💪 Training Complete!').setDescription(desc).setColor(0x57F287)],
+      embeds: [brandedEmbed(brandKitFromConfig(config, interaction.guild?.name), { intent: 'primary', title: '💪 Training Complete!', description: desc })],
     });
   }
 
@@ -649,15 +658,15 @@ export class PetsManager {
     });
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle('⚔️ Pet Battle!')
-        .setDescription(
+      embeds: [brandedEmbed(brandKitFromConfig(config, interaction.guild?.name), {
+        intent: iWin ? 'primary' : 'danger',
+        title: '⚔️ Pet Battle!',
+        description:
           `**${myPet.name}** (Lv.${myPet.level}) vs **${theirPet.name}** (Lv.${theirPet.level})\n\n` +
           `${iWin ? `🏆 **${myPet.name}** wins!` : `💀 **${theirPet.name}** wins!`}\n` +
           (iWin ? `+**${reward}** coins to ${interaction.user}` : `+**${reward}** coins to ${opponent}`) +
-          payoutWarning
-        )
-        .setColor(iWin ? 0x57F287 : 0xED4245)],
+          payoutWarning,
+      })],
     });
   }
 
@@ -712,10 +721,11 @@ export class PetsManager {
     });
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle(`⭐ Pet Prestige ${pr.new_prestige}!`)
-        .setDescription(`${pet.name} has been reborn stronger!\nLevel reset to 1, but permanent stat bonuses applied.\n+1 ATK, +1 DEF, +1 SPD, +2 HP`)
-        .setColor(0xF1C40F)],
+      embeds: [brandedEmbed(brandKitFromConfig(config, interaction.guild?.name), {
+        intent: 'warning',
+        title: `⭐ Pet Prestige ${pr.new_prestige}!`,
+        description: `${pet.name} has been reborn stronger!\nLevel reset to 1, but permanent stat bonuses applied.\n+1 ATK, +1 DEF, +1 SPD, +2 HP`,
+      })],
     });
   }
 }

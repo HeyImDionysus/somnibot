@@ -13,7 +13,6 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
     info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
     child: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
   }),
-  SOMNI_PALETTE: { primary: 0x5865f2, success: 0x57f287, danger: 0xed4245, warning: 0xfee75c },
   randomXp: vi.fn(() => 50),
   calculateLevel: vi.fn((xp: number) => ({ level: Math.floor(xp / 100), currentXp: xp % 100, requiredXp: 100 })),
   LEVEL_CONFIG: { baseXp: 100, growthFactor: 1.2 },

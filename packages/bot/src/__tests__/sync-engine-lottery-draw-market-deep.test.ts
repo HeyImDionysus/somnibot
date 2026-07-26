@@ -4,9 +4,9 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('@somnibot/shared', () => ({
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-  SOMNI_PALETTE: { PRIMARY: 0x5865F2 },
   LEVEL_CONFIG: { DEFAULT_MIN_XP: 15, DEFAULT_MAX_XP: 25 },
   AUTOMATION_LIMITS: { MAX_CHAIN_DEPTH: 3, MAX_FIRES_PER_USER_PER_MINUTE: 5 },
   computeStateDiff: vi.fn(() => ({ roles: [], channels: [], everyoneDrift: null })),
