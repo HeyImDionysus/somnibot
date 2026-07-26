@@ -346,4 +346,133 @@ REVOKE ALL ON FUNCTION public.prediction_place_bet(UUID, UUID, UUID, TEXT, TEXT,
 GRANT EXECUTE ON FUNCTION public.prediction_place_bet(UUID, UUID, UUID, TEXT, TEXT, INTEGER)
   TO service_role;
 
+-- =============================================================================
+-- prediction_unplace_bet — keyed compensation for an UNCONFIRMED
+-- prediction_place_bet (adversarial re-verification, 2026-07-26).
+--
+-- When prediction_place_bet's response is lost, PollsManager cannot tell
+-- whether the bet row + total_pool increment committed. The old compensation
+-- (raw DELETE of the bet row + keyed refund) had a mint window: a committed
+-- place left total_pool inflated by the deleted stake, so winners later split
+-- coins whose owner had already been refunded — the guild minted the stake.
+--
+-- This function resolves the ambiguity ATOMICALLY under the SAME predictions
+-- row lock prediction_place_bet and predictions_resolve_atomic take, so the
+-- status it sees is the status its compensation commits under:
+--
+--   'removed'   — status is still 'open' and the bet row existed: the row is
+--                 deleted AND total_pool is decremented by its RETURNING'd
+--                 amount in ONE transaction. The pool can never keep a stake
+--                 whose row is gone, so the caller's keyed refund is clean.
+--   'not_found' — no bet row with this id (the insert never committed, or a
+--                 retried compensation already removed it). Nothing touched —
+--                 idempotent, so re-calling after a transport error is safe.
+--                 Also returned when the predictions row itself is gone:
+--                 prediction_bets cascades on prediction delete, so there is
+--                 no row and no pool left to correct.
+--   'closed'    — status left 'open' (locked/resolved/cancelled) AND the bet
+--                 row still exists. The row could only have been inserted
+--                 while 'open' (prediction_place_bet's fence), and whoever
+--                 flipped the status serialized AFTER that commit on this
+--                 row's FOR UPDATE — so a resolve's total_pool snapshot
+--                 INCLUDES this stake and its settlement loop will settle the
+--                 bet row like any other (payout if it won, face-value refund
+--                 if nobody won, stake-funds-the-winners if it lost). The
+--                 pool is NOT decremented and the row is NOT deleted, and the
+--                 caller MUST NOT refund: a compensation refund next to the
+--                 resolver's winner split of a pool still containing this
+--                 stake would mint exactly the stake. 'locked' is treated the
+--                 same way deliberately — betting is frozen for everyone, the
+--                 row is a legitimate frozen bet, and the eventual resolve
+--                 settles it; mutating the pool outside 'open' is never this
+--                 function's business.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION public.prediction_unplace_bet(
+  p_guild_id      TEXT,
+  p_prediction_id UUID,
+  p_bet_id        UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_status TEXT;
+  v_amount INTEGER;
+  v_pool   INTEGER;
+BEGIN
+  IF p_guild_id IS NULL OR pg_catalog.btrim(p_guild_id) = '' THEN
+    RAISE EXCEPTION 'prediction_unplace_bet: p_guild_id is required';
+  END IF;
+  IF p_prediction_id IS NULL THEN
+    RAISE EXCEPTION 'prediction_unplace_bet: p_prediction_id is required';
+  END IF;
+  IF p_bet_id IS NULL THEN
+    RAISE EXCEPTION 'prediction_unplace_bet: p_bet_id is required';
+  END IF;
+
+  -- The fence: same FOR UPDATE as prediction_place_bet and
+  -- predictions_resolve_atomic. A concurrent resolve either finishes first
+  -- (we report 'closed' and touch nothing) or waits until the row + pool
+  -- decrement are committed (it never sees the removed stake).
+  SELECT p.status INTO v_status
+    FROM public.predictions AS p
+   WHERE p.id = p_prediction_id AND p.guild_id = p_guild_id
+   FOR UPDATE;
+  IF NOT FOUND THEN
+    -- Prediction gone entirely; prediction_bets cascaded with it. No pool
+    -- exists to correct — the caller falls back to the keyed refund, whose
+    -- credit fence still refuses a double-settle.
+    RETURN pg_catalog.jsonb_build_object('status', 'not_found');
+  END IF;
+
+  IF v_status <> 'open' THEN
+    IF EXISTS (
+      SELECT 1
+        FROM public.prediction_bets AS b
+       WHERE b.id = p_bet_id
+         AND b.prediction_id = p_prediction_id
+         AND b.guild_id = p_guild_id
+    ) THEN
+      -- The stake is IN the pot and the row will be settled by the resolver.
+      -- Hands off: no delete, no pool decrement, and the caller must not
+      -- refund.
+      RETURN pg_catalog.jsonb_build_object('status', 'closed');
+    END IF;
+    RETURN pg_catalog.jsonb_build_object('status', 'not_found');
+  END IF;
+
+  -- Still open: remove the row and its pool contribution as ONE unit.
+  DELETE FROM public.prediction_bets AS b
+   WHERE b.id = p_bet_id
+     AND b.prediction_id = p_prediction_id
+     AND b.guild_id = p_guild_id
+  RETURNING b.amount INTO v_amount;
+  IF NOT FOUND THEN
+    RETURN pg_catalog.jsonb_build_object('status', 'not_found');
+  END IF;
+
+  -- Exact inverse of prediction_place_bet's increment, under the same lock —
+  -- the pool always equals the sum of live bet rows, so no clamping: a
+  -- negative result would be a real corruption and should surface loudly in
+  -- reconciliation, not be papered over with GREATEST(0, ...).
+  UPDATE public.predictions
+     SET total_pool = total_pool - v_amount
+   WHERE id = p_prediction_id
+  RETURNING total_pool INTO v_pool;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'status', 'removed',
+    'amount', v_amount,
+    'new_pool', v_pool
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.prediction_unplace_bet(TEXT, UUID, UUID)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.prediction_unplace_bet(TEXT, UUID, UUID)
+  TO service_role;
+
 COMMIT;

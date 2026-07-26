@@ -589,6 +589,92 @@ export class PollsManager {
       return true;
     };
 
+    // Compensation for an UNCONFIRMED prediction_place_bet — the RPC may have
+    // committed (bet row + total_pool increment) before its response was
+    // lost. prediction_unplace_bet resolves the ambiguity atomically under
+    // the same predictions row lock resolve takes:
+    //   'removed'   → the insert HAD committed; the row AND its total_pool
+    //                 contribution are gone in one transaction, so the keyed
+    //                 refund makes the member whole without inflating the pot
+    //                 (the old raw-delete compensation left the stake in
+    //                 total_pool for winners to split — minting the stake).
+    //   'not_found' → the insert never landed (or a retried compensation
+    //                 already removed it); the stake never entered a live
+    //                 pool. The debit was PROVEN committed above (the flow
+    //                 only reaches the place call after debitStatus ===
+    //                 'settled'), and the keyed refund IS the ledger probe:
+    //                 economy_prediction_settle credits only while no
+    //                 payout/refund row exists for this bet id, replays its
+    //                 own refund idempotently, and refuses with
+    //                 'conflicting_settlement' if a payout already landed.
+    //   'closed'    → the insert committed AND the prediction left 'open':
+    //                 resolve's pool snapshot includes this stake and its
+    //                 settlement loop will settle the bet row like any other.
+    //                 NO refund — a compensation refund next to the winners'
+    //                 split of a pool still containing this stake would mint
+    //                 exactly the stake. The resolver owns this bet now.
+    const compensateUnconfirmedPlace = async (why: string): Promise<void> => {
+      const unplaceArgs = {
+        p_guild_id: guildId,
+        p_prediction_id: predictionId,
+        p_bet_id: betId,
+      };
+      let { data: unplaceRes, error: unplaceErr } = await this.supabase.rpc('prediction_unplace_bet', unplaceArgs);
+      if (unplaceErr) {
+        // Idempotent RPC — probe once with identical args.
+        const probe = await this.supabase.rpc('prediction_unplace_bet', unplaceArgs);
+        if (probe.error) {
+          // We cannot learn whether the stake is in the pool. A blind refund
+          // here could mint (committed place + later resolve), so freeze and
+          // page instead of guessing with money.
+          log.error('CRITICAL: prediction_unplace_bet failed twice — bet state unknown, NOT refunding; manual reconcile required', {
+            predictionId, userId, betId, amount, why,
+            firstError: unplaceErr.message, probeError: probe.error.message,
+          });
+          await interaction.reply({
+            content: '❌ Something went wrong placing this bet and it could not be automatically reversed — the team has been alerted.',
+            ephemeral: true,
+          });
+          return;
+        }
+        unplaceRes = probe.data;
+        unplaceErr = null;
+      }
+      const unplaced = unplaceRes as { status?: string; amount?: number } | null;
+      if (unplaced?.status === 'removed' || unplaced?.status === 'not_found') {
+        const refunded = await refundBetDebit(`${why} (unplace: ${unplaced.status})`);
+        await interaction.reply({
+          content: refunded
+            ? `❌ Failed to place bet — please try again. Your ${currency} were refunded.`
+            : '❌ Failed to place bet — the refund could not be confirmed and the team has been alerted.',
+          ephemeral: true,
+        });
+        return;
+      }
+      if (unplaced?.status === 'closed') {
+        // The bet stands: the stake is inside the snapshotted pool and the
+        // resolver will settle this row. Loud marker for reconciliation —
+        // nobody may hand-refund this bet id.
+        log.error('CRITICAL: unconfirmed bet HAD committed and the prediction closed before compensation — the resolver settles this bet; do NOT refund it manually', {
+          predictionId, userId, betId, amount, why,
+        });
+        await interaction.reply({
+          content: '⚠️ Your bet was placed just before this prediction closed. It is locked in and will be settled with the prediction\'s outcome.',
+          ephemeral: true,
+        });
+        return;
+      }
+      // Unknown status — same freeze-and-page as the double error: without
+      // knowing whether the stake is pooled, any refund could mint.
+      log.error('CRITICAL: prediction_unplace_bet returned unexpected status — bet state unknown, NOT refunding; manual reconcile required', {
+        predictionId, userId, betId, amount, why, status: unplaced?.status ?? 'none',
+      });
+      await interaction.reply({
+        content: '❌ Something went wrong placing this bet and it could not be automatically reversed — the team has been alerted.',
+        ephemeral: true,
+      });
+    };
+
     // Closed-state fence at the money layer: prediction_place_bet inserts the
     // bet row AND increments total_pool in ONE transaction, conditional on
     // the prediction still being 'open' under the same row lock
@@ -608,27 +694,13 @@ export class PollsManager {
     if (placeErr) {
       const probe = await this.supabase.rpc('prediction_place_bet', placeArgs);
       if (probe.error) {
-        // Still ambiguous — compensate with the keyed refund AND a delete of
-        // the (possibly never-inserted) bet row. Both are safe in either
-        // world: the refund replays/conflicts instead of double-crediting,
-        // and the delete no-ops when the insert never landed.
+        // Still ambiguous — the insert may or may not have committed.
+        // prediction_unplace_bet settles the question atomically (delete +
+        // pool decrement while open; 'closed' when the resolver owns the
+        // stake) and the refund only follows the statuses where the stake is
+        // provably NOT in a pool a resolver will pay from.
         log.error('prediction_place_bet failed twice — compensating:', placeErr.message);
-        const refunded = await refundBetDebit('bet insert unconfirmed');
-        const { error: deleteErr } = await this.supabase
-          .from('prediction_bets')
-          .delete()
-          .eq('id', betId);
-        if (deleteErr) {
-          log.error('CRITICAL: compensation delete of unconfirmed bet row failed — manual reconcile required', {
-            predictionId, userId, betId, deleteErr: deleteErr.message,
-          });
-        }
-        await interaction.reply({
-          content: refunded
-            ? `❌ Failed to place bet — please try again. Your ${currency} were refunded.`
-            : '❌ Failed to place bet — the refund could not be confirmed and the team has been alerted.',
-          ephemeral: true,
-        });
+        await compensateUnconfirmedPlace('bet insert unconfirmed');
         return;
       }
       placeRes = probe.data;
@@ -657,25 +729,10 @@ export class PollsManager {
     }
     if (placed?.status !== 'inserted') {
       // Unknown status: we cannot tell whether the row landed. Same
-      // compensation as the twice-failed path — refund + delete are both
-      // safe in either world.
+      // compensation as the twice-failed path — prediction_unplace_bet
+      // resolves the ambiguity atomically and gates the refund on it.
       log.error('prediction_place_bet returned unexpected status:', placed?.status ?? 'none');
-      const refunded = await refundBetDebit('unexpected place_bet status');
-      const { error: deleteErr } = await this.supabase
-        .from('prediction_bets')
-        .delete()
-        .eq('id', betId);
-      if (deleteErr) {
-        log.error('CRITICAL: compensation delete of unconfirmed bet row failed — manual reconcile required', {
-          predictionId, userId, betId, deleteErr: deleteErr.message,
-        });
-      }
-      await interaction.reply({
-        content: refunded
-          ? `❌ Failed to place bet — please try again. Your ${currency} were refunded.`
-          : '❌ Failed to place bet — the refund could not be confirmed and the team has been alerted.',
-        ephemeral: true,
-      });
+      await compensateUnconfirmedPlace('unexpected place_bet status');
       return;
     }
 

@@ -12,6 +12,11 @@
  *    BEFORE the bet row exists; the row lands via the prediction_place_bet
  *    closed-state fence, and every fence refusal refunds through the key.
  *  - Ambiguous debit errors are probed by re-calling with identical args.
+ *  - An UNCONFIRMED place is compensated through prediction_unplace_bet
+ *    (atomic row delete + total_pool decrement while open — never a raw
+ *    delete that leaves the deleted stake inflating the pool), and the
+ *    refund is gated on its status: removed/not_found refund through the
+ *    key; 'closed' NEVER refunds (the resolver owns the pooled stake).
  *  - resolve counts are honest: replayed settles neither count nor rewrite
  *    markers; conflicting settlements are clean skips; RPC errors leave the
  *    marker NULL so an already-resolved /predict resolve re-drives them.
@@ -277,7 +282,7 @@ describe('placeBet — debit-first prediction_bet ledger settlement', () => {
     expect(String(interaction.reply.mock.calls.at(-1)[0].content)).toMatch(/Nothing was debited/);
   });
 
-  it('compensates an unconfirmed bet insert with the keyed refund AND an error-checked delete', async () => {
+  it('compensates an unconfirmed insert via prediction_unplace_bet: removed → pool decremented atomically, THEN the keyed refund', async () => {
     const supa = betSupa({
       economy_prediction_settle: [
         { data: { status: 'settled', replayed: false }, error: null },  // debit
@@ -287,6 +292,10 @@ describe('placeBet — debit-first prediction_bet ledger settlement', () => {
         { data: null, error: { message: 'boom' } },
         { data: null, error: { message: 'boom again' } },               // probe also fails
       ],
+      // The RPC deleted the committed row AND decremented total_pool in one
+      // transaction — the stake is provably out of the pot, so the refund
+      // cannot mint.
+      prediction_unplace_bet: { data: { status: 'removed', amount: 50, new_pool: 100 }, error: null },
     });
     const eventBus = bus();
     const mgr = new PollsManager(supa, eventBus);
@@ -300,11 +309,142 @@ describe('placeBet — debit-first prediction_bet ledger settlement', () => {
       p_type: 'prediction_refund',
       p_request_id: settles[0].args.p_request_id,
     });
-    // Delete-by-id compensation is issued (no-ops if the insert never landed).
-    expect(supa._tableCalls.prediction_bets?.delete ?? []).toHaveLength(1);
-    expect(supa._tableCalls.prediction_bets?.eq ?? []).toContainEqual(['id', settles[0].args.p_request_id]);
+    const unplaces = supa._rpcCalls.filter((c: any) => c.fn === 'prediction_unplace_bet');
+    expect(unplaces).toHaveLength(1);
+    expect(unplaces[0].args).toEqual({
+      p_guild_id: 'g1',
+      p_prediction_id: 'pred1',
+      p_bet_id: settles[0].args.p_request_id,
+    });
+    // Ordering: the pool-correcting unplace commits BEFORE money is credited.
+    const unplaceIdx = supa._rpcCalls.findIndex((c: any) => c.fn === 'prediction_unplace_bet');
+    const refundIdx = supa._rpcCalls.findIndex(
+      (c: any) => c.fn === 'economy_prediction_settle' && c.args.p_type === 'prediction_refund',
+    );
+    expect(unplaceIdx).toBeLessThan(refundIdx);
+    // The raw PostgREST delete (which left total_pool inflated) must be gone.
+    expect(supa._tableCalls.prediction_bets?.delete ?? []).toHaveLength(0);
     expect(eventBus.emit).not.toHaveBeenCalled();
     expect(String(interaction.reply.mock.calls.at(-1)[0].content)).toMatch(/refunded/);
+  });
+
+  it('unplace says closed: the stake is in the snapshotted pool — NO refund, the resolver settles the bet', async () => {
+    const supa = betSupa({
+      economy_prediction_settle: [
+        { data: { status: 'settled', replayed: false }, error: null },  // debit only
+      ],
+      prediction_place_bet: [
+        { data: null, error: { message: 'boom' } },
+        { data: null, error: { message: 'boom again' } },
+      ],
+      // The place HAD committed and resolve flipped the status afterwards:
+      // its pool snapshot includes this stake and its settlement loop will
+      // pay/refund the row. A compensation refund here would mint the stake.
+      prediction_unplace_bet: { data: { status: 'closed' }, error: null },
+    });
+    const eventBus = bus();
+    const mgr = new PollsManager(supa, eventBus);
+    const interaction = betInteraction();
+
+    await mgr.placeBet(interaction, 'pred1', 0, 50);
+
+    const settles = supa._rpcCalls.filter((c: any) => c.fn === 'economy_prediction_settle');
+    expect(settles).toHaveLength(1); // the debit — and nothing else
+    expect(settles[0].args.p_type).toBe('prediction_bet');
+    expect(supa._tableCalls.prediction_bets?.delete ?? []).toHaveLength(0);
+    expect(eventBus.emit).not.toHaveBeenCalled();
+    const reply = String(interaction.reply.mock.calls.at(-1)[0].content);
+    expect(reply).toMatch(/bet was placed/i);
+    expect(reply).not.toMatch(/refunded/);
+  });
+
+  it('unplace not_found is idempotent: nothing pooled, so the keyed refund proceeds (retries replay through the same key)', async () => {
+    const supa = betSupa({
+      economy_prediction_settle: [
+        { data: { status: 'settled', replayed: false }, error: null },  // debit
+        { data: { status: 'settled', replayed: false }, error: null },  // keyed refund
+      ],
+      prediction_place_bet: [
+        { data: null, error: { message: 'boom' } },
+        { data: null, error: { message: 'boom again' } },
+      ],
+      // The insert never committed (or a prior compensation already removed
+      // it) — no row, no pool contribution, nothing touched by the RPC.
+      prediction_unplace_bet: { data: { status: 'not_found' }, error: null },
+    });
+    const eventBus = bus();
+    const mgr = new PollsManager(supa, eventBus);
+    const interaction = betInteraction();
+
+    await mgr.placeBet(interaction, 'pred1', 0, 50);
+
+    const settles = supa._rpcCalls.filter((c: any) => c.fn === 'economy_prediction_settle');
+    expect(settles).toHaveLength(2);
+    // The refund is the ledger fence itself: same request id as the PROVEN
+    // debit, so it credits once, replays idempotently, and refuses if a
+    // payout already exists.
+    expect(settles[1].args).toMatchObject({
+      p_type: 'prediction_refund',
+      p_amount: 50,
+      p_request_id: settles[0].args.p_request_id,
+    });
+    expect(supa._tableCalls.prediction_bets?.delete ?? []).toHaveLength(0);
+    expect(eventBus.emit).not.toHaveBeenCalled();
+    expect(String(interaction.reply.mock.calls.at(-1)[0].content)).toMatch(/refunded/);
+  });
+
+  it('routes the unexpected-place-status path through the same unplace compensation', async () => {
+    const supa = betSupa({
+      economy_prediction_settle: [
+        { data: { status: 'settled', replayed: false }, error: null },  // debit
+        { data: { status: 'settled', replayed: false }, error: null },  // keyed refund
+      ],
+      prediction_place_bet: { data: { status: 'garbled' }, error: null },
+      prediction_unplace_bet: { data: { status: 'removed', amount: 50, new_pool: 100 }, error: null },
+    });
+    const eventBus = bus();
+    const mgr = new PollsManager(supa, eventBus);
+    const interaction = betInteraction();
+
+    await mgr.placeBet(interaction, 'pred1', 0, 50);
+
+    expect(supa._rpcCalls.filter((c: any) => c.fn === 'prediction_unplace_bet')).toHaveLength(1);
+    const settles = supa._rpcCalls.filter((c: any) => c.fn === 'economy_prediction_settle');
+    expect(settles).toHaveLength(2);
+    expect(settles[1].args.p_type).toBe('prediction_refund');
+    expect(supa._tableCalls.prediction_bets?.delete ?? []).toHaveLength(0);
+    expect(eventBus.emit).not.toHaveBeenCalled();
+    expect(String(interaction.reply.mock.calls.at(-1)[0].content)).toMatch(/refunded/);
+  });
+
+  it('freezes (no refund) when unplace fails twice — a blind refund could mint if the stake is pooled', async () => {
+    const supa = betSupa({
+      economy_prediction_settle: [
+        { data: { status: 'settled', replayed: false }, error: null },  // debit only
+      ],
+      prediction_place_bet: [
+        { data: null, error: { message: 'boom' } },
+        { data: null, error: { message: 'boom again' } },
+      ],
+      prediction_unplace_bet: [
+        { data: null, error: { message: 'db down' } },
+        { data: null, error: { message: 'still down' } },               // identical-args probe fails too
+      ],
+    });
+    const eventBus = bus();
+    const mgr = new PollsManager(supa, eventBus);
+    const interaction = betInteraction();
+
+    await mgr.placeBet(interaction, 'pred1', 0, 50);
+
+    const unplaces = supa._rpcCalls.filter((c: any) => c.fn === 'prediction_unplace_bet');
+    expect(unplaces).toHaveLength(2);
+    expect(unplaces[1].args).toEqual(unplaces[0].args); // identical-args probe
+    const settles = supa._rpcCalls.filter((c: any) => c.fn === 'economy_prediction_settle');
+    expect(settles).toHaveLength(1); // the debit — no refund without knowing the pool state
+    expect(supa._tableCalls.prediction_bets?.delete ?? []).toHaveLength(0);
+    expect(eventBus.emit).not.toHaveBeenCalled();
+    expect(String(interaction.reply.mock.calls.at(-1)[0].content)).toMatch(/team has been alerted/);
   });
 });
 
