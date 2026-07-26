@@ -120,14 +120,18 @@ function coerceText(value: unknown, fallback: string): string {
  * (or fragment containing the BRAND_KIT_COLUMNS). Managers that cache config
  * rows can call this directly instead of re-querying through resolveBrandKit.
  *
+ * Accepts any object (e.g. a typed DbGuildConfig row without an index
+ * signature) — the projection reads its columns dynamically and coerces each.
+ *
  * Never throws; any missing/invalid column falls back to the default kit value.
  */
 export function brandKitFromConfig(
-  cfg: Record<string, unknown> | null | undefined,
+  cfgRow: object | null | undefined,
   fallbackName?: string,
 ): BrandKit {
   const fallback = defaultBrandKit(fallbackName);
-  if (!cfg) return fallback;
+  if (!cfgRow) return fallback;
+  const cfg = cfgRow as Record<string, unknown>;
 
   const rawName = cfg.store_brand_name;
   const brandName =

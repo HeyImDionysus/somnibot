@@ -14,7 +14,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import { resolveBrandKit, brandKitFromConfig } from '../branding/brand-kit.js';
+import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
+import { voice } from '../branding/voice.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Polls');
@@ -73,9 +75,10 @@ export class PollsManager {
   ): Promise<void> {
     const guildId = interaction.guildId!;
     const config = await this.getConfig(guildId);
+    const kit = brandKitFromConfig(config, interaction.guild?.name);
 
     if (!config?.polls_enabled) {
-      await interaction.reply({ content: '❌ Polls are not enabled on this server.', ephemeral: true });
+      await interaction.reply({ content: voice(kit.voicePreset, 'disabled', { feature: 'Polls' }), ephemeral: true });
       return;
     }
 
@@ -117,16 +120,19 @@ export class PollsManager {
 
     const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
 
-    const embed = new EmbedBuilder()
-      .setTitle(`📊 ${title}`)
-      .setDescription(
-        (insertedOptions ?? []).map((opt: any, i: number) =>
-          `${numberEmojis[i]} **${opt.label}** — 0 votes`
-        ).join('\n') +
-        `\n\n*${allowMultiple ? 'Multiple votes allowed' : 'One vote per person'}*`
-      )
-      .setColor(0x5865F2)
-      .setFooter({ text: `Poll ID: ${poll.id}` });
+    const embed = applyBrand(
+      new EmbedBuilder()
+        .setTitle(`📊 ${title}`)
+        .setDescription(
+          (insertedOptions ?? []).map((opt: any, i: number) =>
+            `${numberEmojis[i]} **${opt.label}** — 0 votes`
+          ).join('\n') +
+          `\n\n*${allowMultiple ? 'Multiple votes allowed' : 'One vote per person'}*`
+        )
+        .setFooter({ text: `Poll ID: ${poll.id}` }),
+      kit,
+      { intent: 'info' },
+    );
 
     const rows: ActionRowBuilder<ButtonBuilder>[] = [];
     const buttonsPerRow = 5;
@@ -246,6 +252,7 @@ export class PollsManager {
   }
 
   async closePoll(interaction: ChatInputCommandInteraction, pollId: string): Promise<void> {
+    const kit = brandKitFromConfig(await this.getConfig(interaction.guildId!), interaction.guild?.name);
     const { data: poll } = await this.supabase
       .from('polls')
       .select('*')
@@ -253,7 +260,7 @@ export class PollsManager {
       .single();
 
     if (!poll) {
-      await interaction.reply({ content: '❌ Poll not found.', ephemeral: true });
+      await interaction.reply({ content: voice(kit.voicePreset, 'not_found', { thing: 'Poll' }), ephemeral: true });
       return;
     }
 
@@ -308,10 +315,11 @@ export class PollsManager {
     }
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle(`📊 Poll Closed: ${poll.title}`)
-        .setDescription(results.join('\n'))
-        .setColor(0x57F287)],
+      embeds: [brandedEmbed(kit, {
+        intent: 'primary',
+        title: `📊 Poll Closed: ${poll.title}`,
+        description: results.join('\n'),
+      })],
     });
   }
 
@@ -328,7 +336,7 @@ export class PollsManager {
     const brandKit = await resolveBrandKit(this.supabase, guildId, { fallbackName: interaction.guild?.name })
       .catch(() => null);
     const name = brandKit?.brandName ?? interaction.guild?.name ?? 'this server';
-    const content = `⚠️ ${name}'s predictions are temporarily unavailable — please try again in a moment. No bet was placed and nothing was debited.`;
+    const content = `${voice(brandKit?.voicePreset ?? 'default', 'unavailable', { brand: name, feature: 'predictions' })} No bet was placed and nothing was debited.`;
     if (interaction.deferred || interaction.replied) {
       await interaction.editReply({ content });
     } else {
@@ -345,9 +353,10 @@ export class PollsManager {
   ): Promise<void> {
     const guildId = interaction.guildId!;
     const config = await this.getConfig(guildId);
+    const kit = brandKitFromConfig(config, interaction.guild?.name);
 
     if (!config?.predictions_enabled) {
-      await interaction.reply({ content: '❌ Predictions are not enabled on this server.', ephemeral: true });
+      await interaction.reply({ content: voice(kit.voicePreset, 'disabled', { feature: 'Predictions' }), ephemeral: true });
       return;
     }
 
@@ -389,16 +398,19 @@ export class PollsManager {
 
     const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
 
-    const embed = new EmbedBuilder()
-      .setTitle(`🔮 ${title}`)
-      .setDescription(
-        (insertedOptions ?? []).map((opt: any, i: number) =>
-          `${numberEmojis[i]} **${opt.label}** — 0 ${currency} bet`
-        ).join('\n') +
-        `\n\n💰 Total pool: **0** ${currency}\n*Use /predict bet to place your bet!*`
-      )
-      .setColor(0x9B59B6)
-      .setFooter({ text: `Prediction ID: ${prediction.id}` });
+    const embed = applyBrand(
+      new EmbedBuilder()
+        .setTitle(`🔮 ${title}`)
+        .setDescription(
+          (insertedOptions ?? []).map((opt: any, i: number) =>
+            `${numberEmojis[i]} **${opt.label}** — 0 ${currency} bet`
+          ).join('\n') +
+          `\n\n💰 Total pool: **0** ${currency}\n*Use /predict bet to place your bet!*`
+        )
+        .setFooter({ text: `Prediction ID: ${prediction.id}` }),
+      kit,
+      { intent: 'info' },
+    );
 
     await interaction.reply({ embeds: [embed] });
 
@@ -430,6 +442,7 @@ export class PollsManager {
     const cfg = await this.getConfig(guildId) as
       | (DbGuildConfig & { prediction_min_bet?: number; prediction_max_bet?: number })
       | null;
+    const kit = brandKitFromConfig(cfg, interaction.guild?.name);
     const currency = cfg?.currency_name ?? 'coins';
     const minBet = cfg?.prediction_min_bet ?? 1;
     const maxBet = cfg?.prediction_max_bet ?? 0; // 0 = uncapped
@@ -747,13 +760,13 @@ export class PollsManager {
     });
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle('🔮 Bet Placed!')
-        .setDescription(
+      embeds: [brandedEmbed(kit, {
+        intent: 'info',
+        title: '🔮 Bet Placed!',
+        description:
           `You bet **${amount.toLocaleString()}** ${currency} on **${options[optionIndex].label}**.\n` +
-          `New pool total: **${newPool.toLocaleString()}** ${currency}`
-        )
-        .setColor(0x9B59B6)],
+          `New pool total: **${newPool.toLocaleString()}** ${currency}`,
+      })],
     });
   }
 
@@ -764,7 +777,9 @@ export class PollsManager {
   ): Promise<void> {
     const guildId = interaction.guildId!;
     // White-label: resolve the configured currency name for the result embed.
-    const currency = (await this.getConfig(guildId))?.currency_name ?? 'coins';
+    const resolveCfg = await this.getConfig(guildId);
+    const currency = resolveCfg?.currency_name ?? 'coins';
+    const kit = brandKitFromConfig(resolveCfg, interaction.guild?.name);
 
     const { data: prediction } = await this.supabase
       .from('predictions')
@@ -773,7 +788,7 @@ export class PollsManager {
       .single();
 
     if (!prediction) {
-      await interaction.reply({ content: '❌ Prediction not found.', ephemeral: true });
+      await interaction.reply({ content: voice(kit.voicePreset, 'not_found', { thing: 'Prediction' }), ephemeral: true });
       return;
     }
 
@@ -844,14 +859,14 @@ export class PollsManager {
     });
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle(`🔮 Prediction Resolved: ${prediction.title}`)
-        .setDescription(
+      embeds: [brandedEmbed(kit, {
+        intent: 'primary',
+        title: `🔮 Prediction Resolved: ${prediction.title}`,
+        description:
           `✅ Winning outcome: **${winningOption.label}**\n` +
           `💰 Pool: **${finalTotalPool.toLocaleString()}** ${currency}\n` +
-          summaryLine
-        )
-        .setColor(0x57F287)],
+          summaryLine,
+      })],
     });
   }
 

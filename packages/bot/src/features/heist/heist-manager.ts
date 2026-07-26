@@ -19,7 +19,8 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import { eventBus } from '../../services/event-bus.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import { resolveBrandKit, brandKitFromConfig } from '../branding/brand-kit.js';
+import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
 
 const log = createLogger('Heist');
 
@@ -242,6 +243,7 @@ export class HeistManager {
       return;
     }
     const { cName, cEmoji } = this.currencyOf(config);
+    const kit = brandKitFromConfig(config, interaction.guild?.name);
 
     // V53-L3: Valkey-based atomic cooldown (defense-in-depth alongside DB check + unique index)
     const cooldownSecs = config.economy_heist_cooldown_seconds ?? 300;
@@ -454,18 +456,21 @@ export class HeistManager {
     const maxParticipants = config.economy_heist_max_participants ?? 8;
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle(`🏴‍☠️ Heist: ${target.name}`)
-        .setDescription(
-          `<@${userId}> is assembling a crew to rob **${target.name}**!\n\n` +
-          `💰 Potential payout: ${cEmoji} **${basePayout.toLocaleString()}** ${cName} (split among crew)\n` +
-          `🎯 Base success chance: **${baseChance}%** (+7% per extra member)\n` +
-          `💵 Entry fee: ${cEmoji} **${entryFee.toLocaleString()}** ${cName}\n` +
-          `👥 Crew: 1/${maxParticipants}\n\n` +
-          `Use \`/heist join\` within **${joinWindowSecs}s** to join the crew!`
-        )
-        .setColor(0xFFA500)
-        .setFooter({ text: `Heist resolves in ${joinWindowSecs} seconds` })],
+      embeds: [applyBrand(
+        new EmbedBuilder()
+          .setTitle(`🏴‍☠️ Heist: ${target.name}`)
+          .setDescription(
+            `<@${userId}> is assembling a crew to rob **${target.name}**!\n\n` +
+            `💰 Potential payout: ${cEmoji} **${basePayout.toLocaleString()}** ${cName} (split among crew)\n` +
+            `🎯 Base success chance: **${baseChance}%** (+7% per extra member)\n` +
+            `💵 Entry fee: ${cEmoji} **${entryFee.toLocaleString()}** ${cName}\n` +
+            `👥 Crew: 1/${maxParticipants}\n\n` +
+            `Use \`/heist join\` within **${joinWindowSecs}s** to join the crew!`
+          )
+          .setFooter({ text: `Heist resolves in ${joinWindowSecs} seconds` }),
+        kit,
+        { intent: 'warning' },
+      )],
     });
   }
 
@@ -484,6 +489,7 @@ export class HeistManager {
       return;
     }
     const { cName, cEmoji } = this.currencyOf(config);
+    const kit = brandKitFromConfig(config, interaction.guild?.name);
 
     // Find the active recruiting heist for display context (target name / max).
     // This read is NOT a guard — the atomic heist_join RPC below re-checks the
@@ -610,14 +616,14 @@ export class HeistManager {
     getQuestsManager(guildId)?.trackProgress(guildId, userId, 'heist').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle('🏴‍☠️ Joined the Heist!')
-        .setDescription(
+      embeds: [brandedEmbed(kit, {
+        intent: 'warning',
+        title: '🏴‍☠️ Joined the Heist!',
+        description:
           `<@${userId}> joined as the **${joinedRole}**!\n\n` +
           `👥 Crew: **${actualCount}/${max}**\n` +
-          `🎯 Success chance: **${displayChance}%**`
-        )
-        .setColor(0xFFA500)],
+          `🎯 Success chance: **${displayChance}%**`,
+      })],
     });
   }
 
@@ -642,6 +648,7 @@ export class HeistManager {
     const guildId = interaction.guildId!;
     const { config } = await this.getConfig(guildId);
     const { cName, cEmoji } = this.currencyOf(config);
+    const kit = brandKitFromConfig(config, interaction.guild?.name);
 
     const { data: heist, error: heistErr } = await this.supabase
       .from('economy_heists')
@@ -677,10 +684,11 @@ export class HeistManager {
 
       if (!last) {
         await interaction.reply({
-          embeds: [new EmbedBuilder()
-            .setTitle('🏴‍☠️ Heist Status')
-            .setDescription('No heists have been attempted yet! Use `/heist start` to begin one.')
-            .setColor(0x5865F2)],
+          embeds: [brandedEmbed(kit, {
+            intent: 'info',
+            title: '🏴‍☠️ Heist Status',
+            description: 'No heists have been attempted yet! Use `/heist start` to begin one.',
+          })],
         });
         return;
       }
@@ -690,15 +698,15 @@ export class HeistManager {
       const lastCrew = await this.crewMentions(last.id);
       const resultEmoji = last.status === 'success' ? '✅' : '❌';
       await interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setTitle(`🏴‍☠️ Last Heist: ${last.target_name}`)
-          .setDescription(
+        embeds: [brandedEmbed(kit, {
+          intent: last.status === 'success' ? 'primary' : 'danger',
+          title: `🏴‍☠️ Last Heist: ${last.target_name}`,
+          description:
             `${resultEmoji} **${last.status === 'success' ? 'SUCCESS' : 'FAILED'}**\n\n` +
             `👥 Crew: ${lastCrew.join(', ')}\n` +
             `💰 Payout: ${cEmoji} **${last.target_payout.toLocaleString()}** ${cName}\n` +
-            `📅 ${new Date(last.resolved_at).toLocaleString()}`
-          )
-          .setColor(last.status === 'success' ? 0x57F287 : 0xED4245)],
+            `📅 ${new Date(last.resolved_at).toLocaleString()}`,
+        })],
       });
       return;
     }
@@ -714,16 +722,16 @@ export class HeistManager {
     const remainingSecs = Math.max(0, Math.floor((new Date(heist.expires_at).getTime() - Date.now()) / 1000));
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle(`🏴‍☠️ Active Heist: ${heist.target_name}`)
-        .setDescription(
+      embeds: [brandedEmbed(kit, {
+        intent: 'warning',
+        title: `🏴‍☠️ Active Heist: ${heist.target_name}`,
+        description:
           `Status: **${heist.status}**\n\n` +
           `👥 Crew: ${participants}\n` +
           `🎯 Success chance: **${displayChance}%**\n` +
           `💰 Potential payout: ${cEmoji} **${heist.target_payout.toLocaleString()}** ${cName}\n` +
-          `⏱️ ${remainingSecs > 0 ? `Resolves in **${remainingSecs}s**` : 'Resolving...'}`
-        )
-        .setColor(0xFFA500)],
+          `⏱️ ${remainingSecs > 0 ? `Resolves in **${remainingSecs}s**` : 'Resolving...'}`,
+      })],
     });
   }
 
@@ -734,6 +742,7 @@ export class HeistManager {
     const minParticipants = config?.economy_heist_min_participants ?? 2;
     const entryFee = config?.economy_heist_entry_fee ?? 100;
     const { cName, cEmoji } = this.currencyOf(config);
+    const kit = brandKitFromConfig(config, this.client.guilds.cache.get(guildId)?.name);
 
     // Read the row for the display fields (target, chance). Not a guard —
     // the atomic claim below is the sole authority on whether we resolve.
@@ -970,13 +979,13 @@ export class HeistManager {
       const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
       if (channel) {
         await channel.send({
-          embeds: [new EmbedBuilder()
-            .setTitle('🏴‍☠️ Heist Cancelled')
-            .setDescription(
+          embeds: [brandedEmbed(kit, {
+            intent: 'info',
+            title: '🏴‍☠️ Heist Cancelled',
+            description:
               `Not enough crew members joined (needed ${minParticipants}, got ${participants.length}).\n` +
-              `Entry fees have been refunded.`
-            )
-            .setColor(0x95A5A6)],
+              `Entry fees have been refunded.`,
+          })],
         });
       }
       return;
@@ -1061,14 +1070,14 @@ export class HeistManager {
       const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
       if (channel) {
         await channel.send({
-          embeds: [new EmbedBuilder()
-            .setTitle(`✅ Heist Success: ${heist.target_name}`)
-            .setDescription(
+          embeds: [brandedEmbed(kit, {
+            intent: 'primary',
+            title: `✅ Heist Success: ${heist.target_name}`,
+            description:
               `${story}\n\n` +
               `💰 Total haul: ${cEmoji} **${heist.target_payout.toLocaleString()}** ${cName}\n\n` +
-              `**Crew Payouts:**\n${crewList}`
-            )
-            .setColor(0x57F287)],
+              `**Crew Payouts:**\n${crewList}`,
+          })],
         });
       }
       return;
@@ -1104,14 +1113,14 @@ export class HeistManager {
     const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
     if (channel) {
       await channel.send({
-        embeds: [new EmbedBuilder()
-          .setTitle(`❌ Heist Failed: ${heist.target_name}`)
-          .setDescription(
+        embeds: [brandedEmbed(kit, {
+          intent: 'danger',
+          title: `❌ Heist Failed: ${heist.target_name}`,
+          description:
             `${story}\n\n` +
             `👥 ${participants.map((id) => `<@${id}>`).join(', ')}\n\n` +
-            `Each crew member lost their ${cEmoji} **${entryFee.toLocaleString()}** ${cName} entry fee.`
-          )
-          .setColor(0xED4245)],
+            `Each crew member lost their ${cEmoji} **${entryFee.toLocaleString()}** ${cName} entry fee.`,
+        })],
       });
     }
   }

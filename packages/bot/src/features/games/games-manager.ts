@@ -7,7 +7,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ComponentType,
-  EmbedBuilder,
+  type EmbedBuilder,
   type ChatInputCommandInteraction,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -18,7 +18,8 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { randomIntRange, randomChance, cryptoShuffle, randomPick } from '../../utils/random.js';
 import { eventBus } from '../../services/event-bus.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import { resolveBrandKit, brandKitFromConfig, type BrandKit } from '../branding/brand-kit.js';
+import { brandedEmbed, type BrandIntent } from '../branding/branded-embed.js';
 
 const log = createLogger('Games');
 
@@ -484,6 +485,7 @@ export class GamesManager {
       const guildId = interaction.guildId!;
       const userId = interaction.user.id;
       const { cName, cEmoji } = this.currencyOf(v.config);
+      const kit = brandKitFromConfig(v.config, interaction.guild?.name);
 
       const win = randomChance(50);
       const result = randomChance(50) ? 'Heads' : 'Tails';
@@ -491,10 +493,11 @@ export class GamesManager {
       if (win) {
         const ok = await this.settleBet(guildId, userId, amount, 'coinflip', interaction.id);
         await interaction.reply({
-          embeds: [new EmbedBuilder()
-            .setTitle(`🪙 ${result}!`)
-            .setDescription(ok ? `You won ${cEmoji} **${amount.toLocaleString()}** ${cName}! 🎉` : '⚠️ You won but the payout failed — contact an admin.')
-            .setColor(ok ? 0x57F287 : 0xFEE75C)],
+          embeds: [brandedEmbed(kit, {
+            intent: ok ? 'primary' : 'warning',
+            title: `🪙 ${result}!`,
+            description: ok ? `You won ${cEmoji} **${amount.toLocaleString()}** ${cName}! 🎉` : '⚠️ You won but the payout failed — contact an admin.',
+          })],
         });
       } else {
         const ok = await this.settleBet(guildId, userId, -amount, 'coinflip', interaction.id);
@@ -503,10 +506,11 @@ export class GamesManager {
           return;
         }
         await interaction.reply({
-          embeds: [new EmbedBuilder()
-            .setTitle(`🪙 ${result}!`)
-            .setDescription(`You lost ${cEmoji} **${amount.toLocaleString()}** ${cName}. 😢`)
-            .setColor(0xED4245)],
+          embeds: [brandedEmbed(kit, {
+            intent: 'danger',
+            title: `🪙 ${result}!`,
+            description: `You lost ${cEmoji} **${amount.toLocaleString()}** ${cName}. 😢`,
+          })],
         });
       }
     } finally {
@@ -523,6 +527,7 @@ export class GamesManager {
       const guildId = interaction.guildId!;
       const userId = interaction.user.id;
       const { cName, cEmoji } = this.currencyOf(v.config);
+      const kit = brandKitFromConfig(v.config, interaction.guild?.name);
 
       const reels = [
         SLOT_SYMBOLS[randomIntRange(0, SLOT_SYMBOLS.length - 1)],
@@ -548,10 +553,11 @@ export class GamesManager {
           return;
         }
         await interaction.reply({
-          embeds: [new EmbedBuilder()
-            .setTitle('🎰 Slots')
-            .setDescription(`${display}\n\n${multiplier >= 1 ? '🎉' : '🤏'} You ${net >= 0 ? 'won' : 'lost'} ${cEmoji} **${Math.abs(net).toLocaleString()}** ${cName}! (${multiplier}x)`)
-            .setColor(net >= 0 ? 0x57F287 : 0xFEE75C)],
+          embeds: [brandedEmbed(kit, {
+            intent: net >= 0 ? 'primary' : 'warning',
+            title: '🎰 Slots',
+            description: `${display}\n\n${multiplier >= 1 ? '🎉' : '🤏'} You ${net >= 0 ? 'won' : 'lost'} ${cEmoji} **${Math.abs(net).toLocaleString()}** ${cName}! (${multiplier}x)`,
+          })],
         });
       } else {
         const ok = await this.settleBet(guildId, userId, -amount, 'slots', interaction.id);
@@ -560,10 +566,11 @@ export class GamesManager {
           return;
         }
         await interaction.reply({
-          embeds: [new EmbedBuilder()
-            .setTitle('🎰 Slots')
-            .setDescription(`${display}\n\nNo match. You lost ${cEmoji} **${amount.toLocaleString()}** ${cName}. 😢`)
-            .setColor(0xED4245)],
+          embeds: [brandedEmbed(kit, {
+            intent: 'danger',
+            title: '🎰 Slots',
+            description: `${display}\n\nNo match. You lost ${cEmoji} **${amount.toLocaleString()}** ${cName}. 😢`,
+          })],
         });
       }
     } finally {
@@ -580,6 +587,7 @@ export class GamesManager {
       const guildId = interaction.guildId!;
       const userId = interaction.user.id;
       const { cName, cEmoji } = this.currencyOf(v.config);
+      const kit = brandKitFromConfig(v.config, interaction.guild?.name);
 
       const choices = ['rock', 'paper', 'scissors'];
       const emojis: Record<string, string> = { rock: '🪨', paper: '📄', scissors: '✂️' };
@@ -596,7 +604,7 @@ export class GamesManager {
       if (result === 'win') {
         const ok = await this.settleBet(guildId, userId, amount, 'rps', interaction.id);
         await interaction.reply({
-          embeds: [new EmbedBuilder().setTitle('✂️ Rock Paper Scissors').setDescription(`${desc}\n\n${ok ? `You win ${cEmoji} **${amount.toLocaleString()}** ${cName}! 🎉` : '⚠️ You won but the payout failed — contact an admin.'}`).setColor(ok ? 0x57F287 : 0xFEE75C)],
+          embeds: [brandedEmbed(kit, { intent: ok ? 'primary' : 'warning', title: '✂️ Rock Paper Scissors', description: `${desc}\n\n${ok ? `You win ${cEmoji} **${amount.toLocaleString()}** ${cName}! 🎉` : '⚠️ You won but the payout failed — contact an admin.'}` })],
         });
       } else if (result === 'lose') {
         const ok = await this.settleBet(guildId, userId, -amount, 'rps', interaction.id);
@@ -605,11 +613,11 @@ export class GamesManager {
           return;
         }
         await interaction.reply({
-          embeds: [new EmbedBuilder().setTitle('✂️ Rock Paper Scissors').setDescription(`${desc}\n\nYou lost ${cEmoji} **${amount.toLocaleString()}** ${cName}. 😢`).setColor(0xED4245)],
+          embeds: [brandedEmbed(kit, { intent: 'danger', title: '✂️ Rock Paper Scissors', description: `${desc}\n\nYou lost ${cEmoji} **${amount.toLocaleString()}** ${cName}. 😢` })],
         });
       } else {
         await interaction.reply({
-          embeds: [new EmbedBuilder().setTitle('✂️ Rock Paper Scissors').setDescription(`${desc}\n\nIt's a tie! Your ${cName} are returned.`).setColor(0xFEE75C)],
+          embeds: [brandedEmbed(kit, { intent: 'warning', title: '✂️ Rock Paper Scissors', description: `${desc}\n\nIt's a tie! Your ${cName} are returned.` })],
         });
       }
     } finally {
@@ -626,6 +634,7 @@ export class GamesManager {
       const guildId = interaction.guildId!;
       const userId = interaction.user.id;
       const { cName, cEmoji } = this.currencyOf(v.config);
+      const kit = brandKitFromConfig(v.config, interaction.guild?.name);
 
       const playerRoll = randomIntRange(1, 6) + randomIntRange(1, 6);
       const botRoll = randomIntRange(1, 6) + randomIntRange(1, 6);
@@ -633,7 +642,7 @@ export class GamesManager {
       if (playerRoll > botRoll) {
         const ok = await this.settleBet(guildId, userId, amount, 'dice', interaction.id);
         await interaction.reply({
-          embeds: [new EmbedBuilder().setTitle('🎲 Dice Roll').setDescription(`You rolled **${playerRoll}** vs bot's **${botRoll}**\n\n${ok ? `You win ${cEmoji} **${amount.toLocaleString()}** ${cName}! 🎉` : '⚠️ You won but the payout failed — contact an admin.'}`).setColor(ok ? 0x57F287 : 0xFEE75C)],
+          embeds: [brandedEmbed(kit, { intent: ok ? 'primary' : 'warning', title: '🎲 Dice Roll', description: `You rolled **${playerRoll}** vs bot's **${botRoll}**\n\n${ok ? `You win ${cEmoji} **${amount.toLocaleString()}** ${cName}! 🎉` : '⚠️ You won but the payout failed — contact an admin.'}` })],
         });
       } else if (playerRoll < botRoll) {
         const ok = await this.settleBet(guildId, userId, -amount, 'dice', interaction.id);
@@ -642,11 +651,11 @@ export class GamesManager {
           return;
         }
         await interaction.reply({
-          embeds: [new EmbedBuilder().setTitle('🎲 Dice Roll').setDescription(`You rolled **${playerRoll}** vs bot's **${botRoll}**\n\nYou lost ${cEmoji} **${amount.toLocaleString()}** ${cName}. 😢`).setColor(0xED4245)],
+          embeds: [brandedEmbed(kit, { intent: 'danger', title: '🎲 Dice Roll', description: `You rolled **${playerRoll}** vs bot's **${botRoll}**\n\nYou lost ${cEmoji} **${amount.toLocaleString()}** ${cName}. 😢` })],
         });
       } else {
         await interaction.reply({
-          embeds: [new EmbedBuilder().setTitle('🎲 Dice Roll').setDescription(`Both rolled **${playerRoll}**! It's a tie.`).setColor(0xFEE75C)],
+          embeds: [brandedEmbed(kit, { intent: 'warning', title: '🎲 Dice Roll', description: `Both rolled **${playerRoll}**! It's a tie.` })],
         });
       }
     } finally {
@@ -666,6 +675,7 @@ export class GamesManager {
       const userId = interaction.user.id;
       const cur = this.currencyOf(v.config);
       const { cName, cEmoji } = cur;
+      const kit = brandKitFromConfig(v.config, interaction.guild?.name);
 
       const deck = makeDeck();
       const playerHand = [deck.pop()!, deck.pop()!];
@@ -677,16 +687,16 @@ export class GamesManager {
       if (handValue(playerHand) === 21) {
         // Player has natural blackjack — resolve immediately
         const dealerVal = this.dealerPlay(dealerHand, deck);
-        const { result, color, net } = dealerVal === 21 && dealerHand.length === 2
-          ? { result: `Push! Both have natural blackjack. ${cName} returned.`, color: 0xFEE75C, net: 0 }
-          : { result: `♠️ BLACKJACK! You win ${cEmoji} **${Math.floor(amount * 1.5).toLocaleString()}** ${cName}! 🎉`, color: 0x57F287, net: Math.floor(amount * 1.5) };
+        const { result, intent, net } = dealerVal === 21 && dealerHand.length === 2
+          ? { result: `Push! Both have natural blackjack. ${cName} returned.`, intent: 'warning' as BrandIntent, net: 0 }
+          : { result: `♠️ BLACKJACK! You win ${cEmoji} **${Math.floor(amount * 1.5).toLocaleString()}** ${cName}! 🎉`, intent: 'primary' as BrandIntent, net: Math.floor(amount * 1.5) };
 
         if (net !== 0) {
           const ok = await this.settleBet(guildId, userId, net, 'blackjack', interaction.id);
           if (!ok && net < 0) { await interaction.reply({ content: '❌ Transaction failed.', ephemeral: true }); return; }
         }
 
-        await interaction.reply({ embeds: [this.bjEmbed(playerHand, dealerHand, result, color, false)] });
+        await interaction.reply({ embeds: [this.bjEmbed(kit, playerHand, dealerHand, result, intent, false)] });
         return;
       }
 
@@ -701,7 +711,7 @@ export class GamesManager {
       const canDouble = playerHand.length === 2;
 
       const reply = await interaction.reply({
-        embeds: [this.bjEmbed(playerHand, dealerHand, 'Your move!', 0x5865F2, true)],
+        embeds: [this.bjEmbed(kit, playerHand, dealerHand, 'Your move!', 'info', true)],
         components: [makeButtons(canDouble)],
         fetchReply: true,
       });
@@ -725,7 +735,7 @@ export class GamesManager {
               const net = -currentBet;
               await this.settleBet(guildId, userId, net, 'blackjack', interaction.id);
               await btnInteraction.update({
-                embeds: [this.bjEmbed(playerHand, dealerHand, `Bust! You went over with **${pv}**. Lost ${cEmoji} **${currentBet.toLocaleString()}** ${cName}.`, 0xED4245, false)],
+                embeds: [this.bjEmbed(kit, playerHand, dealerHand, `Bust! You went over with **${pv}**. Lost ${cEmoji} **${currentBet.toLocaleString()}** ${cName}.`, 'danger', false)],
                 components: [],
               });
               return;
@@ -734,19 +744,19 @@ export class GamesManager {
             if (pv === 21) {
               // Auto-stand on 21
               collector.stop('stand');
-              await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur, interaction.id);
+              await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur, kit, interaction.id);
               return;
             }
 
             // Continue playing — can no longer double down after first hit
             await btnInteraction.update({
-              embeds: [this.bjEmbed(playerHand, dealerHand, 'Your move!', 0x5865F2, true)],
+              embeds: [this.bjEmbed(kit, playerHand, dealerHand, 'Your move!', 'info', true)],
               components: [makeButtons(false)],
             });
 
           } else if (btnInteraction.customId === 'bj_stand') {
             collector.stop('stand');
-            await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur, interaction.id);
+            await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur, kit, interaction.id);
 
           } else if (btnInteraction.customId === 'bj_double') {
             // Double down: double the bet, take exactly one more card, then stand
@@ -761,11 +771,11 @@ export class GamesManager {
               const net = -currentBet;
               await this.settleBet(guildId, userId, net, 'blackjack', interaction.id);
               await btnInteraction.update({
-                embeds: [this.bjEmbed(playerHand, dealerHand, `Bust on double down! **${pv}**. Lost ${cEmoji} **${currentBet.toLocaleString()}** ${cName}.`, 0xED4245, false)],
+                embeds: [this.bjEmbed(kit, playerHand, dealerHand, `Bust on double down! **${pv}**. Lost ${cEmoji} **${currentBet.toLocaleString()}** ${cName}.`, 'danger', false)],
                 components: [],
               });
             } else {
-              await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur, interaction.id);
+              await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur, kit, interaction.id);
             }
           }
         } catch (err) {
@@ -778,7 +788,7 @@ export class GamesManager {
         if (reason === 'time') {
           // Timed out — auto-stand and resolve
           try {
-            await this.resolveBlackjackTimeout(interaction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur, interaction.id);
+            await this.resolveBlackjackTimeout(interaction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled, cur, kit, interaction.id);
           } catch (err) {
             log.error('Blackjack timeout resolution error:', { error: String(err) });
           }
@@ -800,20 +810,20 @@ export class GamesManager {
   }
 
   /** Build a blackjack embed. When `hideDealer` is true, only the first dealer card is shown. */
-  private bjEmbed(playerHand: Card[], dealerHand: Card[], status: string, color: number, hideDealer: boolean): EmbedBuilder {
+  private bjEmbed(kit: BrandKit, playerHand: Card[], dealerHand: Card[], status: string, intent: BrandIntent, hideDealer: boolean): EmbedBuilder {
     const pv = handValue(playerHand);
     const dealerDisplay = hideDealer
       ? `${dealerHand[0].rank}${dealerHand[0].suit} ❓`
       : `${formatHand(dealerHand)} (${handValue(dealerHand)})`;
 
-    return new EmbedBuilder()
-      .setTitle('🃏 Blackjack')
-      .setDescription(
+    return brandedEmbed(kit, {
+      intent,
+      title: '🃏 Blackjack',
+      description:
         `**Your hand:** ${formatHand(playerHand)} (${pv})\n` +
         `**Dealer:** ${dealerDisplay}\n\n` +
-        status
-      )
-      .setColor(color);
+        status,
+    });
   }
 
   /** Resolve the game after player stands or doubles. */
@@ -823,19 +833,20 @@ export class GamesManager {
     playerHand: Card[], dealerHand: Card[], deck: Card[],
     currentBet: number, _doubled: boolean,
     cur: { cName: string; cEmoji: string },
+    kit: BrandKit,
     interactionId: string,
   ): Promise<void> {
     const playerVal = handValue(playerHand);
     const dealerVal = this.dealerPlay(dealerHand, deck);
 
-    const { result, color, net } = this.bjOutcome(playerVal, playerHand.length, dealerVal, currentBet, cur);
+    const { result, intent, net } = this.bjOutcome(playerVal, playerHand.length, dealerVal, currentBet, cur);
 
     if (net !== 0) {
       await this.settleBet(guildId, userId, net, 'blackjack', interactionId);
     }
 
     await btnInteraction.update({
-      embeds: [this.bjEmbed(playerHand, dealerHand, result, color, false)],
+      embeds: [this.bjEmbed(kit, playerHand, dealerHand, result, intent, false)],
       components: [],
     });
   }
@@ -847,12 +858,13 @@ export class GamesManager {
     playerHand: Card[], dealerHand: Card[], deck: Card[],
     currentBet: number, _doubled: boolean,
     cur: { cName: string; cEmoji: string },
+    kit: BrandKit,
     interactionId: string,
   ): Promise<void> {
     const playerVal = handValue(playerHand);
     const dealerVal = this.dealerPlay(dealerHand, deck);
 
-    const { result, color, net } = this.bjOutcome(playerVal, playerHand.length, dealerVal, currentBet, cur);
+    const { result, intent, net } = this.bjOutcome(playerVal, playerHand.length, dealerVal, currentBet, cur);
 
     if (net !== 0) {
       await this.settleBet(guildId, userId, net, 'blackjack', interactionId);
@@ -860,28 +872,28 @@ export class GamesManager {
 
     try {
       await interaction.editReply({
-        embeds: [this.bjEmbed(playerHand, dealerHand, `⏰ Time's up — auto-stand.\n\n${result}`, color, false)],
+        embeds: [this.bjEmbed(kit, playerHand, dealerHand, `⏰ Time's up — auto-stand.\n\n${result}`, intent, false)],
         components: [],
       });
     } catch { /* message may be gone */ }
   }
 
   /** Compute blackjack outcome. */
-  private bjOutcome(playerVal: number, playerCards: number, dealerVal: number, bet: number, cur: { cName: string; cEmoji: string }): { result: string; color: number; net: number } {
+  private bjOutcome(playerVal: number, playerCards: number, dealerVal: number, bet: number, cur: { cName: string; cEmoji: string }): { result: string; intent: BrandIntent; net: number } {
     const { cName, cEmoji } = cur;
     if (playerVal > 21) {
-      return { result: `Bust! You went over with **${playerVal}**. Lost ${cEmoji} **${bet.toLocaleString()}** ${cName}.`, color: 0xED4245, net: -bet };
+      return { result: `Bust! You went over with **${playerVal}**. Lost ${cEmoji} **${bet.toLocaleString()}** ${cName}.`, intent: 'danger', net: -bet };
     } else if (dealerVal > 21) {
-      return { result: `Dealer busts with **${dealerVal}**! You win ${cEmoji} **${bet.toLocaleString()}** ${cName}! 🎉`, color: 0x57F287, net: bet };
+      return { result: `Dealer busts with **${dealerVal}**! You win ${cEmoji} **${bet.toLocaleString()}** ${cName}! 🎉`, intent: 'primary', net: bet };
     } else if (playerVal === 21 && playerCards === 2) {
       const payout = Math.floor(bet * 1.5);
-      return { result: `♠️ BLACKJACK! You win ${cEmoji} **${payout.toLocaleString()}** ${cName}! 🎉`, color: 0x57F287, net: payout };
+      return { result: `♠️ BLACKJACK! You win ${cEmoji} **${payout.toLocaleString()}** ${cName}! 🎉`, intent: 'primary', net: payout };
     } else if (playerVal > dealerVal) {
-      return { result: `You win with **${playerVal}** vs dealer's **${dealerVal}**! Won ${cEmoji} **${bet.toLocaleString()}** ${cName}! 🎉`, color: 0x57F287, net: bet };
+      return { result: `You win with **${playerVal}** vs dealer's **${dealerVal}**! Won ${cEmoji} **${bet.toLocaleString()}** ${cName}! 🎉`, intent: 'primary', net: bet };
     } else if (playerVal < dealerVal) {
-      return { result: `Dealer wins with **${dealerVal}** vs your **${playerVal}**. Lost ${cEmoji} **${bet.toLocaleString()}** ${cName}.`, color: 0xED4245, net: -bet };
+      return { result: `Dealer wins with **${dealerVal}** vs your **${playerVal}**. Lost ${cEmoji} **${bet.toLocaleString()}** ${cName}.`, intent: 'danger', net: -bet };
     } else {
-      return { result: `Push! Both had **${playerVal}**. ${cName} returned.`, color: 0xFEE75C, net: 0 };
+      return { result: `Push! Both had **${playerVal}**. ${cName} returned.`, intent: 'warning', net: 0 };
     }
   }
 
@@ -899,15 +911,16 @@ export class GamesManager {
     const nextNumber = randomIntRange(1, 100);
     const answer = nextNumber > number ? 'higher' : nextNumber < number ? 'lower' : 'same';
 
+    const kit = brandKitFromConfig(config, interaction.guild?.name);
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle('📈 High or Low?')
-        .setDescription(
+      embeds: [brandedEmbed(kit, {
+        intent: 'info',
+        title: '📈 High or Low?',
+        description:
           `The number is **${number}**.\n` +
           `The next number was **${nextNumber}** — it was **${answer}**!\n\n` +
-          `*(Free game — no bet required. Play for fun!)*`
-        )
-        .setColor(0x5865F2)],
+          `*(Free game — no bet required. Play for fun!)*`,
+      })],
     });
   }
 
@@ -920,6 +933,7 @@ export class GamesManager {
       const guildId = interaction.guildId!;
       const userId = interaction.user.id;
       const { cName, cEmoji } = this.currencyOf(v.config);
+      const kit = brandKitFromConfig(v.config, interaction.guild?.name);
 
       const symbols = ['🍒', '🍋', '💎', '⭐', '7️⃣', '🔔'];
       const grid = Array.from({ length: 9 }, () => symbols[randomIntRange(0, symbols.length - 1)]);
@@ -950,10 +964,11 @@ export class GamesManager {
           return;
         }
         await interaction.reply({
-          embeds: [new EmbedBuilder()
-            .setTitle('🎫 Scratch Card')
-            .setDescription(`${display}\n\n${matchSymbol} x${maxMatch}! You won ${cEmoji} **${payout.toLocaleString()}** ${cName}! (${multiplier}x) 🎉`)
-            .setColor(0x57F287)],
+          embeds: [brandedEmbed(kit, {
+            intent: 'primary',
+            title: '🎫 Scratch Card',
+            description: `${display}\n\n${matchSymbol} x${maxMatch}! You won ${cEmoji} **${payout.toLocaleString()}** ${cName}! (${multiplier}x) 🎉`,
+          })],
         });
       } else {
         const ok = await this.settleBet(guildId, userId, -amount, 'scratch', interaction.id);
@@ -962,10 +977,11 @@ export class GamesManager {
           return;
         }
         await interaction.reply({
-          embeds: [new EmbedBuilder()
-            .setTitle('🎫 Scratch Card')
-            .setDescription(`${display}\n\nNo matches. You lost ${cEmoji} **${amount.toLocaleString()}** ${cName}. 😢`)
-            .setColor(0xED4245)],
+          embeds: [brandedEmbed(kit, {
+            intent: 'danger',
+            title: '🎫 Scratch Card',
+            description: `${display}\n\nNo matches. You lost ${cEmoji} **${amount.toLocaleString()}** ${cName}. 😢`,
+          })],
         });
       }
     } finally {
@@ -982,6 +998,7 @@ export class GamesManager {
       const guildId = interaction.guildId!;
       const userId = interaction.user.id;
       const { cName, cEmoji } = this.currencyOf(v.config);
+      const kit = brandKitFromConfig(v.config, interaction.guild?.name);
 
       const target = randomIntRange(1, 100);
       const playerGuess = interaction.options.getInteger('number') ?? randomIntRange(1, 100);
@@ -1007,13 +1024,13 @@ export class GamesManager {
       }
 
       await interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setTitle('🔢 Guess the Number')
-          .setDescription(
+        embeds: [brandedEmbed(kit, {
+          intent: net > 0 ? 'primary' : net < 0 ? 'danger' : 'warning',
+          title: '🔢 Guess the Number',
+          description:
             `Your guess: **${playerGuess}** | Target: **${target}**\n\n` +
-            `${msg} ${net > 0 ? `Won ${cEmoji} **${net.toLocaleString()}** ${cName}! 🎉` : net < 0 ? `Lost ${cEmoji} **${Math.abs(net).toLocaleString()}** ${cName}.` : 'Break even!'}`
-          )
-          .setColor(net > 0 ? 0x57F287 : net < 0 ? 0xED4245 : 0xFEE75C)],
+            `${msg} ${net > 0 ? `Won ${cEmoji} **${net.toLocaleString()}** ${cName}! 🎉` : net < 0 ? `Lost ${cEmoji} **${Math.abs(net).toLocaleString()}** ${cName}.` : 'Break even!'}`,
+        })],
       });
     } finally {
       await v.unlock();

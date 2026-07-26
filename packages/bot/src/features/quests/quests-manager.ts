@@ -7,7 +7,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
 import { eventBus } from '../../services/event-bus.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import { resolveBrandKit, brandKitFromConfig } from '../branding/brand-kit.js';
+import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
 
 const log = createLogger('Quests');
 
@@ -135,11 +136,14 @@ export class QuestsManager {
     });
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle('📋 Your Quests')
-        .setDescription(lines.join('\n') || 'No active quests.')
-        .setColor(0x5865F2)
-        .setFooter({ text: 'Use /quests claim to collect completed quest rewards' })],
+      embeds: [applyBrand(
+        new EmbedBuilder()
+          .setTitle('📋 Your Quests')
+          .setDescription(lines.join('\n') || 'No active quests.')
+          .setFooter({ text: 'Use /quests claim to collect completed quest rewards' }),
+        brandKitFromConfig(config, interaction.guild?.name),
+        { intent: 'info' },
+      )],
     });
   }
 
@@ -201,9 +205,10 @@ export class QuestsManager {
             .update({ claimed: false }).eq('id', row.id)).catch((e: unknown) => { log.warn('Reset claimed status failed:', (e as Error)?.message ?? e); });
         }
         await interaction.reply({
-          embeds: [new EmbedBuilder()
-            .setDescription('❌ Failed to pay out quest rewards. Please try again.')
-            .setColor(0xFF0000)],
+          embeds: [brandedEmbed(brandKitFromConfig(cfg, interaction.guild?.name), {
+            intent: 'danger',
+            description: '❌ Failed to pay out quest rewards. Please try again.',
+          })],
         });
         return;
       }
@@ -218,10 +223,11 @@ export class QuestsManager {
     });
 
     await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle('🎁 Quests Claimed!')
-        .setDescription(`Claimed **${claimed.length}** quest(s)!\n💰 +**${totalCurrency.toLocaleString()}** coins\n✨ +**${totalXp}** XP`)
-        .setColor(0x57F287)],
+      embeds: [brandedEmbed(brandKitFromConfig(cfg, interaction.guild?.name), {
+        intent: 'primary',
+        title: '🎁 Quests Claimed!',
+        description: `Claimed **${claimed.length}** quest(s)!\n💰 +**${totalCurrency.toLocaleString()}** coins\n✨ +**${totalXp}** XP`,
+      })],
     });
   }
 
