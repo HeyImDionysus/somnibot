@@ -6,6 +6,7 @@
  */
 'use client';
 
+import { VariableChips } from '@/components/shared/variable-chips';
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { useUnsavedWarning } from '@/hooks/use-unsaved-warning';
@@ -157,17 +158,7 @@ export default function WelcomePage() {
         <h3 className="text-sm font-semibold text-discord-text-primary mb-2">
           Available Variables
         </h3>
-        <div className="flex flex-wrap gap-2">
-          {VARIABLES.map((v) => (
-            <span
-              key={v.key}
-              className="rounded bg-discord-bg-tertiary px-2 py-1 text-xs text-discord-text-muted"
-            >
-              <code className="text-somni-cyan">{v.key}</code>{' '}
-              <span className="text-discord-text-muted">— {v.desc}</span>
-            </span>
-          ))}
-        </div>
+        <VariableChips variables={VARIABLES} />
       </section>
 
       {/* ═══ Welcome Message ═══ */}
@@ -214,14 +205,15 @@ export default function WelcomePage() {
                 className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-somni-pink focus:outline-none"
                 placeholder="Welcome to {server}, {user}!"
               />
-              <p className="mt-1.5 text-xs text-discord-text-muted">
-                <span className="font-medium text-discord-text-secondary">Variables:</span>{' '}
-                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{user}'}</code> mention,{' '}
-                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{user.name}'}</code> name,{' '}
-                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{server}'}</code> server name,{' '}
-                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{memberCount}'}</code> total members,{' '}
-                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{memberNumber}'}</code> join position
-              </p>
+              <VariableChips
+                variables={[
+                  { key: '{user}', desc: 'User mention' },
+                  { key: '{user.name}', desc: 'Username' },
+                  { key: '{server}', desc: 'Server name' },
+                  { key: '{memberCount}', desc: 'Total members' },
+                  { key: '{memberNumber}', desc: 'Join position' },
+                ]}
+              />
             </div>
 
             {/* Welcome Card */}
@@ -377,13 +369,14 @@ export default function WelcomePage() {
                 className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-somni-pink focus:outline-none"
                 placeholder="{user.name} left. They were with us for {duration}. 👋"
               />
-              <p className="mt-1.5 text-xs text-discord-text-muted">
-                <span className="font-medium text-discord-text-secondary">Variables:</span>{' '}
-                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{user.name}'}</code> name,{' '}
-                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{server}'}</code> server name,{' '}
-                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{memberCount}'}</code> total members,{' '}
-                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{duration}'}</code> time in server
-              </p>
+              <VariableChips
+                variables={[
+                  { key: '{user.name}', desc: 'Username' },
+                  { key: '{server}', desc: 'Server name' },
+                  { key: '{memberCount}', desc: 'Total members' },
+                  { key: '{duration}', desc: 'Time in server' },
+                ]}
+              />
             </div>
 
             {/* Send Test Goodbye */}
