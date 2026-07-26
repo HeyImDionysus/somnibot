@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 190 migration files in packages/supabase/migrations/
+ * Source: 193 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -2097,6 +2097,12 @@ export interface DbLevelUnlockConfigs {
   feature_key: string;
   required_level: number;
   unlock_message: string | null;
+}
+
+export interface DbMemberErasures {
+  guild_id: string;
+  discord_id: string;
+  erased_at: string;
 }
 
 export interface DbMemberFeatureUnlocks {
