@@ -159,7 +159,11 @@ export class ConfigWatcher {
             invalidateAchievementsCache(this.guild.id);
             invalidateProfilesCache(this.guild.id);
             invalidateHeistCache(this.guild.id);
-            log.info('Economy/Gathering/Crafting/Farming config cache invalidated');
+            // currency_name/currency_emoji are part of the brand kit, and the
+            // economy dashboard route notifies 'economy' — a currency rename
+            // must not leave brand surfaces on the old currency for the TTL.
+            invalidateBrandKitCache(this.guild.id);
+            log.info('Economy/Gathering/Crafting/Farming config cache invalidated (incl. brand kit currency)');
             break;
           case 'branding':
             invalidateBrandKitCache(this.guild.id);

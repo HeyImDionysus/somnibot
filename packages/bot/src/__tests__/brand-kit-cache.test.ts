@@ -11,6 +11,9 @@
  *   4. The ROW is cached, not the projected kit — per-call fallbackName still
  *      applies to cached reads.
  *   5. currency_name/currency_emoji ride along on the same row.
+ *   6. Generation token: an invalidation landing while a resolve is awaiting
+ *      the DB means the fetched row may be stale — it must NOT be cached, and
+ *      a slow stale resolve must never overwrite a fresher cached row.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
@@ -192,6 +195,95 @@ describe('failed reads are never cached', () => {
     expect((await resolveBrandKit(supabase, 'g1')).primaryColor).toBe(0xff1493);
     failing = false; // database recovers within the would-be TTL window
     expect((await resolveBrandKit(supabase, 'g1')).primaryColor).toBe(0xabcdef);
+  });
+});
+
+describe('cache generation token — invalidation during in-flight resolves', () => {
+  /**
+   * Like configSupabase, but each maybeSingle() call returns a promise the
+   * test settles by hand, so invalidations can be interleaved while a
+   * resolve is genuinely awaiting the DB.
+   */
+  function manualSupabase() {
+    const pending: Array<(r: { data: unknown; error: unknown }) => void> = [];
+    const from = vi.fn(() => {
+      const chain: any = {};
+      for (const m of ['select', 'eq']) chain[m] = vi.fn(() => chain);
+      chain.maybeSingle = vi.fn(
+        () =>
+          new Promise<{ data: unknown; error: unknown }>((resolve) => {
+            pending.push(resolve);
+          }),
+      );
+      return chain;
+    });
+    return { supabase: { from } as any, from, pending };
+  }
+
+  it('invalidateBrandKitCache(guildId) during an in-flight resolve → result NOT cached', async () => {
+    const { supabase, from, pending } = manualSupabase();
+
+    const inflight = resolveBrandKit(supabase, 'g1'); // captures generation, awaits DB
+    invalidateBrandKitCache('g1'); // dashboard save lands mid-read
+    pending[0]!({ data: { brand_primary_color: 0x111111 }, error: null });
+
+    // The resolve still answers from its own read...
+    expect((await inflight).primaryColor).toBe(0x111111);
+
+    // ...but the stale row must not have been pinned: the next call re-reads.
+    const second = resolveBrandKit(supabase, 'g1');
+    pending[1]!({ data: { brand_primary_color: 0x222222 }, error: null });
+    expect((await second).primaryColor).toBe(0x222222);
+    expect(from).toHaveBeenCalledTimes(2);
+  });
+
+  it('no-arg invalidateBrandKitCache() during an in-flight resolve → result NOT cached', async () => {
+    const { supabase, from, pending } = manualSupabase();
+
+    const inflight = resolveBrandKit(supabase, 'g1');
+    invalidateBrandKitCache(); // global epoch bump mid-read
+    pending[0]!({ data: { brand_primary_color: 0x111111 }, error: null });
+    await inflight;
+
+    const second = resolveBrandKit(supabase, 'g1');
+    pending[1]!({ data: { brand_primary_color: 0x222222 }, error: null });
+    expect((await second).primaryColor).toBe(0x222222);
+    expect(from).toHaveBeenCalledTimes(2);
+  });
+
+  it('two overlapping resolves — the later invalidation wins over a slow stale read', async () => {
+    const { supabase, from, pending } = manualSupabase();
+
+    const slowStale = resolveBrandKit(supabase, 'g1'); // pre-save read, awaits DB
+    invalidateBrandKitCache('g1'); // owner saves a new color
+    const fresh = resolveBrandKit(supabase, 'g1'); // post-save read
+
+    pending[1]!({ data: { brand_primary_color: 0x00ff00 }, error: null });
+    expect((await fresh).primaryColor).toBe(0x00ff00); // fresh row cached
+
+    pending[0]!({ data: { brand_primary_color: 0xdead00 }, error: null });
+    expect((await slowStale).primaryColor).toBe(0xdead00); // its own read...
+
+    // ...but it must NOT have clobbered the fresher cached row.
+    expect((await resolveBrandKit(supabase, 'g1')).primaryColor).toBe(0x00ff00);
+    expect(from).toHaveBeenCalledTimes(2); // third call served from cache
+  });
+
+  it('generation-counter eviction fails CLOSED — the in-flight result is still not cached', async () => {
+    const { supabase, from, pending } = manualSupabase();
+
+    const inflight = resolveBrandKit(supabase, 'g1'); // captures generation
+    invalidateBrandKitCache('g1');
+    // Flood the per-guild counter map past its cap so g1's counter is evicted
+    // mid-flight. The epoch bump on eviction must keep the capture stale.
+    for (let i = 0; i < 10_000; i++) invalidateBrandKitCache(`evicted-${i}`);
+    pending[0]!({ data: { brand_primary_color: 0x111111 }, error: null });
+    await inflight;
+
+    const second = resolveBrandKit(supabase, 'g1');
+    pending[1]!({ data: { brand_primary_color: 0x222222 }, error: null });
+    expect((await second).primaryColor).toBe(0x222222);
+    expect(from).toHaveBeenCalledTimes(2);
   });
 });
 

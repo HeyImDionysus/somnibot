@@ -2,24 +2,26 @@
  * Tests for /api/branding — white-label brand kit read/write route.
  *
  * Covers:
+ *  - OWNER-ONLY auth: both GET and PUT gate on requireGuildOwner (matching the
+ *    sibling settings routes) — store_brand_name feeds the PayPal checkout
+ *    brand_name, so a delegated dashboard role must never control it.
  *  - GET returns the 5 brand columns scoped to the auth guild (empty object
  *    when no config row exists yet).
  *  - PUT validation mirrors the guild_config CHECK constraints exactly:
  *    colors int 0..16777215 or null, preset enum, name ≤64 nullable,
  *    powered-by boolean; unknown keys and empty payloads are rejected so a
  *    passing payload can never die as a raw 23514 CHECK violation.
- *  - PUT scopes the update to the auth guild and notifies the bot with the
- *    'branding' section so its brand kit cache invalidates immediately.
- *  - Auth failures map through authErrorResponse; rate limiting short-circuits.
+ *  - PUT UPSERTS on guild_id so a pre-init guild (no guild_config row yet)
+ *    persists the save instead of a 0-row update reporting phantom success.
+ *  - PUT reads the changed keys' prior values before the write and passes
+ *    them to notifyBot('branding', changes, ..., before) so the bot's
+ *    config.updated audit row carries a real before_state.
+ *  - Rate limiting short-circuits before auth or DB work.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('@/lib/rbac', () => ({
-  requirePermission: vi.fn(),
-  authErrorResponse: vi.fn(() =>
-    // Minimal stand-in for the real 401/403 mapper.
-    new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
-  ),
+vi.mock('@/lib/api/require-owner', () => ({
+  requireGuildOwner: vi.fn(),
 }));
 vi.mock('@/lib/supabase/admin', () => ({
   createAdminSupabase: vi.fn(),
@@ -33,15 +35,16 @@ vi.mock('@/lib/notify-bot', () => ({
 
 import { NextRequest } from 'next/server';
 import { GET, PUT } from '@/app/api/branding/route';
-import { requirePermission } from '@/lib/rbac';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { notifyBot } from '@/lib/notify-bot';
+import { mockAuthSuccess, mockAuthUnauthorized, mockAuthForbidden } from './helpers/mock-auth';
 
 const mockFrom = vi.fn();
 const mockSupabase = { from: mockFrom };
 
-/** guild_config select().eq().maybeSingle() chain for GET. */
+/** guild_config select().eq().maybeSingle() chain for GET / the PUT before-read. */
 function makeSelectChain(result: { data: unknown; error: unknown }) {
   const chain: any = {
     select: vi.fn(),
@@ -53,14 +56,20 @@ function makeSelectChain(result: { data: unknown; error: unknown }) {
   return chain;
 }
 
-/** guild_config update().eq() thenable chain for PUT. */
-function makeUpdateChain(result: { error: unknown } = { error: null }) {
-  const chain: any = {
-    update: vi.fn(),
-    eq: vi.fn(async () => result),
-  };
-  chain.update.mockReturnValue(chain);
-  return chain;
+/** guild_config upsert() thenable chain for the PUT write. */
+function makeUpsertChain(result: { error: unknown } = { error: null }) {
+  return { upsert: vi.fn(async () => result) } as any;
+}
+
+/**
+ * Wire the PUT's two from('guild_config') calls in order: the before-read
+ * select, then the upsert write.
+ */
+function mockPutChains(opts: { prior?: unknown; priorError?: unknown; upsertError?: unknown } = {}) {
+  const selectChain = makeSelectChain({ data: opts.prior ?? null, error: opts.priorError ?? null });
+  const upsertChain = makeUpsertChain({ error: opts.upsertError ?? null });
+  mockFrom.mockReturnValueOnce(selectChain).mockReturnValueOnce(upsertChain);
+  return { selectChain, upsertChain };
 }
 
 function makePutRequest(body: unknown) {
@@ -71,23 +80,11 @@ function makePutRequest(body: unknown) {
   });
 }
 
-function authError() {
-  const err = new Error('Forbidden');
-  err.name = 'AuthError';
-  return err;
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockSupabase);
   (checkAdminRateLimit as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-  (requirePermission as ReturnType<typeof vi.fn>).mockResolvedValue({
-    userId: 'user-1',
-    discordId: 'discord-1',
-    guildId: 'guild-123',
-    isOwner: true,
-    permissions: ['dashboard.full_access'],
-  });
+  mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>, { guildId: 'guild-123' });
 });
 
 describe('GET /api/branding', () => {
@@ -111,7 +108,7 @@ describe('GET /api/branding', () => {
       'store_brand_name, store_show_powered_by, brand_primary_color, brand_accent_color, brand_voice_preset',
     );
     expect(chain.eq).toHaveBeenCalledWith('guild_id', 'guild-123');
-    expect(requirePermission).toHaveBeenCalledWith('dashboard.manage_server');
+    expect(requireGuildOwner).toHaveBeenCalled();
   });
 
   it('returns an empty object when no config row exists yet', async () => {
@@ -131,19 +128,33 @@ describe('GET /api/branding', () => {
     expect((await res.json()).success).toBe(false);
   });
 
-  it('maps AuthError through authErrorResponse', async () => {
-    (requirePermission as ReturnType<typeof vi.fn>).mockRejectedValue(authError());
+  it('returns 401 when there is no valid session', async () => {
+    mockAuthUnauthorized(requireGuildOwner as ReturnType<typeof vi.fn>);
 
     const res = await GET();
     expect(res.status).toBe(401);
     expect(mockFrom).not.toHaveBeenCalled();
   });
+
+  it('returns 403 for an authenticated non-owner (owner-only surface)', async () => {
+    mockAuthForbidden(requireGuildOwner as ReturnType<typeof vi.fn>);
+
+    const res = await GET();
+    expect(res.status).toBe(403);
+    expect(mockFrom).not.toHaveBeenCalled();
+  });
 });
 
 describe('PUT /api/branding — happy path', () => {
-  it('updates the parsed fields for the auth guild and notifies the bot', async () => {
-    const chain = makeUpdateChain();
-    mockFrom.mockReturnValue(chain);
+  it('upserts the parsed fields keyed on the auth guild and notifies the bot with before-values', async () => {
+    const prior = {
+      store_brand_name: 'Old Name',
+      store_show_powered_by: true,
+      brand_primary_color: 0x111111,
+      brand_accent_color: 0x222222,
+      brand_voice_preset: 'default',
+    };
+    const { selectChain, upsertChain } = mockPutChains({ prior });
 
     const payload = {
       store_brand_name: 'Acme Support',
@@ -157,43 +168,69 @@ describe('PUT /api/branding — happy path', () => {
 
     expect(body).toEqual({ success: true });
     expect(mockFrom).toHaveBeenCalledWith('guild_config');
-    expect(chain.update).toHaveBeenCalledWith(payload);
-    expect(chain.eq).toHaveBeenCalledWith('guild_id', 'guild-123');
-    expect(notifyBot).toHaveBeenCalledWith('branding');
+    // Before-read selects exactly the changed keys for the auth guild.
+    expect(selectChain.select).toHaveBeenCalledWith(Object.keys(payload).join(', '));
+    expect(selectChain.eq).toHaveBeenCalledWith('guild_id', 'guild-123');
+    // Upsert (not update) keyed on the guild_config PK.
+    expect(upsertChain.upsert).toHaveBeenCalledWith(
+      { guild_id: 'guild-123', ...payload },
+      { onConflict: 'guild_id' },
+    );
+    // The audit payload carries the changed keys AND their prior values.
+    expect(notifyBot).toHaveBeenCalledWith('branding', payload, 'dashboard', undefined, prior);
   });
 
-  it('accepts a partial update (single field)', async () => {
-    const chain = makeUpdateChain();
-    mockFrom.mockReturnValue(chain);
+  it('persists a save for a pre-init guild with no guild_config row yet', async () => {
+    const { upsertChain } = mockPutChains({ prior: null });
 
     const res = await PUT(makePutRequest({ brand_voice_preset: 'professional' }));
 
     expect((await res.json()).success).toBe(true);
-    expect(chain.update).toHaveBeenCalledWith({ brand_voice_preset: 'professional' });
+    expect(upsertChain.upsert).toHaveBeenCalledWith(
+      { guild_id: 'guild-123', brand_voice_preset: 'professional' },
+      { onConflict: 'guild_id' },
+    );
+    // No prior row → no before payload (bot falls back to its own snapshot).
+    expect(notifyBot).toHaveBeenCalledWith(
+      'branding', { brand_voice_preset: 'professional' }, 'dashboard', undefined, undefined,
+    );
+  });
+
+  it('a failed before-read never blocks the save', async () => {
+    const { upsertChain } = mockPutChains({ priorError: { message: 'transient' } });
+
+    const res = await PUT(makePutRequest({ store_show_powered_by: true }));
+
+    expect((await res.json()).success).toBe(true);
+    expect(upsertChain.upsert).toHaveBeenCalled();
+    expect(notifyBot).toHaveBeenCalledWith(
+      'branding', { store_show_powered_by: true }, 'dashboard', undefined, undefined,
+    );
   });
 
   it('normalizes a blank brand name to NULL (falls back to the guild name)', async () => {
-    const chain = makeUpdateChain();
-    mockFrom.mockReturnValue(chain);
+    const { upsertChain } = mockPutChains();
 
     await PUT(makePutRequest({ store_brand_name: '   ' }));
 
-    expect(chain.update).toHaveBeenCalledWith({ store_brand_name: null });
+    expect(upsertChain.upsert).toHaveBeenCalledWith(
+      { guild_id: 'guild-123', store_brand_name: null },
+      { onConflict: 'guild_id' },
+    );
   });
 
   it('boundary colors 0 and 16777215 are accepted', async () => {
-    const chain = makeUpdateChain();
-    mockFrom.mockReturnValue(chain);
+    const { upsertChain } = mockPutChains();
 
     const res = await PUT(
       makePutRequest({ brand_primary_color: 0, brand_accent_color: 16777215 }),
     );
 
     expect((await res.json()).success).toBe(true);
-    expect(chain.update).toHaveBeenCalledWith({
-      brand_primary_color: 0,
-      brand_accent_color: 16777215,
-    });
+    expect(upsertChain.upsert).toHaveBeenCalledWith(
+      { guild_id: 'guild-123', brand_primary_color: 0, brand_accent_color: 16777215 },
+      { onConflict: 'guild_id' },
+    );
   });
 });
 
@@ -243,12 +280,12 @@ describe('PUT /api/branding — auth, rate limit, DB failure', () => {
     const res = await PUT(makePutRequest({ brand_voice_preset: 'default' }));
 
     expect(res.status).toBe(429);
-    expect(requirePermission).not.toHaveBeenCalled();
+    expect(requireGuildOwner).not.toHaveBeenCalled();
     expect(mockFrom).not.toHaveBeenCalled();
   });
 
-  it('maps AuthError through authErrorResponse', async () => {
-    (requirePermission as ReturnType<typeof vi.fn>).mockRejectedValue(authError());
+  it('returns 401 when there is no valid session', async () => {
+    mockAuthUnauthorized(requireGuildOwner as ReturnType<typeof vi.fn>);
 
     const res = await PUT(makePutRequest({ brand_voice_preset: 'default' }));
 
@@ -257,8 +294,18 @@ describe('PUT /api/branding — auth, rate limit, DB failure', () => {
     expect(notifyBot).not.toHaveBeenCalled();
   });
 
-  it('maps a DB update error to a generic 500 and does not notify the bot', async () => {
-    mockFrom.mockReturnValue(makeUpdateChain({ error: { message: '23514 check violation' } }));
+  it('returns 403 for an authenticated non-owner (owner-only surface)', async () => {
+    mockAuthForbidden(requireGuildOwner as ReturnType<typeof vi.fn>);
+
+    const res = await PUT(makePutRequest({ brand_voice_preset: 'default' }));
+
+    expect(res.status).toBe(403);
+    expect(mockFrom).not.toHaveBeenCalled();
+    expect(notifyBot).not.toHaveBeenCalled();
+  });
+
+  it('maps a DB upsert error to a generic 500 and does not notify the bot', async () => {
+    mockPutChains({ upsertError: { message: '23514 check violation' } });
 
     const res = await PUT(makePutRequest({ brand_primary_color: 0x123456 }));
 

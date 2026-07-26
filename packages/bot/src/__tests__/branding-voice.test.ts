@@ -36,7 +36,10 @@ describe("voice('default', ...) is byte-identical to current live copy", () => {
     );
   });
 
-  it('insufficient_funds — balance refusal (e.g. pets-manager.ts:325, polls-manager.ts:559)', () => {
+  it('insufficient_funds — shared KERNEL of the balance refusals (no live site is byte-identical)', () => {
+    // pets-manager.ts:325, polls-manager.ts:559 and lottery-manager.ts:367
+    // each add copy around this kernel today — see the voice.ts module doc
+    // before migrating any of them onto voice().
     expect(voice('default', 'insufficient_funds', { amount: '1,000', currency: 'coins' })).toBe(
       '❌ You need **1,000** coins.',
     );

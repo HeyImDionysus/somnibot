@@ -154,6 +154,10 @@ describe('ConfigWatcher', () => {
     expect(mocks.invalidateAchievementsCache).toHaveBeenCalled();
     expect(mocks.invalidateProfilesCache).toHaveBeenCalled();
     expect(mocks.invalidateHeistCache).toHaveBeenCalled();
+    // currency_name/currency_emoji are part of the brand kit, and the economy
+    // dashboard route notifies 'economy' — a currency rename must invalidate
+    // the kit too, or brand surfaces show the old currency for the TTL.
+    expect(mocks.invalidateBrandKitCache).toHaveBeenCalledWith('guild-1');
   });
 
   it('invalidates the brand kit cache on section=branding', async () => {
