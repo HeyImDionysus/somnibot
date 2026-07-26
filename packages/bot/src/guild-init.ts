@@ -12,6 +12,7 @@
  */
 
 import type { Guild, RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
+import { backfillMembers } from './features/welcome/member-service.js';
 import { REST, Routes } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
@@ -227,6 +228,14 @@ export async function initGuildFeatures(
   // V11 Audit C-3: Interval increased to 5 min (matches new default).
   services.snapshotTimer = startPeriodicSnapshots(guild, supabase, 300_000);
   guildLog.info('Guild snapshots started (5 min)');
+
+  // Roster backfill: member rows were only written by guildMemberAdd, so a
+  // server that existed before the bot was installed had an empty members
+  // table forever — the dashboard's Members page showed nobody. Fire and
+  // forget; init must not wait on a large member fetch.
+  void backfillMembers(supabase, guild).catch((err) => {
+    guildLog.warn('Member roster backfill failed', { error: String(err) });
+  });
   const aqHandle = await startActionQueueListener(guild, supabase);
   services.actionQueueStaleTimer = aqHandle.staleRecoveryTimer;
   services.actionQueueStop = aqHandle.stop;

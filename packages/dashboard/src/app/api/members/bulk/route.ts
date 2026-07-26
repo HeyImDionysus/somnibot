@@ -10,6 +10,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { enrichMembers } from '@/lib/api/member-enrichment';
 
 export async function POST(req: NextRequest) {
   const rateLimited = await checkAdminRateLimit(req, 'bulk');
@@ -93,9 +94,12 @@ export async function POST(req: NextRequest) {
     }
 
     case 'export': {
+      // Identity from members; xp/level/wallet/bank/moderation state joined
+      // from their real tables — selecting them here as members columns made
+      // every export fail with "column does not exist".
       const { data: members, error } = await admin
         .from('members')
-        .select('discord_id, username, display_name, joined_at, xp, level, wallet, bank, roles')
+        .select('discord_id, username, joined_at, roles')
         .eq('guild_id', guildId)
         .in('discord_id', member_ids)
         .limit(1000);
@@ -104,9 +108,11 @@ export async function POST(req: NextRequest) {
         return dbError(error, 'members/bulk');
       }
 
+      const enriched = await enrichMembers(admin, guildId, members ?? []);
+
       return NextResponse.json({
         success: true,
-        data: members,
+        data: enriched,
         format: 'json',
       });
     }
