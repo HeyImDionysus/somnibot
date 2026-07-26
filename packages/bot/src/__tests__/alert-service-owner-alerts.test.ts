@@ -7,7 +7,7 @@
  * row AND post to guild_config.alert_channel_id; resolveOwnerAlert must mark
  * matching unresolved rows resolved and post a short recovery notice.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@somnibot/shared', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
@@ -17,6 +17,8 @@ import {
   raiseOwnerAlert,
   resolveOwnerAlert,
   clearAlertChannelCache,
+  clearOwnerAlertPingThrottle,
+  invalidateAlertChannelCache,
 } from '../services/alert-service.js';
 
 // ── Fakes ────────────────────────────────────────────────────
@@ -83,7 +85,14 @@ function makeGuild() {
 
 beforeEach(() => {
   clearAlertChannelCache();
+  clearOwnerAlertPingThrottle();
 });
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+const PING_WINDOW_MS = 5 * 60_000;
 
 // ── raiseOwnerAlert ──────────────────────────────────────────
 
@@ -166,43 +175,154 @@ describe('raiseOwnerAlert', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it('treats a 23505 as dedupe: no repeat Discord ping, code surfaced for refresh-in-place callers', async () => {
+  it('posts the channelMessage override to the channel while the ROW keeps the full message', async () => {
+    const { supabase, inserted } = makeSupabase({ alertChannelId: 'ch1' });
+    const { guild, send } = makeGuild();
+
+    const result = await raiseOwnerAlert(supabase, 'g1', {
+      alertType: 'ticket_create_failed',
+      severity: 'warning',
+      title: 'Ticket could not be created',
+      message: 'creation failed at the insert stage: duplicate key value violates "tickets_pkey"',
+      channelMessage:
+        "A member tried to open a ticket but the bot couldn't save it — details are on the dashboard Alerts page.",
+      guild,
+    });
+
+    expect(result.delivered).toBe(true);
+    // Full detail preserved in the alerts row (dashboard)…
+    expect(inserted[0].message).toContain('duplicate key value');
+    // …raw DB error kept out of the channel-visible embed.
+    const embed = (send.mock.calls[0][0] as any).embeds[0];
+    expect(embed.description).not.toContain('duplicate key value');
+    expect(embed.description).toContain('dashboard Alerts page');
+  });
+
+  it('throttles a burst of raises: 1 ping, N rows', async () => {
+    const { supabase, inserted } = makeSupabase({ alertChannelId: 'ch1' });
+    const { guild, send } = makeGuild();
+
+    for (let i = 0; i < 4; i++) {
+      await raiseOwnerAlert(supabase, 'g1', {
+        alertType: 'message_log_degraded',
+        severity: 'warning',
+        title: 'Message logging degraded',
+        message: `Config unreadable (attempt ${i}).`,
+        guild,
+      });
+    }
+
+    expect(inserted).toHaveLength(4);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('23505 dedupe STILL pings once the window has elapsed (crash-between-insert-and-ping recovery)', async () => {
+    vi.useFakeTimers({ now: 1_000_000 });
     const { supabase } = makeSupabase({
       alertChannelId: 'ch1',
       insertError: { code: '23505', message: 'duplicate key' },
     });
     const { guild, send } = makeGuild();
-
-    const result = await raiseOwnerAlert(supabase, 'g1', {
+    const input = {
       alertType: 'action_queue_depth_commerce',
-      severity: 'critical',
+      severity: 'critical' as const,
       title: 'Commerce queue backing up',
       message: 'Depth 12.',
       guild,
-    });
+    };
 
-    expect(result).toEqual({ inserted: false, insertErrorCode: '23505', delivered: false });
-    expect(send).not.toHaveBeenCalled();
+    // The unresolved row already exists (23505), but no ping was recorded this
+    // boot — the original ping may have been lost to a crash. The dedupe path
+    // must ping instead of staying permanently silent until the row resolves.
+    const first = await raiseOwnerAlert(supabase, 'g1', input);
+    expect(first).toEqual({ inserted: false, insertErrorCode: '23505', delivered: true });
+    expect(send).toHaveBeenCalledTimes(1);
+
+    // Inside the window: suppressed (the old no-repeat-ping dedupe behavior).
+    const second = await raiseOwnerAlert(supabase, 'g1', input);
+    expect(second).toEqual({ inserted: false, insertErrorCode: '23505', delivered: false });
+    expect(send).toHaveBeenCalledTimes(1);
+
+    // Window elapsed: the long-lived unresolved alert re-pings.
+    vi.advanceTimersByTime(PING_WINDOW_MS + 1);
+    const third = await raiseOwnerAlert(supabase, 'g1', input);
+    expect(third.delivered).toBe(true);
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
-  it('still attempts channel delivery when the row insert fails for a non-dedupe reason', async () => {
+  it('still attempts channel delivery when the row insert fails for a non-dedupe reason — throttled', async () => {
     const { supabase } = makeSupabase({
       alertChannelId: 'ch1',
       insertError: { code: '57P01', message: 'db down' },
     });
     const { guild, send } = makeGuild();
-
-    const result = await raiseOwnerAlert(supabase, 'g1', {
+    const input = {
       alertType: 'anti_raid_action_failed',
-      severity: 'warning',
+      severity: 'warning' as const,
       title: 'Anti-raid failed',
       message: 'Kick failed.',
       guild,
-    });
+    };
 
+    const result = await raiseOwnerAlert(supabase, 'g1', input);
     expect(result.inserted).toBe(false);
     expect(result.insertErrorCode).toBe('57P01');
     expect(result.delivered).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+
+    // With NO row written a persistent DB outage used to ping on every raise —
+    // the same throttle window now bounds it.
+    const repeat = await raiseOwnerAlert(supabase, 'g1', input);
+    expect(repeat.delivered).toBe(false);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('throttle is scoped per (guild, alertType): a different type pings immediately', async () => {
+    const { supabase } = makeSupabase({ alertChannelId: 'ch1' });
+    const { guild, send } = makeGuild();
+
+    await raiseOwnerAlert(supabase, 'g1', {
+      alertType: 'message_log_degraded',
+      severity: 'warning',
+      title: 'Message logging degraded',
+      message: 'Config unreadable.',
+      guild,
+    });
+    const other = await raiseOwnerAlert(supabase, 'g1', {
+      alertType: 'ticket_create_failed',
+      severity: 'warning',
+      title: 'Ticket could not be created',
+      message: 'Insert failed.',
+      guild,
+    });
+
+    expect(other.delivered).toBe(true);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it('invalidateAlertChannelCache drops a cached negative so a newly set channel takes effect at once', async () => {
+    const opts: { alertChannelId: string | null } = { alertChannelId: null };
+    const { supabase } = makeSupabase(opts);
+    const { guild, send } = makeGuild();
+    const input = {
+      alertType: 'starboard_channel_missing',
+      severity: 'warning' as const,
+      title: 'Starboard channel is missing',
+      message: 'Gone.',
+      guild,
+    };
+
+    // No channel configured yet — the negative gets cached.
+    expect((await raiseOwnerAlert(supabase, 'g1', input)).delivered).toBe(false);
+
+    // Owner configures the channel; the stale negative would otherwise stick
+    // for the full TTL.
+    opts.alertChannelId = 'ch1';
+    expect((await raiseOwnerAlert(supabase, 'g1', input)).delivered).toBe(false);
+
+    // ConfigWatcher wiring: invalidate on settings change → next raise delivers.
+    invalidateAlertChannelCache('g1');
+    expect((await raiseOwnerAlert(supabase, 'g1', input)).delivered).toBe(true);
     expect(send).toHaveBeenCalledTimes(1);
   });
 });
@@ -266,5 +386,24 @@ describe('resolveOwnerAlert', () => {
 
     expect(count).toBe(2);
     expect(updates).toHaveLength(1);
+  });
+
+  it('clears the ping throttle on resolve so a NEW occurrence pings immediately', async () => {
+    const { supabase } = makeSupabase({ alertChannelId: 'ch1', resolvedRows: [{ id: 'a1' }] });
+    const { guild, send } = makeGuild();
+    const input = {
+      alertType: 'message_log_degraded',
+      severity: 'warning' as const,
+      title: 'Message logging degraded',
+      message: 'Config unreadable.',
+      guild,
+    };
+
+    await raiseOwnerAlert(supabase, 'g1', input); // ping #1 (throttle armed)
+    await resolveOwnerAlert(supabase, 'g1', 'message_log_degraded', undefined, { guild }); // recovery notice #2
+    const reRaise = await raiseOwnerAlert(supabase, 'g1', input); // fresh incident → ping #3, not suppressed
+
+    expect(reRaise.delivered).toBe(true);
+    expect(send).toHaveBeenCalledTimes(3);
   });
 });

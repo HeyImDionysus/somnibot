@@ -58,6 +58,12 @@ async function reportTicketCreateFailure(
       message:
         `A member tried to open a ticket but creation failed at the ${input.stage} stage: ${input.error}. ` +
         `Check the bot's Manage Channels permission and the panel's category configuration.`,
+      // Raw error strings stay in the alerts ROW (message/metadata above);
+      // the channel-visible notice is generic plain language.
+      channelMessage:
+        `A member tried to open a ticket but the bot couldn't save it — details are on the ` +
+        `dashboard Alerts page. Check the bot's Manage Channels permission and the panel's ` +
+        `category configuration.`,
       metadata: { panel_id: input.panelId, member_id: input.userDiscordId, stage: input.stage, error: input.error },
       guild,
     });

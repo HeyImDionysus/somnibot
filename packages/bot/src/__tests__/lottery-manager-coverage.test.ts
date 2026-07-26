@@ -38,7 +38,7 @@ function makeSupabase(tableData: Record<string, any> = {}, rpcResults: Record<st
   const fromMock = vi.fn();
   fromMock.mockImplementation((table: string) => {
     const chain: Record<string, any> = {};
-    const methods = ['select', 'eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'in', 'is', 'order', 'limit', 'single', 'insert', 'update', 'delete', 'maybeSingle'];
+    const methods = ['select', 'eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'in', 'is', 'order', 'limit', 'single', 'insert', 'update', 'delete', 'maybeSingle', 'contains'];
     for (const m of methods) {
       chain[m] = vi.fn().mockReturnValue(chain);
     }
@@ -372,6 +372,33 @@ describe('LotteryManager', () => {
       // and returned no row, so no wallet credit may happen.
       expect(rpcNames(supabase).filter((n: string) => n === 'lottery_award_jackpot')).toHaveLength(1);
       expect(rpcNames(supabase)).not.toContain('economy_add_balance');
+    });
+
+    it('zero-rows award (winner paid on a prior tick, response lost) resolves the draw-degraded alert', async () => {
+      supabase = makeSupabase(
+        {
+          economy_lottery_drawings: { id: 'd1', jackpot: 1000, status: 'drawing', winner_user_id: 'u2', winning_number: 77 },
+          alerts: [{ id: 'a1' }],
+        },
+        { lottery_award_jackpot: { data: [], error: null } },
+      );
+      mgr = new LotteryManager(supabase as any);
+      const result = await mgr.drawWinner('g1');
+      expect(result).toBeNull();
+      // The previous tick paid the winner but lost the RPC response and raised
+      // a "winner still owed" alert. This zero-rows tick is the LAST one that
+      // ever sees the drawing — it must close that alert or it stays open
+      // forever.
+      const alertUpdates = updatePayloads(supabase, 'alerts');
+      expect(alertUpdates).toHaveLength(1);
+      expect(alertUpdates[0]).toMatchObject({ resolved: true });
+      // Narrowed to THIS drawing — a broad resolve could close a different
+      // drawing's still-owed alert.
+      const alertChains = supabase.from.mock.calls
+        .map((args: any[], i: number) => ({ table: args[0], chain: supabase.from.mock.results[i].value }))
+        .filter((e: any) => e.table === 'alerts');
+      const containsArgs = alertChains.flatMap((e: any) => e.chain.contains.mock.calls);
+      expect(containsArgs).toContainEqual(['metadata', { drawing_id: 'd1' }]);
     });
 
     it('does not cancel or announce a reset while a payout retry is pending', async () => {

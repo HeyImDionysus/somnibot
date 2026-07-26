@@ -47,6 +47,14 @@ const _lastAuditedConfig = new Map<string, MessageLogConfig>();
 const DEGRADED_NOTIFY_TTL = 5 * 60_000;
 const _degradedNotified = new Map<string, number>();
 
+// Guilds whose FIRST successful config load this boot already ran alert
+// recovery. Raise → restart → recover used to leave the alert row open
+// forever: the resolve in loadConfig only fired when the in-memory
+// _degradedNotified flag from the ORIGINAL raise still existed, and a restart
+// wipes it. One cheap resolveOwnerAlert (usually 0 open rows) per guild per
+// process lifetime closes rows raised before a restart.
+const _bootRecoveryDone = new Set<string>();
+
 /** Shallow value-equality for the audited config fields. */
 function configsEqual(a: MessageLogConfig, b: MessageLogConfig): boolean {
   return (
@@ -109,6 +117,11 @@ async function notifyMessageLogDegraded(client: SomniClient, guildId: string, er
       message:
         `The message-log config could not be read from the database (${errorMessage}). ` +
         `Edit/delete logging is disabled until the database recovers.`,
+      // Raw DB error strings stay in the alerts ROW (message/metadata above);
+      // the channel-visible notice is generic plain language.
+      channelMessage:
+        'The message-log config could not be read from the database, so edit/delete ' +
+        'logging is paused until it recovers — details are on the dashboard Alerts page.',
       metadata: { error: errorMessage, reason: 'config_fetch_failed' },
       client,
     });
@@ -144,11 +157,16 @@ export async function loadConfig(client: SomniClient, guildId: string): Promise<
     };
   }
 
-  // Successful read — clear any prior degradation throttle for this guild and,
-  // when one WAS set (we had alerted), resolve the open alert with a recovery
-  // notice (#51). Fire-and-forget: recovery bookkeeping must not block the
-  // message-handling hot path (resolveOwnerAlert never throws).
-  if (_degradedNotified.delete(guildId)) {
+  // Successful read — clear any prior degradation throttle for this guild and
+  // resolve the open alert with a recovery notice (#51) when either the
+  // in-memory flag WAS set (we alerted this boot) or this is the guild's first
+  // successful load since process start (the raise may predate a restart, so
+  // no in-memory flag survives — without this the row stays open forever).
+  // Fire-and-forget: recovery bookkeeping must not block the message-handling
+  // hot path (resolveOwnerAlert never throws).
+  const firstLoadThisBoot = !_bootRecoveryDone.has(guildId);
+  if (firstLoadThisBoot) _bootRecoveryDone.add(guildId);
+  if (_degradedNotified.delete(guildId) || firstLoadThisBoot) {
     void resolveOwnerAlert(client.supabase, guildId, 'message_log_degraded', undefined, {
       client,
       notice: 'Message logging recovered — the config is readable again and edit/delete logging has resumed.',
@@ -335,5 +353,6 @@ export function invalidateMessageLogCache(guildId?: string): void {
     _sentDedupe.clear();
     _lastAuditedConfig.clear();
     _degradedNotified.clear();
+    _bootRecoveryDone.clear();
   }
 }

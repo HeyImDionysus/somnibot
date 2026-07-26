@@ -43,6 +43,11 @@ async function reportTranscriptFailure(
       message:
         `The transcript for ticket #${ticket.ticket_number} could not be generated/saved: ${errorMessage}. ` +
         `The conversation record may be missing.`,
+      // Raw error strings stay in the alerts ROW (message/metadata above);
+      // the channel-visible notice is generic plain language.
+      channelMessage:
+        `The transcript for ticket #${ticket.ticket_number} couldn't be generated or saved — ` +
+        `details are on the dashboard Alerts page. The conversation record may be missing.`,
       metadata: { ticket_id: ticket.id, ticket_number: ticket.ticket_number, error: errorMessage },
       guild,
     });

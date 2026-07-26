@@ -45,6 +45,13 @@ export interface OwnerAlertInput extends OwnerAlertDelivery {
   severity: OwnerAlertSeverity;
   title: string;
   message: string;
+  /**
+   * Override for the channel-visible Discord notice. When set, the alerts ROW
+   * keeps the full `message` detail (dashboard) while the embed posted to the
+   * alert channel shows this text instead — use it to keep raw DB error
+   * strings out of chat.
+   */
+  channelMessage?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -69,6 +76,47 @@ const _alertChannelCache = new Map<string, { channelId: string | null; time: num
 /** Test hook — clears the alert-channel config cache. */
 export function clearAlertChannelCache(): void {
   _alertChannelCache.clear();
+}
+
+/**
+ * Invalidate the cached alert_channel_id for a guild (or all guilds). Wired
+ * into ConfigWatcher: the TTL cache also caches negatives, so without this an
+ * owner configuring (or changing) the alert channel would wait out the full
+ * TTL before pings deliver to the new channel.
+ */
+export function invalidateAlertChannelCache(guildId?: string): void {
+  if (guildId) {
+    _alertChannelCache.delete(guildId);
+  } else {
+    _alertChannelCache.clear();
+  }
+}
+
+// Per-(guild, alertType) throttle for the Discord ping leg. One window bounds
+// two failure modes at once:
+//  - flood: a hot failure path re-raising every event (row insert failing, so
+//    the 23505 dedupe index never engages) can only ping once per window;
+//  - permanent silence: a crash between the row insert and its ping used to
+//    mute indexed alert types forever — the 23505 dedupe path returned before
+//    ever pinging, so the lost ping was never retried until the row resolved.
+const PING_THROTTLE_WINDOW_MS = 5 * 60_000;
+// Same headroom rationale as the anti-raid memory maps (V7 Audit §8.P3a):
+// a shard serves ~2500 guilds, 10k entries is ample without unbounded growth.
+const MAX_PING_THROTTLE_ENTRIES = 10_000;
+const _lastPingAt = new Map<string, number>();
+
+/** Evict oldest entry from a Map if it exceeds the cap. */
+function capMap<V>(map: Map<string, V>, max: number): void {
+  /* v8 ignore next 4 -- defensive cap; only fires at 10k+ live throttle keys */
+  if (map.size > max) {
+    const oldest = map.keys().next().value;
+    if (oldest) map.delete(oldest);
+  }
+}
+
+/** Test hook — clears the per-(guild, alertType) ping throttle. */
+export function clearOwnerAlertPingThrottle(): void {
+  _lastPingAt.clear();
 }
 
 async function getAlertChannelId(
@@ -152,8 +200,14 @@ async function postOwnerNotice(
  * - Pass `guild` (or `client`) whenever one is in scope — without it the alert
  *   is row-only and a debug line records the undeliverable notice.
  * - A 23505 insert error is dedupe (an unresolved alert of this type already
- *   exists behind a partial unique index): no duplicate row, no repeat Discord
- *   ping. The code is surfaced in the result for callers that refresh in place.
+ *   exists behind a partial unique index): no duplicate row. The code is
+ *   surfaced in the result for callers that refresh in place.
+ * - The Discord ping is throttled per (guild, alertType) — see the throttle
+ *   note above the map. Every insert outcome shares the one throttled path:
+ *   a fresh row pings; a 23505 dedupe STILL pings once the window has elapsed
+ *   (a crash between the original insert and its ping used to silence that
+ *   type until the row resolved); a non-dedupe insert failure has no row at
+ *   all, so the throttled ping is the only signal left.
  * - Never throws: both legs are best-effort and independently logged.
  */
 export async function raiseOwnerAlert(
@@ -188,16 +242,19 @@ export async function raiseOwnerAlert(
     );
   }
 
-  // Deduped alert — the owner was already notified when the unresolved row
-  // was first raised; do not ping again.
-  if (insertErrorCode === '23505') {
-    return { inserted: false, insertErrorCode, delivered: false };
-  }
-
   const guild = resolveDeliveryGuild(guildId, input);
   if (!guild) {
     log.debug(
       `No Discord context for ${input.alertType} alert in guild ${guildId} — row-only delivery`,
+    );
+    return { inserted, insertErrorCode, delivered: false };
+  }
+
+  const throttleKey = `${guildId}:${input.alertType}`;
+  const lastPingAt = _lastPingAt.get(throttleKey);
+  if (lastPingAt !== undefined && Date.now() - lastPingAt < PING_THROTTLE_WINDOW_MS) {
+    log.debug(
+      `Ping for ${input.alertType} in guild ${guildId} suppressed — last ping inside the throttle window`,
     );
     return { inserted, insertErrorCode, delivered: false };
   }
@@ -207,8 +264,12 @@ export async function raiseOwnerAlert(
     guild,
     input.severity,
     input.title,
-    input.message,
+    input.channelMessage ?? input.message,
   );
+  if (delivered) {
+    _lastPingAt.set(throttleKey, Date.now());
+    capMap(_lastPingAt, MAX_PING_THROTTLE_ENTRIES);
+  }
   return { inserted, insertErrorCode, delivered };
 }
 
@@ -254,6 +315,10 @@ export async function resolveOwnerAlert(
   }
 
   if (resolvedCount === 0) return 0;
+
+  // The alert is closed — drop its ping-throttle entry so a NEW occurrence
+  // after recovery pings immediately instead of waiting out the window.
+  _lastPingAt.delete(`${guildId}:${alertType}`);
 
   const guild = resolveDeliveryGuild(guildId, delivery);
   if (guild) {

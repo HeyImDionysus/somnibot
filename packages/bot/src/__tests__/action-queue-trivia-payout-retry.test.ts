@@ -163,6 +163,20 @@ describe('trivia_payout_retry handler', () => {
     expect('p_idempotency_key' in rpcCalls[0][1]).toBe(false);
   });
 
+  it('legacy rows (no round_id) never auto-resolve alerts — a {user_id}-only match could close a DIFFERENT round', async () => {
+    const { supa, alertUpdates } = makeSupa();
+    const result = await ACTION_HANDLERS.trivia_payout_retry(guild, supa, {
+      user_id: 'u1',
+      amount: 75,
+    }, ctx);
+
+    expect(result.success).toBe(true);
+    // The payout went through, but the still-owed alert for round A must not
+    // be closed by paying legacy round B's row for the same user — the owner
+    // clears any stale alert from the dashboard instead.
+    expect(alertUpdates).toHaveLength(0);
+  });
+
   it('rejects malformed payloads as non-retryable (no budget burn on garbage)', async () => {
     const { supa, rpcCalls } = makeSupa();
 

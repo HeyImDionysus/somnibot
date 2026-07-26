@@ -50,6 +50,7 @@ import { invalidateAchievementsCache } from '../features/achievements/index.js';
 import { invalidateProfilesCache } from '../features/profiles/index.js';
 import { invalidateHeistCache } from '../features/heist/index.js';
 import { invalidateBrandKitCache } from '../features/branding/index.js';
+import { invalidateAlertChannelCache } from './alert-service.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('ConfigWatcher');
@@ -351,6 +352,10 @@ export class ConfigWatcher {
     invalidateHeistCache(this.guild.id);
     // Invalidate the white-label brand kit cache
     invalidateBrandKitCache(this.guild.id);
+    // Alert-service channel cache: the 60s TTL also caches negatives, so a
+    // 'settings' change to alert_channel_id must drop it or owner pings keep
+    // going to the stale (possibly null) channel until the TTL lapses.
+    invalidateAlertChannelCache(this.guild.id);
     log.info('Full config reload complete (incl. economy caches)');
   }
 

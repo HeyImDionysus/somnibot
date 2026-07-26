@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   invalidateProfilesCache: vi.fn(),
   invalidateHeistCache: vi.fn(),
   invalidateBrandKitCache: vi.fn(),
+  invalidateAlertChannelCache: vi.fn(),
 }));
 
 // Mock all feature modules that config-watcher imports for invalidation
@@ -75,6 +76,7 @@ vi.mock('../features/custom-commands/index.js', () => ({ loadCustomCommands: vi.
 vi.mock('../features/stats-channels/index.js', () => ({ StatsChannelManager: class {} }));
 vi.mock('../features/discord-ux/index.js', () => ({}));
 vi.mock('../services/audit.js', () => ({ writeAuditLog: vi.fn(async () => {}) }));
+vi.mock('../services/alert-service.js', () => ({ invalidateAlertChannelCache: mocks.invalidateAlertChannelCache }));
 
 import { ConfigWatcher } from '../services/config-watcher.js';
 
@@ -186,6 +188,19 @@ describe('ConfigWatcher', () => {
 
   it('handles unknown section via full reload', async () => {
     await configHandler({ guildId: 'guild-1', data: { section: 'nonexistent', changedBy: 'user1' } });
+  });
+
+  it('drops the alert-channel cache on section=settings so a changed alert_channel_id takes effect', async () => {
+    // The 60s alert-channel cache also caches negatives — without this
+    // invalidation, owner pings keep resolving the stale channel id (or the
+    // cached "not configured") until the TTL lapses.
+    await configHandler({ guildId: 'guild-1', data: { section: 'settings', changedBy: 'user1' } });
+    expect(mocks.invalidateAlertChannelCache).toHaveBeenCalledWith('guild-1');
+  });
+
+  it('drops the alert-channel cache on section=all (full reload path)', async () => {
+    await configHandler({ guildId: 'guild-1', data: { section: 'all', changedBy: 'user1' } });
+    expect(mocks.invalidateAlertChannelCache).toHaveBeenCalledWith('guild-1');
   });
 
   it('respects cooldown — same section within cooldown window is skipped', async () => {

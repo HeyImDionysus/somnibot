@@ -87,6 +87,11 @@ export async function createInfraction(
     // by ux_infractions_guild_correlation (23505). Treat it as a no-op and read
     // back the original row instead of creating a duplicate / re-firing escalation
     // — flagged replayed:true so the caller also skips its side effects.
+    // NOTE: this check assumes ux_infractions_guild_correlation is the ONLY
+    // unique constraint on infractions besides the PK. If another unique
+    // constraint is ever added, its 23505s would land here too and masquerade
+    // as correlation replays — disambiguate by constraint name (error.details/
+    // constraint) before treating a bare 23505 as a replay.
     if (error.code === '23505' && input.correlationId) {
       const { data: existing } = await supabase
         .from('infractions')

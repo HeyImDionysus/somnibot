@@ -2840,7 +2840,8 @@ async function handleSyncClearAllDrift(
  * (trivia:${roundId}:${userId}), so a retry that lands after a
  * partial success (credit committed, response lost) replays as a no-op
  * instead of double-paying. Rows queued before round ids existed carry no
- * round_id and retry unkeyed — single-shot legacy rows, same as before.
+ * round_id and retry unkeyed — single-shot legacy rows, same as before —
+ * and never auto-resolve alerts (no round-scoped match is possible).
  */
 async function handleTriviaPayoutRetry(
   guild: Guild,
@@ -2871,18 +2872,31 @@ async function handleTriviaPayoutRetry(
     return { success: false, error: `Trivia payout retry failed: ${error.message}` };
   }
 
-  // The winner is paid — resolve the matching payout-failed alert with a
-  // recovery notice (#51). Best effort; resolveOwnerAlert never throws.
-  await resolveOwnerAlert(
-    supabase,
-    guild.id,
-    'trivia_payout_failed',
-    roundId ? { user_id: userId, round_id: roundId } : { user_id: userId },
-    {
-      guild,
-      notice: `The queued trivia payout of ${amount} to <@${userId}> succeeded on retry.`,
-    },
-  );
+  if (roundId) {
+    // The winner is paid — resolve the matching payout-failed alert with a
+    // recovery notice (#51). Best effort; resolveOwnerAlert never throws.
+    await resolveOwnerAlert(
+      supabase,
+      guild.id,
+      'trivia_payout_failed',
+      { user_id: userId, round_id: roundId },
+      {
+        guild,
+        notice: `The queued trivia payout of ${amount} to <@${userId}> succeeded on retry.`,
+      },
+    );
+  } else {
+    // Legacy pre-round_id row: a {user_id}-only contains-match could close a
+    // DIFFERENT round's still-owed alert for the same user, so resolve
+    // NOTHING — the owner clears any stale alert from the dashboard. These
+    // rows also retry unkeyed (no idempotency key), so the single-shot
+    // double-pay window (credit landed, response lost, retry replays) stays
+    // accepted for them: they drain once and can never be re-queued.
+    log.info(
+      `Legacy trivia payout retry (no round_id) paid ${amount} to ${userId} in guild ${guild.id} — ` +
+        `leaving any trivia_payout_failed alert for manual resolution`,
+    );
+  }
 
   return { success: true, data: { userId, amount, roundId } };
 }
@@ -3481,9 +3495,10 @@ export async function checkLanePendingDepthAlerts(
       const metadata = { lane, depth, threshold };
 
       // X1/M2: raiseOwnerAlert writes the row AND posts the Discord notice.
-      // A 23505 keeps the old semantics: the partial unique index
+      // A 23505 means the partial unique index
       // uniq_alerts_unresolved_action_queue_depth deduped us — refresh the
-      // existing unresolved alert with the latest depth (no repeat ping).
+      // existing unresolved alert with the latest depth (any repeat ping is
+      // bounded by raiseOwnerAlert's per-type throttle window).
       const alertResult = await raiseOwnerAlert(supabase, guild.id, {
         alertType,
         severity,

@@ -559,6 +559,22 @@ export class LotteryManager {
     }
     const awardedRow = Array.isArray(awarded) ? awarded[0] : awarded;
     if (!awardedRow) {
+      // Zero rows = the drawing was already finalised: the winner WAS paid on
+      // an earlier tick whose RPC response was lost (that tick raised the
+      // draw-degraded "winner still owed" alert and left the row in
+      // 'drawing'). This is the only tick that learns the truth — resolve the
+      // alert here or it stays open forever, since the finalised drawing is
+      // never selected again. Best effort, never blocks.
+      await resolveOwnerAlert(
+        this.supabase,
+        guildId,
+        'lottery_draw_degraded',
+        { drawing_id: drawing.id },
+        {
+          client: this.client,
+          notice: `Lottery drawing ${drawing.id} recovered — the stored winner's jackpot payout had already landed on an earlier tick.`,
+        },
+      );
       log.info(`Skipping payout of ${drawing.id} — already finalised`);
       return null;
     }
