@@ -5,6 +5,7 @@
  */
 'use client';
 
+import { VariableChips } from '@/components/shared/variable-chips';
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { useToast } from '@/components/shared/toast';
@@ -779,12 +780,14 @@ function AutomationEditor({
           ))}
         </select>
         {trigger && (
-          <p className="mt-2 text-xs text-discord-text-muted">
+          <div className="mt-2 text-xs text-discord-text-muted">
             {trigger.description}
             {trigger.variables.length > 0 && (
-              <span className="ml-2">Variables: <code className="text-discord-accent">{trigger.variables.join(', ')}</code></span>
+              <VariableChips
+                variables={trigger.variables.map((v) => ({ key: v, desc: 'Trigger variable' }))}
+              />
             )}
-          </p>
+          </div>
         )}
 
         {/* Scope */}

@@ -5,6 +5,7 @@
  */
 'use client';
 
+import { VariableChips } from '@/components/shared/variable-chips';
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { ChannelPicker } from '@/components/shared/channel-picker';
@@ -300,7 +301,15 @@ export default function TempChannelsPage() {
                 <input type="text" value={form.naming_format} onChange={(e) => setForm({ ...form, naming_format: e.target.value })}
                   placeholder="{owner-name}'s room"
                   className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
-                <p className="mt-1 text-xs text-discord-text-muted">Variables: {'{owner-name}'}, {'{username}'}, {'{user}'}, {'{tag}'}, {'{count}'}</p>
+                <VariableChips
+                  variables={[
+                    { key: '{owner-name}', desc: 'Room owner name' },
+                    { key: '{username}', desc: 'Username' },
+                    { key: '{user}', desc: 'User mention' },
+                    { key: '{tag}', desc: 'User tag' },
+                    { key: '{count}', desc: 'Room number' },
+                  ]}
+                />
               </div>
               <div className="grid gap-4 sm:grid-cols-3">
                 <div>
@@ -350,13 +359,17 @@ export default function TempChannelsPage() {
               {/* ── Branded message templates ─────────────── */}
               <div className="border-t border-discord-border-subtle pt-4">
                 <h3 className="text-sm font-semibold text-discord-text-primary">Message Templates</h3>
-                <p className="mb-3 text-xs text-discord-text-muted">
-                  Brand the messages members see. Leave blank to use the default. Variables:{' '}
-                  <code className="bg-discord-bg-tertiary px-1 rounded">{'{owner-name}'}</code>{' '}
-                  <code className="bg-discord-bg-tertiary px-1 rounded">{'{room-name}'}</code>{' '}
-                  <code className="bg-discord-bg-tertiary px-1 rounded">{'{user}'}</code>{' '}
-                  <code className="bg-discord-bg-tertiary px-1 rounded">{'{server}'}</code>
+                <p className="mb-1 text-xs text-discord-text-muted">
+                  Brand the messages members see. Leave blank to use the default.
                 </p>
+                <VariableChips
+                  variables={[
+                    { key: '{owner-name}', desc: 'Room owner name' },
+                    { key: '{room-name}', desc: 'Room name' },
+                    { key: '{user}', desc: 'User mention' },
+                    { key: '{server}', desc: 'Server name' },
+                  ]}
+                />
                 <div className="space-y-3">
                   <div>
                     <label className="mb-1 block text-xs font-medium text-discord-text-muted">Room created (welcome posted in the new room)</label>

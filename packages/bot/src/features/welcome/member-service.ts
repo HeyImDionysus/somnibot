@@ -9,7 +9,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { GuildMember } from 'discord.js';
+import type { Guild, GuildMember } from 'discord.js';
 import type { DbMember } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
 
@@ -229,4 +229,85 @@ export async function getMemberNumber(
 
   if (error || !data) return 0;
   return data.member_number as number;
+}
+
+/**
+ * Backfill the roster with everyone ALREADY in the guild.
+ *
+ * Member rows were only ever written by the guildMemberAdd handler — people
+ * who joined after the bot was installed. Install SomniBot into an
+ * established server and the members table stays empty forever: the
+ * dashboard's Members page shows nobody, and every feature that reads the
+ * roster (automation conditions, profiles) sees a ghost town. Verified live:
+ * zero rows for a guild the bot had been serving for days.
+ *
+ * Runs once per guild init. Existing rows are left untouched (their
+ * member_number, onboarding and time tracking are history this sweep must not
+ * rewrite); only missing members are inserted, oldest joiners first so
+ * member_number ordering roughly matches server seniority. Real join dates
+ * come from Discord itself.
+ */
+export async function backfillMembers(
+  supabase: SupabaseClient,
+  guild: Guild,
+): Promise<number> {
+  let discordMembers;
+  try {
+    discordMembers = await guild.members.fetch();
+  } catch (err) {
+    log.warn('Member backfill skipped — could not fetch member list', { error: String(err) });
+    return 0;
+  }
+
+  const { data: existingRows, error: readError } = await supabase
+    .from('members')
+    .select('discord_id')
+    .eq('guild_id', guild.id)
+    .limit(10000);
+
+  if (readError) {
+    log.warn('Member backfill skipped — could not read existing rows', { error: readError.message });
+    return 0;
+  }
+
+  const known = new Set((existingRows ?? []).map((r) => r.discord_id as string));
+  const missing = [...discordMembers.values()]
+    .filter((m) => !m.user.bot && !known.has(m.id))
+    .sort((a, b) => (a.joinedTimestamp ?? 0) - (b.joinedTimestamp ?? 0));
+
+  if (missing.length === 0) return 0;
+
+  let nextNumber = await getNextMemberNumber(supabase, guild.id);
+  let inserted = 0;
+
+  // Chunked inserts; sequential numbering is safe here because this runs once
+  // per init and concurrent live joins retry on the unique index anyway.
+  const CHUNK = 200;
+  for (let i = 0; i < missing.length; i += CHUNK) {
+    const rows = missing.slice(i, i + CHUNK).map((m, j) => ({
+      guild_id: guild.id,
+      discord_id: m.id,
+      username: m.user.tag,
+      avatar_url: m.user.displayAvatarURL({ size: 256 }),
+      joined_at: m.joinedAt?.toISOString() ?? new Date().toISOString(),
+      left_at: null,
+      onboarding_completed: false,
+      is_returning: false,
+      total_time_seconds: 0,
+      member_number: nextNumber + i + j,
+    }));
+
+    const { error } = await supabase
+      .from('members')
+      .upsert(rows, { onConflict: 'guild_id,discord_id', ignoreDuplicates: true });
+
+    if (error) {
+      log.warn('Member backfill chunk failed', { error: error.message });
+      break;
+    }
+    inserted += rows.length;
+  }
+
+  if (inserted > 0) log.info(`Backfilled ${inserted} existing member(s) into the roster`);
+  return inserted;
 }

@@ -5,6 +5,7 @@
  */
 'use client';
 
+import { VariableChips } from '@/components/shared/variable-chips';
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
@@ -554,7 +555,6 @@ export default function LevelsPage() {
             <div className="mt-4">
               <label className="mb-1 block text-xs font-medium text-discord-text-muted">
                 Level-Up Message
-                <span className="ml-2 text-discord-text-muted font-normal">Variables: {'{user}'} {'{level}'} {'{totalXp}'} {'{nextLevelXp}'}</span>
               </label>
               <input
                 type="text"
@@ -562,6 +562,14 @@ export default function LevelsPage() {
                 onChange={(e) => setConfig({ ...config, level_up_message: e.target.value || null })}
                 placeholder="🎉 {user} just reached **Level {level}**!"
                 className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none"
+              />
+              <VariableChips
+                variables={[
+                  { key: '{user}', desc: 'User mention' },
+                  { key: '{level}', desc: 'New level' },
+                  { key: '{totalXp}', desc: 'Total XP' },
+                  { key: '{nextLevelXp}', desc: 'XP for next level' },
+                ]}
               />
             </div>
           </div>
