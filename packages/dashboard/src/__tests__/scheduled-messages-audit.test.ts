@@ -146,6 +146,75 @@ describe('PUT /api/scheduled-messages — audit', () => {
     });
     expect(auditRows[0].details.fields).toEqual(expect.arrayContaining(['name', 'active']));
   });
+
+  it('writes NO scheduled_message.updated row when the PUT changed zero fields', async () => {
+    const { admin, auditRows } = makeAdmin({
+      singles: {
+        scheduled_messages: [
+          { data: ROW, error: null }, // before-row read
+          { data: ROW, error: null }, // "updated" row — only updated_at bumped
+        ],
+      },
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await PUT(makeRequest('PUT', { body: { id: MSG_ID } }));
+
+    expect(res.status).toBe(200);
+    // An empty diff is not a mutation — no fabricated audit row.
+    expect(auditRows).toHaveLength(0);
+  });
+
+  it('logs a failed before-read and keeps the diff honestly one-sided', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { admin, auditRows } = makeAdmin({
+      singles: {
+        scheduled_messages: [
+          { data: null, error: { message: 'read blew up' } },                    // before-row read FAILS
+          { data: { ...ROW, name: 'Weekly Digest' }, error: null },              // updated row
+        ],
+      },
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await PUT(makeRequest('PUT', { body: { id: MSG_ID, name: 'Weekly Digest' } }));
+
+    expect(res.status).toBe(200);
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0].before_state).toBeNull();
+    expect(auditRows[0].after_state).toMatchObject({ name: 'Weekly Digest' });
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('before-state read failed'),
+      'read blew up',
+    );
+    errSpy.mockRestore();
+  });
+
+  it('logs a discarded audit insert error instead of swallowing it', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { admin } = makeAdmin({
+      singles: {
+        scheduled_messages: [
+          { data: ROW, error: null },
+          { data: { ...ROW, name: 'Weekly Digest' }, error: null },
+        ],
+      },
+    });
+    const baseFrom = admin.from;
+    admin.from = vi.fn((t: string) => t === 'audit_logs'
+      ? { insert: vi.fn(async () => ({ error: { message: 'insert denied' } })) }
+      : baseFrom(t)) as any;
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await PUT(makeRequest('PUT', { body: { id: MSG_ID, name: 'Weekly Digest' } }));
+
+    expect(res.status).toBe(200); // audit failure never fails the request…
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to write scheduled_message.updated audit row'),
+      'insert denied',
+    ); // …but it is never silent either.
+    errSpy.mockRestore();
+  });
 });
 
 describe('DELETE /api/scheduled-messages — audit', () => {

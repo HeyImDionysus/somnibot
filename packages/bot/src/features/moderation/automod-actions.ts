@@ -70,6 +70,7 @@ export async function executeAutoModAction(
         actorType: 'bot',
         actorId: 'automod',
         action: `automod.observe.${rule.action}`,
+        category: 'moderation',
         targetType: 'message',
         targetId: message.id,
         details: {
@@ -118,6 +119,7 @@ export async function executeAutoModAction(
         actorType: 'bot',
         actorId: 'automod',
         action: 'automod.delete',
+        category: 'moderation',
         targetType: 'message',
         targetId: message.id,
         details: {
@@ -209,6 +211,7 @@ export async function executeAutoModAction(
         actorType: 'bot',
         actorId: 'automod',
         action: 'automod.warn',
+        category: 'moderation',
         targetType: 'member',
         targetId: member.id,
         details: {
@@ -274,6 +277,7 @@ export async function executeAutoModAction(
         actorType: 'bot',
         actorId: 'automod',
         action: 'automod.mute',
+        category: 'moderation',
         targetType: 'member',
         targetId: member.id,
         details: {
@@ -341,6 +345,7 @@ export async function executeAutoModAction(
         actorType: 'bot',
         actorId: 'automod',
         action: 'automod.kick',
+        category: 'moderation',
         targetType: 'member',
         targetId: member.id,
         details: { rule: rule.name, ruleType: rule.type, violation: violationReason },
@@ -403,6 +408,7 @@ export async function executeAutoModAction(
         actorType: 'bot',
         actorId: 'automod',
         action: 'automod.ban',
+        category: 'moderation',
         targetType: 'member',
         targetId: member.id,
         details: { rule: rule.name, ruleType: rule.type, violation: violationReason },

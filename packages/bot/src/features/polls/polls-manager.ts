@@ -9,6 +9,7 @@ import {
   type ChatInputCommandInteraction,
   type ButtonInteraction,
 } from 'discord.js';
+import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
@@ -520,101 +521,172 @@ export class PollsManager {
       return;
     }
 
-    // V47-M2: Insert the bet FIRST so the UNIQUE(prediction_id, user_id)
-    // constraint is the authoritative gate. Only debit after the row is owned
-    // by this user — otherwise a concurrent /predict bet from the same user
-    // would silently consume their coins on the losing race.
-    const { data: insertedBet, error: insertErr } = await this.supabase
-      .from('prediction_bets')
-      .insert({
-        prediction_id: predictionId,
-        option_id: options[optionIndex].id,
-        guild_id: guildId,
-        user_id: userId,
-        amount,
-      })
-      .select('id')
-      .single();
-
-    if (insertErr || !insertedBet) {
-      // Duplicate bet from a concurrent invocation, or insert failure.
-      // We have NOT debited yet, so there is nothing to roll back.
-      const msg = (insertErr as { code?: string } | null)?.code === '23505'
-        ? '❌ You already placed a bet on this prediction.'
-        : '❌ Failed to place bet — please try again.';
-      await interaction.reply({ content: msg, ephemeral: true });
-      return;
-    }
-
-    // Deduct balance — bet is already locked in. economy_prediction_settle
-    // (#58 ledger gap) applies the debit AND writes the prediction_bet
-    // economy_transactions row atomically, keyed on the bet row id so a
-    // redelivered interaction cannot double-debit.
-    const { data: debitRes, error: debitErr } = await this.supabase.rpc('economy_prediction_settle', {
+    // Money-layer review (2026-07-26): DEBIT-FIRST. The wallet debit and its
+    // prediction_bet ledger row land BEFORE the bet row exists, keyed on a
+    // client-generated bet id. A crash between the two steps can only leave a
+    // debit whose keyed refund is replay-safe — never a ghost bet row that
+    // resolve would pay without the stake ever being taken (the old
+    // insert-first order's free-roll / pay-before-debit window). A concurrent
+    // duplicate attempt debits and is then refunded through the same key, so
+    // no coins are silently consumed on the losing race either.
+    const betId = randomUUID();
+    const debitArgs = {
       p_guild_id: guildId,
       p_user_id: userId,
       p_amount: -amount,
       p_type: 'prediction_bet',
-      p_request_id: insertedBet.id,
+      p_request_id: betId,
       p_description: `Prediction bet (${predictionId})`,
-    });
+    };
+    let { data: debitRes, error: debitErr } = await this.supabase.rpc('economy_prediction_settle', debitArgs);
+    if (debitErr) {
+      // Ambiguous failure — the RPC may have committed before the error
+      // surfaced. Re-call with IDENTICAL args: the replay fence makes the
+      // probe safe. `replayed: true` (or a fresh settle) proves the debit is
+      // committed; a second error confirms nothing was debited.
+      const probe = await this.supabase.rpc('economy_prediction_settle', debitArgs);
+      if (probe.error) {
+        log.error('Prediction bet debit failed (probe confirms not committed):', debitErr.message);
+        await interaction.reply({ content: '❌ Failed to place bet — please try again. Nothing was debited.', ephemeral: true });
+        return;
+      }
+      debitRes = probe.data;
+      debitErr = null;
+    }
     const debitStatus = (debitRes as { status?: string } | null)?.status;
-    if (debitErr || debitStatus !== 'settled') {
-      // Roll back the bet so we don't credit the user with a free bet.
-      await this.supabase
-        .from('prediction_bets')
-        .delete()
-        .eq('id', insertedBet.id);
+    if (debitStatus === 'insufficient_funds') {
       await interaction.reply({ content: `❌ Payment failed — you need **${amount.toLocaleString()}** ${currency}.`, ephemeral: true });
       return;
     }
+    if (debitStatus !== 'settled') {
+      // economy_prediction_settle rolls its wallet delta back on every
+      // non-'settled' return, so nothing was debited here.
+      log.error('Prediction bet debit returned unexpected status:', debitStatus ?? 'none');
+      await interaction.reply({ content: '❌ Failed to place bet — please try again. Nothing was debited.', ephemeral: true });
+      return;
+    }
 
-    // V48-C1: update pool atomically. The RPC error was previously
-    // ignored — if it failed we'd have a bet row + debit on the user
-    // but the predictions.total_pool snapshot would be short, and
-    // resolvePrediction would under-pay every winner. On failure,
-    // refund the user and delete the bet so the books reconcile.
-    const { data: newPool, error: poolErr } = await this.supabase.rpc(
-      'economy_increment_prediction_pool',
-      { p_prediction_id: predictionId, p_amount: amount },
-    );
-    if (poolErr) {
-      log.error('economy_increment_prediction_pool failed:', poolErr.message);
-      // Compensate: re-credit and delete the bet so we don't keep a
-      // ghost bet that resolvePrediction will try to pay out of a pool
-      // that doesn't include it. Routed through economy_prediction_settle
-      // so the ledger shows the refund next to the bet debit it reverses
-      // (same request_id, type prediction_refund — idempotent on retry).
-      const { error: refundErr } = await this.supabase.rpc('economy_prediction_settle', {
+    // Keyed compensation for the settled debit above. Replay-safe (same
+    // request id as the debit) and mutually exclusive with a payout for this
+    // bet, so it can never double-credit.
+    const refundBetDebit = async (why: string): Promise<boolean> => {
+      const { data: refundRes, error: refundErr } = await this.supabase.rpc('economy_prediction_settle', {
         p_guild_id: guildId,
         p_user_id: userId,
         p_amount: amount,
         p_type: 'prediction_refund',
-        p_request_id: insertedBet.id,
-        p_description: `Prediction bet refund — pool update failed (${predictionId})`,
+        p_request_id: betId,
+        p_description: `Prediction bet refund — ${why} (${predictionId})`,
       });
-      if (refundErr) {
-        log.error('CRITICAL: pool RPC failed AND refund failed — manual reconcile required', {
-          predictionId, userId, amount, poolErr: poolErr.message, refundErr: refundErr.message,
+      const refundStatus = (refundRes as { status?: string } | null)?.status;
+      if (refundErr || refundStatus !== 'settled') {
+        log.error('CRITICAL: prediction bet debit could not be refunded — manual reconcile required', {
+          predictionId, userId, amount, betId, why,
+          refundErr: refundErr?.message ?? `status ${refundStatus ?? 'none'}`,
         });
+        return false;
       }
-      await this.supabase
-        .from('prediction_bets')
-        .delete()
-        .eq('id', insertedBet.id);
+      return true;
+    };
+
+    // Closed-state fence at the money layer: prediction_place_bet inserts the
+    // bet row AND increments total_pool in ONE transaction, conditional on
+    // the prediction still being 'open' under the same row lock
+    // predictions_resolve_atomic takes. If the prediction resolved between
+    // the debit and here, the fence reports 'closed' and the debit is
+    // refunded through the key. Idempotent on p_bet_id, so a transport error
+    // is probed by re-calling with identical args.
+    const placeArgs = {
+      p_bet_id: betId,
+      p_prediction_id: predictionId,
+      p_option_id: options[optionIndex].id,
+      p_guild_id: guildId,
+      p_user_id: userId,
+      p_amount: amount,
+    };
+    let { data: placeRes, error: placeErr } = await this.supabase.rpc('prediction_place_bet', placeArgs);
+    if (placeErr) {
+      const probe = await this.supabase.rpc('prediction_place_bet', placeArgs);
+      if (probe.error) {
+        // Still ambiguous — compensate with the keyed refund AND a delete of
+        // the (possibly never-inserted) bet row. Both are safe in either
+        // world: the refund replays/conflicts instead of double-crediting,
+        // and the delete no-ops when the insert never landed.
+        log.error('prediction_place_bet failed twice — compensating:', placeErr.message);
+        const refunded = await refundBetDebit('bet insert unconfirmed');
+        const { error: deleteErr } = await this.supabase
+          .from('prediction_bets')
+          .delete()
+          .eq('id', betId);
+        if (deleteErr) {
+          log.error('CRITICAL: compensation delete of unconfirmed bet row failed — manual reconcile required', {
+            predictionId, userId, betId, deleteErr: deleteErr.message,
+          });
+        }
+        await interaction.reply({
+          content: refunded
+            ? `❌ Failed to place bet — please try again. Your ${currency} were refunded.`
+            : '❌ Failed to place bet — the refund could not be confirmed and the team has been alerted.',
+          ephemeral: true,
+        });
+        return;
+      }
+      placeRes = probe.data;
+      placeErr = null;
+    }
+    const placed = placeRes as { status?: string; new_pool?: number } | null;
+
+    if (placed?.status === 'duplicate') {
+      // A concurrent bet from the same member raced past the pre-check; the
+      // fence refused this row, so hand the settled debit back.
+      await refundBetDebit('duplicate bet');
+      await interaction.reply({ content: '❌ You already placed a bet on this prediction. This attempt was refunded.', ephemeral: true });
+      return;
+    }
+    if (placed?.status === 'closed' || placed?.status === 'not_found') {
+      // The prediction resolved (or vanished) between the debit and the
+      // fence — compensate the debit and tell the member honestly.
+      const refunded = await refundBetDebit('prediction closed before bet landed');
       await interaction.reply({
-        content: `❌ Failed to place bet — please try again. Your ${currency} were refunded.`,
+        content: refunded
+          ? `❌ This prediction just closed — your bet was not placed and your ${currency} were refunded.`
+          : '❌ This prediction just closed — your bet was not placed, but the refund could not be confirmed and the team has been alerted.',
         ephemeral: true,
       });
       return;
     }
+    if (placed?.status !== 'inserted') {
+      // Unknown status: we cannot tell whether the row landed. Same
+      // compensation as the twice-failed path — refund + delete are both
+      // safe in either world.
+      log.error('prediction_place_bet returned unexpected status:', placed?.status ?? 'none');
+      const refunded = await refundBetDebit('unexpected place_bet status');
+      const { error: deleteErr } = await this.supabase
+        .from('prediction_bets')
+        .delete()
+        .eq('id', betId);
+      if (deleteErr) {
+        log.error('CRITICAL: compensation delete of unconfirmed bet row failed — manual reconcile required', {
+          predictionId, userId, betId, deleteErr: deleteErr.message,
+        });
+      }
+      await interaction.reply({
+        content: refunded
+          ? `❌ Failed to place bet — please try again. Your ${currency} were refunded.`
+          : '❌ Failed to place bet — the refund could not be confirmed and the team has been alerted.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const newPool = placed.new_pool ?? prediction.total_pool + amount;
 
     this.eventBus.emit('prediction.bet_placed', guildId, {
       predictionId,
       userId,
       optionId: options[optionIndex].id,
       amount,
-      newPool: (newPool ?? prediction.total_pool + amount) as number,
+      newPool,
     });
 
     await interaction.reply({
@@ -622,7 +694,7 @@ export class PollsManager {
         .setTitle('🔮 Bet Placed!')
         .setDescription(
           `You bet **${amount.toLocaleString()}** ${currency} on **${options[optionIndex].label}**.\n` +
-          `New pool total: **${(newPool ?? prediction.total_pool + amount).toLocaleString()}** ${currency}`
+          `New pool total: **${newPool.toLocaleString()}** ${currency}`
         )
         .setColor(0x9B59B6)],
     });
@@ -684,94 +756,23 @@ export class PollsManager {
 
     const resolved = Array.isArray(resolveRows) ? resolveRows[0] : resolveRows;
     if (!resolved) {
-      await interaction.reply({ content: '❌ This prediction has already been resolved or cancelled.', ephemeral: true });
+      // Already resolved: instead of a bare "already resolved" reply, re-drive
+      // any stranded settlements (review #4) — bets whose payout marker is
+      // still NULL after a crashed or partially-failed earlier run.
+      await this.redriveResolvedPrediction(interaction, predictionId, options, currency);
       return;
     }
 
     const finalTotalPool: number = resolved.total_pool ?? 0;
 
-    // Get all bets (after the status flip — no new bets can land now)
-    const { data: allBets } = await this.supabase
-      .from('prediction_bets')
-      .select('*')
-      .eq('prediction_id', predictionId)
-      .limit(1000);
+    const { payoutCount, refundedCount, winnersExist } = await this.settleResolvedBets(
+      guildId,
+      predictionId,
+      winningOption.id,
+      finalTotalPool,
+    );
 
-    const allBetsArr = (allBets ?? []) as Array<{
-      id: string;
-      user_id: string;
-      option_id: string;
-      amount: number;
-      payout: number | null;
-    }>;
-    const winningBets = allBetsArr.filter((b) => b.option_id === winningOption.id);
-    const totalWinnerPool = winningBets.reduce((sum, b) => sum + b.amount, 0);
-
-    // V48-C2: when no one picked the winning option, the previous
-    // implementation distributed nothing — every bettor lost their stake
-    // and the entire pool evaporated. Refund all unpaid bets at face
-    // value so losers don't fund a non-existent winner.
-    let refundedCount = 0;
-    let payoutCount = 0;
-    if (winningBets.length === 0) {
-      for (const bet of allBetsArr) {
-        if (bet.payout != null) continue;
-        // economy_prediction_settle credits the stake back AND writes the
-        // prediction_refund ledger row atomically (request_id = bet id, so a
-        // re-run resolve loop after a crash cannot double-refund).
-        const { error: refundErr } = await this.supabase.rpc('economy_prediction_settle', {
-          p_guild_id: guildId,
-          p_user_id: bet.user_id,
-          p_amount: bet.amount,
-          p_type: 'prediction_refund',
-          p_request_id: bet.id,
-          p_description: `Prediction refund — no winning bets (${predictionId})`,
-        });
-        if (refundErr) {
-          log.error(`Failed to refund bettor ${bet.user_id} after zero-winner resolve:`, refundErr.message);
-          continue;
-        }
-        await this.supabase
-          .from('prediction_bets')
-          .update({ payout: bet.amount })
-          .eq('id', bet.id);
-        refundedCount++;
-      }
-    } else {
-      // Distribute winnings proportionally
-      for (const bet of winningBets) {
-        // Skip bets that were already paid (defence-in-depth — should not
-        // happen now that the status flip is atomic, but worth the safety net).
-        if (bet.payout != null) continue;
-
-        const share = totalWinnerPool > 0 ? bet.amount / totalWinnerPool : 0;
-        const payout = Math.floor(finalTotalPool * share);
-
-        // economy_prediction_settle credits the winnings AND writes the
-        // prediction_payout ledger row atomically (request_id = bet id, so a
-        // re-run resolve loop after a crash cannot double-pay).
-        const { error: payoutErr } = await this.supabase.rpc('economy_prediction_settle', {
-          p_guild_id: guildId,
-          p_user_id: bet.user_id,
-          p_amount: payout,
-          p_type: 'prediction_payout',
-          p_request_id: bet.id,
-          p_description: `Prediction payout (${predictionId})`,
-        });
-        if (payoutErr) {
-          log.error(`Failed to pay prediction winner ${bet.user_id}:`, payoutErr.message);
-          continue;
-        }
-
-        await this.supabase
-          .from('prediction_bets')
-          .update({ payout })
-          .eq('id', bet.id);
-        payoutCount++;
-      }
-    }
-
-    const summaryLine = winningBets.length === 0
+    const summaryLine = !winnersExist
       ? `🔁 No bets on the winning outcome — pool refunded to **${refundedCount}** bettor(s).`
       : `🏆 Winners: **${payoutCount}** player(s)`;
 
@@ -792,6 +793,181 @@ export class PollsManager {
           `✅ Winning outcome: **${winningOption.label}**\n` +
           `💰 Pool: **${finalTotalPool.toLocaleString()}** ${currency}\n` +
           summaryLine
+        )
+        .setColor(0x57F287)],
+    });
+  }
+
+  /**
+   * Settlement loop for a resolved prediction: pay every winning bet whose
+   * payout marker is NULL, or — when nobody picked the winner — refund every
+   * unpaid bet at face value (V48-C2: losers must not fund a non-existent
+   * winner). economy_prediction_settle credits AND writes the ledger row
+   * atomically (request_id = bet id), so a re-run loop cannot double-pay.
+   *
+   * Counts are HONEST (review #4): a settle the RPC reports as `replayed`
+   * moved no money NOW (an earlier run already paid it; only its marker
+   * write was lost), so it neither increments the counters nor rewrites the
+   * marker. `conflicting_settlement` (the bet already settled the OTHER way)
+   * is a clean skip. Per-bet RPC errors leave the marker NULL so a later
+   * /predict resolve re-drive finds them.
+   */
+  private async settleResolvedBets(
+    guildId: string,
+    predictionId: string,
+    winningOptionId: string,
+    finalTotalPool: number,
+  ): Promise<{ payoutCount: number; refundedCount: number; winnersExist: boolean }> {
+    const { data: allBets } = await this.supabase
+      .from('prediction_bets')
+      .select('*')
+      .eq('prediction_id', predictionId)
+      .limit(1000);
+
+    const allBetsArr = (allBets ?? []) as Array<{
+      id: string;
+      user_id: string;
+      option_id: string;
+      amount: number;
+      payout: number | null;
+    }>;
+    const winningBets = allBetsArr.filter((b) => b.option_id === winningOptionId);
+    const totalWinnerPool = winningBets.reduce((sum, b) => sum + b.amount, 0);
+
+    let refundedCount = 0;
+    let payoutCount = 0;
+
+    const settleOne = async (
+      bet: { id: string; user_id: string; amount: number },
+      creditAmount: number,
+      type: 'prediction_payout' | 'prediction_refund',
+      description: string,
+    ): Promise<boolean> => {
+      const { data: res, error: err } = await this.supabase.rpc('economy_prediction_settle', {
+        p_guild_id: guildId,
+        p_user_id: bet.user_id,
+        p_amount: creditAmount,
+        p_type: type,
+        p_request_id: bet.id,
+        p_description: description,
+      });
+      if (err) {
+        // Marker stays NULL — the next resolve re-drive retries this bet.
+        log.error(`Failed to settle bet ${bet.id} (${type}) for ${bet.user_id}:`, err.message);
+        return false;
+      }
+      const settled = res as { status?: string; replayed?: boolean } | null;
+      if (settled?.status === 'conflicting_settlement') {
+        log.warn(`Bet ${bet.id} was already settled the other way — skipping ${type}.`);
+        return false;
+      }
+      if (settled?.status !== 'settled') {
+        log.error(`Unexpected settle status for bet ${bet.id} (${type}):`, settled?.status ?? 'none');
+        return false;
+      }
+      if (settled.replayed === true) {
+        // An earlier run moved this money; no fresh settlement to count and
+        // no marker to rewrite.
+        return false;
+      }
+      const { error: markErr } = await this.supabase
+        .from('prediction_bets')
+        .update({ payout: creditAmount })
+        .eq('id', bet.id);
+      if (markErr) {
+        // Money moved; the missing marker only means the next re-drive
+        // re-verifies this bet (and replays harmlessly).
+        log.error(`Failed to write payout marker for bet ${bet.id}:`, markErr.message);
+      }
+      return true;
+    };
+
+    if (winningBets.length === 0) {
+      for (const bet of allBetsArr) {
+        if (bet.payout != null) continue;
+        if (await settleOne(bet, bet.amount, 'prediction_refund', `Prediction refund — no winning bets (${predictionId})`)) {
+          refundedCount++;
+        }
+      }
+    } else {
+      for (const bet of winningBets) {
+        if (bet.payout != null) continue;
+        const share = totalWinnerPool > 0 ? bet.amount / totalWinnerPool : 0;
+        const payout = Math.floor(finalTotalPool * share);
+        if (await settleOne(bet, payout, 'prediction_payout', `Prediction payout (${predictionId})`)) {
+          payoutCount++;
+        }
+      }
+    }
+
+    return { payoutCount, refundedCount, winnersExist: winningBets.length > 0 };
+  }
+
+  /**
+   * Review #4 — re-drive stranded winners. /predict resolve on an ALREADY-
+   * resolved prediction re-runs the settlement loop for bets whose payout
+   * marker is still NULL instead of replying "already resolved". The per-bet
+   * replay keys make re-paying a settled bet impossible, so the re-drive can
+   * only move money that never moved. Uses the STORED winning option — the
+   * outcome was fixed at first resolution and a re-run may not change it.
+   */
+  private async redriveResolvedPrediction(
+    interaction: ChatInputCommandInteraction,
+    predictionId: string,
+    options: Array<{ id: string; label: string }>,
+    currency: string,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
+    const { data: current, error: currentErr } = await this.supabase
+      .from('predictions')
+      .select('*')
+      .eq('id', predictionId)
+      .single();
+
+    if (currentErr || !current || current.status !== 'resolved' || !current.winning_option_id) {
+      // Cancelled, unreadable, or racing — nothing safe to re-drive.
+      await interaction.reply({ content: '❌ This prediction has already been resolved or cancelled.', ephemeral: true });
+      return;
+    }
+
+    const winningOptionId: string = current.winning_option_id;
+    const totalPool: number = current.total_pool ?? 0;
+    const winningOption = options.find((opt) => opt.id === winningOptionId);
+
+    const { payoutCount, refundedCount } = await this.settleResolvedBets(
+      guildId,
+      predictionId,
+      winningOptionId,
+      totalPool,
+    );
+
+    if (payoutCount + refundedCount === 0) {
+      await interaction.reply({
+        content: '✅ This prediction is already resolved and every bet is settled — nothing to re-drive.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    this.eventBus.emit('prediction.resolved', guildId, {
+      predictionId,
+      title: current.title,
+      winningOptionId,
+      totalPool,
+      payoutCount,
+      refundedCount,
+      actorId: interaction.user.id,
+      redrive: true,
+    });
+
+    await interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle(`🔮 Prediction Re-Settled: ${current.title}`)
+        .setDescription(
+          `This prediction was already resolved${winningOption ? ` (winner: **${winningOption.label}**)` : ''} — ` +
+          `stranded settlements were re-driven.\n` +
+          `💰 Pool: **${totalPool.toLocaleString()}** ${currency}\n` +
+          `🏆 Paid now: **${payoutCount}** · 🔁 Refunded now: **${refundedCount}**`
         )
         .setColor(0x57F287)],
     });

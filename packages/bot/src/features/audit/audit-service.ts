@@ -21,7 +21,8 @@ const log = createLogger('AuditService');
 interface AuditMapping {
   action: string;
   category: string;
-  targetType?: string;
+  /** Static target type, or a per-event resolver for dual-target events. */
+  targetType?: string | ((data: Record<string, unknown>) => string | undefined);
   actorType: 'user' | 'bot' | 'system' | 'webhook' | 'automation';
   /** Extract target ID from event data */
   targetId?: (data: Record<string, unknown>) => string | undefined;
@@ -987,7 +988,12 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.giveawayId as string,
     actorId: (d) => d.userId as string,
-    details: (d) => ({ userId: d.userId, reason: d.reason, requiredRoleId: d.requiredRoleId, requiredLevel: d.requiredLevel, userLevel: d.userLevel }),
+    // actor_id already carries the denied member — no details copy (M1: the
+    // purge scrub anonymizes actor_id/target_id, not arbitrary detail keys).
+    details: (d) => ({ reason: d.reason, requiredRoleId: d.requiredRoleId, requiredLevel: d.requiredLevel, userLevel: d.userLevel }),
+    // Repeat clicks collapse to ONE row per member/giveaway/reason — denials
+    // are hot button spam with no per-occurrence identity beyond this triple.
+    occurrenceId: (d) => `${d.giveawayId}:${d.userId}:${d.reason}`,
     success: false,
   },
   'xp.admin_adjusted': {
@@ -1063,11 +1069,15 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
   'temp_channel.settings_changed': {
     action: 'temp_channel.settings_changed',
     category: 'temp_channels',
-    targetType: 'channel',
+    // M1 privacy shaping: member-targeted ops (permit/deny/ban/claim) put the
+    // AFFECTED MEMBER in target_id/target_type so purge_member_data's scrub
+    // (WHERE actor_id = member OR target_id = member) reaches these rows; the
+    // channel id moves into details. Channel-shaped ops keep the channel target.
+    targetType: (d) => (d.targetUserId ? 'member' : 'channel'),
     actorType: 'user',
-    targetId: (d) => d.channelId as string,
+    targetId: (d) => (d.targetUserId ?? d.channelId) as string,
     actorId: (d) => d.actorId as string,
-    details: (d) => ({ op: d.op, targetUserId: d.targetUserId, value: d.value }),
+    details: (d) => ({ op: d.op, value: d.value, channelId: d.channelId }),
     beforeState: (d) => (d.before as Record<string, unknown>) ?? undefined,
     afterState: (d) => (d.after as Record<string, unknown>) ?? undefined,
   },
@@ -1128,7 +1138,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     targetType: 'prediction',
     actorType: 'user',
     targetId: (d) => d.predictionId as string,
-    details: (d) => ({ title: d.title, winningOptionId: d.winningOptionId, totalPool: d.totalPool, payoutCount: d.payoutCount, refundedCount: d.refundedCount }),
+    details: (d) => ({ title: d.title, winningOptionId: d.winningOptionId, totalPool: d.totalPool, payoutCount: d.payoutCount, refundedCount: d.refundedCount, redrive: d.redrive }),
   },
 };
 
@@ -1233,7 +1243,8 @@ export class AuditService {
       actor_id: mapping.actorId?.(data) ?? (mapping.actorType === 'system' ? 'system' : 'bot'),
       action: mapping.action,
       category: mapping.category,
-      target_type: mapping.targetType ?? null,
+      target_type:
+        (typeof mapping.targetType === 'function' ? mapping.targetType(data) : mapping.targetType) ?? null,
       target_id: mapping.targetId?.(data) ?? null,
       details: mapping.details?.(data) ?? {},
       before_state: beforeState,

@@ -148,10 +148,12 @@ export async function handleTempChannelCommand(
   }
 
   // [#60] Append-only audit for the /voice owner-control surface. One event
-  // covers all seven controls; AuditService maps it to a
-  // temp_channel.settings_changed audit row (category temp_channels).
+  // covers all eight controls (lock/unlock/limit/name/permit/deny/ban/claim);
+  // AuditService maps it to a temp_channel.settings_changed audit row
+  // (category temp_channels). Member-targeted ops carry the affected member
+  // in targetUserId so the audit row's target is the member (purge-scrubbed).
   const auditSettingsChange = (
-    op: 'lock' | 'unlock' | 'limit' | 'name' | 'permit' | 'deny' | 'ban',
+    op: 'lock' | 'unlock' | 'limit' | 'name' | 'permit' | 'deny' | 'ban' | 'claim',
     extra: {
       targetUserId?: string;
       value?: string | number;
@@ -272,6 +274,13 @@ export async function handleTempChannelCommand(
         }
         // Transfer ownership
         await manager.transferOwnership(vcId, interaction.user.id);
+        // The affected member is the PREVIOUS owner whose room was claimed —
+        // they are the audit row's target; the claimer is the actor.
+        auditSettingsChange('claim', {
+          targetUserId: ownerId,
+          before: { ownerId },
+          after: { ownerId: interaction.user.id },
+        });
         await interaction.reply({ content: applied('👑 You are now the owner of this voice channel.'), ephemeral: true });
         break;
       }

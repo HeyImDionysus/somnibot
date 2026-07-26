@@ -33,7 +33,7 @@ async function writeScheduledMessageAudit(
   },
 ): Promise<void> {
   try {
-    await supabase.from('audit_logs').insert({
+    const { error } = await supabase.from('audit_logs').insert({
       guild_id: entry.guildId,
       actor_type: 'dashboard',
       actor_id: entry.actorId,
@@ -46,8 +46,12 @@ async function writeScheduledMessageAudit(
       after_state: entry.afterState ?? null,
       success: true,
     });
-  } catch {
-    // Audit logging must never break the CRUD flow.
+    if (error) {
+      console.error(`[scheduled-messages] Failed to write ${entry.action} audit row:`, error.message);
+    }
+  } catch (err) {
+    // Audit logging must never break the CRUD flow — but never silently.
+    console.error(`[scheduled-messages] Exception writing ${entry.action} audit row:`, err);
   }
 }
 
@@ -178,12 +182,17 @@ export async function PUT(req: NextRequest) {
 
   // Read the row first so the audit diff carries the BEFORE side of exactly
   // the keys this update touches (an honest two-sided diff, no fabrication).
-  const { data: beforeRow } = await supabase
+  // A FAILED read is logged and the diff stays one-sided — a null before_state
+  // must mean "unavailable, and we said so", never a swallowed error.
+  const { data: beforeRow, error: beforeErr } = await supabase
     .from('scheduled_messages')
     .select('*')
     .eq('id', body.id)
     .eq('guild_id', guildId)
     .maybeSingle();
+  if (beforeErr) {
+    console.error('[scheduled-messages] before-state read failed for scheduled_message.updated audit:', beforeErr.message);
+  }
 
   const { data, error } = await supabase
     .from('scheduled_messages')
@@ -198,17 +207,22 @@ export async function PUT(req: NextRequest) {
   }
 
   const changedKeys = Object.keys(updates).filter((k) => k !== 'updated_at');
-  await writeScheduledMessageAudit(supabase, {
-    guildId,
-    actorId: auth.ctx.discordId,
-    action: 'scheduled_message.updated',
-    targetId: data.id,
-    details: { name: data.name, fields: changedKeys },
-    beforeState: beforeRow
-      ? Object.fromEntries(changedKeys.map((k) => [k, (beforeRow as Record<string, unknown>)[k] ?? null]))
-      : null,
-    afterState: Object.fromEntries(changedKeys.map((k) => [k, (data as Record<string, unknown>)[k] ?? null])),
-  });
+  // A no-op PUT (only the id, nothing picked) bumps updated_at but changes no
+  // owner-visible field — writing a scheduled_message.updated row with an
+  // empty diff would fabricate a mutation.
+  if (changedKeys.length > 0) {
+    await writeScheduledMessageAudit(supabase, {
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'scheduled_message.updated',
+      targetId: data.id,
+      details: { name: data.name, fields: changedKeys },
+      beforeState: beforeRow
+        ? Object.fromEntries(changedKeys.map((k) => [k, (beforeRow as Record<string, unknown>)[k] ?? null]))
+        : null,
+      afterState: Object.fromEntries(changedKeys.map((k) => [k, (data as Record<string, unknown>)[k] ?? null])),
+    });
+  }
 
   await notifyBot('scheduled-messages');
 

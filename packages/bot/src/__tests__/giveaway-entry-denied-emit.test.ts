@@ -105,6 +105,35 @@ describe('giveaway.entry_denied emits', () => {
       expect.objectContaining({ reason: 'level_gate', requiredLevel: 10, userLevel: 3 }));
   });
 
+  it('emits reason=not_active when the giveaway has ended (or is unknown/paused)', async () => {
+    const eventBus = bus();
+    const supa = makeSupa({
+      giveaways: { data: makeGiveaway({ status: 'ended' }), error: null },
+    });
+    const mgr = new GiveawayManager(makeGuild(), supa, {} as any, eventBus);
+
+    const handled = await mgr.handleEntry(makeInteraction());
+
+    expect(handled).toBe(true);
+    expect(eventBus.emit).toHaveBeenCalledWith('giveaway.entry_denied', 'g1',
+      expect.objectContaining({ giveawayId: 'gw1', userId: 'u1', reason: 'not_active' }));
+  });
+
+  it('emits reason=member_not_found when the member record is missing', async () => {
+    const eventBus = bus();
+    const supa = makeSupa({
+      giveaways: { data: makeGiveaway(), error: null },
+    });
+    const guild = makeGuild();
+    guild.members.cache = new Map(); // no member record
+    const mgr = new GiveawayManager(guild, supa, {} as any, eventBus);
+
+    await mgr.handleEntry(makeInteraction());
+
+    expect(eventBus.emit).toHaveBeenCalledWith('giveaway.entry_denied', 'g1',
+      expect.objectContaining({ giveawayId: 'gw1', userId: 'u1', reason: 'member_not_found' }));
+  });
+
   it('does NOT emit entry_denied when the gates pass', async () => {
     const eventBus = bus();
     const supa = makeSupa({
@@ -154,5 +183,41 @@ describe('AuditService maps giveaway.entry_denied', () => {
       details: { reason: 'role_gate', requiredRoleId: 'r1' },
       success: false,
     });
+    // M1: actor_id already carries the member — no redundant details copy.
+    expect(batch[0].details).not.toHaveProperty('userId');
+    // Repeat clicks dedupe to ONE row per member/giveaway/reason.
+    expect(batch[0].occurrence_key).toBe('giveaway.entry_denied:gw1:u1:role_gate');
+  });
+
+  it('dedupes repeat clicks in-queue via the member/giveaway/reason occurrence key', async () => {
+    const { AuditService } = await import('../features/audit/audit-service.js');
+    const upsert = vi.fn().mockResolvedValue({ error: null });
+    const supabase = { from: vi.fn().mockReturnValue({ upsert }) };
+    const handlers: Array<(event: any) => void> = [];
+    const auditBus = { onAny: (h: (event: any) => void) => handlers.push(h) };
+
+    const service = new AuditService('g1', supabase as any, auditBus as any);
+    service.start();
+    const denial = {
+      type: 'giveaway.entry_denied',
+      guildId: 'g1',
+      timestamp: Date.now(),
+      data: { giveawayId: 'gw1', userId: 'u1', reason: 'not_active' },
+    };
+    handlers.forEach((h) => h(denial));
+    handlers.forEach((h) => h(denial)); // spam click — same key
+    handlers.forEach((h) => h({
+      ...denial,
+      data: { giveawayId: 'gw1', userId: 'u1', reason: 'role_gate' }, // different reason → own row
+    }));
+    await (service as any).flush();
+    service.stop();
+
+    const batch = upsert.mock.calls[0][0];
+    expect(batch).toHaveLength(2);
+    expect(batch.map((r: any) => r.occurrence_key)).toEqual([
+      'giveaway.entry_denied:gw1:u1:not_active',
+      'giveaway.entry_denied:gw1:u1:role_gate',
+    ]);
   });
 });

@@ -1,11 +1,13 @@
 /**
  * /voice owner-control surface — audit emit tests (#60).
  *
- * Every successful /voice control (lock/unlock/limit/name/permit/deny/ban)
- * emits ONE temp_channel.settings_changed platform event carrying the op,
- * the optional target/value, and a cheap before/after diff where the prior
- * value is at hand. AuditService maps the event to an audit_logs row
- * (category temp_channels, actorType user).
+ * Every successful /voice control (lock/unlock/limit/name/permit/deny/ban/
+ * claim — all eight) emits ONE temp_channel.settings_changed platform event
+ * carrying the op, the optional target/value, and a cheap before/after diff
+ * where the prior value is at hand. AuditService maps the event to an
+ * audit_logs row (category temp_channels, actorType user). Member-targeted
+ * ops (permit/deny/ban/claim) land with the AFFECTED MEMBER as the row's
+ * target so purge_member_data's actor/target scrub reaches them.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
@@ -150,6 +152,42 @@ describe('/voice controls emit temp_channel.settings_changed', () => {
     });
   });
 
+  it('claim emits op=claim with the previous owner as target and the ownership diff', async () => {
+    const vc = makeVc();
+    // Previous owner has left the channel; a different member claims it.
+    const mgr = { ...ownerManager(), getChannelOwner: () => 'prev-owner' };
+    await handleTempChannelCommand(makeInteraction('claim', vc), mgr);
+    expect(mgr.transferOwnership).toHaveBeenCalledWith('vc1', 'u1');
+    expect(settingsEmits()).toHaveLength(1);
+    expect(settingsEmits()[0][2]).toMatchObject({
+      channelId: 'vc1', actorId: 'u1', op: 'claim', targetUserId: 'prev-owner',
+      before: { ownerId: 'prev-owner' }, after: { ownerId: 'u1' },
+    });
+  });
+
+  it('does NOT emit claim when claiming is disabled for the hub', async () => {
+    const vc = makeVc();
+    const mgr = {
+      ...ownerManager(),
+      getChannelOwner: () => 'prev-owner',
+      getHubForChannel: () => ({ ...HUB, allow_claim: false }),
+    };
+    await handleTempChannelCommand(makeInteraction('claim', vc), mgr);
+    expect(mgr.transferOwnership).not.toHaveBeenCalled();
+    expect(settingsEmits()).toHaveLength(0);
+  });
+
+  it('does NOT emit claim when the transfer throws', async () => {
+    const vc = makeVc();
+    const mgr = {
+      ...ownerManager(),
+      getChannelOwner: () => 'prev-owner',
+      transferOwnership: vi.fn(async () => { throw new Error('DB down'); }),
+    };
+    await handleTempChannelCommand(makeInteraction('claim', vc), mgr);
+    expect(settingsEmits()).toHaveLength(0);
+  });
+
   it('does NOT emit when the control is refused (non-owner)', async () => {
     const vc = makeVc();
     const mgr = { ...ownerManager(), getChannelOwner: () => 'someone-else' };
@@ -181,7 +219,7 @@ describe('AuditService maps temp_channel.settings_changed', () => {
     };
   }
 
-  it('writes a temp_channels row with the actor and diff', async () => {
+  it('writes a channel-targeted temp_channels row for channel-shaped ops', async () => {
     const { AuditService } = await import('../features/audit/audit-service.js');
     const supabase = makeSupabase();
     const bus = makeBus();
@@ -207,11 +245,75 @@ describe('AuditService maps temp_channel.settings_changed', () => {
       category: 'temp_channels',
       actor_type: 'user',
       actor_id: 'u1',
+      target_type: 'channel',
       target_id: 'vc1',
-      details: { op: 'name', value: 'War Room' },
+      details: { op: 'name', value: 'War Room', channelId: 'vc1' },
       before_state: { name: 'Old' },
       after_state: { name: 'War Room' },
       success: true,
+    });
+  });
+
+  it('member-targeted ops put the AFFECTED MEMBER in target_id (M1 purge shaping)', async () => {
+    const { AuditService } = await import('../features/audit/audit-service.js');
+    const supabase = makeSupabase();
+    const bus = makeBus();
+    const service = new AuditService('g1', supabase as any, bus as any);
+    service.start();
+
+    bus._emit({
+      type: 'temp_channel.settings_changed',
+      guildId: 'g1',
+      timestamp: Date.now(),
+      data: {
+        channelId: 'vc1', actorId: 'u1', op: 'ban', targetUserId: 'victim1',
+        after: { connect: false, viewChannel: false },
+      },
+    });
+    await (service as any).flush();
+    service.stop();
+
+    const batch = supabase._upsert.mock.calls[0][0];
+    // purge_member_data scrubs rows WHERE actor_id = member OR target_id =
+    // member — the banned member's id must live in target_id, and the channel
+    // id moves into details so no member snowflake hides outside the scrub.
+    expect(batch[0]).toMatchObject({
+      action: 'temp_channel.settings_changed',
+      actor_id: 'u1',
+      target_type: 'member',
+      target_id: 'victim1',
+      details: { op: 'ban', channelId: 'vc1' },
+    });
+    expect(batch[0].details).not.toHaveProperty('targetUserId');
+  });
+
+  it('maps op=claim with the previous owner as the member target', async () => {
+    const { AuditService } = await import('../features/audit/audit-service.js');
+    const supabase = makeSupabase();
+    const bus = makeBus();
+    const service = new AuditService('g1', supabase as any, bus as any);
+    service.start();
+
+    bus._emit({
+      type: 'temp_channel.settings_changed',
+      guildId: 'g1',
+      timestamp: Date.now(),
+      data: {
+        channelId: 'vc1', actorId: 'claimer1', op: 'claim', targetUserId: 'prev-owner',
+        before: { ownerId: 'prev-owner' }, after: { ownerId: 'claimer1' },
+      },
+    });
+    await (service as any).flush();
+    service.stop();
+
+    const batch = supabase._upsert.mock.calls[0][0];
+    expect(batch[0]).toMatchObject({
+      category: 'temp_channels',
+      actor_id: 'claimer1',
+      target_type: 'member',
+      target_id: 'prev-owner',
+      before_state: { ownerId: 'prev-owner' },
+      after_state: { ownerId: 'claimer1' },
     });
   });
 });

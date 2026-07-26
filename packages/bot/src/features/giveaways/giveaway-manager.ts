@@ -247,6 +247,13 @@ export class GiveawayManager {
       .maybeSingle();
 
     if (!data || (data as GiveawayRow).status !== 'active') {
+      // [#57] Honest deny audit: a click on an ended/paused/unknown giveaway
+      // is a real denial, batched via the event rail like the gate denials.
+      this.eventBus.emit('giveaway.entry_denied', this.guild.id, {
+        giveawayId,
+        userId,
+        reason: 'not_active',
+      });
       await interaction.reply({ content: '❌ This giveaway has ended.', ephemeral: true });
       return true;
     }
@@ -256,6 +263,11 @@ export class GiveawayManager {
     // Check requirements
     const member = this.guild.members.cache.get(userId);
     if (!member) {
+      this.eventBus.emit('giveaway.entry_denied', this.guild.id, {
+        giveawayId,
+        userId,
+        reason: 'member_not_found',
+      });
       await interaction.reply({ content: '❌ Could not find your member data.', ephemeral: true });
       return true;
     }

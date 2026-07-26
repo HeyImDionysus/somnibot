@@ -46,6 +46,7 @@ async function auditDeniedModAttempt(
     actorType: 'discord',
     actorId: interaction.user.id,
     action: `moderation.${command}.denied`,
+    category: 'moderation',
     targetType: targetId ? 'member' : undefined,
     targetId: targetId ?? undefined,
     success: false,
