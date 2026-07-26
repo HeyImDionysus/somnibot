@@ -155,12 +155,21 @@ async function credit(handle: LiveClientHandle, userId: string, amount: number):
  * shape the bot's `seedDefaults()` writes, so sessions can carry a valid
  * `current_scene_id` FK and the RLS/cleanup probes have real rows to isolate.
  */
+// Each seeded adventure needs a UNIQUE name: all scenarios share the one
+// disposable guild, and uq_economy_adventures_guild_lname (catalog uniqueness
+// migration) rejects a repeat of `${runPrefix}dungeon` with 23505 on every
+// scenario after the first. Beyond the failed seeds (gated lanes), the
+// repeated-23505 storm can wedge a kept-alive connection through the fault
+// proxy — the CI shards hung here at 0/84. Deterministic per-call suffix.
+let seedAdventureSeq = 0;
+
 async function seedAdventure(ctx: ScenarioContext, handle: LiveClientHandle): Promise<SeededAdventure> {
+  seedAdventureSeq += 1;
   const { data: adv } = await handle.supabase
     .from('economy_adventures')
     .insert({
       guild_id: handle.guildId,
-      name: `${ctx.runPrefix}dungeon`,
+      name: `${ctx.runPrefix}dungeon-${seedAdventureSeq}`,
       emoji: '🏰',
       description: 'e2e seeded adventure',
       adventure_type: 'dungeon',
