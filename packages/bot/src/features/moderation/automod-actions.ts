@@ -24,6 +24,11 @@ const log = createLogger('AutoModActions');
 
 /**
  * Execute the action configured for an auto-mod rule violation.
+ *
+ * Returns whether the violation was actually ENFORCED (delete / warn / mute /
+ * kick / ban applied). Observe-mode matches log the would-be action and
+ * return false, so the caller's message pipeline (XP, quests, achievements,
+ * economy) keeps running — observing must never silently eat activity.
  */
 export async function executeAutoModAction(
   client: SomniClient,
@@ -37,9 +42,9 @@ export async function executeAutoModAction(
     automodEnabled: boolean;
     automodMode: 'observe' | 'enforce';
   },
-): Promise<void> {
+): Promise<boolean> {
   const member = message.member;
-  if (!member) return;
+  if (!member) return false;
 
   const fullReason = `[Auto-Mod: ${rule.name}] ${violationReason}`;
 
@@ -78,7 +83,7 @@ export async function executeAutoModAction(
     } catch (err) {
       log.error('Failed to write observe audit log:', err);
     }
-    return;
+    return false; // nothing enforced — the message pipeline must continue
   }
 
   // Always try to delete the offending message (except 'warn'-only with no delete)
@@ -139,7 +144,9 @@ export async function executeAutoModAction(
 
       if (!infraction) {
         log.error('Failed to persist auto-mod warning; suppressing follow-on event and escalation');
-        break;
+        // Nothing was enforced ('warn' skips the delete and the infraction
+        // never landed) — let the message pipeline continue.
+        return false;
       }
 
       const activeWarnings = await getActiveWarningCount(
@@ -370,4 +377,6 @@ export async function executeAutoModAction(
       break;
     }
   }
+
+  return true; // enforcement applied
 }

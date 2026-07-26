@@ -258,8 +258,14 @@ export class GatheringManager {
       };
     }
     if (lootTable.length === 0) {
-      // Seed defaults
-      await this.seedDefaultLoot(sourceType);
+      // Seeds only when the guild has NO loot rows for this source at all —
+      // an owner who deactivated the whole table is respected (never
+      // auto-restored).
+      try {
+        await this.seedIfTableEmpty(sourceType);
+      } catch (err) {
+        log.warn('lazy loot seeding failed:', (err as Error).message);
+      }
       lootTable = (await this.getLootTable(sourceType)) ?? [];
     }
 
@@ -438,6 +444,25 @@ export class GatheringManager {
       .setColor(0xffa500);
   }
 
+  /**
+   * Seed the default loot for a source when the guild has NO loot rows for it
+   * (active or not). Returns true when defaults were written. Throws when the
+   * existence check or the write failed, so callers can report the failure.
+   */
+  private async seedIfTableEmpty(sourceType: LootSourceType): Promise<boolean> {
+    const { count, error } = await this.supabase
+      .from('economy_loot_tables')
+      .select('id', { count: 'exact', head: true })
+      .eq('guild_id', this.guild.id)
+      .eq('source_type', sourceType);
+    if (error) {
+      throw new Error(`loot existence check for ${sourceType} failed: ${error.message}`);
+    }
+    if ((count ?? 0) > 0) return false; // owner content (even all-inactive) — never touch it
+    await this.seedDefaultLoot(sourceType);
+    return true;
+  }
+
   private async seedDefaultLoot(sourceType: LootSourceType): Promise<void> {
     const defaults = DEFAULT_LOOT[sourceType];
     if (!defaults) return;
@@ -448,7 +473,14 @@ export class GatheringManager {
       ...d,
     }));
 
-    await this.supabase.from('economy_loot_tables').insert(rows);
+    // ON CONFLICT DO NOTHING: the (guild_id, source_type, lower(item_name),
+    // tool_tier) uniqueness index turns a concurrent double-seed into a no-op.
+    const { error } = await this.supabase
+      .from('economy_loot_tables')
+      .upsert(rows, { ignoreDuplicates: true });
+    if (error) {
+      throw new Error(`default loot seed for ${sourceType} failed: ${error.message}`);
+    }
   }
 
   private async checkTool(userId: string, toolEffect: string): Promise<{ tier: number; inventoryId: string | null; durabilityLeft: number | null; unavailable?: boolean }> {
@@ -571,15 +603,24 @@ export class GatheringManager {
    * appeared until somebody ran the feature's command in Discord, so a fresh
    * install showed an empty dashboard page for a feature that claimed to be
    * on. Guild init calls this so content exists before anyone touches
-   * anything. Idempotent — it only writes when the guild has no rows.
+   * anything. Idempotent — each source only writes when the guild has NO
+   * loot rows for it at all (an all-deactivated table is respected owner
+   * state). Throws when any source failed (after attempting all of them) so
+   * the warmup can report degradation.
    */
   async ensureContentSeeded(): Promise<void> {
     const sources: LootSourceType[] = ['hunt', 'dig', 'mine'];
+    const failed: string[] = [];
     for (const source of sources) {
-      const loot = await this.getLootTable(source);
-      if (loot !== null && loot.length === 0) {
-        await this.seedDefaultLoot(source);
+      try {
+        await this.seedIfTableEmpty(source);
+      } catch (err) {
+        log.error(`loot seeding failed for ${source}:`, (err as Error).message);
+        failed.push(source);
       }
+    }
+    if (failed.length > 0) {
+      throw new Error(`loot table seeding failed for: ${failed.join(', ')}`);
     }
   }
 }

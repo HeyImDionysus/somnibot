@@ -10,7 +10,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
-import { enrichMembers } from '@/lib/api/member-enrichment';
+import { enrichMembers, MemberEnrichmentError } from '@/lib/api/member-enrichment';
 
 export async function POST(req: NextRequest) {
   const rateLimited = await checkAdminRateLimit(req, 'bulk');
@@ -108,7 +108,15 @@ export async function POST(req: NextRequest) {
         return dbError(error, 'members/bulk');
       }
 
-      const enriched = await enrichMembers(admin, guildId, members ?? []);
+      // A silently-zeroed export is indistinguishable from real data — fail
+      // loudly when any stats query behind the enrichment errors (B4).
+      let enriched;
+      try {
+        enriched = await enrichMembers(admin, guildId, members ?? []);
+      } catch (err) {
+        if (err instanceof MemberEnrichmentError) return dbError(err, 'members/bulk/enrichment');
+        throw err;
+      }
 
       return NextResponse.json({
         success: true,

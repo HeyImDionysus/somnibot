@@ -38,7 +38,10 @@ interface ShopItem {
   updated_at: string;
 }
 
-const CATEGORIES = ['Tools', 'Bait', 'Seeds', 'Materials', 'Consumables', 'Roles', 'Cosmetics', 'Lootboxes'] as const;
+// Canonical shop categories — keep in sync with the bot's /shop category
+// choices (features/economy/commands.ts) and the categories used by the
+// content seeder and crafting outputs.
+const CATEGORIES = ['Tools', 'Protection', 'Farming', 'Accessories', 'Bait', 'Seeds', 'Materials', 'Consumables', 'Roles', 'Cosmetics', 'Lootboxes'] as const;
 
 const BLANK_ITEM: Partial<ShopItem> = {
   name: '',

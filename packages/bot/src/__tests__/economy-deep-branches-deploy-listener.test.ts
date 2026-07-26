@@ -262,7 +262,7 @@ describe('EconomyManager deep branches', () => {
     c.then = undefined;
     // Hack: make from return a chain where the last call returns items array
     const fromChain: any = {};
-    for (const m of ['select','eq','order','limit','ilike'])
+    for (const m of ['select','eq','gt','order','limit','ilike'])
       fromChain[m] = vi.fn(() => fromChain);
     fromChain.then = (resolve: any) => resolve({ data: items, error: null });
     supa.from = vi.fn(() => fromChain);

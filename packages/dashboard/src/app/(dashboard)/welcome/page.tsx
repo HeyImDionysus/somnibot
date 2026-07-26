@@ -64,6 +64,10 @@ export default function WelcomePage() {
   useUnsavedWarning(dirty);
   const [sendingTest, setSendingTest] = useState<'welcome' | 'goodbye' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Bind each variable-chip row to its own message box so a click can never
+  // insert into an unrelated field.
+  const welcomeMessageRef = useRef<HTMLTextAreaElement>(null);
+  const goodbyeMessageRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     async function load() {
@@ -197,6 +201,7 @@ export default function WelcomePage() {
             <div>
               <label className="mb-1 block text-sm text-discord-text-muted">Message</label>
               <textarea
+                ref={welcomeMessageRef}
                 value={config.welcome_message ?? ''}
                 onChange={(e) =>
                   setConfig((prev) => ({ ...prev, welcome_message: e.target.value }))
@@ -206,6 +211,7 @@ export default function WelcomePage() {
                 placeholder="Welcome to {server}, {user}!"
               />
               <VariableChips
+                targetRef={welcomeMessageRef}
                 variables={[
                   { key: '{user}', desc: 'User mention' },
                   { key: '{user.name}', desc: 'Username' },
@@ -361,6 +367,7 @@ export default function WelcomePage() {
             <div>
               <label className="mb-1 block text-sm text-discord-text-muted">Message</label>
               <textarea
+                ref={goodbyeMessageRef}
                 value={config.goodbye_message ?? ''}
                 onChange={(e) =>
                   setConfig((prev) => ({ ...prev, goodbye_message: e.target.value }))
@@ -370,6 +377,7 @@ export default function WelcomePage() {
                 placeholder="{user.name} left. They were with us for {duration}. 👋"
               />
               <VariableChips
+                targetRef={goodbyeMessageRef}
                 variables={[
                   { key: '{user.name}', desc: 'Username' },
                   { key: '{server}', desc: 'Server name' },

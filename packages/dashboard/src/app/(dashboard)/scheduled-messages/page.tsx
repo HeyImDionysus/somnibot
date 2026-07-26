@@ -7,7 +7,7 @@
 'use client';
 
 import { VariableChips } from '@/components/shared/variable-chips';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { useDiscordNames } from '@/hooks/use-discord-names';
@@ -115,6 +115,9 @@ export default function ScheduledMessagesPage() {
   const [form, setForm] = useState(emptyForm);
   const [embedOptions, setEmbedOptions] = useState<EmbedOption[]>([]);
   const [featureEnabled, setFeatureEnabled] = useState(true);
+  // Binds the form's variable chips to the message box so a click can never
+  // insert into an unrelated field.
+  const messageRef = useRef<HTMLTextAreaElement>(null);
 
   const fetchMessages = useCallback(async () => {
     try {
@@ -356,10 +359,11 @@ export default function ScheduledMessagesPage() {
               </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-discord-text-muted">Message</label>
-                <textarea value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })}
+                <textarea ref={messageRef} value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })}
                   rows={4} placeholder="Message text (supports {server}, {members}, {date}, {time})"
                   className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none resize-none" />
                 <VariableChips
+                  targetRef={messageRef}
                   variables={[
                     { key: '{server}', desc: 'Server name' },
                     { key: '{members}', desc: 'Member count' },

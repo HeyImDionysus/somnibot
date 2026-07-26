@@ -447,7 +447,7 @@ export interface PlatformEventMap {
   'quest.slate_assigned': { userId: string; questType: 'daily' | 'weekly'; count: number };
   'quest.completed': { userId: string; questId: string; actionType: string; progress: number };
   'casino.bet_settled': { userId: string; game: string; net: number; loss: number };
-  'achievement.unlocked': { userId: string; achievementId: string; name: string; rewardCurrency: number };
+  'achievement.unlocked': { userId: string; achievementId: string; name: string; rewardCurrency: number; rewardXp: number };
   'prestige.performed': { userId: string; newLevel: number; newMultiplier: number };
   'adventure.started': { userId: string; adventureId: string; adventureName: string; ticketCost: number; sessionId: string | null };
   'adventure.completed': { userId: string; sessionId: string; status: string; currency: number; lootCount: number };

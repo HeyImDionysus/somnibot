@@ -21,6 +21,21 @@ export interface MemberIdentity {
   joined_at: string | null;
 }
 
+/**
+ * A stats query failed. Thrown instead of returning fabricated zeros: a
+ * silently-zeroed members page (or CSV export) is indistinguishable from real
+ * data, so callers must catch this and fail the request loudly (dbError).
+ */
+export class MemberEnrichmentError extends Error {
+  readonly source: 'member_levels' | 'economy_wallets' | 'infractions';
+
+  constructor(source: MemberEnrichmentError['source'], cause: { message: string }) {
+    super(`${source} enrichment query failed: ${cause.message}`);
+    this.name = 'MemberEnrichmentError';
+    this.source = source;
+  }
+}
+
 export async function enrichMembers(
   admin: SupabaseClient,
   guildId: string,
@@ -48,6 +63,10 @@ export async function enrichMembers(
       .in('type', ['mute', 'ban'])
       .in('member_id', ids),
   ]);
+
+  if (levelsRes.error) throw new MemberEnrichmentError('member_levels', levelsRes.error);
+  if (walletsRes.error) throw new MemberEnrichmentError('economy_wallets', walletsRes.error);
+  if (infractionsRes.error) throw new MemberEnrichmentError('infractions', infractionsRes.error);
 
   const levels = new Map((levelsRes.data ?? []).map((l) => [l.member_id as string, l]));
   const wallets = new Map((walletsRes.data ?? []).map((w) => [w.user_id as string, w]));

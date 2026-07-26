@@ -27,7 +27,14 @@ let connectionWaiters: Array<(ready: boolean) => void> = [];
 function markValkeyReady(): void {
   valkeyFailed = false;
   lastValkeyFailureAt = 0;
-  _degradedWarningLogged = false;
+  if (_degradedWarningLogged) {
+    _degradedWarningLogged = false;
+    // Pair the DEGRADED warning with an explicit all-clear so operators can
+    // tell a resolved cold-start race from an ongoing outage.
+    console.error(
+      '[RateLimit] ✓ RECOVERED: Valkey connection established — shared rate limiting active.',
+    );
+  }
 }
 
 function markValkeyFailed(): void {
@@ -378,8 +385,12 @@ export async function checkRateLimit(
   maxHits: number,
   windowMs: number,
 ): Promise<{ limited: boolean; remaining: number; retryAfterMs: number }> {
-  // Try Valkey first
-  if (ensureValkey() && valkeyReady) {
+  // Try Valkey first. The bounded wait (1s, only while a connection attempt
+  // is actually in flight) absorbs the cold-start race where the first
+  // requests land before the AUTH handshake completes and used to log a
+  // false DEGRADED warning. When Valkey is failed/unconfigured this resolves
+  // immediately — no added latency on the memory-fallback path.
+  if (await ensureValkeyReady()) {
     try {
       const valkeyKey = `ratelimit:${key}`;
       const windowSec = Math.ceil(windowMs / 1000);

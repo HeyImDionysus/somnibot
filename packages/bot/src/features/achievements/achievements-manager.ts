@@ -1,11 +1,12 @@
 /**
  * AchievementsManager — milestone badges + prestige system.
  */
-import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import { EmbedBuilder, type ChatInputCommandInteraction, type Guild } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
 import { eventBus } from '../../services/event-bus.js';
+import { handleLevelUp } from '../levels/level-announcer.js';
 
 const log = createLogger('Achievements');
 
@@ -40,10 +41,24 @@ const CONFIG_CACHE_TTL_MS = 5 * 60_000; // 5 minutes
 
 export class AchievementsManager {
   private supabase: SupabaseClient;
+  private guild: Guild | null;
   private configCache = new Map<string, { data: DbGuildConfig; time: number }>();
+  /**
+   * Re-entrancy fence for reward_xp payment (keyed guildId:userId). Paying an
+   * achievement's XP reward can level the member up, and level-up side effects
+   * can re-enter checkAndUnlock in the SAME call chain — without the fence
+   * that nests achievement checks inside achievement checks. A fenced call
+   * returns null; unlocks are idempotent, so the next threshold event simply
+   * catches up.
+   */
+  private xpRewardInFlight = new Set<string>();
 
-  constructor(supabase: SupabaseClient) {
+  constructor(supabase: SupabaseClient, guild?: Guild) {
     this.supabase = supabase;
+    // Optional so callers without a live Discord handle (tests) still work;
+    // guild-init always passes the guild so reward XP runs the full level-up
+    // path (role rewards + announcements).
+    this.guild = guild ?? null;
   }
 
   clearCache(): void { this.configCache.clear(); }
@@ -97,6 +112,11 @@ export class AchievementsManager {
 
   /** Check if a user should unlock an achievement. Called from other modules. */
   async checkAndUnlock(guildId: string, userId: string, conditionType: string, currentValue: number): Promise<string | null> {
+    // Recursion guard: this call arrived from the level-up side effects of an
+    // achievement XP reward being paid right now for this member — do not
+    // nest. The unlock is idempotent and re-fires on the next threshold event.
+    if (this.xpRewardInFlight.has(`${guildId}:${userId}`)) return null;
+
     const config = await this.getConfig(guildId);
     if (!config?.economy_achievements_enabled) return null;
 
@@ -136,14 +156,50 @@ export class AchievementsManager {
         if (rewardErr) log.error(`Failed to award ${def.reward_currency} to ${userId}:`, rewardErr.message);
       }
 
+      // Pay reward_xp through the levels system's own award path — the same
+      // increment_member_xp RPC message XP uses — so a resulting level-up
+      // runs the full handleLevelUp flow (role rewards + announcement).
+      // The xpRewardInFlight fence above stops that flow from nesting another
+      // achievement check inside this one.
+      let rewardXp = 0;
+      if (((def.reward_xp as number | null) ?? 0) > 0) {
+        const fenceKey = `${guildId}:${userId}`;
+        this.xpRewardInFlight.add(fenceKey);
+        try {
+          const { data: xpResult, error: xpErr } = await this.supabase.rpc('increment_member_xp', {
+            p_guild_id: guildId,
+            p_member_id: userId,
+            p_xp_amount: def.reward_xp,
+            p_increment_messages: false,
+            p_voice_minutes: 0,
+          });
+          if (xpErr || !xpResult) {
+            log.error(`Failed to award ${def.reward_xp} XP to ${userId}:`, xpErr?.message ?? 'increment_member_xp returned null');
+          } else {
+            rewardXp = def.reward_xp as number;
+            if (this.guild && this.guild.id === guildId && xpResult.new_level > xpResult.old_level) {
+              await handleLevelUp(this.guild, this.supabase, eventBus, userId, xpResult.old_level, xpResult.new_level, xpResult.new_xp)
+                .catch((e: unknown) => { log.warn('achievement XP level-up handling failed:', (e as Error)?.message ?? e); });
+            }
+          }
+        } finally {
+          this.xpRewardInFlight.delete(fenceKey);
+        }
+      }
+
       // [game-economy-achievements-prestige] Append-only audit row on the badge
       // unlock state change (catalog contracts one per state change).
-      eventBus.emit('achievement.unlocked', guildId, {
+      // rewardXp reports what was actually PAID (0 when the grant failed) —
+      // assigned via a variable so the extra field rides along until the
+      // shared PlatformEventMap entry gains it.
+      const unlockPayload = {
         userId,
         achievementId: def.id as string,
         name: def.name as string,
         rewardCurrency: (def.reward_currency as number) ?? 0,
-      });
+        rewardXp,
+      };
+      eventBus.emit('achievement.unlocked', guildId, unlockPayload);
 
       return def.name;
     }

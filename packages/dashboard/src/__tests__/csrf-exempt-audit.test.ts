@@ -38,8 +38,9 @@ function segmentToApiPath(segment: string): string {
 }
 
 /**
- * Known CSRF exempt prefixes — must match csrf.ts exactly.
- * If you update csrf.ts, update this list and explain why in the PR.
+ * Known CSRF exempt prefixes — must match lib/csrf-exempt.ts exactly.
+ * Deliberately an independent copy (NOT an import): adding an exemption must
+ * fail this test so the change is made consciously and explained in the PR.
  */
 const CSRF_EXEMPT_PREFIXES = [
   '/api/paypal/webhook',

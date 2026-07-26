@@ -272,8 +272,12 @@ export class QuestsManager {
   }
 
   private async assignDailyQuests(guildId: string, userId: string, config: DbGuildConfig): Promise<void> {
-    // Seed default templates if none exist
-    await this.seedDefaultTemplates(guildId);
+    // Seed default templates if none exist (the RPC gates on ANY existing
+    // row, so an all-deactivated slate is respected). A failed seed must not
+    // break assignment from whatever templates DO exist.
+    await this.seedDefaultTemplates(guildId).catch((e: unknown) => {
+      log.warn('lazy quest template seeding failed:', (e as Error)?.message ?? e);
+    });
 
     const count = config.economy_daily_quest_count ?? 3;
     const { data: templates } = await this.supabase
@@ -326,8 +330,10 @@ export class QuestsManager {
     const weeklyExisting = (existing ?? []).filter((p: any) => p.template?.quest_type === 'weekly');
     if (weeklyExisting.length >= weeklyCount) return;
 
-    // Seed defaults if needed
-    await this.seedDefaultTemplates(guildId);
+    // Seed defaults if needed (same tolerance as the daily path).
+    await this.seedDefaultTemplates(guildId).catch((e: unknown) => {
+      log.warn('lazy quest template seeding failed:', (e as Error)?.message ?? e);
+    });
 
     const { data: templates } = await this.supabase
       .from('economy_quest_templates')
@@ -395,12 +401,15 @@ export class QuestsManager {
 
   private _resetTimer: NodeJS.Timeout | null = null;
 
-  /** Seed default quest templates via DB function. */
+  /**
+   * Seed default quest templates via DB function. Throws when the RPC
+   * surfaces an error (missing function, failed write) so callers can report
+   * degraded seeding instead of silently showing an empty quests page.
+   */
   private async seedDefaultTemplates(guildId: string): Promise<void> {
-    try {
-      await this.supabase.rpc('seed_default_quest_templates', { p_guild_id: guildId });
-    } catch {
-      // Ignore — function may not exist yet or templates already seeded
+    const { error } = await this.supabase.rpc('seed_default_quest_templates', { p_guild_id: guildId });
+    if (error) {
+      throw new Error(`seed_default_quest_templates failed: ${error.message}`);
     }
   }
 
@@ -411,14 +420,18 @@ export class QuestsManager {
    * assigned, so a fresh install showed an empty quests page for a feature
    * that claimed to be on. Guild init calls this so content exists before
    * anyone touches anything. Idempotent — only writes when the guild has no
-   * templates.
+   * templates. Throws when the gate read or the RPC failed so the warmup can
+   * report degradation.
    */
   async ensureContentSeeded(guildId: string): Promise<void> {
     const { count, error } = await this.supabase
       .from('economy_quest_templates')
       .select('id', { count: 'exact', head: true })
       .eq('guild_id', guildId);
-    if (!error && (count ?? 0) === 0) {
+    if (error) {
+      throw new Error(`quest template existence check failed: ${error.message}`);
+    }
+    if ((count ?? 0) === 0) {
       await this.seedDefaultTemplates(guildId);
     }
   }

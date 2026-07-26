@@ -655,8 +655,11 @@ export async function handleMessageCreateEvent(message: Message, client: SomniCl
     const modConfig = await loadModConfig(client, message.guild.id);
     // Master switch: when automod is disabled, run nothing (no scan, no action).
     if (modConfig.automodEnabled) {
-      const handled = await processMessage(client, message, modConfig);
-      if (handled) return;
+      // True only when a violation was actually ENFORCED. Observe-mode
+      // matches return false so the rest of the pipeline (automations, XP,
+      // achievements, economy, quests) still runs.
+      const enforced = await processMessage(client, message, modConfig);
+      if (enforced) return;
     }
   } catch (err) {
     log.error('Auto-mod error:', { error: String(err) });

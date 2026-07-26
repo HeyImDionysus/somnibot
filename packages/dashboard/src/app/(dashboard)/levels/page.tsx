@@ -127,6 +127,9 @@ export default function LevelsPage() {
   useUnsavedWarning(dirty);
   const [confirmDelete, setConfirmDelete] = useState<{ type: 'reward' | 'multiplier'; id: string } | null>(null);
   const [activeTab, setActiveTab] = useState<'settings' | 'rewards' | 'multipliers' | 'leaderboard'>('settings');
+  // Binds the level-up variable chips to their own input so a click can never
+  // insert into an unrelated field.
+  const levelUpMessageRef = useRef<HTMLInputElement>(null);
 
   // Reward form
   const [newRewardLevel, setNewRewardLevel] = useState(5);
@@ -557,6 +560,7 @@ export default function LevelsPage() {
                 Level-Up Message
               </label>
               <input
+                ref={levelUpMessageRef}
                 type="text"
                 value={config.level_up_message ?? ''}
                 onChange={(e) => setConfig({ ...config, level_up_message: e.target.value || null })}
@@ -564,6 +568,7 @@ export default function LevelsPage() {
                 className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none"
               />
               <VariableChips
+                targetRef={levelUpMessageRef}
                 variables={[
                   { key: '{user}', desc: 'User mention' },
                   { key: '{level}', desc: 'New level' },

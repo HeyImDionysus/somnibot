@@ -19,7 +19,7 @@ const itemSchema = z.object({
   name: z.string().min(1).max(64),
   description: z.string().max(256).nullable().optional(),
   emoji: z.string().min(1).max(64).optional(),
-  category: z.enum(['Tools', 'Bait', 'Seeds', 'Materials', 'Consumables', 'Roles', 'Cosmetics', 'Lootboxes']).optional(),
+  category: z.enum(['Tools', 'Bait', 'Seeds', 'Materials', 'Consumables', 'Roles', 'Cosmetics', 'Lootboxes', 'Protection', 'Farming', 'Accessories']).optional(),
   price: z.number().int().min(0).optional(),
   sell_price: z.number().int().min(0).optional(),
   stock: z.number().int().min(0).nullable().optional(),

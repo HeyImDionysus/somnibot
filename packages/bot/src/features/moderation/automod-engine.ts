@@ -148,7 +148,11 @@ function isExempt(
 /**
  * Process a message through the auto-mod pipeline.
  *
- * Returns true if the message was handled (deleted/action taken).
+ * Returns true only when a violation was actually ENFORCED (delete / warn /
+ * mute / kick / ban applied). Observe-mode matches are logged by the action
+ * layer but return false, so the caller keeps running the rest of the
+ * message pipeline (automations, XP, achievements, economy, quests) —
+ * observing must never suppress member activity.
  */
 // V11 Re-Audit L-3: Per-message aggregate time budget.
 // Individual regex evaluations are capped at 250ms each (see checkWordFilter),
@@ -218,12 +222,16 @@ export async function processMessage(
           900,
           'NX',
         );
-        if (!fresh) return true;
+        // Replay: the first delivery already ran the action layer. Mirror its
+        // return contract — in enforce mode the message was (or is being)
+        // enforced, so the pipeline stays suppressed; in observe mode the
+        // first delivery let the pipeline run, and the replay must not eat it
+        // either (the fence only dedupes the observe log entry).
+        if (!fresh) return modConfig.automodMode === 'enforce';
       } catch {
         // Valkey error — proceed with enforcement (fail open).
       }
-      await executeAutoModAction(client, message, rule, violation, modConfig);
-      return true;
+      return await executeAutoModAction(client, message, rule, violation, modConfig);
     }
   }
 
