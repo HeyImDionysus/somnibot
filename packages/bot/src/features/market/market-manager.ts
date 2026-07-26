@@ -13,7 +13,15 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import {
+  BRAND_KIT_COLUMNS,
+  brandKitFromConfig,
+  defaultBrandKit,
+  resolveBrandKit,
+  type BrandKit,
+} from '../branding/brand-kit.js';
+import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
+import { voice } from '../branding/voice.js';
 
 const log = createLogger('Market');
 
@@ -31,6 +39,8 @@ interface MarketConfig {
   economy_market_fee_pct: number;
   economy_market_listing_days: number;
   economy_market_max_listings: number;
+  /** White-label brand kit projected from the same cached guild_config row. */
+  brandKit: BrandKit;
 }
 
 interface MarketListing {
@@ -95,18 +105,22 @@ export class MarketManager {
     if (this.configCache) return { config: this.configCache, degraded: false };
     const { data, error } = await this.supabase
       .from('guild_config')
-      .select('economy_market_enabled, economy_market_fee_pct, economy_market_listing_days, economy_market_max_listings')
+      .select(`economy_market_enabled, economy_market_fee_pct, economy_market_listing_days, economy_market_max_listings, ${BRAND_KIT_COLUMNS}`)
       .eq('guild_id', this.guild.id)
       .single();
-    const fallback: MarketConfig = {
-      economy_market_enabled: false,
-      economy_market_fee_pct: 5,
-      economy_market_listing_days: 7,
-      economy_market_max_listings: 10,
+    const row = (data ?? null) as
+      | (Partial<Omit<MarketConfig, 'brandKit'>> & Record<string, unknown>)
+      | null;
+    const config: MarketConfig = {
+      economy_market_enabled: row?.economy_market_enabled ?? false,
+      economy_market_fee_pct: row?.economy_market_fee_pct ?? 5,
+      economy_market_listing_days: row?.economy_market_listing_days ?? 7,
+      economy_market_max_listings: row?.economy_market_max_listings ?? 10,
+      brandKit: brandKitFromConfig(row, this.guild.name),
     };
     const degraded = error != null && error.code !== 'PGRST116';
-    if (!degraded) this.configCache = data ?? fallback;
-    return { config: data ?? fallback, degraded };
+    if (!degraded) this.configCache = config;
+    return { config, degraded };
   }
 
   /**
@@ -118,10 +132,12 @@ export class MarketManager {
     const brandKit = await resolveBrandKit(this.supabase, this.guild.id, {
       fallbackName: this.guild.name,
     }).catch(() => null);
+    const kit = brandKit ?? defaultBrandKit(this.guild.name);
     const name = brandKit?.brandName ?? this.guild.name ?? 'this server';
-    return new EmbedBuilder()
-      .setDescription(`⚠️ ${name}'s market is temporarily unavailable — please try again in a moment.${suffix}`)
-      .setColor(0xff9800);
+    return brandedEmbed(kit, {
+      intent: 'warning',
+      description: `${voice(kit.voicePreset, 'unavailable', { brand: name, feature: 'market' })}${suffix}`,
+    });
   }
 
   // ── List Item ─────────────────────────────────────────
@@ -133,19 +149,21 @@ export class MarketManager {
     pricePerUnit: number,
   ): Promise<EmbedBuilder> {
     const { config, degraded } = await this.getConfig();
+    const kit = config.brandKit;
     // A failed config read is an outage, not "the market is off" — degrade honestly.
     if (degraded) {
       return this.unavailableEmbed(' Nothing was listed or charged.');
     }
     if (!config.economy_market_enabled) {
-      return new EmbedBuilder().setDescription('🚫 The market is not enabled.').setColor(0xff0000);
+      return brandedEmbed(kit, { intent: 'danger', description: '🚫 The market is not enabled.' });
     }
 
     // V5 Audit §4.P3a: Reject absurd prices
     if (pricePerUnit > MAX_PRICE_PER_UNIT) {
-      return new EmbedBuilder()
-        .setDescription(`❌ Maximum price per unit is **${MAX_PRICE_PER_UNIT.toLocaleString()}** coins.`)
-        .setColor(0xff0000);
+      return brandedEmbed(kit, {
+        intent: 'danger',
+        description: `❌ Maximum price per unit is **${MAX_PRICE_PER_UNIT.toLocaleString()}** coins.`,
+      });
     }
 
     // Check active listings count
@@ -157,9 +175,10 @@ export class MarketManager {
       .eq('status', 'active');
 
     if ((count ?? 0) >= config.economy_market_max_listings) {
-      return new EmbedBuilder()
-        .setDescription(`📋 You already have **${config.economy_market_max_listings}** active listings (max).`)
-        .setColor(0xffaa00);
+      return brandedEmbed(kit, {
+        intent: 'warning',
+        description: `📋 You already have **${config.economy_market_max_listings}** active listings (max).`,
+      });
     }
 
     // Check inventory
@@ -173,9 +192,10 @@ export class MarketManager {
       .limit(1);
 
     if (!inv || inv.length === 0) {
-      return new EmbedBuilder()
-        .setDescription(`❌ You don't have any **${itemName}** in your inventory.`)
-        .setColor(0xff0000);
+      return brandedEmbed(kit, {
+        intent: 'danger',
+        description: `❌ You don't have any **${itemName}** in your inventory.`,
+      });
     }
 
     const raw = inv[0];
@@ -186,15 +206,17 @@ export class MarketManager {
     // commerce-granted goods) must never reach the player market. Reject before
     // any inventory decrement; the RPC re-checks as defense-in-depth.
     if (invEntry.economy_items?.tradeable === false) {
-      return new EmbedBuilder()
-        .setDescription(`🚫 **${invEntry.economy_items.name}** cannot be traded on the player market.`)
-        .setColor(0xff0000);
+      return brandedEmbed(kit, {
+        intent: 'danger',
+        description: `🚫 **${invEntry.economy_items.name}** cannot be traded on the player market.`,
+      });
     }
 
     if (invEntry.quantity < quantity) {
-      return new EmbedBuilder()
-        .setDescription(`❌ You only have **${invEntry.quantity}x** ${itemName} (trying to list ${quantity}).`)
-        .setColor(0xff0000);
+      return brandedEmbed(kit, {
+        intent: 'danger',
+        description: `❌ You only have **${invEntry.quantity}x** ${itemName} (trying to list ${quantity}).`,
+      });
     }
 
     // Verify+decrement inventory AND insert the listing in ONE row-locked
@@ -215,23 +237,26 @@ export class MarketManager {
     if (createErr) {
       // The transaction rolled back server-side — nothing was decremented.
       log.error('listItem atomic create failed:', createErr.message);
-      return new EmbedBuilder()
-        .setDescription('❌ Failed to create listing. Your items are still in your inventory.')
-        .setColor(0xff0000);
+      return brandedEmbed(kit, {
+        intent: 'danger',
+        description: '❌ Failed to create listing. Your items are still in your inventory.',
+      });
     }
 
     const result = created as { error?: string; listing?: MarketListing } | null;
     if (result?.error === 'not_tradeable') {
       // [game-economy-shop-market] RPC defense-in-depth refused a non-tradeable item.
-      return new EmbedBuilder()
-        .setDescription(`🚫 **${invEntry.economy_items.name}** cannot be traded on the player market.`)
-        .setColor(0xff0000);
+      return brandedEmbed(kit, {
+        intent: 'danger',
+        description: `🚫 **${invEntry.economy_items.name}** cannot be traded on the player market.`,
+      });
     }
     if (!result?.listing) {
       // Typed 'insufficient_inventory' — a concurrent listing consumed the stack
-      return new EmbedBuilder()
-        .setDescription(`❌ You don't have enough **${itemName}** in your inventory.`)
-        .setColor(0xff0000);
+      return brandedEmbed(kit, {
+        intent: 'danger',
+        description: `❌ You don't have enough **${itemName}** in your inventory.`,
+      });
     }
 
     // [game-economy-shop-market] Append-only audit row for the listing state change.
@@ -243,15 +268,15 @@ export class MarketManager {
       pricePerUnit,
     });
 
-    return new EmbedBuilder()
-      .setTitle('📦 Item Listed!')
-      .setDescription(
+    return brandedEmbed(kit, {
+      intent: 'primary',
+      title: '📦 Item Listed!',
+      description:
         `**${invEntry.economy_items.name}** x${quantity}\n` +
         `💰 Price: **${pricePerUnit.toLocaleString()}** coins each\n` +
         `📅 Expires: <t:${Math.floor(new Date(expiresAt).getTime() / 1000)}:R>\n` +
         `💸 Market fee: **${config.economy_market_fee_pct}%** on sale`,
-      )
-      .setColor(0x4caf50);
+    });
   }
 
   // ── Browse ────────────────────────────────────────────
@@ -269,12 +294,13 @@ export class MarketManager {
     const PAGE_SIZE = 15;
 
     const { config, degraded } = await this.getConfig();
+    const kit = config.brandKit;
     // A failed config read is an outage, not "the market is off" — degrade honestly.
     if (degraded) {
       return this.unavailableEmbed();
     }
     if (!config.economy_market_enabled) {
-      return new EmbedBuilder().setDescription('🚫 The market is not enabled.').setColor(0xff0000);
+      return brandedEmbed(kit, { intent: 'danger', description: '🚫 The market is not enabled.' });
     }
 
     // V53 Phase 3 (3.5): Enhanced market search with filtering, sorting, pagination
@@ -330,10 +356,11 @@ export class MarketManager {
     const totalPages = Math.max(1, Math.ceil(totalListings / PAGE_SIZE));
 
     if (listings.length === 0) {
-      return new EmbedBuilder()
-        .setTitle('🏪 Player Market')
-        .setDescription(searchTerm ? `No listings found for "${searchTerm}".` : 'No active listings right now.')
-        .setColor(0x9e9e9e);
+      return brandedEmbed(kit, {
+        intent: 'info',
+        title: '🏪 Player Market',
+        description: searchTerm ? `No listings found for "${searchTerm}".` : 'No active listings right now.',
+      });
     }
 
     const lines = listings.map((l) => {
@@ -348,13 +375,16 @@ export class MarketManager {
     if (maxPrice !== undefined) filters.push(`Max: 💰${maxPrice.toLocaleString()}`);
     const filterLine = filters.length > 0 ? `*Filters: ${filters.join(' • ')}*\n\n` : '';
 
-    return new EmbedBuilder()
-      .setTitle('🏪 Player Market')
-      .setDescription(`${filterLine}${lines.join('\n')}`)
-      .setFooter({
-        text: `Page ${page + 1}/${totalPages} • ${totalListings} listing${totalListings !== 1 ? 's' : ''} • /market buy <id> • ${config.economy_market_fee_pct}% fee`,
-      })
-      .setColor(0x2196f3);
+    return applyBrand(
+      new EmbedBuilder()
+        .setTitle('🏪 Player Market')
+        .setDescription(`${filterLine}${lines.join('\n')}`)
+        .setFooter({
+          text: `Page ${page + 1}/${totalPages} • ${totalListings} listing${totalListings !== 1 ? 's' : ''} • /market buy <id> • ${config.economy_market_fee_pct}% fee`,
+        }),
+      kit,
+      { intent: 'info' },
+    );
   }
 
   // ── Buy ───────────────────────────────────────────────
