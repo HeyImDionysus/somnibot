@@ -892,7 +892,10 @@ jobs:
           # misclassifies a registry-outage crash as a real finding. A report
           # is JSON that parses; anything else is a crash.
           for attempt in 1 2 3 4; do
-            out="$(pnpm audit --audit-level=high --json 2>/dev/null)"; code=$?
+            # GitHub runs steps with implicit `bash -e`: without `|| true`, a
+            # failing pnpm inside the command substitution kills the whole step
+            # instantly and silently (stderr is already discarded).
+            out="$(pnpm audit --audit-level=high --json 2>/dev/null || true)"
             verdict="$(node -e '
               try {
                 const a = JSON.parse(process.argv[1]);
