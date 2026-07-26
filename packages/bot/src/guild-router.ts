@@ -181,7 +181,17 @@ export class GuildRouter {
     // Discord events, which a small server routinely is for half an hour; the
     // background services are precisely the part that must keep running
     // through that.
-    const primaryGuildId = process.env.DISCORD_GUILD_ID;
+    // The RESOLVED primary guild id, not the raw env var: in the documented
+    // auto-detection path DISCORD_GUILD_ID is never set (runFullBoot stores
+    // the detected guild only on client.guildId), and the launcher supports a
+    // comma-separated list where the env value is the whole list. Comparing
+    // against the raw value in either mode matched nothing — so the primary
+    // was still evicted after 30 quiet minutes, which is precisely the failure
+    // this guard exists to prevent. Falls back to the env var only when the
+    // client has no resolved id yet.
+    const primaryGuildId =
+      (this.client as { guildId?: string }).guildId
+      ?? process.env.DISCORD_GUILD_ID?.split(',')[0]?.trim();
 
     for (const [guildId, lastTime] of this.lastAccess) {
       if (guildId === primaryGuildId) continue;
