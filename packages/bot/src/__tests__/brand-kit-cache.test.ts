@@ -272,15 +272,17 @@ describe('cache generation token — invalidation during in-flight resolves', ()
   it('generation-counter eviction fails CLOSED — the in-flight result is still not cached', async () => {
     const { supabase, from, pending } = manualSupabase();
 
-    const inflight = resolveBrandKit(supabase, 'g1'); // captures generation
-    invalidateBrandKitCache('g1');
-    // Flood the per-guild counter map past its cap so g1's counter is evicted
-    // mid-flight. The epoch bump on eviction must keep the capture stale.
+    // A VIRGIN guild (never invalidated in this file): its captured counter is
+    // 0 and stays 0 after eviction rebuilds the map, so ONLY the epoch bump on
+    // eviction can keep the capture stale — this pins the epoch-bump behavior
+    // itself, not the targeted-counter path the other tests already cover.
+    const inflight = resolveBrandKit(supabase, 'evict-virgin'); // captures generation
+    // Flood the per-guild counter map past its cap; evictions must bump the epoch.
     for (let i = 0; i < 10_000; i++) invalidateBrandKitCache(`evicted-${i}`);
     pending[0]!({ data: { brand_primary_color: 0x111111 }, error: null });
     await inflight;
 
-    const second = resolveBrandKit(supabase, 'g1');
+    const second = resolveBrandKit(supabase, 'evict-virgin');
     pending[1]!({ data: { brand_primary_color: 0x222222 }, error: null });
     expect((await second).primaryColor).toBe(0x222222);
     expect(from).toHaveBeenCalledTimes(2);
