@@ -14,6 +14,48 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
+
+/**
+ * [#57] Append-only audit rows for the dashboard giveaway CRUD surface (the
+ * bot rail audits lifecycle events it performs itself — start/pause/end —
+ * but never these dashboard-origin config writes). Best-effort service-role
+ * insert — an audit failure never fails the request.
+ */
+async function writeGiveawayAudit(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  entry: {
+    guildId: string;
+    actorId: string;
+    action: 'giveaway.created' | 'giveaway.updated' | 'giveaway.deleted';
+    targetId: string;
+    details?: Record<string, unknown>;
+    beforeState?: Record<string, unknown> | null;
+    afterState?: Record<string, unknown> | null;
+  },
+): Promise<void> {
+  try {
+    const { error } = await supabase.from('audit_logs').insert({
+      guild_id: entry.guildId,
+      actor_type: 'dashboard',
+      actor_id: entry.actorId,
+      action: entry.action,
+      category: 'giveaways',
+      target_type: 'giveaway',
+      target_id: entry.targetId,
+      details: entry.details ?? {},
+      before_state: entry.beforeState ?? null,
+      after_state: entry.afterState ?? null,
+      success: true,
+    });
+    if (error) {
+      console.error(`[giveaways] Failed to write ${entry.action} audit row:`, error.message);
+    }
+  } catch (err) {
+    // Audit logging must never break the CRUD flow — but never silently.
+    console.error(`[giveaways] Exception writing ${entry.action} audit row:`, err);
+  }
+}
+
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -116,6 +158,15 @@ export async function POST(req: NextRequest) {
     return dbError(error, 'giveaways');
   }
 
+  await writeGiveawayAudit(supabase, {
+    guildId,
+    actorId: auth.ctx.discordId,
+    action: 'giveaway.created',
+    targetId: data.id,
+    details: { prize: data.prize, channelId: data.channel_id, endsAt: data.ends_at },
+    afterState: typedPick(data, ['prize', 'channel_id', 'winner_count', 'ends_at', 'required_role_id', 'required_level', 'prize_product_id', 'prize_license_count', 'status']),
+  });
+
   await notifyBot('giveaways');
 
   return NextResponse.json({ success: true, data });
@@ -159,6 +210,20 @@ export async function PUT(req: NextRequest) {
     updates.ended_at = new Date().toISOString();
   }
 
+  // Read the row first so the audit diff carries the BEFORE side of exactly
+  // the keys this update touches (an honest two-sided diff, no fabrication).
+  // A FAILED read is logged and the diff stays one-sided — a null before_state
+  // must mean "unavailable, and we said so", never a swallowed error.
+  const { data: beforeRow, error: beforeErr } = await supabase
+    .from('giveaways')
+    .select('*')
+    .eq('id', body.id)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  if (beforeErr) {
+    console.error('[giveaways] before-state read failed for giveaway.updated audit:', beforeErr.message);
+  }
+
   const { data, error } = await supabase
     .from('giveaways')
     .update(updates)
@@ -169,6 +234,23 @@ export async function PUT(req: NextRequest) {
 
   if (error) {
     return dbError(error, 'giveaways');
+  }
+
+  const changedKeys = Object.keys(updates);
+  // A no-op PUT (nothing picked from the body) changed nothing — writing a
+  // giveaway.updated row with an empty diff would fabricate a mutation.
+  if (changedKeys.length > 0) {
+    await writeGiveawayAudit(supabase, {
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'giveaway.updated',
+      targetId: data.id,
+      details: { prize: data.prize, fields: changedKeys },
+      beforeState: beforeRow
+        ? Object.fromEntries(changedKeys.map((k) => [k, (beforeRow as Record<string, unknown>)[k] ?? null]))
+        : null,
+      afterState: Object.fromEntries(changedKeys.map((k) => [k, (data as Record<string, unknown>)[k] ?? null])),
+    });
   }
 
   await notifyBot('giveaways');
@@ -192,14 +274,27 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing giveaway id' }, { status: 400 });
   }
 
-  const { error } = await supabase
+  const { data: deletedRows, error } = await supabase
     .from('giveaways')
     .delete()
     .eq('id', id)
-    .eq('guild_id', guildId);
+    .eq('guild_id', guildId)
+    .select();
 
   if (error) {
     return dbError(error, 'giveaways');
+  }
+
+  const deleted = (deletedRows ?? [])[0] as Record<string, unknown> | undefined;
+  if (deleted) {
+    await writeGiveawayAudit(supabase, {
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'giveaway.deleted',
+      targetId: id,
+      details: { prize: deleted.prize, status: deleted.status, entryCount: Array.isArray(deleted.entries) ? deleted.entries.length : 0 },
+      beforeState: typedPick(deleted, ['prize', 'channel_id', 'winner_count', 'ends_at', 'required_role_id', 'required_level', 'prize_product_id', 'prize_license_count', 'status']),
+    });
   }
 
   await notifyBot('giveaways');

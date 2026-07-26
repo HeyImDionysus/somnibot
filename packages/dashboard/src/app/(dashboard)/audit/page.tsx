@@ -12,6 +12,7 @@ import { ScrollText } from 'lucide-react';
 
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
+import { CATEGORIES, ACTOR_ICONS, CATEGORY_COLORS } from './audit-constants';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -19,7 +20,7 @@ interface AuditEntry {
   id: string;
   guild_id: string;
   timestamp: string;
-  actor_type: 'user' | 'bot' | 'system' | 'webhook' | 'automation';
+  actor_type: 'user' | 'bot' | 'system' | 'webhook' | 'automation' | 'discord' | 'dashboard';
   actor_id: string;
   action: string;
   category: string | null;
@@ -38,41 +39,6 @@ interface Pagination {
   total: number;
   totalPages: number;
 }
-
-// ── Constants ─────────────────────────────────────────────
-
-const CATEGORIES = [
-  { value: '', label: 'All Categories' },
-  { value: 'members', label: 'Members' },
-  { value: 'moderation', label: 'Moderation' },
-  { value: 'tickets', label: 'Tickets' },
-  { value: 'commerce', label: 'Commerce' },
-  { value: 'subscriptions', label: 'Subscriptions' },
-  { value: 'levels', label: 'Levels' },
-  { value: 'giveaways', label: 'Giveaways' },
-  { value: 'sync', label: 'Sync & Deploy' },
-  { value: 'system', label: 'System' },
-];
-
-const ACTOR_ICONS: Record<string, string> = {
-  user: '👤',
-  bot: '🤖',
-  system: '⚙️',
-  webhook: '🔄',
-  automation: '⚡',
-};
-
-const CATEGORY_COLORS: Record<string, string> = {
-  members: 'bg-blue-500/20 text-blue-400',
-  moderation: 'bg-red-500/20 text-red-400',
-  tickets: 'bg-yellow-500/20 text-yellow-400',
-  commerce: 'bg-green-500/20 text-green-400',
-  subscriptions: 'bg-purple-500/20 text-purple-400',
-  levels: 'bg-orange-500/20 text-orange-400',
-  giveaways: 'bg-pink-500/20 text-pink-400',
-  sync: 'bg-cyan-500/20 text-cyan-400',
-  system: 'bg-gray-500/20 text-gray-400',
-};
 
 // ── Component ─────────────────────────────────────────────
 

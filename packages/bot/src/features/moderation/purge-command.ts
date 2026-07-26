@@ -61,6 +61,7 @@ export async function handlePurgeCommand(
       actorType: 'discord',
       actorId: interaction.user.id,
       action: 'moderation.purge.denied',
+      category: 'moderation',
       success: false,
       details: { command: 'purge', reason: 'missing_permission', required: 'ManageMessages' },
     });

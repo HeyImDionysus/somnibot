@@ -20,6 +20,7 @@ import {
 import type { TempChannelManager } from './temp-channel-manager.js';
 import type { HubConfig } from './temp-channel-manager.js';
 import { renderTempChannelTemplate, type TemplateVars } from './templates.js';
+import { eventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('TempChannelCmds');
@@ -146,12 +147,35 @@ export async function handleTempChannelCommand(
     return;
   }
 
+  // [#60] Append-only audit for the /voice owner-control surface. One event
+  // covers all eight controls (lock/unlock/limit/name/permit/deny/ban/claim);
+  // AuditService maps it to a temp_channel.settings_changed audit row
+  // (category temp_channels). Member-targeted ops carry the affected member
+  // in targetUserId so the audit row's target is the member (purge-scrubbed).
+  const auditSettingsChange = (
+    op: 'lock' | 'unlock' | 'limit' | 'name' | 'permit' | 'deny' | 'ban' | 'claim',
+    extra: {
+      targetUserId?: string;
+      value?: string | number;
+      before?: Record<string, unknown>;
+      after?: Record<string, unknown>;
+    } = {},
+  ): void => {
+    eventBus.emit('temp_channel.settings_changed', interaction.guild!.id, {
+      channelId: vcId,
+      actorId: interaction.user.id,
+      op,
+      ...extra,
+    });
+  };
+
   try {
     switch (sub) {
       case 'lock': {
         await vc.permissionOverwrites.edit(interaction.guild.id, {
           Connect: false,
         });
+        auditSettingsChange('lock', { after: { locked: true } });
         await interaction.reply({ content: applied('🔒 Voice channel locked.'), ephemeral: true });
         break;
       }
@@ -160,13 +184,20 @@ export async function handleTempChannelCommand(
         await vc.permissionOverwrites.edit(interaction.guild.id, {
           Connect: null,
         });
+        auditSettingsChange('unlock', { after: { locked: false } });
         await interaction.reply({ content: applied('🔓 Voice channel unlocked.'), ephemeral: true });
         break;
       }
 
       case 'limit': {
         const count = interaction.options.getInteger('count', true);
+        const previousLimit = vc.userLimit;
         await vc.setUserLimit(count);
+        auditSettingsChange('limit', {
+          value: count,
+          before: { userLimit: previousLimit },
+          after: { userLimit: count },
+        });
         await interaction.reply({
           content: applied(count === 0 ? '♾️ User limit removed.' : `👥 User limit set to ${count}.`),
           ephemeral: true,
@@ -176,7 +207,13 @@ export async function handleTempChannelCommand(
 
       case 'name': {
         const name = interaction.options.getString('name', true);
+        const previousName = vc.name;
         await vc.setName(name);
+        auditSettingsChange('name', {
+          value: name,
+          before: { name: previousName },
+          after: { name },
+        });
         await interaction.reply({ content: applied(`✏️ Channel renamed to "${name}".`, { 'room-name': name }), ephemeral: true });
         break;
       }
@@ -187,6 +224,7 @@ export async function handleTempChannelCommand(
           Connect: true,
           ViewChannel: true,
         });
+        auditSettingsChange('permit', { targetUserId: user.id, after: { connect: true } });
         await interaction.reply({ content: applied(`✅ <@${user.id}> can now join your channel.`, { target: `<@${user.id}>` }), ephemeral: true });
         break;
       }
@@ -196,6 +234,7 @@ export async function handleTempChannelCommand(
         await vc.permissionOverwrites.create(user.id, {
           Connect: false,
         });
+        auditSettingsChange('deny', { targetUserId: user.id, after: { connect: false } });
         await interaction.reply({ content: applied(`🚫 <@${user.id}> can no longer join your channel.`, { target: `<@${user.id}>` }), ephemeral: true });
         break;
       }
@@ -212,6 +251,7 @@ export async function handleTempChannelCommand(
           Connect: false,
           ViewChannel: false,
         });
+        auditSettingsChange('ban', { targetUserId: user.id, after: { connect: false, viewChannel: false } });
         await interaction.reply({ content: applied(`⛔ <@${user.id}> has been banned from your channel.`, { target: `<@${user.id}>` }), ephemeral: true });
         break;
       }
@@ -234,6 +274,13 @@ export async function handleTempChannelCommand(
         }
         // Transfer ownership
         await manager.transferOwnership(vcId, interaction.user.id);
+        // The affected member is the PREVIOUS owner whose room was claimed —
+        // they are the audit row's target; the claimer is the actor.
+        auditSettingsChange('claim', {
+          targetUserId: ownerId,
+          before: { ownerId },
+          after: { ownerId: interaction.user.id },
+        });
         await interaction.reply({ content: applied('👑 You are now the owner of this voice channel.'), ephemeral: true });
         break;
       }

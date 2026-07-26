@@ -552,7 +552,15 @@ describe('PollsManager', () => {
         }
         return chainBuilder();
       });
-      supabase.rpc.mockResolvedValue({ data: 50, error: null });
+      supabase.rpc.mockImplementation(async (fn: string) => {
+        if (fn === 'economy_prediction_settle') {
+          return { data: { status: 'settled', replayed: false }, error: null };
+        }
+        if (fn === 'prediction_place_bet') {
+          return { data: { status: 'inserted', replayed: false, new_pool: 50 }, error: null };
+        }
+        return { data: null, error: null };
+      });
       const interaction = makeInteraction();
       await mgr.placeBet(interaction as any, 'pred1', 0, 50); // exactly at the floor
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -634,7 +642,15 @@ describe('PollsManager', () => {
         }
         return chainBuilder();
       });
-      supabase.rpc.mockResolvedValue({ data: 150, error: null });
+      supabase.rpc.mockImplementation(async (fn: string) => {
+        if (fn === 'economy_prediction_settle') {
+          return { data: { status: 'settled', replayed: false }, error: null };
+        }
+        if (fn === 'prediction_place_bet') {
+          return { data: { status: 'inserted', replayed: false, new_pool: 150 }, error: null };
+        }
+        return { data: null, error: null };
+      });
       const interaction = makeInteraction();
       await mgr.placeBet(interaction as any, 'pred1', 0, 50);
       expect(interaction.reply).toHaveBeenCalledWith(

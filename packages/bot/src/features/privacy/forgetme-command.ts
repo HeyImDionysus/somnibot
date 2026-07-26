@@ -258,6 +258,7 @@ export async function handleForgetMeCommand(
       actorType: 'bot',
       actorId: 'purged_user', // Don't store the user ID — they asked to be forgotten
       action: 'member.data_purged',
+      category: 'members',
       targetType: 'member',
       targetId: 'purged_user',
       details: {

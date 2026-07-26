@@ -88,6 +88,7 @@ export async function handleRoleUpdate(
             actorType: 'bot',
             actorId: 'sync-engine',
             action: 'drift.auto_repair',
+            category: 'sync',
             targetType: 'role',
             targetId: newRole.id,
             details: {
@@ -258,6 +259,7 @@ export async function handleRoleDelete(
     actorType: 'system',
     actorId: 'sync-engine',
     action: 'drift.role_deleted',
+    category: 'sync',
     targetType: 'role',
     targetId: role.id,
     details: { roleName: role.name, templateKey: mapping.template_key },
@@ -458,6 +460,7 @@ async function autoRepairRole(
       actorType: 'bot',
       actorId: 'sync-engine',
       action: 'drift.auto_repair',
+      category: 'sync',
       targetType: 'role',
       targetId: role.id,
       details: { roleName: role.name, templateKey },

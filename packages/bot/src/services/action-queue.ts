@@ -3158,6 +3158,8 @@ async function processAction(
   // Audit log. The payload is redacted first: deliver_receipt / fulfill_*
   // payloads carry the plaintext license key (by design, for retryability),
   // and audit_logs retention is far too long to hold a copy of it.
+  // Category deliberately stays the 'system' default: these bot.* rows come
+  // from a generic dispatcher, not any one feature bucket.
   await writeAuditLog(supabase, {
     guildId: guild.id,
     actorType: 'dashboard',

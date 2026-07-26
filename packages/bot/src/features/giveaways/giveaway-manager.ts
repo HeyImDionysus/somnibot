@@ -247,6 +247,13 @@ export class GiveawayManager {
       .maybeSingle();
 
     if (!data || (data as GiveawayRow).status !== 'active') {
+      // [#57] Honest deny audit: a click on an ended/paused/unknown giveaway
+      // is a real denial, batched via the event rail like the gate denials.
+      this.eventBus.emit('giveaway.entry_denied', this.guild.id, {
+        giveawayId,
+        userId,
+        reason: 'not_active',
+      });
       await interaction.reply({ content: '❌ This giveaway has ended.', ephemeral: true });
       return true;
     }
@@ -256,11 +263,24 @@ export class GiveawayManager {
     // Check requirements
     const member = this.guild.members.cache.get(userId);
     if (!member) {
+      this.eventBus.emit('giveaway.entry_denied', this.guild.id, {
+        giveawayId,
+        userId,
+        reason: 'member_not_found',
+      });
       await interaction.reply({ content: '❌ Could not find your member data.', ephemeral: true });
       return true;
     }
 
     if (giveaway.required_role_id && !member.roles.cache.has(giveaway.required_role_id)) {
+      // [#57] Entry attempts are hot (button clicks) — the denial is audited
+      // via the batched event rail, never a direct audit write.
+      this.eventBus.emit('giveaway.entry_denied', this.guild.id, {
+        giveawayId,
+        userId,
+        reason: 'role_gate',
+        requiredRoleId: giveaway.required_role_id,
+      });
       await interaction.reply({
         content: `❌ You need the <@&${giveaway.required_role_id}> role to enter this giveaway.`,
         ephemeral: true,
@@ -278,6 +298,13 @@ export class GiveawayManager {
 
       const userLevel = levelData?.level ?? 0;
       if (userLevel < giveaway.required_level) {
+        this.eventBus.emit('giveaway.entry_denied', this.guild.id, {
+          giveawayId,
+          userId,
+          reason: 'level_gate',
+          requiredLevel: giveaway.required_level,
+          userLevel,
+        });
         await interaction.reply({
           content: `❌ You need to be level ${giveaway.required_level} or higher to enter. Your current level: ${userLevel}.`,
           ephemeral: true,

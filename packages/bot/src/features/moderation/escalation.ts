@@ -242,6 +242,7 @@ export async function executeEscalation(
       actorType: 'bot',
       actorId: client.user?.id ?? 'unknown',
       action: `escalation.${step.action}.failed`,
+      category: 'moderation',
       targetType: 'member',
       targetId: member.id,
       details: { error: String(err), activeWarnings },

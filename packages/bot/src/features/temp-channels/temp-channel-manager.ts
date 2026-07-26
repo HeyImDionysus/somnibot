@@ -516,6 +516,7 @@ export class TempChannelManager {
           actorType: 'system',
           actorId: 'system',
           action: 'temp_channel.orphan_reconciled',
+          category: 'temp_channels',
           targetType: 'channel',
           targetId: channelId,
           details: { ownerId: active.owner_id, reason: 'startup_reconciliation' },

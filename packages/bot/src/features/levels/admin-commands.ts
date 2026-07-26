@@ -93,6 +93,7 @@ export async function handleXpAdminCommand(
       actorType: 'discord',
       actorId: interaction.user.id,
       action: 'levels.xp_admin.denied',
+      category: 'levels',
       targetType: 'member',
       targetId: targetUser.id,
       success: false,
