@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, linkSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -101,13 +101,28 @@ describe('VPS command runner', () => {
 
   it('marks SSH transport exit code 255 as retriable', async () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), 'somnibot-vps-runner-'));
-    const sshPath = path.join(tempDir, 'ssh');
+    // The runner only treats exit 255 as retriable when the executable is named
+    // `ssh`, and the deployment plan always passes that bare name (never a path)
+    // so the OS resolves it from PATH. Mirror that exactly: drop a stand-in
+    // binary on PATH and spawn it by name. The previous fixture used a `#!`
+    // script, which Windows — the launcher's own platform — cannot execute, so
+    // the spawn failed outright and the assertion covered nothing there.
+    const sshPath = path.join(tempDir, process.platform === 'win32' ? 'ssh.exe' : 'ssh');
+    const originalPath = process.env.PATH;
     try {
-      writeFileSync(sshPath, `#!${process.execPath}\nrequire("node:fs").writeSync(2, "ssh transport failed"); process.exit(255);\n`);
+      try {
+        linkSync(process.execPath, sshPath);
+      } catch {
+        copyFileSync(process.execPath, sshPath);
+      }
       chmodSync(sshPath, 0o700);
+      process.env.PATH = `${tempDir}${path.delimiter}${originalPath ?? ''}`;
 
       const runner = createVpsCommandRunner({ timeoutMs: 5_000 });
-      const result = await runner(command(sshPath, ['example.com', 'true']), { index: 0, total: 1 });
+      const result = await runner(command('ssh', [
+        '-e',
+        'require("node:fs").writeSync(2, "ssh transport failed"); process.exit(255)',
+      ]), { index: 0, total: 1 });
 
       expect(result).toMatchObject({
         ok: false,
@@ -116,6 +131,7 @@ describe('VPS command runner', () => {
       });
       expect(result.error).toContain('ssh transport failed');
     } finally {
+      process.env.PATH = originalPath;
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
