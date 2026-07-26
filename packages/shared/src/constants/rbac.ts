@@ -110,6 +110,7 @@ export const ROUTE_PERMISSIONS: Record<string, DashboardPermission | null> = {
   '/channels': 'dashboard.manage_channels',
   '/onboarding': 'dashboard.manage_server',
   '/welcome': 'dashboard.manage_server',
+  '/branding': 'dashboard.manage_server',
   '/sync': 'dashboard.manage_server',
   '/moderation': 'dashboard.manage_moderation',
   '/moderation/rules': 'dashboard.manage_moderation',

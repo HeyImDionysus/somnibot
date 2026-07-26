@@ -18,6 +18,10 @@
       "types": "./dist/constants/index.d.ts",
       "import": "./dist/constants/index.js"
     },
+    "./constants/brand": {
+      "types": "./dist/constants/brand.d.ts",
+      "import": "./dist/constants/brand.js"
+    },
     "./validators": {
       "types": "./dist/validators/index.d.ts",
       "import": "./dist/validators/index.js"

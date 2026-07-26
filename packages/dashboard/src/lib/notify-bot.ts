@@ -25,6 +25,7 @@ export type ConfigSection =
   | 'embeds'
   | 'commerce'
   | 'economy'
+  | 'branding'
   | 'settings'
   | 'all';
 

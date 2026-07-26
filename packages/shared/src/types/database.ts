@@ -2273,7 +2273,9 @@ export interface DbTutorialProgress {
 }
 
 // ── Feature Embed Overrides (feature_embed_overrides) ─────
-// V53 Phase 3 — read by services/embed-theme via the typed client.
+// V53 Phase 3 — table still exists (20260601000001) but its consumer
+// (services/embed-theme) was removed as dead code; the white-label brand kit
+// (features/branding) is the supported per-guild embed theming path.
 
 export type FeatureEmbedKey =
   | 'welcome'

@@ -21,6 +21,7 @@
  * - 'custom-commands' → reload custom command definitions
  * - 'stats-channels' → reload stats channel config
  * - 'embeds' → reload saved embed templates
+ * - 'branding' → invalidate the white-label brand kit cache
  * - 'settings' → reload instance-wide settings (full reload)
  * - 'all' → full config reload
  */
@@ -48,6 +49,7 @@ import { invalidateQuestsCache } from '../features/quests/index.js';
 import { invalidateAchievementsCache } from '../features/achievements/index.js';
 import { invalidateProfilesCache } from '../features/profiles/index.js';
 import { invalidateHeistCache } from '../features/heist/index.js';
+import { invalidateBrandKitCache } from '../features/branding/index.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('ConfigWatcher');
@@ -157,7 +159,15 @@ export class ConfigWatcher {
             invalidateAchievementsCache(this.guild.id);
             invalidateProfilesCache(this.guild.id);
             invalidateHeistCache(this.guild.id);
-            log.info('Economy/Gathering/Crafting/Farming config cache invalidated');
+            // currency_name/currency_emoji are part of the brand kit, and the
+            // economy dashboard route notifies 'economy' — a currency rename
+            // must not leave brand surfaces on the old currency for the TTL.
+            invalidateBrandKitCache(this.guild.id);
+            log.info('Economy/Gathering/Crafting/Farming config cache invalidated (incl. brand kit currency)');
+            break;
+          case 'branding':
+            invalidateBrandKitCache(this.guild.id);
+            log.info('Brand kit cache invalidated');
             break;
           case 'all':
             await this.reloadAll();
@@ -339,6 +349,8 @@ export class ConfigWatcher {
     invalidateAchievementsCache(this.guild.id);
     invalidateProfilesCache(this.guild.id);
     invalidateHeistCache(this.guild.id);
+    // Invalidate the white-label brand kit cache
+    invalidateBrandKitCache(this.guild.id);
     log.info('Full config reload complete (incl. economy caches)');
   }
 
