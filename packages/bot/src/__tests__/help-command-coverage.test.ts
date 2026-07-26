@@ -41,8 +41,8 @@ vi.mock('discord.js', () => ({
   ApplicationCommandType: { ChatInput: 1 },
 }));
 
-vi.mock('@somnibot/shared', () => ({
-  SOMNI_PALETTE: { CYAN: 0x00FFFF },
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
 }));
 
 import { buildHelpCommand, handleHelpCommand, handleHelpCategorySelect } from '../features/help/index.js';

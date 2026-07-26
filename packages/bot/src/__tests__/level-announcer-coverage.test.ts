@@ -17,7 +17,8 @@ vi.mock('../features/levels/xp-tracker.js', () => ({
   loadRewards: vi.fn().mockResolvedValue([]),
 }));
 
-vi.mock('@somnibot/shared', () => ({
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   totalXpForLevel: vi.fn().mockReturnValue(100),
   LEVEL_CONFIG: { XP_FORMULA: (lvl: number) => lvl * 100 },
   createLogger: () => ({

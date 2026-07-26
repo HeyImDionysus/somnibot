@@ -155,7 +155,7 @@ export class PetsManager {
       );
 
       // Notify owners whose pets transitioned from happy to sad/sick
-      const decayKit = brandKitFromConfig(config, this.client?.guilds.cache.get(guildId)?.name);
+      const decayKit = brandKitFromConfig(config, this.client?.guilds?.cache?.get(guildId)?.name);
       for (const u of petUpdates) {
         if (shouldNotify && this.client && u.oldStatus === 'happy' && (u.status === 'sad' || u.status === 'sick')) {
           try {

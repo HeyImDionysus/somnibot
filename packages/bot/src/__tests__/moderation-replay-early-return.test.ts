@@ -21,8 +21,8 @@ vi.mock('discord.js', () => ({
   PermissionFlagsBits: { ModerateMembers: 1n << 40n, KickMembers: 1n << 1n, BanMembers: 1n << 2n },
 }));
 
-vi.mock('@somnibot/shared', () => ({
-  SOMNI_PALETTE: { ORANGE: 0xffa500, RED: 0xff0000, GREEN: 0x00ff00, BLUE: 0x0000ff },
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
 }));
 

@@ -42,7 +42,8 @@ vi.mock('discord.js', () => ({
   ComponentType: { Button: 2 },
 }));
 
-vi.mock('@somnibot/shared', () => ({
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
   levelProgress: vi.fn().mockReturnValue({ currentLevelXp: 100, xpForNextLevel: 500, progress: 0.2 }),
 }));

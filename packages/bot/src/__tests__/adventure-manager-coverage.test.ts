@@ -25,7 +25,8 @@ vi.mock('discord.js', () => ({
   ButtonStyle: { Primary: 1 },
 }));
 
-vi.mock('@somnibot/shared', () => ({
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => ({
     info: vi.fn(),
     warn: vi.fn(),

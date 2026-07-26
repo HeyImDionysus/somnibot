@@ -134,7 +134,7 @@ export class LotteryManager {
     const selected = pending ?? await this.getPendingDrawing(guildId);
     if (!selected) return;
 
-    const kit = brandKitFromConfig(config, this.client?.guilds.cache.get(guildId)?.name);
+    const kit = brandKitFromConfig(config, this.client?.guilds?.cache?.get(guildId)?.name);
     const result = await this.drawWinner(guildId, selected);
 
     const logChannelId = config.economy_log_channel_id;

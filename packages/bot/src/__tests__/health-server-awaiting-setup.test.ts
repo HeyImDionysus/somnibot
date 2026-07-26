@@ -9,7 +9,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import http, { type Server } from 'node:http';
 
-vi.mock('@somnibot/shared', () => ({
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
 }));
 

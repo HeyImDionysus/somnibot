@@ -16,7 +16,15 @@ import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import {
+  BRAND_KIT_COLUMNS,
+  brandKitFromConfig,
+  defaultBrandKit,
+  resolveBrandKit,
+  type BrandKit,
+} from '../branding/brand-kit.js';
+import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
+import { voice } from '../branding/voice.js';
 
 const log = createLogger('Gathering');
 
@@ -27,6 +35,8 @@ export interface GatheringConfig {
   economy_gathering_cooldown_seconds: number;
   currency_name: string;
   currency_emoji: string;
+  /** White-label brand kit projected from the same cached guild_config row. */
+  brandKit: BrandKit;
 }
 
 interface LootEntry {
@@ -148,7 +158,7 @@ export class GatheringManager {
 
     const { data } = await this.supabase
       .from('guild_config')
-      .select('economy_gathering_enabled, economy_gathering_cooldown_seconds, currency_name, currency_emoji')
+      .select(`economy_gathering_enabled, economy_gathering_cooldown_seconds, ${BRAND_KIT_COLUMNS}`)
       .eq('guild_id', this.guild.id)
       .maybeSingle();
 
@@ -159,6 +169,7 @@ export class GatheringManager {
       // renamed their currency is honored on gather payouts too.
       currency_name: data?.currency_name ?? 'Coins',
       currency_emoji: data?.currency_emoji ?? '🪙',
+      brandKit: brandKitFromConfig(data ?? null, this.guild.name),
     };
     this.configCacheTime = now;
     return this.configCache;
@@ -174,7 +185,10 @@ export class GatheringManager {
     const config = await this.getConfig();
     if (!config.economy_gathering_enabled) {
       return {
-        embed: new EmbedBuilder().setDescription('❌ Gathering is not enabled on this server.').setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: voice(config.brandKit.voicePreset, 'disabled', { feature: 'Gathering' }),
+        }),
         result: null,
         error: 'disabled',
       };
@@ -190,9 +204,10 @@ export class GatheringManager {
       const idemResult = await this.valkey.set(idemKey, '1', 'PX', 900_000, 'NX');
       if (idemResult !== 'OK') {
         return {
-          embed: new EmbedBuilder()
-            .setDescription('⏳ That gather was already processed.')
-            .setColor(0xffa500),
+          embed: brandedEmbed(config.brandKit, {
+            intent: 'warning',
+            description: '⏳ That gather was already processed.',
+          }),
           result: null,
           error: 'duplicate',
         };
@@ -208,9 +223,13 @@ export class GatheringManager {
       const ttl = await this.valkey.pttl(cdKey);
       const remaining = Math.ceil(Math.max(ttl, 0) / 1000);
       return {
-        embed: new EmbedBuilder()
-          .setDescription(`⏳ You need to wait **${this.formatCooldown(remaining)}** before ${SOURCE_CONFIG[sourceType].verb} again.`)
-          .setColor(0xffa500),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'warning',
+          description: voice(config.brandKit.voicePreset, 'cooldown', {
+            time: this.formatCooldown(remaining),
+            action: SOURCE_CONFIG[sourceType].verb,
+          }),
+        }),
         result: null,
         error: 'cooldown',
       };
@@ -221,9 +240,10 @@ export class GatheringManager {
     const sourceConfig = SOURCE_CONFIG[sourceType];
     if (!sourceConfig) {
       return {
-        embed: new EmbedBuilder()
-          .setDescription('❌ Unknown gathering activity. Try `hunt`, `dig`, or `mine`.')
-          .setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: '❌ Unknown gathering activity. Try `hunt`, `dig`, or `mine`.',
+        }),
         result: null,
         error: 'invalid_source',
       };
@@ -274,9 +294,10 @@ export class GatheringManager {
     const available = lootTable.filter((e: LootEntry) => e.tool_tier <= toolTier);
     if (available.length === 0) {
       return {
-        embed: new EmbedBuilder()
-          .setDescription(`❌ No loot available for your current tool tier. Try upgrading your ${toolEffect.replace('_', ' ')}!`)
-          .setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: `❌ No loot available for your current tool tier. Try upgrading your ${toolEffect.replace('_', ' ')}!`,
+        }),
         result: null,
         error: 'no_loot',
       };
@@ -293,9 +314,10 @@ export class GatheringManager {
       const durabilityOk = await this.consumeDurability(toolResult.inventoryId);
       if (!durabilityOk) {
         return {
-          embed: new EmbedBuilder()
-            .setDescription('❌ Failed to consume tool durability — gathering cancelled. Try again.')
-            .setColor(0xff0000),
+          embed: brandedEmbed(config.brandKit, {
+            intent: 'danger',
+            description: '❌ Failed to consume tool durability — gathering cancelled. Try again.',
+          }),
           result: null,
           error: 'durability_failed',
         };
@@ -310,9 +332,10 @@ export class GatheringManager {
       const lootAdded = await this.addToInventory(userId, picked.gives_item_id, quantity);
       if (!lootAdded) {
         return {
-          embed: new EmbedBuilder()
-            .setDescription('❌ Failed to add loot to your inventory. Please try again or contact an admin.')
-            .setColor(0xff0000),
+          embed: brandedEmbed(config.brandKit, {
+            intent: 'danger',
+            description: '❌ Failed to add loot to your inventory. Please try again or contact an admin.',
+          }),
           result: null,
           error: 'inventory_upsert_failed',
         };
@@ -333,9 +356,10 @@ export class GatheringManager {
           amount: totalValue,
         });
         return {
-          embed: new EmbedBuilder()
-            .setDescription('❌ Wallet credit failed — please try again or contact an admin.')
-            .setColor(0xff0000),
+          embed: brandedEmbed(config.brandKit, {
+            intent: 'danger',
+            description: '❌ Wallet credit failed — please try again or contact an admin.',
+          }),
           result: null,
           error: 'wallet_credit_failed',
         };
@@ -355,7 +379,10 @@ export class GatheringManager {
     });
 
     const flavor = randomPick(FLAVOR_TEXT[sourceType]);
-    const embed = new EmbedBuilder()
+    // Rarity hue is SEMANTIC (the color *is* the rarity tier) — keepColor
+    // preserves it while the embed still picks up the branded attribution.
+    const embed = applyBrand(
+      new EmbedBuilder()
       .setTitle(`${SOURCE_CONFIG[sourceType].emoji} ${sourceType.charAt(0).toUpperCase() + sourceType.slice(1)} Results`)
       .setDescription(
         `${flavor}\n\n` +
@@ -369,7 +396,10 @@ export class GatheringManager {
           : ''),
       )
       .setColor(RARITY_COLORS[picked.rarity])
-      .setTimestamp();
+      .setTimestamp(),
+      config.brandKit,
+      { keepColor: true },
+    );
 
     // Quest progress
     getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'gather').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
@@ -439,10 +469,14 @@ export class GatheringManager {
     const brandKit = await resolveBrandKit(this.supabase, this.guild.id, {
       fallbackName: this.guild.name,
     }).catch(() => null);
+    const kit = brandKit ?? defaultBrandKit(this.guild.name);
     const name = brandKit?.brandName ?? this.guild.name ?? 'this server';
-    return new EmbedBuilder()
-      .setDescription(`⚠️ ${name}'s gathering grounds are temporarily unavailable — please try again in a moment. No cooldown was started and nothing was spent.`)
-      .setColor(0xffa500);
+    return brandedEmbed(kit, {
+      intent: 'warning',
+      description:
+        `${voice(kit.voicePreset, 'unavailable', { brand: name, feature: 'gathering grounds' })}` +
+        ' No cooldown was started and nothing was spent.',
+    });
   }
 
   /**

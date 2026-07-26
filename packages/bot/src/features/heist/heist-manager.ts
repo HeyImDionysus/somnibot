@@ -742,7 +742,7 @@ export class HeistManager {
     const minParticipants = config?.economy_heist_min_participants ?? 2;
     const entryFee = config?.economy_heist_entry_fee ?? 100;
     const { cName, cEmoji } = this.currencyOf(config);
-    const kit = brandKitFromConfig(config, this.client.guilds.cache.get(guildId)?.name);
+    const kit = brandKitFromConfig(config, this.client?.guilds?.cache?.get(guildId)?.name);
 
     // Read the row for the display fields (target, chance). Not a guard —
     // the atomic claim below is the sole authority on whether we resolve.

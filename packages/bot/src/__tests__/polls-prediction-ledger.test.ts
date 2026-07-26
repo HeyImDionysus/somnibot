@@ -23,12 +23,16 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 
-vi.mock('@somnibot/shared', () => ({
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
 }));
 
 vi.mock('discord.js', () => ({
   EmbedBuilder: class {
+    // Real EmbedBuilder always exposes `data` (branded embeds read data.footer
+    // to append attribution without clobbering a semantic footer).
+    data: Record<string, unknown> = {};
     setTitle() { return this; } setDescription() { return this; } setColor() { return this; }
     setFooter() { return this; } setTimestamp() { return this; } addFields() { return this; }
   },
@@ -40,7 +44,8 @@ vi.mock('discord.js', () => ({
 }));
 
 vi.mock('../features/quests/quests-manager.js', () => ({ getQuestsManager: () => null }));
-vi.mock('../features/branding/brand-kit.js', () => ({
+vi.mock('../features/branding/brand-kit.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../features/branding/brand-kit.js')>()),
   resolveBrandKit: vi.fn(async () => ({ brandName: 'Test' })),
 }));
 
