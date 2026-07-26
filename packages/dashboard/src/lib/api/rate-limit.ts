@@ -124,7 +124,15 @@ function ensureValkey(): boolean {
     return false;
   }
 
-  const { host, port, username, password } = parseRedisUrl(url);
+  // Same rule as the bot's client (packages/bot/src/services/valkey.ts): a
+  // password embedded in the URL wins, otherwise VALKEY_PASSWORD applies.
+  // docker-compose starts Valkey with --requirepass from VALKEY_PASSWORD, so
+  // reading only the URL meant the server had auth on and this client did not
+  // — every command failed NOAUTH and rate limiting ran DEGRADED (per-instance,
+  // limits halved) on any install with a generated password, i.e. all of them.
+  const parsed = parseRedisUrl(url);
+  const { host, port, username } = parsed;
+  const password = parsed.password || process.env.VALKEY_PASSWORD || '';
 
   try {
     const sock = createConnection({ host, port, timeout: 2000 });
