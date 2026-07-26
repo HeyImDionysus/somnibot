@@ -885,7 +885,49 @@ jobs:
             packages/*/node_modules
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Audit dependencies (high + critical)
-        run: pnpm audit --audit-level=high
+        # pnpm crashes (Response.json parse error) when the npm registry's
+        # advisory endpoint has an outage — which is an upstream incident, not
+        # a finding. That crash was hard-failing every PR in the repo for as
+        # long as the registry misbehaved. Retry, and distinguish the two exit
+        # modes: a real vulnerability report still fails the job every time;
+        # only a crashed audit (no report produced) degrades to a loud warning
+        # after all retries, so an unrelated registry incident cannot freeze
+        # every merge. The audit re-runs on every subsequent PR and push, so a
+        # skipped window is bounded.
+        run: |
+          set -uo pipefail
+          # Crash-vs-report detection must be STRUCTURAL: pnpm's own deprecation
+          # warning contains the word "vulnerabilities", so any text match
+          # misclassifies a registry-outage crash as a real finding. A report
+          # is JSON that parses; anything else is a crash.
+          for attempt in 1 2 3 4; do
+            # GitHub runs steps with implicit `bash -e`: without `|| true`, a
+            # failing pnpm inside the command substitution kills the whole step
+            # instantly and silently (stderr is already discarded).
+            out="$(pnpm audit --audit-level=high --json 2>/dev/null || true)"
+            verdict="$(node -e '
+              try {
+                const a = JSON.parse(process.argv[1]);
+                const v = (a.metadata && a.metadata.vulnerabilities) || {};
+                const bad = (v.high || 0) + (v.critical || 0);
+                console.log(bad > 0 ? "VULNS:" + bad : "CLEAN");
+              } catch { console.log("CRASH"); }
+            ' "$out" 2>/dev/null || echo CRASH)"
+            case "$verdict" in
+              CLEAN)
+                echo "audit clean (attempt $attempt)"
+                exit 0 ;;
+              VULNS:*)
+                echo "$out"
+                echo "::error::Dependency audit found ${verdict#VULNS:} high/critical vulnerabilities"
+                exit 1 ;;
+              *)
+                echo "audit produced no parseable report (attempt $attempt/4) — registry issue, retrying in $((attempt*15))s" ;;
+            esac
+            sleep $((attempt*15))
+          done
+          echo "::warning::pnpm audit could not obtain a report after 4 attempts — upstream registry outage, not a clean audit. Re-verified automatically on the next run."
+          exit 0
       - name: Scan for hardcoded secrets
         run: |
           set -euo pipefail

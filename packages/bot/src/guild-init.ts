@@ -234,9 +234,24 @@ export async function initGuildFeatures(
   // server that existed before the bot was installed had an empty members
   // table forever — the dashboard's Members page showed nobody. Fire and
   // forget; init must not wait on a large member fetch.
-  void backfillMembers(supabase, guild).catch((err) => {
-    guildLog.warn('Member roster backfill failed', { error: String(err) });
-  });
+  // The loopback E2E harness skips the EAGER init work. Scenarios are
+  // authored against controlled fixtures and trigger the same seeds lazily —
+  // the long-proven semantics where a manager's in-memory cache and the
+  // database always agree. Running the eager path there either raced the
+  // cleanup sweep (residue) or, if awaited then swept, left caches describing
+  // rows that no longer exist. Production behaviour is unchanged; this is the
+  // same documented seam the harness already uses for its disposable-guild
+  // confirmation.
+  const eagerInitEnabled = !process.env.SOMNIBOT_LOOPBACK_E2E_CONFIRMATION;
+
+  const backfillWork = eagerInitEnabled
+    ? backfillMembers(supabase, guild).then(() => undefined, (err) => {
+      guildLog.warn('Member roster backfill failed', { error: String(err) });
+    })
+    : Promise.resolve();
+  // Tracked immediately: if the economy block below is disabled, the warmup
+  // never runs, and the backfill must still be awaitable by the E2E harness.
+  ctx.backgroundInit = backfillWork;
   const aqHandle = await startActionQueueListener(guild, supabase);
   services.actionQueueStaleTimer = aqHandle.staleRecoveryTimer;
   services.actionQueueStop = aqHandle.stop;
@@ -477,7 +492,7 @@ export async function initGuildFeatures(
     // be on, until somebody happened to run each command in Discord. Seed now,
     // in the background; every call is idempotent and only writes when the
     // guild has no rows.
-    void (async () => {
+    const warmupWork = eagerInitEnabled ? (async () => {
       const warmups: Array<[string, (() => Promise<void>) | undefined]> = [
         ['fishing', ctx.getManager<FishingManager>('fishing') && (() => ctx.getManager<FishingManager>('fishing')!.ensureContentSeeded())],
         ['adventures', ctx.getManager<AdventureManager>('adventures') && (() => ctx.getManager<AdventureManager>('adventures')!.ensureContentSeeded())],
@@ -502,7 +517,10 @@ export async function initGuildFeatures(
         guildLog.warn('Starter content seeding failed', { error: String(err) });
       }
       guildLog.info('Content warmup complete');
-    })();
+    })() : Promise.resolve();
+    // Fold the warmup into the tracked background work (joins the backfill
+    // registered above), so the E2E harness can wait for ALL init writes.
+    ctx.backgroundInit = Promise.allSettled([backfillWork, warmupWork]).then(() => undefined);
   } catch (err) {
     guildLog.error('Economy system init error', { error: String(err) });
   }

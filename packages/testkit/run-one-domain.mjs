@@ -48,6 +48,13 @@ Object.assign(process.env, {
   SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || DEMO_ANON,
   // Real Valkey (local docker / CI service) so cooldown/streak/rate-limit legs drive.
   VALKEY_URL: valkeyUrl,
+  // The local Valkey container runs with --requirepass from the repo .env, so
+  // the harness must authenticate exactly like the bot does. Without this,
+  // every command failed NOAUTH, the bot raised a valkey_disconnected owner
+  // alert in every scenario, and every happy-path assertion failed on the
+  // false alarm. Passthrough only — empty stays empty (CI's service container
+  // has no auth), and the fault proxy relays AUTH bytes untouched.
+  VALKEY_PASSWORD: process.env.VALKEY_PASSWORD || '',
   SOMNIBOT_LOOPBACK_E2E_CONFIRMATION:
     'I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE',
   PAYPAL_ENV: 'sandbox',
