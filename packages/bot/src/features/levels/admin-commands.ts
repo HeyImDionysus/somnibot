@@ -14,7 +14,7 @@ import {
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import { writeAuditLog } from '../../services/audit.js';
-import { calculateLevel , createLogger } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('XPAdmin');
 
@@ -176,37 +176,39 @@ export async function handleXpAdminCommand(
 
     case 'set': {
       const amount = interaction.options.getInteger('amount', true);
-      const newLevel = calculateLevel(amount);
 
-      // V51: check upsert error
-      const { error: setErr } = await client.supabase.from('member_levels').upsert(
-        {
-          guild_id: guildId,
-          member_id: targetUser.id,
-          xp: amount,
-          level: newLevel,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'guild_id,member_id' },
-      );
+      // Level-curve parity: the DB is the single writer of member_levels.level
+      // semantics. set_member_xp computes the level with public.level_for_xp —
+      // the same cumulative quadratic curve used by increment_member_xp and all
+      // display code — so /xp set can never write a level the next message-XP
+      // RPC would contradict (which previously caused phantom multi-level jumps
+      // and mass role-reward grants).
+      const { data: result, error: setErr } = await client.supabase.rpc('set_member_xp', {
+        p_guild_id: guildId,
+        p_member_id: targetUser.id,
+        p_xp: amount,
+      });
 
-      if (setErr) {
-        log.error('set upsert failed:', setErr.message);
+      if (setErr || !result) {
+        log.error('set_member_xp failed:', setErr?.message);
         await interaction.editReply('❌ Failed to set XP. Please try again.');
         break;
       }
+
+      const newXp = result.new_xp as number;
+      const newLevel = result.new_level as number;
 
       client.eventBus.emit('xp.admin_adjusted', guildId, {
         actorId: interaction.user.id,
         targetId: targetUser.id,
         operation: 'set',
         amount,
-        newXp: amount,
+        newXp,
         newLevel,
       });
 
       await interaction.editReply(
-        `✅ Set <@${targetUser.id}>'s XP to **${amount.toLocaleString()}** (Level ${newLevel}).`,
+        `✅ Set <@${targetUser.id}>'s XP to **${newXp.toLocaleString()}** (Level ${newLevel}).`,
       );
       break;
     }

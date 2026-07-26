@@ -12,7 +12,18 @@ vi.mock('@somnibot/shared', () => ({
     DEFAULT_COOLDOWN_SECONDS: 60,
     DEFAULT_VOICE_XP_PER_INTERVAL: 5,
   },
-  calculateLevel: (xp: number) => Math.floor(Math.sqrt(xp / 100)),
+  // Real cumulative quadratic curve (5L² + 50L + 100, cap 200) — must match
+  // packages/shared/src/constants/levels.ts (was a bogus sqrt formula).
+  calculateLevel: (xp: number): number => {
+    let level = 0;
+    let xpNeeded = 0;
+    while (level < 200) {
+      xpNeeded += 5 * level * level + 50 * level + 100;
+      if (xp < xpNeeded) break;
+      level++;
+    }
+    return level;
+  },
   randomXp: (min: number, max: number) => Math.floor((min + max) / 2),
 }));
 vi.mock('../services/audit.js', () => ({ writeAuditLog: vi.fn(async () => {}) }));
