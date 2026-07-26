@@ -185,6 +185,68 @@ async function seedIfEmpty(
 }
 
 /**
+ * Starter shop items reconcile PER ITEM rather than gating on a name count.
+ *
+ * The catalog uniqueness index means one row per (guild, name): if crafting's
+ * warmup or a lazy /craft created its price-0 'Padlock' output shell first, a
+ * count gate would starve ALL FOUR starter items forever, and an upsert could
+ * never turn the shell into the buyable item. So per name:
+ *   - absent            → insert the starter definition
+ *   - bare output shell → upgrade it in place (price 0/null AND no use_effect),
+ *                         preserving the row id so crafted copies in member
+ *                         inventories become the real item
+ *   - anything else     → operator-shaped content, never touched
+ */
+async function reconcileStarterItems(supabase: SupabaseClient, guildId: string): Promise<void> {
+  const names = SHOP_ITEMS.map((i) => i.name);
+  const { data, error: readError } = await supabase
+    .from('economy_items')
+    .select('id, name, price, use_effect')
+    .eq('guild_id', guildId)
+    .in('name', names);
+
+  if (readError) {
+    throw new Error(`could not check existing economy_items rows: ${readError.message}`);
+  }
+
+  const byName = new Map((data ?? []).map((r) => [String(r.name), r]));
+  const toInsert = SHOP_ITEMS.filter((i) => !byName.has(i.name));
+  // Crafting output shells are created with exactly price 0 and no use_effect;
+  // anything else (including a null price) is operator-shaped and untouchable.
+  const toUpgrade = SHOP_ITEMS.filter((i) => {
+    const row = byName.get(i.name);
+    return row !== undefined && row.price === 0 && row.use_effect === null;
+  });
+
+  const failures: string[] = [];
+  if (toInsert.length > 0) {
+    const { error } = await supabase
+      .from('economy_items')
+      .upsert(toInsert.map((r) => ({ ...r, guild_id: guildId })), { ignoreDuplicates: true });
+    if (error) failures.push(`insert: ${error.message}`);
+    else log.info(`Seeded ${toInsert.length} starter item(s)`);
+  }
+  for (const item of toUpgrade) {
+    const row = byName.get(item.name);
+    if (row === undefined) continue;
+    const { id: _unused, ...fields } = item as Record<string, unknown> & { id?: unknown };
+    void _unused;
+    const { error } = await supabase
+      .from('economy_items')
+      .update(fields)
+      .eq('guild_id', guildId)
+      .eq('id', row.id)
+      .eq('price', 0)
+      .is('use_effect', null);
+    if (error) failures.push(`upgrade ${item.name}: ${error.message}`);
+    else log.info(`Upgraded crafting output shell '${item.name}' to the starter shop item`);
+  }
+  if (failures.length > 0) {
+    throw new Error(`starter item reconcile failed: ${failures.join('; ')}`);
+  }
+}
+
+/**
  * Seed starter content for features that ship without any.
  * Called from guild-init's content warmup; safe to run on every boot.
  * Throws when any table failed to seed (after attempting all of them), so the
@@ -197,10 +259,7 @@ export async function seedStarterContent(
   const seeds: Array<[string, () => Promise<void>]> = [
     ['economy_achievement_defs', () => seedIfEmpty(supabase, guildId, 'economy_achievement_defs', ACHIEVEMENT_DEFS)],
     ['automod_rules', () => seedIfEmpty(supabase, guildId, 'automod_rules', AUTOMOD_RULES)],
-    // Name-scoped gate: crafting's warmup also creates economy_items rows
-    // (recipe outputs), so "any row exists" would starve the starter shop on
-    // every default install. Only the starter item names gate this seed.
-    ['economy_items', () => seedIfEmpty(supabase, guildId, 'economy_items', SHOP_ITEMS, SHOP_ITEMS.map((i) => i.name))],
+    ['economy_items', () => reconcileStarterItems(supabase, guildId)],
   ];
 
   const failures: string[] = [];

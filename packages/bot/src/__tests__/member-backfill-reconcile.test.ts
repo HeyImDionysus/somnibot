@@ -126,6 +126,11 @@ function standardHandler(memberRows: MemberRow[], erasureIds: string[] = []) {
       const rows = (opArgs(entry, 'upsert') as [Array<{ discord_id: string }>])[0];
       return { data: rows.map((r) => ({ discord_id: r.discord_id })), error: null };
     }
+    if (firstOp(entry) === 'update') {
+      // The CAS reconcile reads the affected rows back; one matched row.
+      const id = entry.ops.find(([m, a]) => m === 'eq' && (a as [string, string])[0] === 'discord_id');
+      return { data: [{ discord_id: id ? (id[1] as [string, string])[1] : 'x' }], error: null };
+    }
     return { data: null, error: null };
   };
 }
@@ -192,9 +197,14 @@ describe('backfillMembers — left_at reconciliation (B1)', () => {
     });
     expect(payload).not.toHaveProperty('member_number');
     expect(payload).not.toHaveProperty('total_time_seconds');
-    // Scoped to exactly this guild + member.
+    // Scoped to exactly this guild + member, compare-and-set on the
+    // snapshotted left_at so a mid-backfill leave/rejoin is never overwritten.
     const eqArgs = updates[0].ops.filter(([m]) => m === 'eq').map(([, a]) => a);
-    expect(eqArgs).toEqual([['guild_id', 'guild-1'], ['discord_id', 'rejoiner']]);
+    expect(eqArgs).toEqual([
+      ['guild_id', 'guild-1'],
+      ['discord_id', 'rejoiner'],
+      ['left_at', '2026-01-15T00:00:00Z'],
+    ]);
     // Nothing to insert.
     expect(supabase.entries.some((e) => firstOp(e) === 'upsert')).toBe(false);
   });
@@ -394,5 +404,53 @@ describe('recordMemberJoin — erasure marker cleanup (B8)', () => {
     // Every members-table write happens after the marker delete.
     const memberWriteIndex = supabase.entries.findIndex((e) => e.table === 'members');
     expect(memberWriteIndex).toBeGreaterThan(0);
+  });
+});
+
+// ── Review F2: late-erasure sweep ───────────────────────────
+
+describe('backfillMembers — late-erasure sweep (review F2)', () => {
+  it('removes a row inserted for a member whose /forgetme landed mid-backfill', async () => {
+    // First erasure read (pre-partition): empty. Second (post-insert sweep):
+    // 'late-erased' has filed /forgetme while chunks were inserting.
+    let erasureReads = 0;
+    const supabase = makeScriptedSupabase((entry) => {
+      if (entry.table === 'members' && firstOp(entry) === 'select') {
+        return { data: [], error: null };
+      }
+      if (entry.table === 'member_erasures' && firstOp(entry) === 'select') {
+        erasureReads += 1;
+        return {
+          data: erasureReads === 1 ? [] : [{ discord_id: 'late-erased' }],
+          error: null,
+        };
+      }
+      if (firstOp(entry) === 'upsert') {
+        const rows = (opArgs(entry, 'upsert') as [Array<{ discord_id: string }>])[0];
+        return { data: rows.map((r) => ({ discord_id: r.discord_id })), error: null };
+      }
+      return { data: null, error: null };
+    });
+    const guild = makeGuild([makeDiscordMember('late-erased'), makeDiscordMember('ok')]);
+
+    const inserted = await backfillMembers(supabase as never, guild as never);
+
+    // Both rows inserted, then the marked one swept back out and un-counted.
+    expect(erasureReads).toBe(2);
+    const del = supabase.entries.find((e) => e.table === 'members' && firstOp(e) === 'delete');
+    expect(del).toBeDefined();
+    const inArgs = del!.ops.find(([m]) => m === 'in')?.[1] as [string, string[]];
+    expect(inArgs).toEqual(['discord_id', ['late-erased']]);
+    expect(inserted).toBe(1);
+  });
+
+  it('issues no delete when no new markers appeared during the run', async () => {
+    const supabase = makeScriptedSupabase(standardHandler([]));
+    const guild = makeGuild([makeDiscordMember('ok')]);
+
+    const inserted = await backfillMembers(supabase as never, guild as never);
+
+    expect(inserted).toBe(1);
+    expect(supabase.entries.some((e) => firstOp(e) === 'delete')).toBe(false);
   });
 });

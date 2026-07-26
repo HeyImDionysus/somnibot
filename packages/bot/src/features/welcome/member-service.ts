@@ -308,10 +308,13 @@ export async function backfillMembers(
   // PostgREST's max_rows — 1000 — which made big rosters re-insert forever).
   const existing = new Map<string, { left_at: string | null; onboarding_completed: boolean }>();
   for (let from = 0; ; from += READ_PAGE) {
+    // Stable order: unordered .range() pages can skip/duplicate rows when
+    // concurrent writes shift page boundaries mid-scan.
     const { data, error } = await supabase
       .from('members')
       .select('discord_id, left_at, onboarding_completed')
       .eq('guild_id', guild.id)
+      .order('discord_id', { ascending: true })
       .range(from, from + READ_PAGE - 1);
 
     if (error) {
@@ -335,6 +338,7 @@ export async function backfillMembers(
       .from('member_erasures')
       .select('discord_id')
       .eq('guild_id', guild.id)
+      .order('discord_id', { ascending: true })
       .range(from, from + READ_PAGE - 1);
 
     if (error) {
@@ -378,8 +382,14 @@ export async function backfillMembers(
   let reconciled = 0;
   for (const m of staleLeft) {
     const row = existing.get(m.id);
-    const repairOnboarding = row !== undefined && !row.onboarding_completed && hasCompletedOnboarding(m);
-    const { error } = await supabase
+    if (row === undefined || row.left_at === null) continue;
+    const repairOnboarding = !row.onboarding_completed && hasCompletedOnboarding(m);
+    // Compare-and-set on the snapshotted left_at: if the live gateway handler
+    // touched the row after our snapshot (a fresh leave sets a NEW left_at, a
+    // live rejoin clears it), this matches 0 rows and we must not overwrite —
+    // blindly clearing left_at here would resurrect a member who left
+    // mid-backfill, permanently.
+    const { data: updated, error } = await supabase
       .from('members')
       .update({
         left_at: null,
@@ -390,10 +400,16 @@ export async function backfillMembers(
         ...(repairOnboarding ? { onboarding_completed: true } : {}),
       })
       .eq('guild_id', guild.id)
-      .eq('discord_id', m.id);
+      .eq('discord_id', m.id)
+      .eq('left_at', row.left_at)
+      .select('discord_id');
 
     if (error) {
       log.warn('Member backfill left_at reconcile failed', { discordId: m.id, error: error.message });
+      continue;
+    }
+    if ((updated ?? []).length === 0) {
+      log.debug?.('Member backfill left_at reconcile skipped — row changed since snapshot', { discordId: m.id });
       continue;
     }
     reconciled += 1;
@@ -458,8 +474,55 @@ export async function backfillMembers(
       // Only a member_number collision is retryable; redraw and try again.
       if (error.code === '23505' && attempt < MAX_CHUNK_ATTEMPTS) continue;
 
-      log.warn('Member backfill chunk failed', { error: error.message });
+      // A dropped chunk means these members stay missing until the next guild
+      // init — loud, with the blast radius, never a quiet warn.
+      log.error('Member backfill chunk dropped — members remain missing until next init', {
+        count: chunkMembers.length,
+        attempts: attempt,
+        error: error.message,
+      });
       break;
+    }
+  }
+
+  // Late-erasure sweep: a /forgetme filed AFTER the marker read above but
+  // BEFORE a chunk insert can re-create a pre-install member's identity row
+  // (their purge had no members row to delete yet). Re-read the markers and
+  // remove any row this run inserted for a now-marked member. Markers filed
+  // after THIS read are safe without us: by then the row exists, so their own
+  // purge deletes it.
+  if (missing.length > 0) {
+    const lateErased = new Set<string>();
+    for (let from = 0; ; from += READ_PAGE) {
+      const { data, error } = await supabase
+        .from('member_erasures')
+        .select('discord_id')
+        .eq('guild_id', guild.id)
+        .order('discord_id', { ascending: true })
+        .range(from, from + READ_PAGE - 1);
+      if (error) {
+        log.error('Member backfill late-erasure sweep failed — run /forgetme again if a purged member reappeared', {
+          error: error.message,
+        });
+        break;
+      }
+      for (const r of data ?? []) lateErased.add(r.discord_id as string);
+      if ((data ?? []).length < READ_PAGE) break;
+    }
+
+    const resurrected = missing.filter((m) => lateErased.has(m.id) && !erased.has(m.id)).map((m) => m.id);
+    if (resurrected.length > 0) {
+      const { error } = await supabase
+        .from('members')
+        .delete()
+        .eq('guild_id', guild.id)
+        .in('discord_id', resurrected);
+      if (error) {
+        log.error('Member backfill late-erasure delete failed', { count: resurrected.length, error: error.message });
+      } else {
+        inserted = Math.max(0, inserted - resurrected.length);
+        log.info(`Roster backfill removed ${resurrected.length} row(s) re-created past an in-flight erasure`);
+      }
     }
   }
 

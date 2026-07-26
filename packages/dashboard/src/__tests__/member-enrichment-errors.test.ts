@@ -14,9 +14,14 @@ type TableResult = { data: unknown; error: { message: string } | null };
 
 function chainBuilder(result: TableResult) {
   const chain: Record<string, unknown> = {};
-  for (const m of ['select', 'eq', 'in']) {
+  for (const m of ['select', 'eq', 'in', 'order']) {
     chain[m] = vi.fn().mockReturnValue(chain);
   }
+  // Paged reads resolve per .range() call: all rows land on the first page
+  // (short page ends the loop). Errors surface on the first page too.
+  chain.range = vi.fn((from: number) =>
+    Promise.resolve(from === 0 ? result : { data: [], error: null }),
+  );
   chain.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
     Promise.resolve(result).then(res, rej);
   return chain;

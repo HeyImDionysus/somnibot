@@ -41,6 +41,7 @@ async function fetchBannedIds(
       .eq('guild_id', guildId)
       .eq('active', true)
       .eq('type', 'ban')
+      .order('id', { ascending: true })
       .range(from, from + READ_PAGE - 1);
 
     if (error) return { ids: null, error };
@@ -139,6 +140,7 @@ export async function GET(req: NextRequest) {
           .eq('guild_id', guildId)
           .not('left_at', 'is', null)
           .order('joined_at', { ascending: false })
+          .order('discord_id', { ascending: true })
           .range(from, from + READ_PAGE - 1);
         if (searchFilter) query = query.or(searchFilter);
 

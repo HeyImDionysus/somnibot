@@ -7,18 +7,23 @@
 import { describe, it, expect, vi } from 'vitest';
 import { seedStarterContent } from '../services/content-seeder.js';
 
-function makeSupabase(counts: Record<string, number>) {
+function makeSupabase(
+  counts: Record<string, number>,
+  dataRows: Record<string, Record<string, unknown>[]> = {},
+) {
   const upserts: Record<string, Record<string, unknown>[]> = {};
   const upsertOpts: Record<string, Record<string, unknown> | undefined> = {};
   const gateNames: Record<string, string[] | undefined> = {};
+  const updates: Record<string, Array<{ payload: Record<string, unknown>; filters: Array<[string, unknown[]]> }>> = {};
   const client = {
     from: vi.fn((table: string) => ({
       select: vi.fn(() => ({
         // The gate builder is awaitable directly (any-row gate) AND supports
-        // .in() for the name-scoped shop gate — mirroring supabase-js's
-        // thenable query builder.
+        // .in() for the name-scoped starter reconcile read — mirroring
+        // supabase-js's thenable query builder. Reads resolve with BOTH a
+        // count (any-row gates) and data rows (the per-item reconcile).
         eq: vi.fn(() => {
-          const result = { count: counts[table] ?? 0, error: null };
+          const result = { count: counts[table] ?? 0, data: dataRows[table] ?? [], error: null };
           return {
             in: vi.fn(async (_col: string, names: string[]) => {
               gateNames[table] = names;
@@ -34,9 +39,24 @@ function makeSupabase(counts: Record<string, number>) {
         upsertOpts[table] = opts;
         return { error: null };
       }),
+      update: vi.fn((payload: Record<string, unknown>) => {
+        const entry = { payload, filters: [] as Array<[string, unknown[]]> };
+        (updates[table] ??= []).push(entry);
+        const chain: Record<string, unknown> = {
+          then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
+            Promise.resolve({ error: null }).then(resolve, reject),
+        };
+        for (const m of ['eq', 'is', 'in']) {
+          chain[m] = (...args: unknown[]) => {
+            entry.filters.push([m, args]);
+            return chain;
+          };
+        }
+        return chain;
+      }),
     })),
   };
-  return { client: client as never, upserts, upsertOpts, gateNames };
+  return { client: client as never, upserts, upsertOpts, gateNames, updates };
 }
 
 describe('seedStarterContent', () => {
@@ -129,13 +149,52 @@ describe('seedStarterContent', () => {
   });
 
   it('never writes into a table the guild already has content in', async () => {
-    const { client, upserts } = makeSupabase({
-      economy_achievement_defs: 3,
-      automod_rules: 1,
-      economy_items: 12,
-    });
+    const { client, upserts, updates } = makeSupabase(
+      {
+        economy_achievement_defs: 3,
+        automod_rules: 1,
+        economy_items: 12,
+      },
+      {
+        // Operator-shaped starter-name rows (priced, live effects): untouchable.
+        economy_items: [
+          { id: 'i1', name: 'Padlock', price: 500, use_effect: { type: 'padlock' } },
+          { id: 'i2', name: 'Shovel', price: 150, use_effect: { type: 'shovel' } },
+          { id: 'i3', name: 'Pickaxe', price: 150, use_effect: { type: 'pickaxe' } },
+          { id: 'i4', name: 'Hunting Rifle', price: 300, use_effect: { type: 'hunting_rifle' } },
+        ],
+      },
+    );
     await seedStarterContent(client, 'g1');
     expect(Object.keys(upserts)).toHaveLength(0);
+    expect(updates.economy_items ?? []).toHaveLength(0);
+  });
+
+  it('upgrades a bare crafting output shell into the starter item, preserving its id', async () => {
+    // Crafting seeded its price-0 'Padlock' output first (the F1 starvation
+    // scenario) — the reconcile must upgrade THAT row in place and still
+    // insert the three absent tools.
+    const { client, upserts, updates } = makeSupabase(
+      {},
+      { economy_items: [{ id: 'shell-1', name: 'Padlock', price: 0, use_effect: null }] },
+    );
+    await seedStarterContent(client, 'g1');
+
+    const insertedNames = (upserts.economy_items ?? []).map((r) => r.name);
+    expect(insertedNames.sort()).toEqual(['Hunting Rifle', 'Pickaxe', 'Shovel']);
+
+    expect(updates.economy_items).toHaveLength(1);
+    const up = updates.economy_items[0];
+    expect(up.payload.name).toBe('Padlock');
+    expect((up.payload.price as number) > 0).toBe(true);
+    expect(up.payload.use_effect).toMatchObject({ type: 'padlock' });
+    // CAS filters: only the untouched shell (id + price 0 + no effect) upgrades.
+    expect(up.filters).toEqual([
+      ['eq', ['guild_id', 'g1']],
+      ['eq', ['id', 'shell-1']],
+      ['eq', ['price', 0]],
+      ['is', ['use_effect', null]],
+    ]);
   });
 
   it('a failed count check skips that table AND surfaces the failure', async () => {

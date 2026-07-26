@@ -13,7 +13,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
-import { dbError, apiServerError} from '@/lib/api/response';
+import { dbError, dbConflictOr500, apiServerError} from '@/lib/api/response';
 
 const recipeInputSchema = z.object({
   item_name: z.string().min(1).max(64),
@@ -89,7 +89,8 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (error) {
-      return dbError(error, 'economy/crafting');
+      return dbConflictOr500(error, 'economy/crafting', 'uq_economy_recipes_guild_lname',
+        'A recipe with that name already exists (names are case-insensitive).');
     }
 
     await notifyBot('economy');
@@ -129,7 +130,8 @@ export async function PUT(request: NextRequest) {
       .single();
 
     if (error) {
-      return dbError(error, 'economy/crafting');
+      return dbConflictOr500(error, 'economy/crafting', 'uq_economy_recipes_guild_lname',
+        'A recipe with that name already exists (names are case-insensitive).');
     }
 
     await notifyBot('economy');

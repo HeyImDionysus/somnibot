@@ -13,7 +13,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
-import { dbError, apiServerError} from '@/lib/api/response';
+import { dbError, dbConflictOr500, apiServerError} from '@/lib/api/response';
 
 const SOURCE_TYPES = ['hunt', 'dig', 'mine'] as const;
 const RARITIES = ['common', 'uncommon', 'rare', 'epic', 'legendary'] as const;
@@ -102,7 +102,8 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (error) {
-      return dbError(error, 'economy/gathering');
+      return dbConflictOr500(error, 'economy/gathering', 'uq_economy_loot_tables_guild_source_lname_tier',
+        'A loot entry with that item name already exists for this source and tool tier.');
     }
 
     await notifyBot('economy');
@@ -145,7 +146,8 @@ export async function PUT(request: NextRequest) {
       .single();
 
     if (error) {
-      return dbError(error, 'economy/gathering');
+      return dbConflictOr500(error, 'economy/gathering', 'uq_economy_loot_tables_guild_source_lname_tier',
+        'A loot entry with that item name already exists for this source and tool tier.');
     }
 
     await notifyBot('economy');
