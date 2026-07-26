@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import '@/styles/globals.css';
+import { CsrfBoundary } from '@/components/csrf-boundary';
 
 export const metadata: Metadata = {
   title: 'SomniBot Dashboard',
@@ -29,6 +30,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body className="min-h-screen bg-discord-bg-tertiary text-discord-text-primary antialiased">
+        <CsrfBoundary />
         {children}
       </body>
     </html>
