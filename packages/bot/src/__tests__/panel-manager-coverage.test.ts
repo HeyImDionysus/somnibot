@@ -26,6 +26,8 @@ vi.mock('discord.js', () => ({
   ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4 },
   EmbedBuilder: vi.fn().mockImplementation(function () {
     return {
+      // Real EmbedBuilder exposes `data`; branded embeds read data.footer.
+      data: {} as Record<string, unknown>,
       setColor: vi.fn().mockReturnThis(),
       setTitle: vi.fn().mockReturnThis(),
       setDescription: vi.fn().mockReturnThis(),

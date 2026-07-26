@@ -16,14 +16,18 @@ import {
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import type { EconomyManager } from './economy-manager.js';
-import { applyBrand, resolveBrandKit, type BrandKit } from '../branding/index.js';
+import { applyBrand, defaultBrandKit, resolveBrandKit, type BrandKit } from '../branding/index.js';
 
 const COLLECT_INCOME_RPC_TIMEOUT_MS = 8_000;
 
 /** Resolve the guild's white-label brand kit for an economy reply (cached). */
 async function brandKitFor(interaction: ChatInputCommandInteraction): Promise<BrandKit> {
-  const client = interaction.client as SomniClient;
-  return resolveBrandKit(client.supabase, interaction.guildId!, {
+  // Decoration must never break the command: resolveBrandKit swallows read
+  // failures, but the client/supabase deref has to be guarded too.
+  const client = interaction.client as SomniClient | undefined;
+  const supabase = client?.supabase;
+  if (!supabase) return defaultBrandKit(interaction.guild?.name);
+  return resolveBrandKit(supabase, interaction.guildId!, {
     fallbackName: interaction.guild?.name,
   });
 }

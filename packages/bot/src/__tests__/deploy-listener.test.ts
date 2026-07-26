@@ -19,6 +19,9 @@ vi.mock('discord.js', () => {
   }
   return {
     EmbedBuilder: class {
+    // Real EmbedBuilder always exposes `data` (branded embeds read
+    // data.footer to append attribution without clobbering it).
+    data: Record<string, unknown> = {};
       setColor() { return this; } setTitle() { return this; }
       setDescription() { return this; } setFooter() { return this; }
       setTimestamp() { return this; } addFields() { return this; }

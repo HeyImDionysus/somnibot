@@ -40,6 +40,14 @@ vi.mock('discord.js', () => ({
   }),
   ButtonStyle: { Primary: 1, Secondary: 2 },
   ComponentType: { Button: 2 },
+  // /leaderboard is now a branded embed rather than plain text.
+  EmbedBuilder: vi.fn().mockImplementation(function () {
+    const e: any = { data: {} as Record<string, unknown> };
+    for (const m of ['setTitle', 'setDescription', 'setColor', 'setFooter', 'setTimestamp', 'addFields']) {
+      e[m] = vi.fn().mockReturnValue(e);
+    }
+    return e;
+  }),
 }));
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({

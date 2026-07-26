@@ -34,6 +34,7 @@ import {
   deliverDecisionDm,
   deliverDecisionDmsForGuild,
 } from '../features/appeals/appeal-notifier.js';
+import { defaultBrandKit } from '../features/branding/brand-kit.js';
 
 // ── Supabase mock ─────────────────────────────────────────
 // A chain whose builder methods return `this`, with terminal resolvers keyed by
@@ -207,13 +208,13 @@ describe('calculateAppealExpiry', () => {
 
 describe('appeal decision DM', () => {
   it('builds an approved embed', () => {
-    const embed = buildDecisionDmEmbed(appealRow({ status: 'approved' }), 'Acme');
+    const embed = buildDecisionDmEmbed(appealRow({ status: 'approved' }), 'Acme', defaultBrandKit('Acme'));
     expect(String(embed.data.title)).toContain('Approved');
     expect(String(embed.data.description)).toContain('Acme');
   });
 
   it('builds a denied embed', () => {
-    const embed = buildDecisionDmEmbed(appealRow({ status: 'denied' }), 'Acme');
+    const embed = buildDecisionDmEmbed(appealRow({ status: 'denied' }), 'Acme', defaultBrandKit('Acme'));
     expect(String(embed.data.title)).toContain('Denied');
     expect(String(embed.data.description)).toContain('stands');
   });
@@ -221,20 +222,20 @@ describe('appeal decision DM', () => {
   it('delivers the DM when the user is reachable', async () => {
     const send = vi.fn().mockResolvedValue({});
     const client = { users: { fetch: vi.fn().mockResolvedValue({ send }) } };
-    const outcome = await deliverDecisionDm(client as never, appealRow({ status: 'approved' }), 'Acme');
+    const outcome = await deliverDecisionDm(client as never, appealRow({ status: 'approved' }), 'Acme', defaultBrandKit('Acme'));
     expect(outcome).toBe('delivered');
     expect(send).toHaveBeenCalled();
   });
 
   it('reports terminal when the member cannot be DM’d (code 50007)', async () => {
     const client = { users: { fetch: vi.fn().mockResolvedValue({ send: vi.fn().mockRejectedValue({ code: 50007 }) }) } };
-    const outcome = await deliverDecisionDm(client as never, appealRow({ status: 'denied' }), 'Acme');
+    const outcome = await deliverDecisionDm(client as never, appealRow({ status: 'denied' }), 'Acme', defaultBrandKit('Acme'));
     expect(outcome).toBe('terminal');
   });
 
   it('reports transient on an unknown error (so the latch is not burned)', async () => {
     const client = { users: { fetch: vi.fn().mockRejectedValue(new Error('network')) } };
-    const outcome = await deliverDecisionDm(client as never, appealRow({ status: 'denied' }), 'Acme');
+    const outcome = await deliverDecisionDm(client as never, appealRow({ status: 'denied' }), 'Acme', defaultBrandKit('Acme'));
     expect(outcome).toBe('transient');
   });
 

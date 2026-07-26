@@ -9,18 +9,24 @@ import { type GuildMember, EmbedBuilder, type TextChannel } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import type { InfractionType } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
+import { applyBrand, defaultBrandKit, resolveBrandKit, type BrandIntent } from '../branding/index.js';
 
 const log = createLogger('ModLog');
 
-// SomniBot palette
-const COLORS = {
-  warn: 0xFF6B00,    // ORANGE
-  mute: 0xFEE75C,    // YELLOW
-  kick: 0xFF6B00,    // ORANGE
-  ban: 0xED4245,     // RED
-  pardon: 0x57F287,  // GREEN
-  delete: 0x5865F2,  // BLURPLE
-} as const;
+/**
+ * Severity intent per action. The mod log is a STAFF surface, so it renders in
+ * the guild's brand colors (via the intent map) with NO powered-by attribution.
+ * Severity stays legible: destructive actions are danger, corrective ones
+ * warning, restorative primary, informational info.
+ */
+const ACTION_INTENTS = {
+  warn: 'warning',
+  mute: 'warning',
+  kick: 'warning',
+  ban: 'danger',
+  pardon: 'primary',
+  delete: 'info',
+} as const satisfies Record<string, BrandIntent>;
 
 const ICONS = {
   warn: '⚠️',
@@ -65,12 +71,17 @@ export async function postModLogEntry(
     const channel = client.channels.cache.get(entry.channelId) as TextChannel | undefined;
     if (!channel || !('send' in channel)) return;
 
-    const color = COLORS[entry.action] ?? COLORS.warn;
+    const intent: BrandIntent = ACTION_INTENTS[entry.action] ?? 'warning';
     const icon = ICONS[entry.action] ?? '⚠️';
     const label = ACTION_LABELS[entry.action] ?? entry.action;
 
+    // Cached per-guild kit (30s TTL) — cheap at moderation volume, and the
+    // resolver never throws, so a brand read can never drop a mod-log entry.
+    const kit = await resolveBrandKit(client.supabase, channel.guildId, {
+      fallbackName: channel.guild?.name,
+    }).catch(() => undefined);
+
     const embed = new EmbedBuilder()
-      .setColor(color)
       .setTitle(`${icon} ${label}`)
       .addFields(
         { name: 'Member', value: `<@${getMemberId(entry.member)}> (${getMemberTag(entry.member)})`, inline: true },
@@ -122,6 +133,13 @@ export async function postModLogEntry(
     if (avatarUrl) {
       embed.setThumbnail(avatarUrl);
     }
+
+    // Staff surface: brand colors, never the powered-by attribution. If the
+    // brand read failed the embed keeps the vendor default via defaultBrandKit.
+    applyBrand(embed, kit ?? defaultBrandKit(channel.guild?.name), {
+      intent,
+      attribution: false,
+    });
 
     await channel.send({ embeds: [embed] });
   } catch (err) {
