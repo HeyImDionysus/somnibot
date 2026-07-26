@@ -12,6 +12,7 @@
  */
 
 import type { Guild, RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
+import { seedStarterContent } from './services/content-seeder.js';
 import { REST, Routes } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
@@ -483,6 +484,13 @@ export async function initGuildFeatures(
         } catch (err) {
           guildLog.warn(`Content warmup failed for ${name}`, { error: String(err) });
         }
+      }
+      // Features that shipped with NO default content at all — achievement
+      // definitions, automod starter rules, shop items (see content-seeder).
+      try {
+        await seedStarterContent(supabase, guildId);
+      } catch (err) {
+        guildLog.warn('Starter content seeding failed', { error: String(err) });
       }
       guildLog.info('Content warmup complete');
     })();
