@@ -302,7 +302,13 @@ export function Sidebar() {
               <div
                 className={cn(
                   'overflow-hidden transition-all duration-200',
-                  isCollapsed ? 'max-h-0 opacity-0' : 'max-h-[500px] opacity-100',
+                  // The max-height is only an animation device for the collapse
+                  // transition, but at 500px it was also silently CLIPPING any
+                  // group taller than that — the last entries of a long
+                  // category simply did not render on screen. Size it beyond
+                  // any plausible group height so it can never truncate real
+                  // navigation.
+                  isCollapsed ? 'max-h-0 opacity-0' : 'max-h-[2000px] opacity-100',
                 )}
               >
                 {group.items.map((item) => {
