@@ -9,7 +9,10 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { colorToHex, SOMNI_PALETTE } from '@somnibot/shared';
+// Subpath import: the shared BARREL (and even ./constants) transitively pulls
+// node:crypto (constants/levels.ts), which the Next client bundle rejects.
+// constants/brand is dependency-free and exported as its own entry.
+import { colorToHex, SOMNI_PALETTE } from '@somnibot/shared/constants/brand';
 import { useToast } from '@/components/shared/toast';
 import { useUnsavedWarning } from '@/hooks/use-unsaved-warning';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
