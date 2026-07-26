@@ -25,10 +25,7 @@ import {
   type Guild,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
-
-const HOT_PINK = 0xFF1493;
-const CYAN = 0x00E5FF;
-const YELLOW = 0xFFD700;
+import { applyBrand, resolveBrandKit } from '../branding/index.js';
 
 // ── Command Builders ──────────────────────────────────────
 
@@ -107,8 +104,10 @@ export async function handleViewProfile(
     ? `<t:${Math.floor(member.joinedAt.getTime() / 1000)}:R>`
     : 'Unknown';
 
+  const kit = await resolveBrandKit(supabase, guildId, {
+    fallbackName: interaction.guild?.name,
+  });
   const embed = new EmbedBuilder()
-    .setColor(HOT_PINK)
     .setAuthor({
       name: `${target.displayName}'s Profile`,
       iconURL: target.displayAvatarURL(),
@@ -125,6 +124,7 @@ export async function handleViewProfile(
     )
     .setFooter({ text: `ID: ${target.id}` })
     .setTimestamp();
+  applyBrand(embed, kit, { intent: 'primary' });
 
   await interaction.editReply({ embeds: [embed] });
 }
@@ -193,8 +193,10 @@ export async function handleViewPurchases(
     return `${status} **${product}** — ${amount} (${date})`;
   });
 
+  const kit = await resolveBrandKit(supabase, guildId, {
+    fallbackName: interaction.guild?.name,
+  });
   const embed = new EmbedBuilder()
-    .setColor(CYAN)
     .setAuthor({
       name: `${target.displayName}'s Purchases`,
       iconURL: target.displayAvatarURL(),
@@ -220,6 +222,7 @@ export async function handleViewPurchases(
     )
     .setFooter({ text: `Customer ID: ${customer.id}` })
     .setTimestamp();
+  applyBrand(embed, kit, { intent: 'info' });
 
   await interaction.editReply({ embeds: [embed] });
 }

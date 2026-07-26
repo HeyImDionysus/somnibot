@@ -21,6 +21,7 @@ import {
 } from 'discord.js';
 import { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
+import { applyBrand, brandedEmbed, resolveBrandKit } from '../branding/index.js';
 
 const log = createLogger('ForumTickets');
 
@@ -78,7 +79,10 @@ export class ForumTicketService {
       appliedTags.push(forumConfig.open_tag_id);
     }
 
-    // Create the forum thread
+    // Create the forum thread — branded with the owner's white-label kit.
+    const kit = await resolveBrandKit(this.supabase, this.guild.id, {
+      fallbackName: this.guild.name,
+    });
     const embed = new EmbedBuilder()
       .setTitle(`🎫 ${options.subject}`)
       .setDescription(options.description || 'No description provided.')
@@ -87,8 +91,8 @@ export class ForumTicketService {
         { name: 'Created by', value: `<@${options.userId}>`, inline: true },
         { name: 'Status', value: '🟢 Open', inline: true },
       )
-      .setColor(0x5865f2)
       .setTimestamp();
+    applyBrand(embed, kit, { intent: 'info' });
 
     const closeButton = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
@@ -205,13 +209,16 @@ export class ForumTicketService {
         await thread.edit({ appliedTags: newTags }).catch(() => { /* channel may already be deleted */ });
       }
 
-      // Send close message
+      // Send close message — branded danger intent from the owner's kit.
+      const kit = await resolveBrandKit(this.supabase, this.guild.id, {
+        fallbackName: this.guild.name,
+      });
       await thread.send({
         embeds: [
-          new EmbedBuilder()
-            .setDescription('🔒 This ticket has been closed.')
-            .setColor(0xed4245)
-            .setTimestamp(),
+          brandedEmbed(kit, {
+            intent: 'danger',
+            description: '🔒 This ticket has been closed.',
+          }).setTimestamp(),
         ],
       }).catch(() => { /* forum thread may be inaccessible */ });
 

@@ -24,6 +24,7 @@ import {
   type RoleDeliveryActionClaim,
 } from '../features/commerce/entitlement-service.js';
 import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
+import { resolveBrandKit } from '../features/branding/index.js';
 import { raiseOwnerAlert } from './alert-service.js';
 import { createLogger, getGracePeriodDays } from '@somnibot/shared';
 
@@ -1943,15 +1944,23 @@ export class CommerceFulfillmentService {
     // initial DM would have shown, not the date the retry succeeded.
     const orderDate = new Date();
     try {
-      const user = await this.guild.client.users.fetch(payload.discord_id);
-      await deliverReceiptDM(user, {
-        orderNumber: payload.order_number,
-        productName: payload.product_name,
-        amountCents: payload.amount_cents,
-        currency: payload.currency,
-        licenseKey: payload.license_key_plaintext ?? null,
-        date: orderDate,
+      // Buyer-facing receipt: framed with the owner's white-label kit (cached).
+      const brandKit = await resolveBrandKit(this.supabase, payload.guild_id, {
+        fallbackName: this.guild.name,
       });
+      const user = await this.guild.client.users.fetch(payload.discord_id);
+      await deliverReceiptDM(
+        user,
+        {
+          orderNumber: payload.order_number,
+          productName: payload.product_name,
+          amountCents: payload.amount_cents,
+          currency: payload.currency,
+          licenseKey: payload.license_key_plaintext ?? null,
+          date: orderDate,
+        },
+        brandKit,
+      );
       result.receiptSent = true;
     } catch (err) {
       const redacted = payload.discord_id ? `***${payload.discord_id.slice(-4)}` : 'unknown';

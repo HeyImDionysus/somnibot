@@ -1,12 +1,14 @@
 /**
  * Music Embeds — Rich Discord embeds for now-playing and queue display.
  *
- * Uses the SomniBot brand palette (CYAN for music).
+ * White-label: every music embed takes its color from the guild's brand kit —
+ * the accent (info intent) for playback surfaces, the derived danger intent
+ * for errors. Callers resolve the kit once per handler and pass it in; when
+ * omitted the vendor default kit applies (default accent = the classic CYAN).
  */
 import { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import type { QueueEntry, GuildQueue, LoopMode } from './music-queue.js';
-
-const MUSIC_COLOR = 0x00D4FF; // SOMNI_PALETTE.CYAN
+import { defaultBrandKit, intentColor, type BrandKit } from '../branding/index.js';
 
 // ── Progress Bar ──────────────────────────────────────────
 
@@ -50,6 +52,7 @@ export function buildNowPlayingEmbed(
   positionMs: number,
   queue: GuildQueue,
   activeFilters?: string,
+  kit: BrandKit = defaultBrandKit(),
 ): { embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] } {
   const isStream = entry.isStream ?? false;
 
@@ -64,7 +67,7 @@ export function buildNowPlayingEmbed(
   }
 
   const embed = new EmbedBuilder()
-    .setColor(MUSIC_COLOR)
+    .setColor(intentColor(kit, 'info'))
     .setAuthor({ name: isStream ? '📡 Now Streaming' : '🎵 Now Playing' })
     .setTitle(entry.title)
     .setURL(entry.uri)
@@ -146,12 +149,13 @@ const TRACKS_PER_PAGE = 10;
 export function buildQueueEmbed(
   queue: GuildQueue,
   page = 1,
+  kit: BrandKit = defaultBrandKit(),
 ): { embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] } {
   const totalTracks = queue.entries.length;
 
   if (totalTracks === 0) {
     const embed = new EmbedBuilder()
-      .setColor(MUSIC_COLOR)
+      .setColor(intentColor(kit, 'info'))
       .setDescription('📭 The queue is empty. Use `/play` to add tracks.');
     return { embeds: [embed], components: [] };
   }
@@ -188,7 +192,7 @@ export function buildQueueEmbed(
   const totalDuration = queue.entries.reduce((sum, e) => sum + e.duration, 0);
 
   const embed = new EmbedBuilder()
-    .setColor(MUSIC_COLOR)
+    .setColor(intentColor(kit, 'info'))
     .setAuthor({ name: '📜 Music Queue' })
     .setDescription(description)
     .setFooter({
@@ -221,9 +225,10 @@ export function buildQueueEmbed(
 export function buildAddedEmbed(
   entry: QueueEntry,
   position: number,
+  kit: BrandKit = defaultBrandKit(),
 ): EmbedBuilder {
   const embed = new EmbedBuilder()
-    .setColor(MUSIC_COLOR)
+    .setColor(intentColor(kit, 'info'))
     .setDescription(
       `✅ Added [**${entry.title}**](${entry.uri}) to the queue\n` +
       `Duration: \`${formatDuration(entry.duration)}\` · Position: \`#${position}\``,
@@ -239,33 +244,38 @@ export function buildAddedEmbed(
 export function buildPlaylistAddedEmbed(
   count: number,
   playlistName: string,
+  kit: BrandKit = defaultBrandKit(),
 ): EmbedBuilder {
   return new EmbedBuilder()
-    .setColor(MUSIC_COLOR)
+    .setColor(intentColor(kit, 'info'))
     .setDescription(`✅ Added **${count}** tracks from **${playlistName}** to the queue`);
 }
 
 // ── Error Embed ───────────────────────────────────────────
 
-export function buildMusicErrorEmbed(message: string): EmbedBuilder {
+export function buildMusicErrorEmbed(message: string, kit: BrandKit = defaultBrandKit()): EmbedBuilder {
   return new EmbedBuilder()
-    .setColor(0xF23F43) // Discord danger
+    .setColor(intentColor(kit, 'danger')) // semantic danger, derived from the kit
     .setDescription(`❌ ${message}`);
 }
 
 // ── Info Embed ────────────────────────────────────────────
 
-export function buildMusicInfoEmbed(message: string): EmbedBuilder {
+export function buildMusicInfoEmbed(message: string, kit: BrandKit = defaultBrandKit()): EmbedBuilder {
   return new EmbedBuilder()
-    .setColor(MUSIC_COLOR)
+    .setColor(intentColor(kit, 'info'))
     .setDescription(message);
 }
 
 // ── Filter Embed ──────────────────────────────────────────
 
-export function buildFilterEmbed(message: string, activeFilters: string): EmbedBuilder {
+export function buildFilterEmbed(
+  message: string,
+  activeFilters: string,
+  kit: BrandKit = defaultBrandKit(),
+): EmbedBuilder {
   return new EmbedBuilder()
-    .setColor(MUSIC_COLOR)
+    .setColor(intentColor(kit, 'info'))
     .setDescription(message)
     .addFields({ name: 'Active Filters', value: activeFilters || 'None' });
 }

@@ -17,6 +17,7 @@ import {
   ComponentType,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { applyBrand, brandedEmbed, resolveBrandKit, type BrandKit } from '../branding/index.js';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -195,18 +196,17 @@ export class TutorialEngine {
     );
   }
 
-  private buildEmbed(step: TutorialStep, index: number, total: number): EmbedBuilder {
+  private buildEmbed(step: TutorialStep, index: number, total: number, kit: BrandKit): EmbedBuilder {
     const embed = new EmbedBuilder()
       .setTitle(step.title)
       .setDescription(step.description)
-      .setColor(0x5865f2)
       .setFooter({ text: `Step ${index + 1} of ${total}` });
 
     if (step.image_url) {
       embed.setImage(step.image_url);
     }
 
-    return embed;
+    return applyBrand(embed, kit, { intent: 'info' });
   }
 
   private buildButtons(index: number, total: number): ActionRowBuilder<ButtonBuilder> {
@@ -254,7 +254,12 @@ export class TutorialEngine {
     userId: string,
   ): Promise<void> {
     const step = steps[stepIndex]!;
-    const embed = this.buildEmbed(step, stepIndex, steps.length);
+    // Kit resolved once per step render (cached), shared by the step embed and
+    // the finish/skip terminal embeds below.
+    const kit = await resolveBrandKit(this.supabase, this.guildId, {
+      fallbackName: interaction.guild?.name,
+    });
+    const embed = this.buildEmbed(step, stepIndex, steps.length, kit);
     const row = this.buildButtons(stepIndex, steps.length);
 
     const messagePayload = { embeds: [embed], components: [row], ephemeral: true as const };
@@ -293,10 +298,11 @@ export class TutorialEngine {
           await this.updateProgress(userId, stepIndex, true);
           await collected.update({
             embeds: [
-              new EmbedBuilder()
-                .setTitle('🎉 Tutorial Complete!')
-                .setDescription("You're all set! Enjoy the server. Run `/tutorial` any time to revisit.")
-                .setColor(0x57f287),
+              brandedEmbed(kit, {
+                intent: 'primary',
+                title: '🎉 Tutorial Complete!',
+                description: "You're all set! Enjoy the server. Run `/tutorial` any time to revisit.",
+              }),
             ],
             components: [],
           });
@@ -305,10 +311,11 @@ export class TutorialEngine {
           await this.updateProgress(userId, stepIndex, true);
           await collected.update({
             embeds: [
-              new EmbedBuilder()
-                .setTitle('⏭️ Tutorial Skipped')
-                .setDescription('No worries! Run `/tutorial` any time to see it again.')
-                .setColor(0xfee75c),
+              brandedEmbed(kit, {
+                intent: 'warning',
+                title: '⏭️ Tutorial Skipped',
+                description: 'No worries! Run `/tutorial` any time to see it again.',
+              }),
             ],
             components: [],
           });

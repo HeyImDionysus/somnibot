@@ -12,6 +12,7 @@ import {
   EmbedBuilder,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
+import { applyBrand, resolveBrandKit } from '../branding/index.js';
 
 // ── Cooldown definitions ──────────────────────────────────
 
@@ -136,12 +137,15 @@ export async function handleTimersCommand(
     // Role income lookup failed — skip silently
   }
 
-  // Build embed
+  // Build embed — framed with the owner's white-label brand kit.
+  const kit = await resolveBrandKit(client.supabase, guildId, {
+    fallbackName: interaction.guild?.name,
+  });
   const embed = new EmbedBuilder()
     .setTitle('⏱️ Your Cooldowns')
-    .setColor(0x5865f2)
     .setFooter({ text: `Requested by ${interaction.user.displayName}` })
     .setTimestamp();
+  applyBrand(embed, kit, { intent: 'info' });
 
   const categoryOrder = ['Economy', 'Role Income', 'Fishing', 'Gathering', 'Heist', 'XP'];
   for (const cat of categoryOrder) {

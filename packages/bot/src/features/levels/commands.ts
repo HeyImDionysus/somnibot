@@ -11,10 +11,11 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ComponentType,
+  EmbedBuilder,
   SlashCommandSubcommandBuilder,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import { applyBrand, resolveBrandKit } from '../branding/index.js';
 import { generateRankCard, loadRankCardSettings } from './rank-card.js';
 import { levelProgress } from '@somnibot/shared';
 
@@ -270,7 +271,15 @@ export async function handleLeaderboardCommand(
   const totalPages = Math.ceil((count ?? 0) / pageSize);
   let currentPage = 0;
 
-  const buildLeaderboardContent = async (page: number): Promise<string> => {
+  // White-label: the leaderboard renders as a branded embed (owner kit color +
+  // powered-by attribution) instead of unbrandable plain text. The content is
+  // unchanged — the same title, entry lines, and page indicator, structured as
+  // title/description/footer.
+  const brandKit = await resolveBrandKit(client.supabase, guildId, {
+    fallbackName: interaction.guild?.name,
+  });
+
+  const buildLeaderboardEmbed = async (page: number): Promise<EmbedBuilder> => {
     const offset = page * pageSize;
     const { data: pageData } = await client.supabase
       .from('member_levels')
@@ -280,7 +289,12 @@ export async function handleLeaderboardCommand(
       .range(offset, offset + pageSize - 1)
       .limit(1000);
 
-    if (!pageData || pageData.length === 0) return 'No data.';
+    const embed = new EmbedBuilder().setTitle('🏆 Server Leaderboard');
+
+    if (!pageData || pageData.length === 0) {
+      embed.setDescription('No data.');
+      return applyBrand(embed, brandKit, { intent: 'primary' });
+    }
 
     const medals = ['🥇', '🥈', '🥉'];
     const lines = pageData.map((entry, i) => {
@@ -289,13 +303,14 @@ export async function handleLeaderboardCommand(
       return `${medal} <@${entry.member_id}> — Level ${entry.level} (${entry.xp.toLocaleString()} XP)`;
     });
 
-    return `🏆 **Server Leaderboard**\n\n${lines.join('\n')}\n\nPage ${page + 1}/${totalPages}`;
+    embed.setDescription(lines.join('\n')).setFooter({ text: `Page ${page + 1}/${totalPages}` });
+    return applyBrand(embed, brandKit, { intent: 'primary' });
   };
 
-  const content = await buildLeaderboardContent(0);
+  const embed = await buildLeaderboardEmbed(0);
 
   if (totalPages <= 1) {
-    await interaction.editReply({ content });
+    await interaction.editReply({ embeds: [embed] });
     return;
   }
 
@@ -312,7 +327,7 @@ export async function handleLeaderboardCommand(
       .setDisabled(totalPages <= 1),
   );
 
-  const reply = await interaction.editReply({ content, components: [row] });
+  const reply = await interaction.editReply({ embeds: [embed], components: [row] });
 
   const collector = reply.createMessageComponentCollector({
     componentType: ComponentType.Button,
@@ -328,7 +343,7 @@ export async function handleLeaderboardCommand(
     if (btnInteraction.customId === 'lb_prev') currentPage--;
     if (btnInteraction.customId === 'lb_next') currentPage++;
 
-    const newContent = await buildLeaderboardContent(currentPage);
+    const newEmbed = await buildLeaderboardEmbed(currentPage);
     const newRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId('lb_prev')
@@ -342,7 +357,7 @@ export async function handleLeaderboardCommand(
         .setDisabled(currentPage >= totalPages - 1),
     );
 
-    await btnInteraction.update({ content: newContent, components: [newRow] });
+    await btnInteraction.update({ embeds: [newEmbed], components: [newRow] });
   });
 
   collector.on('end', async () => {

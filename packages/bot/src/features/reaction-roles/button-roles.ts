@@ -25,6 +25,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
+import { applyBrand, resolveBrandKit } from '../branding/index.js';
 
 const log = createLogger('ButtonRoles');
 
@@ -227,11 +228,12 @@ export async function deployButtonRolesPanel(
     return { success: false, error: 'Channel not found.' };
   }
 
+  const kit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name });
   const embed = new EmbedBuilder()
-    .setColor(0x5865F2)
     .setTitle('🎭 Role Selection')
     .setDescription('Click a button below to toggle a role on or off.')
     .setTimestamp();
+  applyBrand(embed, kit, { intent: 'info' });
 
   // Build rows (max 5 buttons per row, max 5 rows)
   const rows: ActionRowBuilder<MessageActionRowComponentBuilder>[] = [];

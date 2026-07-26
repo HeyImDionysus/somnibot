@@ -13,10 +13,14 @@ import {
   type User,
 } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
+import {
+  applyBrand,
+  defaultBrandKit,
+  intentColor,
+  type BrandKit,
+} from '../branding/index.js';
 
 const log = createLogger('ReceiptBuilder');
-
-const HOT_PINK = 0xFF1493;
 
 interface ReceiptData {
   orderNumber: string;
@@ -31,8 +35,12 @@ interface ReceiptData {
  * Build a Components v2 receipt for DM delivery.
  *
  * Falls back to standard embed if Components v2 isn't available.
+ *
+ * Buyer-facing: framed with the owner's white-label kit (brand primary color,
+ * brand-name footer, powered-by attribution per the owner toggle). Callers
+ * that cannot resolve a kit fall back to the vendor defaults.
  */
-export function buildReceiptEmbed(data: ReceiptData): EmbedBuilder {
+export function buildReceiptEmbed(data: ReceiptData, kit: BrandKit = defaultBrandKit()): EmbedBuilder {
   const amount = (data.amountCents / 100).toFixed(2);
   const dateStr = data.date.toLocaleDateString('en-US', {
     year: 'numeric',
@@ -41,7 +49,6 @@ export function buildReceiptEmbed(data: ReceiptData): EmbedBuilder {
   });
 
   const embed = new EmbedBuilder()
-    .setColor(HOT_PINK)
     .setTitle('🧾 Order Confirmed')
     .addFields(
       { name: 'Order', value: data.orderNumber, inline: true },
@@ -66,17 +73,20 @@ export function buildReceiptEmbed(data: ReceiptData): EmbedBuilder {
     );
   }
 
-  embed.setFooter({ text: 'SomniBot Commerce' });
+  embed.setFooter({ text: `${kit.brandName} Commerce` });
   embed.setTimestamp(data.date);
 
-  return embed;
+  return applyBrand(embed, kit, { intent: 'primary' });
 }
 
 /**
  * Try to build Components v2 receipt container.
  * Falls back to standard embed if container APIs aren't available.
  */
-export function buildReceiptComponents(data: ReceiptData): ContainerBuilder | null {
+export function buildReceiptComponents(
+  data: ReceiptData,
+  kit: BrandKit = defaultBrandKit(),
+): ContainerBuilder | null {
   try {
     const amount = (data.amountCents / 100).toFixed(2);
     const dateStr = data.date.toLocaleDateString('en-US', {
@@ -86,7 +96,7 @@ export function buildReceiptComponents(data: ReceiptData): ContainerBuilder | nu
     });
 
     const container = new ContainerBuilder()
-      .setAccentColor(HOT_PINK)
+      .setAccentColor(intentColor(kit, 'primary'))
       .addTextDisplayComponents(
         new TextDisplayBuilder().setContent('🧾 **Order Confirmed**'),
       )
@@ -150,11 +160,12 @@ export function buildReceiptComponents(data: ReceiptData): ContainerBuilder | nu
 export async function deliverReceiptDM(
   user: User,
   data: ReceiptData,
+  kit: BrandKit = defaultBrandKit(),
 ): Promise<void> {
   const dm = await user.createDM();
 
   // Try Components v2 first
-  const container = buildReceiptComponents(data);
+  const container = buildReceiptComponents(data, kit);
   if (container) {
     try {
       await dm.send({
@@ -169,7 +180,7 @@ export async function deliverReceiptDM(
   }
 
   // Fallback: standard embed
-  const embed = buildReceiptEmbed(data);
+  const embed = buildReceiptEmbed(data, kit);
   await dm.send({ embeds: [embed] });
 }
 
@@ -181,9 +192,10 @@ export async function deliverReceiptDM(
 export async function sendReceiptDM(
   user: User,
   data: ReceiptData,
+  kit: BrandKit = defaultBrandKit(),
 ): Promise<boolean> {
   try {
-    await deliverReceiptDM(user, data);
+    await deliverReceiptDM(user, data, kit);
     return true;
   } catch (err) {
     log.error(`Failed to DM receipt to ${user.id}:`, err);

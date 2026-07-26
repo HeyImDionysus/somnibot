@@ -11,14 +11,12 @@
  */
 
 import { EmbedBuilder } from 'discord.js';
-import { SOMNI_PALETTE, createLogger } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 import type { SomniClient } from '../../client.js';
 import { AppealsManager, type AppealRecord } from './appeals-manager.js';
+import { applyBrand, resolveBrandKit, type BrandKit } from '../branding/index.js';
 
 const log = createLogger('Appeals');
-
-/** Approved appeals show a success-green; denied/other show the warning accent. */
-const APPROVED_COLOR = 0x57f287;
 
 /**
  * Discord API error codes for which a DM can NEVER be delivered to this user, so
@@ -34,11 +32,18 @@ function errorCode(err: unknown): number | null {
 
 /**
  * Build the decision DM embed. Pure — unit tested directly.
+ *
+ * Branded with the guild's white-label kit: approved renders with the brand
+ * primary, denied with the derived warning intent, plus the powered-by
+ * attribution footer when the owner leaves it on.
  */
-export function buildDecisionDmEmbed(appeal: AppealRecord, guildName: string): EmbedBuilder {
+export function buildDecisionDmEmbed(
+  appeal: AppealRecord,
+  guildName: string,
+  kit: BrandKit,
+): EmbedBuilder {
   const approved = appeal.status === 'approved';
   const embed = new EmbedBuilder()
-    .setColor(approved ? APPROVED_COLOR : SOMNI_PALETTE.ORANGE)
     .setTitle(approved ? '✅ Appeal Approved' : '❌ Appeal Denied')
     .setDescription(
       approved
@@ -47,7 +52,7 @@ export function buildDecisionDmEmbed(appeal: AppealRecord, guildName: string): E
     )
     .addFields({ name: 'Your appeal reason', value: truncate(appeal.reason, 1000) })
     .setTimestamp(appeal.decided_at ? new Date(appeal.decided_at) : new Date());
-  return embed;
+  return applyBrand(embed, kit, { intent: approved ? 'primary' : 'warning' });
 }
 
 function truncate(text: string, max: number): string {
@@ -68,10 +73,11 @@ export async function deliverDecisionDm(
   client: Pick<SomniClient, 'users'>,
   appeal: AppealRecord,
   guildName: string,
+  kit: BrandKit,
 ): Promise<'delivered' | 'terminal' | 'transient'> {
   try {
     const user = await client.users.fetch(appeal.appellant_discord_id);
-    await user.send({ embeds: [buildDecisionDmEmbed(appeal, guildName)] });
+    await user.send({ embeds: [buildDecisionDmEmbed(appeal, guildName, kit)] });
     return 'delivered';
   } catch (err) {
     const code = errorCode(err);
@@ -95,15 +101,20 @@ export async function deliverDecisionDm(
  * delivered/terminal outcome. Returns the number of latches flipped.
  */
 export async function deliverDecisionDmsForGuild(
-  client: Pick<SomniClient, 'users'>,
+  client: Pick<SomniClient, 'users' | 'supabase'>,
   manager: AppealsManager,
   guildId: string,
   guildName: string,
 ): Promise<number> {
   const pending = await manager.collectUndeliveredDecisions(guildId);
+  if (pending.length === 0) return 0;
+  // The appellant may be BANNED (guild cache useless for them) — the guild
+  // name passed by the sweep is the fallback brand name. Kit resolved once
+  // per guild sweep (cached; never throws).
+  const kit = await resolveBrandKit(client.supabase, guildId, { fallbackName: guildName });
   let flipped = 0;
   for (const appeal of pending) {
-    const outcome = await deliverDecisionDm(client, appeal, guildName);
+    const outcome = await deliverDecisionDm(client, appeal, guildName, kit);
     if (outcome !== 'transient') {
       await manager.markDecisionNotified(appeal.id);
       flipped++;

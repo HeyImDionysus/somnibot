@@ -16,8 +16,17 @@ import {
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import type { EconomyManager } from './economy-manager.js';
+import { applyBrand, resolveBrandKit, type BrandKit } from '../branding/index.js';
 
 const COLLECT_INCOME_RPC_TIMEOUT_MS = 8_000;
+
+/** Resolve the guild's white-label brand kit for an economy reply (cached). */
+async function brandKitFor(interaction: ChatInputCommandInteraction): Promise<BrandKit> {
+  const client = interaction.client as SomniClient;
+  return resolveBrandKit(client.supabase, interaction.guildId!, {
+    fallbackName: interaction.guild?.name,
+  });
+}
 
 type RoleIncomeRpcResult = {
   status: 'credited' | 'cooldown' | 'no_eligible_roles' | 'verification_unavailable';
@@ -272,9 +281,9 @@ async function handleBalance(
 
   const netWorth = wallet.wallet + wallet.bank;
 
+  const kit = await brandKitFor(interaction);
   const embed = new EmbedBuilder()
     .setAuthor({ name: `${user.displayName}'s Balance`, iconURL: user.displayAvatarURL() })
-    .setColor(0x5865F2)
     .addFields(
       { name: '💰 Wallet', value: `${cfg.currency_emoji} ${wallet.wallet.toLocaleString()}`, inline: true },
       { name: '🏦 Bank', value: `${cfg.currency_emoji} ${wallet.bank.toLocaleString()} / ${wallet.bank_max.toLocaleString()}`, inline: true },
@@ -282,6 +291,7 @@ async function handleBalance(
     )
     .setFooter({ text: wallet.passive ? '🛡️ Passive mode enabled' : '⚔️ Passive mode disabled' })
     .setTimestamp();
+  applyBrand(embed, kit, { intent: 'info' });
 
   // V53 Phase 3 (3.4): Quick action buttons
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -320,14 +330,15 @@ async function handleTimedReward(
 
   const cfg = await mgr.loadConfig();
   if (result.success) {
+    const kit = await brandKitFor(interaction);
     const embed = new EmbedBuilder()
-      .setColor(0x2ecc71)
       .setTitle(`${cfg.currency_emoji} ${type.charAt(0).toUpperCase() + type.slice(1)} Reward`)
       .setDescription(result.message)
       .addFields(
         { name: '💰 New Balance', value: `${cfg.currency_emoji} ${result.balance.wallet.toLocaleString()}`, inline: true },
       )
       .setTimestamp();
+    applyBrand(embed, kit, { intent: 'primary' });
 
     if (result.streak) {
       embed.addFields(
@@ -348,12 +359,13 @@ async function handleWork(interaction: ChatInputCommandInteraction, mgr: Economy
 
   if (result.success) {
     const cfg = await mgr.loadConfig();
+    const kit = await brandKitFor(interaction);
     const embed = new EmbedBuilder()
-      .setColor(0x3498db)
       .setTitle('💼 Work')
       .setDescription(result.message)
       .addFields({ name: '💰 Balance', value: `${cfg.currency_emoji} ${result.balance.wallet.toLocaleString()}`, inline: true })
       .setTimestamp();
+    applyBrand(embed, kit, { intent: 'info' });
     await interaction.editReply({ embeds: [embed] });
   } else {
     await interaction.editReply({ content: result.message });
@@ -365,12 +377,13 @@ async function handleCrime(interaction: ChatInputCommandInteraction, mgr: Econom
   const result = await mgr.crime(interaction.user.id);
   const cfg = await mgr.loadConfig();
 
+  const kit = await brandKitFor(interaction);
   const embed = new EmbedBuilder()
-    .setColor(result.success ? 0x2ecc71 : 0xe74c3c)
     .setTitle(result.success ? '🎭 Crime — Success!' : '🚨 Crime — Busted!')
     .setDescription(result.message)
     .addFields({ name: '💰 Balance', value: `${cfg.currency_emoji} ${result.balance.wallet.toLocaleString()}`, inline: true })
     .setTimestamp();
+  applyBrand(embed, kit, { intent: result.success ? 'primary' : 'danger' });
 
   await interaction.editReply({ embeds: [embed] });
 }
@@ -440,12 +453,13 @@ async function handleRob(interaction: ChatInputCommandInteraction, mgr: EconomyM
   const result = await mgr.rob(interaction.user.id, target.id);
   const cfg = await mgr.loadConfig();
 
+  const kit = await brandKitFor(interaction);
   const embed = new EmbedBuilder()
-    .setColor(result.success ? 0x2ecc71 : 0xe74c3c)
     .setTitle(result.success ? '💰 Robbery — Success!' : '🚨 Robbery — Failed!')
     .setDescription(result.message)
     .addFields({ name: '💰 Your Balance', value: `${cfg.currency_emoji} ${result.balance.wallet.toLocaleString()}`, inline: true })
     .setTimestamp();
+  applyBrand(embed, kit, { intent: result.success ? 'primary' : 'danger' });
 
   await interaction.editReply({ embeds: [embed] });
 }
@@ -484,12 +498,13 @@ async function handleShop(interaction: ChatInputCommandInteraction, mgr: Economy
     return `${item.emoji} **${item.name}** — ${cfg.currency_emoji} ${item.price.toLocaleString()}${stockStr}\n> ${item.description ?? 'No description'}`;
   });
 
+  const kit = await brandKitFor(interaction);
   const embed = new EmbedBuilder()
-    .setColor(0xf39c12)
     .setTitle(`🏪 Shop${category ? ` — ${category}` : ''}`)
     .setDescription(lines.join('\n\n'))
     .setFooter({ text: `Use /buy <item> to purchase • ${items.length} items` })
     .setTimestamp();
+  applyBrand(embed, kit, { intent: 'warning' });
 
   // V53 Phase 3 (3.4): Quick action buttons
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -564,12 +579,13 @@ async function handleInventory(interaction: ChatInputCommandInteraction, mgr: Ec
     return `${item.item_emoji} **${item.item_name}** ×${item.quantity}${durStr}`;
   });
 
+  const kit = await brandKitFor(interaction);
   const embed = new EmbedBuilder()
-    .setColor(0x9b59b6)
     .setAuthor({ name: `${user.displayName}'s Inventory`, iconURL: user.displayAvatarURL() })
     .setDescription(lines.join('\n'))
     .setFooter({ text: `${items.length} items • Use /use <item> to use an item` })
     .setTimestamp();
+  applyBrand(embed, kit, { intent: 'info' });
 
   // V53 Phase 3 (3.4): Quick action buttons
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -606,11 +622,12 @@ async function handleEconLeaderboard(interaction: ChatInputCommandInteraction, m
     return `${medal} <@${entry.user_id}> — ${cfg.currency_emoji} ${entry.net_worth.toLocaleString()}`;
   });
 
+  const kit = await brandKitFor(interaction);
   const embed = new EmbedBuilder()
-    .setColor(0xf1c40f)
     .setTitle(`${cfg.currency_emoji} Economy Leaderboard`)
     .setDescription(lines.join('\n'))
     .setTimestamp();
+  applyBrand(embed, kit, { intent: 'warning' });
 
   await interaction.reply({ embeds: [embed] });
 }

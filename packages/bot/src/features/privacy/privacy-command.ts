@@ -13,6 +13,7 @@ import {
   EmbedBuilder,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
+import { applyBrand, resolveBrandKit } from '../branding/index.js';
 
 // ── Command builder ───────────────────────────────────────
 
@@ -49,8 +50,11 @@ export async function handlePrivacyCommand(
       '• Purchase records (if applicable)\n\n' +
       '**Questions?** Contact us at `heyimdionysus@gmail.com`',
     )
-    .setColor(0x5865F2)
     .setFooter({ text: 'We never sell your data. Use /forgetme to delete everything.' });
+  const kit = await resolveBrandKit(client.supabase, interaction.guildId!, {
+    fallbackName: interaction.guild?.name,
+  });
+  applyBrand(embed, kit, { intent: 'info' });
 
   await interaction.reply({ embeds: [embed], ephemeral: true });
 }

@@ -20,6 +20,7 @@ import type { PlatformEventBus } from './event-bus.js';
 import type Valkey from 'iovalkey';
 import type { PlatformEvent, PlatformEventMap } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
+import { applyBrand, resolveBrandKit } from '../features/branding/index.js';
 
 const log = createLogger('CrossFeatureBridge');
 
@@ -265,11 +266,15 @@ export class CrossFeatureBridge {
       if (!member) return;
 
       const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import('discord.js');
+      // Event-driven (no interaction): the cached guild name is the brand fallback.
+      const kit = await resolveBrandKit(this.supabase, this.guild.id, {
+        fallbackName: this.guild.name,
+      });
       const embed = new EmbedBuilder()
         .setTitle('📋 How was your support experience?')
         .setDescription(`Your ticket #${ticketId.slice(0, 8)} has been resolved. We'd love your feedback!`)
-        .setColor(0x5865F2)
         .setTimestamp();
+      applyBrand(embed, kit, { intent: 'info' });
 
       const row = new ActionRowBuilder<InstanceType<typeof ButtonBuilder>>().addComponents(
         new ButtonBuilder().setCustomId(`survey:${ticketId}:great`).setLabel('😊 Great').setStyle(ButtonStyle.Success),

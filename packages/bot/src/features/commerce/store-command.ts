@@ -13,10 +13,7 @@ import {
   type Guild,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
-
-const HOT_PINK = 0xFF1493;
-const CYAN = 0x00E5FF;
+import { applyBrand, resolveBrandKit } from '../branding/index.js';
 
 export function buildStoreCommand() {
   return new SlashCommandBuilder()
@@ -60,49 +57,42 @@ export async function handleStoreCommand(
     return;
   }
 
-  // White-label branding: the storefront header carries the owner's brand name
-  // (falling back to the guild name, then a neutral default) plus a subtle
-  // powered-by-SomniBot attribution, instead of hardcoded vendor branding.
-  const { data: storeConfig } = await supabase
-    .from('guild_config')
-    .select('store_brand_name, store_show_powered_by')
-    .eq('guild_id', guildId)
-    .maybeSingle();
-  const brandName =
-    (typeof storeConfig?.store_brand_name === 'string' && storeConfig.store_brand_name.trim().length > 0
-      ? storeConfig.store_brand_name.trim()
-      : undefined)
-    ?? interaction.guild?.name
-    ?? 'Server Store';
-  const showPoweredBy = storeConfig?.store_show_powered_by ?? true;
+  // White-label branding: the storefront header carries the owner's brand kit
+  // (name falling back to the guild name, brand colors, powered-by attribution)
+  // instead of hardcoded vendor branding. One cached kit read covers it all.
+  const kit = await resolveBrandKit(supabase, guildId, {
+    fallbackName: interaction.guild?.name ?? 'Server Store',
+  });
 
   // Build product embeds (max 10 per message)
   const embeds: EmbedBuilder[] = [];
   const rows: ActionRowBuilder<ButtonBuilder>[] = [];
 
-  // Header embed
+  // Header embed — the attribution footer is handled by applyBrand per the
+  // owner's powered-by toggle.
   const headerEmbed = new EmbedBuilder()
-    .setColor(HOT_PINK)
-    .setTitle(brandName)
+    .setTitle(kit.brandName)
     .setDescription('Browse our products below. Click "Buy" to purchase!');
-  if (showPoweredBy) {
-    headerEmbed.setFooter({ text: 'Powered by SomniBot' });
-  }
+  applyBrand(headerEmbed, kit, { intent: 'primary' });
   embeds.push(headerEmbed);
 
   for (const product of products.slice(0, 9)) {
     const price = (product.price_cents / 100).toFixed(2);
     const typeLabel = product.type === 'subscription' ? '🔄 Subscription' : '🎁 One-Time';
 
+    // Product cards keep attribution off — the header already carries it.
     embeds.push(
-      new EmbedBuilder()
-        .setColor(CYAN)
-        .setTitle(product.name)
-        .setDescription(product.description || 'No description')
-        .addFields(
-          { name: 'Price', value: `$${price} ${product.currency}`, inline: true },
-          { name: 'Type', value: typeLabel, inline: true },
-        ),
+      applyBrand(
+        new EmbedBuilder()
+          .setTitle(product.name)
+          .setDescription(product.description || 'No description')
+          .addFields(
+            { name: 'Price', value: `$${price} ${product.currency}`, inline: true },
+            { name: 'Type', value: typeLabel, inline: true },
+          ),
+        kit,
+        { intent: 'info', attribution: false },
+      ),
     );
 
     // Buy button
