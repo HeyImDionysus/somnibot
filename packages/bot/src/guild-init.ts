@@ -12,6 +12,7 @@
  */
 
 import type { Guild, RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
+import { seedStarterContent } from './services/content-seeder.js';
 import { backfillMembers } from './features/welcome/member-service.js';
 import { REST, Routes } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -468,6 +469,40 @@ export async function initGuildFeatures(
     registerProfilesManager(profilesManager, guildId); ctx.setManager('profiles', profilesManager);
     const profCmds = buildProfileCommands();
     for (const cmd of Object.values(profCmds)) allCommands.push(cmd.toJSON());
+
+    // ── Content warmup ──
+    // Fishing, adventures, crafting, farming, gathering and quests all ship
+    // default content, but they seeded it lazily on first command use — so a
+    // fresh install showed empty dashboard pages for features that claimed to
+    // be on, until somebody happened to run each command in Discord. Seed now,
+    // in the background; every call is idempotent and only writes when the
+    // guild has no rows.
+    void (async () => {
+      const warmups: Array<[string, (() => Promise<void>) | undefined]> = [
+        ['fishing', ctx.getManager<FishingManager>('fishing') && (() => ctx.getManager<FishingManager>('fishing')!.ensureContentSeeded())],
+        ['adventures', ctx.getManager<AdventureManager>('adventures') && (() => ctx.getManager<AdventureManager>('adventures')!.ensureContentSeeded())],
+        ['crafting', ctx.getManager<CraftingManager>('crafting') && (() => ctx.getManager<CraftingManager>('crafting')!.ensureContentSeeded())],
+        ['farming', ctx.getManager<FarmingManager>('farming') && (() => ctx.getManager<FarmingManager>('farming')!.ensureContentSeeded())],
+        ['gathering', ctx.getManager<GatheringManager>('gathering') && (() => ctx.getManager<GatheringManager>('gathering')!.ensureContentSeeded())],
+        ['quests', ctx.getManager<QuestsManager>('quests') && (() => ctx.getManager<QuestsManager>('quests')!.ensureContentSeeded(guildId))],
+      ];
+      for (const [name, run] of warmups) {
+        if (!run) continue; // feature disabled — nothing registered
+        try {
+          await run();
+        } catch (err) {
+          guildLog.warn(`Content warmup failed for ${name}`, { error: String(err) });
+        }
+      }
+      // Features that shipped with NO default content at all — achievement
+      // definitions, automod starter rules, shop items (see content-seeder).
+      try {
+        await seedStarterContent(supabase, guildId);
+      } catch (err) {
+        guildLog.warn('Starter content seeding failed', { error: String(err) });
+      }
+      guildLog.info('Content warmup complete');
+    })();
   } catch (err) {
     guildLog.error('Economy system init error', { error: String(err) });
   }

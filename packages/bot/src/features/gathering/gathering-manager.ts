@@ -564,4 +564,22 @@ export class GatheringManager {
     const s = seconds % 60;
     return s > 0 ? `${m}m ${s}s` : `${m}m`;
   }
+  /**
+   * Seed this feature's default content now instead of on first command use.
+   *
+   * The defaults below always existed, but they were planted lazily: nothing
+   * appeared until somebody ran the feature's command in Discord, so a fresh
+   * install showed an empty dashboard page for a feature that claimed to be
+   * on. Guild init calls this so content exists before anyone touches
+   * anything. Idempotent — it only writes when the guild has no rows.
+   */
+  async ensureContentSeeded(): Promise<void> {
+    const sources: LootSourceType[] = ['hunt', 'dig', 'mine'];
+    for (const source of sources) {
+      const loot = await this.getLootTable(source);
+      if (loot !== null && loot.length === 0) {
+        await this.seedDefaultLoot(source);
+      }
+    }
+  }
 }
