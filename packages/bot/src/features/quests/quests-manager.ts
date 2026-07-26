@@ -403,6 +403,25 @@ export class QuestsManager {
       // Ignore — function may not exist yet or templates already seeded
     }
   }
+
+  /**
+   * Seed this feature's default content now instead of on first command use.
+   *
+   * Quest templates were only planted when a member's daily quests were first
+   * assigned, so a fresh install showed an empty quests page for a feature
+   * that claimed to be on. Guild init calls this so content exists before
+   * anyone touches anything. Idempotent — only writes when the guild has no
+   * templates.
+   */
+  async ensureContentSeeded(guildId: string): Promise<void> {
+    const { count, error } = await this.supabase
+      .from('economy_quest_templates')
+      .select('id', { count: 'exact', head: true })
+      .eq('guild_id', guildId);
+    if (!error && (count ?? 0) === 0) {
+      await this.seedDefaultTemplates(guildId);
+    }
+  }
 }
 
 /** Get the start of the current ISO week (Monday 00:00 UTC). */

@@ -687,4 +687,19 @@ export class FarmingManager {
     const m = Math.floor((seconds % 3600) / 60);
     return m > 0 ? `${h}h ${m}m` : `${h}h`;
   }
+  /**
+   * Seed this feature's default content now instead of on first command use.
+   *
+   * The defaults below always existed, but they were planted lazily: nothing
+   * appeared until somebody ran the feature's command in Discord, so a fresh
+   * install showed an empty dashboard page for a feature that claimed to be
+   * on. Guild init calls this so content exists before anyone touches
+   * anything. Idempotent — it only writes when the guild has no rows.
+   */
+  async ensureContentSeeded(): Promise<void> {
+    const crops = await this.getCrops();
+    if (crops !== null && crops.length === 0) {
+      await this.seedDefaultCrops();
+    }
+  }
 }

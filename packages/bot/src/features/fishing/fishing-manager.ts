@@ -734,4 +734,16 @@ export class FishingManager {
     }
     return true;
   }
+  /**
+   * Seed this feature's default content now instead of on first command use.
+   *
+   * The defaults below always existed, but they were planted lazily: nothing
+   * appeared until somebody ran the feature's command in Discord, so a fresh
+   * install showed an empty dashboard page for a feature that claimed to be
+   * on. Guild init calls this so content exists before anyone touches
+   * anything. Idempotent — it only writes when the guild has no rows.
+   */
+  async ensureContentSeeded(): Promise<void> {
+    await this.getSpecies();
+  }
 }
