@@ -446,9 +446,18 @@ jobs:
   #     this proves the DB-observable effect through the real wiring only.
   # ──────────────────────────────────────────────────────────────────────────
   test-live:
-    name: 🛰️ Live-Stack E2E
+    name: 🛰️ Live-Stack E2E (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     needs: install
+    # Sharded 4-ways with vitest's native --shard: this was the pipeline's long
+    # pole — one runner grinding the whole live suite serially for ~25-35
+    # minutes while every other check finished in 2-3. Four runners each boot
+    # their own local Supabase (setup is ~3.5 min of the job) and run a quarter
+    # of the scenarios; coverage is identical, the wall-clock is not.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     # Real Valkey so cooldown / streak / rate-limit code paths (SET … NX) run for
     # real instead of failing closed — capabilities.redis flips on and the domain
     # proofs drive their redis-branch legs live.
@@ -527,7 +536,7 @@ jobs:
           pnpm --filter @somnibot/bot build
           pnpm --filter @somnibot/testkit build
       - name: Run live-stack E2E (real initGuildFeatures)
-        run: pnpm --filter @somnibot/testkit test:live -- --reporter=verbose
+        run: pnpm --filter @somnibot/testkit test:live -- --reporter=verbose --shard=${{ matrix.shard }}/4
         env:
           # Guard env for the loopback lane. live-setup.ts also force-pins the
           # safety-critical vars, but setting them here documents the contract
