@@ -17,7 +17,15 @@ import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import {
+  BRAND_KIT_COLUMNS,
+  brandKitFromConfig,
+  defaultBrandKit,
+  resolveBrandKit,
+  type BrandKit,
+} from '../branding/brand-kit.js';
+import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
+import { voice } from '../branding/voice.js';
 
 const log = createLogger('Fishing');
 
@@ -30,6 +38,8 @@ interface FishingConfig {
   economy_fishing_treasure_chance_pct: number;
   economy_fishing_collection_reward_enabled: boolean;
   economy_fishing_collection_reward_coins: number;
+  /** White-label brand kit projected from the same cached guild_config row. */
+  brandKit: BrandKit;
 }
 
 interface FishSpecies {
@@ -155,16 +165,18 @@ export class FishingManager {
     if (this.configCache) return this.configCache;
     const { data, error } = await this.supabase
       .from('guild_config')
-      .select('economy_fishing_enabled, economy_fishing_cooldown_seconds, economy_fishing_junk_chance_pct, economy_fishing_treasure_chance_pct, economy_fishing_collection_reward_enabled, economy_fishing_collection_reward_coins')
+      .select(`economy_fishing_enabled, economy_fishing_cooldown_seconds, economy_fishing_junk_chance_pct, economy_fishing_treasure_chance_pct, economy_fishing_collection_reward_enabled, economy_fishing_collection_reward_coins, ${BRAND_KIT_COLUMNS}`)
       .eq('guild_id', this.guild.id)
       .single();
-    const cfg: FishingConfig = data ?? {
-      economy_fishing_enabled: true,
-      economy_fishing_cooldown_seconds: 30,
-      economy_fishing_junk_chance_pct: 15,
-      economy_fishing_treasure_chance_pct: 5,
-      economy_fishing_collection_reward_enabled: true,
-      economy_fishing_collection_reward_coins: 5000,
+    const row = (data ?? null) as (Record<string, unknown> | null);
+    const cfg: FishingConfig = {
+      economy_fishing_enabled: (row?.economy_fishing_enabled as boolean | undefined) ?? true,
+      economy_fishing_cooldown_seconds: (row?.economy_fishing_cooldown_seconds as number | undefined) ?? 30,
+      economy_fishing_junk_chance_pct: (row?.economy_fishing_junk_chance_pct as number | undefined) ?? 15,
+      economy_fishing_treasure_chance_pct: (row?.economy_fishing_treasure_chance_pct as number | undefined) ?? 5,
+      economy_fishing_collection_reward_enabled: (row?.economy_fishing_collection_reward_enabled as boolean | undefined) ?? true,
+      economy_fishing_collection_reward_coins: (row?.economy_fishing_collection_reward_coins as number | undefined) ?? 5000,
+      brandKit: brandKitFromConfig(row, this.guild.name),
     };
     // [game-economy-fishing DEPFAIL] Never CACHE a fallback built from a
     // FAILED read (database unreachable): a transient outage would otherwise
@@ -245,10 +257,14 @@ export class FishingManager {
     const brandKit = await resolveBrandKit(this.supabase, this.guild.id, {
       fallbackName: this.guild.name,
     }).catch(() => null);
+    const kit = brandKit ?? defaultBrandKit(this.guild.name);
     const name = brandKit?.brandName ?? this.guild.name ?? 'this server';
-    return new EmbedBuilder()
-      .setDescription(`⚠️ ${name}'s fishing pond is temporarily unavailable — please try again in a moment. No coins or bait were spent and no cast cooldown was started.`)
-      .setColor(0xffa500);
+    return brandedEmbed(kit, {
+      intent: 'warning',
+      description:
+        `${voice(kit.voicePreset, 'unavailable', { brand: name, feature: 'fishing pond' })}` +
+        ` No ${kit.currencyName} or bait were spent and no cast cooldown was started.`,
+    });
   }
 
   /**
@@ -348,7 +364,10 @@ export class FishingManager {
     const config = await this.getConfig();
     if (!config.economy_fishing_enabled) {
       return {
-        embed: new EmbedBuilder().setDescription('🚫 Fishing is not enabled.').setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: '🚫 Fishing is not enabled.',
+        }),
         cooldownKey: '',
       };
     }
@@ -368,9 +387,10 @@ export class FishingManager {
     if (!claimed) {
       const ttl = await this.valkey.ttl(cdKey);
       return {
-        embed: new EmbedBuilder()
-          .setDescription(`⏳ You can fish again <t:${Math.floor(Date.now() / 1000) + Math.max(1, ttl)}:R>.`)
-          .setColor(0xffaa00),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'warning',
+          description: `⏳ You can fish again <t:${Math.floor(Date.now() / 1000) + Math.max(1, ttl)}:R>.`,
+        }),
         cooldownKey: '',
       };
     }
@@ -391,9 +411,10 @@ export class FishingManager {
     }
     if (!hasRod) {
       return {
-        embed: new EmbedBuilder()
-          .setDescription('🎣 You need a **Fishing Rod** to fish! Buy one from `/shop`.')
-          .setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: '🎣 You need a **Fishing Rod** to fish! Buy one from `/shop`.',
+        }),
         cooldownKey: '',
       };
     }
@@ -453,16 +474,22 @@ export class FishingManager {
       const valueText = fishCatch.paid !== false
         ? `💰 Value: **${fishCatch.price.toLocaleString()}** coins`
         : '⚠️ Wallet credit failed — contact an admin.';
-      embed = new EmbedBuilder()
-        .setTitle('🎣 You cast your line...')
-        .setDescription(
-          `${fishCatch.species.emoji} You caught a **${fishCatch.species.name}**!\n` +
-          `⚖️ Weight: **${fishCatch.weight.toFixed(2)} kg**\n` +
-          valueText,
-        )
-        .setColor(RARITY_COLORS[fishCatch.species.rarity])
-        .addFields({ name: 'Rarity', value: fishCatch.species.rarity.toUpperCase(), inline: true })
-        .setFooter({ text: `Using ${rodName}${baitUsed ? ` + ${baitUsed}` : ''}` });
+      // Rarity hue is SEMANTIC (the color *is* the rarity tier) — keepColor
+      // preserves it while the embed still picks up the branded attribution.
+      embed = applyBrand(
+        new EmbedBuilder()
+          .setTitle('🎣 You cast your line...')
+          .setDescription(
+            `${fishCatch.species.emoji} You caught a **${fishCatch.species.name}**!\n` +
+            `⚖️ Weight: **${fishCatch.weight.toFixed(2)} kg**\n` +
+            valueText,
+          )
+          .setColor(RARITY_COLORS[fishCatch.species.rarity])
+          .addFields({ name: 'Rarity', value: fishCatch.species.rarity.toUpperCase(), inline: true })
+          .setFooter({ text: `Using ${rodName}${baitUsed ? ` + ${baitUsed}` : ''}` }),
+        config.brandKit,
+        { keepColor: true },
+      );
 
       // [game-economy-fishing] One-time collection completion bonus: only a fish
       // catch can discover a new species, so the completion check lives here.
@@ -635,13 +662,14 @@ export class FishingManager {
       .limit(1000);
 
     const totalEarned = (data ?? []).reduce((sum: number, c: any) => sum + (c.price_earned ?? 0), 0);
-    return new EmbedBuilder()
-      .setTitle('🐟 Fishing Summary')
-      .setDescription(
+    const kit = (await this.getConfig()).brandKit;
+    return brandedEmbed(kit, {
+      intent: 'info',
+      title: '🐟 Fishing Summary',
+      description:
         `You've caught **${count ?? 0}** fish total.\n` +
-        `Total earnings: 💰 **${totalEarned.toLocaleString()}** coins.`,
-      )
-      .setColor(0x2196f3);
+        `Total earnings: 💰 **${totalEarned.toLocaleString()}** ${kit.currencyName}.`,
+    });
   }
 
   // ── Collection ────────────────────────────────────────
@@ -738,11 +766,14 @@ export class FishingManager {
       return `❓ **???** (${s.rarity}) — not caught yet`;
     });
 
-    return new EmbedBuilder()
-      .setTitle('📖 Fish Collection')
-      .setDescription(lines.join('\n') || 'No species available.')
-      .setFooter({ text: `${caught.size}/${species.length} species discovered` })
-      .setColor(0x00bcd4);
+    return applyBrand(
+      new EmbedBuilder()
+        .setTitle('📖 Fish Collection')
+        .setDescription(lines.join('\n') || 'No species available.')
+        .setFooter({ text: `${caught.size}/${species.length} species discovered` }),
+      (await this.getConfig()).brandKit,
+      { intent: 'info' },
+    );
   }
 
   // ── Leaderboard ───────────────────────────────────────
@@ -760,10 +791,11 @@ export class FishingManager {
       return `${medal} <@${c.user_id}> — ${c.economy_fish_species.emoji} **${c.economy_fish_species.name}** (${c.weight.toFixed(2)} kg)`;
     });
 
-    return new EmbedBuilder()
-      .setTitle('🏆 Fishing Leaderboard — Heaviest Catches')
-      .setDescription(lines.join('\n') || 'No catches yet!')
-      .setColor(0xffc107);
+    return brandedEmbed((await this.getConfig()).brandKit, {
+      intent: 'warning',
+      title: '🏆 Fishing Leaderboard — Heaviest Catches',
+      description: lines.join('\n') || 'No catches yet!',
+    });
   }
 
   // ── Helpers ───────────────────────────────────────────

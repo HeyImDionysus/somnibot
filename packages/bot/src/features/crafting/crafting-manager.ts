@@ -14,7 +14,15 @@ import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import {
+  BRAND_KIT_COLUMNS,
+  brandKitFromConfig,
+  defaultBrandKit,
+  resolveBrandKit,
+  type BrandKit,
+} from '../branding/brand-kit.js';
+import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
+import { voice } from '../branding/voice.js';
 
 const log = createLogger('Crafting');
 
@@ -23,6 +31,8 @@ const log = createLogger('Crafting');
 export interface CraftingConfig {
   economy_crafting_enabled: boolean;
   economy_crafting_cooldown_seconds: number;
+  /** White-label brand kit projected from the same cached guild_config row. */
+  brandKit: BrandKit;
 }
 
 interface RecipeInput {
@@ -97,13 +107,14 @@ export class CraftingManager {
 
     const { data } = await this.supabase
       .from('guild_config')
-      .select('economy_crafting_enabled, economy_crafting_cooldown_seconds')
+      .select(`economy_crafting_enabled, economy_crafting_cooldown_seconds, ${BRAND_KIT_COLUMNS}`)
       .eq('guild_id', this.guild.id)
       .maybeSingle();
 
     this.configCache = {
       economy_crafting_enabled: data?.economy_crafting_enabled ?? true,
       economy_crafting_cooldown_seconds: data?.economy_crafting_cooldown_seconds ?? 60,
+      brandKit: brandKitFromConfig(data ?? null, this.guild.name),
     };
     this.configCacheTime = now;
     return this.configCache;
@@ -114,7 +125,12 @@ export class CraftingManager {
   async listRecipes(): Promise<{ embed: EmbedBuilder }> {
     const config = await this.getConfig();
     if (!config.economy_crafting_enabled) {
-      return { embed: new EmbedBuilder().setDescription('❌ Crafting is not enabled on this server.').setColor(0xff0000) };
+      return {
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: voice(config.brandKit.voicePreset, 'disabled', { feature: 'Crafting' }),
+        }),
+      };
     }
 
     // [game-economy-crafting DEPFAIL] Check the READ ERROR first: a failed
@@ -142,10 +158,13 @@ export class CraftingManager {
       groups[r.category].push(r);
     }
 
-    const embed = new EmbedBuilder()
-      .setTitle('📖 Recipe Book')
-      .setColor(0x8b4513)
-      .setTimestamp();
+    const embed = applyBrand(
+      new EmbedBuilder()
+        .setTitle('📖 Recipe Book')
+        .setTimestamp(),
+      config.brandKit,
+      { intent: 'primary' },
+    );
 
     for (const [cat, items] of Object.entries(groups)) {
       const lines = items.map((r) =>
@@ -164,7 +183,12 @@ export class CraftingManager {
   async craft(userId: string, recipeName: string): Promise<{ embed: EmbedBuilder }> {
     const config = await this.getConfig();
     if (!config.economy_crafting_enabled) {
-      return { embed: new EmbedBuilder().setDescription('❌ Crafting is not enabled on this server.').setColor(0xff0000) };
+      return {
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: voice(config.brandKit.voicePreset, 'disabled', { feature: 'Crafting' }),
+        }),
+      };
     }
 
     // Find recipe. [game-economy-crafting DEPFAIL] A failed recipe read
@@ -188,9 +212,10 @@ export class CraftingManager {
     const recipe = recipes.find((r) => r.name.toLowerCase() === recipeName.toLowerCase());
     if (!recipe) {
       return {
-        embed: new EmbedBuilder()
-          .setDescription(`❌ Recipe "**${recipeName}**" not found. Use \`/recipes\` to see available recipes.`)
-          .setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: `❌ Recipe "**${recipeName}**" not found. Use \`/recipes\` to see available recipes.`,
+        }),
       };
     }
 
@@ -203,9 +228,13 @@ export class CraftingManager {
       const ttl = await this.valkey.pttl(cdKey);
       const remaining = Math.ceil(Math.max(ttl, 0) / 1000);
       return {
-        embed: new EmbedBuilder()
-          .setDescription(`⏳ You need to wait **${this.formatTime(remaining)}** before crafting again.`)
-          .setColor(0xffa500),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'warning',
+          description: voice(config.brandKit.voicePreset, 'cooldown', {
+            time: this.formatTime(remaining),
+            action: 'crafting',
+          }),
+        }),
       };
     }
 
@@ -233,10 +262,11 @@ export class CraftingManager {
 
     if (missing.length > 0) {
       return {
-        embed: new EmbedBuilder()
-          .setTitle('❌ Missing Materials')
-          .setDescription(`You don't have enough materials to craft **${recipe.name}**:\n\n${missing.map((m) => `• ${m}`).join('\n')}`)
-          .setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          title: '❌ Missing Materials',
+          description: `You don't have enough materials to craft **${recipe.name}**:\n\n${missing.map((m) => `• ${m}`).join('\n')}`,
+        }),
       };
     }
 
@@ -255,9 +285,10 @@ export class CraftingManager {
           })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
         }
         return {
-          embed: new EmbedBuilder()
-            .setDescription(`❌ Failed to consume **${input.item_name}** — another action used it first. Try again.`)
-            .setColor(0xff0000),
+          embed: brandedEmbed(config.brandKit, {
+            intent: 'danger',
+            description: `❌ Failed to consume **${input.item_name}** — another action used it first. Try again.`,
+          }),
         };
       }
       consumed.push({ itemName: input.item_name, qty: input.qty, itemId: result.itemId });
@@ -266,9 +297,10 @@ export class CraftingManager {
     // Give output — guard against misconfigured recipes with no output
     if (!recipe.output_item_id) {
       return {
-        embed: new EmbedBuilder()
-          .setDescription('❌ This recipe has no output item configured. Contact an admin to fix it.')
-          .setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: '❌ This recipe has no output item configured. Contact an admin to fix it.',
+        }),
       };
     }
     // V53-C1: check inventory upsert — refund consumed materials on failure
@@ -293,9 +325,10 @@ export class CraftingManager {
         reason: 'output_grant_failed',
       });
       return {
-        embed: new EmbedBuilder()
-          .setDescription('❌ Failed to add crafted item to your inventory. Your materials have been refunded.')
-          .setColor(0xff0000),
+        embed: brandedEmbed(config.brandKit, {
+          intent: 'danger',
+          description: '❌ Failed to add crafted item to your inventory. Your materials have been refunded.',
+        }),
       };
     }
 
@@ -325,14 +358,17 @@ export class CraftingManager {
     });
 
     return {
-      embed: new EmbedBuilder()
-        .setTitle(`${recipe.emoji} Crafted!`)
-        .setDescription(
-          `You crafted **${recipe.output_qty}x ${recipe.name}**!\n\n` +
-          `Materials used:\n${recipe.inputs.map((i) => `• ${i.qty}x ${i.item_name}`).join('\n')}`,
-        )
-        .setColor(0x4caf50)
-        .setTimestamp(),
+      embed: applyBrand(
+        new EmbedBuilder()
+          .setTitle(`${recipe.emoji} Crafted!`)
+          .setDescription(
+            `You crafted **${recipe.output_qty}x ${recipe.name}**!\n\n` +
+            `Materials used:\n${recipe.inputs.map((i) => `• ${i.qty}x ${i.item_name}`).join('\n')}`,
+          )
+          .setTimestamp(),
+        config.brandKit,
+        { intent: 'primary' },
+      ),
     };
   }
 
@@ -370,10 +406,14 @@ export class CraftingManager {
     const brandKit = await resolveBrandKit(this.supabase, this.guild.id, {
       fallbackName: this.guild.name,
     }).catch(() => null);
+    const kit = brandKit ?? defaultBrandKit(this.guild.name);
     const name = brandKit?.brandName ?? this.guild.name ?? 'this server';
-    return new EmbedBuilder()
-      .setDescription(`⚠️ ${name}'s crafting workshop is temporarily unavailable — please try again in a moment. No materials were consumed.`)
-      .setColor(0xffa500);
+    return brandedEmbed(kit, {
+      intent: 'warning',
+      description:
+        `${voice(kit.voicePreset, 'unavailable', { brand: name, feature: 'crafting workshop' })}` +
+        ' No materials were consumed.',
+    });
   }
 
   // V49-L1: seedDefaultRecipes now creates output items in economy_items

@@ -46,6 +46,13 @@ export interface BrandEmbedOptions {
    * (staff/log surfaces). Defaults to attributing per kit.poweredByAttribution.
    */
   attribution?: boolean;
+  /**
+   * Set to `true` to keep the embed's existing color instead of applying the
+   * intent color. For surfaces whose color carries MEANING the brand must not
+   * overwrite — fish/gathering rarity tiers, where the hue *is* the rarity.
+   * Those embeds still receive the branded footer/attribution.
+   */
+  keepColor?: boolean;
 }
 
 export interface BrandedEmbedForOptions extends BrandEmbedOptions {
@@ -137,7 +144,9 @@ export function applyBrand(
   kit: BrandKit,
   opts: BrandEmbedOptions = {},
 ): EmbedBuilder {
-  embed.setColor(intentColor(kit, opts.intent ?? 'primary'));
+  if (!opts.keepColor) {
+    embed.setColor(intentColor(kit, opts.intent ?? 'primary'));
+  }
 
   const attribution = kit.poweredByAttribution;
   if (opts.attribution === false || !attribution) return embed;
