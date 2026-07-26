@@ -171,7 +171,20 @@ export class GuildRouter {
     const now = Date.now();
     const toEvict: string[] = [];
 
+    // The primary guild is never evicted. Eviction bounds memory across MANY
+    // guilds; applying it to the one guild this instance exists to serve tore
+    // down every background service — diagnostics, audit, giveaway
+    // fulfilment, the action-queue listener that executes dashboard actions —
+    // after 30 quiet minutes. The bot stayed connected, so Discord showed it
+    // online, while the dashboard showed a frozen health snapshot and its
+    // buttons enqueued work nothing would ever pick up. "Idle" here means no
+    // Discord events, which a small server routinely is for half an hour; the
+    // background services are precisely the part that must keep running
+    // through that.
+    const primaryGuildId = process.env.DISCORD_GUILD_ID;
+
     for (const [guildId, lastTime] of this.lastAccess) {
+      if (guildId === primaryGuildId) continue;
       if (now - lastTime > IDLE_TIMEOUT_MS && this.contexts.has(guildId)) {
         toEvict.push(guildId);
       }
