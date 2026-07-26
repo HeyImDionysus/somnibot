@@ -123,7 +123,6 @@ async function handleRankView(
   const cardBuffer = await generateRankCard({
     username: displayName,
     avatarUrl,
-    level: levelData.level,
     xp: levelData.xp,
     rank,
     totalMessages: levelData.total_messages ?? 0,
@@ -216,7 +215,6 @@ async function handleRankCustomize(
     const cardBuffer = await generateRankCard({
       username: interaction.user.username,
       avatarUrl: interaction.user.displayAvatarURL({ extension: 'png', size: 256 }),
-      level: levelData?.level ?? 0,
       xp: levelData?.xp ?? 0,
       rank: 1,
       totalMessages: levelData?.total_messages ?? 0,

@@ -10,7 +10,6 @@ import { levelProgress, totalXpForLevel, LEVEL_CONFIG } from '@somnibot/shared';
 interface RankCardOptions {
   username: string;
   avatarUrl: string;
-  level: number;
   xp: number;
   rank: number;
   totalMessages: number;
@@ -147,13 +146,17 @@ export async function generateRankCard(options: RankCardOptions): Promise<Buffer
     : options.username;
   ctx.fillText(displayName, textX, 70);
 
+  // Level-curve parity: derive the displayed level from the SAME XP the
+  // progress bar uses (levelProgress), never from a stored level column —
+  // the number and the bar can then never disagree.
+  const progress = levelProgress(options.xp);
+
   // Level & Rank
   ctx.fillStyle = '#b5bac1';
   ctx.font = '22px sans-serif';
-  ctx.fillText(`Level ${options.level}  ·  Rank #${options.rank}`, textX, 105);
+  ctx.fillText(`Level ${progress.level}  ·  Rank #${options.rank}`, textX, 105);
 
   // ── Progress Bar ──────────────────────────────────
-  const progress = levelProgress(options.xp);
   const barY = 135;
   const barHeight = 28;
   const barRadius = 14;

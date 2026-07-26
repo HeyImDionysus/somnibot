@@ -8,8 +8,23 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('discord.js', () => ({}));
 
-vi.mock('@somnibot/shared', () => ({
-  calculateLevel: vi.fn().mockImplementation((xp: number) => Math.floor(xp / 100)),
+vi.mock('@somnibot/shared', () => {
+  // Real cumulative quadratic curve (5L² + 50L + 100, cap 200) — must match
+  // packages/shared/src/constants/levels.ts. The previous mock used
+  // floor(xp / 100), the exact wrong formula the level-curve-parity fix
+  // removed from SQL; a test must never keep it alive.
+  const calculateLevel = (xp: number): number => {
+    let level = 0;
+    let xpNeeded = 0;
+    while (level < 200) {
+      xpNeeded += 5 * level * level + 50 * level + 100;
+      if (xp < xpNeeded) break;
+      level++;
+    }
+    return level;
+  };
+  return {
+  calculateLevel: vi.fn().mockImplementation(calculateLevel),
   randomXp: vi.fn().mockReturnValue(25),
   LEVEL_CONFIG: {
     DEFAULT_MIN_XP: 15,
@@ -17,7 +32,7 @@ vi.mock('@somnibot/shared', () => ({
     DEFAULT_COOLDOWN_SECONDS: 60,
     DEFAULT_VOICE_XP_PER_INTERVAL: 10,
     DEFAULT_VOICE_INTERVAL_MINUTES: 5,
-    XP_FORMULA: (lvl: number) => lvl * 100,
+    XP_FORMULA: (lvl: number) => 5 * lvl * lvl + 50 * lvl + 100,
   },
   createLogger: () => ({
     info: vi.fn(),
@@ -25,7 +40,8 @@ vi.mock('@somnibot/shared', () => ({
     error: vi.fn(),
     debug: vi.fn(),
   }),
-}));
+  };
+});
 
 import {
   loadLevelConfig,

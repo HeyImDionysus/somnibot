@@ -9,9 +9,11 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+// Note: no calculateLevel mock — since the level-curve-parity fix, the /xp
+// admin handler never computes a level in TS; the set_member_xp RPC is the
+// single writer of member_levels.level semantics.
 vi.mock('@somnibot/shared', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-  calculateLevel: (xp: number) => Math.floor(Math.sqrt(Math.max(0, xp) / 100)),
 }));
 
 vi.mock('discord.js', () => ({
@@ -91,5 +93,50 @@ describe('handleXpAdminCommand — Manage-Guild re-check', () => {
       'xp.admin_adjusted', 'g1',
       expect.objectContaining({ operation: 'add', targetId: 'target1', actorId: 'actor1' }),
     );
+  });
+});
+
+describe('handleXpAdminCommand — /xp set goes through the set_member_xp RPC', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('calls set_member_xp with the raw XP and never upserts member_levels directly', async () => {
+    const interaction = makeInteraction(true, 'set');
+    const client = makeClient();
+    client._rpc.mockResolvedValue({
+      data: { new_xp: 100, old_level: 10, new_level: 1, leveled_up: false },
+      error: null,
+    });
+
+    await handleXpAdminCommand(interaction as any, client as any);
+
+    // The level is computed in SQL (public.level_for_xp) — the handler must
+    // not hand-compute it and must not write member_levels itself. That
+    // client-side write is exactly what used to create phantom multi-level
+    // jumps (quadratic level written, next message-XP RPC recomputed flat).
+    expect(client._rpc).toHaveBeenCalledWith('set_member_xp', {
+      p_guild_id: 'g1',
+      p_member_id: 'target1',
+      p_xp: 100,
+    });
+    expect(client._tables).not.toContain('member_levels');
+
+    // The reply and the audit event both use the RPC's level, not a TS one.
+    expect(client._emit).toHaveBeenCalledWith(
+      'xp.admin_adjusted', 'g1',
+      expect.objectContaining({ operation: 'set', targetId: 'target1', newXp: 100, newLevel: 1 }),
+    );
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.stringContaining('Level 1'));
+  });
+
+  it('reports failure and emits nothing when the RPC errors', async () => {
+    const interaction = makeInteraction(true, 'set');
+    const client = makeClient();
+    client._rpc.mockResolvedValue({ data: null, error: { message: 'boom' } });
+
+    await handleXpAdminCommand(interaction as any, client as any);
+
+    expect(client._tables).not.toContain('member_levels');
+    expect(client._emit).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.stringContaining('Failed to set XP'));
   });
 });
