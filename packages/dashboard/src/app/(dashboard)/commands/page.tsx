@@ -5,6 +5,7 @@
  */
 'use client';
 
+import { VariableChips } from '@/components/shared/variable-chips';
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { ChannelPicker } from '@/components/shared/channel-picker';
@@ -350,6 +351,16 @@ export default function CustomCommandsPage() {
                             placeholder="Message content — variables: {user}, {server}, {channel}, {memberCount}"
                             rows={2}
                             className="w-full rounded-input bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none resize-none"
+                          />
+                        )}
+                        {(action.type === 'send_message' || action.type === 'send_dm') && (
+                          <VariableChips
+                            variables={[
+                              { key: '{user}', desc: 'User mention' },
+                              { key: '{server}', desc: 'Server name' },
+                              { key: '{channel}', desc: 'Channel mention' },
+                              { key: '{memberCount}', desc: 'Member count' },
+                            ]}
                           />
                         )}
                         {(action.type === 'give_role' || action.type === 'remove_role') && (

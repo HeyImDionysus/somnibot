@@ -6,6 +6,7 @@
  */
 'use client';
 
+import { VariableChips } from '@/components/shared/variable-chips';
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { ChannelPicker } from '@/components/shared/channel-picker';
@@ -358,6 +359,16 @@ export default function ScheduledMessagesPage() {
                 <textarea value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })}
                   rows={4} placeholder="Message text (supports {server}, {members}, {date}, {time})"
                   className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none resize-none" />
+                <VariableChips
+                  variables={[
+                    { key: '{server}', desc: 'Server name' },
+                    { key: '{members}', desc: 'Member count' },
+                    { key: '{date}', desc: 'Current date' },
+                    { key: '{time}', desc: 'Current time' },
+                    { key: '{timestamp}', desc: 'Unix timestamp' },
+                    { key: '{memberCount}', desc: 'Member count' },
+                  ]}
+                />
               </div>
 
               {/* Embed picker — replaces raw UUID input */}
@@ -520,14 +531,16 @@ export default function ScheduledMessagesPage() {
       {/* ── Variables Reference ───────────────────────── */}
       <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-5">
         <h3 className="text-sm font-semibold text-discord-text-primary mb-3">Message Variables</h3>
-        <div className="grid gap-2 text-xs text-discord-text-muted sm:grid-cols-2">
-          <div><code className="text-discord-accent">{'{server}'}</code> — Server name</div>
-          <div><code className="text-discord-accent">{'{members}'}</code> — Member count</div>
-          <div><code className="text-discord-accent">{'{date}'}</code> — Current date</div>
-          <div><code className="text-discord-accent">{'{time}'}</code> — Current time</div>
-          <div><code className="text-discord-accent">{'{timestamp}'}</code> — Unix timestamp</div>
-          <div><code className="text-discord-accent">{'{memberCount}'}</code> — Member count</div>
-        </div>
+        <VariableChips
+          variables={[
+                    { key: '{server}', desc: 'Server name' },
+                    { key: '{members}', desc: 'Member count' },
+                    { key: '{date}', desc: 'Current date' },
+                    { key: '{time}', desc: 'Current time' },
+                    { key: '{timestamp}', desc: 'Unix timestamp' },
+                    { key: '{memberCount}', desc: 'Member count' },
+                  ]}
+        />
       </div>
 
       {/* Confirm Delete Dialog */}
