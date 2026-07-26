@@ -36,7 +36,7 @@ vi.mock('@somnibot/shared', () => ({
 }));
 
 vi.mock('../features/moderation/infraction-service.js', () => ({
-  createInfraction: vi.fn().mockResolvedValue({ id: 'inf1', type: 'warn' }),
+  createInfraction: vi.fn().mockResolvedValue({ infraction: { id: 'inf1', type: 'warn' }, replayed: false }),
   getMemberInfractions: vi.fn().mockResolvedValue([
     { id: 'inf1', type: 'warn', reason: 'test', created_at: '2026-01-01', active: true, moderator_id: 'mod1' },
   ]),

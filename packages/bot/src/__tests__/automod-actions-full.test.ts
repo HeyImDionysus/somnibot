@@ -12,7 +12,7 @@ vi.mock('@somnibot/shared', () => ({
 }));
 
 vi.mock('../features/moderation/infraction-service.js', () => ({
-  createInfraction: vi.fn(async () => ({ id: 'inf1' })),
+  createInfraction: vi.fn(async () => ({ infraction: { id: 'inf1' }, replayed: false })),
   getActiveWarningCount: vi.fn(async () => 2),
   calculateExpiryDate: vi.fn(() => '2026-12-31T00:00:00Z'),
 }));
@@ -179,11 +179,11 @@ describe('executeAutoModAction — warn action', () => {
     expect(msg.delete).not.toHaveBeenCalled();
   });
 
-  it('calls executeEscalation', async () => {
+  it('calls executeEscalation keyed on the source warn infraction (M3)', async () => {
     const msg = makeMessage();
     const client = makeClient();
     await executeAutoModAction(client, msg, makeRule({ action: 'warn' }), 'violation', modConfig);
-    expect(executeEscalation).toHaveBeenCalledWith(client, msg.member, expect.any(String), modConfig);
+    expect(executeEscalation).toHaveBeenCalledWith(client, msg.member, expect.any(String), modConfig, 'inf1');
   });
 
   it('posts mod log with escalation info when log_to_mod_channel is true', async () => {

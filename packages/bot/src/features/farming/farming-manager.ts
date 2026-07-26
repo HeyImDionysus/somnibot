@@ -12,6 +12,7 @@ import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { walletBalance, joinProp } from '../../utils/db-helpers.js';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
 import { resolveBrandKit } from '../branding/brand-kit.js';
@@ -665,13 +666,13 @@ export class FarmingManager {
    * happened. Best effort — a failed alert never blocks the harvest flow.
    */
   private async raiseFarmPayoutAlert(userId: string, amount: number): Promise<void> {
-    await this.supabase.from('alerts').insert({
-      guild_id: this.guild.id,
-      alert_type: 'farming_payout_reverted',
+    await raiseOwnerAlert(this.supabase, this.guild.id, {
+      alertType: 'farming_payout_reverted',
       severity: 'warning',
       title: 'Farming payout reverted',
       message: `A farm harvest payout of ${amount} failed for ${userId}; the crops were restored for retry.`,
       metadata: { user_id: userId, amount },
+      guild: this.guild,
     });
   }
 

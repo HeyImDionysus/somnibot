@@ -2494,7 +2494,9 @@ describe('EntitlementService.reactivate', () => {
     const guild = makeGuild([member]);
 
     const alertsUpdateChain = supaChain();
-    alertsUpdateChain.then = (resolve: any) => resolve({ data: null, error: null });
+    // resolveOwnerAlert (X1/M2) awaits `.select('id')` on the update chain to
+    // count how many rows it resolved (recovery notice only when > 0).
+    alertsUpdateChain.select = vi.fn(async () => ({ data: [{ id: 'a1' }], error: null }));
     const alertsChain = supaChain();
     alertsChain.update = vi.fn(() => alertsUpdateChain);
     const { supabase } = purchaseReactivateSupabase({ alertsChain });
@@ -2507,7 +2509,9 @@ describe('EntitlementService.reactivate', () => {
       expect.objectContaining({ resolved: true, resolved_at: expect.any(String) }),
     );
     expect(alertsUpdateChain.eq).toHaveBeenCalledWith('alert_type', 'entitlement_grace_period');
-    expect(alertsUpdateChain.eq).toHaveBeenCalledWith('metadata->>entitlement_id', 'ent1');
+    // Entitlement narrowing now goes through the shared resolveOwnerAlert
+    // metadata-subset match instead of a raw ->> filter.
+    expect(alertsUpdateChain.contains).toHaveBeenCalledWith('metadata', { entitlement_id: 'ent1' });
     expect(alertsUpdateChain.eq).toHaveBeenCalledWith('resolved', false);
   });
 });

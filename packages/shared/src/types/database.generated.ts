@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 192 migration files in packages/supabase/migrations/
+ * Source: 190 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -2029,6 +2029,7 @@ export interface DbEconomyTransactions {
   description: string | null;
   metadata: Json | null;
   created_at: string;
+  idempotency_key: string | null;
 }
 
 export interface DbEconomyTriviaQuestions {
@@ -2096,12 +2097,6 @@ export interface DbLevelUnlockConfigs {
   feature_key: string;
   required_level: number;
   unlock_message: string | null;
-}
-
-export interface DbMemberErasures {
-  guild_id: string;
-  discord_id: string;
-  erased_at: string;
 }
 
 export interface DbMemberFeatureUnlocks {

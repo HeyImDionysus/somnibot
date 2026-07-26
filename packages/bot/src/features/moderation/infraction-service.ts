@@ -42,13 +42,28 @@ export interface InfractionRecord {
   created_at: string;
 }
 
+export interface CreateInfractionResult {
+  infraction: InfractionRecord;
+  /**
+   * True when this call was deduped by the correlation key (23505 on
+   * ux_infractions_guild_correlation): the returned row is the ORIGINAL
+   * infraction from the first delivery. Callers MUST skip their side-effect
+   * block (DM, mod log, event emits, escalation) on a replay — re-running it
+   * was the M3 residual bug (a replayed /warn re-DMed, re-modlogged, and
+   * RE-RAN ESCALATION, issuing a second timeout/kick/ban).
+   */
+  replayed: boolean;
+}
+
 /**
  * Create a new infraction record.
+ *
+ * Returns `{ infraction, replayed }`, or null when the write failed outright.
  */
 export async function createInfraction(
   supabase: SupabaseClient,
   input: CreateInfractionInput,
-): Promise<InfractionRecord | null> {
+): Promise<CreateInfractionResult | null> {
   const { data, error } = await supabase
     .from('infractions')
     .insert({
@@ -70,7 +85,8 @@ export async function createInfraction(
   if (error) {
     // Idempotency: a replayed write (same guild_id + correlation_id) is rejected
     // by ux_infractions_guild_correlation (23505). Treat it as a no-op and read
-    // back the original row instead of creating a duplicate / re-firing escalation.
+    // back the original row instead of creating a duplicate / re-firing escalation
+    // — flagged replayed:true so the caller also skips its side effects.
     if (error.code === '23505' && input.correlationId) {
       const { data: existing } = await supabase
         .from('infractions')
@@ -78,13 +94,13 @@ export async function createInfraction(
         .eq('guild_id', input.guildId)
         .eq('correlation_id', input.correlationId)
         .maybeSingle();
-      if (existing) return existing as InfractionRecord;
+      if (existing) return { infraction: existing as InfractionRecord, replayed: true };
     }
     log.error('Failed to create infraction:', error.message);
     return null;
   }
 
-  return data as InfractionRecord;
+  return { infraction: data as InfractionRecord, replayed: false };
 }
 
 /**

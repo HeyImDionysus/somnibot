@@ -185,7 +185,7 @@ vi.mock('../features/moderation/mod-log.js', () => ({
 }));
 
 vi.mock('../features/moderation/infraction-service.js', () => ({
-  createInfraction: vi.fn(async () => ({ id: 'inf1' })),
+  createInfraction: vi.fn(async () => ({ infraction: { id: 'inf1' }, replayed: false })),
   getActiveWarningCount: vi.fn(async () => 0),
 }));
 

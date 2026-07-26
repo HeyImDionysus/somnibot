@@ -11,6 +11,7 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('ScheduledRunner');
@@ -392,15 +393,15 @@ export class ScheduledMessageRunner {
     const channelName =
       channel && 'name' in channel ? `#${(channel as TextChannel).name}` : `channel ${schedule.channel_id}`;
     try {
-      await this.supabase.from('alerts').insert({
-        guild_id: this.guild.id,
-        alert_type: 'scheduled_message_delivery_failed',
+      await raiseOwnerAlert(this.supabase, this.guild.id, {
+        alertType: 'scheduled_message_delivery_failed',
         severity: 'warning',
         title: `Scheduled message "${schedule.name}" could not be delivered`,
         message:
           `Scheduled message "${schedule.name}" could not post to ${channelName}: ${reason}. ` +
           `It has been paused; re-enable it after fixing the issue. Other schedules are unaffected.`,
         metadata: { schedule_id: schedule.id, channel_id: schedule.channel_id, reason },
+        guild: this.guild,
       });
     } catch (alertErr) {
       log.error(
@@ -466,15 +467,15 @@ export class ScheduledMessageRunner {
 
     const missedCount = this.countOccurrences(schedule, baseline, now);
     try {
-      await this.supabase.from('alerts').insert({
-        guild_id: this.guild.id,
-        alert_type: 'scheduled_message_missed_occurrence',
+      await raiseOwnerAlert(this.supabase, this.guild.id, {
+        alertType: 'scheduled_message_missed_occurrence',
         severity: 'info',
         title: `Scheduled message "${schedule.name}" missed ${missedCount} occurrence(s)`,
         message:
           `While I was offline, "${schedule.name}" missed ${missedCount} occurrence(s). ` +
           `Per your missed-run policy (skip-missed) nothing was sent late.`,
         metadata: { schedule_id: schedule.id, missed_count: missedCount },
+        guild: this.guild,
       });
     } catch (alertErr) {
       log.error(

@@ -15,6 +15,7 @@ import {
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert, resolveOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('MessageLog');
 
@@ -101,15 +102,15 @@ async function notifyMessageLogDegraded(client: SomniClient, guildId: string, er
   });
 
   try {
-    await client.supabase.from('alerts').insert({
-      guild_id: guildId,
-      alert_type: 'message_log_degraded',
+    await raiseOwnerAlert(client.supabase, guildId, {
+      alertType: 'message_log_degraded',
       severity: 'warning',
       title: 'Message logging degraded',
       message:
         `The message-log config could not be read from the database (${errorMessage}). ` +
         `Edit/delete logging is disabled until the database recovers.`,
       metadata: { error: errorMessage, reason: 'config_fetch_failed' },
+      client,
     });
   } catch (alertErr) {
     log.error('Failed to write message-log degraded alert:', { error: String(alertErr) });
@@ -143,8 +144,16 @@ export async function loadConfig(client: SomniClient, guildId: string): Promise<
     };
   }
 
-  // Successful read — clear any prior degradation throttle for this guild.
-  _degradedNotified.delete(guildId);
+  // Successful read — clear any prior degradation throttle for this guild and,
+  // when one WAS set (we had alerted), resolve the open alert with a recovery
+  // notice (#51). Fire-and-forget: recovery bookkeeping must not block the
+  // message-handling hot path (resolveOwnerAlert never throws).
+  if (_degradedNotified.delete(guildId)) {
+    void resolveOwnerAlert(client.supabase, guildId, 'message_log_degraded', undefined, {
+      client,
+      notice: 'Message logging recovered — the config is readable again and edit/delete logging has resumed.',
+    });
+  }
 
   const config: MessageLogConfig = {
     message_log_enabled: data?.message_log_enabled ?? false,

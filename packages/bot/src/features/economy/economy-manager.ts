@@ -12,6 +12,7 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { randomInt } from 'node:crypto';
 import { eventBus } from '../../services/event-bus.js';
@@ -1454,13 +1455,13 @@ export class EconomyManager {
    * reward was dropped for this window. Best effort — never blocks the claim flow.
    */
   private async raiseRewardOutageAlert(userId: string, type: string, amount: number): Promise<void> {
-    await this.supabase.from('alerts').insert({
-      guild_id: this.guild.id,
-      alert_type: 'economy_reward_outage',
+    await raiseOwnerAlert(this.supabase, this.guild.id, {
+      alertType: 'economy_reward_outage',
       severity: 'warning',
       title: 'Economy reward credit failed',
       message: `A ${type} reward of ${amount} failed to credit ${userId}. The claim cooldown slot was released so the member can retry once the dependency recovers.`,
       metadata: { user_id: userId, reward_type: type, amount },
+      guild: this.guild,
     });
   }
 

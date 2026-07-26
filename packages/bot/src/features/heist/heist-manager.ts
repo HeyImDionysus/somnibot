@@ -17,6 +17,7 @@ import type { DbGuildConfig } from '@somnibot/shared';
 import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 import { eventBus } from '../../services/event-bus.js';
 import { resolveBrandKit } from '../branding/brand-kit.js';
 
@@ -156,13 +157,13 @@ export class HeistManager {
    */
   private async raiseSettlementFailedAlert(guildId: string, heistId: string): Promise<void> {
     try {
-      await this.supabase.from('alerts').insert({
-        guild_id: guildId,
-        alert_type: 'heist_settlement_failed',
+      await raiseOwnerAlert(this.supabase, guildId, {
+        alertType: 'heist_settlement_failed',
         severity: 'critical',
         title: 'Heist settlement failed',
         message: `Heist ${heistId} could not be settled after ${HeistManager.MAX_RETRY_ATTEMPTS} retries. It is left in_progress for the next restart's resume.`,
         metadata: { heist_id: heistId, attempts: HeistManager.MAX_RETRY_ATTEMPTS },
+        client: this.client,
       });
     } catch (err) {
       log.warn('heist settlement-failed alert failed:', (err as Error)?.message ?? err);

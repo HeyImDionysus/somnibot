@@ -62,6 +62,13 @@ export async function executeEscalation(
     infractionExpiryDays: number;
     modLogChannelId: string | null;
   },
+  /**
+   * Id of the infraction that triggered this escalation (M3). It derives the
+   * escalation infraction's correlation key 'escalation:<sourceInfractionId>',
+   * so a replayed source delivery (or a crash-retry of the same escalation)
+   * cannot record a second escalation row or re-fire its side effects.
+   */
+  sourceInfractionId?: string,
 ): Promise<{ action: InfractionType; durationMinutes?: number } | null> {
   // Count ALL active infractions, not just warns — a mute/kick should also
   // push the user closer to escalation thresholds (matches MEE6/Dyno behavior).
@@ -82,6 +89,7 @@ export async function executeEscalation(
   }
 
   const escalationReason = `Escalation: ${activeWarnings} active warning(s). Original: ${reason}`;
+  const correlationId = sourceInfractionId ? `escalation:${sourceInfractionId}` : undefined;
 
   try {
     switch (step.action) {
@@ -95,7 +103,7 @@ export async function executeEscalation(
         }
 
         // Create infraction record
-        await createInfraction(client.supabase, {
+        const created = await createInfraction(client.supabase, {
           guildId: member.guild.id,
           memberId: member.id,
           moderatorId: 'system',
@@ -103,7 +111,15 @@ export async function executeEscalation(
           reason: escalationReason,
           durationMinutes: step.durationMinutes,
           expiresAt: calculateExpiryDate(config.infractionExpiryDays),
+          correlationId,
         });
+
+        // Replayed escalation (same source infraction) — the original run
+        // already emitted the event and mod-logged; don't double either.
+        if (created?.replayed) {
+          log.info(`Replayed escalation mute for ${member.id} (${correlationId}) — side effects skipped`);
+          return { action: 'mute', durationMinutes: step.durationMinutes };
+        }
 
         // Emit event
         client.eventBus.emit('member.muted', member.guild.id, {
@@ -137,14 +153,21 @@ export async function executeEscalation(
 
         await member.kick(escalationReason);
 
-        await createInfraction(client.supabase, {
+        const created = await createInfraction(client.supabase, {
           guildId: member.guild.id,
           memberId: member.id,
           moderatorId: 'system',
           type: 'kick',
           reason: escalationReason,
           expiresAt: calculateExpiryDate(config.infractionExpiryDays),
+          correlationId,
         });
+
+        // Replayed escalation — skip the duplicate event emit and mod log.
+        if (created?.replayed) {
+          log.info(`Replayed escalation kick for ${member.id} (${correlationId}) — side effects skipped`);
+          return { action: 'kick' };
+        }
 
         client.eventBus.emit('member.kicked', member.guild.id, {
           discordId: member.id,
@@ -176,14 +199,21 @@ export async function executeEscalation(
         // Suspend entitlements (commerce interaction §18.6)
         await suspendEntitlements(client, member.guild.id, member.id);
 
-        await createInfraction(client.supabase, {
+        const created = await createInfraction(client.supabase, {
           guildId: member.guild.id,
           memberId: member.id,
           moderatorId: 'system',
           type: 'ban',
           reason: escalationReason,
           expiresAt: calculateExpiryDate(config.infractionExpiryDays),
+          correlationId,
         });
+
+        // Replayed escalation — skip the duplicate event emit and mod log.
+        if (created?.replayed) {
+          log.info(`Replayed escalation ban for ${member.id} (${correlationId}) — side effects skipped`);
+          return { action: 'ban' };
+        }
 
         client.eventBus.emit('member.banned', member.guild.id, {
           discordId: member.id,

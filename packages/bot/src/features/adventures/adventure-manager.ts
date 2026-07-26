@@ -23,6 +23,7 @@ import type {
   AdventureSceneLoot,
 } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import { eventBus } from '../../services/event-bus.js';
@@ -1126,13 +1127,13 @@ export class AdventureManager {
    * marked payout_failed for retry). Best effort — never blocks the flow.
    */
   private async raisePayoutFailedAlert(userId: string, sessionId: string, amount: number): Promise<void> {
-    await this.supabase.from('alerts').insert({
-      guild_id: this.guild.id,
-      alert_type: 'adventure_payout_failed',
+    await raiseOwnerAlert(this.supabase, this.guild.id, {
+      alertType: 'adventure_payout_failed',
       severity: 'warning',
       title: 'Adventure payout failed',
       message: `An adventure reward of ${amount} could not be credited to ${userId}. The session is marked payout_failed for retry.`,
       metadata: { user_id: userId, session_id: sessionId, amount },
+      guild: this.guild,
     });
   }
   /**

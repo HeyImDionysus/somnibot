@@ -11,6 +11,7 @@ import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { walletBalance, joinProp } from '../../utils/db-helpers.js';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
 import { resolveBrandKit } from '../branding/brand-kit.js';
@@ -546,13 +547,13 @@ export class CraftingManager {
    * a failed alert never blocks the craft flow.
    */
   private async raiseCraftDegradedAlert(userId: string, recipeName: string): Promise<void> {
-    await this.supabase.from('alerts').insert({
-      guild_id: this.guild.id,
-      alert_type: 'crafting_degraded',
+    await raiseOwnerAlert(this.supabase, this.guild.id, {
+      alertType: 'crafting_degraded',
       severity: 'warning',
       title: 'Crafting degraded',
       message: `Crafting "${recipeName}" failed to grant its output for ${userId}; materials were refunded.`,
       metadata: { user_id: userId, recipe_name: recipeName },
+      guild: this.guild,
     });
   }
 

@@ -13,6 +13,7 @@ import type Valkey from 'iovalkey';
 import type { LootSourceType, LootRarity } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
 import { resolveBrandKit } from '../branding/brand-kit.js';
@@ -566,13 +567,13 @@ export class GatheringManager {
    * but the currency credit was lost. Best effort — never blocks the flow.
    */
   private async raiseGatherPayoutAlert(userId: string, amount: number, sourceType: LootSourceType): Promise<void> {
-    await this.supabase.from('alerts').insert({
-      guild_id: this.guild.id,
-      alert_type: 'gathering_payout_failed',
+    await raiseOwnerAlert(this.supabase, this.guild.id, {
+      alertType: 'gathering_payout_failed',
       severity: 'warning',
       title: 'Gathering payout failed',
       message: `A ${sourceType} payout of ${amount} failed to credit ${userId} after the roll.`,
       metadata: { user_id: userId, amount, source_type: sourceType },
+      guild: this.guild,
     });
   }
 

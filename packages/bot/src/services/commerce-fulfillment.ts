@@ -24,6 +24,7 @@ import {
   type RoleDeliveryActionClaim,
 } from '../features/commerce/entitlement-service.js';
 import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
+import { raiseOwnerAlert } from './alert-service.js';
 import { createLogger, getGracePeriodDays } from '@somnibot/shared';
 
 const log = createLogger('Fulfillment');
@@ -330,6 +331,8 @@ export async function writeReceiptDeliveryAlert(
      * the operator isn't sent to an empty DLQ.
      */
     payloadPreserved?: boolean;
+    /** Discord delivery context — pass when a Guild is in scope (X1/M2). */
+    guild?: Guild | null;
   },
 ): Promise<void> {
   const payloadPreserved = opts.payloadPreserved ?? true;
@@ -348,9 +351,8 @@ export async function writeReceiptDeliveryAlert(
         `after ${opts.attempts} attempt(s). ` +
         recovery;
 
-  const { error } = await supabase.from('alerts').insert({
-    guild_id: opts.guildId,
-    alert_type: 'receipt_delivery_failed',
+  await raiseOwnerAlert(supabase, opts.guildId, {
+    alertType: 'receipt_delivery_failed',
     severity: 'critical',
     title: `Receipt delivery failed — order ${opts.orderNumber}`,
     message,
@@ -363,10 +365,8 @@ export async function writeReceiptDeliveryAlert(
       lastError: opts.lastError,
       payloadPreserved,
     },
+    guild: opts.guild,
   });
-  if (error) {
-    log.error('Failed to write receipt delivery alert', { order: opts.orderNumber, detail: error.message });
-  }
 }
 
 // ── Service ────────────────────────────────────────────────
@@ -2057,6 +2057,7 @@ export class CommerceFulfillmentService {
       attempts: 1,
       lastError: deliveryError instanceof Error ? deliveryError.message : String(deliveryError),
       payloadPreserved,
+      guild: this.guild,
     });
     return false;
   }
