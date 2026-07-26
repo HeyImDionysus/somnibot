@@ -28,7 +28,7 @@ vi.mock('@somnibot/shared', () => ({
 }));
 
 // Mock the infraction service
-const mockCreateInfraction = vi.fn().mockResolvedValue({ id: 'inf-1' });
+const mockCreateInfraction = vi.fn().mockResolvedValue({ infraction: { id: 'inf-1' }, replayed: false });
 const mockGetActiveWarningCount = vi.fn().mockResolvedValue(3);
 const mockCalculateExpiryDate = vi.fn().mockReturnValue('2026-07-01');
 
@@ -128,7 +128,7 @@ function makeGuild(overrides: any = {}) {
 describe('handleModalSubmit', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockCreateInfraction.mockResolvedValue({ id: 'inf-1' });
+    mockCreateInfraction.mockResolvedValue({ infraction: { id: 'inf-1' }, replayed: false });
     mockGetActiveWarningCount.mockResolvedValue(3);
     mockGetEscalationAction.mockReturnValue(null);
   });

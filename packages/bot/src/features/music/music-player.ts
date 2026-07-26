@@ -28,6 +28,7 @@ import { MusicSelfHealer, type SearchProvider } from './music-self-healer.js';
 import { applyFilterPreset, applyCustomTimescale, describeActiveFilters, type FilterPreset } from './music-filters.js';
 import type { Band, TimescaleSettings } from 'shoukaku';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('MusicPlayer');
 
@@ -256,13 +257,13 @@ export class MusicPlayerManager {
     const message = err instanceof Error ? err.message : String(err);
     this.eventBus.emit('music.store_outage', this.guild.id, { userId, operation, error: message });
     try {
-      await this.supabase.from('alerts').insert({
-        guild_id: this.guild.id,
-        alert_type: 'music_store_outage',
+      await raiseOwnerAlert(this.supabase, this.guild.id, {
+        alertType: 'music_store_outage',
         severity: 'warning',
         title: 'Music queue store unavailable',
         message: `The music queue store could not be reached during "${operation}". Playback is degraded until it recovers.`,
         metadata: { user_id: userId, operation, error: message },
+        guild: this.guild,
       });
     } catch (alertErr) {
       log.warn('Failed to raise music store-outage alert:', (alertErr as Error)?.message ?? alertErr);

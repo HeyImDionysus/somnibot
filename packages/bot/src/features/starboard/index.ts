@@ -20,38 +20,40 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('Starboard');
 
 /**
  * Raise exactly one owner alert when the configured starboard channel is gone
  * (deleted or invisible), so the degraded state is visible instead of silent.
- * Deduplicated on the open (unresolved) alert for this channel.
+ * Deduplicated on the open (unresolved) alert for this channel. Delivered via
+ * raiseOwnerAlert so the notice also reaches the owner's alert channel.
  */
 async function raiseStarboardChannelMissingAlert(
   supabase: SupabaseClient,
-  guildId: string,
+  guild: Guild,
   channelId: string,
 ): Promise<void> {
   try {
     const { data: existing } = await supabase
       .from('alerts')
       .select('id')
-      .eq('guild_id', guildId)
+      .eq('guild_id', guild.id)
       .eq('alert_type', 'starboard_channel_missing')
       .eq('resolved', false)
       .maybeSingle();
     if (existing) return;
 
-    await supabase.from('alerts').insert({
-      guild_id: guildId,
-      alert_type: 'starboard_channel_missing',
+    await raiseOwnerAlert(supabase, guild.id, {
+      alertType: 'starboard_channel_missing',
       severity: 'warning',
       title: 'Starboard channel is missing',
       message:
         `The configured starboard channel (<#${channelId}>) could not be found — it may have been deleted ` +
         `or I lost access. Starred messages are not being posted. Set a valid starboard channel to restore it.`,
       metadata: { channel_id: channelId },
+      guild,
     });
   } catch (alertErr) {
     log.error('Failed to write starboard channel-missing alert:', { error: String(alertErr) });
@@ -156,7 +158,7 @@ export async function handleStarboardReaction(
   if (!starboardChannel) {
     // Degraded-state contract: the starboard channel was deleted or is
     // inaccessible. Surface it to the owner instead of returning silently.
-    await raiseStarboardChannelMissingAlert(supabase, guildId, config.starboard_channel_id);
+    await raiseStarboardChannelMissingAlert(supabase, guild, config.starboard_channel_id);
     return;
   }
 

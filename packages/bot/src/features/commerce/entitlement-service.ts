@@ -7,6 +7,7 @@
 import type { Guild, GuildMember } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
+import { raiseOwnerAlert, resolveOwnerAlert } from '../../services/alert-service.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Entitlement');
@@ -532,15 +533,15 @@ export class EntitlementService {
       grace_period_ends_at: gracePeriodEnds.toISOString(),
       source: 'entitlement_service.suspend',
     };
-    const { error: alertError } = await this.supabase.from('alerts').insert({
-      guild_id: guildId,
-      alert_type: 'entitlement_grace_period',
+    const alertResult = await raiseOwnerAlert(this.supabase, guildId, {
+      alertType: 'entitlement_grace_period',
       severity: 'warning',
       title: 'Paid entitlement entered payment grace period',
       message: alertMessage,
       metadata: alertMetadata,
+      guild: this.guild,
     });
-    if (alertError && alertError.code === '23505') {
+    if (alertResult.insertErrorCode === '23505') {
       // Codex W2: a stale unresolved alert already occupies the unique slot for
       // this entitlement (e.g. a prior recovery's resolve failed non-fatally,
       // then this suspension re-entered grace). The UPDATE above just committed
@@ -563,8 +564,6 @@ export class EntitlementService {
       if (refreshError) {
         log.error('Failed to refresh duplicate grace-period alert:', refreshError.message);
       }
-    } else if (alertError) {
-      log.error('Failed to write grace-period alert:', alertError.message);
     }
 
     // Audit trail — lifecycle transitions on paid entitlements must be traceable.
@@ -766,18 +765,18 @@ export class EntitlementService {
     }
 
     // Resolve the grace alert only after exact DB identity and Discord role
-    // delivery have both been confirmed. Failure is non-fatal but visible.
-    const resolvedAt = new Date().toISOString();
-    const { error: alertError } = await this.supabase
-      .from('alerts')
-      .update({ resolved: true, resolved_at: resolvedAt, updated_at: resolvedAt })
-      .eq('guild_id', guildId)
-      .eq('alert_type', 'entitlement_grace_period')
-      .eq('metadata->>entitlement_id', entitlementId)
-      .eq('resolved', false);
-    if (alertError) {
-      log.error('Failed to resolve grace-period alert:', alertError.message);
-    }
+    // delivery have both been confirmed. Failure is non-fatal but visible
+    // (resolveOwnerAlert logs internally and posts the #51 recovery notice).
+    await resolveOwnerAlert(
+      this.supabase,
+      guildId,
+      'entitlement_grace_period',
+      { entitlement_id: entitlementId },
+      {
+        guild: this.guild,
+        notice: `Entitlement ${entitlementId} recovered from its payment grace period — access is active again.`,
+      },
+    );
 
     log.info(`Entitlement reactivated: ${entitlementId}`);
     return true;

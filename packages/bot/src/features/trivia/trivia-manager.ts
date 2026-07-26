@@ -17,10 +17,12 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig, TriviaDifficulty, TriviaQuestionContent } from '@somnibot/shared';
 import { BUILT_IN_TRIVIA_QUESTIONS } from '@somnibot/shared';
 import type { Redis } from 'iovalkey';
+import { randomUUID } from 'node:crypto';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { eventBus } from '../../services/event-bus.js';
 import { resolveBrandKit } from '../branding/brand-kit.js';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('Trivia');
 
@@ -73,6 +75,16 @@ interface ActiveRound {
   shuffled: string[];
   timeout: ReturnType<typeof setTimeout>;
   guildId: string;
+  /**
+   * Stable identity of this round, minted once at round start (X2/39). It keys
+   * the payout idempotency fence trivia:${roundId}:${userId} shared by the
+   * primary economy_add_balance credit AND the bot_action_queue retry, so a
+   * retry after a partial success can never double-pay a winner. A uuid — the
+   * channelId+timestamp pair is NOT stable across restarts/redeliveries.
+   */
+  roundId: string;
+  /** Discord guild for owner-alert delivery; null when unresolvable. */
+  guild: Guild | null;
   edit: RoundEditor;
 }
 
@@ -310,6 +322,8 @@ export class TriviaManager {
       correctIndex,
       shuffled,
       guildId,
+      roundId: randomUUID(),
+      guild: interaction.guild,
       edit: (payload) => interaction.editReply(payload),
       timeout: setTimeout(() => this.endRound(channelId), 20_000),
     };
@@ -366,6 +380,8 @@ export class TriviaManager {
       correctIndex,
       shuffled,
       guildId,
+      roundId: randomUUID(),
+      guild,
       edit,
       timeout: setTimeout(() => this.endRound(channelId), 20_000),
     };
@@ -432,22 +448,28 @@ export class TriviaManager {
         const streakBonus = 1 + (streak * streakMultPct) / 100;
         const payout = Math.floor(basePayout * hardMult * streakBonus);
 
-        // Award currency
+        // Award currency — keyed on trivia:${roundId}:${userId} (X2/39) so the
+        // bot_action_queue retry below uses the SAME idempotency key: a retry
+        // that runs after this credit actually landed (partial success — e.g.
+        // the RPC committed but the response was lost) replays as a no-op
+        // instead of paying the winner twice.
+        const idempotencyKey = `trivia:${round.roundId}:${userId}`;
         const { error: triviaPayErr } = await this.supabase.rpc('economy_add_balance', {
           p_guild_id: guildId,
           p_user_id: userId,
           p_amount: payout,
+          p_idempotency_key: idempotencyKey,
         });
         if (triviaPayErr) {
           log.error(`Failed to pay ${userId}:`, triviaPayErr.message);
           // [game-economy-trivia] Owner alert + operator-retry queue + audit on the
           // failed-winner-payout branch so the owed winner is not silently lost.
-          await this.raiseTriviaPayoutAlert(guildId, userId, payout)
+          await this.raiseTriviaPayoutAlert(round, userId, payout)
             .catch((e: unknown) => { log.warn('trivia payout alert failed:', (e as Error)?.message ?? e); });
           await Promise.resolve(this.supabase.from('bot_action_queue').insert({
             guild_id: guildId,
             action: 'trivia_payout_retry',
-            payload: { user_id: userId, amount: payout, reason: 'trivia_payout_failed', original_error: triviaPayErr.message },
+            payload: { user_id: userId, amount: payout, round_id: round.roundId, reason: 'trivia_payout_failed', original_error: triviaPayErr.message },
             status: 'pending',
           })).catch((e: unknown) => { log.warn('trivia payout retry-queue failed:', (e as Error)?.message ?? e); });
           eventBus.emit('trivia.payout_failed', guildId, {
@@ -509,16 +531,18 @@ export class TriviaManager {
   /**
    * [game-economy-trivia] Raise a payout-failed owner alert when a correct
    * answer's reward credit fails, so an operator knows a winner is still owed
-   * their prize (a retry job is queued in bot_action_queue). Best effort.
+   * their prize (a retry job is queued in bot_action_queue). Delivered via
+   * raiseOwnerAlert (row + alert-channel notice); the round carries the Guild.
+   * Best effort.
    */
-  private async raiseTriviaPayoutAlert(guildId: string, userId: string, amount: number): Promise<void> {
-    await this.supabase.from('alerts').insert({
-      guild_id: guildId,
-      alert_type: 'trivia_payout_failed',
+  private async raiseTriviaPayoutAlert(round: ActiveRound, userId: string, amount: number): Promise<void> {
+    await raiseOwnerAlert(this.supabase, round.guildId, {
+      alertType: 'trivia_payout_failed',
       severity: 'warning',
       title: 'Trivia payout failed',
       message: `A trivia reward of ${amount} failed to credit ${userId}. A retry has been queued.`,
-      metadata: { user_id: userId, amount },
+      metadata: { user_id: userId, amount, round_id: round.roundId },
+      guild: round.guild,
     });
   }
 }

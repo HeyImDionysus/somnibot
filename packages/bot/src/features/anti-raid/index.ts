@@ -24,6 +24,7 @@ import type { PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 import { randomUUID } from 'node:crypto';
 import { getValkey } from '../../services/valkey.js';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('AntiRaid');
 
@@ -218,27 +219,28 @@ async function logRaidEvent(
 }
 
 /**
- * Persist an anti-raid failure-branch owner alert to the `alerts` table.
- * Failure branches previously only surfaced as a mod-log embed / log.warn, so
- * a raid-containment failure (missing permission, kick/ban error) was never
+ * Persist an anti-raid failure-branch owner alert to the `alerts` table AND
+ * post it to the owner's alert channel (raiseOwnerAlert — X1/M2). Failure
+ * branches previously only surfaced as a mod-log embed / log.warn, so a
+ * raid-containment failure (missing permission, kick/ban error) was never
  * durably recorded for the owner. Best-effort — never throws into the join path.
  */
 async function raiseAntiRaidAlert(
   supabase: SupabaseClient,
-  guildId: string,
+  guild: Guild,
   alertType: string,
   title: string,
   message: string,
   metadata: Record<string, unknown>,
 ): Promise<void> {
   try {
-    await supabase.from('alerts').insert({
-      guild_id: guildId,
-      alert_type: alertType,
+    await raiseOwnerAlert(supabase, guild.id, {
+      alertType,
       severity: 'warning',
       title,
       message,
       metadata,
+      guild,
     });
   } catch (alertErr) {
     log.error('Failed to write anti-raid alert:', { error: String(alertErr) });
@@ -365,7 +367,7 @@ export async function processAntiRaid(
       });
       await raiseAntiRaidAlert(
         supabase,
-        guild.id,
+        guild,
         'anti_raid_action_failed',
         'Anti-raid could not kick a too-new account',
         `Anti-raid tried to kick <@${member.id}> (${member.user.tag}) for failing the account-age check but the kick failed: ${String(err)}. Check the bot's Kick Members permission and role position.`,
@@ -508,7 +510,7 @@ export async function processAntiRaid(
           });
           await raiseAntiRaidAlert(
             supabase,
-            guild.id,
+            guild,
             'anti_raid_lockdown_failed',
             'Anti-raid lockdown failed — missing permission',
             'A raid was detected but lockdown could not activate: the bot lacks the **Manage Server** permission. ' +
@@ -603,7 +605,7 @@ export async function processAntiRaid(
           });
           await raiseAntiRaidAlert(
             supabase,
-            guild.id,
+            guild,
             'anti_raid_lockdown_failed',
             'Anti-raid lockdown failed',
             `A raid was detected but lockdown could not be fully activated: ${String(err)}. ` +
@@ -621,7 +623,7 @@ export async function processAntiRaid(
       });
       await raiseAntiRaidAlert(
         supabase,
-        guild.id,
+        guild,
         'anti_raid_action_failed',
         `Anti-raid ${config.anti_raid_action} failed during a raid`,
         `Anti-raid tried to ${config.anti_raid_action} <@${member.id}> (${member.user.tag}) during an active raid but the action failed: ${String(err)}. ` +

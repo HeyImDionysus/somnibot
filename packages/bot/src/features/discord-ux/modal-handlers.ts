@@ -92,20 +92,32 @@ async function handleWarnModal(
 
   const expiryDays = config?.infraction_expiry_days ?? 30;
 
-  // Create infraction via the service (sets expires_at correctly)
-  const infraction = await createInfraction(supabase, {
+  // Create infraction via the service (sets expires_at correctly). The modal
+  // interaction id is the correlation key (M3): a re-delivered submit dedups.
+  const created = await createInfraction(supabase, {
     guildId: guild.id,
     memberId: targetUserId,
     moderatorId: moderator.id,
     type: 'warn',
     reason,
     expiresAt: calculateExpiryDate(expiryDays),
+    correlationId: interaction.id,
   });
 
-  if (!infraction) {
+  if (!created) {
     await interaction.editReply({ content: '❌ Failed to create warning.' });
     return;
   }
+
+  // Replayed delivery — the original submit already ran the side-effect block
+  // (event, escalation, DM). Skip it all (M3).
+  if (created.replayed) {
+    await interaction.editReply({
+      content: '⚠️ This warning was already recorded (duplicate delivery) — no new warning was added.',
+    });
+    return;
+  }
+  const infraction = created.infraction;
 
   // Get total active warnings (for display + escalation)
   const totalInfractions = await getActiveWarningCount(supabase, guild.id, targetUserId);
@@ -134,6 +146,7 @@ async function handleWarnModal(
           infractionExpiryDays: expiryDays,
           modLogChannelId: config?.mod_log_channel_id ?? null,
         },
+        infraction.id,
       );
     }
   }

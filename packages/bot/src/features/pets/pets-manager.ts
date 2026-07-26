@@ -17,6 +17,7 @@ import type { DbGuildConfig } from '@somnibot/shared';
 import type { Redis } from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 import { eventBus } from '../../services/event-bus.js';
 import { resolveBrandKit } from '../branding/brand-kit.js';
 
@@ -666,13 +667,13 @@ export class PetsManager {
    * (a retry job is queued in bot_action_queue). Best effort — never blocks play.
    */
   private async raiseBattlePayoutAlert(guildId: string, userId: string, reward: number): Promise<void> {
-    await this.supabase.from('alerts').insert({
-      guild_id: guildId,
-      alert_type: 'pet_battle_payout_failed',
+    await raiseOwnerAlert(this.supabase, guildId, {
+      alertType: 'pet_battle_payout_failed',
       severity: 'warning',
       title: 'Pet battle payout failed',
       message: `A pet-battle reward of ${reward} failed to credit ${userId}. A retry has been queued.`,
       metadata: { user_id: userId, reward },
+      client: this.client,
     });
   }
 

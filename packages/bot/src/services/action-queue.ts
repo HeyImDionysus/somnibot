@@ -70,6 +70,7 @@ import {
 } from './action-queue-event-ingress.js';
 import { runReconciliation } from './reconciliation.js';
 import { repairDriftItem, acceptDriftItem, ignoreDriftItem, clearAllDrift } from '../sync/repair-actions.js';
+import { raiseOwnerAlert, resolveOwnerAlert } from './alert-service.js';
 import { createLogger, type DriftItem } from '@somnibot/shared';
 
 const log = createLogger('ActionQueue');
@@ -2829,7 +2830,80 @@ async function handleSyncClearAllDrift(
   return { success: true };
 }
 
-const ACTION_HANDLERS: Record<string, ActionHandler> = {
+/**
+ * Retry a failed trivia winner payout (X2/39). TriviaManager queues
+ * `trivia_payout_retry` when the primary economy_add_balance credit fails —
+ * this handler was MISSING, so every retry burned its budget on
+ * "Unknown action", dead-lettered, and the owed winner was never paid.
+ *
+ * The credit is keyed with the SAME idempotency key the primary payout used
+ * (trivia:${roundId}:${userId}), so a retry that lands after a
+ * partial success (credit committed, response lost) replays as a no-op
+ * instead of double-paying. Rows queued before round ids existed carry no
+ * round_id and retry unkeyed — single-shot legacy rows, same as before —
+ * and never auto-resolve alerts (no round-scoped match is possible).
+ */
+async function handleTriviaPayoutRetry(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const userId = typeof payload.user_id === 'string' ? payload.user_id : '';
+  if (!userId) return { success: false, error: 'Missing user_id', retryable: false };
+
+  const rawAmount = payload.amount;
+  const amount =
+    typeof rawAmount === 'number' && Number.isFinite(rawAmount) ? Math.floor(rawAmount) : NaN;
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { success: false, error: `Invalid payout amount: ${String(rawAmount)}`, retryable: false };
+  }
+
+  const roundId = typeof payload.round_id === 'string' && payload.round_id ? payload.round_id : null;
+
+  const rpcArgs: Record<string, unknown> = {
+    p_guild_id: guild.id,
+    p_user_id: userId,
+    p_amount: amount,
+  };
+  if (roundId) rpcArgs.p_idempotency_key = `trivia:${roundId}:${userId}`;
+
+  const { error } = await supabase.rpc('economy_add_balance', rpcArgs as never);
+  if (error) {
+    return { success: false, error: `Trivia payout retry failed: ${error.message}` };
+  }
+
+  if (roundId) {
+    // The winner is paid — resolve the matching payout-failed alert with a
+    // recovery notice (#51). Best effort; resolveOwnerAlert never throws.
+    await resolveOwnerAlert(
+      supabase,
+      guild.id,
+      'trivia_payout_failed',
+      { user_id: userId, round_id: roundId },
+      {
+        guild,
+        notice: `The queued trivia payout of ${amount} to <@${userId}> succeeded on retry.`,
+      },
+    );
+  } else {
+    // Legacy pre-round_id row: a {user_id}-only contains-match could close a
+    // DIFFERENT round's still-owed alert for the same user, so resolve
+    // NOTHING — the owner clears any stale alert from the dashboard. These
+    // rows also retry unkeyed (no idempotency key), so the single-shot
+    // double-pay window (credit landed, response lost, retry replays) stays
+    // accepted for them: they drain once and can never be re-queued.
+    log.info(
+      `Legacy trivia payout retry (no round_id) paid ${amount} to ${userId} in guild ${guild.id} — ` +
+        `leaving any trivia_payout_failed alert for manual resolution`,
+    );
+  }
+
+  return { success: true, data: { userId, amount, roundId } };
+}
+
+// Exported for tests: registration coverage (the X2/39 dead letter was an
+// action queued with NO registered handler) + direct handler unit tests.
+export const ACTION_HANDLERS: Record<string, ActionHandler> = {
   create_role: handleCreateRole,
   update_role: handleUpdateRole,
   delete_role: handleDeleteRole,
@@ -2856,6 +2930,7 @@ const ACTION_HANDLERS: Record<string, ActionHandler> = {
   bulk_role_remove: handleBulkRoleRemove,
   bulk_send_dm: handleBulkSendDm,
   emit_audit_event: handleEmitAuditEvent,
+  trivia_payout_retry: handleTriviaPayoutRetry,
   sync_repair_drift: handleSyncRepairDrift,
   sync_accept_drift: handleSyncAcceptDrift,
   sync_ignore_drift: handleSyncIgnoreDrift,
@@ -3419,42 +3494,37 @@ export async function checkLanePendingDepthAlerts(
             'Game-economy/infra jobs are backing up; commerce processing is unaffected (separate lane).';
       const metadata = { lane, depth, threshold };
 
-      const { error: insertErr } = await supabase.from('alerts').insert({
-        guild_id: guild.id,
-        alert_type: alertType,
+      // X1/M2: raiseOwnerAlert writes the row AND posts the Discord notice.
+      // A 23505 means the partial unique index
+      // uniq_alerts_unresolved_action_queue_depth deduped us — refresh the
+      // existing unresolved alert with the latest depth (any repeat ping is
+      // bounded by raiseOwnerAlert's per-type throttle window).
+      const alertResult = await raiseOwnerAlert(supabase, guild.id, {
+        alertType,
         severity,
         title,
         message,
         metadata,
+        guild,
       });
-      if (insertErr) {
-        if (insertErr.code === '23505') {
-          // Lost the dedupe race (or the alert already exists) — refresh the
-          // existing unresolved alert with the latest depth.
-          const { error: refreshErr } = await supabase
-            .from('alerts')
-            .update({ severity, title, message, metadata, updated_at: now })
-            .eq('guild_id', guild.id)
-            .eq('alert_type', alertType)
-            .eq('resolved', false);
-          if (refreshErr) {
-            log.error(`Failed to refresh ${alertType} alert:`, refreshErr.message);
-          }
-        } else {
-          log.error(`Failed to write ${alertType} alert:`, insertErr.message);
+      if (alertResult.insertErrorCode === '23505') {
+        const { error: refreshErr } = await supabase
+          .from('alerts')
+          .update({ severity, title, message, metadata, updated_at: now })
+          .eq('guild_id', guild.id)
+          .eq('alert_type', alertType)
+          .eq('resolved', false);
+        if (refreshErr) {
+          log.error(`Failed to refresh ${alertType} alert:`, refreshErr.message);
         }
       }
     } else {
-      // Lane drained — auto-resolve any outstanding alert (no-op otherwise).
-      const { error: resolveErr } = await supabase
-        .from('alerts')
-        .update({ resolved: true, resolved_at: now, updated_at: now })
-        .eq('guild_id', guild.id)
-        .eq('alert_type', alertType)
-        .eq('resolved', false);
-      if (resolveErr) {
-        log.error(`Failed to resolve ${alertType} alert:`, resolveErr.message);
-      }
+      // Lane drained — auto-resolve any outstanding alert (no-op otherwise)
+      // and post the recovery notice (#51) when one was actually open.
+      await resolveOwnerAlert(supabase, guild.id, alertType, undefined, {
+        guild,
+        notice: `The ${lane} action-queue lane has drained back under its pending threshold (${threshold}).`,
+      });
     }
   }
 }

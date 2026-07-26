@@ -10,6 +10,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert, resolveOwnerAlert } from '../../services/alert-service.js';
 import { eventBus } from '../../services/event-bus.js';
 import { resolveBrandKit } from '../branding/brand-kit.js';
 
@@ -558,9 +559,39 @@ export class LotteryManager {
     }
     const awardedRow = Array.isArray(awarded) ? awarded[0] : awarded;
     if (!awardedRow) {
+      // Zero rows = the drawing was already finalised: the winner WAS paid on
+      // an earlier tick whose RPC response was lost (that tick raised the
+      // draw-degraded "winner still owed" alert and left the row in
+      // 'drawing'). This is the only tick that learns the truth — resolve the
+      // alert here or it stays open forever, since the finalised drawing is
+      // never selected again. Best effort, never blocks.
+      await resolveOwnerAlert(
+        this.supabase,
+        guildId,
+        'lottery_draw_degraded',
+        { drawing_id: drawing.id },
+        {
+          client: this.client,
+          notice: `Lottery drawing ${drawing.id} recovered — the stored winner's jackpot payout had already landed on an earlier tick.`,
+        },
+      );
       log.info(`Skipping payout of ${drawing.id} — already finalised`);
       return null;
     }
+
+    // The payout succeeded — resolve any open draw-degraded alert for this
+    // drawing and post the recovery notice (#51: degraded-flag clears used to
+    // leave the alert row unresolved forever). Best effort, never blocks.
+    await resolveOwnerAlert(
+      this.supabase,
+      guildId,
+      'lottery_draw_degraded',
+      { drawing_id: drawing.id },
+      {
+        client: this.client,
+        notice: `Lottery drawing ${drawing.id} recovered — the stored winner's jackpot payout succeeded on retry.`,
+      },
+    );
 
     // [game-economy-lottery] Append-only audit row for the draw state change
     // (winner selected + jackpot paid). Only the call that performed the payout
@@ -585,13 +616,13 @@ export class LotteryManager {
    * prize (the draw is retried next tick). Best effort — never blocks the draw.
    */
   private async raiseDrawDegradedAlert(guildId: string, drawingId: string): Promise<void> {
-    await this.supabase.from('alerts').insert({
-      guild_id: guildId,
-      alert_type: 'lottery_draw_degraded',
+    await raiseOwnerAlert(this.supabase, guildId, {
+      alertType: 'lottery_draw_degraded',
       severity: 'warning',
       title: 'Lottery jackpot payout degraded',
       message: `The jackpot payout for drawing ${drawingId} failed. The stored winner will be retried on the next draw tick.`,
       metadata: { drawing_id: drawingId },
+      client: this.client,
     });
   }
 }

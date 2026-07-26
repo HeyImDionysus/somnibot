@@ -214,7 +214,7 @@ export async function handleWarnCommand(
   // Create infraction. interaction.id is the idempotency key: a re-delivered
   // /warn (gateway RESUME) reuses the same key and dedups (no duplicate row,
   // no double escalation).
-  const infraction = await createInfraction(client.supabase, {
+  const created = await createInfraction(client.supabase, {
     guildId: interaction.guildId!,
     memberId: member.id,
     moderatorId: interaction.user.id,
@@ -224,8 +224,20 @@ export async function handleWarnCommand(
     correlationId: interaction.id,
   });
 
-  if (!infraction) {
+  if (!created) {
     await interaction.editReply('❌ Failed to create warning.');
+    return;
+  }
+  const { infraction, replayed } = created;
+
+  // Replayed delivery — the original /warn already ran the full side-effect
+  // block (events, DM, mod log, escalation). Re-running it would double-DM,
+  // double-modlog, and re-fire escalation (a second timeout/kick/ban).
+  if (replayed) {
+    log.info(`Replayed /warn for ${member.id} (correlation ${interaction.id}) — side effects skipped`);
+    await interaction.editReply(
+      `⚠️ This warning was already recorded (duplicate delivery) — no new warning was added.`,
+    );
     return;
   }
 
@@ -284,7 +296,8 @@ export async function handleWarnCommand(
     channelId: config?.mod_log_channel_id ?? null,
   });
 
-  // Auto-escalate if needed
+  // Auto-escalate if needed. The warn infraction id keys the escalation's
+  // correlation ('escalation:<id>') so a replayed source cannot re-escalate.
   if (nextAction && nextAction.action !== 'warn') {
     await executeEscalation(
       client,
@@ -295,6 +308,7 @@ export async function handleWarnCommand(
         infractionExpiryDays: expiryDays,
         modLogChannelId: config?.mod_log_channel_id ?? null,
       },
+      infraction.id,
     );
   }
 
@@ -359,8 +373,10 @@ export async function handleMuteCommand(
     .eq('guild_id', interaction.guildId!)
     .maybeSingle();
 
-  // Create infraction
-  const infraction = await createInfraction(client.supabase, {
+  // Create infraction. interaction.id dedups a re-delivered /mute (M3): the
+  // timeout above is idempotent to re-apply, but the row, events, DM, and mod
+  // log must not double.
+  const created = await createInfraction(client.supabase, {
     guildId: interaction.guildId!,
     memberId: member.id,
     moderatorId: interaction.user.id,
@@ -368,7 +384,17 @@ export async function handleMuteCommand(
     reason,
     durationMinutes: duration,
     expiresAt: calculateExpiryDate(config?.infraction_expiry_days ?? 30),
+    correlationId: interaction.id,
   });
+
+  // Replayed delivery — skip the side-effect block (events, DM, mod log).
+  if (created?.replayed) {
+    log.info(`Replayed /mute for ${member.id} (correlation ${interaction.id}) — side effects skipped`);
+    await interaction.editReply(
+      `⚠️ This mute was already recorded (duplicate delivery) — no duplicate log entries were written.`,
+    );
+    return;
+  }
 
   // Emit event
   client.eventBus.emit('moderation.action', interaction.guildId!, {
@@ -377,7 +403,7 @@ export async function handleMuteCommand(
     moderatorId: interaction.user.id,
     reason,
     durationMinutes: duration,
-    infractionId: infraction?.id,
+    infractionId: created?.infraction.id,
   });
 
   // Append-only audit trail: `moderation.action` is not audit-mapped, so a
@@ -485,15 +511,25 @@ export async function handleKickCommand(
     .eq('guild_id', interaction.guildId!)
     .maybeSingle();
 
-  // Create infraction
-  await createInfraction(client.supabase, {
+  // Create infraction. interaction.id dedups a re-delivered /kick (M3).
+  const created = await createInfraction(client.supabase, {
     guildId: interaction.guildId!,
     memberId: member.id,
     moderatorId: interaction.user.id,
     type: 'kick',
     reason,
     expiresAt: calculateExpiryDate(config?.infraction_expiry_days ?? 30),
+    correlationId: interaction.id,
   });
+
+  // Replayed delivery — skip the side-effect block (events, mod log).
+  if (created?.replayed) {
+    log.info(`Replayed /kick for ${member.id} (correlation ${interaction.id}) — side effects skipped`);
+    await interaction.editReply(
+      `⚠️ This kick was already recorded (duplicate delivery) — no duplicate log entries were written.`,
+    );
+    return;
+  }
 
   // Emit event
   client.eventBus.emit('moderation.action', interaction.guildId!, {
@@ -595,15 +631,26 @@ export async function handleBanCommand(
     .eq('guild_id', interaction.guildId!)
     .maybeSingle();
 
-  // Create infraction
-  await createInfraction(client.supabase, {
+  // Create infraction. interaction.id dedups a re-delivered /ban (M3).
+  const created = await createInfraction(client.supabase, {
     guildId: interaction.guildId!,
     memberId: member.id,
     moderatorId: interaction.user.id,
     type: 'ban',
     reason,
     expiresAt: calculateExpiryDate(config?.infraction_expiry_days ?? 30),
+    correlationId: interaction.id,
   });
+
+  // Replayed delivery — the original /ban already suspended entitlements,
+  // emitted events, and mod-logged. Skip the whole side-effect block.
+  if (created?.replayed) {
+    log.info(`Replayed /ban for ${member.id} (correlation ${interaction.id}) — side effects skipped`);
+    await interaction.editReply(
+      `⚠️ This ban was already recorded (duplicate delivery) — no duplicate log entries were written.`,
+    );
+    return;
+  }
 
   // Suspend entitlements — entitlements link via customer_id, not discord_id
   // First find the customer record for this Discord user

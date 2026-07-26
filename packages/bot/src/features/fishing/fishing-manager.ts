@@ -14,6 +14,7 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { randomPick, randomFloat } from '../../utils/random.js';
 import { joinProp } from '../../utils/db-helpers.js';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
 import { resolveBrandKit } from '../branding/brand-kit.js';
@@ -573,13 +574,13 @@ export class FishingManager {
    * effort — a failed alert never blocks the catch flow.
    */
   private async raisePayoutDegradedAlert(userId: string, amount: number): Promise<void> {
-    await this.supabase.from('alerts').insert({
-      guild_id: this.guild.id,
-      alert_type: 'fishing_payout_degraded',
+    await raiseOwnerAlert(this.supabase, this.guild.id, {
+      alertType: 'fishing_payout_degraded',
       severity: 'warning',
       title: 'Fishing payout degraded',
       message: `A fishing auto-sell credit of ${amount} failed for ${userId}. The catch is recorded unpaid and will be retried.`,
       metadata: { user_id: userId, amount },
+      guild: this.guild,
     });
   }
 

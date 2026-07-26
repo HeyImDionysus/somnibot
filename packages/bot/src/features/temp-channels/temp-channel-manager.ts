@@ -13,6 +13,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { writeAuditLog } from '../../services/audit.js';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 import { renderTempChannelTemplate } from './templates.js';
 
 const log = createLogger('TempChannels');
@@ -281,17 +282,17 @@ export class TempChannelManager {
       // Member has DMs disabled — nothing more we can surface to them here.
     }
 
-    // Owner alert — one row in the alerts table.
+    // Owner alert — alerts row + alert-channel notice (X1/M2).
     try {
-      await this.supabase.from('alerts').insert({
-        guild_id: this.guild.id,
-        alert_type: 'temp_channel_creation_failed',
+      await raiseOwnerAlert(this.supabase, this.guild.id, {
+        alertType: 'temp_channel_creation_failed',
         severity: 'warning',
         title: 'Temporary voice channel could not be created',
         message:
           `A member tried to create a temporary voice channel from hub <#${hub.hub_channel_id}> ` +
           `but creation failed: ${String(err)}. Check my Manage Channels permission and the hub's category.`,
         metadata: { hub_id: hub.id, hub_channel_id: hub.hub_channel_id, member_id: member.id },
+        guild: this.guild,
       });
     } catch (alertErr) {
       log.error('Failed to write temp-channel creation alert:', { error: String(alertErr) });

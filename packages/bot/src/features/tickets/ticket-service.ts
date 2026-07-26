@@ -24,6 +24,7 @@ import type { DbTicketPanel, DbTicket, TicketTypeConfig } from '@somnibot/shared
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 import { resolveBrandKit } from '../branding/brand-kit.js';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('Tickets');
 
@@ -39,10 +40,10 @@ const log = createLogger('Tickets');
 async function reportTicketCreateFailure(
   supabase: SupabaseClient,
   eventBus: PlatformEventBus,
-  guildId: string,
+  guild: Guild,
   input: { userDiscordId: string; panelId: string; ticketNumber?: number; stage: string; error: string },
 ): Promise<void> {
-  eventBus.emit('ticket.create_failed', guildId, {
+  eventBus.emit('ticket.create_failed', guild.id, {
     userDiscordId: input.userDiscordId,
     panelId: input.panelId,
     ticketNumber: input.ticketNumber,
@@ -50,15 +51,21 @@ async function reportTicketCreateFailure(
     error: input.error,
   });
   try {
-    await supabase.from('alerts').insert({
-      guild_id: guildId,
-      alert_type: 'ticket_create_failed',
+    await raiseOwnerAlert(supabase, guild.id, {
+      alertType: 'ticket_create_failed',
       severity: 'warning',
       title: 'Ticket could not be created',
       message:
         `A member tried to open a ticket but creation failed at the ${input.stage} stage: ${input.error}. ` +
         `Check the bot's Manage Channels permission and the panel's category configuration.`,
+      // Raw error strings stay in the alerts ROW (message/metadata above);
+      // the channel-visible notice is generic plain language.
+      channelMessage:
+        `A member tried to open a ticket but the bot couldn't save it — details are on the ` +
+        `dashboard Alerts page. Check the bot's Manage Channels permission and the panel's ` +
+        `category configuration.`,
       metadata: { panel_id: input.panelId, member_id: input.userDiscordId, stage: input.stage, error: input.error },
+      guild,
     });
   } catch (alertErr) {
     log.error('Failed to write ticket-create alert:', { error: String(alertErr) });
@@ -175,7 +182,7 @@ export async function createTicket(
     });
   } catch (err) {
     log.error('Failed to create ticket channel:', { error: String(err) });
-    await reportTicketCreateFailure(supabase, eventBus, guild.id, {
+    await reportTicketCreateFailure(supabase, eventBus, guild, {
       userDiscordId: member.id,
       panelId: panel.id,
       ticketNumber,
@@ -244,7 +251,7 @@ export async function createTicket(
     log.error('Failed to save ticket:', dbError?.message);
     // Clean up the channel
     await channel.delete().catch(() => { /* channel may already be deleted */ });
-    await reportTicketCreateFailure(supabase, eventBus, guild.id, {
+    await reportTicketCreateFailure(supabase, eventBus, guild, {
       userDiscordId: member.id,
       panelId: panel.id,
       ticketNumber,

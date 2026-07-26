@@ -13,7 +13,7 @@ vi.mock('@somnibot/shared', () => ({
   }),
 }));
 
-const mockCreateInfraction = vi.fn().mockResolvedValue({ id: 'inf1' });
+const mockCreateInfraction = vi.fn().mockResolvedValue({ infraction: { id: 'inf1' }, replayed: false });
 const mockGetActiveWarningCount = vi.fn().mockResolvedValue(2);
 const mockCalculateExpiryDate = vi.fn().mockReturnValue('2026-12-31');
 vi.mock('../features/moderation/infraction-service.js', () => ({

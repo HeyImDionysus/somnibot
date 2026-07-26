@@ -12,6 +12,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('StatsManager');
 
@@ -184,9 +185,8 @@ export class StatsChannelManager {
       );
       if (already) return;
 
-      await this.supabase.from('alerts').insert({
-        guild_id: this.guild.id,
-        alert_type: 'stats_channel_deleted',
+      await raiseOwnerAlert(this.supabase, this.guild.id, {
+        alertType: 'stats_channel_deleted',
         severity: 'warning',
         title: 'Stats counter channel was deleted',
         message:
@@ -197,6 +197,7 @@ export class StatsChannelManager {
           channel_id: config.channel_id,
           stat_type: config.stat_type,
         },
+        guild: this.guild,
       });
     } catch (alertErr) {
       log.error('Failed to write stats-channel deleted alert:', { error: String(alertErr) });

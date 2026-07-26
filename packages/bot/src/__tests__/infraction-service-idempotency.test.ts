@@ -32,26 +32,29 @@ const base = {
 };
 
 describe('createInfraction idempotency', () => {
-  it('returns the inserted row on first write', async () => {
+  it('returns the inserted row with replayed:false on first write', async () => {
     const sb = makeSupabase({ data: { id: 'inf1', ...base }, error: null });
-    const row = await createInfraction(sb, base);
-    expect(row?.id).toBe('inf1');
+    const result = await createInfraction(sb, base);
+    expect(result?.infraction.id).toBe('inf1');
+    expect(result?.replayed).toBe(false);
   });
 
-  it('a replayed write (23505 on correlation key) reads back the original row, not null', async () => {
+  it('a replayed write (23505 on correlation key) reads back the original row and flags replayed:true', async () => {
     const sb = makeSupabase(
       { data: null, error: { code: '23505', message: 'duplicate key' } },
       { data: { id: 'inf-original', ...base }, error: null },
     );
-    const row = await createInfraction(sb, base);
-    // Dedup no-op: returns the existing row so the caller does not re-fire escalation.
-    expect(row?.id).toBe('inf-original');
+    const result = await createInfraction(sb, base);
+    // Dedup no-op: returns the existing row AND signals the replay so the
+    // caller skips its side-effect block (no second DM/mod-log/escalation).
+    expect(result?.infraction.id).toBe('inf-original');
+    expect(result?.replayed).toBe(true);
   });
 
   it('returns null on a real insert error when no correlation id is supplied', async () => {
     const sb = makeSupabase({ data: null, error: { code: '23505', message: 'dup' } });
     const { correlationId: _drop, ...noCorrelation } = base;
-    const row = await createInfraction(sb, noCorrelation);
-    expect(row).toBeNull();
+    const result = await createInfraction(sb, noCorrelation);
+    expect(result).toBeNull();
   });
 });

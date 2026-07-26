@@ -15,6 +15,7 @@ import type Valkey from 'iovalkey';
 import { randomInt } from 'node:crypto';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('Giveaway');
 
@@ -214,13 +215,13 @@ export class GiveawayManager {
     metadata: Record<string, unknown>,
   ): Promise<void> {
     try {
-      await this.supabase.from('alerts').insert({
-        guild_id: this.guild.id,
-        alert_type: 'giveaway_failed',
+      await raiseOwnerAlert(this.supabase, this.guild.id, {
+        alertType: 'giveaway_failed',
         severity: 'warning',
         title: 'Giveaway action failed',
         message,
         metadata: { stage, ...metadata },
+        guild: this.guild,
       });
     } catch (alertErr) {
       log.error('Failed to write giveaway alert:', { error: String(alertErr) });

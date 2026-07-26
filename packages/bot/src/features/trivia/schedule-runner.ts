@@ -19,6 +19,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Guild, TextChannel } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 import type { TriviaDifficulty } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { TriviaManager } from './trivia-manager.js';
 
 const log = createLogger('TriviaSchedule');
@@ -225,9 +226,8 @@ export class TriviaScheduleRunner {
     if (this.channelMissingAlerted) return;
     this.channelMissingAlerted = true;
     try {
-      await this.supabase.from('alerts').insert({
-        guild_id: this.guild.id,
-        alert_type: 'trivia_schedule_channel_missing',
+      await raiseOwnerAlert(this.supabase, this.guild.id, {
+        alertType: 'trivia_schedule_channel_missing',
         severity: 'warning',
         title: 'Hosted trivia channel is unavailable',
         message:
@@ -235,6 +235,7 @@ export class TriviaScheduleRunner {
           `channel, so automatic rounds cannot post. Pick a valid channel on the trivia settings page; ` +
           `on-command /trivia is unaffected.`,
         metadata: { channel_id: channelId },
+        guild: this.guild,
       });
     } catch (alertErr) {
       log.error(

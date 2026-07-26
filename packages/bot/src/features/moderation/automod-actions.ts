@@ -131,8 +131,10 @@ export async function executeAutoModAction(
     }
 
     case 'warn': {
-      // Create warning infraction
-      const infraction = await createInfraction(client.supabase, {
+      // Create warning infraction. message.id is the correlation key (M3): the
+      // automod engine executes at most one rule per message, and a gateway
+      // RESUME can re-deliver the same messageCreate — the replay dedups here.
+      const created = await createInfraction(client.supabase, {
         guildId: message.guild!.id,
         memberId: member.id,
         moderatorId: 'system',
@@ -140,14 +142,23 @@ export async function executeAutoModAction(
         reason: fullReason,
         automodRuleId: rule.id,
         expiresAt: calculateExpiryDate(modConfig.infractionExpiryDays),
+        correlationId: message.id,
       });
 
-      if (!infraction) {
+      if (!created) {
         log.error('Failed to persist auto-mod warning; suppressing follow-on event and escalation');
         // Nothing was enforced ('warn' skips the delete and the infraction
         // never landed) — let the message pipeline continue.
         return false;
       }
+
+      // Replayed message delivery — the original run already emitted the
+      // event, ran escalation, and mod-logged. Skip the whole block.
+      if (created.replayed) {
+        log.info(`Replayed auto-mod warn for message ${message.id} — side effects skipped`);
+        break;
+      }
+      const infraction = created.infraction;
 
       const activeWarnings = await getActiveWarningCount(
         client.supabase,
@@ -166,8 +177,9 @@ export async function executeAutoModAction(
         autoModRuleId: rule.id,
       });
 
-      // Check escalation chain
-      await executeEscalation(client, member, fullReason, modConfig);
+      // Check escalation chain — keyed on the source warn infraction so a
+      // replayed source cannot re-escalate ('escalation:<sourceInfractionId>').
+      await executeEscalation(client, member, fullReason, modConfig, infraction.id);
 
       if (rule.log_to_mod_channel) {
         const chain = modConfig.escalationChain.length > 0
@@ -220,7 +232,7 @@ export async function executeAutoModAction(
         log.error(`Failed to timeout member:`, err);
       }
 
-      await createInfraction(client.supabase, {
+      const created = await createInfraction(client.supabase, {
         guildId: message.guild!.id,
         memberId: member.id,
         moderatorId: 'system',
@@ -229,7 +241,14 @@ export async function executeAutoModAction(
         automodRuleId: rule.id,
         durationMinutes,
         expiresAt: calculateExpiryDate(modConfig.infractionExpiryDays),
+        correlationId: message.id,
       });
+
+      // Replayed message delivery — skip duplicate event/mod-log/audit (M3).
+      if (created?.replayed) {
+        log.info(`Replayed auto-mod mute for message ${message.id} — side effects skipped`);
+        break;
+      }
 
       client.eventBus.emit('member.muted', message.guild!.id, {
         discordId: member.id,
@@ -283,7 +302,7 @@ export async function executeAutoModAction(
         log.error(`Failed to kick member:`, err);
       }
 
-      await createInfraction(client.supabase, {
+      const created = await createInfraction(client.supabase, {
         guildId: message.guild!.id,
         memberId: member.id,
         moderatorId: 'system',
@@ -291,7 +310,14 @@ export async function executeAutoModAction(
         reason: fullReason,
         automodRuleId: rule.id,
         expiresAt: calculateExpiryDate(modConfig.infractionExpiryDays),
+        correlationId: message.id,
       });
+
+      // Replayed message delivery — skip duplicate event/mod-log/audit (M3).
+      if (created?.replayed) {
+        log.info(`Replayed auto-mod kick for message ${message.id} — side effects skipped`);
+        break;
+      }
 
       client.eventBus.emit('member.kicked', message.guild!.id, {
         discordId: member.id,
@@ -338,7 +364,7 @@ export async function executeAutoModAction(
         log.error(`Failed to ban member:`, err);
       }
 
-      await createInfraction(client.supabase, {
+      const created = await createInfraction(client.supabase, {
         guildId: message.guild!.id,
         memberId: member.id,
         moderatorId: 'system',
@@ -346,7 +372,14 @@ export async function executeAutoModAction(
         reason: fullReason,
         automodRuleId: rule.id,
         expiresAt: calculateExpiryDate(modConfig.infractionExpiryDays),
+        correlationId: message.id,
       });
+
+      // Replayed message delivery — skip duplicate event/mod-log/audit (M3).
+      if (created?.replayed) {
+        log.info(`Replayed auto-mod ban for message ${message.id} — side effects skipped`);
+        break;
+      }
 
       client.eventBus.emit('member.banned', message.guild!.id, {
         discordId: member.id,
