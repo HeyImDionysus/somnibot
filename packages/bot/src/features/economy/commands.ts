@@ -126,7 +126,14 @@ export function buildEconomyCommands() {
     .addStringOption((opt) =>
       opt.setName('category').setDescription('Filter by category').setRequired(false)
         .addChoices(
+          // Canonical shop categories — keep in sync with the dashboard shop
+          // page (economy/shop/page.tsx CATEGORIES) and the categories used by
+          // the content seeder and crafting outputs. Discord caps choices at
+          // 25; currently 11.
           { name: 'Tools', value: 'Tools' },
+          { name: 'Protection', value: 'Protection' },
+          { name: 'Farming', value: 'Farming' },
+          { name: 'Accessories', value: 'Accessories' },
           { name: 'Bait', value: 'Bait' },
           { name: 'Seeds', value: 'Seeds' },
           { name: 'Materials', value: 'Materials' },
@@ -463,7 +470,12 @@ async function handleShop(interaction: ChatInputCommandInteraction, mgr: Economy
   }
 
   if (items.length === 0) {
-    await interaction.reply({ content: '🏪 The shop is empty!', ephemeral: true });
+    // White-label: even the empty-state carries the owner-configured currency
+    // (a shop of only craft-earned items lists nothing but is still branded).
+    await interaction.reply({
+      content: `🏪 The shop is empty — nothing is currently sold for ${cfg.currency_emoji} ${cfg.currency_name}.`,
+      ephemeral: true,
+    });
     return;
   }
 

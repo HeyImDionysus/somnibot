@@ -13,7 +13,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
-import { dbError, apiServerError} from '@/lib/api/response';
+import { dbError, dbConflictOr500, apiServerError} from '@/lib/api/response';
 
 const cropSchema = z.object({
   name: z.string().min(1).max(64),
@@ -81,7 +81,8 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (error) {
-      return dbError(error, 'economy/farming');
+      return dbConflictOr500(error, 'economy/farming', 'uq_economy_crops_guild_lname',
+        'A crop with that name already exists (names are case-insensitive).');
     }
 
     await notifyBot('economy');
@@ -113,7 +114,8 @@ export async function PUT(request: NextRequest) {
       .single();
 
     if (error) {
-      return dbError(error, 'economy/farming');
+      return dbConflictOr500(error, 'economy/farming', 'uq_economy_crops_guild_lname',
+        'A crop with that name already exists (names are case-insensitive).');
     }
 
     await notifyBot('economy');

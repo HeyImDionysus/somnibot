@@ -13,7 +13,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
-import { dbError } from '@/lib/api/response';
+import { dbError, dbConflictOr500 } from '@/lib/api/response';
 
 const adventureSchema = z.object({
   id: z.string().uuid().optional(),
@@ -75,7 +75,8 @@ export async function POST(request: NextRequest) {
       .select('*')
       .single();
 
-    if (error) return dbError(error, 'economy/adventures');
+    if (error) return dbConflictOr500(error, 'economy/adventures', 'uq_economy_adventures_guild_lname',
+        'An adventure with that name already exists (names are case-insensitive).');
     await notifyBot('economy');
     return NextResponse.json({ data }, { status: 201 });
   } catch (err: unknown) {
@@ -115,7 +116,8 @@ export async function PUT(request: NextRequest) {
       .select('*')
       .single();
 
-    if (error) return dbError(error, 'economy/adventures');
+    if (error) return dbConflictOr500(error, 'economy/adventures', 'uq_economy_adventures_guild_lname',
+        'An adventure with that name already exists (names are case-insensitive).');
     await notifyBot('economy');
     return NextResponse.json({ data });
   } catch (err: unknown) {

@@ -6,6 +6,20 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
 import { dbError } from '@/lib/api/response';
+import { BUILT_IN_TRIVIA_QUESTIONS } from '@somnibot/shared';
+
+// The bot serves these alongside the guild's custom pack (see shared/constants/
+// trivia.ts). Mapped once at module scope into the page's row shape — synthetic
+// ids are stable because the bank is a fixed ordered constant.
+const BUILT_IN_ROWS = BUILT_IN_TRIVIA_QUESTIONS.map((q, i) => ({
+  id: `built-in-${i}`,
+  category: q.category,
+  difficulty: q.difficulty,
+  question: q.question,
+  correct_answer: q.correct,
+  wrong_answers: q.wrong,
+  builtIn: true as const,
+}));
 
 const triviaQuestionSchema = z.object({
   id: z.string().uuid().optional(),
@@ -27,7 +41,7 @@ export async function GET() {
       .order('created_at', { ascending: false })
       .limit(500);
     if (error) return dbError(error, 'economy/trivia');
-    return NextResponse.json({ success: true, questions: data ?? [] });
+    return NextResponse.json({ success: true, questions: data ?? [], builtIn: BUILT_IN_ROWS });
   } catch (e) {
     return authErrorResponse(e);
   }

@@ -82,6 +82,34 @@ import { HeistManager, buildHeistCommands, registerHeistManager, unregisterHeist
 
 const log = createLogger('GuildInit');
 
+// ── Content-warmup concurrency gate ──
+// Each guild's content warmup runs as a detached promise (tracked via
+// ctx.backgroundInit but never awaited by init), so a mass-guild boot would
+// otherwise fire every guild's seed reads/writes at Supabase simultaneously.
+// This module-level semaphore caps how many warmup bodies run at once; the
+// promises stay detached, waiters simply queue for a slot.
+const WARMUP_MAX_CONCURRENT = 3;
+let warmupActive = 0;
+const warmupWaiters: Array<() => void> = [];
+
+async function acquireWarmupSlot(): Promise<void> {
+  if (warmupActive < WARMUP_MAX_CONCURRENT) {
+    warmupActive++;
+    return;
+  }
+  await new Promise<void>((resolve) => warmupWaiters.push(resolve));
+}
+
+function releaseWarmupSlot(): void {
+  const next = warmupWaiters.shift();
+  if (next) {
+    // Hand the slot to the next waiter — active count is unchanged.
+    next();
+  } else {
+    warmupActive--;
+  }
+}
+
 /**
  * All per-guild timers and services stored in the context for cleanup.
  */
@@ -465,7 +493,9 @@ export async function initGuildFeatures(
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_achievements_enabled || guildCfg.economy_prestige_enabled) {
-        const mgr = new AchievementsManager(supabase);
+        // The guild handle lets reward_xp grants run the level-up path
+        // (role rewards + announcements) exactly like message XP.
+        const mgr = new AchievementsManager(supabase, guild);
         registerAchievementsManager(mgr, guildId); ctx.setManager('achievements', mgr);
         const cmds = buildAchievementCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
@@ -493,30 +523,50 @@ export async function initGuildFeatures(
     // in the background; every call is idempotent and only writes when the
     // guild has no rows.
     const warmupWork = eagerInitEnabled ? (async () => {
-      const warmups: Array<[string, (() => Promise<void>) | undefined]> = [
-        ['fishing', ctx.getManager<FishingManager>('fishing') && (() => ctx.getManager<FishingManager>('fishing')!.ensureContentSeeded())],
-        ['adventures', ctx.getManager<AdventureManager>('adventures') && (() => ctx.getManager<AdventureManager>('adventures')!.ensureContentSeeded())],
-        ['crafting', ctx.getManager<CraftingManager>('crafting') && (() => ctx.getManager<CraftingManager>('crafting')!.ensureContentSeeded())],
-        ['farming', ctx.getManager<FarmingManager>('farming') && (() => ctx.getManager<FarmingManager>('farming')!.ensureContentSeeded())],
-        ['gathering', ctx.getManager<GatheringManager>('gathering') && (() => ctx.getManager<GatheringManager>('gathering')!.ensureContentSeeded())],
-        ['quests', ctx.getManager<QuestsManager>('quests') && (() => ctx.getManager<QuestsManager>('quests')!.ensureContentSeeded(guildId))],
-      ];
-      for (const [name, run] of warmups) {
-        if (!run) continue; // feature disabled — nothing registered
-        try {
-          await run();
-        } catch (err) {
-          guildLog.warn(`Content warmup failed for ${name}`, { error: String(err) });
-        }
-      }
-      // Features that shipped with NO default content at all — achievement
-      // definitions, automod starter rules, shop items (see content-seeder).
+      // Bounded concurrency: the promise stays detached (ctx.backgroundInit
+      // below still tracks it), but at most WARMUP_MAX_CONCURRENT guilds run
+      // their seed reads/writes at once.
+      await acquireWarmupSlot();
+      const failed: string[] = [];
       try {
-        await seedStarterContent(supabase, guildId);
-      } catch (err) {
-        guildLog.warn('Starter content seeding failed', { error: String(err) });
+        // Starter content runs FIRST: the crafting warmup below creates
+        // economy_items rows (recipe outputs), and the starter shop's
+        // name-scoped gate must be evaluated before any of that lands —
+        // otherwise a default install never gets the Padlock + tools
+        // (see content-seeder.ts).
+        try {
+          await seedStarterContent(supabase, guildId);
+        } catch (err) {
+          failed.push('starter-content');
+          guildLog.warn('Starter content seeding failed', { error: String(err) });
+        }
+        const warmups: Array<[string, (() => Promise<void>) | undefined]> = [
+          ['fishing', ctx.getManager<FishingManager>('fishing') && (() => ctx.getManager<FishingManager>('fishing')!.ensureContentSeeded())],
+          ['adventures', ctx.getManager<AdventureManager>('adventures') && (() => ctx.getManager<AdventureManager>('adventures')!.ensureContentSeeded())],
+          ['crafting', ctx.getManager<CraftingManager>('crafting') && (() => ctx.getManager<CraftingManager>('crafting')!.ensureContentSeeded())],
+          ['farming', ctx.getManager<FarmingManager>('farming') && (() => ctx.getManager<FarmingManager>('farming')!.ensureContentSeeded())],
+          ['gathering', ctx.getManager<GatheringManager>('gathering') && (() => ctx.getManager<GatheringManager>('gathering')!.ensureContentSeeded())],
+          ['quests', ctx.getManager<QuestsManager>('quests') && (() => ctx.getManager<QuestsManager>('quests')!.ensureContentSeeded(guildId))],
+        ];
+        for (const [name, run] of warmups) {
+          if (!run) continue; // feature disabled — nothing registered
+          try {
+            await run();
+          } catch (err) {
+            failed.push(name);
+            guildLog.warn(`Content warmup failed for ${name}`, { error: String(err) });
+          }
+        }
+      } finally {
+        releaseWarmupSlot();
       }
-      guildLog.info('Content warmup complete');
+      // Every seed helper now surfaces its Supabase {error}, so this line is
+      // honest: "complete" means every enabled feature actually has content.
+      if (failed.length > 0) {
+        guildLog.warn('Content warmup degraded — some features could not seed content', { failed });
+      } else {
+        guildLog.info('Content warmup complete');
+      }
     })() : Promise.resolve();
     // Fold the warmup into the tracked background work (joins the backfill
     // registered above), so the E2E harness can wait for ALL init writes.

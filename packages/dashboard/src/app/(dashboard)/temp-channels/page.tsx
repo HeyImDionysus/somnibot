@@ -6,7 +6,7 @@
 'use client';
 
 import { VariableChips } from '@/components/shared/variable-chips';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
@@ -82,6 +82,9 @@ export default function TempChannelsPage() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
   const [featureEnabled, setFeatureEnabled] = useState(true);
+  // Binds the naming-format variable chips to their own input so a click can
+  // never insert into an unrelated field.
+  const namingFormatRef = useRef<HTMLInputElement>(null);
 
   const fetchHubs = useCallback(async () => {
     try {
@@ -298,10 +301,11 @@ export default function TempChannelsPage() {
               </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-discord-text-muted">Naming Format</label>
-                <input type="text" value={form.naming_format} onChange={(e) => setForm({ ...form, naming_format: e.target.value })}
+                <input ref={namingFormatRef} type="text" value={form.naming_format} onChange={(e) => setForm({ ...form, naming_format: e.target.value })}
                   placeholder="{owner-name}'s room"
                   className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
                 <VariableChips
+                  targetRef={namingFormatRef}
                   variables={[
                     { key: '{owner-name}', desc: 'Room owner name' },
                     { key: '{username}', desc: 'Username' },

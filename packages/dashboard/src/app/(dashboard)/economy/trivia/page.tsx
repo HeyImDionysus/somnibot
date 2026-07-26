@@ -135,6 +135,7 @@ export default function TriviaPage() {
 
   const [config, setConfig] = useState<TriviaConfig>(DEFAULT_CONFIG);
   const [questions, setQuestions] = useState<TriviaQuestion[]>([]);
+  const [builtIns, setBuiltIns] = useState<TriviaQuestion[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<(Omit<TriviaQuestion, 'id'> & { id?: string }) | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -167,6 +168,7 @@ export default function TriviaPage() {
       if (questionsRes.ok) {
         const qJson = await questionsRes.json();
         setQuestions(qJson.questions ?? []);
+        setBuiltIns(qJson.builtIn ?? []);
       }
     } catch {
       toast({ title: 'Failed to load trivia data', variant: 'error' });
@@ -452,6 +454,37 @@ export default function TriviaPage() {
           </div>
         )}
       </div>
+
+      {/* Built-in Questions — served alongside the custom pack, read-only */}
+      {builtIns.length > 0 && (
+        <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4">
+          <div className="mb-4">
+            <h2 className="text-lg font-semibold text-discord-text-primary">Built-in Questions ({builtIns.length})</h2>
+            <p className="text-xs text-discord-text-secondary mt-1">
+              Every server ships with this question bank — the bot mixes it into rounds together
+              with your custom questions. Built-ins cannot be edited or removed.
+            </p>
+          </div>
+          <div className="space-y-2">
+            {builtIns.map((q) => (
+              <div
+                key={q.id}
+                className="flex items-center justify-between rounded-md bg-discord-bg-tertiary p-3"
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-discord-text-primary truncate">{q.question}</p>
+                  <p className="text-xs text-discord-text-secondary">
+                    {q.category} • {q.difficulty} • Answer: {q.correct_answer}
+                  </p>
+                </div>
+                <span className="ml-2 text-xs bg-discord-blurple/20 text-discord-blurple px-1.5 py-0.5 rounded">
+                  Built-in
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Edit Modal */}
       {editing && (

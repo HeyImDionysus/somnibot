@@ -466,9 +466,15 @@ export class AdventureManager {
    * unreachable). A failed read is never cached — caching the fabricated
    * empty list would break every post-outage start
    * ([game-economy-adventures DEPFAIL]).
+   *
+   * Seeding is gated on the guild having NO adventure rows at all (active or
+   * not): an owner who deactivated the entire catalog made a deliberate call
+   * that is never overwritten with restored defaults.
    */
   private async getAdventures(): Promise<Adventure[] | null> {
-    if (this.adventureCache) return this.adventureCache;
+    // A cached [] is a legitimate empty catalog (owner deactivated every
+    // adventure) — only null means "not loaded yet".
+    if (this.adventureCache !== null) return this.adventureCache;
     const { data, error } = await this.supabase
       .from('economy_adventures')
       .select('id, name, emoji, description, adventure_type, difficulty, min_scenes, max_scenes')
@@ -480,23 +486,38 @@ export class AdventureManager {
       log.error('getAdventures read failed:', error.message);
       return null;
     }
-    if (!data || data.length === 0) {
-      await this.seedDefaults();
-      const { data: seeded, error: seededErr } = await this.supabase
-        .from('economy_adventures')
-        .select('id, name, emoji, description, adventure_type, difficulty, min_scenes, max_scenes')
-        .eq('guild_id', this.guild.id)
-        .eq('active', true)
-        .limit(1000);
-      if (seededErr) {
-        log.error('getAdventures post-seed read failed:', seededErr.message);
-        return null;
-      }
-      this.adventureCache = (seeded ?? []) as Adventure[];
-    } else {
+    if (data && data.length > 0) {
       this.adventureCache = data as Adventure[];
+      return this.adventureCache;
     }
-    return this.adventureCache!;
+
+    // No ACTIVE adventures — seed only when the guild has none AT ALL.
+    let seededNow = false;
+    try {
+      seededNow = await this.seedIfCatalogEmpty();
+    } catch (err) {
+      // Gate read or seed write failed — never cache the fabricated empty
+      // catalog ([game-economy-adventures DEPFAIL]).
+      log.error('adventure seeding failed:', (err as Error).message);
+      return null;
+    }
+    if (!seededNow) {
+      this.adventureCache = []; // deactivate-all is respected owner state
+      return this.adventureCache;
+    }
+
+    const { data: seeded, error: seededErr } = await this.supabase
+      .from('economy_adventures')
+      .select('id, name, emoji, description, adventure_type, difficulty, min_scenes, max_scenes')
+      .eq('guild_id', this.guild.id)
+      .eq('active', true)
+      .limit(1000);
+    if (seededErr) {
+      log.error('getAdventures post-seed read failed:', seededErr.message);
+      return null;
+    }
+    this.adventureCache = (seeded ?? []) as Adventure[];
+    return this.adventureCache;
   }
 
   /**
@@ -525,11 +546,33 @@ export class AdventureManager {
     })).catch((e: unknown) => { log.warn('ticket refund failed:', (e as Error)?.message ?? e); });
   }
 
+  /**
+   * Seed the default adventures when the guild has NO adventure rows (active
+   * or not). Returns true when defaults were written. Throws when the
+   * existence check or any write failed, so callers (warmup, getAdventures)
+   * can report the failure instead of silently proceeding.
+   */
+  private async seedIfCatalogEmpty(): Promise<boolean> {
+    const { count, error } = await this.supabase
+      .from('economy_adventures')
+      .select('id', { count: 'exact', head: true })
+      .eq('guild_id', this.guild.id);
+    if (error) {
+      throw new Error(`adventure existence check failed: ${error.message}`);
+    }
+    if ((count ?? 0) > 0) return false; // owner content (even all-inactive) — never touch it
+    await this.seedDefaults();
+    return true;
+  }
+
   private async seedDefaults(): Promise<void> {
     for (const def of DEFAULT_ADVENTURES) {
-      const { data } = await this.supabase
+      // ON CONFLICT DO NOTHING: the (guild_id, lower(name)) uniqueness index
+      // turns a concurrent double-seed into a no-op (no row returned) instead
+      // of a duplicate adventure with a second scene set.
+      const { data, error } = await this.supabase
         .from('economy_adventures')
-        .insert({
+        .upsert({
           guild_id: this.guild.id,
           name: def.name,
           emoji: def.emoji,
@@ -539,21 +582,28 @@ export class AdventureManager {
           min_scenes: def.scenes.length,
           max_scenes: def.scenes.length,
           is_default: true,
-        })
+        }, { ignoreDuplicates: true })
         .select('id')
-        .single();
+        .maybeSingle();
+      if (error) {
+        throw new Error(`default adventure "${def.name}" seed failed: ${error.message}`);
+      }
+      if (!data) continue; // lost a seed race — the other writer plants the scenes
 
-      if (data) {
-        const sceneRows = def.scenes.map((s, i) => ({
-          adventure_id: (data as Record<string, unknown>).id as string,
-          scene_index: i,
-          text: s.text,
-          choices: s.choices,
-          loot: s.loot,
-          is_ending: s.is_ending,
-          ending_type: s.ending_type,
-        }));
-        await this.supabase.from('economy_adventure_scenes').insert(sceneRows);
+      const sceneRows = def.scenes.map((s, i) => ({
+        adventure_id: (data as Record<string, unknown>).id as string,
+        scene_index: i,
+        text: s.text,
+        choices: s.choices,
+        loot: s.loot,
+        is_ending: s.is_ending,
+        ending_type: s.ending_type,
+      }));
+      const { error: scenesErr } = await this.supabase
+        .from('economy_adventure_scenes')
+        .insert(sceneRows);
+      if (scenesErr) {
+        throw new Error(`scenes for default adventure "${def.name}" failed: ${scenesErr.message}`);
       }
     }
   }
@@ -1092,9 +1142,11 @@ export class AdventureManager {
    * appeared until somebody ran the feature's command in Discord, so a fresh
    * install showed an empty dashboard page for a feature that claimed to be
    * on. Guild init calls this so content exists before anyone touches
-   * anything. Idempotent — it only writes when the guild has no rows.
+   * anything. Idempotent — it only writes when the guild has NO rows at all
+   * (an all-deactivated catalog is respected owner state). Throws when the
+   * gate read or the seed write failed so the warmup can report degradation.
    */
   async ensureContentSeeded(): Promise<void> {
-    await this.getAdventures();
+    await this.seedIfCatalogEmpty();
   }
 }

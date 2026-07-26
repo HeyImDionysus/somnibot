@@ -77,6 +77,7 @@ describe('/forgetme two-phase commerce cleanup', () => {
   it('reports pending role cleanup without claiming completion or writing a completion audit', async () => {
     const { interaction } = makeInteraction();
     const supabase = {
+      from: vi.fn(() => ({ upsert: vi.fn(async () => ({ error: null })) })),
       rpc: vi.fn(async () => ({
         data: {
           purge_status: 'pending_role_cleanup',
@@ -98,6 +99,7 @@ describe('/forgetme two-phase commerce cleanup', () => {
   it('writes a completion audit using numeric counters only after cleanup settles', async () => {
     const { interaction } = makeInteraction();
     const supabase = {
+      from: vi.fn(() => ({ upsert: vi.fn(async () => ({ error: null })) })),
       rpc: vi.fn(async () => ({
         data: {
           purge_status: 'completed',
@@ -127,6 +129,7 @@ describe('/forgetme two-phase commerce cleanup', () => {
   it('fails closed on a lifecycle result without an explicit purge status', async () => {
     const { interaction } = makeInteraction();
     const supabase = {
+      from: vi.fn(() => ({ upsert: vi.fn(async () => ({ error: null })) })),
       rpc: vi.fn(async () => ({ data: { economy_wallets: 1 }, error: null })),
     };
 

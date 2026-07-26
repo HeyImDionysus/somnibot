@@ -5,3 +5,4 @@ export * from './levels.js';
 export * from './automations.js';
 export * from './discord.js';
 export * from './rbac.js';
+export * from './trivia.js';

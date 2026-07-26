@@ -181,9 +181,15 @@ export class FishingManager {
    * unreachable). A failed read must never be cached as an empty catalog —
    * that would pin "no species" past the outage and lie to every subsequent
    * /fish collection ([game-economy-fishing DEPFAIL]).
+   *
+   * Seeding is gated on the guild having NO species rows at all (active or
+   * not): an owner who deactivated the entire catalog made a deliberate call
+   * that is never overwritten with restored defaults.
    */
   private async getSpecies(): Promise<FishSpecies[] | null> {
-    if (this.speciesCache) return this.speciesCache;
+    // A cached [] is a legitimate empty catalog (owner deactivated every
+    // species) — only null means "not loaded yet".
+    if (this.speciesCache !== null) return this.speciesCache;
     const { data, error } = await this.supabase
       .from('economy_fish_species')
       .select('id, name, emoji, rarity, min_weight, max_weight, base_price')
@@ -195,23 +201,38 @@ export class FishingManager {
       log.error('getSpecies read failed:', error.message);
       return null;
     }
-    if (!data || data.length === 0) {
-      await this.seedDefaultSpecies();
-      const { data: seeded, error: seededErr } = await this.supabase
-        .from('economy_fish_species')
-        .select('id, name, emoji, rarity, min_weight, max_weight, base_price')
-        .eq('guild_id', this.guild.id)
-        .eq('active', true)
-        .limit(1000);
-      if (seededErr) {
-        log.error('getSpecies post-seed read failed:', seededErr.message);
-        return null;
-      }
-      this.speciesCache = (seeded ?? []) as FishSpecies[];
-    } else {
+    if (data && data.length > 0) {
       this.speciesCache = data as FishSpecies[];
+      return this.speciesCache;
     }
-    return this.speciesCache!;
+
+    // No ACTIVE species — seed only when the guild has none AT ALL.
+    let seededNow = false;
+    try {
+      seededNow = await this.seedIfCatalogEmpty();
+    } catch (err) {
+      // Gate read or seed write failed — never cache the fabricated empty
+      // catalog ([game-economy-fishing DEPFAIL]).
+      log.error('species seeding failed:', (err as Error).message);
+      return null;
+    }
+    if (!seededNow) {
+      this.speciesCache = []; // deactivate-all is respected owner state
+      return this.speciesCache;
+    }
+
+    const { data: seeded, error: seededErr } = await this.supabase
+      .from('economy_fish_species')
+      .select('id, name, emoji, rarity, min_weight, max_weight, base_price')
+      .eq('guild_id', this.guild.id)
+      .eq('active', true)
+      .limit(1000);
+    if (seededErr) {
+      log.error('getSpecies post-seed read failed:', seededErr.message);
+      return null;
+    }
+    this.speciesCache = (seeded ?? []) as FishSpecies[];
+    return this.speciesCache;
   }
 
   /**
@@ -229,13 +250,39 @@ export class FishingManager {
       .setColor(0xffa500);
   }
 
+  /**
+   * Seed the default species when the guild has NO species rows (active or
+   * not). Returns true when defaults were written. Throws when the existence
+   * check or the write failed, so callers (warmup, getSpecies) can report the
+   * failure instead of silently proceeding with an empty catalog.
+   */
+  private async seedIfCatalogEmpty(): Promise<boolean> {
+    const { count, error } = await this.supabase
+      .from('economy_fish_species')
+      .select('id', { count: 'exact', head: true })
+      .eq('guild_id', this.guild.id);
+    if (error) {
+      throw new Error(`species existence check failed: ${error.message}`);
+    }
+    if ((count ?? 0) > 0) return false; // owner content (even all-inactive) — never touch it
+    await this.seedDefaultSpecies();
+    return true;
+  }
+
   private async seedDefaultSpecies(): Promise<void> {
     const rows = DEFAULT_SPECIES.map((s) => ({
       ...s,
       guild_id: this.guild.id,
       is_default: true,
     }));
-    await this.supabase.from('economy_fish_species').insert(rows);
+    // ON CONFLICT DO NOTHING: the (guild_id, lower(name)) uniqueness index
+    // turns a concurrent double-seed into a no-op instead of duplicate rows.
+    const { error } = await this.supabase
+      .from('economy_fish_species')
+      .upsert(rows, { ignoreDuplicates: true });
+    if (error) {
+      throw new Error(`default species seed failed: ${error.message}`);
+    }
   }
 
   // ── Check tools ───────────────────────────────────────
@@ -741,9 +788,11 @@ export class FishingManager {
    * appeared until somebody ran the feature's command in Discord, so a fresh
    * install showed an empty dashboard page for a feature that claimed to be
    * on. Guild init calls this so content exists before anyone touches
-   * anything. Idempotent — it only writes when the guild has no rows.
+   * anything. Idempotent — it only writes when the guild has NO rows at all
+   * (an all-deactivated catalog is respected owner state). Throws when the
+   * gate read or the seed write failed so the warmup can report degradation.
    */
   async ensureContentSeeded(): Promise<void> {
-    await this.getSpecies();
+    await this.seedIfCatalogEmpty();
   }
 }

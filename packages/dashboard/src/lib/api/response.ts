@@ -39,6 +39,26 @@ export function dbError(
 }
 
 /**
+ * Map a Supabase error to a 409 when it is a unique violation on a constraint
+ * the route understands (a user-correctable duplicate), else fall through to
+ * the generic dbError. Routes must name the constraint: an UNEXPECTED unique
+ * violation is an invariant break and must stay a 500 (see the commerce
+ * routes' exact-trigger-conflict convention).
+ */
+export function dbConflictOr500(
+  error: { message: string; code?: string },
+  context: string,
+  expectedConstraint: string,
+  conflictMessage: string,
+): NextResponse {
+  if (error.code === '23505' && error.message.includes(expectedConstraint)) {
+    console.warn(`[${context}] duplicate rejected (${expectedConstraint})`);
+    return apiError(conflictMessage, 409);
+  }
+  return dbError(error, context);
+}
+
+/**
  * Return a 500 error, safely extracting the message.
  *
  * V11 Re-Audit N-1: Like dbError, log the real message server-side but

@@ -20,8 +20,13 @@
  *    protection, and the three tools are exactly what /hunt, /dig and /mine
  *    look up by effect type and tier.
  *
- * Idempotent per table: a guild with ANY rows in a table is left alone, so
- * operator edits and deletions are never overwritten or resurrected.
+ * Idempotent per table: achievements and automod rules are gated on ANY row
+ * existing, so operator edits and deletions are never overwritten or
+ * resurrected. The shop gate is name-scoped instead — crafting's warmup also
+ * writes economy_items rows (recipe outputs), so an any-row gate would starve
+ * the starter shop on every default install. Any surviving row bearing one of
+ * the four starter item names (edited, deactivated, or untouched) suppresses
+ * the shop seed.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
@@ -84,7 +89,7 @@ const SHOP_ITEMS = [
     name: 'Padlock',
     description: 'Protects your wallet from one robbery attempt, then breaks.',
     emoji: '🔒',
-    category: 'protection',
+    category: 'Protection',
     price: 500,
     sell_price: 200,
     usable: true,
@@ -96,7 +101,7 @@ const SHOP_ITEMS = [
     name: 'Shovel',
     description: 'Tier 1 digging tool — better finds from /dig while it lasts.',
     emoji: '🪏',
-    category: 'tool',
+    category: 'Tools',
     price: 500,
     sell_price: 200,
     usable: false,
@@ -108,7 +113,7 @@ const SHOP_ITEMS = [
     name: 'Pickaxe',
     description: 'Tier 1 mining tool — better finds from /mine while it lasts.',
     emoji: '⛏️',
-    category: 'tool',
+    category: 'Tools',
     price: 750,
     sell_price: 300,
     usable: false,
@@ -120,7 +125,7 @@ const SHOP_ITEMS = [
     name: 'Hunting Rifle',
     description: 'Tier 1 hunting tool — better finds from /hunt while it lasts.',
     emoji: '🏹',
-    category: 'tool',
+    category: 'Tools',
     price: 750,
     sell_price: 300,
     usable: false,
@@ -138,44 +143,139 @@ const SHOP_ITEMS = [
   grant_role_id: null,
 }));
 
-/** Insert rows only when the guild has none in that table. */
+/**
+ * Insert rows unless the guild already has matching rows.
+ *
+ * The gate is name-scoped when `gateNames` is provided (only rows whose `name`
+ * is one of the seed names count), otherwise any row in the table counts.
+ * Failures SURFACE: a failed existence check or a failed write throws so the
+ * warmup loop can report degraded seeding instead of logging "complete" over
+ * missing content.
+ */
 async function seedIfEmpty(
   supabase: SupabaseClient,
   guildId: string,
   table: string,
   rows: Record<string, unknown>[],
+  gateNames?: string[],
 ): Promise<void> {
-  const { count, error: countError } = await supabase
+  let gate = supabase
     .from(table)
     .select('*', { count: 'exact', head: true })
     .eq('guild_id', guildId);
+  if (gateNames) gate = gate.in('name', gateNames);
+  const { count, error: countError } = await gate;
 
   if (countError) {
-    log.warn(`Skipping ${table} — could not check existing rows`, { error: countError.message });
-    return;
+    throw new Error(`could not check existing ${table} rows: ${countError.message}`);
   }
   if ((count ?? 0) > 0) return; // operator content exists — never touch it
 
+  // NOTE: PostgREST's ignoreDuplicates targets the PRIMARY KEY only — a
+  // concurrent double-seed hitting a catalog name index raises 23505, which
+  // surfaces (throw below) as a loud degraded warmup; the next boot's gate
+  // then sees the winner's rows and skips. Loud-then-converge, not silent.
   const { error } = await supabase
     .from(table)
-    .insert(rows.map((r) => ({ ...r, guild_id: guildId })));
+    .upsert(rows.map((r) => ({ ...r, guild_id: guildId })), { ignoreDuplicates: true });
 
   if (error) {
-    log.warn(`Seeding ${table} failed`, { error: error.message });
-  } else {
-    log.info(`Seeded ${rows.length} starter row(s) into ${table}`);
+    throw new Error(`seeding ${table} failed: ${error.message}`);
+  }
+  log.info(`Seeded ${rows.length} starter row(s) into ${table}`);
+}
+
+/**
+ * Starter shop items reconcile PER ITEM rather than gating on a name count.
+ *
+ * The catalog uniqueness index means one row per (guild, name): if crafting's
+ * warmup or a lazy /craft created its price-0 'Padlock' output shell first, a
+ * count gate would starve ALL FOUR starter items forever, and an upsert could
+ * never turn the shell into the buyable item. So per name:
+ *   - absent            → insert the starter definition
+ *   - bare output shell → upgrade it in place (price 0/null AND no use_effect),
+ *                         preserving the row id so crafted copies in member
+ *                         inventories become the real item
+ *   - anything else     → operator-shaped content, never touched
+ */
+async function reconcileStarterItems(supabase: SupabaseClient, guildId: string): Promise<void> {
+  const names = SHOP_ITEMS.map((i) => i.name);
+  const { data, error: readError } = await supabase
+    .from('economy_items')
+    .select('id, name, price, use_effect')
+    .eq('guild_id', guildId)
+    .in('name', names);
+
+  if (readError) {
+    throw new Error(`could not check existing economy_items rows: ${readError.message}`);
+  }
+
+  const byName = new Map((data ?? []).map((r) => [String(r.name), r]));
+  const toInsert = SHOP_ITEMS.filter((i) => !byName.has(i.name));
+  // Crafting output shells are created with exactly price 0 and no use_effect;
+  // anything else (including a null price) is operator-shaped and untouchable.
+  const toUpgrade = SHOP_ITEMS.filter((i) => {
+    const row = byName.get(i.name);
+    return row !== undefined && row.price === 0 && row.use_effect === null;
+  });
+
+  const failures: string[] = [];
+  if (toInsert.length > 0) {
+    const { error } = await supabase
+      .from('economy_items')
+      .upsert(toInsert.map((r) => ({ ...r, guild_id: guildId })), { ignoreDuplicates: true });
+    if (error) failures.push(`insert: ${error.message}`);
+    else log.info(`Seeded ${toInsert.length} starter item(s)`);
+  }
+  for (const item of toUpgrade) {
+    const row = byName.get(item.name);
+    if (row === undefined) continue;
+    const { id: _unused, ...fields } = item as Record<string, unknown> & { id?: unknown };
+    void _unused;
+    const { data: upgraded, error } = await supabase
+      .from('economy_items')
+      .update(fields)
+      .eq('guild_id', guildId)
+      .eq('id', row.id)
+      .eq('price', 0)
+      .is('use_effect', null)
+      .select('id');
+    if (error) failures.push(`upgrade ${item.name}: ${error.message}`);
+    else if ((upgraded ?? []).length > 0) {
+      log.info(`Upgraded crafting output shell '${item.name}' to the starter shop item`);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`starter item reconcile failed: ${failures.join('; ')}`);
   }
 }
 
 /**
  * Seed starter content for features that ship without any.
  * Called from guild-init's content warmup; safe to run on every boot.
+ * Throws when any table failed to seed (after attempting all of them), so the
+ * warmup loop can log a degraded warning instead of a false "complete".
  */
 export async function seedStarterContent(
   supabase: SupabaseClient,
   guildId: string,
 ): Promise<void> {
-  await seedIfEmpty(supabase, guildId, 'economy_achievement_defs', ACHIEVEMENT_DEFS);
-  await seedIfEmpty(supabase, guildId, 'automod_rules', AUTOMOD_RULES);
-  await seedIfEmpty(supabase, guildId, 'economy_items', SHOP_ITEMS);
+  const seeds: Array<[string, () => Promise<void>]> = [
+    ['economy_achievement_defs', () => seedIfEmpty(supabase, guildId, 'economy_achievement_defs', ACHIEVEMENT_DEFS)],
+    ['automod_rules', () => seedIfEmpty(supabase, guildId, 'automod_rules', AUTOMOD_RULES)],
+    ['economy_items', () => reconcileStarterItems(supabase, guildId)],
+  ];
+
+  const failures: string[] = [];
+  for (const [table, run] of seeds) {
+    try {
+      await run();
+    } catch (err) {
+      log.warn(`Starter seeding failed for ${table}`, { error: String(err) });
+      failures.push(table);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`starter content seeding failed for: ${failures.join(', ')}`);
+  }
 }

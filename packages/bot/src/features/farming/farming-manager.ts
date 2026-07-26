@@ -183,7 +183,13 @@ export class FarmingManager {
       return { embed: await this.unavailableEmbed() };
     }
     if (crops.length === 0) {
-      await this.seedDefaultCrops();
+      // Seeds only when the guild has NO crop rows at all — an owner who
+      // deactivated the whole catalog is respected (never auto-restored).
+      try {
+        await this.ensureContentSeeded();
+      } catch (err) {
+        log.warn('lazy crop seeding failed:', (err as Error).message);
+      }
       crops = (await this.getCrops()) ?? [];
     }
 
@@ -539,7 +545,14 @@ export class FarmingManager {
       seed_item_id: null,
       is_default: true,
     }));
-    await this.supabase.from('economy_crops').insert(rows);
+    // ON CONFLICT DO NOTHING: the (guild_id, lower(name)) uniqueness index
+    // turns a concurrent double-seed into a no-op instead of duplicate rows.
+    const { error } = await this.supabase
+      .from('economy_crops')
+      .upsert(rows, { ignoreDuplicates: true });
+    if (error) {
+      throw new Error(`default crop seed failed: ${error.message}`);
+    }
   }
 
   private getPlotStatus(plot: Plot | undefined, cropMap: Map<string, Crop>, config: FarmingConfig): PlotStatus {
@@ -694,12 +707,20 @@ export class FarmingManager {
    * appeared until somebody ran the feature's command in Discord, so a fresh
    * install showed an empty dashboard page for a feature that claimed to be
    * on. Guild init calls this so content exists before anyone touches
-   * anything. Idempotent — it only writes when the guild has no rows.
+   * anything. Idempotent — it only writes when the guild has NO crop rows at
+   * all (an owner who deactivated the whole catalog is respected, never
+   * auto-restored). Throws when the gate read or the seed write failed so
+   * the warmup can report degradation.
    */
   async ensureContentSeeded(): Promise<void> {
-    const crops = await this.getCrops();
-    if (crops !== null && crops.length === 0) {
-      await this.seedDefaultCrops();
+    const { count, error } = await this.supabase
+      .from('economy_crops')
+      .select('id', { count: 'exact', head: true })
+      .eq('guild_id', this.guild.id);
+    if (error) {
+      throw new Error(`crop existence check failed: ${error.message}`);
     }
+    if ((count ?? 0) > 0) return; // owner content (even all-inactive) — never touch it
+    await this.seedDefaultCrops();
   }
 }

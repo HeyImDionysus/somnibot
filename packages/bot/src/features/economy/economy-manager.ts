@@ -1111,6 +1111,11 @@ export class EconomyManager {
       .select('id, name, description, emoji, category, price, stock')
       .eq('guild_id', this.guild.id)
       .eq('active', true)
+      // Zero-priced items are not products: crafting seeds its recipe outputs
+      // as active price-0 rows (other systems reference them by id), and the
+      // shop must neither list nor sell them. The buy RPC enforces the same
+      // rule server-side.
+      .gt('price', 0)
       .order('sort_order', { ascending: true })
       .order('price', { ascending: true })
       .limit(1000);
@@ -1199,6 +1204,9 @@ export class EconomyManager {
     switch (result.status) {
       case 'item_not_found':
         return { success: false, amount: 0, balance: wallet, message: '❌ Item not found.' };
+      case 'not_purchasable':
+        // Zero-priced rows (e.g. crafting recipe outputs) are not products.
+        return { success: false, amount: 0, balance: wallet, message: '❌ This item is not for sale — it can only be crafted or earned.' };
       case 'max_per_user':
         return { success: false, amount: 0, balance: wallet, message: `❌ You can only own **${result.max_per_user}** of this item (you have ${result.owned}).` };
       case 'out_of_stock':

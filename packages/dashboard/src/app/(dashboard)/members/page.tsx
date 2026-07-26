@@ -28,11 +28,20 @@ interface Member {
 
 type BulkAction = 'assign_role' | 'remove_role' | 'reset_economy' | 'export' | 'send_dm';
 
+type StatusFilter = 'active' | 'banned' | 'left';
+
+const STATUS_FILTERS: Array<{ value: StatusFilter; label: string }> = [
+  { value: 'active', label: 'Active' },
+  { value: 'banned', label: 'Banned' },
+  { value: 'left', label: 'Left' },
+];
+
 export default function MembersPage() {
   const [members, setMembers] = useState<Member[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
+  const [status, setStatus] = useState<StatusFilter>('active');
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkAction, setBulkAction] = useState<BulkAction | ''>('');
@@ -45,7 +54,7 @@ export default function MembersPage() {
   const fetchMembers = useCallback(async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+      const params = new URLSearchParams({ page: String(page), limit: String(limit), status });
       if (search) params.set('search', search);
       const res = await fetch(`/api/members?${params}`);
       const json = await res.json();
@@ -58,7 +67,7 @@ export default function MembersPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, search]);
+  }, [page, search, status]);
 
   useEffect(() => {
     fetchMembers();
@@ -159,7 +168,7 @@ export default function MembersPage() {
         </div>
       )}
 
-      {/* Search + Bulk Actions Bar */}
+      {/* Search + Status Filter + Bulk Actions Bar */}
       <div className="flex flex-wrap items-center gap-3">
         <input
           type="text"
@@ -168,6 +177,22 @@ export default function MembersPage() {
           placeholder="Search by username or Discord ID..."
           className="flex-1 min-w-[200px] rounded border border-discord-border bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink/50 focus:outline-none"
         />
+
+        <div className="flex overflow-hidden rounded border border-discord-border">
+          {STATUS_FILTERS.map((f) => (
+            <button
+              key={f.value}
+              onClick={() => { setStatus(f.value); setPage(1); setSelected(new Set()); }}
+              className={`px-3 py-2 text-sm transition-colors ${
+                status === f.value
+                  ? 'bg-somni-pink text-white'
+                  : 'bg-discord-bg-secondary text-discord-text-secondary hover:text-discord-text-primary'
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
 
         {selected.size > 0 && (
           <>
@@ -288,6 +313,8 @@ export default function MembersPage() {
                 <td className="px-3 py-2.5">
                   {m.is_banned ? (
                     <span className="rounded-full bg-red-500/20 px-2 py-0.5 text-xs text-red-400">Banned</span>
+                  ) : status === 'left' ? (
+                    <span className="rounded-full bg-gray-500/20 px-2 py-0.5 text-xs text-gray-400">Left</span>
                   ) : m.suspended ? (
                     <span className="rounded-full bg-yellow-500/20 px-2 py-0.5 text-xs text-yellow-400">Suspended</span>
                   ) : m.is_muted ? (
@@ -304,7 +331,13 @@ export default function MembersPage() {
             {members.length === 0 && (
               <tr>
                 <td colSpan={8} className="px-3 py-8 text-center text-discord-text-muted">
-                  {search ? 'No members matching search' : 'No members found'}
+                  {search
+                    ? 'No members matching search'
+                    : status === 'banned'
+                      ? 'No banned members'
+                      : status === 'left'
+                        ? 'No former members'
+                        : 'No members found'}
                 </td>
               </tr>
             )}

@@ -124,7 +124,13 @@ export class CraftingManager {
       return { embed: await this.unavailableEmbed() };
     }
     if (recipes.length === 0) {
-      await this.seedDefaultRecipes();
+      // Seeds only when the guild has NO recipe rows at all — an owner who
+      // deactivated the whole book is respected (never auto-restored).
+      try {
+        await this.ensureContentSeeded();
+      } catch (err) {
+        log.warn('lazy recipe seeding failed:', (err as Error).message);
+      }
       recipes = (await this.getRecipes()) ?? [];
     }
 
@@ -168,7 +174,13 @@ export class CraftingManager {
       return { embed: await this.unavailableEmbed() };
     }
     if (recipes.length === 0) {
-      await this.seedDefaultRecipes();
+      // Seeds only when the guild has NO recipe rows at all — an owner who
+      // deactivated the whole book is respected (never auto-restored).
+      try {
+        await this.ensureContentSeeded();
+      } catch (err) {
+        log.warn('lazy recipe seeding failed:', (err as Error).message);
+      }
       recipes = (await this.getRecipes()) ?? [];
     }
 
@@ -367,6 +379,8 @@ export class CraftingManager {
   // (if they don't already exist) and links them via output_item_id.
   // Previously all default recipes had output_item_id: null, making them
   // impossible to craft (the craft() function rejects null output_item_id).
+  // Throws when any read/write fails so callers can report degradation
+  // instead of silently seeding a partial recipe book.
   private async seedDefaultRecipes(): Promise<void> {
     const rows: Array<Record<string, unknown>> = [];
 
@@ -375,20 +389,27 @@ export class CraftingManager {
       let itemId: string | null = null;
 
       // Check if the item already exists for this guild
-      const { data: existing } = await this.supabase
+      const { data: existing, error: existingErr } = await this.supabase
         .from('economy_items')
         .select('id')
         .eq('guild_id', this.guild.id)
         .ilike('name', r.output_name)
         .limit(1);
+      if (existingErr) {
+        throw new Error(`output item lookup for "${r.output_name}" failed: ${existingErr.message}`);
+      }
 
       if (existing && existing.length > 0) {
         itemId = (existing[0] as { id: string }).id;
       } else {
-        // Create the output item
-        const { data: created } = await this.supabase
+        // Create the output item. NOTE: PostgREST's ignoreDuplicates targets
+        // the PRIMARY KEY only, so a concurrent duplicate NAME raises 23505
+        // on the (guild_id, lower(name)) index rather than silently no-oping
+        // — that path falls through to the re-lookup below so the recipe
+        // still links the race winner's row.
+        const { data: created, error: createdErr } = await this.supabase
           .from('economy_items')
-          .insert({
+          .upsert({
             guild_id: this.guild.id,
             name: r.output_name,
             emoji: r.emoji,
@@ -399,11 +420,28 @@ export class CraftingManager {
             usable: false,
             tradeable: true,
             active: true,
-          })
+          }, { ignoreDuplicates: true })
           .select('id')
-          .single();
+          .maybeSingle();
+        if (createdErr && createdErr.code !== '23505') {
+          throw new Error(`output item create for "${r.output_name}" failed: ${createdErr.message}`);
+        }
 
         itemId = (created as { id: string } | null)?.id ?? null;
+        if (!itemId) {
+          // Lost a create race — the row exists now; resolve its id so the
+          // recipe still links a real output.
+          const { data: raced, error: racedErr } = await this.supabase
+            .from('economy_items')
+            .select('id')
+            .eq('guild_id', this.guild.id)
+            .ilike('name', r.output_name)
+            .limit(1);
+          if (racedErr) {
+            throw new Error(`output item re-lookup for "${r.output_name}" failed: ${racedErr.message}`);
+          }
+          itemId = (raced?.[0] as { id: string } | undefined)?.id ?? null;
+        }
       }
 
       rows.push({
@@ -424,7 +462,14 @@ export class CraftingManager {
       });
     }
 
-    await this.supabase.from('economy_recipes').insert(rows);
+    // ON CONFLICT DO NOTHING: the (guild_id, lower(name)) uniqueness index on
+    // economy_recipes turns a concurrent double-seed into a no-op.
+    const { error: recipesErr } = await this.supabase
+      .from('economy_recipes')
+      .upsert(rows, { ignoreDuplicates: true });
+    if (recipesErr) {
+      throw new Error(`default recipe seed failed: ${recipesErr.message}`);
+    }
   }
 
   /**
@@ -524,12 +569,20 @@ export class CraftingManager {
    * appeared until somebody ran the feature's command in Discord, so a fresh
    * install showed an empty dashboard page for a feature that claimed to be
    * on. Guild init calls this so content exists before anyone touches
-   * anything. Idempotent — it only writes when the guild has no rows.
+   * anything. Idempotent — it only writes when the guild has NO recipe rows
+   * at all (an owner who deactivated the whole book is respected, never
+   * auto-restored). Throws when the gate read or the seed write failed so
+   * the warmup can report degradation.
    */
   async ensureContentSeeded(): Promise<void> {
-    const recipes = await this.getRecipes();
-    if (recipes !== null && recipes.length === 0) {
-      await this.seedDefaultRecipes();
+    const { count, error } = await this.supabase
+      .from('economy_recipes')
+      .select('id', { count: 'exact', head: true })
+      .eq('guild_id', this.guild.id);
+    if (error) {
+      throw new Error(`recipe existence check failed: ${error.message}`);
     }
+    if ((count ?? 0) > 0) return; // owner content (even all-inactive) — never touch it
+    await this.seedDefaultRecipes();
   }
 }

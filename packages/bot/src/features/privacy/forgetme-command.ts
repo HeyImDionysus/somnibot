@@ -14,6 +14,10 @@
  * Tickets and audit logs are anonymized (not deleted) to preserve
  * operational integrity.
  *
+ * A member_erasures marker is written BEFORE the purge (marker-first) so the
+ * roster backfill can never re-create the erased member record; a voluntary
+ * rejoin clears the marker (fresh consent).
+ *
  * Requires confirmation via a button click to prevent accidental use.
  */
 
@@ -76,6 +80,8 @@ export async function handleForgetMeCommand(
       '• 🎟️ Entitlements — active entitlements cancelled\n' +
       '• 👤 Profile — custom profile and member record\n' +
       '• 🎫 Tickets — creator info anonymized (transcripts preserved)\n\n' +
+      '**Staying in the server?** New data will accumulate as you keep using bot features. ' +
+      'The bot will not re-create the deleted record on its own — only if you leave and rejoin.\n\n' +
       '**This cannot be undone.** Are you sure?',
     )
     .setColor(0xff0000)
@@ -127,6 +133,32 @@ export async function handleForgetMeCommand(
       ],
       components: [],
     });
+
+    // Marker-first: write the do-not-recreate marker BEFORE the purge so a
+    // partial failure still suppresses re-creation — if the purge succeeds
+    // but a later marker write failed, the roster backfill would silently
+    // resurrect the very record the member asked to erase. If the marker
+    // cannot be written, abort: purging without it risks exactly that.
+    // A voluntary rejoin (guildMemberAdd) deletes the marker again.
+    const { error: markerError } = await supabase
+      .from('member_erasures')
+      .upsert(
+        { guild_id: guildId, discord_id: userId, erased_at: new Date().toISOString() },
+        { onConflict: 'guild_id,discord_id' },
+      );
+
+    if (markerError) {
+      log.error(`member_erasures marker write failed for ${userId}:`, markerError.message);
+      await interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setDescription('❌ An error occurred while deleting your data. Please contact a server administrator.')
+            .setColor(0xff0000),
+        ],
+        components: [],
+      });
+      return;
+    }
 
     // Call the purge RPC. 40001 is an EXPECTED transient outcome: the purge
     // takes its customer locks NOWAIT and aborts atomically instead of

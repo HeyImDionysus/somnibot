@@ -19,6 +19,9 @@ out/
 .env.local
 .env.*.local
 
+# MCP server config can embed credentials/tokens
+.mcp.json
+
 # IDE
 .vscode/
 .idea/

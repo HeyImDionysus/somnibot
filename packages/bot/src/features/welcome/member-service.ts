@@ -9,6 +9,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { GuildMemberFlags } from 'discord.js';
 import type { Guild, GuildMember } from 'discord.js';
 import type { DbMember } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
@@ -92,6 +93,23 @@ export async function recordMemberJoin(
 ): Promise<DbMember | null> {
   const guildId = member.guild.id;
   const discordId = member.id;
+
+  // A voluntary rejoin is fresh consent: clear any /forgetme erasure marker
+  // FIRST, so nothing later in the join path — or a concurrently running
+  // roster backfill — keeps suppressing a member who chose to come back.
+  // Marker cleanup must never block join handling, hence the defensive catch.
+  try {
+    const { error: markerError } = await supabase
+      .from('member_erasures')
+      .delete()
+      .eq('guild_id', guildId)
+      .eq('discord_id', discordId);
+    if (markerError) {
+      log.warn('Failed to clear erasure marker on rejoin:', markerError.message);
+    }
+  } catch (err) {
+    log.warn('Failed to clear erasure marker on rejoin:', String(err));
+  }
 
   // Calculate cumulative time if returning
   let totalTimeSeconds = 0;
@@ -232,7 +250,23 @@ export async function getMemberNumber(
 }
 
 /**
- * Backfill the roster with everyone ALREADY in the guild.
+ * A member has proven they are past Discord's onboarding/membership screening
+ * when Discord either set the CompletedOnboarding flag or reports them as not
+ * pending. Pre-install members never went through the bot's flag-transition
+ * path, so this is the only truthful signal available at backfill time.
+ */
+function hasCompletedOnboarding(m: GuildMember): boolean {
+  return (m.flags?.has(GuildMemberFlags.CompletedOnboarding) ?? false) || !m.pending;
+}
+
+/**
+ * PostgREST hard-caps a single response at max_rows (1000), so any read that
+ * can exceed that must page with .range() and accumulate.
+ */
+const READ_PAGE = 1000;
+
+/**
+ * Backfill and reconcile the roster with everyone ALREADY in the guild.
  *
  * Member rows were only ever written by the guildMemberAdd handler — people
  * who joined after the bot was installed. Install SomniBot into an
@@ -241,11 +275,22 @@ export async function getMemberNumber(
  * roster (automation conditions, profiles) sees a ghost town. Verified live:
  * zero rows for a guild the bot had been serving for days.
  *
- * Runs once per guild init. Existing rows are left untouched (their
- * member_number, onboarding and time tracking are history this sweep must not
- * rewrite); only missing members are inserted, oldest joiners first so
- * member_number ordering roughly matches server seniority. Real join dates
- * come from Discord itself.
+ * Runs once per guild init and makes three kinds of writes:
+ * 1. INSERT missing members, oldest joiners first so member_number ordering
+ *    roughly matches server seniority. Real join dates come from Discord.
+ * 2. RECONCILE rows with a stale left_at — members who rejoined while the bot
+ *    was offline are present in the fetch but "gone" in the DB. Their left_at
+ *    is cleared, identity refreshed, and joined_at reset to Discord's current
+ *    join date; time spent away is deliberately not accumulated (there is no
+ *    reliable leave/rejoin timeline to derive it from).
+ * 3. REPAIR onboarding_completed=false rows whose member the current fetch
+ *    proves is past screening — otherwise pre-install members stay locked out
+ *    of onboarding-gated features forever.
+ *
+ * member_number and total_time_seconds are history this sweep never rewrites.
+ * Members with a /forgetme erasure marker are excluded from every write:
+ * re-creating (or touching) their data would break the erasure promise. Only
+ * a voluntary rejoin (guildMemberAdd) clears the marker.
  */
 export async function backfillMembers(
   supabase: SupabaseClient,
@@ -259,55 +304,237 @@ export async function backfillMembers(
     return 0;
   }
 
-  const { data: existingRows, error: readError } = await supabase
-    .from('members')
-    .select('discord_id')
-    .eq('guild_id', guild.id)
-    .limit(10000);
-
-  if (readError) {
-    log.warn('Member backfill skipped — could not read existing rows', { error: readError.message });
-    return 0;
-  }
-
-  const known = new Set((existingRows ?? []).map((r) => r.discord_id as string));
-  const missing = [...discordMembers.values()]
-    .filter((m) => !m.user.bot && !known.has(m.id))
-    .sort((a, b) => (a.joinedTimestamp ?? 0) - (b.joinedTimestamp ?? 0));
-
-  if (missing.length === 0) return 0;
-
-  let nextNumber = await getNextMemberNumber(supabase, guild.id);
-  let inserted = 0;
-
-  // Chunked inserts; sequential numbering is safe here because this runs once
-  // per init and concurrent live joins retry on the unique index anyway.
-  const CHUNK = 200;
-  for (let i = 0; i < missing.length; i += CHUNK) {
-    const rows = missing.slice(i, i + CHUNK).map((m, j) => ({
-      guild_id: guild.id,
-      discord_id: m.id,
-      username: m.user.tag,
-      avatar_url: m.user.displayAvatarURL({ size: 256 }),
-      joined_at: m.joinedAt?.toISOString() ?? new Date().toISOString(),
-      left_at: null,
-      onboarding_completed: false,
-      is_returning: false,
-      total_time_seconds: 0,
-      member_number: nextNumber + i + j,
-    }));
-
-    const { error } = await supabase
+  // Read ALL existing rows, paged (a .limit() read is silently truncated at
+  // PostgREST's max_rows — 1000 — which made big rosters re-insert forever).
+  const existing = new Map<string, { left_at: string | null; onboarding_completed: boolean }>();
+  for (let from = 0; ; from += READ_PAGE) {
+    // Stable order: unordered .range() pages can skip/duplicate rows when
+    // concurrent writes shift page boundaries mid-scan.
+    const { data, error } = await supabase
       .from('members')
-      .upsert(rows, { onConflict: 'guild_id,discord_id', ignoreDuplicates: true });
+      .select('discord_id, left_at, onboarding_completed')
+      .eq('guild_id', guild.id)
+      .order('discord_id', { ascending: true })
+      .range(from, from + READ_PAGE - 1);
 
     if (error) {
-      log.warn('Member backfill chunk failed', { error: error.message });
-      break;
+      log.warn('Member backfill skipped — could not read existing rows', { error: error.message });
+      return 0;
     }
-    inserted += rows.length;
+    for (const r of data ?? []) {
+      existing.set(r.discord_id as string, {
+        left_at: (r.left_at as string | null) ?? null,
+        onboarding_completed: Boolean(r.onboarding_completed),
+      });
+    }
+    if ((data ?? []).length < READ_PAGE) break;
   }
 
-  if (inserted > 0) log.info(`Backfilled ${inserted} existing member(s) into the roster`);
+  // Erasure suppression list. If it cannot be read the backfill must not run:
+  // proceeding could resurrect data a member explicitly asked to erase.
+  const erased = new Set<string>();
+  for (let from = 0; ; from += READ_PAGE) {
+    const { data, error } = await supabase
+      .from('member_erasures')
+      .select('discord_id')
+      .eq('guild_id', guild.id)
+      .order('discord_id', { ascending: true })
+      .range(from, from + READ_PAGE - 1);
+
+    if (error) {
+      log.warn('Member backfill skipped — could not read erasure markers', { error: error.message });
+      return 0;
+    }
+    for (const r of data ?? []) erased.add(r.discord_id as string);
+    if ((data ?? []).length < READ_PAGE) break;
+  }
+
+  const fetched = [...discordMembers.values()].filter((m) => !m.user.bot && !erased.has(m.id));
+
+  // Partition 1 — present on Discord, no row at all: insert.
+  const missing = fetched
+    .filter((m) => !existing.has(m.id))
+    .sort((a, b) => (a.joinedTimestamp ?? 0) - (b.joinedTimestamp ?? 0));
+
+  // Partition 2 — present on Discord but the row says they left (rejoined
+  // while the bot was offline): clear left_at and refresh identity. Values
+  // differ per member, so these are per-row updates; the set is naturally
+  // small (only offline-window rejoins land here).
+  const staleLeft = fetched.filter((m) => {
+    const row = existing.get(m.id);
+    return row !== undefined && row.left_at !== null;
+  });
+  const staleLeftIds = new Set(staleLeft.map((m) => m.id));
+
+  // Partition 3 — row says onboarding incomplete but the current fetch proves
+  // the member is past screening. Rows also in partition 2 get the repair
+  // folded into their per-row update instead.
+  const onboardingRepair = fetched.filter((m) => {
+    const row = existing.get(m.id);
+    return (
+      row !== undefined &&
+      !row.onboarding_completed &&
+      !staleLeftIds.has(m.id) &&
+      hasCompletedOnboarding(m)
+    );
+  });
+
+  let reconciled = 0;
+  for (const m of staleLeft) {
+    const row = existing.get(m.id);
+    if (row === undefined || row.left_at === null) continue;
+    const repairOnboarding = !row.onboarding_completed && hasCompletedOnboarding(m);
+    // Compare-and-set on the snapshotted left_at: if the live gateway handler
+    // touched the row after our snapshot (a fresh leave sets a NEW left_at, a
+    // live rejoin clears it), this matches 0 rows and we must not overwrite —
+    // blindly clearing left_at here would resurrect a member who left
+    // mid-backfill, permanently.
+    const { data: updated, error } = await supabase
+      .from('members')
+      .update({
+        left_at: null,
+        is_returning: true,
+        username: m.user.tag,
+        avatar_url: m.user.displayAvatarURL({ size: 256 }),
+        joined_at: m.joinedAt?.toISOString() ?? new Date().toISOString(),
+        ...(repairOnboarding ? { onboarding_completed: true } : {}),
+      })
+      .eq('guild_id', guild.id)
+      .eq('discord_id', m.id)
+      .eq('left_at', row.left_at)
+      .select('discord_id');
+
+    if (error) {
+      log.warn('Member backfill left_at reconcile failed', { discordId: m.id, error: error.message });
+      continue;
+    }
+    if ((updated ?? []).length === 0) {
+      log.debug?.('Member backfill left_at reconcile skipped — row changed since snapshot', { discordId: m.id });
+      continue;
+    }
+    reconciled += 1;
+  }
+
+  // Chunked repair: identical payload for every row, so .in() batches apply.
+  const CHUNK = 200;
+  let repaired = 0;
+  for (let i = 0; i < onboardingRepair.length; i += CHUNK) {
+    const chunkIds = onboardingRepair.slice(i, i + CHUNK).map((m) => m.id);
+    const { error } = await supabase
+      .from('members')
+      .update({ onboarding_completed: true })
+      .eq('guild_id', guild.id)
+      .in('discord_id', chunkIds);
+
+    if (error) {
+      log.warn('Member backfill onboarding repair chunk failed', { error: error.message });
+      continue;
+    }
+    repaired += chunkIds.length;
+  }
+
+  let inserted = 0;
+
+  // Chunked inserts. The member number is drawn fresh per attempt because
+  // get_next_member_number cannot reserve numbers: a live join racing the
+  // backfill can take one of ours, and the uniq (guild_id, member_number)
+  // index then rejects the whole chunk with 23505 — redraw and retry, bounded,
+  // mirroring the recordMemberJoin retry. A failed chunk never aborts the
+  // rest of the sweep, and only rows PostgREST actually inserted are counted
+  // (ignoreDuplicates makes rows.length a lie whenever a duplicate slips in).
+  const MAX_CHUNK_ATTEMPTS = 5;
+  const insertedIds = new Set<string>();
+  for (let i = 0; i < missing.length; i += CHUNK) {
+    const chunkMembers = missing.slice(i, i + CHUNK);
+
+    for (let attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS; attempt += 1) {
+      const base = await getNextMemberNumber(supabase, guild.id);
+      const rows = chunkMembers.map((m, j) => ({
+        guild_id: guild.id,
+        discord_id: m.id,
+        username: m.user.tag,
+        avatar_url: m.user.displayAvatarURL({ size: 256 }),
+        joined_at: m.joinedAt?.toISOString() ?? new Date().toISOString(),
+        left_at: null,
+        onboarding_completed: hasCompletedOnboarding(m),
+        is_returning: false,
+        total_time_seconds: 0,
+        member_number: base + j,
+      }));
+
+      const { data, error } = await supabase
+        .from('members')
+        .upsert(rows, { onConflict: 'guild_id,discord_id', ignoreDuplicates: true })
+        .select('discord_id');
+
+      if (!error) {
+        inserted += (data ?? []).length;
+        for (const r of data ?? []) insertedIds.add(r.discord_id as string);
+        break;
+      }
+
+      // Only a member_number collision is retryable; redraw and try again.
+      if (error.code === '23505' && attempt < MAX_CHUNK_ATTEMPTS) continue;
+
+      // A dropped chunk means these members stay missing until the next guild
+      // init — loud, with the blast radius, never a quiet warn.
+      log.error('Member backfill chunk dropped — members remain missing until next init', {
+        count: chunkMembers.length,
+        attempts: attempt,
+        error: error.message,
+      });
+      break;
+    }
+  }
+
+  // Late-erasure sweep: a /forgetme filed AFTER the marker read above but
+  // BEFORE a chunk insert can re-create a pre-install member's identity row
+  // (their purge had no members row to delete yet). Re-read the markers and
+  // remove any row this run inserted for a now-marked member. Markers filed
+  // after THIS read are safe without us: by then the row exists, so their own
+  // purge deletes it.
+  if (missing.length > 0) {
+    const lateErased = new Set<string>();
+    for (let from = 0; ; from += READ_PAGE) {
+      const { data, error } = await supabase
+        .from('member_erasures')
+        .select('discord_id')
+        .eq('guild_id', guild.id)
+        .order('discord_id', { ascending: true })
+        .range(from, from + READ_PAGE - 1);
+      if (error) {
+        log.error('Member backfill late-erasure sweep failed — run /forgetme again if a purged member reappeared', {
+          error: error.message,
+        });
+        break;
+      }
+      for (const r of data ?? []) lateErased.add(r.discord_id as string);
+      if ((data ?? []).length < READ_PAGE) break;
+    }
+
+    // Only rows THIS run actually inserted: a live rejoin's fresh row (its
+    // guildMemberAdd cleared the marker first) must never be swept, and a
+    // dropped chunk's members must not decrement the inserted count.
+    const resurrected = [...insertedIds].filter((id) => lateErased.has(id));
+    if (resurrected.length > 0) {
+      const { error } = await supabase
+        .from('members')
+        .delete()
+        .eq('guild_id', guild.id)
+        .in('discord_id', resurrected);
+      if (error) {
+        log.error('Member backfill late-erasure delete failed', { count: resurrected.length, error: error.message });
+      } else {
+        inserted = Math.max(0, inserted - resurrected.length);
+        log.info(`Roster backfill removed ${resurrected.length} row(s) re-created past an in-flight erasure`);
+      }
+    }
+  }
+
+  if (inserted > 0 || reconciled > 0 || repaired > 0) {
+    log.info(
+      `Roster backfill: ${inserted} inserted, ${reconciled} left_at reconciled, ${repaired} onboarding repaired`,
+    );
+  }
   return inserted;
 }
