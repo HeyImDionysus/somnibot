@@ -13,6 +13,12 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { recordAdminChange } from '@/lib/admin-changes';
+
+/** "1 failed bot action" / "3 failed bot actions". */
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
 
 const actionQueuePostSchema = z.object({
   action: z.enum(['acknowledge', 'retry']),
@@ -205,7 +211,7 @@ export async function POST(request: NextRequest) {
 
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
+  const { guildId, discordId } = auth.ctx;
 
   const parsed = await parseBody(request, actionQueuePostSchema);
   if (!parsed.ok) return parsed.response;
@@ -226,6 +232,22 @@ export async function POST(request: NextRequest) {
     if (error) {
       return dbError(error, 'action-queue');
     }
+
+    await recordAdminChange({
+      guildId,
+      actorId: discordId,
+      action: 'action_queue.dlq_acknowledged',
+      targetType: 'failed bot actions',
+      targetId: ids.length === 1 ? ids[0]! : null,
+      description:
+        `Marked ${plural(ids.length, 'failed bot action')} as acknowledged, `
+        + 'clearing them from the failures list',
+      before: { acknowledged: false },
+      after: { acknowledged: true, ids },
+      blastRadius: 'low',
+      undoReason:
+        'acknowledging only hides the failures from the pending list; there is no supported way to mark them unacknowledged again',
+    }, supabase);
 
     return NextResponse.json({ success: true, acknowledged: ids.length });
   }
@@ -335,6 +357,30 @@ export async function POST(request: NextRequest) {
       } else {
         failed++;
       }
+    }
+
+    // Only a retry that actually re-opened work changed anything. A batch where
+    // every id failed or was operator-held left the queue exactly as it was,
+    // and recording it would put a change on the page that never happened.
+    if (retried > 0) {
+      await recordAdminChange({
+        guildId,
+        actorId: discordId,
+        action: 'action_queue.dlq_retried',
+        targetType: 'failed bot actions',
+        targetId: null,
+        description:
+          `Sent ${plural(retried, 'failed bot action')} back to the bot to run again`
+          + (operatorHeld > 0 ? `, held ${operatorHeld} for review` : '')
+          + (failed > 0 ? `, and could not retry ${failed}` : ''),
+        before: { status: 'failed' },
+        after: { retried, operatorHeld, failed },
+        // The bot picks these up and performs real work — role grants,
+        // fulfilment, notifications.
+        blastRadius: 'high',
+        undoReason:
+          'the bot may already have run the retried actions, so they cannot be pulled back — check the action queue for what they did',
+      }, supabase);
     }
 
     return NextResponse.json({

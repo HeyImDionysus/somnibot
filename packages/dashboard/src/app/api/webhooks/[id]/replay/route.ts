@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createHmac } from 'crypto';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { recordAdminChange } from '@/lib/admin-changes';
 
 /** V7 Audit §7.P2a — Zod schema for replay event ID path param. */
 const eventIdSchema = z.string().min(1).max(128).regex(/^[\w-]+$/, 'Invalid event ID format');
@@ -207,6 +208,35 @@ export async function POST(
         status: 'pending',
       }).then(null, () => { /* non-blocking */ });
     }
+
+    // Replaying re-posts the original PayPal payload to the live webhook
+    // handler, which can re-run fulfilment, entitlement grants and role
+    // delivery for a real customer. There is no undo and there never can be —
+    // no row update and no allowlisted queue action un-runs a side effect that
+    // already reached a buyer.
+    //
+    // [privacy] `event.payload` is NOT recorded. A PayPal event body carries
+    // payer identity, email and transaction detail; the Admin Changes page is
+    // not the place to mirror it. The identifiers below are enough to find the
+    // event on the Webhooks page.
+    await recordAdminChange({
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'webhook.replayed',
+      targetType: 'payment webhook',
+      targetId: id,
+      description:
+        `Replayed the ${String(event.event_type ?? 'PayPal')} payment webhook `
+        + `(attempt ${replayCount}), which re-runs whatever it originally triggered`,
+      before: { result: event.result ?? null, replay_count: event.replay_count ?? 0 },
+      after: {
+        replay_count: replayCount,
+        outcome: success ? 'accepted' : `http_${replayRes.status}`,
+      },
+      blastRadius: 'high',
+      undoReason:
+        'a replayed webhook re-runs real payment side effects such as fulfilment and role delivery, and those cannot be taken back',
+    }, supabase);
 
     return NextResponse.json({ success, replayed: true });
   } catch (err) {

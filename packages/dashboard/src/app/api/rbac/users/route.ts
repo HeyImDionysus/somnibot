@@ -13,6 +13,7 @@ import { invalidateCsrfCookies } from '@/lib/api/csrf';
 import { dbError } from '@/lib/api/response';
 import { loadTeamConfig, writeTeamAudit } from '@/lib/team-invitations';
 import { writeRbacAudit, raiseEscalationBlockedAlert } from '@/lib/rbac-audit';
+import { recordAdminChange } from '@/lib/admin-changes';
 
 const rbacUserAssign = z.object({
   discord_id: z.string().regex(/^\d{17,20}$/, 'Must be a Discord snowflake ID'),
@@ -78,9 +79,15 @@ export async function POST(request: NextRequest) {
     // ── V5 Audit §1.2: Prevent priority escalation ──────────────
     // Fetch the target role's priority and is_system flag.
     // A user must not assign a role with higher priority than their own.
+    //
+    // `name` is fetched by the same query (no extra round trip) so the recorded
+    // admin change can name the role in plain English instead of printing a
+    // UUID at the owner. Nothing else is read: `permissions` is the role's own
+    // configuration, already recorded by /api/rbac/roles, and copying it onto
+    // every grant would multiply the permission list across the change log.
     const { data: targetRole } = await admin
       .from('dashboard_roles')
-      .select('priority, is_system')
+      .select('name, priority, is_system')
       .eq('id', body.role_id)
       .eq('guild_id', ctx.guildId)
       .single();
@@ -153,6 +160,10 @@ export async function POST(request: NextRequest) {
       }
     }
     // ── End priority escalation check ────────────────────────────
+
+    // Plain-English name for the role in every recorded change below.
+    const roleLabel = ((targetRole as { name?: unknown }).name as string | undefined)
+      ?? body.role_id;
 
     // ── Consent-based invitation model ───────────────────────────
     // The catalog contracts consent-based invitations with
@@ -237,6 +248,31 @@ export async function POST(request: NextRequest) {
         },
       });
 
+      // [security] Only the invitation's own lifecycle fields are recorded.
+      // team_invitations carries no accept code — acceptance binds to the
+      // invitee's signed-in Discord identity (see the accept route) — and the
+      // whole row is never copied here, so a future code/token column cannot
+      // leak into a page every manage_team holder can read.
+      await recordAdminChange({
+        guildId: ctx.guildId,
+        actorId: ctx.discordId,
+        action: 'team.invite_sent',
+        targetType: 'dashboard team invitation',
+        targetId: (invitation as { id?: string } | null)?.id ?? null,
+        description:
+          `Invited ${body.discord_id} to the "${roleLabel}" dashboard role — `
+          + 'they get access only once they accept',
+        after: {
+          discord_id: body.discord_id,
+          role: roleLabel,
+          status: 'pending',
+          expires_at: expiresAt,
+        },
+        blastRadius: 'high',
+        undoReason:
+          'the invitation has already been sent — revoke it from the Team page instead, which the member is not notified about',
+      }, admin);
+
       const inviteResp = NextResponse.json({
         success: true,
         mode: 'invitation',
@@ -282,6 +318,25 @@ export async function POST(request: NextRequest) {
       // owner-alert mirror is best-effort
     }
 
+    await recordAdminChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      action: 'team.role_assigned',
+      targetType: 'dashboard team member',
+      targetId: body.discord_id,
+      description:
+        `Gave ${body.discord_id} the "${roleLabel}" dashboard role, which takes effect immediately`,
+      after: {
+        discord_id: body.discord_id,
+        role: roleLabel,
+        assigned_by: ctx.discordId,
+      },
+      // Live dashboard access granted without the member's consent.
+      blastRadius: 'critical',
+      undoReason:
+        'a granted dashboard role cannot be taken back by an undo — revoke it from the Team page instead',
+    }, admin);
+
     // V9 Audit §1.P2: Invalidate CSRF tokens after privilege change.
     // Clearing the cookies forces a re-fetch of /api/csrf, which re-derives
     // the token from the (now changed) session state. Both the current and the
@@ -308,12 +363,16 @@ export async function DELETE(request: NextRequest) {
 
     const admin = createAdminSupabase();
 
+    // RETURNING carries the removed row out of the delete, so the "before"
+    // state is captured by the mutation itself rather than by a second read
+    // that could race it. The role name is embedded (same call, no extra round
+    // trip) so the recorded change reads as a sentence and not a UUID.
     const { data: removed, error } = await admin
       .from('dashboard_user_roles')
       .delete()
       .eq('id', assignmentId)
       .eq('guild_id', ctx.guildId)
-      .select('discord_id, role_id')
+      .select('discord_id, role_id, assigned_by, dashboard_roles(name)')
       .maybeSingle();
 
     if (error) return dbError(error, 'rbac/users');
@@ -321,7 +380,12 @@ export async function DELETE(request: NextRequest) {
     // Audit the revoke (previously the DELETE path wrote no audit_logs row) and
     // page the owner — a team member losing dashboard access is a
     // security-relevant privilege change.
-    const revoked = (removed ?? null) as { discord_id?: string; role_id?: string } | null;
+    const revoked = (removed ?? null) as {
+      discord_id?: string;
+      role_id?: string;
+      assigned_by?: string | null;
+      dashboard_roles?: { name?: string } | null;
+    } | null;
     await writeTeamAudit(admin, {
       guildId: ctx.guildId,
       actorId: ctx.discordId,
@@ -342,6 +406,28 @@ export async function DELETE(request: NextRequest) {
       } catch {
         // owner-alert mirror is best-effort
       }
+    }
+
+    if (revoked) {
+      const revokedRole = revoked.dashboard_roles?.name ?? revoked.role_id ?? 'dashboard';
+      await recordAdminChange({
+        guildId: ctx.guildId,
+        actorId: ctx.discordId,
+        action: 'team.role_revoked',
+        targetType: 'dashboard team member',
+        targetId: revoked.discord_id ?? assignmentId,
+        description:
+          `Removed the "${revokedRole}" dashboard role from ${revoked.discord_id ?? 'a team member'}, `
+          + 'ending their dashboard access through it',
+        before: {
+          discord_id: revoked.discord_id ?? null,
+          role: revokedRole,
+          assigned_by: revoked.assigned_by ?? null,
+        },
+        blastRadius: 'high',
+        undoReason:
+          'the assignment row was deleted, so there is nothing to restore into — grant the role again from the Team page',
+      }, admin);
     }
 
     // V9 Audit §1.P2: Invalidate CSRF tokens after privilege change. Clears both
