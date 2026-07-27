@@ -1,6 +1,21 @@
 /**
  * POST /api/orders/[id]/refund — drive one durable, attempt-keyed owner
  * refund without guessing whether PayPal accepted an ambiguous request.
+ *
+ * ── Why the recorded change carries no undo button ────────────────────────
+ * This is the one route in the dashboard that moves REAL money out of the
+ * owner's PayPal account. PayPal has no "un-refund": once a capture is
+ * refunded the funds are gone, and getting them back means the customer buying
+ * the product again. A db-undo here would be replayed as a row update, so the
+ * only thing it could do is flip `orders.status` back to 'completed' — which
+ * would make the Admin Changes page claim the money came back while PayPal's
+ * ledger says otherwise. That row is therefore recorded with `critical` blast
+ * radius and NO undo, ever.
+ *
+ * The description is also branched on whether a PayPal capture was actually
+ * refunded. A zero-amount "local" attempt (an order with no captured payment)
+ * revokes access without any money moving, and describing that as a refund
+ * would be the same lie in the opposite direction.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -9,6 +24,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { getPayPalRuntimeConfig, getPayPalToken } from '@/lib/paypal';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { isCanonicalPayPalResourceId } from '@/lib/paypal-resource-id';
+import { readRowBefore, recordAdminChange } from '@/lib/admin-changes';
 
 type AttemptStatus =
   | 'prepared'
@@ -251,6 +267,30 @@ function parseFinalizationResult(value: unknown, attempt: RefundAttempt): boolea
     && row.paypal_refund_id === attempt.paypalRefundId;
 }
 
+/**
+ * The one sentence a non-technical owner reads on the Admin Changes page.
+ *
+ * `paid` decides between "real money left your PayPal account" and "no money
+ * moved". Getting that wrong in either direction is the failure this project
+ * has already been burned by, so it is derived from the frozen attempt
+ * contract rather than from anything the caller sent.
+ */
+function describeRefund(opts: {
+  paid: boolean;
+  amount: string;
+  orderLabel: string;
+  accessRevoked: boolean;
+}): string {
+  const access = opts.accessRevoked
+    ? " and the customer's access to it was revoked"
+    : " (the customer's access to it was already inactive)";
+  return opts.paid
+    ? `Refunded ${opts.amount} to the customer through PayPal for ${opts.orderLabel} — `
+      + `real money has left your PayPal account${access}`
+    : `Marked ${opts.orderLabel} as refunded — it had no captured PayPal payment, so no `
+      + `real money moved${access}`;
+}
+
 function providerUnconfirmedResponse() {
   return NextResponse.json(
     {
@@ -483,6 +523,18 @@ export async function POST(
     return persistenceFailureResponse(attempt.status);
   }
 
+  // Read the order BEFORE finalization flips it to 'refunded'. Afterwards this
+  // read would only echo the state the finalize just wrote, which is the exact
+  // "captured the after-state and called it the before-state" bug this recorder
+  // exists to avoid. Best-effort: a failed read degrades the record, never the
+  // refund.
+  const orderBefore = await readRowBefore(
+    supabase,
+    'orders',
+    { id: orderId, guild_id: guildId },
+    'id, order_number, status, amount_cents, currency, customer_id, product_id',
+  );
+
   const { data: finalizationData, error: finalizationError } = await supabase.rpc(
     'commerce_finalize_admin_refund',
     {
@@ -498,6 +550,57 @@ export async function POST(
       code: finalizationError?.code,
     });
     return persistenceFailureResponse(attempt.status);
+  }
+
+  // Recorded at exactly one point: the request whose finalization actually
+  // flipped this order to refunded. `already_refunded` marks a replay — a
+  // concurrent or retried attempt that found the work done — and recording
+  // that too would show the owner a second "Refunded 19.99 USD" line for money
+  // that left once. `parseFinalizationResult` has already proven this payload
+  // matches the frozen attempt, so the fields below are trustworthy.
+  const finalization = asRecord(finalizationData);
+  if (finalization?.already_refunded !== true) {
+    const paid = isPaidAttempt(attempt);
+    const orderNumber = orderBefore?.order_number;
+    await recordAdminChange(
+      {
+        guildId,
+        actorId: discordId,
+        action: 'commerce.order_refunded',
+        targetType: 'real-money order',
+        targetId: orderId,
+        description: describeRefund({
+          paid,
+          amount: `${formatCents(attempt.refundAmountCents)} ${attempt.currency}`,
+          orderLabel: typeof orderNumber === 'string' && orderNumber !== ''
+            ? `order ${orderNumber}`
+            : `order ${orderId}`,
+          accessRevoked: Number(finalization?.entitlements_changed ?? 0) > 0
+            || Number(finalization?.licenses_changed ?? 0) > 0
+            || Number(finalization?.sessions_changed ?? 0) > 0,
+        }),
+        before: orderBefore,
+        after: {
+          status: 'refunded',
+          paypal_refund_id: attempt.paypalRefundId,
+          refund_amount_cents: attempt.refundAmountCents,
+          currency: attempt.currency,
+          reason: attempt.reason,
+          entitlements_changed: finalization?.entitlements_changed ?? 0,
+          licenses_changed: finalization?.licenses_changed ?? 0,
+          sessions_changed: finalization?.sessions_changed ?? 0,
+        },
+        blastRadius: 'critical',
+        // NEVER an undo. See the module header.
+        undoReason: paid
+          ? 'PayPal has no way to reverse a refund — the money has already left your '
+            + 'account, and charging the customer again means they must buy the product again'
+          : "the order was marked refunded and the customer's access, license keys and "
+            + 'device sessions were revoked — restoring them means granting the '
+            + 'entitlement again by hand',
+      },
+      supabase,
+    );
   }
 
   return completedResponse();

@@ -12,6 +12,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError, apiError, apiServerError } from '@/lib/api/response';
+import { humanizeColumn, readRowBefore, recordAdminChange } from '@/lib/admin-changes';
 import {
   assertProductRolesNotIncomeEarning,
   COMMERCE_INCOME_WALL_MESSAGE,
@@ -45,6 +46,31 @@ function commerceWriteError(error: { message: string; code?: string }) {
     return apiError(COMMERCE_INCOME_WALL_MESSAGE, 409);
   }
   return dbError(error, 'store/plans');
+}
+
+/**
+ * Why no plan change offers an undo button.
+ *
+ * The undo route replays a stored payload as a row update, but only against
+ * tables listed in `UNDO_TABLE_COLUMNS` — and `plans` is not one of them.
+ * Attaching an undo anyway would be silently dropped at record time and shown
+ * as a generic "no safe reversal exists"; saying it plainly here tells the
+ * owner what to actually do instead.
+ */
+const PLAN_UNDO_REASON =
+  'subscription plans are outside the dashboard undo system — edit the plan again to change it back';
+
+/** `1999, 'USD'` → `"19.99 USD"` — the real-money amount a subscriber is charged. */
+function formatRealMoney(cents: number, currency: string): string {
+  const whole = Math.trunc(Math.abs(cents) / 100);
+  const fraction = String(Math.abs(cents) % 100).padStart(2, '0');
+  return `${cents < 0 ? '-' : ''}${whole}.${fraction} ${currency.toUpperCase()}`;
+}
+
+/** "every month" / "every 3 months" — the billing cadence in plain words. */
+function describeInterval(unit: string, count: number): string {
+  const noun = unit.toLowerCase();
+  return count === 1 ? `every ${noun}` : `every ${count} ${noun}s`;
 }
 
 async function loadGuildProduct(
@@ -209,6 +235,27 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (error) return commerceWriteError(error);
+
+  await recordAdminChange(
+    {
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'store.plan_created',
+      targetType: 'subscription plan',
+      targetId: id,
+      description:
+        `Created the subscription plan "${body.name}" — subscribers are charged `
+        + `${formatRealMoney(body.price_cents, body.currency ?? 'USD')} in real money `
+        + `${describeInterval(body.interval_unit, body.interval_count ?? 1)}`,
+      after: data as Record<string, unknown> | null,
+      blastRadius: 'medium',
+      undoReason:
+        'a newly created subscription plan cannot be removed by an undo — delete it '
+        + 'from the product\'s plan list instead',
+    },
+    supabase,
+  );
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -297,6 +344,10 @@ export async function PUT(req: NextRequest) {
     return apiServerError(err, 'store/plans');
   }
 
+  // Prior values are captured BEFORE the write — read afterwards they would
+  // just be the values that were written.
+  const before = await readRowBefore(supabase, 'plans', { id, guild_id: guildId });
+
   const { data, error } = await supabase
     .from('plans')
     .update({ ...updates, updated_at: new Date().toISOString() })
@@ -306,6 +357,35 @@ export async function PUT(req: NextRequest) {
     .single();
 
   if (error) return commerceWriteError(error);
+
+  const changedFields = Object.keys(updates).map(humanizeColumn);
+  const pricingChanged = 'price_cents' in updates
+    || 'currency' in updates
+    || 'active' in updates
+    || 'interval_unit' in updates
+    || 'interval_count' in updates;
+
+  await recordAdminChange(
+    {
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'store.plan_updated',
+      targetType: 'subscription plan',
+      targetId: id,
+      description:
+        `Updated the subscription plan "${(before?.name as string | undefined) ?? id}"`
+        + (changedFields.length > 0 ? ` (${changedFields.join(', ')})` : '')
+        + (pricingChanged
+          ? ' — this changes what subscribers are charged in real money from their next bill'
+          : ''),
+      before,
+      after: updates as Record<string, unknown>,
+      blastRadius: pricingChanged ? 'high' : 'medium',
+      undoReason: PLAN_UNDO_REASON,
+    },
+    supabase,
+  );
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -344,6 +424,10 @@ export async function DELETE(req: NextRequest) {
     return apiServerError(err, 'store/plans');
   }
 
+  // The whole row, read before it is destroyed — the change history is the only
+  // place the deleted plan survives.
+  const before = await readRowBefore(supabase, 'plans', { id, guild_id: guildId });
+
   const { error } = await supabase
     .from('plans')
     .delete()
@@ -351,5 +435,25 @@ export async function DELETE(req: NextRequest) {
     .eq('guild_id', guildId);
 
   if (error) return commerceWriteError(error);
+
+  await recordAdminChange(
+    {
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'store.plan_deleted',
+      targetType: 'subscription plan',
+      targetId: id,
+      description:
+        `Deleted the subscription plan "${(before?.name as string | undefined) ?? id}" — `
+        + 'nobody can start a new subscription on it',
+      before,
+      blastRadius: 'high',
+      undoReason:
+        'the plan row was permanently deleted, so there is nothing to restore it into — '
+        + 'create the plan again to offer it',
+    },
+    supabase,
+  );
+
   return NextResponse.json({ success: true });
 }

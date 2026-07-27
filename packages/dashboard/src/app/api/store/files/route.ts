@@ -14,6 +14,15 @@ import { randomBytes } from 'crypto';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { recordAdminChange } from '@/lib/admin-changes';
+
+/** The owner-facing name of a product file, whichever column carries it. */
+function fileLabel(row: Record<string, unknown> | null | undefined): string {
+  const candidates = [row?.display_name, row?.name, row?.file_name];
+  const named = candidates.find((v) => typeof v === 'string' && v.trim() !== '');
+  return typeof named === 'string' ? named : 'unnamed file';
+}
+
 const STORAGE_BUCKET = 'product-files';
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 
@@ -215,6 +224,25 @@ export async function POST(req: NextRequest) {
     return dbError(insertError, 'store/files');
   }
 
+  await recordAdminChange(
+    {
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'store.product_file_uploaded',
+      targetType: 'product download',
+      targetId: (fileRecord as { id?: string } | null)?.id ?? null,
+      description:
+        `Uploaded "${displayName ?? file.name}" (version ${version ?? '1.0.0'}) to the `
+        + `store product "${product.name}" — everyone who has bought it can download it`,
+      after: fileRecord as Record<string, unknown> | null,
+      blastRadius: 'medium',
+      undoReason:
+        'a newly uploaded file cannot be removed by an undo — delete it from the '
+        + "product's file list instead",
+    },
+    supabase,
+  );
+
   return NextResponse.json({ success: true, data: fileRecord });
 }
 
@@ -268,6 +296,28 @@ export async function DELETE(req: NextRequest) {
   if (error) {
     return dbError(error, 'store/files');
   }
+
+  // `fileRecord` was read (whole row) before both deletions, so the change
+  // history still describes exactly what was removed.
+  await recordAdminChange(
+    {
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'store.product_file_deleted',
+      targetType: 'product download',
+      targetId: fileId,
+      description:
+        `Deleted "${fileLabel(fileRecord as Record<string, unknown>)}" from a store `
+        + 'product — the stored file itself was erased, so customers who paid for it '
+        + 'can no longer download it',
+      before: fileRecord as Record<string, unknown>,
+      blastRadius: 'high',
+      undoReason:
+        'the file was erased from storage as well as the catalogue, so nothing remains '
+        + 'to restore — upload the file again',
+    },
+    supabase,
+  );
 
   return NextResponse.json({ success: true });
 }
