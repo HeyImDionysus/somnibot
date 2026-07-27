@@ -12,7 +12,7 @@
  * nothing — the receipt DM rendered a null licence key.
  *
  * The authoritative rail is the database trigger added in
- * `20260727010000_license_delivery_requires_config.sql`, which auto-provisions
+ * `20260727040000_license_delivery_requires_config.sql`, which auto-provisions
  * the config for ANY writer (dashboard, bot, seed, manual SQL). The helper here
  * is the store-route's verification of that rail: it confirms the config really
  * landed for the product this request just wrote and, if it somehow did not,

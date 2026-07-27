@@ -2,7 +2,7 @@
  * Finding 6 — a `license_key` product must be able to deliver a key.
  *
  * The authoritative rail is the DB trigger in
- * `20260727010000_license_delivery_requires_config.sql`. These cover the
+ * `20260727040000_license_delivery_requires_config.sql`. These cover the
  * store-route's verification of that rail: the product either provably has a
  * `product_license_config` row, or it is taken off sale.
  */
