@@ -3,21 +3,28 @@
 @tailwind utilities;
 
 :root {
+  /* Kept in lockstep with tailwind.config.ts — same names, same values. Two
+     sources of truth for one palette is how a UI drifts. */
   --bg-primary: #313338;
   --bg-secondary: #2b2d31;
   --bg-tertiary: #1e1f22;
   --bg-floating: #111214;
+  --bg-elevated: #383a40;
+  --bg-hover: #35373c;
+  --bg-active: #404249;
   --text-primary: #f2f3f5;
   --text-secondary: #b5bac1;
   --text-muted: #949ba4;
   --accent-primary: #5865f2;
+  --accent-primary-hover: #4752c4;
   --accent-success: #23a559;
   --accent-danger: #f23f43;
   --accent-warning: #f0b232;
   --border-subtle: #3f4147;
   --border-strong: #4e5058;
-  --radius-card: 8px;
-  --radius-input: 4px;
+  --radius-card: 12px;
+  --radius-input: 8px;
+  --radius-panel: 16px;
   --transition-speed: 150ms;
 }
 
@@ -42,12 +49,12 @@ body {
 
 ::-webkit-scrollbar-track {
   background: var(--bg-secondary);
-  border-radius: 4px;
+  border-radius: 8px;
 }
 
 ::-webkit-scrollbar-thumb {
   background: var(--bg-floating);
-  border-radius: 4px;
+  border-radius: 8px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
