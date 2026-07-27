@@ -7,6 +7,7 @@
 import { TableSkeleton } from '@/components/shared/loading-skeleton';
 
 import { useEffect, useState, useCallback } from 'react';
+import { ChannelPicker } from '@/components/shared/channel-picker';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -90,6 +91,14 @@ export default function FraudPage() {
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // Fraud notification routing. The columns and the bot's mirror have existed
+  // since migration 20260723120100; the dashboard never surfaced them, so an
+  // owner could not choose where critical fraud signals are announced.
+  const [staffChannelId, setStaffChannelId] = useState<string | null>(null);
+  const [dmOnCritical, setDmOnCritical] = useState(true);
+  const [notifySaving, setNotifySaving] = useState(false);
+  const [notifyError, setNotifyError] = useState<string | null>(null);
+  const [notifySaved, setNotifySaved] = useState(false);
 
   const loadSignals = useCallback(async () => {
     setLoading(true);
@@ -136,12 +145,101 @@ export default function FraudPage() {
     loadRules();
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/guild');
+        if (!res.ok) return;
+        const body = await res.json();
+        const cfg = (body?.data ?? body?.config ?? body) as Record<string, unknown>;
+        if (cancelled || !cfg) return;
+        setStaffChannelId((cfg.fraud_staff_alert_channel_id as string | null) ?? null);
+        setDmOnCritical((cfg.fraud_owner_dm_on_critical as boolean | undefined) ?? true);
+      } catch {
+        // Non-fatal: the rest of the page still works without the routing card.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const saveNotificationConfig = async (patch: Record<string, string | boolean | null>) => {
+    setNotifySaving(true);
+    setNotifyError(null);
+    setNotifySaved(false);
+    try {
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setNotifyError((body as { error?: string }).error ?? 'Could not save that setting.');
+        return;
+      }
+      setNotifySaved(true);
+    } catch {
+      setNotifyError('Could not reach the server to save that setting.');
+    } finally {
+      setNotifySaving(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-discord-text-primary">Fraud Controls</h1>
         <p className="mt-1 text-sm text-discord-text-muted">Monitor suspicious activity and configure detection rules</p>
+      </div>
+
+      {/* Notification routing */}
+      <div className="rounded-lg bg-discord-bg-secondary p-4">
+        <h2 className="text-lg font-semibold text-discord-text-primary">Who hears about fraud</h2>
+        <p className="mt-1 text-sm text-discord-text-muted">
+          Where the bot announces suspicious activity. Without a channel set, critical
+          signals still appear here but nobody is told in Discord.
+        </p>
+
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <ChannelPicker
+            label="Staff alert channel"
+            hint="Pick a channel only your staff can read — these messages name members."
+            value={staffChannelId}
+            allowNone
+            channelTypes={['text']}
+            disabled={notifySaving}
+            onChange={(v) => {
+              const next = Array.isArray(v) ? (v[0] ?? null) : v;
+              setStaffChannelId(next);
+              void saveNotificationConfig({ fraud_staff_alert_channel_id: next });
+            }}
+          />
+          <label className="flex items-start gap-2 text-sm text-discord-text-primary sm:pt-7">
+            <input
+              type="checkbox"
+              className="mt-1 rounded"
+              checked={dmOnCritical}
+              disabled={notifySaving}
+              onChange={(e) => {
+                setDmOnCritical(e.target.checked);
+                void saveNotificationConfig({ fraud_owner_dm_on_critical: e.target.checked });
+              }}
+            />
+            <span>
+              DM me for critical signals
+              <span className="block text-xs text-discord-text-muted">
+                Sent to the server owner, in addition to the channel above.
+              </span>
+            </span>
+          </label>
+        </div>
+
+        {notifyError && <p className="mt-3 text-sm text-red-400">{notifyError}</p>}
+        {notifySaved && !notifyError && (
+          <p className="mt-3 text-sm text-green-400">Saved.</p>
+        )}
       </div>
 
       {/* Summary Cards */}

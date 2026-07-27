@@ -95,6 +95,15 @@ export default function TeamSettingsPage() {
   const [confirmDeleteRole, setConfirmDeleteRole] = useState<{ id: string; name: string } | null>(null);
 
   const [tab, setTab] = useState<'members' | 'roles'>('members');
+  // Invitation controls. These columns and the bot's sweeper have existed since
+  // migration 20260723193000; the dashboard never surfaced them, so the consent
+  // model they implement was not something an owner could actually choose.
+  const [directAssign, setDirectAssign] = useState(false);
+  const [inviteDm, setInviteDm] = useState(true);
+  const [maxPending, setMaxPending] = useState(25);
+  const [expiryMs, setExpiryMs] = useState(259_200_000);
+  const [ctrlSaving, setCtrlSaving] = useState(false);
+  const [ctrlError, setCtrlError] = useState<string | null>(null);
   const [roles, setRoles] = useState<DashboardRole[]>([]);
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [invitations, setInvitations] = useState<PendingInvitation[]>([]);
@@ -216,11 +225,134 @@ export default function TeamSettingsPage() {
     setPerms(perms.includes(perm) ? perms.filter(p => p !== perm) : [...perms, perm]);
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/guild');
+        if (!res.ok) return;
+        const body = await res.json();
+        const cfg = (body?.data ?? body?.config ?? body) as Record<string, unknown>;
+        if (cancelled || !cfg) return;
+        setDirectAssign((cfg.team_direct_assignment_enabled as boolean | undefined) ?? false);
+        setInviteDm((cfg.team_invite_dm_enabled as boolean | undefined) ?? true);
+        setMaxPending((cfg.team_max_pending_invitations as number | undefined) ?? 25);
+        setExpiryMs((cfg.team_invitation_expiry_ms as number | undefined) ?? 259_200_000);
+      } catch {
+        // Non-fatal: the members/roles tabs still work without this card.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const saveTeamControls = async (patch: Record<string, string | number | boolean>) => {
+    setCtrlSaving(true);
+    setCtrlError(null);
+    try {
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setCtrlError((body as { error?: string }).error ?? 'Could not save that setting.');
+      }
+    } catch {
+      setCtrlError('Could not reach the server to save that setting.');
+    } finally {
+      setCtrlSaving(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-discord-text-primary">Team</h1>
         <p className="mt-1 text-sm text-discord-text-muted">Manage dashboard access with role-based permissions</p>
+      </div>
+
+      {/* How invitations work */}
+      <div className="rounded-lg bg-discord-bg-secondary p-4">
+        <h2 className="text-lg font-semibold text-discord-text-primary">How invitations work</h2>
+        <p className="mt-1 text-sm text-discord-text-muted">
+          By default, adding someone sends an invitation they have to accept.
+        </p>
+
+        <div className="mt-4 space-y-4">
+          <label className="flex items-start gap-2 text-sm text-discord-text-primary">
+            <input
+              type="checkbox"
+              className="mt-1 rounded"
+              checked={directAssign}
+              disabled={ctrlSaving}
+              onChange={(e) => {
+                setDirectAssign(e.target.checked);
+                void saveTeamControls({ team_direct_assignment_enabled: e.target.checked });
+              }}
+            />
+            <span>
+              Add people without asking them first
+              <span className="block text-xs text-yellow-400/90">
+                Skips consent — someone gains dashboard access to your server without
+                agreeing to it. Leave this off unless you have a specific reason.
+              </span>
+            </span>
+          </label>
+
+          <label className="flex items-start gap-2 text-sm text-discord-text-primary">
+            <input
+              type="checkbox"
+              className="mt-1 rounded"
+              checked={inviteDm}
+              disabled={ctrlSaving}
+              onChange={(e) => {
+                setInviteDm(e.target.checked);
+                void saveTeamControls({ team_invite_dm_enabled: e.target.checked });
+              }}
+            />
+            <span>
+              DM the invitation
+              <span className="block text-xs text-discord-text-muted">
+                With this off, invitees have to be told some other way — the invite still exists.
+              </span>
+            </span>
+          </label>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="block text-sm">
+              <span className="text-discord-text-muted">Most invitations pending at once</span>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={maxPending}
+                disabled={ctrlSaving}
+                onChange={(e) => setMaxPending(Number(e.target.value))}
+                onBlur={(e) => void saveTeamControls({ team_max_pending_invitations: Number(e.target.value) })}
+                className="mt-1 w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+              />
+            </label>
+            <label className="block text-sm">
+              <span className="text-discord-text-muted">Invitations expire after</span>
+              <select
+                value={String(expiryMs)}
+                disabled={ctrlSaving}
+                onChange={(e) => {
+                  setExpiryMs(Number(e.target.value));
+                  void saveTeamControls({ team_invitation_expiry_ms: Number(e.target.value) });
+                }}
+                className="mt-1 w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+              >
+                <option value="86400000">24 hours</option>
+                <option value="259200000">3 days</option>
+                <option value="604800000">7 days</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        {ctrlError && <p className="mt-3 text-sm text-red-400">{ctrlError}</p>}
       </div>
 
       {/* Tabs */}
