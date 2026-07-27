@@ -668,3 +668,78 @@ describe('handleBuyButton — licence-key deliverability guard (Finding 6)', () 
     expect(engine.inserts.orders ?? []).toHaveLength(1);
   });
 });
+
+describe('handleBuyButton — post-checkout destinations (Finding 7)', () => {
+  beforeEach(() => {
+    invalidateBrandKitCache();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function contextOf(fetchMock: ReturnType<typeof makePayPalFetch>, endpoint: string) {
+    const call = fetchMock.mock.calls.find(([url]) => String(url).includes(endpoint));
+    expect(call).toBeDefined();
+    return JSON.parse((call![1] as RequestInit).body as string).application_context;
+  }
+
+  it.each([
+    ['one_time', '/v2/checkout/orders'],
+    ['subscription', '/v1/billing/subscriptions'],
+  ] as const)(
+    'sends the %s buyer to the public portal confirmation, never the admin store',
+    async (type, endpoint) => {
+      const { supabase } = makeQueryEngine({
+        products: [type === 'one_time' ? oneTimeProduct : subscriptionProduct],
+        customers: [{ id: 'cust-1', guild_id: VICTIM_GUILD, discord_id: 'user-1' }],
+        entitlements: [],
+        plans: type === 'subscription' ? [legitPlan] : [],
+        orders: [],
+      });
+      const fetchMock = makePayPalFetch();
+      vi.stubGlobal('fetch', fetchMock);
+
+      await handleBuyButton(
+        makeInteraction(), supabase, VICTIM_GUILD,
+        'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+      );
+
+      const context = contextOf(fetchMock, endpoint);
+      expect(context.return_url).toBe(
+        `https://dashboard.example/portal/order-complete?guild=${VICTIM_GUILD}`,
+      );
+      expect(context.cancel_url).toBe(
+        `https://dashboard.example/portal/order-cancelled?guild=${VICTIM_GUILD}`,
+      );
+      // `/store` is an admin route behind the middleware's login redirect, and
+      // nothing ever read these params.
+      expect(context.return_url).not.toContain('/store');
+      expect(context.cancel_url).not.toContain('/store');
+      expect(context.return_url).not.toContain('order_complete=true');
+      expect(context.cancel_url).not.toContain('order_cancelled=true');
+    },
+  );
+
+  it('url-encodes the guild id it hands to the confirmation page', async () => {
+    const oddGuild = 'guild/with?chars';
+    const { supabase } = makeQueryEngine({
+      products: [{ ...oneTimeProduct, guild_id: oddGuild }],
+      customers: [{ id: 'cust-1', guild_id: oddGuild, discord_id: 'user-1' }],
+      entitlements: [],
+      orders: [],
+    });
+    const fetchMock = makePayPalFetch();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await handleBuyButton(
+      makeInteraction(), supabase, oddGuild,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    const context = contextOf(fetchMock, '/v2/checkout/orders');
+    expect(context.return_url).toBe(
+      `https://dashboard.example/portal/order-complete?guild=${encodeURIComponent(oddGuild)}`,
+    );
+  });
+});

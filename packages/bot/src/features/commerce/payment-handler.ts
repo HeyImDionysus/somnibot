@@ -320,8 +320,19 @@ export async function handleBuyButton(
   }
 
   const price = (product.price_cents / 100).toFixed(2);
-  const returnUrl = `${dashboardUrl}/store?order_complete=true`;
-  const cancelUrl = `${dashboardUrl}/store?order_cancelled=true`;
+  // Post-checkout destinations MUST be publicly reachable: the buyer is a
+  // Discord customer, not a dashboard admin. `/store` lives under
+  // app/(dashboard) and is not in the middleware's public-route list, so the
+  // old return_url dumped every paying customer on the admin /login page — and
+  // nothing ever read the `order_complete` / `order_cancelled` params anyway.
+  // `/portal/*` is already sessionless-public, so these pages need no
+  // middleware change and expose no admin surface. The guild id rides along so
+  // the page can link to the right per-guild portal; it is a public server id,
+  // and the pages deliberately show NOTHING customer-specific because these
+  // URLs are guessable.
+  const portalQuery = `?guild=${encodeURIComponent(guildId)}`;
+  const returnUrl = `${dashboardUrl}/portal/order-complete${portalQuery}`;
+  const cancelUrl = `${dashboardUrl}/portal/order-cancelled${portalQuery}`;
   // White-label: the PayPal checkout brand must be the owner's store brand.
   const brandName = brandKit.brandName;
 
