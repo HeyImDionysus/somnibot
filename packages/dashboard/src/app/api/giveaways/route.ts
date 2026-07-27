@@ -14,6 +14,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 /**
  * [#57] Append-only audit rows for the dashboard giveaway CRUD surface (the
@@ -169,6 +170,19 @@ export async function POST(req: NextRequest) {
 
   await notifyBot('giveaways');
 
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'created',
+    action: 'giveaways.giveaway_created',
+    table: 'giveaways',
+    targetType: 'giveaway',
+    targetId: (data as { id?: string } | null)?.id ?? null,
+    label: undefined,
+    after: data as Record<string, unknown> | null,
+    blastRadius: 'medium',
+  }, supabase);
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -255,6 +269,22 @@ export async function PUT(req: NextRequest) {
 
   await notifyBot('giveaways');
 
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'updated',
+    action: 'giveaways.giveaway_updated',
+    table: 'giveaways',
+    targetType: 'giveaway',
+    targetId: body.id,
+    label: (beforeRow as Record<string, unknown> | null)?.prize as string | undefined,
+
+    before: (beforeRow as Record<string, unknown> | null) ?? undefined,
+    after: updates as Record<string, unknown>,
+    match: { id: body.id, guild_id: auth.ctx.guildId },
+    blastRadius: 'medium',
+  }, supabase);
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -273,6 +303,8 @@ export async function DELETE(req: NextRequest) {
   if (!id) {
     return NextResponse.json({ success: false, error: 'Missing giveaway id' }, { status: 400 });
   }
+
+  const before = await readRowBefore(supabase, 'giveaways', { id: id, guild_id: auth.ctx.guildId });
 
   const { data: deletedRows, error } = await supabase
     .from('giveaways')
@@ -298,6 +330,20 @@ export async function DELETE(req: NextRequest) {
   }
 
   await notifyBot('giveaways');
+
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'deleted',
+    action: 'giveaways.giveaway_deleted',
+    table: 'giveaways',
+    targetType: 'giveaway',
+    targetId: id,
+    label: before?.prize as string | undefined,
+
+    before,
+    blastRadius: 'medium',
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }

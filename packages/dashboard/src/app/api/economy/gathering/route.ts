@@ -109,7 +109,6 @@ export async function POST(request: NextRequest) {
 
     await notifyBot('economy');
 
-
     await recordCrudChange({
       guildId: ctx.guildId,
       actorId: ctx.discordId,
@@ -149,7 +148,6 @@ export async function PUT(request: NextRequest) {
 
     const admin = createAdminSupabase();
 
-
     const before = await readRowBefore(admin, 'economy_loot_tables', { id: id, guild_id: ctx.guildId });
 
     const { data, error } = await admin
@@ -169,31 +167,19 @@ export async function PUT(request: NextRequest) {
 
     await notifyBot('economy');
 
-
     await recordCrudChange({
-
       guildId: ctx.guildId,
-
       actorId: ctx.discordId,
-
       operation: 'updated',
-
       action: 'economy.loot_table_updated',
-
       table: 'economy_loot_tables',
-
       targetType: 'loot table',
-
       targetId: id,
-
       label: before?.name as string | undefined,
 
       before,
-
       after: parsed as Record<string, unknown>,
-
       match: { id: id, guild_id: ctx.guildId },
-
     }, admin);
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
@@ -215,9 +201,7 @@ export async function DELETE(request: NextRequest) {
 
     const admin = createAdminSupabase();
 
-
     // Captured first: the row is hard-deleted, so this is the only copy left.
-
     const before = await readRowBefore(admin, 'economy_loot_tables', { id: id, guild_id: ctx.guildId });
 
     const { error } = await admin
@@ -232,29 +216,18 @@ export async function DELETE(request: NextRequest) {
 
     await notifyBot('economy');
 
-
     await recordCrudChange({
-
       guildId: ctx.guildId,
-
       actorId: ctx.discordId,
-
       operation: 'deleted',
-
       action: 'economy.loot_table_deleted',
-
       table: 'economy_loot_tables',
-
       targetType: 'loot table',
-
       targetId: id,
-
       label: before?.name as string | undefined,
 
       before,
-
       blastRadius: 'medium',
-
     }, admin);
     return NextResponse.json({ success: true });
   } catch (err: unknown) {

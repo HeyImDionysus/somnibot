@@ -11,6 +11,7 @@ import { parseBody } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 const fraudRuleCreate = z.object({
   name: z.string().min(1).max(100).trim(),
@@ -76,6 +77,20 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (error) return dbError(error, 'fraud/rules');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'created',
+      action: 'fraud.rule_created',
+      table: 'fraud_rules',
+      targetType: 'fraud rule',
+      targetId: (data as { id?: string } | null)?.id ?? null,
+      label: undefined,
+      after: data as Record<string, unknown> | null,
+      blastRadius: 'medium',
+    }, admin);
+
     return NextResponse.json({ success: true, data });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
@@ -101,6 +116,8 @@ export async function PATCH(request: NextRequest) {
     if (body.config !== undefined) updates.config = body.config;
     if (body.auto_action !== undefined) updates.auto_action = body.auto_action;
 
+    const before = await readRowBefore(admin, 'fraud_rules', { id: body.id, guild_id: ctx.guildId });
+
     const { data, error } = await admin
       .from('fraud_rules')
       .update(updates)
@@ -110,6 +127,22 @@ export async function PATCH(request: NextRequest) {
       .single();
 
     if (error) return dbError(error, 'fraud/rules');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'updated',
+      action: 'fraud.rule_updated',
+      table: 'fraud_rules',
+      targetType: 'fraud rule',
+      targetId: body.id,
+      label: before?.name as string | undefined,
+      before,
+      after: updates as Record<string, unknown>,
+      match: { id: body.id, guild_id: ctx.guildId },
+      blastRadius: 'medium',
+    }, admin);
+
     return NextResponse.json({ success: true, data });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
@@ -128,6 +161,8 @@ export async function DELETE(request: NextRequest) {
     if (!ruleId) return NextResponse.json({ error: 'Missing rule ID' }, { status: 400 });
 
     const admin = createAdminSupabase();
+    const before = await readRowBefore(admin, 'fraud_rules', { id: ruleId, guild_id: ctx.guildId });
+
     const { error } = await admin
       .from('fraud_rules')
       .delete()
@@ -135,6 +170,20 @@ export async function DELETE(request: NextRequest) {
       .eq('guild_id', ctx.guildId);
 
     if (error) return dbError(error, 'fraud/rules');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'deleted',
+      action: 'fraud.rule_deleted',
+      table: 'fraud_rules',
+      targetType: 'fraud rule',
+      targetId: ruleId,
+      label: before?.name as string | undefined,
+      before,
+      blastRadius: 'medium',
+    }, admin);
+
     return NextResponse.json({ success: true });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';

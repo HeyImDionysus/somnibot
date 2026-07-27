@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 // Branded member-surface templates: blank/null ⇒ bot's built-in default.
@@ -135,6 +136,18 @@ export async function POST(req: NextRequest) {
 
   await notifyBot('temp-channels');
 
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'created',
+    action: 'temp_channels.hub_created',
+    table: 'temp_channel_hubs',
+    targetType: 'temp channel hub',
+    targetId: (data as { id?: string } | null)?.id ?? null,
+    label: undefined,
+    after: data as Record<string, unknown> | null,
+  }, supabase);
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -160,6 +173,8 @@ export async function PUT(req: NextRequest) {
   }
   updates.updated_at = new Date().toISOString();
 
+  const before = await readRowBefore(supabase, 'temp_channel_hubs', { id: body.id, guild_id: auth.ctx.guildId });
+
   const { data, error } = await supabase
     .from('temp_channel_hubs')
     .update(updates)
@@ -173,6 +188,21 @@ export async function PUT(req: NextRequest) {
   }
 
   await notifyBot('temp-channels');
+
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'updated',
+    action: 'temp_channels.hub_updated',
+    table: 'temp_channel_hubs',
+    targetType: 'temp channel hub',
+    targetId: body.id,
+    label: before?.name as string | undefined,
+
+    before,
+    after: updates as Record<string, unknown>,
+    match: { id: body.id, guild_id: auth.ctx.guildId },
+  }, supabase);
 
   return NextResponse.json({ success: true, data });
 }
@@ -193,6 +223,8 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing hub id' }, { status: 400 });
   }
 
+  const before = await readRowBefore(supabase, 'temp_channel_hubs', { id: id, guild_id: auth.ctx.guildId });
+
   const { error } = await supabase
     .from('temp_channel_hubs')
     .delete()
@@ -204,6 +236,19 @@ export async function DELETE(req: NextRequest) {
   }
 
   await notifyBot('temp-channels');
+
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'deleted',
+    action: 'temp_channels.hub_deleted',
+    table: 'temp_channel_hubs',
+    targetType: 'temp channel hub',
+    targetId: id,
+    label: before?.name as string | undefined,
+
+    before,
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }

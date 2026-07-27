@@ -123,7 +123,6 @@ export async function PUT(request: NextRequest) {
 
     const before = await readRowBefore(supabase, 'economy_adventures', { id: parsed.id, guild_id: ctx.guildId });
 
-
     const { data, error } = await supabase
       .from('economy_adventures')
       .update(updateData)

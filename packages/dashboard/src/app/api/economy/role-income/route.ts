@@ -23,6 +23,7 @@ import {
   COMMERCE_INCOME_WALL_MESSAGE,
   isCommerceIncomeWallConflictError,
 } from '@/lib/api/commerce-income-wall';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 export async function POST(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'write');
@@ -60,6 +61,19 @@ export async function POST(request: NextRequest) {
 
     await notifyBot('economy');
 
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'created',
+      action: 'economy.role_income_created',
+      table: 'economy_role_income',
+      targetType: 'role income entry',
+      targetId: parsed.data.role_id,
+      label: `role ${parsed.data.role_id}`,
+      after: parsed.data as Record<string, unknown>,
+      blastRadius: 'medium',
+    }, admin);
+
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
@@ -80,6 +94,8 @@ export async function DELETE(request: NextRequest) {
 
     const admin = createAdminSupabase();
 
+    const before = await readRowBefore(admin, 'economy_role_income', { role_id, guild_id: ctx.guildId });
+
     const { error } = await admin
       .from('economy_role_income')
       .delete()
@@ -91,6 +107,19 @@ export async function DELETE(request: NextRequest) {
     }
 
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'deleted',
+      action: 'economy.role_income_deleted',
+      table: 'economy_role_income',
+      targetType: 'role income entry',
+      targetId: role_id,
+      label: `role ${role_id}`,
+      before,
+      blastRadius: 'medium',
+    }, admin);
 
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
