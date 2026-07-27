@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 200 migration files in packages/supabase/migrations/
+ * Source: 201 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1565,6 +1565,10 @@ export interface DbCommercePortalRequests {
   reason: string | null;
   created_at: string;
   updated_at: string;
+  reviewer_id: string | null;
+  resolution_note: string | null;
+  decided_at: string | null;
+  customer_notified: boolean;
 }
 
 export interface DbCommerceProductTempRoleConfig {
