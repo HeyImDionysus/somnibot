@@ -322,7 +322,29 @@ async function isRaidModeActive(guildId: string): Promise<boolean> {
  * Activate raid mode for a guild (with auto-expiry).
  * V5 Audit §14.6 — Falls back to in-memory state if Valkey is unavailable.
  */
-async function activateRaidMode(guildId: string): Promise<void> {
+async function activateRaidMode(
+  guildId: string,
+  supabase?: SupabaseClient,
+  triggerJoins = 0,
+): Promise<void> {
+  // Durable mirror FIRST: Valkey expires in 5 minutes and dies with the
+  // process, so a restart mid-raid would otherwise drop containment, strand
+  // the lockdown at "Very High" with invites paused, and lose the auto-unban
+  // queue. Best-effort — a failed write must never stop containment.
+  if (supabase) {
+    try {
+      await supabase.from('anti_raid_state').upsert({
+        guild_id: guildId,
+        activated_at: new Date().toISOString(),
+        trigger_joins: triggerJoins,
+        expires_at: new Date(Date.now() + RAID_MODE_COOLDOWN).toISOString(),
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'guild_id' });
+    } catch (err) {
+      log.warn('Could not persist raid state', { guildId, error: String(err) });
+    }
+  }
+
   try {
     const valkey = getValkey();
     await valkey.set(raidModeKey(guildId), String(Date.now()), 'PX', RAID_MODE_COOLDOWN);
@@ -353,6 +375,8 @@ export async function processAntiRaid(
     try {
       await member.send({
         content: `⚠️ Your account is too new to join **${guild.name}**. Accounts must be at least ${config.anti_raid_account_age_days} day(s) old. Please try again later.`,
+        // DM to a blocked member — nothing here should ping.
+        allowedMentions: { parse: [] },
       }).catch((e: unknown) => { log.warn('Action failed:', (e as Error)?.message ?? e); });
 
       await member.kick(`Anti-raid: Account age ${Math.floor(accountAgeDays)}d < ${config.anti_raid_account_age_days}d minimum`);
@@ -432,6 +456,10 @@ export async function processAntiRaid(
         await restoreLockdownInvites(guild, config, eventBus).catch((err) => {
           log.error('Failed to restore lockdown invites:', { error: String(err) });
         });
+
+        // Containment is fully undone — drop the durable record so a later
+        // restart does not try to resume a raid that is over.
+        await clearRaidState(supabase, guild.id);
       }
     } catch {
       // Best-effort restore
@@ -440,7 +468,7 @@ export async function processAntiRaid(
 
   // Check if threshold exceeded — activate raid mode
   if (joinCount >= config.anti_raid_join_threshold && !raidActive) {
-    await activateRaidMode(guild.id);
+    await activateRaidMode(guild.id, supabase, joinCount);
 
     const embed = new EmbedBuilder()
       .setTitle('🚨 RAID DETECTED')
@@ -469,6 +497,8 @@ export async function processAntiRaid(
       if (action === 'kick' || action === 'ban') {
         await member.send({
           content: `⚠️ **${guild.name}** is currently experiencing a raid. Your join has been temporarily blocked. Please try again later.`,
+          // DM to a blocked member — nothing here should ping.
+          allowedMentions: { parse: [] },
         }).catch((e: unknown) => { log.warn('Action failed:', (e as Error)?.message ?? e); });
 
         if (action === 'ban') {
@@ -790,6 +820,78 @@ async function processRaidUnbans(guild: Guild, config: AntiRaidConfig, eventBus?
 /**
  * Invalidate config cache (called from ConfigWatcher).
  */
+/** Drop the durable raid record. Best-effort: never blocks the caller. */
+async function clearRaidState(supabase: SupabaseClient, guildId: string): Promise<void> {
+  try {
+    await supabase.from('anti_raid_state').delete().eq('guild_id', guildId);
+  } catch (err) {
+    log.warn('Could not clear raid state', { guildId, error: String(err) });
+  }
+}
+
+/**
+ * Rebuild raid mode after a restart.
+ *
+ * Called once per guild at boot. Raid mode lived only in Valkey (5-minute PX)
+ * and in memory, so restarting mid-raid dropped containment, left any lockdown
+ * pinned at "Very High" with its invites paused, and lost the auto-unban queue
+ * — with nothing scheduled to undo any of it.
+ *
+ * Two outcomes, both better than the silence they replace:
+ *   * still within the window → re-arm Valkey for the REMAINING time, so
+ *     containment continues and the normal expiry path still runs;
+ *   * already elapsed → leave raid mode off and clear the record, so the next
+ *     join takes the ordinary "raid is over" branch that restores verification
+ *     and sweeps the unbans.
+ */
+export async function resumeRaidState(
+  guild: Guild,
+  supabase: SupabaseClient,
+): Promise<'resumed' | 'expired' | 'none'> {
+  type RaidStateRow = { expires_at?: string; trigger_joins?: number };
+  let row: RaidStateRow | null = null;
+  try {
+    const { data, error } = await supabase
+      .from('anti_raid_state')
+      .select('expires_at, trigger_joins')
+      .eq('guild_id', guild.id)
+      .maybeSingle();
+    if (error) return 'none';
+    // anti_raid_state is new (20260727003000) and not in the hand-maintained
+    // client types yet — read through unknown, as elsewhere for new tables.
+    row = (data as unknown as RaidStateRow | null) ?? null;
+  } catch {
+    return 'none';
+  }
+
+  if (!row?.expires_at) return 'none';
+
+  const remainingMs = new Date(row.expires_at).getTime() - Date.now();
+
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+    // The raid lapsed while the bot was down. Do NOT re-enter raid mode for a
+    // raid that is over — clear the record and let the ordinary expiry branch
+    // restore verification and unban on the next join.
+    await clearRaidState(supabase, guild.id);
+    log.info(`Raid mode had already expired for guild ${guild.id} — cleared`);
+    return 'expired';
+  }
+
+  try {
+    const valkey = getValkey();
+    await valkey.set(raidModeKey(guild.id), String(Date.now()), 'PX', remainingMs);
+  } catch {
+    _memoryRaidMode.set(guild.id, Date.now());
+    capMap(_memoryRaidMode, MAX_MEMORY_GUILDS);
+  }
+
+  log.warn(
+    `Resumed active raid mode for guild ${guild.id} after restart `
+    + `(${Math.round(remainingMs / 1000)}s remaining, ${row.trigger_joins ?? 0} trigger joins)`,
+  );
+  return 'resumed';
+}
+
 export function invalidateAntiRaidCache(guildId?: string): void {
   if (guildId) {
     _configCache.delete(guildId);

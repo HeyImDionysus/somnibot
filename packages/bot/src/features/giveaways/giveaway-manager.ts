@@ -544,6 +544,8 @@ export class GiveawayManager {
       const winnerMentions = newWinners.map((id) => `<@${id}>`).join(', ');
       await channel.send({
         content: `🎊 **Giveaway Reroll** — New winner${newWinners.length > 1 ? 's' : ''}: ${winnerMentions || 'No eligible entries'}`,
+        // winners are pinged on purpose; the PRIZE name is owner-authored.
+        allowedMentions: { parse: ['users'] },
       });
     }
 
@@ -621,10 +623,16 @@ export class GiveawayManager {
               `Winner${winners.length > 1 ? 's' : ''}: ${winnerMentions}\n\nCongratulations!`,
             );
           applyBrand(embed, kit, { intent: 'primary' });
-          await channel.send({ content: winnerMentions, embeds: [embed] });
+          await channel.send({
+            content: winnerMentions,
+            embeds: [embed],
+            allowedMentions: { parse: ['users'] },
+          });
         } else {
           await channel.send({
             content: `🎉 **Giveaway ended!** Prize: **${giveaway.prize}**\nWinner${winners.length > 1 ? 's' : ''}: ${winnerMentions}\n\nCongratulations!`,
+            // nobody won — nothing should ping.
+            allowedMentions: { parse: [] },
           });
         }
       } else if (this.cfg.winnerAnnouncementStyle === 'embed') {
@@ -637,6 +645,9 @@ export class GiveawayManager {
       } else {
         await channel.send({
           content: `😔 **Giveaway ended!** Prize: **${giveaway.prize}**\nNo valid entries — no winners selected.`,
+          // Nobody won, so nothing should ping — and the PRIZE name is
+          // owner-authored, so it must not be able to.
+          allowedMentions: { parse: [] },
         });
       }
     }

@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 198 migration files in packages/supabase/migrations/
+ * Source: 199 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1437,6 +1437,16 @@ export interface DbActionQueueDlq {
   retried_at: string | null;
   created_at: string;
   lane: 'commerce' | 'game';
+}
+
+export interface DbAntiRaidState {
+  guild_id: string;
+  activated_at: string;
+  trigger_joins: number;
+  expires_at: string;
+  previous_verification_level: number | null;
+  lockdown_channel_ids: Json;
+  updated_at: string;
 }
 
 export interface DbAppeals {

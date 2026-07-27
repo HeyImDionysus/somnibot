@@ -199,7 +199,13 @@ export async function handleStarboardReaction(
     // Update existing starboard message
     try {
       const sbMsg = await starboardChannel.messages.fetch(existing.starboard_message_id);
-      await sbMsg.edit({ content: headerText, embeds: [embed] });
+      // Same rule as the create path: an edited starboard entry must not
+      // re-ping anyone as its star count changes.
+      await sbMsg.edit({
+        content: headerText,
+        embeds: [embed],
+        allowedMentions: { parse: [] },
+      });
     } catch {
       // Message may have been deleted — create a new one below
     }
@@ -211,7 +217,13 @@ export async function handleStarboardReaction(
   } else {
     // Create new starboard message
     try {
-      const sbMsg = await starboardChannel.send({ content: headerText, embeds: [embed] });
+      // A starboard entry is a record, not a notification — the original
+      // message's own mentions must not re-ping anyone from here.
+      const sbMsg = await starboardChannel.send({
+        content: headerText,
+        embeds: [embed],
+        allowedMentions: { parse: [] },
+      });
 
       if (existing) {
         await supabase
