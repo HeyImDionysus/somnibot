@@ -31,7 +31,12 @@ import { createMockSupabase, registerTable, buildRequest } from './helpers';
 const PRODUCT_ID = '00000000-0000-4000-a000-000000000001';
 const MAX_DEVICES = 3;
 
-type SessionRow = { active: boolean; last_seen_at: string; deactivation_reason: string | null };
+type SessionRow = {
+  active: boolean;
+  last_seen_at: string;
+  deactivation_reason: string | null;
+  ip_address?: string | null;
+};
 
 /**
  * The exact session table a key under `evict_oldest` produces: `max_devices`
@@ -47,7 +52,12 @@ function seatThrashingRows(distinctDevices: number): SessionRow[] {
   }));
 }
 
-function setup(guildId: string, rows: SessionRow[], devicePolicy = 'evict_oldest') {
+function setup(
+  guildId: string,
+  rows: SessionRow[],
+  devicePolicy = 'evict_oldest',
+  signalError: { code?: string; message: string } | null = null,
+) {
   const mock = Object.assign(createMockSupabase(), {
     rpc: vi.fn().mockImplementation(async (fn: string) => {
       if (fn === 'license_validate_lookup') {
@@ -74,6 +84,11 @@ function setup(guildId: string, rows: SessionRow[], devicePolicy = 'evict_oldest
       if (fn === 'license_validate_device') {
         return { data: { status: 'reactivated', session_id: 'sess-1', active_devices: MAX_DEVICES, max_devices: MAX_DEVICES }, error: null };
       }
+      if (fn === 'fraud_upsert_open_signal') {
+        return signalError
+          ? { data: null, error: signalError }
+          : { data: 'signal-1', error: null };
+      }
       return { data: null, error: null };
     }),
   });
@@ -90,7 +105,7 @@ function setup(guildId: string, rows: SessionRow[], devicePolicy = 'evict_oldest
   alerts.select.mockResolvedValue({ data: [], error: null });
 
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
-  return { mock, fraudSignals };
+  return { mock, fraudSignals, alerts };
 }
 
 function req() {
@@ -105,10 +120,14 @@ function req() {
   });
 }
 
-function deviceAbuseInserts(fraudSignals: ReturnType<typeof registerTable>) {
-  return fraudSignals.insert.mock.calls
-    .map((c) => c[0] as Record<string, unknown>)
-    .filter((s) => s.signal_type === 'device_abuse');
+function signalUpserts(mock: ReturnType<typeof createMockSupabase>) {
+  return mock.rpc.mock.calls
+    .filter((call) => call[0] === 'fraud_upsert_open_signal')
+    .map((call) => call[1] as Record<string, unknown>);
+}
+
+function deviceAbuseUpserts(mock: ReturnType<typeof createMockSupabase>) {
+  return signalUpserts(mock).filter((signal) => signal.p_signal_type === 'device_abuse');
 }
 
 let errorSpy: ReturnType<typeof vi.spyOn>;
@@ -126,69 +145,140 @@ describe('device-abuse signal under the default evict_oldest policy', () => {
   it('fires on ten sharers even though the seat count is pinned at three', async () => {
     // The scenario the old detector could not see. Only MAX_DEVICES rows are
     // active — `activeDevices > maxDevices * 3` is 3 > 9, false, forever.
-    const { fraudSignals } = setup('guild-shared', seatThrashingRows(10));
+    const { mock, fraudSignals } = setup('guild-shared', seatThrashingRows(10));
 
     const res = await POST(req() as never);
     expect(res.status).toBe(200);
 
-    await vi.waitFor(() => expect(deviceAbuseInserts(fraudSignals)).toHaveLength(1));
+    await vi.waitFor(() => expect(deviceAbuseUpserts(mock)).toHaveLength(1));
 
-    const signal = deviceAbuseInserts(fraudSignals)[0];
-    expect(signal.severity).toBe('high');
-    expect(signal.entity_id).toBe('key-1');
-    const evidence = signal.evidence as Record<string, unknown>;
+    const signal = deviceAbuseUpserts(mock)[0];
+    expect(signal.p_severity).toBe('high');
+    expect(signal.p_entity_id).toBe('key-1');
+    const evidence = signal.p_evidence as Record<string, unknown>;
     expect(evidence.devices_in_window).toBe(10);
     // The signature of seat thrashing: many devices, seats pinned at the limit.
     expect(evidence.active_sessions).toBe(MAX_DEVICES);
     expect(evidence.evicted_for_device_limit).toBe(7);
+    expect(fraudSignals.insert).not.toHaveBeenCalled();
   });
 
   it('escalates to critical for a widely shared key', async () => {
-    const { fraudSignals } = setup('guild-very-shared', seatThrashingRows(20));
+    const { mock } = setup('guild-very-shared', seatThrashingRows(20));
 
     await POST(req() as never);
-    await vi.waitFor(() => expect(deviceAbuseInserts(fraudSignals)).toHaveLength(1));
+    await vi.waitFor(() => expect(deviceAbuseUpserts(mock)).toHaveLength(1));
 
-    expect(deviceAbuseInserts(fraudSignals)[0].severity).toBe('critical');
+    expect(deviceAbuseUpserts(mock)[0].p_severity).toBe('critical');
   });
 
   it('fires under the reject policy too, where the count is equally pinned', async () => {
-    const { fraudSignals } = setup('guild-reject', seatThrashingRows(12), 'reject');
+    const { mock } = setup('guild-reject', seatThrashingRows(12), 'reject');
 
     await POST(req() as never);
-    await vi.waitFor(() => expect(deviceAbuseInserts(fraudSignals)).toHaveLength(1));
+    await vi.waitFor(() => expect(deviceAbuseUpserts(mock)).toHaveLength(1));
   });
 
   it('stays quiet for an honest customer using their three seats', async () => {
-    const { fraudSignals } = setup('guild-honest', seatThrashingRows(3));
+    const { mock } = setup('guild-honest', seatThrashingRows(3));
 
     const res = await POST(req() as never);
     expect(res.status).toBe(200);
     await new Promise((r) => setTimeout(r, 10));
 
-    expect(deviceAbuseInserts(fraudSignals)).toHaveLength(0);
+    expect(deviceAbuseUpserts(mock)).toHaveLength(0);
   });
 
   it('stays quiet through normal churn — a reinstall and a new laptop', async () => {
     // 3 seats + 6 historical devices over a whole week is still under the bar.
-    const { fraudSignals } = setup('guild-churn', seatThrashingRows(9));
+    const { mock } = setup('guild-churn', seatThrashingRows(9));
 
     await POST(req() as never);
     await new Promise((r) => setTimeout(r, 10));
 
-    expect(deviceAbuseInserts(fraudSignals)).toHaveLength(0);
+    expect(deviceAbuseUpserts(mock)).toHaveLength(0);
   });
 
   it('never blocks the validation — the signal is advisory', async () => {
     // A paying customer whose fingerprint is unstable gets reviewed, not
     // locked out. This is what makes the generous threshold safe.
-    const { fraudSignals } = setup('guild-advisory', seatThrashingRows(30));
+    const { mock } = setup('guild-advisory', seatThrashingRows(30));
 
     const res = await POST(req() as never);
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.valid).toBe(true);
 
-    await vi.waitFor(() => expect(deviceAbuseInserts(fraudSignals)).toHaveLength(1));
+    await vi.waitFor(() => expect(deviceAbuseUpserts(mock)).toHaveLength(1));
+  });
+
+  it('refreshes a repeated open signal without treating deduplication as a detector outage', async () => {
+    const { mock, fraudSignals, alerts } = setup('guild-repeat', seatThrashingRows(20));
+
+    await POST(req() as never);
+    await POST(req() as never);
+    await vi.waitFor(() => expect(deviceAbuseUpserts(mock)).toHaveLength(2));
+
+    expect(fraudSignals.insert).not.toHaveBeenCalled();
+    expect(alerts.insert).not.toHaveBeenCalled();
+    expect(
+      errorSpy.mock.calls.filter((call) => call[0] === '[License] Fraud check failed:'),
+    ).toHaveLength(0);
+  });
+
+  it('routes the adjacent IP-mismatch detector through the same atomic upsert', async () => {
+    const rows = Array.from({ length: 5 }, (_, index) => ({
+      active: index < MAX_DEVICES,
+      last_seen_at: new Date().toISOString(),
+      deactivation_reason: index < MAX_DEVICES ? null : 'device_limit',
+      ip_address: `203.0.113.${index + 1}`,
+    }));
+    const { mock, fraudSignals } = setup('guild-ip-mismatch', rows);
+
+    await POST(req() as never);
+    await vi.waitFor(() => expect(signalUpserts(mock)).toHaveLength(1));
+
+    expect(signalUpserts(mock)[0]).toMatchObject({
+      p_signal_type: 'ip_mismatch',
+      p_severity: 'medium',
+      p_entity_type: 'license_key',
+      p_entity_id: 'key-1',
+      p_evidence: { unique_ips: 5, window_hours: 24 },
+    });
+    expect(fraudSignals.insert).not.toHaveBeenCalled();
+  });
+
+  it('still surfaces a genuine upsert failure to the operator without blocking validation', async () => {
+    const { alerts } = setup(
+      'guild-upsert-failure',
+      seatThrashingRows(20),
+      'evict_oldest',
+      { code: '42501', message: 'permission denied for function fraud_upsert_open_signal' },
+    );
+
+    const res = await POST(req() as never);
+    expect((await res.json()).valid).toBe(true);
+
+    await vi.waitFor(() => expect(alerts.insert).toHaveBeenCalledTimes(1));
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[License] Fraud check failed:',
+      expect.objectContaining({
+        guild_id: 'guild-upsert-failure',
+        check: 'device_abuse',
+        error: expect.stringContaining('permission denied'),
+      }),
+    );
+  });
+
+  it('counts critical observations by refreshed time, not the original row creation time', async () => {
+    const { mock, fraudSignals } = setup('guild-refreshed-threshold', seatThrashingRows(20));
+
+    await POST(req() as never);
+    await vi.waitFor(() => expect(deviceAbuseUpserts(mock)).toHaveLength(1));
+
+    await vi.waitFor(() =>
+      expect(fraudSignals.gte).toHaveBeenCalledWith('updated_at', expect.any(String)),
+    );
+    expect(fraudSignals.gte).not.toHaveBeenCalledWith('created_at', expect.any(String));
   });
 });

@@ -564,6 +564,45 @@ const DEVICE_ABUSE_CRITICAL_RATIO = 5;
 /** Bound on rows read per check. A key over this is far past any threshold. */
 const DEVICE_ABUSE_ROW_CAP = 1000;
 
+interface OpenFraudSignal {
+  guildId: string;
+  signalType: 'device_abuse' | 'ip_mismatch';
+  severity: 'medium' | 'high' | 'critical';
+  entityType: 'license_key';
+  entityId: string;
+  discordId: string | null;
+  description: string;
+  evidence: Record<string, unknown>;
+}
+
+/**
+ * Persist one open signal per entity through the partial-index-aware RPC.
+ *
+ * PostgREST's column-only `upsert` cannot express
+ * `ON CONFLICT (...) WHERE status = 'open'`; the database function is the
+ * atomic boundary that refreshes evidence and preserves monotonic severity.
+ */
+async function upsertOpenFraudSignal(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  signal: OpenFraudSignal,
+): Promise<void> {
+  const { error } = await supabase.rpc('fraud_upsert_open_signal', {
+    p_guild_id: signal.guildId,
+    p_signal_type: signal.signalType,
+    p_severity: signal.severity,
+    p_entity_type: signal.entityType,
+    p_entity_id: signal.entityId,
+    p_discord_id: signal.discordId,
+    p_description: signal.description,
+    p_evidence: signal.evidence,
+    p_auto_action: null,
+  });
+
+  if (error) {
+    throw new Error(`fraud signal upsert failed: ${error.message}`);
+  }
+}
+
 /**
  * Device-sharing signal.
  *
@@ -631,13 +670,13 @@ async function checkDeviceAbuse(
   if (devicesInWindow <= maxDevices * DEVICE_ABUSE_HIGH_RATIO) return;
 
   const windowDays = Math.round(DEVICE_ABUSE_WINDOW_MS / (24 * 60 * 60 * 1000));
-  const { error: insertError } = await supabase.from('fraud_signals').insert({
-    guild_id: guildId,
-    signal_type: 'device_abuse',
+  await upsertOpenFraudSignal(supabase, {
+    guildId,
+    signalType: 'device_abuse',
     severity: devicesInWindow > maxDevices * DEVICE_ABUSE_CRITICAL_RATIO ? 'critical' : 'high',
-    entity_type: 'license_key',
-    entity_id: licenseKeyId,
-    discord_id: discordId,
+    entityType: 'license_key',
+    entityId: licenseKeyId,
+    discordId,
     description:
       `${devicesInWindow} distinct devices used a ${maxDevices}-device license in the last ${windowDays} days`,
     evidence: {
@@ -652,12 +691,7 @@ async function checkDeviceAbuse(
       evicted_for_device_limit: evictedInWindow,
       truncated: devicesInWindow >= DEVICE_ABUSE_ROW_CAP,
     },
-    status: 'open',
   });
-
-  if (insertError) {
-    throw new Error(`fraud signal insert failed: ${insertError.message}`);
-  }
 }
 
 async function checkIPMismatch(
@@ -682,27 +716,22 @@ async function checkIPMismatch(
   const uniqueIPs = new Set((sessions || []).map(s => s.ip_address).filter(Boolean));
 
   if (uniqueIPs.size >= 5) {
-    const { error: insertError } = await supabase.from('fraud_signals').insert({
-      guild_id: guildId,
-      signal_type: 'ip_mismatch',
+    await upsertOpenFraudSignal(supabase, {
+      guildId,
+      signalType: 'ip_mismatch',
       severity: uniqueIPs.size >= 10 ? 'critical' : 'medium',
-      entity_type: 'license_key',
-      entity_id: licenseKeyId,
-      discord_id: discordId,
+      entityType: 'license_key',
+      entityId: licenseKeyId,
+      discordId,
       description: `${uniqueIPs.size} unique IPs in the last 24 hours`,
       evidence: { unique_ips: uniqueIPs.size, window_hours: 24 },
-      status: 'open',
     });
-
-    if (insertError) {
-      throw new Error(`fraud signal insert failed: ${insertError.message}`);
-    }
   }
 }
 
 /**
- * V11 Audit M-8: Auto-create an incident when ≥ 3 critical fraud signals
- * accumulate within the last hour for a guild.
+ * V11 Audit M-8: Auto-create an incident when ≥ 3 critical fraud signals were
+ * observed or refreshed within the last hour for a guild.
  *
  * Mirror of the bot's `checkCriticalThreshold` — runs in the dashboard
  * context (no event bus) after license validation fraud checks.
@@ -721,7 +750,7 @@ async function checkCriticalFraudThreshold(
     .eq('guild_id', guildId)
     .eq('status', 'open')
     .eq('severity', 'critical')
-    .gte('created_at', since);
+    .gte('updated_at', since);
 
   if (countError) {
     throw new Error(`fraud signal count query failed: ${countError.message}`);
