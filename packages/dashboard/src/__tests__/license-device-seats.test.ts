@@ -4,7 +4,7 @@
  * The route used to log-and-swallow a failure from `license_validate_device`
  * and fall through to `{ valid: true, ..., session_id: null }`. Combined with
  * the RPC's 23505 on any returning device (fixed in
- * 20260727011000_license_device_session_reuse.sql), that meant a machine could
+ * 20260727031000_license_device_session_reuse.sql), that meant a machine could
  * validate as healthy forever while consuming ZERO seats and never
  * heartbeating again — the seat limit silently stopped counting it.
  *
