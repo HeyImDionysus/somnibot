@@ -440,7 +440,7 @@ export default function FarmingPage() {
                   )}
                 </div>
                 <p className="text-xs text-discord-text-secondary mt-1">
-                  Grow: {formatDuration(crop.grow_seconds)} • Wilt: {formatDuration(crop.wilt_seconds)} • Sell: 💰 {crop.sell_price.toLocaleString()} • Seeds back: {crop.seeds_returned}
+                  Grow: {formatDuration(crop.grow_seconds)} • Wilt: {formatDuration(crop.wilt_seconds)} • Sell: 💰 {crop.sell_price.toLocaleString()}{crop.seed_item_id && crop.seeds_returned > 0 ? ` • Seeds back: ${crop.seeds_returned}` : ''}
                 </p>
               </div>
               <div className="flex items-center gap-1 ml-2">
