@@ -14,6 +14,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 
@@ -117,6 +118,9 @@ export async function PUT(req: NextRequest) {
     }
   }
 
+  // Prior values captured before the bookkeeping columns below are folded in.
+  const before = await readGuildConfigBefore(supabase, guildId, Object.keys(updates));
+
   updates.updated_at = new Date().toISOString();
 
   // FIX #10: Use upsert instead of update — new guilds may not have a
@@ -134,6 +138,15 @@ export async function PUT(req: NextRequest) {
   }
 
   await notifyBot('levels');
+
+  await recordGuildConfigChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    action: 'levels.updated',
+    area: 'levels & XP',
+    updates,
+    before,
+  }, supabase);
 
   return NextResponse.json({ success: true, data });
 }

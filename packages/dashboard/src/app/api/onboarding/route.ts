@@ -9,6 +9,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
+import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -49,6 +50,8 @@ export async function PUT(req: NextRequest) {
   // Whitelist allowed fields
   const allowed = typedPick(body, ['member_role_id', 'onboarding_enabled', 'interest_role_mapping', 'returning_member_skip_welcome_dm', 'returning_member_restore_entitlements', 'returning_member_restore_levels']);
 
+  const before = await readGuildConfigBefore(supabase, guildId, Object.keys(allowed));
+
   const { error } = await supabase
     .from('guild_config')
     .upsert({ guild_id: guildId, ...allowed }, { onConflict: 'guild_id' });
@@ -58,6 +61,15 @@ export async function PUT(req: NextRequest) {
   }
 
   await notifyBot('onboarding', allowed);
+
+  await recordGuildConfigChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    action: 'onboarding.updated',
+    area: 'onboarding',
+    updates: allowed,
+    before,
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }

@@ -146,6 +146,13 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "anti_raid_join_threshold",
         "anti_raid_join_window_seconds",
         "anti_raid_log_channel_id",
+        // White-label brand kit — written by api/branding PUT (migrations
+        // 20260723120200 + 20260724160000). Omitting these made every branding
+        // change unundoable, which is exactly the "column exists, control
+        // doesn't" gap the allowlist is supposed to track.
+        "brand_accent_color",
+        "brand_primary_color",
+        "brand_voice_preset",
         "currency_emoji",
         "currency_name",
         "custom_bot_statuses",
@@ -274,7 +281,9 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "starboard_threshold",
         "stats_enabled",
         "stats_update_interval_minutes",
+        "store_brand_name",
         "store_enabled",
+        "store_show_powered_by",
         "sync_auto_repair",
         "sync_auto_repair_everyone",
         "sync_enabled",

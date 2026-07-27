@@ -20,6 +20,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkRateLimit } from '@/lib/api/rate-limit';
 import { parseBody } from '@/lib/api/validation';
 import { z } from 'zod';
+import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 
 const updateSchema = z.object({
   retention_days: z.number().int().min(30).max(3650),
@@ -66,6 +67,8 @@ export async function POST(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
 
   const admin = createAdminSupabase();
+  const before = await readGuildConfigBefore(admin, auth.ctx.guildId, ['data_retention_days']);
+
   const { error } = await admin
     .from('guild_config')
     .update({ data_retention_days: parsed.data.retention_days })
@@ -75,6 +78,19 @@ export async function POST(req: NextRequest) {
     console.error('[Retention] Update failed:', error.message);
     return NextResponse.json({ error: 'Failed to update retention setting' }, { status: 500 });
   }
+
+  // Shortening retention causes irreversible purges, so this is high blast
+  // radius. Restoring the number is still offered — it stops FUTURE purges —
+  // but it cannot bring back rows an earlier sweep already deleted.
+  await recordGuildConfigChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    action: 'retention.updated',
+    area: 'data retention',
+    updates: { data_retention_days: parsed.data.retention_days },
+    before,
+    blastRadius: 'high',
+  }, admin);
 
   return NextResponse.json({
     success: true,

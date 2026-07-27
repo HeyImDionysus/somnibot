@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
 import { dbError, apiServerError} from '@/lib/api/response';
+import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 
 const ECONOMY_COLUMNS = [
   'economy_enabled',
@@ -177,6 +178,8 @@ export async function PATCH(request: NextRequest) {
 
     const admin = createAdminSupabase();
 
+    const before = await readGuildConfigBefore(admin, ctx.guildId, Object.keys(updates));
+
     const { error } = await admin
       .from('guild_config')
       .update(updates)
@@ -188,6 +191,15 @@ export async function PATCH(request: NextRequest) {
 
     // Notify bot to reload economy config
     await notifyBot('economy');
+
+    await recordGuildConfigChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      action: 'economy.updated',
+      area: 'economy',
+      updates,
+      before,
+    }, admin);
 
     return NextResponse.json({ success: true });
   } catch (err: unknown) {

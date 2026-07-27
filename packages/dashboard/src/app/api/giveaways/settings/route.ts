@@ -11,6 +11,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 
 export async function GET() {
   const auth = await requireGuildOwner();
@@ -70,6 +71,8 @@ export async function PUT(req: NextRequest) {
 
   updates.updated_at = new Date().toISOString();
 
+  const before = await readGuildConfigBefore(supabase, guildId, Object.keys(updates));
+
   const { error } = await supabase
     .from('guild_config')
     .upsert({ guild_id: guildId, ...updates }, { onConflict: 'guild_id' });
@@ -77,6 +80,15 @@ export async function PUT(req: NextRequest) {
   if (error) return dbError(error, 'giveaways/settings');
 
   await notifyBot('giveaways');
+
+  await recordGuildConfigChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    action: 'giveaways.settings_updated',
+    area: 'giveaway defaults',
+    updates,
+    before,
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }

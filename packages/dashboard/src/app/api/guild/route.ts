@@ -15,6 +15,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { dbError } from '@/lib/api/response';
+import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 
 const guildConfigPatchSchema = z.object({
   mod_log_channel_id: z.string().nullable().optional(),
@@ -218,6 +219,8 @@ export async function PATCH(request: NextRequest) {
   }
 
   const admin = createAdminSupabase();
+  const before = await readGuildConfigBefore(admin, guildId, Object.keys(updates));
+
   const { error } = await admin
     .from('guild_config')
     .upsert({ guild_id: guildId, ...updates }, { onConflict: 'guild_id' });
@@ -227,6 +230,15 @@ export async function PATCH(request: NextRequest) {
   // Notify the bot so it hot-reloads the changed config immediately.
   // Fields in this schema span multiple feature areas — use 'all' to cover them.
   await notifyBot('all', updates);
+
+  await recordGuildConfigChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    action: 'guild.config_updated',
+    area: 'server settings',
+    updates,
+    before,
+  }, admin);
 
   return NextResponse.json({ success: true });
 }
