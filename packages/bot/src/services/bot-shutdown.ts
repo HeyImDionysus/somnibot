@@ -34,6 +34,8 @@ export type BotLevelServices = {
   presence?: Stoppable | null;
   stopAntiRaidPruner?: (() => void) | null;
   stopTeamInvitationSweeper?: (() => void) | null;
+  /** Portal-request notifier — stopped so its interval cannot outlive shutdown. */
+  portalRequestNotifier?: Stoppable | null;
 };
 
 type ShutdownDependencies = {
@@ -92,6 +94,7 @@ export async function shutdownBot({
   stopSafely('Presence manager', () => botLevelServices.presence?.stop(), log);
   stopSafely('Anti-raid pruner', botLevelServices.stopAntiRaidPruner, log);
   stopSafely('Team-invitation sweeper', botLevelServices.stopTeamInvitationSweeper, log);
+  stopSafely('Portal-request notifier', () => botLevelServices.portalRequestNotifier?.stop(), log);
 
   try {
     client.shoukaku?.nodes?.forEach((node) => node.disconnect(1000, 'shutdown'));

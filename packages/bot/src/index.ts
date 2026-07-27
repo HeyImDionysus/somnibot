@@ -44,6 +44,7 @@ import {
   startTeamInvitationSweeper,
   stopTeamInvitationSweeper,
 } from './features/team-invitations/index.js';
+import { startPortalRequestNotifier } from './features/commerce/portal-request-notifier.js';
 import { BotPresenceManager } from './features/discord-ux/index.js';
 import { shutdownBot, type BotLevelServices } from './services/bot-shutdown.js';
 import { EmbedBuilder, Events } from 'discord.js';
@@ -634,6 +635,13 @@ async function runFullBoot(
       // overdue invitations. Bot-level singleton (sweeps every guild's rows).
       startTeamInvitationSweeper(client, client.supabase);
       log.info('Team-invitation sweeper started');
+
+      // Customer refund/support decisions: the dashboard decides but cannot
+      // reach Discord, so the buyer's DM happens here. Without this the queue
+      // moved and the customer was never told. Bot-level singleton.
+      botLevelServices.portalRequestNotifier =
+        startPortalRequestNotifier(client, client.supabase);
+      log.info('Portal-request notifier started');
 
       // V10 Audit L-4: BotPresenceManager sets client-wide presence.
       // Create once at bot level (using primary guild for config/member count).
