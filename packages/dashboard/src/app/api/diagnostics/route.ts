@@ -114,9 +114,25 @@ export async function GET(request: NextRequest) {
     metricsByType[m.metric_type]!.push({ value: Number(m.value_ms), time: m.recorded_at });
   }
 
+  // Guided mode + the owner's alert thresholds, so the page can explain each
+  // metric and show the number it will actually alert on. Best-effort: a
+  // failed read just renders the page without the extra context.
+  const { data: guidedCfg } = await supabase
+    .from('guild_config')
+    .select('diagnostics_guided_mode, memory_alert_threshold_mb, ws_ping_alert_threshold_ms, webhook_error_rate_threshold')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  const cfgRow = (guidedCfg ?? null) as Record<string, unknown> | null;
+
   return NextResponse.json({
     success: true,
     data: {
+      guidedMode: (cfgRow?.diagnostics_guided_mode as boolean | undefined) ?? true,
+      thresholds: {
+        memoryRssMb: Number(cfgRow?.memory_alert_threshold_mb ?? 512),
+        wsPingMs: Number(cfgRow?.ws_ping_alert_threshold_ms ?? 500),
+        webhookErrorRate: Number(cfgRow?.webhook_error_rate_threshold ?? 0.25),
+      },
       bot: {
         online: isOnline,
         uptimeSeconds: botHealth?.uptime_seconds ?? 0,

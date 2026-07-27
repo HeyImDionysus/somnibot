@@ -32,6 +32,7 @@ const guildConfigPatchSchema = z.object({
   // Diagnostics alert thresholds. Ranges MUST mirror the guild_config CHECK
   // constraints (migration 20260727000000) or a valid-looking payload dies as
   // a raw 23514 instead of a readable validation error.
+  diagnostics_guided_mode: z.boolean().optional(),
   memory_alert_threshold_mb: z.number().int().min(64).max(16384).optional(),
   ws_ping_alert_threshold_ms: z.number().int().min(50).max(10000).optional(),
   webhook_error_rate_threshold: z.number().min(0).max(1).optional(),
