@@ -30,6 +30,8 @@ vi.mock('@/lib/notify-bot', () => ({
 vi.mock('@/lib/admin-changes', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/admin-changes')>()),
   recordGuildConfigChange: vi.fn().mockResolvedValue(undefined),
+  recordCrudChange: vi.fn().mockResolvedValue(undefined),
+  readRowBefore: vi.fn().mockResolvedValue(undefined),
   readGuildConfigBefore: vi.fn().mockResolvedValue({
     store_brand_name: 'Old Name',
     welcome_enabled: false,
@@ -39,7 +41,12 @@ vi.mock('@/lib/admin-changes', async (importOriginal) => ({
 import { NextRequest } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { recordGuildConfigChange, readGuildConfigBefore } from '@/lib/admin-changes';
+import {
+  recordGuildConfigChange,
+  readGuildConfigBefore,
+  recordCrudChange,
+  readRowBefore,
+} from '@/lib/admin-changes';
 
 const GUILD = '111111111111111111';
 const ACTOR = '222222222222222222';
@@ -59,7 +66,7 @@ function mockConfigClient(opts: { writeError?: { message: string; code?: string 
     single: vi.fn(async () => result),
     then: (resolve: (v: unknown) => unknown) => resolve(result),
   };
-  for (const m of ['select', 'eq', 'update', 'upsert']) {
+  for (const m of ['select', 'eq', 'update', 'upsert', 'insert', 'delete']) {
     chain[m] = vi.fn(() => chain);
   }
   vi.mocked(createAdminSupabase).mockReturnValue({ from: vi.fn(() => chain) } as never);
@@ -133,5 +140,45 @@ describe('PUT /api/welcome', () => {
       action: 'welcome.updated',
       updates: { welcome_enabled: true },
     });
+  });
+});
+
+describe('CRUD routes', () => {
+  it('DELETE /api/moderation/rules captures the rule before it is gone', async () => {
+    // The row is hard-deleted, so what the recorder captures beforehand is the
+    // only remaining description of what the rule was.
+    vi.mocked(readRowBefore).mockResolvedValue({ id: 'rule-1', name: 'No links' });
+    const { DELETE } = await import('@/app/api/moderation/rules/route');
+
+    const res = await DELETE(
+      new NextRequest('http://x/api/moderation/rules?id=rule-1', { method: 'DELETE' }),
+    );
+    expect(res.status).toBe(200);
+
+    expect(recordCrudChange).toHaveBeenCalledTimes(1);
+    const [arg] = vi.mocked(recordCrudChange).mock.calls[0];
+    expect(arg).toMatchObject({
+      guildId: GUILD,
+      actorId: ACTOR,
+      operation: 'deleted',
+      action: 'moderation.rule_deleted',
+      table: 'automod_rules',
+      targetId: 'rule-1',
+      label: 'No links',
+    });
+    expect(arg.before).toMatchObject({ name: 'No links' });
+  });
+
+  it('does not record when the delete itself failed', async () => {
+    mockConfigClient({ writeError: { message: 'boom' } });
+    vi.mocked(readRowBefore).mockResolvedValue({ id: 'rule-1', name: 'No links' });
+    const { DELETE } = await import('@/app/api/moderation/rules/route');
+
+    const res = await DELETE(
+      new NextRequest('http://x/api/moderation/rules?id=rule-1', { method: 'DELETE' }),
+    );
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(recordCrudChange).not.toHaveBeenCalled();
   });
 });

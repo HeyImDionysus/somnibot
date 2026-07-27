@@ -14,6 +14,7 @@ import { typedPick } from '@/lib/api/typed-pick';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -87,6 +88,19 @@ export async function POST(req: NextRequest) {
 
   await notifyBot('moderation');
 
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'created',
+    action: 'moderation.rule_created',
+    table: 'automod_rules',
+    targetType: 'auto-mod rule',
+    targetId: (data as { id?: string } | null)?.id ?? null,
+    label: name,
+    after: data as Record<string, unknown> | null,
+    blastRadius: 'medium',
+  }, supabase);
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -112,6 +126,8 @@ export async function PUT(req: NextRequest) {
 
   updates.updated_at = new Date().toISOString();
 
+  const before = await readRowBefore(supabase, 'automod_rules', { id: body.id, guild_id: guildId });
+
   const { data, error } = await supabase
     .from('automod_rules')
     .update(updates)
@@ -125,6 +141,21 @@ export async function PUT(req: NextRequest) {
   }
 
   await notifyBot('moderation');
+
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'updated',
+    action: 'moderation.rule_updated',
+    table: 'automod_rules',
+    targetType: 'auto-mod rule',
+    targetId: body.id,
+    label: (before?.name as string | undefined) ?? (updates.name as string | undefined),
+    before,
+    after: updates,
+    match: { id: body.id, guild_id: guildId },
+    blastRadius: 'medium',
+  }, supabase);
 
   return NextResponse.json({ success: true, data });
 }
@@ -145,6 +176,9 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing rule id' }, { status: 400 });
   }
 
+  // Capture the rule before it goes — this record is the only copy afterwards.
+  const before = await readRowBefore(supabase, 'automod_rules', { id, guild_id: guildId });
+
   const { error } = await supabase
     .from('automod_rules')
     .delete()
@@ -156,6 +190,19 @@ export async function DELETE(req: NextRequest) {
   }
 
   await notifyBot('moderation');
+
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'deleted',
+    action: 'moderation.rule_deleted',
+    table: 'automod_rules',
+    targetType: 'auto-mod rule',
+    targetId: id,
+    label: before?.name as string | undefined,
+    before,
+    blastRadius: 'medium',
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }

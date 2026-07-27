@@ -14,6 +14,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -128,6 +129,18 @@ export async function POST(req: NextRequest) {
 
   await notifyBot('custom-commands');
 
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'created',
+    action: 'custom_command.created',
+    table: 'custom_commands',
+    targetType: 'custom command',
+    targetId: (data as { id?: string } | null)?.id ?? null,
+    label: cleanName,
+    after: data as Record<string, unknown> | null,
+  }, supabase);
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -155,6 +168,8 @@ export async function PUT(req: NextRequest) {
 
   updates.updated_at = new Date().toISOString();
 
+  const before = await readRowBefore(supabase, 'custom_commands', { id: body.id, guild_id: guildId });
+
   const { data, error } = await supabase
     .from('custom_commands')
     .update(updates)
@@ -168,6 +183,20 @@ export async function PUT(req: NextRequest) {
   }
 
   await notifyBot('custom-commands');
+
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'updated',
+    action: 'custom_command.updated',
+    table: 'custom_commands',
+    targetType: 'custom command',
+    targetId: body.id,
+    label: (before?.name as string | undefined) ?? (updates.name as string | undefined),
+    before,
+    after: updates,
+    match: { id: body.id, guild_id: guildId },
+  }, supabase);
 
   return NextResponse.json({ success: true, data });
 }
@@ -191,6 +220,8 @@ export async function DELETE(req: NextRequest) {
     );
   }
 
+  const before = await readRowBefore(supabase, 'custom_commands', { id, guild_id: guildId });
+
   const { error } = await supabase
     .from('custom_commands')
     .delete()
@@ -202,6 +233,18 @@ export async function DELETE(req: NextRequest) {
   }
 
   await notifyBot('custom-commands');
+
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'deleted',
+    action: 'custom_command.deleted',
+    table: 'custom_commands',
+    targetType: 'custom command',
+    targetId: id,
+    label: before?.name as string | undefined,
+    before,
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }

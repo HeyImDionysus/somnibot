@@ -14,6 +14,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
+import { recordCrudChange } from '@/lib/admin-changes';
 
 /**
  * [#63] Append-only audit rows for the dashboard scheduled-message CRUD
@@ -157,6 +158,18 @@ export async function POST(req: NextRequest) {
 
   await notifyBot('scheduled-messages');
 
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'created',
+    action: 'scheduled_message.created',
+    table: 'scheduled_messages',
+    targetType: 'scheduled message',
+    targetId: data.id,
+    label: data.name,
+    after: data as Record<string, unknown>,
+  }, supabase);
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -226,6 +239,24 @@ export async function PUT(req: NextRequest) {
 
   await notifyBot('scheduled-messages');
 
+  // Same no-op guard as the audit row above: a PUT that changed no
+  // owner-visible field must not appear as a change on the page.
+  if (changedKeys.length > 0) {
+    await recordCrudChange({
+      guildId,
+      actorId: auth.ctx.discordId,
+      operation: 'updated',
+      action: 'scheduled_message.updated',
+      table: 'scheduled_messages',
+      targetType: 'scheduled message',
+      targetId: data.id,
+      label: data.name,
+      before: (beforeRow as Record<string, unknown> | null) ?? undefined,
+      after: Object.fromEntries(changedKeys.map((k) => [k, (updates as Record<string, unknown>)[k]])),
+      match: { id: body.id, guild_id: guildId },
+    }, supabase);
+  }
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -269,6 +300,18 @@ export async function DELETE(req: NextRequest) {
   }
 
   await notifyBot('scheduled-messages');
+
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'deleted',
+    action: 'scheduled_message.deleted',
+    table: 'scheduled_messages',
+    targetType: 'scheduled message',
+    targetId: id,
+    label: deleted?.name as string | undefined,
+    before: deleted,
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }
