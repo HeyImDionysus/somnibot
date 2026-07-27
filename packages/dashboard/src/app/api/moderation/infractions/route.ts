@@ -11,7 +11,13 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { recordAdminChange, readRowBefore } from '@/lib/admin-changes';
 
+/** Keep a free-text reason to one readable clause in the change description. */
+function summarize(text: string, max = 120): string {
+  const flat = String(text).replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
 
 export async function GET(req: NextRequest) {
   const auth = await requireGuildOwner();
@@ -63,7 +69,7 @@ export async function POST(req: NextRequest) {
 
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
+  const { guildId, discordId } = auth.ctx;
 
   const supabase = createAdminSupabase();
   const parsed = await parseBody(req, schemas.infraction.create);
@@ -118,6 +124,32 @@ export async function POST(req: NextRequest) {
     return dbError(error, 'moderation/infractions');
   }
 
+  // Wording matters here. This route writes an `infractions` row and nothing
+  // else — no bot_action_queue entry, and the bot has no Realtime subscription
+  // on `infractions` — so creating a "ban" from the dashboard does NOT ban
+  // anyone in Discord. "Recorded" is the honest verb; "Banned" would tell the
+  // owner something happened that did not.
+  await recordAdminChange({
+    guildId,
+    actorId: discordId,
+    action: 'moderation.infraction_created',
+    targetType: 'infraction',
+    targetId: (data as { id?: string } | null)?.id ?? null,
+    description:
+      `Recorded a manual ${type} against ${member_id} in their moderation history: `
+      + `${summarize(reason)}`,
+    after: {
+      member_id,
+      type,
+      reason,
+      duration_minutes: type === 'mute' ? (duration_minutes ?? null) : null,
+      expires_at: expiresAt.toISOString(),
+    },
+    blastRadius: type === 'ban' || type === 'kick' ? 'high' : 'medium',
+    undoReason:
+      'a newly recorded infraction cannot be removed by an undo — pardon it from the Moderation page instead',
+  }, supabase);
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -127,7 +159,7 @@ export async function PATCH(req: NextRequest) {
 
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
+  const { guildId, discordId } = auth.ctx;
 
   const supabase = createAdminSupabase();
   const parsed = await parseBody(req, schemas.infraction.pardon);
@@ -139,6 +171,15 @@ export async function PATCH(req: NextRequest) {
   }
 
   if (body.action === 'pardon') {
+    // Prior state read BEFORE the pardon, so the change shows what the
+    // infraction was rather than what it became.
+    const before = await readRowBefore(
+      supabase,
+      'infractions',
+      { id: body.id, guild_id: guildId },
+      'id, member_id, type, reason, active, pardoned',
+    );
+
     const { data, error } = await supabase
       .from('infractions')
       .update({
@@ -155,6 +196,29 @@ export async function PATCH(req: NextRequest) {
     if (error) {
       return dbError(error, 'moderation/infractions');
     }
+
+    await recordAdminChange({
+      guildId,
+      actorId: discordId,
+      action: 'moderation.infraction_pardoned',
+      targetType: 'infraction',
+      targetId: body.id,
+      description:
+        `Pardoned the ${String(before?.type ?? '')} recorded against `
+        + `${String(before?.member_id ?? 'a member')}, clearing it from their history`.replace(
+          /\s+/g,
+          ' ',
+        ),
+      before: before
+        ? { active: before.active ?? null, pardoned: before.pardoned ?? null }
+        : undefined,
+      after: { active: false, pardoned: true, pardoned_by: body.pardoned_by ?? 'dashboard' },
+      blastRadius: 'medium',
+      // `infractions` is deliberately absent from UNDO_TABLE_COLUMNS, so a db
+      // undo would be rejected the moment the button was pressed.
+      undoReason:
+        'a pardon is final — record a fresh infraction if the original action should still stand',
+    }, supabase);
 
     return NextResponse.json({ success: true, data });
   }

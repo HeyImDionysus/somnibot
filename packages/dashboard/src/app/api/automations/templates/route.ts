@@ -10,6 +10,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { recordAdminChange } from '@/lib/admin-changes';
 
 
 // ── Templates (inlined to avoid cross-package build dependency) ──
@@ -148,7 +149,7 @@ export async function POST(req: NextRequest) {
 
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
+  const { guildId, discordId } = auth.ctx;
 
   const supabase = createAdminSupabase();
   const parsed = await parseBody(req, schemas.automation.deployTemplate);
@@ -197,6 +198,30 @@ export async function POST(req: NextRequest) {
   if (error) {
     return dbError(error, 'automations/templates');
   }
+
+  const automationName = overrides?.name ?? template.name;
+  await recordAdminChange({
+    guildId,
+    actorId: discordId,
+    action: 'automation.template_deployed',
+    targetType: 'automation',
+    targetId: (data as { id?: string } | null)?.id ?? null,
+    description:
+      `Created the automation "${automationName}" from the ${template.name} template `
+      + `and switched it on, so it now runs when ${template.trigger_type} happens`,
+    after: {
+      name: automationName,
+      template_id: template.id,
+      trigger_type: template.trigger_type,
+      enabled: true,
+      action_count: actions.length,
+    },
+    // A live automation can DM members, post messages and grant roles the next
+    // time its trigger fires.
+    blastRadius: 'medium',
+    undoReason:
+      'a newly created automation cannot be removed by an undo — turn it off or delete it from the Automations page instead',
+  }, supabase);
 
   return NextResponse.json({ success: true, data });
 }

@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { recordAdminChange, readRowBefore, undoByRestoring } from '@/lib/admin-changes';
 
 const alertActionSchema = z.object({
   id: z.string().uuid(),
@@ -87,7 +88,7 @@ export async function PATCH(req: NextRequest) {
 
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
+  const { guildId, discordId } = auth.ctx;
 
   const supabase = createAdminSupabase();
 
@@ -95,13 +96,29 @@ export async function PATCH(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const { id, action } = parsed.data;
 
+  // Prior state, read BEFORE the write. This is the one route in this group
+  // whose undo is genuinely replayable: `alerts` is on the undo allowlist and
+  // acknowledged/resolved are exactly the admin-action columns it permits, so
+  // restoring them puts the alert back on the active list. Reading afterwards
+  // would capture the values we just wrote and make the undo a no-op.
+  const before = await readRowBefore(
+    supabase,
+    'alerts',
+    { id, guild_id: guildId },
+    'id, title, alert_type, acknowledged, acknowledged_at, resolved, resolved_at',
+  );
+  const alertLabel = (before?.title as string | undefined)
+    ?? (before?.alert_type as string | undefined)
+    ?? 'this alert';
+
   if (action === 'acknowledge') {
+    const now = new Date().toISOString();
     const { error } = await supabase
       .from('alerts')
       .update({
         acknowledged: true,
-        acknowledged_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        acknowledged_at: now,
+        updated_at: now,
       })
       .eq('id', id)
       .eq('guild_id', guildId);
@@ -109,16 +126,48 @@ export async function PATCH(req: NextRequest) {
     if (error) {
       return dbError(error, 'alerts');
     }
+
+    // `updated_at` is deliberately not restored — it is a bookkeeping stamp,
+    // not a setting the owner chose, and the recorder treats it the same way.
+    const restorable = before !== undefined
+      && 'acknowledged' in before && 'acknowledged_at' in before;
+    await recordAdminChange({
+      guildId,
+      actorId: discordId,
+      action: 'alerts.acknowledged',
+      targetType: 'alert',
+      targetId: id,
+      description: `Acknowledged the alert "${alertLabel}"`,
+      before: restorable
+        ? { acknowledged: before.acknowledged, acknowledged_at: before.acknowledged_at }
+        : undefined,
+      after: { acknowledged: true, acknowledged_at: now },
+      blastRadius: 'low',
+      ...(restorable
+        ? {
+            undo: undoByRestoring(
+              'alerts',
+              { id, guild_id: guildId },
+              { acknowledged: before.acknowledged, acknowledged_at: before.acknowledged_at },
+            ),
+          }
+        : {
+            undoReason:
+              'the alert could not be read before the change, so there is nothing to restore',
+          }),
+    }, supabase);
+
     return NextResponse.json({ success: true });
   }
 
   if (action === 'resolve') {
+    const now = new Date().toISOString();
     const { error } = await supabase
       .from('alerts')
       .update({
         resolved: true,
-        resolved_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        resolved_at: now,
+        updated_at: now,
       })
       .eq('id', id)
       .eq('guild_id', guildId);
@@ -126,6 +175,35 @@ export async function PATCH(req: NextRequest) {
     if (error) {
       return dbError(error, 'alerts');
     }
+
+    const restorable = before !== undefined
+      && 'resolved' in before && 'resolved_at' in before;
+    await recordAdminChange({
+      guildId,
+      actorId: discordId,
+      action: 'alerts.resolved',
+      targetType: 'alert',
+      targetId: id,
+      description: `Marked the alert "${alertLabel}" resolved`,
+      before: restorable
+        ? { resolved: before.resolved, resolved_at: before.resolved_at }
+        : undefined,
+      after: { resolved: true, resolved_at: now },
+      blastRadius: 'low',
+      ...(restorable
+        ? {
+            undo: undoByRestoring(
+              'alerts',
+              { id, guild_id: guildId },
+              { resolved: before.resolved, resolved_at: before.resolved_at },
+            ),
+          }
+        : {
+            undoReason:
+              'the alert could not be read before the change, so there is nothing to restore',
+          }),
+    }, supabase);
+
     return NextResponse.json({ success: true });
   }
 
