@@ -75,5 +75,24 @@ export async function register() {
       process.env.DASHBOARD_ENV_VALID = 'true';
       console.log('✓ Dashboard environment validation passed.');
     }
+
+    // Finding 1: PayPal-truth reconciliation runs HERE, in the dashboard's own
+    // long-lived Node server, precisely so it keeps working when the bot is
+    // the broken thing. Never in the serverless-compatibility runtime, where
+    // there is no process to hold a timer.
+    if (process.env.VERCEL !== '1') {
+      try {
+        const { startPayPalReconcileScheduler } = await import(
+          '@/lib/paypal-reconcile-scheduler'
+        );
+        startPayPalReconcileScheduler();
+      } catch (err) {
+        // Startup must never fail because reconciliation could not schedule.
+        console.error(
+          '⚠ Could not start the PayPal reconciliation scheduler:',
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
   }
 }
