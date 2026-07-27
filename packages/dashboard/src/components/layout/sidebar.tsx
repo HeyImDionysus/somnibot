@@ -120,6 +120,20 @@ const navigation: NavGroup[] = [
       { label: 'Reaction Roles', href: '/reaction-roles', icon: Palette, requires: 'discord' },
       { label: 'Giveaways', href: '/giveaways', icon: Gift, requires: 'discord', badge: ActiveGiveawaysBadge },
       { label: 'Scheduled Messages', href: '/scheduled-messages', icon: Clock, requires: 'discord' },
+    ],
+  },
+  {
+    // Split out of Engagement, which had grown to twenty entries — over a third
+    // of the whole sidebar in one undifferentiated run.
+    //
+    // The split is not only about length. "Shop Items" (spend play coins) used
+    // to sit four rows above "Store" (spend real money) in the same group, which
+    // put the game economy and the real-money storefront side by side in the
+    // one place an operator scans fastest. Those two must never read as
+    // siblings; the group titles now say which currency each one deals in.
+    id: 'coin-economy',
+    title: 'Coin economy',
+    items: [
       { label: 'Economy', href: '/economy', icon: Coins, requires: 'discord' },
       { label: 'Econ Analytics', href: '/economy/analytics', icon: TrendingUp, requires: 'discord' },
       { label: 'Shop Items', href: '/economy/shop', icon: Store, requires: 'discord' },
@@ -159,8 +173,10 @@ const navigation: NavGroup[] = [
     ],
   },
   {
+    // Named for the currency, not the department. "Commerce" told an operator
+    // nothing about which of the two economies they were about to touch.
     id: 'commerce',
-    title: 'Commerce',
+    title: 'Real-money store',
     items: [
       { label: 'Analytics', href: '/analytics', icon: TrendingUp },
       { label: 'Store', href: '/store', icon: ShoppingCart, requires: 'paypal' },
@@ -208,6 +224,32 @@ function saveCollapsed(state: Record<string, boolean>) {
 interface UserInfo {
   name: string;
   avatarUrl: string | null;
+}
+
+/**
+ * One source of truth for how a sidebar row looks. The same classes were
+ * written out three times (group items, Team, Settings), so the two System
+ * links had already drifted from the rest.
+ *
+ * The selected state is Discord's, and it is two signals rather than one: a
+ * solid grey pill behind the row, plus a blurple bar butted against the sidebar
+ * edge. The previous single signal — a 20%-opacity blurple wash — was barely
+ * distinguishable from hover, which is a real problem in a sidebar this long.
+ * The bar is a `before:` pseudo-element so selection costs no extra DOM.
+ */
+function navRowClass(isActive: boolean, isLocked = false): string {
+  return cn(
+    'group relative flex items-center gap-2.5 rounded-input px-2.5 py-2 text-sm transition-standard',
+    // Collapsed to zero height when inactive so it animates in rather than popping.
+    'before:absolute before:-left-2 before:top-1/2 before:w-1 before:-translate-y-1/2',
+    'before:rounded-r-full before:bg-discord-accent before:transition-all',
+    isActive && !isLocked ? 'before:h-5' : 'before:h-0',
+    isActive && !isLocked
+      ? 'bg-discord-bg-active font-medium text-white'
+      : isLocked
+        ? 'cursor-not-allowed text-discord-text-muted/50'
+        : 'text-discord-text-secondary hover:bg-discord-bg-hover hover:text-discord-text-primary',
+  );
 }
 
 export function Sidebar() {
@@ -267,7 +309,7 @@ export function Sidebar() {
             className="h-full w-full object-cover"
           />
         </div>
-        <span className="text-base font-bold text-discord-text-primary">SomniBot</span>
+        <span className="text-base font-medium text-discord-text-primary">SomniBot</span>
       </div>
 
       {/* Guild Selector (multi-guild — V53 Phase 4) */}
@@ -283,13 +325,13 @@ export function Sidebar() {
             <div key={group.id} className="mb-1">
               {/* Group header */}
               {group.alwaysOpen ? (
-                <h3 className="mb-1 px-2 text-[11px] font-semibold uppercase tracking-wide text-discord-text-muted">
+                <h3 className="mb-1.5 px-2.5 text-[11px] font-medium uppercase tracking-wide text-discord-text-muted">
                   {group.title}
                 </h3>
               ) : (
                 <button
                   onClick={() => toggleGroup(group.id)}
-                  className="mb-1 flex w-full items-center justify-between px-2 text-[11px] font-semibold uppercase tracking-wide text-discord-text-muted hover:text-discord-text-secondary transition-colors"
+                  className="mb-1.5 flex w-full items-center justify-between px-2.5 text-[11px] font-medium uppercase tracking-wide text-discord-text-muted hover:text-discord-text-secondary transition-colors"
                 >
                   <span>{group.title}</span>
                   <ChevronDown
@@ -325,14 +367,7 @@ export function Sidebar() {
                     <Link
                       key={item.href}
                       href={isLocked ? '#' : item.href}
-                      className={cn(
-                        'group flex items-center gap-2 rounded-[4px] px-2 py-1.5 text-sm transition-standard',
-                        isActive && !isLocked
-                          ? 'bg-discord-accent/20 text-white'
-                          : isLocked
-                            ? 'cursor-not-allowed text-discord-text-muted/50'
-                            : 'text-discord-text-secondary hover:bg-discord-bg-primary/50 hover:text-discord-text-primary',
-                      )}
+                      className={navRowClass(isActive, isLocked)}
                       onClick={isLocked ? (e) => e.preventDefault() : undefined}
                       aria-disabled={isLocked}
                     >
@@ -358,17 +393,12 @@ export function Sidebar() {
 
         {/* Settings — always at bottom of nav */}
         <div className="mb-4">
-          <h3 className="mb-1 px-2 text-[11px] font-semibold uppercase tracking-wide text-discord-text-muted">
+          <h3 className="mb-1.5 px-2.5 text-[11px] font-medium uppercase tracking-wide text-discord-text-muted">
             System
           </h3>
           <Link
             href="/settings/team"
-            className={cn(
-              'group flex items-center gap-2 rounded-[4px] px-2 py-1.5 text-sm transition-standard',
-              pathname === '/settings/team'
-                ? 'bg-discord-accent/20 text-white'
-                : 'text-discord-text-secondary hover:bg-discord-bg-primary/50 hover:text-discord-text-primary',
-            )}
+            className={navRowClass(pathname === '/settings/team')}
           >
             <UserCog
               size={18}
@@ -378,12 +408,7 @@ export function Sidebar() {
           </Link>
           <Link
             href="/settings"
-            className={cn(
-              'group flex items-center gap-2 rounded-[4px] px-2 py-1.5 text-sm transition-standard',
-              pathname === '/settings'
-                ? 'bg-discord-accent/20 text-white'
-                : 'text-discord-text-secondary hover:bg-discord-bg-primary/50 hover:text-discord-text-primary',
-            )}
+            className={navRowClass(pathname === '/settings')}
           >
             <Settings
               size={18}

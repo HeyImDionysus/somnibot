@@ -427,7 +427,7 @@ export default function StorePage() {
               max={30}
               value={gracePeriodDays}
               onChange={(e) => setGracePeriodDays(parseInt(e.target.value) || 0)}
-              className="w-20 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-1.5 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
+              className="w-20 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-1.5 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
             />
             <span className="text-xs text-discord-text-muted">days</span>
             <button

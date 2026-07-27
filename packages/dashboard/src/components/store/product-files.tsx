@@ -143,8 +143,8 @@ export default function ProductFiles({ productId, productName }: Props) {
   };
 
   return (
-    <div className="bg-discord-secondary rounded-lg border border-discord-border">
-      <div className="p-4 border-b border-discord-border">
+    <div className="bg-discord-secondary rounded-lg border border-discord-border-subtle">
+      <div className="p-4 border-b border-discord-border-subtle">
         <h3 className="text-sm font-semibold text-white">
           📁 Files for &quot;{productName}&quot;
         </h3>
@@ -166,7 +166,7 @@ export default function ProductFiles({ productId, productName }: Props) {
         className={`m-4 border-2 border-dashed rounded-lg p-6 text-center transition-colors cursor-pointer ${
           dragOver
             ? 'border-discord-blurple bg-discord-blurple/10'
-            : 'border-discord-border hover:border-discord-text-muted'
+            : 'border-discord-border-subtle hover:border-discord-text-muted'
         }`}
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}

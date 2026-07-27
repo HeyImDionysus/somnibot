@@ -289,7 +289,7 @@ export default function SetupPage() {
       {/* Header */}
       <div>
         <h1 className="flex items-center gap-2 text-xl font-bold text-discord-text-primary">
-          <Rocket size={22} className="text-somni-pink" />
+          <Rocket size={22} className="text-discord-accent" />
           Server Setup Wizard
         </h1>
         <p className="mt-1 text-sm text-discord-text-muted">
@@ -603,7 +603,7 @@ function Step2Roles({
         return (
           <div
             key={tierKey}
-            className="rounded-lg border border-discord-border bg-discord-bg-tertiary/30 p-4"
+            className="rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary/30 p-4"
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -613,7 +613,7 @@ function Step2Roles({
                   tierKey === 'member' && 'text-green-400',
                   tierKey === 'cosmetic' && 'text-pink-400',
                 )} />
-                <h3 className="text-sm font-semibold text-discord-text-primary">
+                <h3 className="text-sm font-medium text-discord-text-primary">
                   {meta.label} Tier
                 </h3>
                 <Badge variant={meta.badge}>{tierRoles.length} role{tierRoles.length !== 1 ? 's' : ''}</Badge>
@@ -674,7 +674,7 @@ function Step2Roles({
                       value={newName}
                       onChange={(e) => setNewName(e.target.value)}
                       placeholder={tierKey === 'admin' ? 'e.g. Server Admin' : tierKey === 'moderator' ? 'e.g. Moderator' : tierKey === 'member' ? 'e.g. Verified Member' : 'e.g. Team Red'}
-                      className="w-full rounded border border-discord-border bg-discord-bg-tertiary px-3 py-1.5 text-sm text-discord-text-primary placeholder:text-discord-text-muted/50 focus:border-somni-pink focus:outline-none"
+                      className="w-full rounded border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-1.5 text-sm text-discord-text-primary placeholder:text-discord-text-muted/50 focus:border-discord-accent focus:outline-none"
                       onKeyDown={(e) => e.key === 'Enter' && addRole()}
                       autoFocus
                     />
@@ -685,7 +685,7 @@ function Step2Roles({
                       type="color"
                       value={newColor}
                       onChange={(e) => setNewColor(e.target.value)}
-                      className="h-8 w-full cursor-pointer rounded border border-discord-border bg-discord-bg-tertiary"
+                      className="h-8 w-full cursor-pointer rounded border border-discord-border-subtle bg-discord-bg-tertiary"
                     />
                   </div>
                   <label className="flex items-center gap-1.5 text-xs text-discord-text-secondary">
@@ -873,7 +873,7 @@ function Step4Review({
         </ul>
 
         {/* Role hierarchy preview */}
-        <div className="ml-4 space-y-2 rounded border border-discord-border/50 bg-discord-bg-secondary/30 p-2">
+        <div className="ml-4 space-y-2 rounded border border-discord-border-subtle/50 bg-discord-bg-secondary/30 p-2">
           <div className="flex items-center gap-2 text-xs text-discord-text-muted">
             <span className="font-medium">🤖 SomniBot</span>
             <span className="text-[10px]">(locked — top of hierarchy)</span>
@@ -1187,7 +1187,7 @@ function Step7GoLive({
       <CardHeader>
         <CardTitle>
           <div className="flex items-center gap-2">
-            <Zap size={18} className="text-somni-pink" />
+            <Zap size={18} className="text-discord-accent" />
             Step 7: Go Live
           </div>
         </CardTitle>

@@ -153,7 +153,7 @@ export default function TutorialPage() {
         <button
           onClick={saveConfig}
           disabled={saving}
-          className="rounded-md bg-somni-pink px-4 py-2 text-sm font-medium text-white hover:bg-somni-pink/80 disabled:opacity-50"
+          className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent-hover disabled:opacity-50"
         >
           {saving ? 'Saving...' : 'Save Changes'}
         </button>
@@ -171,8 +171,8 @@ export default function TutorialPage() {
       )}
 
       {/* Config toggles */}
-      <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4 space-y-4">
-        <h2 className="text-lg font-semibold text-discord-text-primary">Settings</h2>
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-4">
+        <h2 className="text-lg font-medium text-discord-text-primary">Settings</h2>
 
         <label className="flex items-center justify-between">
           <span className="text-sm text-discord-text-secondary">Enable tutorial system</span>
@@ -180,7 +180,7 @@ export default function TutorialPage() {
             type="checkbox"
             checked={config.enabled}
             onChange={(e) => setConfig({ ...config, enabled: e.target.checked })}
-            className="h-5 w-5 rounded border-discord-border"
+            className="h-5 w-5 rounded border-discord-border-subtle"
           />
         </label>
 
@@ -195,7 +195,7 @@ export default function TutorialPage() {
             type="checkbox"
             checked={config.auto_trigger}
             onChange={(e) => setConfig({ ...config, auto_trigger: e.target.checked })}
-            className="h-5 w-5 rounded border-discord-border"
+            className="h-5 w-5 rounded border-discord-border-subtle"
           />
         </label>
 
@@ -204,7 +204,7 @@ export default function TutorialPage() {
           <select
             value={config.trigger_mode}
             onChange={(e) => setConfig({ ...config, trigger_mode: e.target.value })}
-            className="rounded border border-discord-border bg-discord-bg-tertiary px-3 py-1.5 text-sm text-discord-text-primary"
+            className="rounded border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-1.5 text-sm text-discord-text-primary"
           >
             <option value="first_command">First command</option>
             <option value="join">On join</option>
@@ -214,16 +214,16 @@ export default function TutorialPage() {
       </div>
 
       {/* Tutorial Steps */}
-      <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4 space-y-4">
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-discord-text-primary">
+          <h2 className="text-lg font-medium text-discord-text-primary">
             Steps ({steps.length})
           </h2>
           <div className="flex gap-2">
             {steps.length === 0 && (
               <button
                 onClick={initBuiltIn}
-                className="rounded-md border border-discord-border px-3 py-1.5 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary"
+                className="rounded-md border border-discord-border-subtle px-3 py-1.5 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary"
               >
                 Load Default Steps
               </button>
@@ -246,7 +246,7 @@ export default function TutorialPage() {
             {steps.map((step, idx) => (
               <div
                 key={step.id}
-                className="rounded-lg border border-discord-border bg-discord-bg-tertiary p-4 space-y-3"
+                className="rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary p-4 space-y-3"
               >
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-discord-text-muted font-mono">
@@ -285,21 +285,21 @@ export default function TutorialPage() {
                   value={step.title}
                   onChange={(e) => updateStep(idx, 'title', e.target.value)}
                   placeholder="Step title..."
-                  className="w-full rounded border border-discord-border bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink/50 focus:outline-none"
+                  className="w-full rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent/50 focus:outline-none"
                 />
                 <textarea
                   value={step.description}
                   onChange={(e) => updateStep(idx, 'description', e.target.value)}
                   placeholder="Step description (supports markdown)..."
                   rows={3}
-                  className="w-full rounded border border-discord-border bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink/50 focus:outline-none resize-y"
+                  className="w-full rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent/50 focus:outline-none resize-y"
                 />
                 <input
                   type="text"
                   value={step.image_url ?? ''}
                   onChange={(e) => updateStep(idx, 'image_url', e.target.value)}
                   placeholder="Image URL (optional)..."
-                  className="w-full rounded border border-discord-border bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink/50 focus:outline-none"
+                  className="w-full rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent/50 focus:outline-none"
                 />
               </div>
             ))}

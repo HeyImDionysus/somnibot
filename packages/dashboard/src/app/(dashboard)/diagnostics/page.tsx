@@ -119,7 +119,7 @@ function Guidance({ metric, on }: { metric: GuidedMetric; on: boolean }) {
   const g = DIAGNOSTICS_GUIDANCE[metric];
   if (!g) return null;
   return (
-    <div className="mt-2 rounded-md border border-discord-border/60 bg-discord-bg-secondary/40 p-2">
+    <div className="mt-2 rounded-md border border-discord-border-subtle/60 bg-discord-bg-secondary/40 p-2">
       <p className="text-xs text-discord-text-secondary">{g.plainLanguage}</p>
       <p className="mt-1 text-xs text-discord-text-muted">
         <span className="font-medium text-discord-text-secondary">Normal:</span> {g.healthyRange}
@@ -609,7 +609,7 @@ export default function DiagnosticsPage() {
               defaultValue={diag?.thresholds?.memoryRssMb ?? 512}
               onBlur={(e) => void saveThresholds({ memory_alert_threshold_mb: Number(e.target.value) })}
               disabled={savingThresholds}
-              className="mt-1 w-full rounded-md border border-discord-border bg-discord-bg-primary px-2 py-1 text-discord-text-primary"
+              className="mt-1 w-full rounded-md border border-discord-border-subtle bg-discord-bg-primary px-2 py-1 text-discord-text-primary"
             />
           </label>
           <label className="block text-sm">
@@ -619,7 +619,7 @@ export default function DiagnosticsPage() {
               defaultValue={diag?.thresholds?.wsPingMs ?? 500}
               onBlur={(e) => void saveThresholds({ ws_ping_alert_threshold_ms: Number(e.target.value) })}
               disabled={savingThresholds}
-              className="mt-1 w-full rounded-md border border-discord-border bg-discord-bg-primary px-2 py-1 text-discord-text-primary"
+              className="mt-1 w-full rounded-md border border-discord-border-subtle bg-discord-bg-primary px-2 py-1 text-discord-text-primary"
             />
           </label>
           <label className="block text-sm">
@@ -629,7 +629,7 @@ export default function DiagnosticsPage() {
               defaultValue={diag?.thresholds?.webhookErrorRate ?? 0.25}
               onBlur={(e) => void saveThresholds({ webhook_error_rate_threshold: Number(e.target.value) })}
               disabled={savingThresholds}
-              className="mt-1 w-full rounded-md border border-discord-border bg-discord-bg-primary px-2 py-1 text-discord-text-primary"
+              className="mt-1 w-full rounded-md border border-discord-border-subtle bg-discord-bg-primary px-2 py-1 text-discord-text-primary"
             />
           </label>
         </div>

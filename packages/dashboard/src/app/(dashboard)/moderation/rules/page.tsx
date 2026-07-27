@@ -183,7 +183,7 @@ export default function AutoModRulesPage() {
         </div>
         <button
           onClick={handleCreate}
-          className="rounded-md bg-somni-pink px-4 py-2 text-sm font-semibold text-white hover:bg-somni-pink/80"
+          className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent-hover"
         >
           + New Rule
         </button>
@@ -197,15 +197,15 @@ export default function AutoModRulesPage() {
 
       {/* Rule List */}
       {rules.length === 0 && !editingRule && (
-        <div className="flex flex-col items-center justify-center rounded-lg border border-discord-border bg-discord-bg-secondary py-16">
+        <div className="flex flex-col items-center justify-center rounded-lg border border-discord-border-subtle bg-discord-bg-secondary py-16">
           <span className="text-4xl">🛡️</span>
-          <h3 className="mt-4 text-lg font-semibold text-discord-text-primary">No Rules Yet</h3>
+          <h3 className="mt-4 text-lg font-medium text-discord-text-primary">No Rules Yet</h3>
           <p className="mt-1 text-sm text-discord-text-muted">
             Create your first auto-mod rule to start protecting your server.
           </p>
           <button
             onClick={handleCreate}
-            className="mt-4 rounded-md bg-somni-pink px-4 py-2 text-sm font-semibold text-white hover:bg-somni-pink/80"
+            className="mt-4 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent-hover"
           >
             Create Rule
           </button>
@@ -220,14 +220,14 @@ export default function AutoModRulesPage() {
           <div
             key={rule.id}
             className={`rounded-lg border bg-discord-bg-secondary p-4 ${
-              rule.enabled ? 'border-discord-border' : 'border-discord-border/50 opacity-60'
+              rule.enabled ? 'border-discord-border-subtle' : 'border-discord-border-subtle/50 opacity-60'
             }`}
           >
             <div className="flex items-start justify-between gap-4">
               <div className="flex-1">
                 <div className="flex items-center gap-2">
                   <span>{ruleType?.icon ?? '🛡️'}</span>
-                  <h3 className="font-semibold text-discord-text-primary">{rule.name}</h3>
+                  <h3 className="font-medium text-discord-text-primary">{rule.name}</h3>
                   <span className="rounded-full bg-discord-bg-tertiary px-2 py-0.5 text-xs text-discord-text-muted">
                     {ruleType?.label ?? rule.type}
                   </span>
@@ -367,8 +367,8 @@ function RuleEditor({
   onCancel: () => void;
 }) {
   return (
-    <div className="rounded-lg border-2 border-somni-pink/30 bg-discord-bg-secondary p-6">
-      <h3 className="text-lg font-semibold text-discord-text-primary">
+    <div className="rounded-lg border-2 border-discord-accent/30 bg-discord-bg-secondary p-6">
+      <h3 className="text-lg font-medium text-discord-text-primary">
         {isCreating ? 'Create Rule' : 'Edit Rule'}
       </h3>
 
@@ -381,7 +381,7 @@ function RuleEditor({
             value={rule.name ?? ''}
             onChange={(e) => onChange({ ...rule, name: e.target.value })}
             placeholder="e.g. Profanity Filter"
-            className="w-full max-w-md rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+            className="w-full max-w-md rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none"
           />
         </div>
 
@@ -395,7 +395,7 @@ function RuleEditor({
               onChange({ ...rule, type: newType, config: getDefaultConfig(newType) });
             }}
             disabled={!isCreating}
-            className="rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary disabled:opacity-50"
+            className="rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary disabled:opacity-50"
           >
             {RULE_TYPES.map((t) => (
               <option key={t.value} value={t.value}>{t.icon} {t.label}</option>
@@ -412,7 +412,7 @@ function RuleEditor({
           <select
             value={rule.action ?? 'warn'}
             onChange={(e) => onChange({ ...rule, action: e.target.value })}
-            className="rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+            className="rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
           >
             {ACTIONS.map((a) => (
               <option key={a.value} value={a.value}>{a.label}</option>
@@ -429,7 +429,7 @@ function RuleEditor({
               min={1}
               value={rule.mute_duration_minutes ?? 5}
               onChange={(e) => onChange({ ...rule, mute_duration_minutes: parseInt(e.target.value) || 5 })}
-              className="w-24 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+              className="w-24 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
             />
           </div>
         )}
@@ -450,7 +450,7 @@ function RuleEditor({
           <button
             onClick={onSave}
             disabled={saving || !rule.name}
-            className="rounded-md bg-somni-pink px-5 py-2 text-sm font-semibold text-white hover:bg-somni-pink/80 disabled:opacity-50"
+            className="rounded-md bg-discord-accent px-5 py-2 text-sm font-medium text-white hover:bg-discord-accent-hover disabled:opacity-50"
           >
             {saving ? 'Saving...' : isCreating ? 'Create Rule' : 'Save Changes'}
           </button>
@@ -487,12 +487,12 @@ function WordFilterConfig({ config, onChange }: { config: Record<string, unknown
             }
           }}
           placeholder="Type a word and press Enter"
-          className="flex-1 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
+          className="flex-1 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
         />
         <select
           value={(config.matchMode as string) ?? 'exact'}
           onChange={(e) => onChange({ ...config, matchMode: e.target.value })}
-          className="rounded-md border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
+          className="rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
         >
           <option value="exact">Exact</option>
           <option value="wildcard">Wildcard</option>
@@ -520,7 +520,7 @@ function LinkFilterConfig({ config, onChange }: { config: Record<string, unknown
         <select
           value={(config.mode as string) ?? 'blacklist'}
           onChange={(e) => onChange({ ...config, mode: e.target.value })}
-          className="rounded-md border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
+          className="rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
         >
           <option value="blacklist">Blacklist (block these)</option>
           <option value="whitelist">Whitelist (only allow these)</option>
@@ -538,7 +538,7 @@ function LinkFilterConfig({ config, onChange }: { config: Record<string, unknown
             }
           }}
           placeholder="example.com"
-          className="flex-1 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
+          className="flex-1 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
         />
       </div>
       <div className="flex flex-wrap gap-1">
@@ -588,13 +588,13 @@ function RuleConfig({
           <input
             type="number" min={2} value={(config.maxMessages as number) ?? 5}
             onChange={(e) => onChange({ ...config, maxMessages: parseInt(e.target.value) || 5 })}
-            className="w-16 rounded border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
+            className="w-16 rounded border border-discord-border-subtle bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
           />
           <span className="text-sm text-discord-text-muted">messages in</span>
           <input
             type="number" min={1} value={(config.intervalSeconds as number) ?? 5}
             onChange={(e) => onChange({ ...config, intervalSeconds: parseInt(e.target.value) || 5 })}
-            className="w-16 rounded border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
+            className="w-16 rounded border border-discord-border-subtle bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
           />
           <span className="text-sm text-discord-text-muted">seconds</span>
         </div>
@@ -606,13 +606,13 @@ function RuleConfig({
           <input
             type="number" min={2} value={(config.threshold as number) ?? 3}
             onChange={(e) => onChange({ ...config, threshold: parseInt(e.target.value) || 3 })}
-            className="w-16 rounded border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
+            className="w-16 rounded border border-discord-border-subtle bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
           />
           <span className="text-sm text-discord-text-muted">identical messages in</span>
           <input
             type="number" min={5} value={(config.intervalSeconds as number) ?? 30}
             onChange={(e) => onChange({ ...config, intervalSeconds: parseInt(e.target.value) || 30 })}
-            className="w-16 rounded border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
+            className="w-16 rounded border border-discord-border-subtle bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
           />
           <span className="text-sm text-discord-text-muted">seconds</span>
         </div>
@@ -626,7 +626,7 @@ function RuleConfig({
             <input
               type="number" min={50} max={100} value={(config.maxPercent as number) ?? 70}
               onChange={(e) => onChange({ ...config, maxPercent: parseInt(e.target.value) || 70 })}
-              className="w-16 rounded border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
+              className="w-16 rounded border border-discord-border-subtle bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
             />
             <span className="text-sm text-discord-text-muted">% uppercase</span>
           </div>
@@ -635,7 +635,7 @@ function RuleConfig({
             <input
               type="number" min={1} value={(config.minLength as number) ?? 10}
               onChange={(e) => onChange({ ...config, minLength: parseInt(e.target.value) || 10 })}
-              className="w-16 rounded border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
+              className="w-16 rounded border border-discord-border-subtle bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
             />
           </div>
         </div>
@@ -648,7 +648,7 @@ function RuleConfig({
           <input
             type="number" min={1} value={(config.maxMentions as number) ?? 5}
             onChange={(e) => onChange({ ...config, maxMentions: parseInt(e.target.value) || 5 })}
-            className="w-16 rounded border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
+            className="w-16 rounded border border-discord-border-subtle bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
           />
         </div>
       );
@@ -660,7 +660,7 @@ function RuleConfig({
           <input
             type="number" min={5} value={(config.maxNewlines as number) ?? 15}
             onChange={(e) => onChange({ ...config, maxNewlines: parseInt(e.target.value) || 15 })}
-            className="w-16 rounded border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
+            className="w-16 rounded border border-discord-border-subtle bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
           />
         </div>
       );

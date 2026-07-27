@@ -254,36 +254,36 @@ export default function ModerationPage() {
       <div className="grid grid-cols-2 gap-4">
         <Link
           href="/moderation/rules"
-          className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4 hover:border-somni-pink/50 transition-colors"
+          className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 hover:border-discord-accent/50 transition-colors"
         >
           <div className="flex items-center gap-3">
             <span className="text-2xl">🛡️</span>
             <div>
-              <h3 className="font-semibold text-discord-text-primary">Auto-Mod Rules</h3>
+              <h3 className="font-medium text-discord-text-primary">Auto-Mod Rules</h3>
               <p className="text-xs text-discord-text-muted">Word filter, spam detection, link blocking, and more</p>
             </div>
           </div>
         </Link>
         <Link
           href="/moderation/infractions"
-          className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4 hover:border-somni-pink/50 transition-colors"
+          className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 hover:border-discord-accent/50 transition-colors"
         >
           <div className="flex items-center gap-3">
             <span className="text-2xl">📋</span>
             <div>
-              <h3 className="font-semibold text-discord-text-primary">Infractions</h3>
+              <h3 className="font-medium text-discord-text-primary">Infractions</h3>
               <p className="text-xs text-discord-text-muted">View, search, and manage member infractions</p>
             </div>
           </div>
         </Link>
         <Link
           href="/moderation/appeals"
-          className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4 hover:border-somni-pink/50 transition-colors"
+          className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 hover:border-discord-accent/50 transition-colors"
         >
           <div className="flex items-center gap-3">
             <span className="text-2xl">⚖️</span>
             <div>
-              <h3 className="font-semibold text-discord-text-primary">Appeals</h3>
+              <h3 className="font-medium text-discord-text-primary">Appeals</h3>
               <p className="text-xs text-discord-text-muted">Review, approve, and deny member appeals</p>
             </div>
           </div>
@@ -291,8 +291,8 @@ export default function ModerationPage() {
       </div>
 
       {/* General Settings */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
-        <h2 className="text-lg font-semibold text-discord-text-primary">General Settings</h2>
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
+        <h2 className="text-lg font-medium text-discord-text-primary">General Settings</h2>
 
         <div className="mt-6 space-y-5">
           {/* Mod Log Channel */}
@@ -323,17 +323,17 @@ export default function ModerationPage() {
               onChange={(e) =>
                 setConfig({ ...config, infraction_expiry_days: parseInt(e.target.value) || 30 })
               }
-              className="w-24 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+              className="w-24 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
             />
           </div>
         </div>
       </section>
 
       {/* Escalation Chain */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-discord-text-primary">Escalation Chain</h2>
+            <h2 className="text-lg font-medium text-discord-text-primary">Escalation Chain</h2>
             <p className="mt-1 text-sm text-discord-text-muted">
               Automatic punishment escalation based on active warning count.
             </p>
@@ -357,7 +357,7 @@ export default function ModerationPage() {
 
         <div className="mt-6 space-y-3">
           {config.escalation_chain.length === 0 && (
-            <div className="rounded-lg border border-discord-border bg-discord-bg-tertiary p-4 text-center text-sm text-discord-text-muted">
+            <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary p-4 text-center text-sm text-discord-text-muted">
               No escalation steps configured. Add steps below or reset to defaults.
             </div>
           )}
@@ -365,7 +365,7 @@ export default function ModerationPage() {
           {config.escalation_chain.map((step, idx) => (
             <div
               key={idx}
-              className="flex items-center gap-3 rounded-lg border border-discord-border bg-discord-bg-tertiary p-3"
+              className="flex items-center gap-3 rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary p-3"
             >
               {/* Threshold */}
               <div className="flex items-center gap-2">
@@ -375,7 +375,7 @@ export default function ModerationPage() {
                   min={1}
                   value={step.threshold}
                   onChange={(e) => updateStep(idx, { threshold: parseInt(e.target.value) || 1 })}
-                  className="w-14 rounded border border-discord-border bg-discord-bg-secondary px-2 py-1 text-center text-sm text-discord-text-primary"
+                  className="w-14 rounded border border-discord-border-subtle bg-discord-bg-secondary px-2 py-1 text-center text-sm text-discord-text-primary"
                 />
                 <span className="text-xs text-discord-text-muted whitespace-nowrap">warning(s)</span>
               </div>
@@ -395,7 +395,7 @@ export default function ModerationPage() {
                       durationMinutes: action === 'mute' ? 60 : undefined,
                     });
                   }}
-                  className="rounded border border-discord-border bg-discord-bg-secondary px-2 py-1 text-sm text-discord-text-primary"
+                  className="rounded border border-discord-border-subtle bg-discord-bg-secondary px-2 py-1 text-sm text-discord-text-primary"
                 >
                   <option value="warn">Warn</option>
                   <option value="mute">Mute</option>
@@ -412,7 +412,7 @@ export default function ModerationPage() {
                     min={1}
                     value={step.durationMinutes ?? 60}
                     onChange={(e) => updateStep(idx, { durationMinutes: parseInt(e.target.value) || 60 })}
-                    className="w-20 rounded border border-discord-border bg-discord-bg-secondary px-2 py-1 text-sm text-discord-text-primary"
+                    className="w-20 rounded border border-discord-border-subtle bg-discord-bg-secondary px-2 py-1 text-sm text-discord-text-primary"
                   />
                   <span className="text-xs text-discord-text-muted">min</span>
                 </div>
@@ -442,7 +442,7 @@ export default function ModerationPage() {
 
           <button
             onClick={addStep}
-            className="w-full rounded-lg border border-dashed border-discord-border p-3 text-sm text-discord-text-muted hover:border-somni-pink/50 hover:text-discord-text-primary"
+            className="w-full rounded-lg border border-dashed border-discord-border-subtle p-3 text-sm text-discord-text-muted hover:border-discord-accent/50 hover:text-discord-text-primary"
           >
             + Add Escalation Step
           </button>
@@ -450,7 +450,7 @@ export default function ModerationPage() {
 
         {/* Visual chain preview */}
         {config.escalation_chain.length > 0 && (
-          <div className="mt-4 rounded-lg border border-discord-border bg-discord-bg-tertiary p-4">
+          <div className="mt-4 rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary p-4">
             <h4 className="text-xs font-medium text-discord-text-muted uppercase mb-2">Preview</h4>
             <div className="flex flex-wrap items-center gap-2">
               {[...config.escalation_chain]
@@ -472,8 +472,8 @@ export default function ModerationPage() {
       </section>
 
       {/* Commerce Interaction Info */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
-        <h2 className="text-lg font-semibold text-discord-text-primary mb-3">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
+        <h2 className="text-lg font-medium text-discord-text-primary mb-3">
           Moderation × Commerce
         </h2>
         <div className="space-y-2 text-sm text-discord-text-muted">
@@ -497,10 +497,10 @@ export default function ModerationPage() {
       </section>
 
       {/* Anti-Raid Protection */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h2 className="text-lg font-semibold text-discord-text-primary">Anti-Raid Protection</h2>
+            <h2 className="text-lg font-medium text-discord-text-primary">Anti-Raid Protection</h2>
             <p className="mt-1 text-sm text-discord-text-muted">
               Detects join floods and takes automatic action against suspicious accounts.
             </p>
@@ -525,7 +525,7 @@ export default function ModerationPage() {
                   max={100}
                   value={antiRaid.anti_raid_join_threshold}
                   onChange={(e) => setAntiRaid({ ...antiRaid, anti_raid_join_threshold: parseInt(e.target.value) || 10 })}
-                  className="mt-2 w-24 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+                  className="mt-2 w-24 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
                 />
               </div>
               <div>
@@ -537,7 +537,7 @@ export default function ModerationPage() {
                   max={300}
                   value={antiRaid.anti_raid_join_window_seconds}
                   onChange={(e) => setAntiRaid({ ...antiRaid, anti_raid_join_window_seconds: parseInt(e.target.value) || 10 })}
-                  className="mt-2 w-24 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+                  className="mt-2 w-24 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
                 />
               </div>
               <div>
@@ -549,7 +549,7 @@ export default function ModerationPage() {
                   max={365}
                   value={antiRaid.anti_raid_account_age_days}
                   onChange={(e) => setAntiRaid({ ...antiRaid, anti_raid_account_age_days: parseInt(e.target.value) || 7 })}
-                  className="mt-2 w-24 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+                  className="mt-2 w-24 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
                 />
               </div>
             </div>
@@ -560,7 +560,7 @@ export default function ModerationPage() {
                 <select
                   value={antiRaid.anti_raid_action}
                   onChange={(e) => setAntiRaid({ ...antiRaid, anti_raid_action: e.target.value as AntiRaidConfig['anti_raid_action'] })}
-                  className="mt-2 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+                  className="mt-2 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
                 >
                   <option value="kick">Kick suspicious accounts</option>
                   <option value="ban">Ban suspicious accounts</option>
@@ -583,10 +583,10 @@ export default function ModerationPage() {
       </section>
 
       {/* Message Logging */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h2 className="text-lg font-semibold text-discord-text-primary">Message Logging</h2>
+            <h2 className="text-lg font-medium text-discord-text-primary">Message Logging</h2>
             <p className="mt-1 text-sm text-discord-text-muted">
               Log message edits and deletions to a designated channel.
             </p>
@@ -614,10 +614,10 @@ export default function ModerationPage() {
       </section>
 
       {/* Starboard */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h2 className="text-lg font-semibold text-discord-text-primary">Starboard</h2>
+            <h2 className="text-lg font-medium text-discord-text-primary">Starboard</h2>
             <p className="mt-1 text-sm text-discord-text-muted">
               Highlight popular messages that receive enough reactions in a starboard channel.
             </p>
@@ -652,7 +652,7 @@ export default function ModerationPage() {
                   max={100}
                   value={starboard.starboard_threshold}
                   onChange={(e) => setStarboard({ ...starboard, starboard_threshold: parseInt(e.target.value) || 3 })}
-                  className="mt-2 w-24 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+                  className="mt-2 w-24 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
                 />
               </div>
             </div>
@@ -665,7 +665,7 @@ export default function ModerationPage() {
                   value={starboard.starboard_emoji}
                   onChange={(e) => setStarboard({ ...starboard, starboard_emoji: e.target.value || '⭐' })}
                   placeholder="⭐"
-                  className="mt-2 w-24 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+                  className="mt-2 w-24 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
                 />
               </div>
               <div className="flex items-center justify-between">
@@ -690,14 +690,14 @@ export default function ModerationPage() {
         <button
           onClick={handleSave}
           disabled={saving}
-          className="rounded-md bg-somni-pink px-6 py-2.5 text-sm font-semibold text-white hover:bg-somni-pink/80 disabled:opacity-50"
+          className="rounded-md bg-discord-accent px-6 py-2.5 text-sm font-medium text-white hover:bg-discord-accent-hover disabled:opacity-50"
         >
           {saving ? 'Saving...' : 'Save Escalation'}
         </button>
         <button
           onClick={handleSaveGuildConfig}
           disabled={savingGuild}
-          className="rounded-md bg-discord-accent px-6 py-2.5 text-sm font-semibold text-white hover:bg-discord-accent/80 disabled:opacity-50"
+          className="rounded-md bg-discord-accent px-6 py-2.5 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
         >
           {savingGuild ? 'Saving...' : 'Save Anti-Raid / Logging / Starboard'}
         </button>

@@ -206,7 +206,7 @@ export default function SyncPage() {
           <div className="flex items-center gap-3">
             <span className="text-2xl">🚨</span>
             <div>
-              <h3 className="font-semibold text-red-400">
+              <h3 className="font-medium text-red-400">
                 Critical Drift Detected
               </h3>
               <p className="text-sm text-red-300/80">
@@ -221,7 +221,7 @@ export default function SyncPage() {
       {status.driftItems.length > 0 && (
         <section className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-discord-text-primary">
+            <h2 className="text-lg font-medium text-discord-text-primary">
               Drift Items
             </h2>
             <button
@@ -256,7 +256,7 @@ export default function SyncPage() {
                           • {item.entityType}
                         </span>
                       </div>
-                      <h3 className="mt-1 font-semibold text-discord-text-primary">
+                      <h3 className="mt-1 font-medium text-discord-text-primary">
                         {item.entityName}
                       </h3>
                       <p className="mt-0.5 text-sm text-discord-text-muted">
@@ -287,7 +287,7 @@ export default function SyncPage() {
                       <button
                         onClick={() => handleDriftAction('repair', item)}
                         disabled={!!actionLoading}
-                        className="rounded bg-somni-pink/20 px-3 py-1.5 text-xs font-medium text-somni-pink hover:bg-somni-pink/30 disabled:opacity-50"
+                        className="rounded bg-discord-accent/20 px-3 py-1.5 text-xs font-medium text-discord-accent hover:bg-discord-accent/30 disabled:opacity-50"
                         title="Revert Discord to match desired state"
                       >
                         Repair
@@ -320,9 +320,9 @@ export default function SyncPage() {
 
       {/* No Drift */}
       {status.driftItems.length === 0 && (
-        <section className="flex flex-col items-center justify-center rounded-lg border border-discord-border bg-discord-bg-secondary py-16">
+        <section className="flex flex-col items-center justify-center rounded-lg border border-discord-border-subtle bg-discord-bg-secondary py-16">
           <span className="text-4xl">✅</span>
-          <h3 className="mt-4 text-lg font-semibold text-discord-text-primary">
+          <h3 className="mt-4 text-lg font-medium text-discord-text-primary">
             Server In Sync
           </h3>
           <p className="mt-1 text-sm text-discord-text-muted">
@@ -332,8 +332,8 @@ export default function SyncPage() {
       )}
 
       {/* Configuration */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
-        <h2 className="text-lg font-semibold text-discord-text-primary">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
+        <h2 className="text-lg font-medium text-discord-text-primary">
           Sync Settings
         </h2>
         <p className="mt-1 text-sm text-discord-text-muted">
@@ -397,7 +397,7 @@ export default function SyncPage() {
                     : null,
                 )
               }
-              className="w-24 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+              className="w-24 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
             />
           </div>
 
@@ -471,7 +471,7 @@ export default function SyncPage() {
           <button
             onClick={handleConfigSave}
             disabled={saving}
-            className="rounded-md bg-somni-pink px-6 py-2.5 text-sm font-semibold text-white hover:bg-somni-pink/80 disabled:opacity-50"
+            className="rounded-md bg-discord-accent px-6 py-2.5 text-sm font-medium text-white hover:bg-discord-accent-hover disabled:opacity-50"
           >
             {saving ? 'Saving...' : 'Save Settings'}
           </button>
@@ -480,42 +480,42 @@ export default function SyncPage() {
       </section>
 
       {/* How It Works */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
-        <h2 className="text-lg font-semibold text-discord-text-primary mb-3">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
+        <h2 className="text-lg font-medium text-discord-text-primary mb-3">
           How Drift Detection Works
         </h2>
         <div className="space-y-3 text-sm text-discord-text-muted">
           <div className="flex items-start gap-3">
-            <span className="mt-0.5 text-somni-cyan font-mono text-xs">1</span>
+            <span className="mt-0.5 text-discord-accent font-mono text-xs">1</span>
             <p>
               <strong className="text-discord-text-primary">Snapshot</strong> — The bot periodically
               reads your Discord server&apos;s roles, channels, and permissions.
             </p>
           </div>
           <div className="flex items-start gap-3">
-            <span className="mt-0.5 text-somni-cyan font-mono text-xs">2</span>
+            <span className="mt-0.5 text-discord-accent font-mono text-xs">2</span>
             <p>
               <strong className="text-discord-text-primary">Diff</strong> — Compares the snapshot
               against the desired state (what the dashboard says it should be).
             </p>
           </div>
           <div className="flex items-start gap-3">
-            <span className="mt-0.5 text-somni-cyan font-mono text-xs">3</span>
+            <span className="mt-0.5 text-discord-accent font-mono text-xs">3</span>
             <p>
               <strong className="text-discord-text-primary">Classify</strong> — Categorizes each
               difference by type and severity.
             </p>
           </div>
           <div className="flex items-start gap-3">
-            <span className="mt-0.5 text-somni-cyan font-mono text-xs">4</span>
+            <span className="mt-0.5 text-discord-accent font-mono text-xs">4</span>
             <p>
               <strong className="text-discord-text-primary">Action</strong> — You choose to{' '}
-              <span className="text-somni-pink">Repair</span> (revert to desired),{' '}
+              <span className="text-discord-accent">Repair</span> (revert to desired),{' '}
               <span className="text-green-400">Accept</span> (update desired), or{' '}
               Ignore each item.
             </p>
           </div>
-          <div className="mt-2 rounded border border-discord-border bg-discord-bg-tertiary px-4 py-2 text-xs">
+          <div className="mt-2 rounded border border-discord-border-subtle bg-discord-bg-tertiary px-4 py-2 text-xs">
             Additionally, the bot detects changes in real-time via Discord events (role/channel
             create/update/delete). These appear here instantly — no need to wait for the next sync cycle.
           </div>
