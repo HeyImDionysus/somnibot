@@ -18,6 +18,7 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
 import { dbError } from '@/lib/api/response';
+import { recordGuildConfigChange } from '@/lib/admin-changes';
 
 const BRANDING_COLUMNS = [
   'store_brand_name',
@@ -107,6 +108,18 @@ export async function PUT(request: NextRequest) {
   // Notify bot to invalidate its brand kit cache, carrying the changed keys
   // and their prior values so the config.updated audit row isn't empty.
   await notifyBot('branding', updates, 'dashboard', undefined, before);
+
+  // Make the change visible (and undoable) on the Admin Changes page. The
+  // brand drives every member-facing surface, so this is a medium blast radius.
+  await recordGuildConfigChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    action: 'branding.updated',
+    area: 'branding',
+    updates,
+    before,
+    blastRadius: 'medium',
+  }, admin);
 
   return NextResponse.json({ success: true });
 }

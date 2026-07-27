@@ -8,6 +8,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { notifyBot } from '@/lib/notify-bot';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 
 
 export async function PUT(req: NextRequest) {
@@ -37,6 +38,8 @@ export async function PUT(req: NextRequest) {
   // which rejects out-of-range values with a 400 before this point — matching
   // the /api/sync update_config route (reject, never silently clamp/partial-write).
 
+  const before = await readGuildConfigBefore(supabase, guildId, Object.keys(allowed));
+
   const { error } = await supabase
     .from('guild_config')
     .upsert({ guild_id: guildId, ...allowed }, { onConflict: 'guild_id' });
@@ -47,6 +50,18 @@ export async function PUT(req: NextRequest) {
 
   // Notify the bot so it hot-reloads sync configuration.
   await notifyBot('settings', allowed);
+
+  // Auto-repair rewrites roles/channels to match the dashboard, so a change
+  // here can move real Discord objects on the next sync tick.
+  await recordGuildConfigChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    action: 'sync.config_updated',
+    area: 'server sync',
+    updates: allowed,
+    before,
+    blastRadius: 'high',
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }

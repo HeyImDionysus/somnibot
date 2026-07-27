@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 
 const syncConfigAction = z.object({
   action: z.literal('update_config'),
@@ -97,6 +98,14 @@ export async function POST(request: NextRequest) {
   const admin = createAdminSupabase();
 
   if (body.action === 'update_config') {
+    const syncUpdates = {
+      sync_enabled: body.syncEnabled,
+      sync_interval_minutes: body.syncIntervalMinutes,
+      sync_auto_repair: body.autoRepair,
+      sync_auto_repair_everyone: body.autoRepairEveryone,
+    };
+    const before = await readGuildConfigBefore(admin, guildId, Object.keys(syncUpdates));
+
     const { error } = await admin
       .from('guild_config')
       .upsert({ guild_id: guildId,
@@ -110,6 +119,18 @@ export async function POST(request: NextRequest) {
 
     // Notify bot so it hot-reloads sync config immediately
     await notifyBot('settings');
+
+    // Auto-repair rewrites roles/channels to match the dashboard, so a change
+    // here can move real Discord objects on the next sync tick.
+    await recordGuildConfigChange({
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'sync.config_updated',
+      area: 'server sync',
+      updates: syncUpdates,
+      before,
+      blastRadius: 'high',
+    }, admin);
 
     return NextResponse.json({ success: true });
   }

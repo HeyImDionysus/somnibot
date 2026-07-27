@@ -9,6 +9,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
+import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -48,6 +49,8 @@ export async function PUT(req: NextRequest) {
 
   const allowed = typedPick(body, ['welcome_enabled', 'welcome_channel_id', 'welcome_message', 'welcome_card_enabled', 'welcome_card_background', 'welcome_dm_enabled', 'welcome_dm_message', 'welcome_auto_roles', 'goodbye_enabled', 'goodbye_channel_id', 'goodbye_message']);
 
+  const before = await readGuildConfigBefore(supabase, guildId, Object.keys(allowed));
+
   const { error } = await supabase
     .from('guild_config')
     .update(allowed)
@@ -58,6 +61,15 @@ export async function PUT(req: NextRequest) {
   }
 
   await notifyBot('welcome', allowed);
+
+  await recordGuildConfigChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    action: 'welcome.updated',
+    area: 'welcome & goodbye',
+    updates: allowed,
+    before,
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }
