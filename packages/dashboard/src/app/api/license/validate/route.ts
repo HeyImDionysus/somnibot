@@ -14,15 +14,10 @@ import { createHash } from 'crypto';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { licenseUnavailable } from '@/lib/api/license-status';
+import { getClientIp } from '@/lib/api/client-ip';
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
-}
-
-function getClientIp(req: NextRequest): string {
-  return req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
-    ?? req.headers.get('x-real-ip')
-    ?? 'unknown';
 }
 
 // ── Composite lookup result shape ────────────────────────────

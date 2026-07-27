@@ -41,9 +41,21 @@ export interface SomniLicenseConfig {
   /**
    * Offline grace period (ms) before a cached validation expires. Default: 86400000 (24h).
    *
-   * Note: This uses client-side Date.now() and can be bypassed by clock manipulation.
    * The server-side heartbeat system is the authoritative enforcement mechanism.
-   * This grace period is a UX convenience for intermittent connectivity.
+   * This grace period is a UX convenience for intermittent connectivity, and it
+   * also covers a licence-server fault (see {@link INDETERMINATE_STATUSES}).
+   *
+   * **The cache is in-memory only, deliberately.** Restarting the app while
+   * offline therefore starts from nothing: `validate()` returns
+   * `network_error` rather than resuming the grace window. That is a real
+   * inconvenience for a customer whose laptop reboots on a plane, and it is
+   * still the right default — grace is measured on the monotonic clock
+   * (`performance.now()`), precisely so the window cannot be extended by
+   * winding the system clock back. A persisted window has no monotonic clock to
+   * anchor to across a restart, so persisting it would mean re-admitting the
+   * wall-clock bypass this SDK went to some trouble to remove. If your product
+   * needs offline restarts, prefer a longer `offlineGraceMs` (the window still
+   * cannot be extended by tampering) over persisting the cache.
    */
   offlineGraceMs?: number;
   /**

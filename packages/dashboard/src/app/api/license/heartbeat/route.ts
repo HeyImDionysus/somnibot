@@ -15,6 +15,7 @@ import { createHash } from 'crypto';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { licenseUnavailable } from '@/lib/api/license-status';
+import { getClientIp } from '@/lib/api/client-ip';
 import { isEntitlementAccessLive } from '@somnibot/shared';
 
 function sha256(input: string): string {
@@ -28,7 +29,7 @@ export async function POST(req: NextRequest) {
   const supabase = createAdminSupabase();
 
   // ── B.5: Rate limit ──
-  const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
+  const clientIp = getClientIp(req);
   const ipLimit = await rateLimits.licenseHeartbeat(clientIp);
   if (ipLimit.limited) {
     return NextResponse.json(

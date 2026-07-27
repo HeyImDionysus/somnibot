@@ -9,6 +9,7 @@ import { createHash } from 'crypto';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { dbError } from '@/lib/api/response';
+import { getClientIp } from '@/lib/api/client-ip';
 import { writeCommerceAudit } from '@/lib/commerce-audit';
 
 function sha256(input: string): string {
@@ -19,7 +20,7 @@ export async function POST(req: NextRequest) {
   const supabase = createAdminSupabase();
 
   // ── B.5: Rate limit ──
-  const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
+  const clientIp = getClientIp(req);
   const ipLimit = await rateLimits.licenseDeactivate(clientIp);
   if (ipLimit.limited) {
     return NextResponse.json(

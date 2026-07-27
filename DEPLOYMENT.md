@@ -224,7 +224,35 @@ LAVALINK_PORT=2333
 LAVALINK_PASSWORD=<node scripts/gen-secret.mjs 16>
 
 PAYPAL_WEBHOOK_URL=https://somnibot.example.com/api/paypal/webhook
+
+# Reverse-proxy hops in front of the dashboard. 1 = Caddy only (the stack in
+# docker-compose.prod.yml). Raise it if you put another proxy in front, e.g.
+# Cloudflare -> Caddy is 2. See "Client IP and rate limiting" below.
+SOMNIBOT_TRUSTED_PROXY_HOPS=1
 ```
+
+### Client IP and rate limiting
+
+Per-IP rate limits on the public licence endpoints (`/api/license/validate`,
+`/api/license/heartbeat`, `/api/license/deactivate`) key off the client address
+derived from `X-Forwarded-For`. That header is append-only, so its *first* value
+is whatever the client sent and only the last hops are written by your own
+proxies. `SOMNIBOT_TRUSTED_PROXY_HOPS` tells the dashboard how many trailing
+entries to trust.
+
+| Setup | Value |
+|---|---|
+| VPS: Caddy → dashboard (docker-compose.prod.yml) | `1` (default) |
+| Regular local: Tailscale Funnel / ngrok / Cloudflare Tunnel → dashboard | `1` (default) |
+| Cloudflare (or another CDN) → Caddy → dashboard | `2` |
+| No reverse proxy at all (not a supported mode) | `0` |
+
+Set it too high and callers share a rate-limit bucket; set it too low and a
+client can rotate the header to bypass the limits entirely. If the dashboard
+logs `[client-ip]` warnings on startup traffic, the value does not match
+reality. Getting it wrong degrades rather than locks out — a rate-limited
+licence response is non-terminal for the SDK, so customers keep running on their
+cached validation — but it should still be set correctly.
 
 Manual fallback: start the production stack on the VPS:
 
