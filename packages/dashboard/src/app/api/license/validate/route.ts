@@ -213,6 +213,26 @@ export async function POST(req: NextRequest) {
   }
 
   // 6. Multi-device tracking (atomic RPC stays separate — needs FOR UPDATE)
+  //
+  // On the `evict_oldest` default (product_license_config.device_policy, set in
+  // 20260518000101): it does not REFUSE anyone, so a share group is never told
+  // "no" — each validation evicts the least-recently-seen session and takes its
+  // place. It is kept as the default deliberately:
+  //
+  //   * `reject` hard-blocks a customer who reimaged their machine or replaced
+  //     a laptop until they find the portal and free a seat by hand. Breaking a
+  //     paying customer's working install is worse than the leak.
+  //   * Since the seat layer actually works again (Finding 3), eviction is real
+  //     friction on sharers rather than a no-op: every extra person kicks
+  //     someone else off mid-session, and it is self-limiting in a way that
+  //     costs an honest customer nothing.
+  //   * The leak is no longer invisible — the device-abuse signal below now
+  //     fires under this policy — so the owner can flip individual products to
+  //     `reject` from the licence config with evidence in hand.
+  //
+  // Changing the column default would apply to new products only, but the
+  // recommendation is to keep it: switch specific products to `reject` when a
+  // signal says so.
   let sessionId: string | undefined;
 
   if (device_fingerprint && result.config_max_devices) {
@@ -511,6 +531,60 @@ async function raiseFraudCheckAlert(
   }
 }
 
+/**
+ * Rolling window for the device-abuse signal.
+ *
+ * A week, not a day: a sharing group does not have to be online on the same
+ * day for the key to be serving all of them, and "how many distinct machines
+ * does this key serve" is naturally a weekly question. The IP check below uses
+ * 24h because a burst of IPs in one day is itself the anomaly there.
+ */
+const DEVICE_ABUSE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Distinct devices in the window, as a multiple of max_devices, that trips the signal. */
+const DEVICE_ABUSE_HIGH_RATIO = 3;
+const DEVICE_ABUSE_CRITICAL_RATIO = 5;
+
+/** Bound on rows read per check. A key over this is far past any threshold. */
+const DEVICE_ABUSE_ROW_CAP = 1000;
+
+/**
+ * Device-sharing signal.
+ *
+ * ## Why this does not count active sessions
+ *
+ * It used to fire on `activeDevices > maxDevices * 3` — which is mathematically
+ * unreachable in the default configuration. Under `evict_oldest` (the schema
+ * default) every new device evicts the least-recently-seen one, so the active
+ * count is *pinned at* `max_devices` by construction; it can never reach three
+ * times it. Under `reject` the RPC refuses past the limit, so it is pinned
+ * there too. The signal could only ever have fired on legacy or
+ * hand-inserted rows. Ten people sharing one 3-seat key produced exactly the
+ * same active count as one honest customer with three machines.
+ *
+ * ## What it counts instead
+ *
+ * Distinct DEVICES that used the key inside the window, whether or not they
+ * currently hold a seat. Eviction pins the seat count; it does not pin the
+ * number of machines, which is the thing we actually care about. A row in
+ * `license_sessions` is one device — `UNIQUE(license_key_id,
+ * device_fingerprint)` guarantees it — so the row count in the window *is* the
+ * distinct-device count, with no DISTINCT and no aggregation.
+ *
+ * (Eviction *rate* was the other candidate. It is worse here: a device's
+ * `deactivation_reason` is cleared when it reclaims its row, so churn
+ * systematically undercounts exactly the keys that churn hardest. It is
+ * reported as supporting evidence, not used as the trigger.)
+ *
+ * ## Thresholds
+ *
+ * `> max_devices * 3` distinct machines in seven days. Honest churn — a
+ * reinstall, a new laptop, a re-imaged machine — moves this by one or two, so
+ * a 3-seat licence has to reach ten distinct machines before it trips. The
+ * cost of a false positive is low by design: fraud signals are advisory, they
+ * open an operator alert and never refuse a validation, so a customer with an
+ * unstable fingerprint is reviewed, not locked out.
+ */
 async function checkDeviceAbuse(
   supabase: ReturnType<typeof createAdminSupabase>,
   guildId: string,
@@ -518,34 +592,55 @@ async function checkDeviceAbuse(
   maxDevices: number,
   discordId: string | null,
 ): Promise<void> {
-  const { count, error: countError } = await supabase
-    .from('license_sessions')
-    .select('*', { count: 'exact', head: true })
-    .eq('license_key_id', licenseKeyId)
-    .eq('active', true);
+  const since = new Date(Date.now() - DEVICE_ABUSE_WINDOW_MS).toISOString();
 
-  if (countError) {
-    throw new Error(`session count query failed: ${countError.message}`);
+  // One read serves every number below — cheaper than the head-count it
+  // replaces plus the counts the evidence needs.
+  const { data: sessions, error: sessionsError } = await supabase
+    .from('license_sessions')
+    .select('active, last_seen_at, deactivation_reason')
+    .eq('license_key_id', licenseKeyId)
+    .gte('last_seen_at', since)
+    .limit(DEVICE_ABUSE_ROW_CAP);
+
+  if (sessionsError) {
+    throw new Error(`session window query failed: ${sessionsError.message}`);
   }
 
-  const activeDevices = count || 0;
+  const rows = sessions ?? [];
+  const devicesInWindow = rows.length;
+  const activeDevices = rows.filter((s) => s.active).length;
+  const evictedInWindow = rows.filter((s) => s.deactivation_reason === 'device_limit').length;
 
-  if (activeDevices > maxDevices * 3) {
-    const { error: insertError } = await supabase.from('fraud_signals').insert({
-      guild_id: guildId,
-      signal_type: 'device_abuse',
-      severity: activeDevices > maxDevices * 5 ? 'critical' : 'high',
-      entity_type: 'license_key',
-      entity_id: licenseKeyId,
-      discord_id: discordId,
-      description: `${activeDevices} active device sessions on a ${maxDevices}-device license`,
-      evidence: { active_sessions: activeDevices, max_devices: maxDevices, ratio: activeDevices / maxDevices },
-      status: 'open',
-    });
+  if (devicesInWindow <= maxDevices * DEVICE_ABUSE_HIGH_RATIO) return;
 
-    if (insertError) {
-      throw new Error(`fraud signal insert failed: ${insertError.message}`);
-    }
+  const windowDays = Math.round(DEVICE_ABUSE_WINDOW_MS / (24 * 60 * 60 * 1000));
+  const { error: insertError } = await supabase.from('fraud_signals').insert({
+    guild_id: guildId,
+    signal_type: 'device_abuse',
+    severity: devicesInWindow > maxDevices * DEVICE_ABUSE_CRITICAL_RATIO ? 'critical' : 'high',
+    entity_type: 'license_key',
+    entity_id: licenseKeyId,
+    discord_id: discordId,
+    description:
+      `${devicesInWindow} distinct devices used a ${maxDevices}-device license in the last ${windowDays} days`,
+    evidence: {
+      devices_in_window: devicesInWindow,
+      window_days: windowDays,
+      max_devices: maxDevices,
+      ratio: devicesInWindow / maxDevices,
+      // Context for the operator: under evict_oldest `active_sessions` is
+      // pinned at max_devices, so a high device count with a pinned seat count
+      // and a non-zero eviction count is the signature of seat thrashing.
+      active_sessions: activeDevices,
+      evicted_for_device_limit: evictedInWindow,
+      truncated: devicesInWindow >= DEVICE_ABUSE_ROW_CAP,
+    },
+    status: 'open',
+  });
+
+  if (insertError) {
+    throw new Error(`fraud signal insert failed: ${insertError.message}`);
   }
 }
 
