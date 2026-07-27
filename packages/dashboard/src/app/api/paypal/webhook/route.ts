@@ -41,7 +41,10 @@ import {
   handleSubscriptionPayment,
   handleCaptureRefunded,
   handleSaleRefunded,
+  handleDisputeEvent,
+  handleCaptureDenied,
   resolveRefundPaymentId,
+  resolveDisputedTransactionIds,
 } from './handlers';
 
 // ── Main handler ────────────────────────────────────
@@ -87,6 +90,14 @@ const RESUMABLE_FAILED_EVENT_TYPES = new Set([
   'BILLING.SUBSCRIPTION.CANCELLED',
   'BILLING.SUBSCRIPTION.SUSPENDED',
   'BILLING.SUBSCRIPTION.PAYMENT.FAILED',
+  // Finding 9: dispute and denied-capture handling is awareness-only and fully
+  // idempotent — the order status flips are conditional on the current status
+  // and the alerts are DB-deduped on dispute/capture id. A transient failure
+  // must not permanently lose the operator's only notice of a chargeback.
+  'CUSTOMER.DISPUTE.CREATED',
+  'CUSTOMER.DISPUTE.UPDATED',
+  'CUSTOMER.DISPUTE.RESOLVED',
+  'PAYMENT.CAPTURE.DENIED',
 ]);
 
 type PayPalWebhookEvent = {
@@ -200,6 +211,17 @@ async function resolveWebhookGuildId(
   const refundPaymentId = resolveRefundPaymentId(event.resource, event.event_type);
   if (refundPaymentId) {
     return lookupPaymentGuildId(supabase, refundPaymentId);
+  }
+
+  // Finding 9: a dispute resource carries no custom_id at all — it identifies
+  // the money via disputed_transactions[].seller_transaction_id, which is the
+  // capture/sale id stored in payments.paypal_payment_id. Without this, every
+  // chargeback would land as an unattributed row.
+  if (event.event_type.startsWith('CUSTOMER.DISPUTE.')) {
+    for (const transactionId of resolveDisputedTransactionIds(event.resource)) {
+      const disputeGuildId = await lookupPaymentGuildId(supabase, transactionId);
+      if (disputeGuildId) return disputeGuildId;
+    }
   }
 
   return null;
@@ -472,6 +494,16 @@ export async function POST(req: NextRequest) {
         await handleSaleRefunded(supabase, event.resource, event.event_type, {
           retryingFailedEvent,
         });
+        break;
+      // Finding 9: these used to fall to `default:`, log "Unhandled event",
+      // and then take the success path — a chargeback recorded as a success.
+      case 'CUSTOMER.DISPUTE.CREATED':
+      case 'CUSTOMER.DISPUTE.UPDATED':
+      case 'CUSTOMER.DISPUTE.RESOLVED':
+        await handleDisputeEvent(supabase, event.resource, event.event_type);
+        break;
+      case 'PAYMENT.CAPTURE.DENIED':
+        await handleCaptureDenied(supabase, event.resource);
         break;
       default:
         console.log(`[Webhook] Unhandled event: ${event.event_type}`);

@@ -1,0 +1,505 @@
+/**
+ * Finding 9 — chargebacks and declined captures must not be swallowed as
+ * success.
+ *
+ * Before this change:
+ *  - `CUSTOMER.DISPUTE.CREATED` fell to the route's `default:` branch, logged
+ *    "Unhandled event", and then took the SUCCESS path — a chargeback was
+ *    literally recorded as `webhook_events.result = 'success'`.
+ *  - `orders.status` has allowed `'disputed'` since the initial schema and
+ *    nothing ever set it.
+ *  - `PAYMENT.CAPTURE.DENIED` was not in `PAYPAL_HANDLED_WEBHOOK_EVENTS`, so
+ *    the webhook was never subscribed to it; a denied capture left the order
+ *    `pending` forever with no alert.
+ *
+ * Settlement is intentionally NOT re-done here: PAYMENT.CAPTURE.REVERSED /
+ * .REFUNDED already revoke access when money actually moves. This is about
+ * awareness.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+const { replaySecret } = vi.hoisted(() => {
+  const secret = 'test-disputes-replay-secret';
+  process.env.NEXTAUTH_SECRET = 'test-secret-disputes';
+  process.env.WEBHOOK_REPLAY_SECRET = secret;
+  process.env.PAYPAL_WEBHOOK_ID = 'test-webhook-id';
+  return { replaySecret: secret };
+});
+
+vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
+vi.mock('@/lib/paypal', () => ({
+  getPayPalRuntimeConfig: vi.fn().mockResolvedValue({
+    apiBase: 'https://api-m.sandbox.paypal.com',
+    webhookId: 'test-webhook-id',
+  }),
+  getPayPalToken: vi.fn().mockResolvedValue('test-token'),
+  getPayPalTokenResult: vi.fn().mockResolvedValue({ ok: true, token: 'test-token' }),
+  getSubscriptionAmount: vi.fn(),
+  isRetriablePayPalStatus: (s: number) => s >= 500 || s === 429 || s === 408,
+  PAYPAL_API_BASE: 'https://api-m.sandbox.paypal.com',
+}));
+vi.mock('@/lib/api/rate-limit', () => ({
+  rateLimits: {
+    paypalWebhook: vi.fn().mockResolvedValue({ limited: false, remaining: 1, retryAfterMs: 0 }),
+  },
+}));
+
+import { POST } from '@/app/api/paypal/webhook/route';
+import {
+  handleDisputeEvent,
+  handleCaptureDenied,
+  resolveDisputeId,
+  resolveDisputedTransactionIds,
+} from '@/app/api/paypal/webhook/handlers';
+import { createAdminSupabase } from '@/lib/supabase/admin';
+import {
+  PAYPAL_HANDLED_WEBHOOK_EVENT_TYPES,
+  PAYPAL_INTENTIONALLY_EXCLUDED_WEBHOOK_EVENTS,
+} from '@/lib/paypal-webhook-events';
+
+const GUILD_ID = '111111111111111111';
+const CAPTURE_ID = 'CAPTURE-DISPUTED-1';
+const ORDER_UUID = '00000000-0000-4000-8000-000000000001';
+
+// ── Recording Supabase double ───────────────────────────────────────────────
+
+interface RecordedOp {
+  table: string;
+  op: 'select' | 'insert' | 'update' | 'upsert' | 'delete';
+  payload?: Record<string, unknown>;
+  filters: Array<{ method: string; args: unknown[] }>;
+}
+
+type Resolver = (op: RecordedOp) => { data: unknown; error: unknown };
+
+let ops: RecordedOp[] = [];
+let resolvers: Record<string, Resolver> = {};
+
+const CHAIN_METHODS = [
+  'select', 'eq', 'is', 'in', 'neq', 'gt', 'lt', 'gte', 'lte',
+  'or', 'not', 'order', 'limit', 'range', 'match', 'filter',
+];
+
+function makeSupabase() {
+  const from = (table: string) => {
+    const op: RecordedOp = { table, op: 'select', filters: [] };
+
+    const resolve = () => {
+      const resolver = resolvers[`${table}.${op.op}`] ?? resolvers[table];
+      return resolver ? resolver(op) : { data: null, error: null };
+    };
+
+    const chain: Record<string, unknown> = {};
+    for (const method of CHAIN_METHODS) {
+      chain[method] = (...args: unknown[]) => {
+        if (method !== 'select') op.filters.push({ method, args });
+        return chain;
+      };
+    }
+    for (const method of ['insert', 'update', 'upsert'] as const) {
+      chain[method] = (payload: Record<string, unknown>) => {
+        op.op = method;
+        op.payload = payload;
+        return chain;
+      };
+    }
+    chain.delete = () => { op.op = 'delete'; return chain; };
+
+    const settle = () => { ops.push(op); return resolve(); };
+
+    chain.maybeSingle = () => {
+      const result = settle();
+      const data = Array.isArray(result.data) ? result.data[0] ?? null : result.data;
+      return Promise.resolve({ data, error: result.error });
+    };
+    chain.single = chain.maybeSingle;
+    chain.then = (
+      onFulfilled?: (v: unknown) => unknown,
+      onRejected?: (e: unknown) => unknown,
+    ) => Promise.resolve(settle()).then(onFulfilled ?? undefined, onRejected ?? undefined);
+
+    return chain;
+  };
+
+  return { from: vi.fn(from), rpc: vi.fn().mockResolvedValue({ data: null, error: null }) };
+}
+
+function opsFor(table: string, op?: RecordedOp['op']) {
+  return ops.filter((o) => o.table === table && (op ? o.op === op : true));
+}
+
+function filterArgs(op: RecordedOp, method: string) {
+  return op.filters.filter((f) => f.method === method).map((f) => f.args);
+}
+
+let supabase: ReturnType<typeof makeSupabase>;
+let logSpy: ReturnType<typeof vi.spyOn>;
+let warnSpy: ReturnType<typeof vi.spyOn>;
+let errorSpy: ReturnType<typeof vi.spyOn>;
+
+// ── Fixtures ────────────────────────────────────────────────────────────────
+
+function disputeResource(overrides: Record<string, unknown> = {}) {
+  return {
+    dispute_id: 'PP-D-27803',
+    status: 'WAITING_FOR_SELLER_RESPONSE',
+    reason: 'MERCHANDISE_OR_SERVICE_NOT_RECEIVED',
+    dispute_amount: { currency_code: 'USD', value: '9.99' },
+    dispute_life_cycle_stage: 'CHARGEBACK',
+    disputed_transactions: [{ seller_transaction_id: CAPTURE_ID }],
+    ...overrides,
+  };
+}
+
+function deniedCaptureResource(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'CAPTURE-DENIED-1',
+    status: 'DECLINED',
+    amount: { currency_code: 'USD', value: '19.99' },
+    custom_id: JSON.stringify({
+      g: GUILD_ID,
+      p: 'product-1',
+      c: 'customer-1',
+      d: '222222222222222222',
+    }),
+    supplementary_data: { related_ids: { order_id: 'PAYPAL-ORDER-1' } },
+    ...overrides,
+  };
+}
+
+function makeReplay(body: unknown) {
+  return new Request('http://localhost/api/paypal/webhook', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-replay-secret': replaySecret,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Payments lookup resolves the disputed capture to a local order + guild. */
+function withMatchedPayment() {
+  resolvers['payments'] = () => ({
+    data: [{ order_id: ORDER_UUID, guild_id: GUILD_ID }],
+    error: null,
+  });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  ops = [];
+  resolvers = {
+    'webhook_events.upsert': () => ({ data: [{ event_id: 'inserted' }], error: null }),
+    'alerts.update': () => ({ data: [], error: null }),
+  };
+  supabase = makeSupabase();
+  (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+  delete process.env.DISCORD_GUILD_ID;
+  logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  logSpy.mockRestore();
+  warnSpy.mockRestore();
+  errorSpy.mockRestore();
+});
+
+// ── Catalog wiring ──────────────────────────────────────────────────────────
+
+describe('handled-event catalog', () => {
+  it('subscribes to the dispute and denied-capture events', () => {
+    for (const eventType of [
+      'PAYMENT.CAPTURE.DENIED',
+      'CUSTOMER.DISPUTE.CREATED',
+      'CUSTOMER.DISPUTE.UPDATED',
+      'CUSTOMER.DISPUTE.RESOLVED',
+    ]) {
+      expect(PAYPAL_HANDLED_WEBHOOK_EVENT_TYPES).toContain(eventType);
+    }
+    // Nothing is deliberately excluded, so nothing is silently dropped.
+    expect(PAYPAL_INTENTIONALLY_EXCLUDED_WEBHOOK_EVENTS).toEqual([]);
+  });
+});
+
+// ── Resource parsing ────────────────────────────────────────────────────────
+
+describe('dispute resource parsing', () => {
+  it('reads the dispute id from dispute_id, not id', () => {
+    expect(resolveDisputeId(disputeResource())).toBe('PP-D-27803');
+  });
+
+  it('falls back to id when dispute_id is absent', () => {
+    expect(resolveDisputeId({ id: 'PP-D-9' })).toBe('PP-D-9');
+  });
+
+  it('returns null for a dispute with no usable id', () => {
+    expect(resolveDisputeId({})).toBeNull();
+    expect(resolveDisputeId({ dispute_id: 123 })).toBeNull();
+  });
+
+  it('extracts seller_transaction_id from disputed_transactions', () => {
+    expect(resolveDisputedTransactionIds(disputeResource())).toEqual([CAPTURE_ID]);
+  });
+
+  it('ignores malformed or non-canonical transaction entries', () => {
+    const ids = resolveDisputedTransactionIds({
+      disputed_transactions: [
+        null,
+        'nope',
+        { seller_transaction_id: '' },
+        { seller_transaction_id: 'has spaces' },
+        { seller_transaction_id: CAPTURE_ID },
+        { seller_transaction_id: CAPTURE_ID },
+      ],
+    });
+    expect(ids).toEqual([CAPTURE_ID]);
+  });
+
+  it('returns nothing when disputed_transactions is missing', () => {
+    expect(resolveDisputedTransactionIds({})).toEqual([]);
+  });
+});
+
+// ── Dispute handling ────────────────────────────────────────────────────────
+
+describe('handleDisputeEvent', () => {
+  it('marks the matched order disputed and alerts, without revoking access', async () => {
+    withMatchedPayment();
+    resolvers['orders.update'] = () => ({ data: [{ id: ORDER_UUID }], error: null });
+
+    await handleDisputeEvent(supabase as never, disputeResource(), 'CUSTOMER.DISPUTE.CREATED');
+
+    const orderUpdate = opsFor('orders', 'update')[0];
+    expect(orderUpdate).toBeDefined();
+    expect(orderUpdate!.payload).toMatchObject({ status: 'disputed' });
+    // Only a completed order is flipped — never a pending or refunded one.
+    expect(filterArgs(orderUpdate!, 'eq')).toContainEqual(['status', 'completed']);
+
+    const alert = opsFor('alerts', 'insert')[0];
+    expect(alert!.payload).toMatchObject({
+      guild_id: GUILD_ID,
+      alert_type: 'paypal_dispute',
+      severity: 'critical',
+    });
+
+    // Settlement is NOT re-done here.
+    expect(opsFor('entitlements')).toHaveLength(0);
+    expect(opsFor('license_keys')).toHaveLength(0);
+    expect(supabase.rpc).not.toHaveBeenCalled();
+  });
+
+  it('records the dispute amount as integer cents, never a float', async () => {
+    withMatchedPayment();
+    resolvers['orders.update'] = () => ({ data: [], error: null });
+
+    await handleDisputeEvent(
+      supabase as never,
+      disputeResource({ dispute_amount: { currency_code: 'USD', value: '192.35' } }),
+      'CUSTOMER.DISPUTE.CREATED',
+    );
+
+    const metadata = (opsFor('alerts', 'insert')[0]!.payload as {
+      metadata: Record<string, unknown>;
+    }).metadata;
+    expect(metadata.dispute_amount_cents).toBe(19235);
+    expect(Number.isInteger(metadata.dispute_amount_cents)).toBe(true);
+    expect(metadata.currency).toBe('USD');
+  });
+
+  it('does not flip order status for CUSTOMER.DISPUTE.RESOLVED', async () => {
+    withMatchedPayment();
+
+    await handleDisputeEvent(supabase as never, disputeResource(), 'CUSTOMER.DISPUTE.RESOLVED');
+
+    expect(opsFor('orders', 'update')).toHaveLength(0);
+    // Resolved is informational, so it is a warning rather than critical.
+    expect(opsFor('alerts', 'insert')[0]!.payload).toMatchObject({ severity: 'warning' });
+  });
+
+  it('still alerts when no local payment matches the disputed transaction', async () => {
+    resolvers['payments'] = () => ({ data: [], error: null });
+    process.env.DISCORD_GUILD_ID = '333333333333333333';
+
+    await handleDisputeEvent(supabase as never, disputeResource(), 'CUSTOMER.DISPUTE.CREATED');
+
+    const alert = opsFor('alerts', 'insert')[0];
+    expect(alert!.payload).toMatchObject({ guild_id: '333333333333333333' });
+    expect((alert!.payload as { metadata: Record<string, unknown> }).metadata)
+      .toMatchObject({ unmatched_transaction: true, order_ids: [] });
+    expect(opsFor('orders', 'update')).toHaveLength(0);
+  });
+
+  it('refreshes the open alert in place across CREATED -> UPDATED', async () => {
+    withMatchedPayment();
+    resolvers['orders.update'] = () => ({ data: [], error: null });
+    resolvers['alerts.update'] = () => ({ data: [{ id: 'alert-1' }], error: null });
+
+    await handleDisputeEvent(supabase as never, disputeResource(), 'CUSTOMER.DISPUTE.UPDATED');
+
+    const alertUpdate = opsFor('alerts', 'update')[0]!;
+    expect(filterArgs(alertUpdate, 'eq')).toContainEqual(['metadata->>dispute_id', 'PP-D-27803']);
+    expect(opsFor('alerts', 'insert')).toHaveLength(0);
+  });
+
+  it('throws on a dispute with no usable id so the event is not silently lost', async () => {
+    await expect(
+      handleDisputeEvent(supabase as never, { disputed_transactions: [] }, 'CUSTOMER.DISPUTE.CREATED'),
+    ).rejects.toThrow(/dispute id/i);
+  });
+
+  it('fails loudly if the payments lookup errors, rather than alerting a wrong guild', async () => {
+    resolvers['payments'] = () => ({ data: null, error: { message: 'db down' } });
+
+    await expect(
+      handleDisputeEvent(supabase as never, disputeResource(), 'CUSTOMER.DISPUTE.CREATED'),
+    ).rejects.toThrow(/disputed payments/i);
+  });
+});
+
+// ── Denied captures ─────────────────────────────────────────────────────────
+
+describe('handleCaptureDenied', () => {
+  it('cancels the pending order and alerts', async () => {
+    resolvers['orders.select'] = () => ({ data: { id: ORDER_UUID, status: 'pending' }, error: null });
+    resolvers['orders.update'] = () => ({ data: [{ id: ORDER_UUID }], error: null });
+
+    await handleCaptureDenied(supabase as never, deniedCaptureResource());
+
+    const orderUpdate = opsFor('orders', 'update')[0]!;
+    expect(orderUpdate.payload).toMatchObject({ status: 'cancelled' });
+    // Conditional on pending, so a replay is a no-op and nothing else is clobbered.
+    expect(filterArgs(orderUpdate, 'eq')).toContainEqual(['status', 'pending']);
+
+    const alert = opsFor('alerts', 'insert')[0]!;
+    expect(alert.payload).toMatchObject({
+      guild_id: GUILD_ID,
+      alert_type: 'paypal_capture_denied',
+      severity: 'warning',
+    });
+    expect((alert.payload as { metadata: Record<string, unknown> }).metadata)
+      .toMatchObject({ amount_cents: 1999, order_cancelled: true });
+  });
+
+  it('never touches an order that is no longer pending', async () => {
+    resolvers['orders.select'] = () => ({ data: { id: ORDER_UUID, status: 'completed' }, error: null });
+
+    await handleCaptureDenied(supabase as never, deniedCaptureResource());
+
+    expect(opsFor('orders', 'update')).toHaveLength(0);
+    expect((opsFor('alerts', 'insert')[0]!.payload as { metadata: Record<string, unknown> }).metadata)
+      .toMatchObject({ order_cancelled: false });
+  });
+
+  it('scopes the order lookup to the guild the checkout claimed', async () => {
+    resolvers['orders.select'] = () => ({ data: null, error: null });
+
+    await handleCaptureDenied(supabase as never, deniedCaptureResource());
+
+    const lookup = opsFor('orders', 'select')[0]!;
+    expect(filterArgs(lookup, 'eq')).toContainEqual(['guild_id', GUILD_ID]);
+    expect(filterArgs(lookup, 'eq')).toContainEqual(['paypal_order_id', 'PAYPAL-ORDER-1']);
+  });
+
+  it('alerts even when custom_id is malformed and no order can be found', async () => {
+    process.env.DISCORD_GUILD_ID = '333333333333333333';
+
+    await handleCaptureDenied(
+      supabase as never,
+      deniedCaptureResource({ custom_id: 'not-json' }),
+    );
+
+    expect(opsFor('orders')).toHaveLength(0);
+    expect(opsFor('alerts', 'insert')[0]!.payload).toMatchObject({
+      guild_id: '333333333333333333',
+    });
+  });
+
+  it('throws when the capture has no usable provider id', async () => {
+    await expect(
+      handleCaptureDenied(supabase as never, { status: 'DECLINED' }),
+    ).rejects.toThrow(/provider id/i);
+  });
+});
+
+// ── End-to-end through the route ────────────────────────────────────────────
+
+describe('route dispatch', () => {
+  it('routes CUSTOMER.DISPUTE.CREATED to the dispute handler, not default:', async () => {
+    withMatchedPayment();
+    resolvers['orders.update'] = () => ({ data: [{ id: ORDER_UUID }], error: null });
+
+    const res = await POST(makeReplay({
+      event_type: 'CUSTOMER.DISPUTE.CREATED',
+      resource: disputeResource(),
+      id: 'EVT-DISPUTE-ROUTED',
+    }) as never);
+
+    expect(res.status).toBe(200);
+    expect(logSpy).not.toHaveBeenCalledWith(
+      '[Webhook] Unhandled event: CUSTOMER.DISPUTE.CREATED',
+    );
+    expect(opsFor('orders', 'update')[0]!.payload).toMatchObject({ status: 'disputed' });
+    expect(opsFor('alerts', 'insert')).toHaveLength(1);
+  });
+
+  it('routes PAYMENT.CAPTURE.DENIED to the denied-capture handler', async () => {
+    resolvers['orders.select'] = () => ({ data: { id: ORDER_UUID, status: 'pending' }, error: null });
+    resolvers['orders.update'] = () => ({ data: [{ id: ORDER_UUID }], error: null });
+
+    const res = await POST(makeReplay({
+      event_type: 'PAYMENT.CAPTURE.DENIED',
+      resource: deniedCaptureResource(),
+      id: 'EVT-DENIED-ROUTED',
+    }) as never);
+
+    expect(res.status).toBe(200);
+    expect(logSpy).not.toHaveBeenCalledWith(
+      '[Webhook] Unhandled event: PAYMENT.CAPTURE.DENIED',
+    );
+    expect(opsFor('orders', 'update')[0]!.payload).toMatchObject({ status: 'cancelled' });
+  });
+
+  it('attributes a dispute webhook row to the guild that owns the payment', async () => {
+    withMatchedPayment();
+    resolvers['orders.update'] = () => ({ data: [], error: null });
+    resolvers['payments.select'] = (op) =>
+      // resolveWebhookGuildId uses maybeSingle(); handleDisputeEvent uses in().
+      filterArgs(op, 'in').length > 0
+        ? { data: [{ order_id: ORDER_UUID, guild_id: GUILD_ID }], error: null }
+        : { data: { guild_id: GUILD_ID }, error: null };
+
+    const req = new Request('http://localhost/api/paypal/webhook', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'paypal-auth-algo': 'SHA256withRSA',
+        'paypal-cert-url': 'https://example.com/cert',
+        'paypal-transmission-id': 'EVT-DISPUTE-ATTRIBUTED',
+        'paypal-transmission-sig': 'sig-1',
+        'paypal-transmission-time': new Date().toISOString(),
+      },
+      body: JSON.stringify({
+        id: 'EVT-DISPUTE-ATTRIBUTED',
+        event_type: 'CUSTOMER.DISPUTE.CREATED',
+        resource: disputeResource(),
+      }),
+    });
+
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    try {
+      await POST(req as never);
+    } finally {
+      global.fetch = originalFetch;
+    }
+
+    expect(opsFor('webhook_events', 'upsert')[0]!.payload).toMatchObject({
+      guild_id: GUILD_ID,
+    });
+  });
+});

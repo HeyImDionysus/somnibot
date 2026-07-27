@@ -2088,11 +2088,15 @@ describe('PayPal webhook — edge cases', () => {
     }
   });
 
+  // Finding 9: this case used to assert that CUSTOMER.DISPUTE.CREATED hit the
+  // `default:` branch and was recorded as a SUCCESS — i.e. it encoded the bug
+  // where a chargeback was filed as a success. Disputes are handled now, so
+  // the "unhandled event" contract is proven with a genuinely unhandled type.
   it('unhandled event type returns 200 without error', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const req = makeReplay({
-      event_type: 'CUSTOMER.DISPUTE.CREATED',
-      resource: { id: 'DISPUTE-1' },
+      event_type: 'BILLING.PLAN.UPDATED',
+      resource: { id: 'PLAN-1' },
       id: 'EVT-UNHANDLED',
     });
 
@@ -2100,7 +2104,29 @@ describe('PayPal webhook — edge cases', () => {
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.status).toBe('ok');
-    expect(logSpy).toHaveBeenCalledWith('[Webhook] Unhandled event: CUSTOMER.DISPUTE.CREATED');
+    expect(logSpy).toHaveBeenCalledWith('[Webhook] Unhandled event: BILLING.PLAN.UPDATED');
+    logSpy.mockRestore();
+  });
+
+  it('CUSTOMER.DISPUTE.CREATED is no longer swallowed as an unhandled success', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const req = makeReplay({
+      event_type: 'CUSTOMER.DISPUTE.CREATED',
+      resource: {
+        dispute_id: 'PP-D-27803',
+        status: 'WAITING_FOR_SELLER_RESPONSE',
+        reason: 'MERCHANDISE_OR_SERVICE_NOT_RECEIVED',
+        dispute_amount: { currency_code: 'USD', value: '9.99' },
+        disputed_transactions: [{ seller_transaction_id: 'CAPTURE-DISPUTED-1' }],
+      },
+      id: 'EVT-DISPUTE-HANDLED',
+    });
+
+    await POST(req as never);
+
+    expect(logSpy).not.toHaveBeenCalledWith(
+      '[Webhook] Unhandled event: CUSTOMER.DISPUTE.CREATED',
+    );
     logSpy.mockRestore();
   });
 
