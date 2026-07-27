@@ -43,6 +43,43 @@ function sameValue(a: unknown, b: unknown): boolean {
   }
 }
 
+/**
+ * Resolve a product THROUGH the caller's guild.
+ *
+ * `product_license_config` is keyed by `product_id` alone and carries no
+ * `guild_id`, and every query here runs on the service-role client, which is
+ * exempt from row-level security. Both handlers previously destructured
+ * `guildId` from the auth context and then never used it — so naming any
+ * product's UUID read, and overwrote, that product's licence configuration
+ * regardless of which guild owned it. Tenancy for this table lives entirely in
+ * the parent `products` row, so it has to be checked here or not at all.
+ *
+ * Returns null when the product does not exist OR belongs to another guild.
+ * Callers answer 404 for both: confirming that someone else's product id is
+ * real would leak catalogue membership across tenants.
+ */
+async function findOwnedProduct(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  productId: string,
+  guildId: string,
+): Promise<{ id: string; name: string } | null> {
+  const { data } = await supabase
+    .from('products')
+    .select('id, name')
+    .eq('id', productId)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  return (data as { id: string; name: string } | null) ?? null;
+}
+
+/** Uniform answer for "not yours" and "not there" — deliberately identical. */
+function productNotFound() {
+  return NextResponse.json(
+    { success: false, error: 'Product not found' },
+    { status: 404 },
+  );
+}
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ productId: string }> },
@@ -53,6 +90,12 @@ export async function GET(
 
   const { productId } = await params;
   const supabase = createAdminSupabase();
+
+  // Tenancy gate. Without this, any owner could read any guild's licence
+  // configuration — device caps, tiers, offline grace — by naming its product id.
+  if (!(await findOwnedProduct(supabase, productId, guildId))) {
+    return productNotFound();
+  }
 
   const { data, error } = await supabase
     .from('product_license_config')
@@ -124,16 +167,15 @@ export async function PUT(
     require_discord_guild_membership: require_discord_guild_membership ?? true,
   };
 
-  // Resolve the product THROUGH this guild. It supplies the product name for
-  // the change description, and its absence is the signal that the row being
-  // written does not belong to the caller — in which case no undo is offered,
-  // because the undo route's tenancy check would refuse it at click time.
-  const { data: product } = await supabase
-    .from('products')
-    .select('id, name')
-    .eq('id', productId)
-    .eq('guild_id', guildId)
-    .maybeSingle();
+  // Tenancy gate, BEFORE the write. Resolving the product here used to serve
+  // only to name it in the change description; the upsert then ran whether or
+  // not it resolved, so a caller could overwrite another guild's licence
+  // settings — changing how many devices a stranger's paying customers may use,
+  // or how long their installs survive offline. Refuse first, write second.
+  const product = await findOwnedProduct(supabase, productId, guildId);
+  if (!product) {
+    return productNotFound();
+  }
 
   // Prior values, read before the upsert: this is what an undo restores.
   const before = await readRowBefore(
@@ -171,8 +213,9 @@ export async function PUT(
           changed.filter((column) => column in before).map((column) => [column, before[column]]),
         )
       : null;
-    const canRestore = product != null
-      && priorForChanged != null
+    // Ownership is no longer part of this test — an unowned product can no
+    // longer reach here at all.
+    const canRestore = priorForChanged != null
       && Object.keys(priorForChanged).length === changed.length;
 
     await recordAdminChange(
@@ -184,7 +227,7 @@ export async function PUT(
         targetId: productId,
         description:
           `${describeSettingChange([...changed])} in the license settings for the store `
-          + `product "${(product as { name?: string } | null)?.name ?? productId}"`,
+          + `product "${product.name}"`,
         before: priorForChanged ?? undefined,
         after: Object.fromEntries(changed.map((column) => [column, written[column]])),
         // These settings decide whether a paying customer's installed copy keeps
