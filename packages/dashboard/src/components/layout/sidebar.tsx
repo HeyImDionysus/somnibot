@@ -37,7 +37,6 @@ import {
   Key,
   MessageSquareWarning,
   Receipt,
-  Tag,
   ScrollText,
   Activity,
   TrendingUp,
@@ -184,7 +183,10 @@ const navigation: NavGroup[] = [
       { label: 'Customers', href: '/customers', icon: Users, requires: 'paypal' },
       { label: 'License Keys', href: '/licenses', icon: Key, requires: 'paypal' },
       { label: 'Requests', href: '/store/requests', icon: MessageSquareWarning, requires: 'paypal', badge: PendingRequestsBadge },
-      { label: 'Promotions', href: '/store/promotions', icon: Tag, requires: 'paypal' },
+      // Promotions (/store/promotions) is deliberately NOT linked: nothing in
+      // checkout redeems a coupon, so the nav must not advertise a discount
+      // feature that does not exist (Finding 8). The route still resolves and
+      // explains itself for anyone holding a bookmark.
     ],
   },
   {
