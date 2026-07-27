@@ -214,7 +214,7 @@ describe('handleMusicCommand', () => {
     const p = mp();
     const i = mi('volume', { int: 75 });
     await handleMusicCommand(i as any, p as any);
-    expect(p.setVolume).toHaveBeenCalledWith('g1', 75);
+    expect(p.setVolume).toHaveBeenCalledWith('g1', 75, { userId: 'u1' });
   });
 
   it('volume — non-DJ denied', async () => {
@@ -229,7 +229,7 @@ describe('handleMusicCommand', () => {
     const p = mp();
     const i = mi('loop', { str: 'track' });
     await handleMusicCommand(i as any, p as any);
-    expect(p.setLoopMode).toHaveBeenCalledWith('g1', 'track');
+    expect(p.setLoopMode).toHaveBeenCalledWith('g1', 'track', { userId: 'u1' });
   });
 
   it('loop — non-DJ denied', async () => {
@@ -244,7 +244,7 @@ describe('handleMusicCommand', () => {
     const p = mp();
     const i = mi('shuffle');
     await handleMusicCommand(i as any, p as any);
-    expect(p.shuffle).toHaveBeenCalledWith('g1');
+    expect(p.shuffle).toHaveBeenCalledWith('g1', { userId: 'u1' });
   });
 
   it('shuffle — non-DJ denied', async () => {
@@ -259,7 +259,7 @@ describe('handleMusicCommand', () => {
     const p = mp();
     const i = mi('seek', { str: '1:30' });
     await handleMusicCommand(i as any, p as any);
-    expect(p.seek).toHaveBeenCalledWith('g1', 90000);
+    expect(p.seek).toHaveBeenCalledWith('g1', 90000, { userId: 'u1' });
   });
 
   it('seek — invalid format', async () => {
@@ -281,7 +281,7 @@ describe('handleMusicCommand', () => {
     const p = mp();
     const i = mi('remove', { int: 2 });
     await handleMusicCommand(i as any, p as any);
-    expect(p.remove).toHaveBeenCalledWith('g1', 2);
+    expect(p.remove).toHaveBeenCalledWith('g1', 2, { userId: 'u1' });
   });
 
   it('remove — non-DJ denied', async () => {
@@ -296,7 +296,7 @@ describe('handleMusicCommand', () => {
     const p = mp();
     const i = mi('pause');
     await handleMusicCommand(i as any, p as any);
-    expect(p.togglePause).toHaveBeenCalledWith('g1');
+    expect(p.togglePause).toHaveBeenCalledWith('g1', { userId: 'u1' });
   });
 
   it('pause — non-DJ denied', async () => {
@@ -318,7 +318,7 @@ describe('handleMusicCommand', () => {
     const p = mp();
     const i = mi('filter', { str: 'bass' });
     await handleMusicCommand(i as any, p as any);
-    expect(p.applyFilter).toHaveBeenCalledWith('g1', 'bass');
+    expect(p.applyFilter).toHaveBeenCalledWith('g1', 'bass', { userId: 'u1' });
   });
 
   it('filter — apply custom speed', async () => {

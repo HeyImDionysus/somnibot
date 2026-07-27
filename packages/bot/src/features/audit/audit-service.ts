@@ -915,6 +915,38 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     details: (d) => ({ rewardType: d.rewardType, amount: d.amount }),
     success: false,
   },
+  // The ADD side of the queue. music.skipped/music.stopped record only
+  // removals; without this the trail shows tracks leaving a queue nothing was
+  // ever recorded as entering.
+  'music.queued': {
+    action: 'music.queued',
+    category: 'music',
+    targetType: 'music_queue',
+    actorType: 'user',
+    targetId: (d) => d.userId as string,
+    actorId: (d) => d.userId as string,
+    details: (d) => ({
+      userId: d.userId,
+      title: d.title,
+      author: d.author,
+      uri: d.uri,
+      trackCount: d.trackCount,
+      playlistName: d.playlistName,
+      queueLength: d.queueLength,
+      sessionStarted: d.sessionStarted,
+    }),
+  },
+  // The APPLIED side of a fairness-gated control — same target shape as
+  // music.denied below (target_type 'music_control', target_id = the action),
+  // so both outcomes of the same control read identically.
+  'music.control_applied': {
+    action: 'music.control_applied',
+    category: 'music',
+    targetType: 'music_control',
+    actorType: 'user',
+    targetId: (d) => d.action as string,
+    details: (d) => ({ userId: d.userId, action: d.action, value: d.value }),
+  },
   'music.skipped': {
     action: 'music.skipped',
     category: 'music',

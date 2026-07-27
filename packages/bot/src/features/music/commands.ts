@@ -394,7 +394,7 @@ async function handleVolume(
   }
 
   const level = interaction.options.getInteger('level', true);
-  const result = await musicPlayer.setVolume(guildId, level);
+  const result = await musicPlayer.setVolume(guildId, level, { userId: interaction.user.id });
   await interaction.reply({
     embeds: [result.success
       ? buildMusicInfoEmbed(result.message)
@@ -418,7 +418,7 @@ async function handleLoop(
   }
 
   const mode = interaction.options.getString('mode', true) as 'off' | 'track' | 'queue';
-  const result = await musicPlayer.setLoopMode(guildId, mode);
+  const result = await musicPlayer.setLoopMode(guildId, mode, { userId: interaction.user.id });
   await interaction.reply({
     embeds: [buildMusicInfoEmbed(result.message)],
   });
@@ -439,7 +439,7 @@ async function handleShuffle(
     return;
   }
 
-  const result = await musicPlayer.shuffle(guildId);
+  const result = await musicPlayer.shuffle(guildId, { userId: interaction.user.id });
   await interaction.reply({
     embeds: [result.success
       ? buildMusicInfoEmbed(result.message)
@@ -473,7 +473,7 @@ async function handleSeek(
     return;
   }
 
-  const result = await musicPlayer.seek(guildId, positionMs);
+  const result = await musicPlayer.seek(guildId, positionMs, { userId: interaction.user.id });
   await interaction.reply({
     embeds: [result.success
       ? buildMusicInfoEmbed(result.message)
@@ -497,7 +497,7 @@ async function handleRemove(
   }
 
   const position = interaction.options.getInteger('position', true);
-  const result = await musicPlayer.remove(guildId, position);
+  const result = await musicPlayer.remove(guildId, position, { userId: interaction.user.id });
   await interaction.reply({
     embeds: [result.success
       ? buildMusicInfoEmbed(result.message)
@@ -541,7 +541,7 @@ async function handlePause(
     return;
   }
 
-  const result = await musicPlayer.togglePause(guildId);
+  const result = await musicPlayer.togglePause(guildId, { userId: interaction.user.id });
   await interaction.reply({
     embeds: [result.success
       ? buildMusicInfoEmbed(result.message)
@@ -580,7 +580,7 @@ async function handleFilter(
 
   // Apply preset first (if given)
   if (preset) {
-    const result = await musicPlayer.applyFilter(guildId, preset);
+    const result = await musicPlayer.applyFilter(guildId, preset, { userId: interaction.user.id });
     if (!result.success) {
       await interaction.reply({
         embeds: [buildMusicErrorEmbed(result.message)],
@@ -606,6 +606,7 @@ async function handleFilter(
       speed ?? undefined,
       pitch ?? undefined,
       rate ?? undefined,
+      { userId: interaction.user.id },
     );
     if (!result.success) {
       await interaction.reply({

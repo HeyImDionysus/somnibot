@@ -300,13 +300,13 @@ function gateDashboardConfig(ctx: ScenarioContext, assertionClass: AssertionClas
   );
 }
 
-/** GATE the music.* audit lane (written by dashboard save / Valkey outage / config-load, none reachable). */
+/** GATE the music.* audit lane (written by dashboard save / Lavalink playback / Valkey outage, none reachable). */
 function gateMusicAudit(ctx: ScenarioContext, promise: string): void {
   ctx.gate(
     'audit',
     'audit-row',
     promise,
-    'music.* audit rows (config save/reject, queue teardown, store-outage, capacity) are written by the dashboard save path, a Valkey outage, or a config-load failure — none reachable in the bot-only local-Supabase harness',
+    'music.* audit rows (config save/reject, queue add, applied control, skip, queue teardown, store-outage, capacity) are written by the dashboard save path, the Lavalink-backed playback path, a Valkey outage, or a config-load failure — none reachable in the bot-only local-Supabase harness',
   );
 }
 
