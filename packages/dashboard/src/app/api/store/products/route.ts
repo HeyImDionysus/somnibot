@@ -16,6 +16,12 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError, apiError, apiServerError } from '@/lib/api/response';
 import {
+  readRowBefore,
+  recordAdminChange,
+  recordCrudChange,
+  undoByRestoring,
+} from '@/lib/admin-changes';
+import {
   assertProductRolesNotIncomeEarning,
   COMMERCE_INCOME_WALL_MESSAGE,
   evaluateEffectivePostWriteProduct,
@@ -46,6 +52,22 @@ function commerceWriteError(error: { message: string; code?: string }) {
   }
   return dbError(error, 'store/products');
 }
+
+/**
+ * `1999, 'USD'` → `"19.99 USD"`.
+ *
+ * Written out in full for the admin-changes sentence so an owner reading their
+ * change history sees the REAL-MONEY amount a customer is charged. This store
+ * is not the in-server coin economy; a bare number there would be ambiguous.
+ */
+function formatRealMoney(cents: number, currency: string): string {
+  const whole = Math.trunc(Math.abs(cents) / 100);
+  const fraction = String(Math.abs(cents) % 100).padStart(2, '0');
+  return `${cents < 0 ? '-' : ''}${whole}.${fraction} ${currency.toUpperCase()}`;
+}
+
+/** Product columns whose change alters what a customer pays or can buy. */
+const PRODUCT_MONEY_FIELDS = ['price_cents', 'currency', 'active', 'type'] as const;
 
 function paypalNotReadyResponse(message: string) {
   return NextResponse.json(
@@ -444,6 +466,32 @@ export async function POST(req: NextRequest) {
   // Notify bot about new product
   await notifyBot('commerce', { product_created: data.id });
 
+  // Recorded only now: the product row, its PayPal catalog entry and every
+  // plan are already committed, so this describes something that really exists.
+  await recordAdminChange(
+    {
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'store.product_created',
+      targetType: 'store product',
+      targetId: data.id,
+      description:
+        `Created the store product "${name}" — `
+        + (price_cents > 0
+          ? `customers pay ${formatRealMoney(price_cents, currency ?? 'USD')} in real money for it`
+          : 'it is free, so no payment is taken')
+        + (savedPlans.length > 0
+          ? `, billed on ${savedPlans.length} subscription plan${savedPlans.length === 1 ? '' : 's'}`
+          : ''),
+      after: data as unknown as Record<string, unknown>,
+      blastRadius: 'medium',
+      undoReason:
+        'a newly created store product cannot be removed by an undo — deactivate it from the Store page instead'
+        + (paypalProductId ? ', and its PayPal catalog entry stays in your PayPal account' : ''),
+    },
+    supabase,
+  );
+
   return NextResponse.json({
     success: true,
     data: fullProduct ?? data,
@@ -533,6 +581,11 @@ export async function PUT(req: NextRequest) {
   // That strict schema — not this handler — is the mass-assignment guard: only
   // the intended columns can ever reach `.update()`. We stamp updated_at
   // ourselves so the client can never spoof it.
+  //
+  // Read the prior row BEFORE the write: afterwards it is gone, and an undo
+  // built from the post-write row would "restore" the values just written.
+  const before = await readRowBefore(supabase, 'products', { id, guild_id: guildId });
+
   const { data, error } = await supabase
     .from('products')
     .update({ ...updates, updated_at: new Date().toISOString() })
@@ -547,6 +600,29 @@ export async function PUT(req: NextRequest) {
 
   // Notify bot so it hot-reloads product changes
   await notifyBot('commerce', { product_updated: id });
+
+  await recordCrudChange(
+    {
+      guildId,
+      actorId: auth.ctx.discordId,
+      operation: 'updated',
+      action: 'store.product_updated',
+      table: 'products',
+      targetType: 'store product',
+      targetId: id,
+      label: (before?.name as string | undefined)
+        ?? (data as { name?: string } | null)?.name,
+      before,
+      after: updates as Record<string, unknown>,
+      match: { id, guild_id: guildId },
+      // Price / availability edits change what real customers are charged or
+      // can buy, so undoing one is worth a confirmation step.
+      blastRadius: PRODUCT_MONEY_FIELDS.some((field) => field in updates)
+        ? 'high'
+        : 'medium',
+    },
+    supabase,
+  );
 
   return NextResponse.json({ success: true, data });
 }
@@ -567,6 +643,15 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing product id' }, { status: 400 });
   }
 
+  // Read first: after the write the prior `active` value is unrecoverable, and
+  // it is the one thing that makes this change genuinely undoable.
+  const before = await readRowBefore(
+    supabase,
+    'products',
+    { id, guild_id: guildId },
+    'id, name, active',
+  );
+
   // Soft delete — deactivate instead of hard delete to preserve entitlements
   const { error } = await supabase
     .from('products')
@@ -580,6 +665,36 @@ export async function DELETE(req: NextRequest) {
 
   // Notify bot so deactivated product is no longer purchasable
   await notifyBot('commerce', { product_deactivated: id });
+
+  // Only when the row was actually found in this guild. The update above
+  // matches zero rows for an unknown id and still reports success (see the
+  // route's missing 404), and a change history entry for a product that was
+  // never touched would be worse than none.
+  if (before) {
+    // This is an UPDATE, not a delete — the row still exists with active=false,
+    // so restoring the prior flag is a real reversal, not a resurrection.
+    await recordAdminChange(
+      {
+        guildId,
+        actorId: auth.ctx.discordId,
+        action: 'store.product_deactivated',
+        targetType: 'store product',
+        targetId: id,
+        description:
+          `Deactivated the store product "${(before.name as string | null) ?? id}" — `
+          + 'customers can no longer buy it. Everyone who already bought it keeps their access.',
+        before: { active: before.active },
+        after: { active: false },
+        blastRadius: 'high',
+        undo: undoByRestoring(
+          'products',
+          { id, guild_id: guildId },
+          { active: before.active },
+        ),
+      },
+      supabase,
+    );
+  }
 
   return NextResponse.json({ success: true });
 }
