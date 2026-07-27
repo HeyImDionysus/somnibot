@@ -1857,6 +1857,12 @@ describe('PayPal webhook — edge cases', () => {
     }
   });
 
+  // Finding 2 note: these two cases originally used CHECKOUT.ORDER.APPROVED as
+  // their stand-in for "a non-resumable event type". That type is now
+  // deliberately resumable — a failed capture must be recoverable by PayPal's
+  // own redelivery — so they use CHECKOUT.ORDER.COMPLETED instead. The
+  // invariant under test is unchanged: a type that is NOT in
+  // RESUMABLE_FAILED_EVENT_TYPES is never silently auto-retried.
   it('does not blindly retry non-resumable failed duplicate webhooks', async () => {
     const originalFetch = global.fetch;
     global.fetch = vi.fn().mockResolvedValue(
@@ -1870,7 +1876,7 @@ describe('PayPal webhook — edge cases', () => {
         ],
       });
       const req = makeSignedWebhook({
-        event_type: 'CHECKOUT.ORDER.APPROVED',
+        event_type: 'CHECKOUT.ORDER.COMPLETED',
         resource: { id: 'ORDER-FAILED-RETRY' },
         id: 'EVT-CAPTURE-FAILED-RETRY',
       });
@@ -1909,7 +1915,7 @@ describe('PayPal webhook — edge cases', () => {
         ],
       });
       const req = makeSignedWebhook({
-        event_type: 'CHECKOUT.ORDER.APPROVED',
+        event_type: 'CHECKOUT.ORDER.COMPLETED',
         resource: { id: 'ORDER-STALE-NON-RESUMABLE' },
         id: 'EVT-CAPTURE-STALE-NON-RESUMABLE',
       });

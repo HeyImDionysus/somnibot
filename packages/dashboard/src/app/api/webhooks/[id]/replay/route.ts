@@ -12,6 +12,8 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createHmac } from 'crypto';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { isSoleInstanceOperator, mayAccessWebhookRow } from '../../scope';
+import { raiseWebhookProcessingErrorAlert } from '../../../paypal/webhook/alerts';
 
 /** V7 Audit §7.P2a — Zod schema for replay event ID path param. */
 const eventIdSchema = z.string().min(1).max(128).regex(/^[\w-]+$/, 'Invalid event ID format');
@@ -52,7 +54,7 @@ export async function POST(
   // ── Require guild owner ──
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
+  const { guildId, discordId } = auth.ctx;
 
   const { id: rawId } = await params;
 
@@ -68,15 +70,32 @@ export async function POST(
 
   const supabase = createAdminSupabase();
 
-  // Fetch the webhook event — scope by guild_id to prevent cross-guild replay
+  // Fetch by primary key, then authorize in code. Guild scoping is still
+  // absolute for attributed rows — another guild's event is never replayable —
+  // but an UNATTRIBUTED row (guild_id NULL) could not be replayed at all under
+  // the old `.eq('guild_id', …)` filter, because NULL never equals anything.
+  // Those are precisely the failed-capture rows an operator most needs to
+  // re-drive. See ../../scope.ts for who may touch them and why.
+  //
+  // Unauthorized rows return the same 404 as missing ones, so this cannot be
+  // used to probe which event ids exist in another guild.
   const { data: event, error: fetchError } = await supabase
     .from('webhook_events')
     .select('*')
     .eq('event_id', id)
-    .eq('guild_id', guildId)
-    .single();
+    .maybeSingle();
 
-  if (fetchError || !event) {
+  const eventGuildId = (event?.guild_id ?? null) as string | null;
+  const isUnattributed = event != null && eventGuildId === null;
+  const soleOperator = isUnattributed
+    ? await isSoleInstanceOperator(supabase, discordId)
+    : false;
+
+  if (
+    fetchError
+    || !event
+    || !mayAccessWebhookRow(eventGuildId, guildId, soleOperator)
+  ) {
     return NextResponse.json(
       { success: false, error: 'Webhook event not found' },
       { status: 404 },
@@ -100,11 +119,18 @@ export async function POST(
       processed_at: nowIso,
     };
 
+    // event_id is the primary key, so the guild predicate is defence in depth:
+    // it makes the claim fail rather than cross guilds if the row's
+    // attribution changed between the read above and this write. Unattributed
+    // rows keep the same guarantee via IS NULL — `.eq()` would never match.
     let claimQuery = supabase
       .from('webhook_events')
       .update(claimUpdate)
-      .eq('event_id', id)
-      .eq('guild_id', guildId);
+      .eq('event_id', id);
+
+    claimQuery = isUnattributed
+      ? claimQuery.is('guild_id', null)
+      : claimQuery.eq('guild_id', guildId);
 
     if (event.result == null) {
       const processedAt = Date.parse(String(event.processed_at ?? ''));
@@ -186,6 +212,16 @@ export async function POST(
           error_details: `Replay failed: HTTP ${replayRes.status}`,
         })
         .eq('event_id', id);
+
+      // Finding 2: any row landing on result = 'error' raises an alert, so a
+      // replay that silently fails is not another dead end.
+      await raiseWebhookProcessingErrorAlert(supabase, {
+        eventId: id,
+        eventType: event.event_type ?? 'unknown',
+        guildId: eventGuildId,
+        reason: `Replay failed: HTTP ${replayRes.status}`,
+        requiresManualReplay: true,
+      });
     }
     // Note: the webhook handler itself updates result on success
 
@@ -217,6 +253,14 @@ export async function POST(
         error_details: `Replay exception: ${String(err)}`,
       })
       .eq('event_id', id);
+
+    await raiseWebhookProcessingErrorAlert(supabase, {
+      eventId: id,
+      eventType: event.event_type ?? 'unknown',
+      guildId: eventGuildId,
+      reason: `Replay exception: ${String(err)}`,
+      requiresManualReplay: true,
+    });
 
     return NextResponse.json(
       { success: false, error: 'Replay failed' },

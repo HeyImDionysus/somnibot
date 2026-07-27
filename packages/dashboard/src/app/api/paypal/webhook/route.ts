@@ -30,6 +30,7 @@ import {
   raisePayPalVerifyUnavailableAlert,
   verifyWebhookSignature,
 } from './verify';
+import { raiseWebhookProcessingErrorAlert } from './alerts';
 import {
   handleOrderApproved,
   handlePaymentCaptured,
@@ -47,6 +48,16 @@ import {
 
 const WEBHOOK_PROCESSING_STALE_MS = 5 * 60 * 1000;
 const RESUMABLE_FAILED_EVENT_TYPES = new Set([
+  // Finding 2: a failed capture used to be permanent. handleOrderApproved is
+  // the ONLY thing that captures an approved order (intent: 'CAPTURE'), so a
+  // PayPal 5xx/timeout there left the buyer redirected to a success page with
+  // an approved-but-uncaptured order — and because this type was not
+  // resumable, PayPal's redelivery got HTTP 200 and PayPal stopped retrying.
+  // The handler is now idempotent at PayPal (PayPal-Request-Id keyed on the
+  // order id) and treats ORDER_ALREADY_CAPTURED as success, so a resumed
+  // retry can never double-charge: it either captures once or observes the
+  // capture that already happened.
+  'CHECKOUT.ORDER.APPROVED',
   // Capture/activation handlers freeze order grants and use a staged outbox
   // keyed by the provider id, so any partial database/queue failure resumes
   // the exact snapshot without duplicating totals, license keys, or actions.
@@ -99,6 +110,32 @@ function parseCustomIdGuildId(customId: unknown): string | null {
   return null;
 }
 
+/**
+ * Finding 2: order-shaped PayPal resources (CHECKOUT.ORDER.*) do NOT carry
+ * `custom_id` at the resource root — the checkout metadata lives on each
+ * purchase unit (`purchase_units[].custom_id`). Reading only the root meant
+ * `CHECKOUT.ORDER.APPROVED` always resolved to a null guild, the
+ * `webhook_events` row was written with `guild_id` omitted, and the dashboard
+ * (which filters `.eq('guild_id', …)`) could neither list nor replay it.
+ *
+ * Every purchase unit that carries a parseable guild must agree. A mixed-guild
+ * order is not something this integration creates (one product per checkout),
+ * so an ambiguous resource resolves to null rather than guessing — the same
+ * fail-closed answer as before, but now only for genuinely ambiguous input.
+ */
+function parsePurchaseUnitsGuildId(purchaseUnits: unknown): string | null {
+  if (!Array.isArray(purchaseUnits)) return null;
+
+  const guildIds = new Set<string>();
+  for (const unit of purchaseUnits) {
+    if (!unit || typeof unit !== 'object') continue;
+    const guildId = parseCustomIdGuildId((unit as { custom_id?: unknown }).custom_id);
+    if (guildId) guildIds.add(guildId);
+  }
+
+  return guildIds.size === 1 ? [...guildIds][0]! : null;
+}
+
 async function lookupSubscriptionGuildId(
   supabase: ReturnType<typeof createAdminSupabase>,
   subscriptionId: string,
@@ -142,6 +179,10 @@ async function resolveWebhookGuildId(
 ): Promise<string | null> {
   const customIdGuildId = parseCustomIdGuildId(event.resource.custom_id);
   if (customIdGuildId) return customIdGuildId;
+
+  // Order-shaped resources keep custom_id on the purchase units.
+  const purchaseUnitGuildId = parsePurchaseUnitsGuildId(event.resource.purchase_units);
+  if (purchaseUnitGuildId) return purchaseUnitGuildId;
 
   const resourceId = event.resource.id;
   if (typeof resourceId === 'string' && event.event_type.startsWith('BILLING.SUBSCRIPTION.')) {
@@ -348,6 +389,16 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ error: 'Processing failed' }, { status: 500 });
           }
 
+          // Finding 2: this row just landed on result = 'error' and PayPal is
+          // about to be told 200 — tell the operator before they stop retrying.
+          await raiseWebhookProcessingErrorAlert(supabase, {
+            eventId: resolvedEventId,
+            eventType: event.event_type,
+            guildId: webhookGuildId,
+            reason: 'Stale webhook requires manual replay',
+            requiresManualReplay: true,
+          });
+
           return NextResponse.json({ status: 'stale_requires_manual_replay' }, { status: 200 });
         }
 
@@ -468,6 +519,18 @@ export async function POST(req: NextRequest) {
           ...(webhookGuildId ? { guild_id: webhookGuildId } : {}),
         })
         .eq('event_id', resolvedEventId);
+
+      // Finding 2: a webhook_events row landing on result = 'error' used to be
+      // completely silent. Non-resumable types get HTTP 200 on PayPal's next
+      // delivery, so PayPal stops retrying and the failure is permanent unless
+      // a human notices. Alert on every error, resumable or not.
+      await raiseWebhookProcessingErrorAlert(supabase, {
+        eventId: resolvedEventId,
+        eventType: event.event_type,
+        guildId: webhookGuildId,
+        reason: String(err),
+        requiresManualReplay: !RESUMABLE_FAILED_EVENT_TYPES.has(event.event_type),
+      });
     }
 
     // V11 Re-Audit L-2: Don't leak event_type in error responses.

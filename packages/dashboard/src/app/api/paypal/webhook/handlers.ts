@@ -984,6 +984,27 @@ export function resolveRefundPaymentId(
 
 // ── Order Approved ──────────────────────────────────
 
+/**
+ * Finding 2: PayPal reports an already-captured order as HTTP 422 with
+ * `details[0].issue === 'ORDER_ALREADY_CAPTURED'`. That is not a failure — it
+ * is proof the capture we are retrying already happened, and the resulting
+ * `PAYMENT.CAPTURE.COMPLETED` event is what actually creates the order rows.
+ *
+ * This matters because `CHECKOUT.ORDER.APPROVED` is now resumable: without it,
+ * a capture that timed out client-side but succeeded at PayPal would fail
+ * forever on every retry.
+ */
+function isAlreadyCapturedResponse(status: number, body: string): boolean {
+  if (status !== 422) return false;
+  try {
+    const parsed = JSON.parse(body) as { details?: Array<{ issue?: unknown }> };
+    return Array.isArray(parsed.details)
+      && parsed.details.some((detail) => detail?.issue === 'ORDER_ALREADY_CAPTURED');
+  } catch {
+    return false;
+  }
+}
+
 export async function handleOrderApproved(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
@@ -1004,6 +1025,11 @@ export async function handleOrderApproved(
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
+        // Finding 2: make the capture itself idempotent at PayPal. Keyed on
+        // the immutable PayPal order id, so a retry after a timeout or 5xx
+        // replays the ORIGINAL capture result instead of attempting a second
+        // charge. This is what makes CHECKOUT.ORDER.APPROVED safe to resume.
+        'PayPal-Request-Id': `capture-${paypalOrderId}`,
       },
       signal: AbortSignal.timeout(10_000),
     },
@@ -1011,6 +1037,11 @@ export async function handleOrderApproved(
 
   if (!captureRes.ok) {
     const errorText = await captureRes.text();
+    if (isAlreadyCapturedResponse(captureRes.status, errorText)) {
+      // Already captured by an earlier attempt — the money moved exactly once.
+      console.log(`[Webhook] PayPal order already captured: ${paypalOrderId}`);
+      return;
+    }
     throw new Error(`Failed to capture PayPal order: ${errorText}`);
   }
 
