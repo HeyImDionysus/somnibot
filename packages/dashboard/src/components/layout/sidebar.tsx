@@ -9,6 +9,7 @@ import { GuildSelector } from '@/components/guild-selector';
 import {
   OpenTicketsBadge,
   PendingOrdersBadge,
+  PendingRequestsBadge,
   ActiveGiveawaysBadge,
   DlqBadge,
   SidebarBadgesProvider,
@@ -34,6 +35,7 @@ import {
   Sparkles,
   FileCode2,
   Key,
+  MessageSquareWarning,
   Receipt,
   Tag,
   ScrollText,
@@ -165,6 +167,7 @@ const navigation: NavGroup[] = [
       { label: 'Orders', href: '/store/orders', icon: Receipt, requires: 'paypal', badge: PendingOrdersBadge },
       { label: 'Customers', href: '/customers', icon: Users, requires: 'paypal' },
       { label: 'License Keys', href: '/licenses', icon: Key, requires: 'paypal' },
+      { label: 'Requests', href: '/store/requests', icon: MessageSquareWarning, requires: 'paypal', badge: PendingRequestsBadge },
       { label: 'Promotions', href: '/store/promotions', icon: Tag, requires: 'paypal' },
     ],
   },

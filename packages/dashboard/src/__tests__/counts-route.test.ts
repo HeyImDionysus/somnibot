@@ -134,6 +134,33 @@ describe('GET /api/counts (single table)', () => {
     expect(mockFrom).not.toHaveBeenCalledWith('action_queue_dlq');
   });
 
+  it('counts commerce_portal_requests as pending only (owner)', async () => {
+    const chain = makeChain({ count: 4, error: null });
+    mockFrom.mockReturnValue(chain);
+
+    const res = await GET(makeRequest({ table: 'commerce_portal_requests' }));
+    const body = await res.json();
+
+    expect(body.count).toBe(4);
+    expect(chain.eq).toHaveBeenCalledWith('guild_id', 'guild-123');
+    // A to-do badge must not stay lit for requests already decided.
+    expect(chain.eq).toHaveBeenCalledWith('status', 'pending');
+  });
+
+  it('does NOT expose commerce_portal_requests to non-owners', async () => {
+    setAuth({ isOwner: false });
+    const chain = makeChain({ count: 4, error: null });
+    mockFrom.mockReturnValue(chain);
+
+    const res = await GET(makeRequest({ table: 'commerce_portal_requests' }));
+    const body = await res.json();
+
+    // These rows name customers and their orders; the backing API is
+    // owner-gated, so the badge must never be more permissive.
+    expect(body.count).toBe(0);
+    expect(mockFrom).not.toHaveBeenCalledWith('commerce_portal_requests');
+  });
+
   it('counts tickets as open OR claimed (matches dashboard stats)', async () => {
     const chain = makeChain({ count: 3, error: null });
     mockFrom.mockReturnValue(chain);

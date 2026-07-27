@@ -130,6 +130,9 @@ export const ROUTE_PERMISSIONS: Record<string, DashboardPermission | null> = {
   '/store/orders': 'dashboard.manage_orders',
   '/customers': 'dashboard.manage_customers',
   '/licenses': 'dashboard.manage_licenses',
+  // Customer refund/support queue. The API is owner-gated (these rows name
+  // customers and their orders), so this is the page-level mirror of that.
+  '/store/requests': 'dashboard.manage_orders',
   '/store/promotions': 'dashboard.manage_store',
   '/economy': 'dashboard.manage_economy',
   '/economy/shop': 'dashboard.manage_economy',

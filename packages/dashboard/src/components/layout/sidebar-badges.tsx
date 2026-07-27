@@ -114,6 +114,15 @@ export function PendingOrdersBadge() {
   return <SidebarBadge table="orders" />;
 }
 
+/**
+ * Customer refund/support requests waiting for a decision. Surfaced in the nav
+ * because a request nobody notices is the exact failure this queue had — buyers
+ * filing into silence.
+ */
+export function PendingRequestsBadge() {
+  return <SidebarBadge table="commerce_portal_requests" />;
+}
+
 export function ActiveGiveawaysBadge() {
   return <SidebarBadge table="giveaways" />;
 }
