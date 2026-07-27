@@ -203,12 +203,28 @@ export async function handleWarnCommand(
     return;
   }
 
-  // Load mod config for escalation and expiry
-  const { data: config } = await client.supabase
+  // Load mod config for escalation and expiry.
+  //
+  // The error used to be discarded here. A failed read left `config` null,
+  // which fell through to `escalation_chain: []` further down — so a database
+  // blip silently turned escalation OFF: the warning was recorded, no
+  // timeout/kick/ban fired, and nothing said why. Escalation is the part of a
+  // warning with teeth, so an unreadable config is an outage, not "no chain
+  // configured".
+  const { data: config, error: configError } = await client.supabase
     .from('guild_config')
     .select('escalation_chain, infraction_expiry_days, mod_log_channel_id')
     .eq('guild_id', interaction.guildId!)
     .maybeSingle();
+
+  if (configError) {
+    log.error('Could not read moderation config for /warn:', configError.message);
+    await interaction.editReply(
+      '⚠️ Could not read the moderation settings for this server, so no warning was recorded. '
+      + 'Nothing was applied — please try again in a moment.',
+    );
+    return;
+  }
 
   const expiryDays = config?.infraction_expiry_days ?? 30;
 

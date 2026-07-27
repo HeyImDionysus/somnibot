@@ -69,12 +69,18 @@ const PLOT_ICONS: Record<PlotStatus, string> = {
   wilted: '🥀',
 };
 
-// Default crops seeded on first use
+// Default crops seeded on first use.
+//
+// seeds_returned is 0 on every default: seedDefaultCrops links no seed item,
+// and harvest only returns seeds when a crop HAS one. A non-zero value here
+// would render as "Seeds back: N" on the dashboard and never happen. An owner
+// who links a real seed item can set the number themselves, at which point it
+// is honoured (and planting starts costing seeds, which is the trade).
 const DEFAULT_CROPS = [
-  { name: 'Potato', emoji: '🥔', grow_seconds: 7200, wilt_seconds: 86400, sell_price: 30, seeds_returned: 1, category: 'Vegetable', sort_order: 0 },
-  { name: 'Corn', emoji: '🌽', grow_seconds: 28800, wilt_seconds: 86400, sell_price: 80, seeds_returned: 2, category: 'Vegetable', sort_order: 1 },
-  { name: 'Tomato', emoji: '🍅', grow_seconds: 43200, wilt_seconds: 72000, sell_price: 120, seeds_returned: 1, category: 'Vegetable', sort_order: 2 },
-  { name: 'Pumpkin', emoji: '🎃', grow_seconds: 86400, wilt_seconds: 172800, sell_price: 300, seeds_returned: 1, category: 'Vegetable', sort_order: 3 },
+  { name: 'Potato', emoji: '🥔', grow_seconds: 7200, wilt_seconds: 86400, sell_price: 30, seeds_returned: 0, category: 'Vegetable', sort_order: 0 },
+  { name: 'Corn', emoji: '🌽', grow_seconds: 28800, wilt_seconds: 86400, sell_price: 80, seeds_returned: 0, category: 'Vegetable', sort_order: 1 },
+  { name: 'Tomato', emoji: '🍅', grow_seconds: 43200, wilt_seconds: 72000, sell_price: 120, seeds_returned: 0, category: 'Vegetable', sort_order: 2 },
+  { name: 'Pumpkin', emoji: '🎃', grow_seconds: 86400, wilt_seconds: 172800, sell_price: 300, seeds_returned: 0, category: 'Vegetable', sort_order: 3 },
   { name: 'Golden Apple', emoji: '🍎', grow_seconds: 172800, wilt_seconds: 259200, sell_price: 1000, seeds_returned: 0, category: 'Fruit', sort_order: 4 },
 ];
 
