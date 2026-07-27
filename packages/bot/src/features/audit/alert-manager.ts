@@ -28,6 +28,12 @@ export interface AlertThresholds {
   webhookErrorRate: number; // 0.0–1.0
 }
 
+/** Postgres numeric comes back as a string; coerce and reject nonsense. */
+function numberOr(value: unknown, fallback: number): number {
+  const n = typeof value === 'string' ? Number(value) : value;
+  return typeof n === 'number' && Number.isFinite(n) ? n : fallback;
+}
+
 const DEFAULT_THRESHOLDS: AlertThresholds = {
   memoryRssMb: 512,
   wsPingMs: 500,
@@ -78,32 +84,81 @@ export class AlertManager {
   }
 
   /**
+   * Per-guild threshold overrides, cached briefly.
+   *
+   * Snapshots arrive on a 60s tick, so a 60s TTL means an owner's change is
+   * picked up on the next evaluation without adding a read to every call.
+   */
+  private thresholdCache = new Map<string, { value: AlertThresholds; time: number }>();
+
+  /**
+   * Thresholds for one guild: the owner's configured values over the shipped
+   * defaults. A failed or missing read falls back to the defaults rather than
+   * skipping evaluation — losing alerting entirely because a config read
+   * blipped would be worse than alerting on the default numbers.
+   */
+  private async thresholdsFor(guildId: string): Promise<AlertThresholds> {
+    const now = Date.now();
+    const cached = this.thresholdCache.get(guildId);
+    if (cached && now - cached.time < 60_000) return cached.value;
+
+    let resolved = this.thresholds;
+    try {
+      const { data, error } = await this.supabase
+        .from('guild_config')
+        .select('memory_alert_threshold_mb, ws_ping_alert_threshold_ms, webhook_error_rate_threshold')
+        .eq('guild_id', guildId)
+        .maybeSingle();
+      if (!error && data) {
+        const row = data as Record<string, unknown>;
+        resolved = {
+          memoryRssMb: numberOr(row.memory_alert_threshold_mb, this.thresholds.memoryRssMb),
+          wsPingMs: numberOr(row.ws_ping_alert_threshold_ms, this.thresholds.wsPingMs),
+          webhookErrorRate: numberOr(row.webhook_error_rate_threshold, this.thresholds.webhookErrorRate),
+        };
+      }
+    } catch (err) {
+      log.warn('Could not read alert thresholds; using defaults', { guildId, error: String(err) });
+    }
+
+    this.thresholdCache.set(guildId, { value: resolved, time: now });
+    return resolved;
+  }
+
+  /** Drop a guild's cached thresholds so the next evaluation re-reads them. */
+  invalidateThresholds(guildId?: string): void {
+    if (guildId) this.thresholdCache.delete(guildId);
+    else this.thresholdCache.clear();
+  }
+
+  /**
    * Evaluate a health snapshot and create/resolve alerts as needed.
    */
   async evaluate(snapshot: HealthSnapshot): Promise<void> {
     const alerts: AlertEntry[] = [];
+    const thresholds = await this.thresholdsFor(snapshot.guild_id);
 
     // 1. Memory pressure
-    if (snapshot.memory_rss_mb > this.thresholds.memoryRssMb) {
+    if (snapshot.memory_rss_mb > thresholds.memoryRssMb) {
       alerts.push({
         guild_id: snapshot.guild_id,
         alert_type: 'memory_high',
-        severity: snapshot.memory_rss_mb > this.thresholds.memoryRssMb * 1.5 ? 'critical' : 'warning',
+        severity: snapshot.memory_rss_mb > thresholds.memoryRssMb * 1.5 ? 'critical' : 'warning',
         title: 'High Memory Usage',
-        message: `Bot RSS memory is ${snapshot.memory_rss_mb.toFixed(1)}MB (threshold: ${this.thresholds.memoryRssMb}MB)`,
-        metadata: { rss_mb: snapshot.memory_rss_mb, threshold_mb: this.thresholds.memoryRssMb },
+        message: `Bot RSS memory is ${snapshot.memory_rss_mb.toFixed(1)}MB (threshold: ${thresholds.memoryRssMb}MB)`,
+        metadata: { rss_mb: snapshot.memory_rss_mb, threshold_mb: thresholds.memoryRssMb },
       });
     }
 
     // 2. High WS ping
-    if (snapshot.discord_ws_ping > this.thresholds.wsPingMs) {
+    if (snapshot.discord_ws_ping > thresholds.wsPingMs) {
       alerts.push({
         guild_id: snapshot.guild_id,
         alert_type: 'ws_ping_high',
-        severity: snapshot.discord_ws_ping > this.thresholds.wsPingMs * 2 ? 'critical' : 'warning',
+        severity: snapshot.discord_ws_ping > thresholds.wsPingMs * 2 ? 'critical' : 'warning',
         title: 'High Discord Latency',
-        message: `WebSocket ping is ${snapshot.discord_ws_ping}ms (threshold: ${this.thresholds.wsPingMs}ms)`,
-        metadata: { ping_ms: snapshot.discord_ws_ping, threshold_ms: this.thresholds.wsPingMs },
+        message: `WebSocket ping is ${snapshot.discord_ws_ping}ms (threshold: ${thresholds.wsPingMs}ms)`,
+        metadata: { ping_ms: snapshot.discord_ws_ping, threshold_ms: thresholds.wsPingMs },
       });
     }
 

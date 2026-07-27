@@ -555,6 +555,22 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     targetId: (d) => d.commandId as string,
     details: (d) => ({ commandName: d.commandName, userId: d.userId, channelId: d.channelId, actionCount: d.actionCount }),
   },
+  'custom_command.degraded': {
+    action: 'custom_command.degraded',
+    category: 'custom_commands',
+    targetType: 'custom_command',
+    actorType: 'user',
+    targetId: (d) => d.commandId as string,
+    details: (d) => ({
+      commandName: d.commandName,
+      userId: d.userId,
+      channelId: d.channelId,
+      actionCount: d.actionCount,
+      failedActions: d.failedActions,
+      failedTypes: d.failedTypes,
+    }),
+    success: false,
+  },
   'diagnostics.alert_raised': {
     action: 'diagnostics.alert_raised',
     category: 'diagnostics',
@@ -635,6 +651,15 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.userId as string,
     details: (d) => ({ achievementId: d.achievementId, name: d.name, rewardCurrency: d.rewardCurrency }),
+  },
+  'achievement.unlock_failed': {
+    action: 'achievement.unlock_failed',
+    category: 'game_economy',
+    targetType: 'achievement',
+    actorType: 'system',
+    targetId: (d) => d.achievementId as string,
+    details: (d) => ({ userId: d.userId, name: d.name, stage: d.stage }),
+    success: false,
   },
   'prestige.performed': {
     action: 'prestige.performed',

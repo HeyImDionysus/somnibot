@@ -42,7 +42,7 @@ import { handleViewProfile, handleWarnUser, handleViewPurchases, handleCreateTic
 import { handleModalSubmit } from '../features/discord-ux/modal-handlers.js';
 import { handleAutocomplete } from '../features/discord-ux/autocomplete.js';
 import { handleHelpCategorySelect } from '../features/help/index.js';
-import { applyBrand, resolveBrandKit } from '../features/branding/index.js';
+import { applyBrand, brandedEmbed, resolveBrandKit } from '../features/branding/index.js';
 
 // Feature handler imports — slash commands
 import { handleStoreCommand } from '../features/commerce/store-command.js';
@@ -396,12 +396,15 @@ async function handleSlashCommand(
       .select('music_enabled')
       .eq('guild_id', guildId)
       .maybeSingle();
+    // One resolve serves BOTH decline paths below (owner-disabled and
+    // infrastructure-unavailable); the kit read is cached and never throws.
+    const brandKit = await resolveBrandKit(client.supabase, guildId, { fallbackName: interaction.guild?.name });
+
     if (musicFlagCfg?.music_enabled === false) {
       // Catalog `music-disabled`: a branded, guild-named ephemeral embed notice
       // rendered with the owner's white-label brand kit (configured brand name
       // falling back to the guild's name, accent color, powered-by attribution)
       // — never a stock SomniBot string.
-      const brandKit = await resolveBrandKit(client.supabase, guildId, { fallbackName: interaction.guild?.name });
       const disabledEmbed = new EmbedBuilder()
         .setColor(brandKit.accentColor)
         .setTitle('🎵 Music is switched off')
@@ -415,9 +418,18 @@ async function handleSlashCommand(
       await interaction.reply({ embeds: [disabledEmbed], ephemeral: true });
       return;
     }
-    // Music is enabled but no manager is available — an infrastructure/startup gap.
+    // Music is enabled but no manager is available — an infrastructure/startup
+    // gap. This is the SAME class of member-facing notice as the disabled
+    // branch above, so it gets the same branded treatment rather than a bare
+    // line of plain text that looks nothing like the rest of the bot.
     await interaction.reply({
-      content: '❌ Music system is temporarily unavailable. Please try again shortly.',
+      embeds: [brandedEmbed(brandKit, {
+        intent: 'warning',
+        title: '🎵 Music is temporarily unavailable',
+        description:
+          `Music is switched on in **${brandKit.brandName}** but its audio service `
+          + 'is not reachable right now. An admin has been notified — please try again shortly.',
+      })],
       ephemeral: true,
     });
     return;
