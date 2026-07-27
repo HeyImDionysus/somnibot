@@ -121,13 +121,13 @@ export default function PollsPage() {
       </h1>
 
       {/* Config */}
-      <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4 space-y-3">
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-3">
         <Toggle label="Enable Polls" checked={config.polls_enabled} onChange={(v) => saveConfig({ polls_enabled: v })} />
         <Toggle label="Enable Predictions (currency bets)" checked={config.predictions_enabled} onChange={(v) => saveConfig({ predictions_enabled: v })} />
       </div>
 
       {/* Polls List */}
-      <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4">
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4">
         <h2 className="text-lg font-semibold text-discord-text-primary mb-3">Polls ({polls.length})</h2>
         {polls.length === 0 ? (
           <EmptyState icon={BarChart3} title="No polls" description="Polls created with /poll will appear here." />
@@ -147,7 +147,7 @@ export default function PollsPage() {
       </div>
 
       {/* Predictions List */}
-      <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4">
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4">
         <h2 className="text-lg font-semibold text-discord-text-primary mb-3">Predictions ({predictions.length})</h2>
         {predictions.length === 0 ? (
           <EmptyState icon={BarChart3} title="No predictions" description="Predictions created with /predict will appear here." />

@@ -158,17 +158,17 @@ export default function WelcomePage() {
       </div>
 
       {/* Variable Reference */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4">
-        <h3 className="text-sm font-semibold text-discord-text-primary mb-2">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4">
+        <h3 className="text-sm font-medium text-discord-text-primary mb-2">
           Available Variables
         </h3>
         <VariableChips variables={VARIABLES} />
       </section>
 
       {/* ═══ Welcome Message ═══ */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-discord-text-primary">
+          <h2 className="text-lg font-medium text-discord-text-primary">
             Welcome Message
           </h2>
           <label className="relative inline-flex cursor-pointer items-center">
@@ -207,7 +207,7 @@ export default function WelcomePage() {
                   setConfig((prev) => ({ ...prev, welcome_message: e.target.value }))
                 }
                 rows={3}
-                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-somni-pink focus:outline-none"
+                className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-discord-accent focus:outline-none"
                 placeholder="Welcome to {server}, {user}!"
               />
               <VariableChips
@@ -233,7 +233,7 @@ export default function WelcomePage() {
                     welcome_card_enabled: e.target.checked,
                   }))
                 }
-                className="h-4 w-4 rounded border-discord-border bg-discord-bg-tertiary accent-somni-pink"
+                className="h-4 w-4 rounded border-discord-border-subtle bg-discord-bg-tertiary accent-discord-accent"
               />
               <span className="text-sm text-discord-text-primary">
                 Include welcome card image
@@ -254,7 +254,7 @@ export default function WelcomePage() {
                       welcome_card_background: e.target.value || null,
                     }))
                   }
-                  className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-somni-pink focus:outline-none"
+                  className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-discord-accent focus:outline-none"
                   placeholder="https://example.com/background.png"
                 />
               </div>
@@ -278,9 +278,9 @@ export default function WelcomePage() {
       </section>
 
       {/* ═══ Welcome DM ═══ */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-discord-text-primary">
+          <h2 className="text-lg font-medium text-discord-text-primary">
             Welcome DM
           </h2>
           <label className="relative inline-flex cursor-pointer items-center">
@@ -305,7 +305,7 @@ export default function WelcomePage() {
                 setConfig((prev) => ({ ...prev, welcome_dm_message: e.target.value }))
               }
               rows={3}
-              className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-somni-pink focus:outline-none"
+              className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-discord-accent focus:outline-none"
               placeholder="Hey {user.name}! Welcome to {server}."
             />
           </div>
@@ -313,8 +313,8 @@ export default function WelcomePage() {
       </section>
 
       {/* ═══ Auto-Roles ═══ */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
-        <h2 className="text-lg font-semibold text-discord-text-primary">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
+        <h2 className="text-lg font-medium text-discord-text-primary">
           Auto-Roles
         </h2>
         <p className="mt-1 text-sm text-discord-text-muted">
@@ -334,9 +334,9 @@ export default function WelcomePage() {
       </section>
 
       {/* ═══ Goodbye Message ═══ */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-discord-text-primary">
+          <h2 className="text-lg font-medium text-discord-text-primary">
             Goodbye Message
           </h2>
           <label className="relative inline-flex cursor-pointer items-center">
@@ -373,7 +373,7 @@ export default function WelcomePage() {
                   setConfig((prev) => ({ ...prev, goodbye_message: e.target.value }))
                 }
                 rows={2}
-                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-somni-pink focus:outline-none"
+                className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-discord-accent focus:outline-none"
                 placeholder="{user.name} left. They were with us for {duration}. 👋"
               />
               <VariableChips
@@ -409,7 +409,7 @@ export default function WelcomePage() {
         <button
           onClick={handleSave}
           disabled={saving}
-          className="rounded-md bg-somni-pink px-6 py-2.5 text-sm font-semibold text-white hover:bg-somni-pink/80 disabled:opacity-50"
+          className="rounded-md bg-discord-accent px-6 py-2.5 text-sm font-medium text-white hover:bg-discord-accent-hover disabled:opacity-50"
         >
           {saving ? 'Saving...' : 'Save Changes'}
         </button>

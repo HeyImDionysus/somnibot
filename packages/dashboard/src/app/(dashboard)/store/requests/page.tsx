@@ -188,7 +188,7 @@ export default function StoreRequestsPage() {
               <div
                 key={r.id}
                 className={`rounded-lg border p-4 ${
-                  r.stale ? 'border-red-500/40 bg-red-500/5' : 'border-discord-border bg-discord-bg-secondary'
+                  r.stale ? 'border-red-500/40 bg-red-500/5' : 'border-discord-border-subtle bg-discord-bg-secondary'
                 }`}
               >
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -237,7 +237,7 @@ export default function StoreRequestsPage() {
                       onChange={(e) => setNotes((p) => ({ ...p, [r.id]: e.target.value }))}
                       placeholder="What should the customer be told? This is sent to them."
                       rows={2}
-                      className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+                      className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
                     />
                     <div className="flex flex-wrap gap-2">
                       {r.status === 'pending' && (

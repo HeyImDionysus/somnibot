@@ -127,7 +127,7 @@ export default function TranscriptsPage() {
           </div>
           <button
             onClick={downloadTranscript}
-            className="rounded-md border border-discord-border px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary hover:text-discord-text-primary"
+            className="rounded-md border border-discord-border-subtle px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary hover:text-discord-text-primary"
           >
             ⬇️ Download HTML
           </button>
@@ -140,7 +140,7 @@ export default function TranscriptsPage() {
         </div>
 
         {/* Render the HTML transcript in an iframe */}
-        <div className="rounded-lg border border-discord-border overflow-hidden" style={{ height: '70vh' }}>
+        <div className="rounded-lg border border-discord-border-subtle overflow-hidden" style={{ height: '70vh' }}>
           <iframe
             srcDoc={viewing.html_content}
             title={`Ticket #${viewing.ticket_number} Transcript`}
@@ -178,7 +178,7 @@ export default function TranscriptsPage() {
           placeholder="Search by ticket number..."
           value={search}
           onChange={(e) => handleSearch(e.target.value)}
-          className="flex-1 rounded-lg border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink/50 focus:outline-none"
+          className="flex-1 rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent/50 focus:outline-none"
         />
       </div>
 
@@ -189,9 +189,9 @@ export default function TranscriptsPage() {
       )}
 
       {transcripts.length === 0 ? (
-        <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-8 text-center">
+        <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-8 text-center">
           <div className="text-4xl mb-3">📋</div>
-          <h3 className="text-lg font-semibold text-discord-text-primary">
+          <h3 className="text-lg font-medium text-discord-text-primary">
             {search ? 'No matching transcripts' : 'No transcripts yet'}
           </h3>
           <p className="mt-1 text-sm text-discord-text-muted">
@@ -206,12 +206,12 @@ export default function TranscriptsPage() {
             {transcripts.map((t) => (
               <div
                 key={t.id}
-                className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4 hover:border-somni-pink/30 transition-colors cursor-pointer"
+                className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 hover:border-discord-accent/30 transition-colors cursor-pointer"
                 onClick={() => viewTranscript(t.ticket_id)}
               >
                 <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="font-semibold text-discord-text-primary">
+                    <h3 className="font-medium text-discord-text-primary">
                       Ticket #{t.ticket_number}
                     </h3>
                     <div className="mt-1 flex items-center gap-4 text-xs text-discord-text-muted">
@@ -231,7 +231,7 @@ export default function TranscriptsPage() {
 
           {/* Pagination */}
           {total > PAGE_SIZE && (
-            <div className="flex items-center justify-between border-t border-discord-border pt-4">
+            <div className="flex items-center justify-between border-t border-discord-border-subtle pt-4">
               <span className="text-sm text-discord-text-muted">
                 Showing {startItem}–{endItem} of {total}
               </span>
@@ -239,7 +239,7 @@ export default function TranscriptsPage() {
                 <button
                   onClick={() => setPage((p) => Math.max(0, p - 1))}
                   disabled={page === 0}
-                  className="rounded-md border border-discord-border px-3 py-1.5 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="rounded-md border border-discord-border-subtle px-3 py-1.5 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   Previous
                 </button>
@@ -261,8 +261,8 @@ export default function TranscriptsPage() {
                       onClick={() => setPage(pageNum)}
                       className={`rounded-md px-3 py-1.5 text-sm ${
                         pageNum === page
-                          ? 'bg-somni-pink text-white'
-                          : 'border border-discord-border text-discord-text-secondary hover:bg-discord-bg-secondary'
+                          ? 'bg-discord-accent text-white'
+                          : 'border border-discord-border-subtle text-discord-text-secondary hover:bg-discord-bg-secondary'
                       }`}
                     >
                       {pageNum + 1}
@@ -272,7 +272,7 @@ export default function TranscriptsPage() {
                 <button
                   onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
                   disabled={page >= totalPages - 1}
-                  className="rounded-md border border-discord-border px-3 py-1.5 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="rounded-md border border-discord-border-subtle px-3 py-1.5 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   Next
                 </button>

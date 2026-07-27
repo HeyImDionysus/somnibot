@@ -117,7 +117,7 @@ function NumberField({
       <span className="block text-sm text-discord-text-secondary mb-1">{label}</span>
       <input
         type="number"
-        className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border px-3 py-2 text-sm text-discord-text-primary"
+        className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
         value={value}
         min={min}
         max={max}
@@ -296,7 +296,7 @@ export default function TriviaPage() {
       </div>
 
       {/* Config */}
-      <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4 space-y-4">
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-4">
         <Toggle
           label="Enable Trivia"
           checked={config.economy_trivia_enabled}
@@ -336,7 +336,7 @@ export default function TriviaPage() {
       </div>
 
       {/* Hosted / Scheduled Trivia */}
-      <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4 space-y-4">
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-4">
         <div>
           <h2 className="text-lg font-semibold text-discord-text-primary flex items-center gap-2">
             <CalendarClock className="w-5 h-5" /> Hosted Trivia
@@ -377,7 +377,7 @@ export default function TriviaPage() {
             <div>
               <span className="block text-sm text-discord-text-secondary mb-1">Category (optional)</span>
               <select
-                className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border px-3 py-2 text-sm text-discord-text-primary"
+                className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
                 value={config.economy_trivia_schedule_category ?? ''}
                 onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
                   saveConfig({ economy_trivia_schedule_category: e.target.value || null })
@@ -390,7 +390,7 @@ export default function TriviaPage() {
             <div>
               <span className="block text-sm text-discord-text-secondary mb-1">Difficulty (optional)</span>
               <select
-                className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border px-3 py-2 text-sm text-discord-text-primary"
+                className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
                 value={config.economy_trivia_schedule_difficulty ?? ''}
                 onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
                   saveConfig({
@@ -407,7 +407,7 @@ export default function TriviaPage() {
       </div>
 
       {/* Custom Questions */}
-      <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4">
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold text-discord-text-primary">Custom Questions ({questions.length})</h2>
           <div className="flex gap-2">
@@ -457,7 +457,7 @@ export default function TriviaPage() {
 
       {/* Built-in Questions — served alongside the custom pack, read-only */}
       {builtIns.length > 0 && (
-        <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4">
+        <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4">
           <div className="mb-4">
             <h2 className="text-lg font-semibold text-discord-text-primary">Built-in Questions ({builtIns.length})</h2>
             <p className="text-xs text-discord-text-secondary mt-1">
@@ -497,7 +497,7 @@ export default function TriviaPage() {
               <div>
                 <span className="block text-xs text-discord-text-secondary mb-1">Category</span>
                 <select
-                  className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border px-3 py-2 text-sm text-discord-text-primary"
+                  className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
                   value={editing.category}
                   onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setEditing({ ...editing, category: e.target.value })}
                 >
@@ -507,7 +507,7 @@ export default function TriviaPage() {
               <div>
                 <span className="block text-xs text-discord-text-secondary mb-1">Difficulty</span>
                 <select
-                  className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border px-3 py-2 text-sm text-discord-text-primary"
+                  className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
                   value={editing.difficulty}
                   onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setEditing({ ...editing, difficulty: e.target.value })}
                 >
@@ -518,7 +518,7 @@ export default function TriviaPage() {
             <div>
               <span className="block text-xs text-discord-text-secondary mb-1">Question</span>
               <textarea
-                className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border px-3 py-2 text-sm text-discord-text-primary"
+                className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
                 rows={2}
                 value={editing.question}
                 onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditing({ ...editing, question: e.target.value })}
@@ -527,7 +527,7 @@ export default function TriviaPage() {
             <div>
               <span className="block text-xs text-discord-text-secondary mb-1">Correct Answer</span>
               <input
-                className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border px-3 py-2 text-sm text-discord-text-primary"
+                className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
                 value={editing.correct_answer}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, correct_answer: e.target.value })}
               />
@@ -537,7 +537,7 @@ export default function TriviaPage() {
               {(editing.wrong_answers ?? []).map((wa, i) => (
                 <input
                   key={i}
-                  className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border px-3 py-2 text-sm text-discord-text-primary mb-1"
+                  className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary mb-1"
                   placeholder={`Wrong answer ${i + 1}`}
                   value={wa}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => {

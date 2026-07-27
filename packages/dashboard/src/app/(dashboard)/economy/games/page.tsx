@@ -59,7 +59,7 @@ function NumberField({ label, value, onChange, min, max }: { label: string; valu
       <span className="block text-sm text-discord-text-secondary mb-1">{label}</span>
       <input
         type="number"
-        className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border px-3 py-2 text-sm text-discord-text-primary"
+        className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
         value={value}
         min={min}
         max={max}
@@ -128,7 +128,7 @@ export default function GamesPage() {
       </h1>
 
       {/* Games Config */}
-      <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4 space-y-4">
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-4">
         <h2 className="text-lg font-semibold text-discord-text-primary">Mini-Games</h2>
         <Toggle label="Enable Mini-Games" checked={config.economy_games_enabled} onChange={(v) => saveConfig({ economy_games_enabled: v })} />
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -140,14 +140,14 @@ export default function GamesPage() {
       </div>
 
       {/* Lottery Config */}
-      <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4 space-y-4">
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-4">
         <h2 className="text-lg font-semibold text-discord-text-primary">Lottery</h2>
         <Toggle label="Enable Lottery" checked={config.economy_lottery_enabled} onChange={(v) => saveConfig({ economy_lottery_enabled: v })} />
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div>
             <span className="block text-sm text-discord-text-secondary mb-1">Drawing Schedule</span>
             <select
-              className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border px-3 py-2 text-sm text-discord-text-primary"
+              className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
               value={config.economy_lottery_schedule}
               onChange={(e: React.ChangeEvent<HTMLSelectElement>) => saveConfig({ economy_lottery_schedule: e.target.value })}
             >

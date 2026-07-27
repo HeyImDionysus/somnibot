@@ -31,7 +31,7 @@ function formatNum(n: number): string {
 
 function KpiCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4">
+    <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4">
       <p className="text-xs text-discord-text-muted">{label}</p>
       <p className="mt-1 text-2xl font-bold text-discord-text-primary">{value}</p>
       {sub && <p className="mt-0.5 text-xs text-discord-text-muted">{sub}</p>}
@@ -93,7 +93,7 @@ export default function EconomyAnalyticsPage() {
         <select
           value={days}
           onChange={(e) => setDays(Number(e.target.value))}
-          className="rounded border border-discord-border bg-discord-bg-secondary px-3 py-1.5 text-sm text-discord-text-primary"
+          className="rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-1.5 text-sm text-discord-text-primary"
         >
           <option value={7}>7 days</option>
           <option value={14}>14 days</option>
@@ -114,25 +114,25 @@ export default function EconomyAnalyticsPage() {
       {/* Charts Grid */}
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Transaction Volume by Type */}
-        <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4">
+        <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4">
           <h3 className="mb-3 text-sm font-semibold text-discord-text-primary">Transaction Volume by Type</h3>
           <BarChart data={data.tx_volume} labelKey="tx_type" valueKey="tx_count" color="#5865F2" />
         </div>
 
         {/* Popular Items */}
-        <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4">
+        <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4">
           <h3 className="mb-3 text-sm font-semibold text-discord-text-primary">Most Popular Items</h3>
           <BarChart data={data.popular_items} labelKey="item_name" valueKey="purchase_count" color="#57F287" />
         </div>
 
         {/* Feature Participation */}
-        <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4">
+        <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4">
           <h3 className="mb-3 text-sm font-semibold text-discord-text-primary">Feature Participation (DAU)</h3>
           <BarChart data={data.feature_participation} labelKey="feature" valueKey="daily_active_users" color="#FEE75C" />
         </div>
 
         {/* Top Earners */}
-        <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4">
+        <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4">
           <h3 className="mb-3 text-sm font-semibold text-discord-text-primary">Top 10 Earners</h3>
           <div className="space-y-1.5">
             {data.top_earners.map((e, i) => (
@@ -148,12 +148,12 @@ export default function EconomyAnalyticsPage() {
       </div>
 
       {/* Market Activity Table */}
-      <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-4">
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4">
         <h3 className="mb-3 text-sm font-semibold text-discord-text-primary">Market Activity (Last 7 Days)</h3>
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-discord-border text-left text-discord-text-muted">
+              <tr className="border-b border-discord-border-subtle text-left text-discord-text-muted">
                 <th className="px-2 py-2">Date</th>
                 <th className="px-2 py-2 text-right">Listed</th>
                 <th className="px-2 py-2 text-right">Sold</th>
@@ -162,7 +162,7 @@ export default function EconomyAnalyticsPage() {
             </thead>
             <tbody>
               {data.market_activity.slice(-7).map((d) => (
-                <tr key={d.day} className="border-b border-discord-border/30">
+                <tr key={d.day} className="border-b border-discord-border-subtle/30">
                   <td className="px-2 py-1.5 text-discord-text-secondary">{new Date(d.day).toLocaleDateString()}</td>
                   <td className="px-2 py-1.5 text-right text-discord-text-secondary">{d.listings_created}</td>
                   <td className="px-2 py-1.5 text-right text-discord-text-secondary">{d.listings_sold}</td>

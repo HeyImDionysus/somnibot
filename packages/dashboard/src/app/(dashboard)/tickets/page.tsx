@@ -346,8 +346,8 @@ export default function TicketsPage() {
         </div>
 
         {/* Panel Name */}
-        <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6 space-y-5">
-          <h2 className="text-lg font-semibold text-discord-text-primary">Panel Settings</h2>
+        <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 space-y-5">
+          <h2 className="text-lg font-medium text-discord-text-primary">Panel Settings</h2>
 
           <div>
             <label className="block text-sm font-medium text-discord-text-primary mb-1">Panel Name</label>
@@ -356,7 +356,7 @@ export default function TicketsPage() {
               value={editingPanel.name}
               onChange={(e) => setEditingPanel({ ...editingPanel, name: e.target.value })}
               placeholder="e.g., Support Tickets"
-              className="w-full max-w-md rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+              className="w-full max-w-md rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none"
             />
           </div>
 
@@ -414,7 +414,7 @@ export default function TicketsPage() {
               <select
                 value={editingPanel.input_mode}
                 onChange={(e) => setEditingPanel({ ...editingPanel, input_mode: e.target.value as 'buttons' | 'dropdown' })}
-                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+                className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
               >
                 <option value="buttons">Buttons</option>
                 <option value="dropdown">Dropdown</option>
@@ -428,7 +428,7 @@ export default function TicketsPage() {
                 max={10}
                 value={editingPanel.max_open_per_user}
                 onChange={(e) => setEditingPanel({ ...editingPanel, max_open_per_user: parseInt(e.target.value) || 3 })}
-                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+                className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
               />
             </div>
             <div className="flex items-end">
@@ -458,7 +458,7 @@ export default function TicketsPage() {
                   ...editingPanel,
                   inactivity_warn_hours: Math.max(0, parseInt(e.target.value) || 0),
                 })}
-                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+                className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
               />
               <p className="mt-1 text-xs text-discord-text-muted">0 disables the nudge.</p>
             </div>
@@ -475,7 +475,7 @@ export default function TicketsPage() {
                   ...editingPanel,
                   inactivity_close_hours: Math.max(0, parseInt(e.target.value) || 0),
                 })}
-                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+                className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
               />
               <p className="mt-1 text-xs text-discord-text-muted">
                 0 disables auto-close. Must be longer than the warning, or the ticket
@@ -523,14 +523,14 @@ export default function TicketsPage() {
               onChange={(e) => setEditingPanel({ ...editingPanel, introduction_message: e.target.value || null })}
               placeholder="Welcome! A staff member will be with you shortly."
               rows={3}
-              className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none resize-none"
+              className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none resize-none"
             />
           </div>
         </section>
 
         {/* Panel Message (Embed) */}
-        <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6 space-y-4">
-          <h2 className="text-lg font-semibold text-discord-text-primary">Panel Message</h2>
+        <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 space-y-4">
+          <h2 className="text-lg font-medium text-discord-text-primary">Panel Message</h2>
           <p className="text-sm text-discord-text-muted">The embed shown in the panel channel.</p>
 
           <div>
@@ -540,7 +540,7 @@ export default function TicketsPage() {
               value={(editingPanel.panel_message.title as string) || ''}
               onChange={(e) => setEditingPanel({ ...editingPanel, panel_message: { ...editingPanel.panel_message, title: e.target.value } })}
               placeholder="🎫 Support Tickets"
-              className="w-full max-w-md rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+              className="w-full max-w-md rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none"
             />
           </div>
           <div>
@@ -550,7 +550,7 @@ export default function TicketsPage() {
               onChange={(e) => setEditingPanel({ ...editingPanel, panel_message: { ...editingPanel.panel_message, description: e.target.value } })}
               placeholder="Click a button below to open a ticket."
               rows={3}
-              className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none resize-none"
+              className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none resize-none"
             />
           </div>
           <div>
@@ -560,29 +560,29 @@ export default function TicketsPage() {
               value={(editingPanel.panel_message.footer as string) || ''}
               onChange={(e) => setEditingPanel({ ...editingPanel, panel_message: { ...editingPanel.panel_message, footer: e.target.value } })}
               placeholder="Optional footer text"
-              className="w-full max-w-md rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+              className="w-full max-w-md rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none"
             />
           </div>
         </section>
 
         {/* Ticket Types */}
-        <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6 space-y-4">
+        <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 space-y-4">
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-lg font-semibold text-discord-text-primary">Ticket Types</h2>
+              <h2 className="text-lg font-medium text-discord-text-primary">Ticket Types</h2>
               <p className="text-sm text-discord-text-muted">Each type becomes a button or dropdown option.</p>
             </div>
           </div>
 
           <div className="space-y-3">
             {editingPanel.ticket_types.map((tt, idx) => (
-              <div key={tt.id} className="rounded-lg border border-discord-border bg-discord-bg-tertiary p-4 space-y-3">
+              <div key={tt.id} className="rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary p-4 space-y-3">
                 <div className="flex items-center gap-3">
                   {/* Emoji picker */}
                   <select
                     value={tt.emoji}
                     onChange={(e) => updateTicketType(idx, { emoji: e.target.value })}
-                    className="w-16 rounded border border-discord-border bg-discord-bg-secondary px-2 py-1.5 text-center text-lg"
+                    className="w-16 rounded border border-discord-border-subtle bg-discord-bg-secondary px-2 py-1.5 text-center text-lg"
                   >
                     {EMOJI_OPTIONS.map((e) => (
                       <option key={e} value={e}>{e}</option>
@@ -595,7 +595,7 @@ export default function TicketsPage() {
                     value={tt.label}
                     onChange={(e) => updateTicketType(idx, { label: e.target.value })}
                     placeholder="Type label (e.g., Billing)"
-                    className="flex-1 rounded border border-discord-border bg-discord-bg-secondary px-3 py-1.5 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+                    className="flex-1 rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-1.5 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none"
                   />
 
                   {/* Color */}
@@ -627,7 +627,7 @@ export default function TicketsPage() {
                     value={tt.description || ''}
                     onChange={(e) => updateTicketType(idx, { description: e.target.value || undefined })}
                     placeholder="Dropdown description (optional)"
-                    className="w-full rounded border border-discord-border bg-discord-bg-secondary px-3 py-1.5 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+                    className="w-full rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-1.5 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none"
                   />
                 )}
 
@@ -637,14 +637,14 @@ export default function TicketsPage() {
                   value={tt.categoryOverride || ''}
                   onChange={(e) => updateTicketType(idx, { categoryOverride: e.target.value || undefined })}
                   placeholder="Category override ID (optional — uses panel default if empty)"
-                  className="w-full rounded border border-discord-border bg-discord-bg-secondary px-3 py-1.5 text-xs text-discord-text-secondary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+                  className="w-full rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-1.5 text-xs text-discord-text-secondary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none"
                 />
               </div>
             ))}
 
             <button
               onClick={addTicketType}
-              className="w-full rounded-lg border border-dashed border-discord-border p-3 text-sm text-discord-text-muted hover:border-somni-pink/50 hover:text-discord-text-primary"
+              className="w-full rounded-lg border border-dashed border-discord-border-subtle p-3 text-sm text-discord-text-muted hover:border-discord-accent/50 hover:text-discord-text-primary"
             >
               + Add Ticket Type
             </button>
@@ -652,9 +652,9 @@ export default function TicketsPage() {
         </section>
 
         {/* Preview */}
-        <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
-          <h2 className="text-lg font-semibold text-discord-text-primary mb-4">Preview</h2>
-          <div className="rounded-lg border-l-4 border-somni-pink bg-discord-bg-tertiary p-4">
+        <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
+          <h2 className="text-lg font-medium text-discord-text-primary mb-4">Preview</h2>
+          <div className="rounded-lg border-l-4 border-discord-accent bg-discord-bg-tertiary p-4">
             <div className="font-bold text-discord-text-primary mb-1">
               {(editingPanel.panel_message.title as string) || editingPanel.name || '🎫 Support Tickets'}
             </div>
@@ -662,7 +662,7 @@ export default function TicketsPage() {
               {(editingPanel.panel_message.description as string) || 'Click a button below to open a ticket.'}
             </div>
             {(editingPanel.panel_message.footer as string) && (
-              <div className="text-xs text-discord-text-muted border-t border-discord-border pt-2 mt-2">
+              <div className="text-xs text-discord-text-muted border-t border-discord-border-subtle pt-2 mt-2">
                 {editingPanel.panel_message.footer as string}
               </div>
             )}
@@ -692,7 +692,7 @@ export default function TicketsPage() {
           <button
             onClick={savePanel}
             disabled={saving || !editingPanel.name || !editingPanel.channel_id || !editingPanel.open_category_id}
-            className="rounded-md bg-somni-pink px-6 py-2.5 text-sm font-semibold text-white hover:bg-somni-pink/80 disabled:opacity-50"
+            className="rounded-md bg-discord-accent px-6 py-2.5 text-sm font-medium text-white hover:bg-discord-accent-hover disabled:opacity-50"
           >
             {saving ? 'Saving...' : editingPanel.id ? 'Update Panel' : 'Create Panel'}
           </button>
@@ -718,13 +718,13 @@ export default function TicketsPage() {
         <div className="flex items-center gap-2">
           <Link
             href="/tickets/transcripts"
-            className="rounded-md border border-discord-border px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary hover:text-discord-text-primary transition-colors"
+            className="rounded-md border border-discord-border-subtle px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary hover:text-discord-text-primary transition-colors"
           >
             📋 Transcripts
           </Link>
           <button
             onClick={openNewPanel}
-            className="rounded-md bg-somni-pink px-4 py-2 text-sm font-semibold text-white hover:bg-somni-pink/80"
+            className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent-hover"
           >
             + New Panel
           </button>
@@ -733,7 +733,7 @@ export default function TicketsPage() {
 
       {/* Guild-Level Transcript Defaults */}
       <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-5 space-y-3">
-        <h3 className="text-sm font-semibold text-discord-text-primary">Transcript Defaults</h3>
+        <h3 className="text-sm font-medium text-discord-text-primary">Transcript Defaults</h3>
         <p className="text-xs text-discord-text-muted">
           Guild-level defaults for ticket transcripts. Individual panels can override these with per-panel settings.
         </p>
@@ -783,12 +783,12 @@ export default function TicketsPage() {
       )}
 
       {/* Tabs */}
-      <div className="flex gap-1 border-b border-discord-border">
+      <div className="flex gap-1 border-b border-discord-border-subtle">
         <button
           onClick={() => setActiveTab('panels')}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
             activeTab === 'panels'
-              ? 'border-somni-pink text-white'
+              ? 'border-discord-accent text-white'
               : 'border-transparent text-discord-text-muted hover:text-discord-text-primary'
           }`}
         >
@@ -798,7 +798,7 @@ export default function TicketsPage() {
           onClick={() => setActiveTab('tickets')}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
             activeTab === 'tickets'
-              ? 'border-somni-pink text-white'
+              ? 'border-discord-accent text-white'
               : 'border-transparent text-discord-text-muted hover:text-discord-text-primary'
           }`}
         >
@@ -810,15 +810,15 @@ export default function TicketsPage() {
       {activeTab === 'panels' && (
         <div className="space-y-4">
           {panels.length === 0 ? (
-            <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-8 text-center">
+            <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-8 text-center">
               <div className="text-4xl mb-3">🎫</div>
-              <h3 className="text-lg font-semibold text-discord-text-primary">No ticket panels yet</h3>
+              <h3 className="text-lg font-medium text-discord-text-primary">No ticket panels yet</h3>
               <p className="mt-1 text-sm text-discord-text-muted">
                 Create a panel to let members open support tickets in your Discord server.
               </p>
               <button
                 onClick={openNewPanel}
-                className="mt-4 rounded-md bg-somni-pink px-6 py-2 text-sm font-semibold text-white hover:bg-somni-pink/80"
+                className="mt-4 rounded-md bg-discord-accent px-6 py-2 text-sm font-medium text-white hover:bg-discord-accent-hover"
               >
                 Create Your First Panel
               </button>
@@ -827,12 +827,12 @@ export default function TicketsPage() {
             panels.map((panel) => (
               <div
                 key={panel.id}
-                className="rounded-lg border border-discord-border bg-discord-bg-secondary p-5"
+                className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-5"
               >
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <div className="flex items-center gap-3">
-                      <h3 className="font-semibold text-discord-text-primary">{panel.name}</h3>
+                      <h3 className="font-medium text-discord-text-primary">{panel.name}</h3>
                       <span
                         className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
                           panel.active
@@ -869,7 +869,7 @@ export default function TicketsPage() {
                     </button>
                     <button
                       onClick={() => editPanel(panel)}
-                      className="rounded-md border border-discord-border px-3 py-1 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary hover:text-discord-text-primary"
+                      className="rounded-md border border-discord-border-subtle px-3 py-1 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary hover:text-discord-text-primary"
                     >
                       Edit
                     </button>
@@ -898,7 +898,7 @@ export default function TicketsPage() {
                 onClick={() => { setTicketFilter(status); setTicketPage(0); }}
                 className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
                   ticketFilter === status
-                    ? 'bg-somni-pink text-white'
+                    ? 'bg-discord-accent text-white'
                     : 'bg-discord-bg-secondary text-discord-text-muted hover:text-discord-text-primary'
                 }`}
               >
@@ -908,18 +908,18 @@ export default function TicketsPage() {
           </div>
 
           {tickets.length === 0 ? (
-            <div className="rounded-lg border border-discord-border bg-discord-bg-secondary p-8 text-center">
+            <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-8 text-center">
               <div className="text-4xl mb-3">📭</div>
-              <h3 className="text-lg font-semibold text-discord-text-primary">No tickets found</h3>
+              <h3 className="text-lg font-medium text-discord-text-primary">No tickets found</h3>
               <p className="mt-1 text-sm text-discord-text-muted">
                 {ticketFilter === 'all' ? 'No tickets have been created yet.' : `No ${ticketFilter} tickets.`}
               </p>
             </div>
           ) : (
-            <div className="rounded-lg border border-discord-border bg-discord-bg-secondary overflow-hidden">
+            <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary overflow-hidden">
               <table className="w-full">
                 <thead>
-                  <tr className="border-b border-discord-border text-left text-xs font-medium text-discord-text-muted uppercase">
+                  <tr className="border-b border-discord-border-subtle text-left text-xs font-medium text-discord-text-muted uppercase">
                     <th className="px-4 py-3">#</th>
                     <th className="px-4 py-3">Creator</th>
                     <th className="px-4 py-3">Type</th>
@@ -940,7 +940,7 @@ export default function TicketsPage() {
                     return (
                       <tr
                         key={ticket.id}
-                        className="border-b border-discord-border/50 hover:bg-discord-bg-tertiary/50"
+                        className="border-b border-discord-border-subtle/50 hover:bg-discord-bg-tertiary/50"
                       >
                         <td className="px-4 py-3 text-sm font-mono text-discord-text-primary">
                           {ticket.ticket_number}
@@ -979,7 +979,7 @@ export default function TicketsPage() {
             const startItem = ticketPage * TICKET_PAGE_SIZE + 1;
             const endItem = Math.min((ticketPage + 1) * TICKET_PAGE_SIZE, ticketTotal);
             return (
-              <div className="flex items-center justify-between border-t border-discord-border pt-4">
+              <div className="flex items-center justify-between border-t border-discord-border-subtle pt-4">
                 <span className="text-sm text-discord-text-muted">
                   Showing {startItem}–{endItem} of {ticketTotal}
                 </span>
@@ -987,7 +987,7 @@ export default function TicketsPage() {
                   <button
                     onClick={() => setTicketPage((p) => Math.max(0, p - 1))}
                     disabled={ticketPage === 0}
-                    className="rounded-md border border-discord-border px-3 py-1.5 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="rounded-md border border-discord-border-subtle px-3 py-1.5 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     Previous
                   </button>
@@ -1008,8 +1008,8 @@ export default function TicketsPage() {
                         onClick={() => setTicketPage(pageNum)}
                         className={`rounded-md px-3 py-1.5 text-sm ${
                           pageNum === ticketPage
-                            ? 'bg-somni-pink text-white'
-                            : 'border border-discord-border text-discord-text-secondary hover:bg-discord-bg-secondary'
+                            ? 'bg-discord-accent text-white'
+                            : 'border border-discord-border-subtle text-discord-text-secondary hover:bg-discord-bg-secondary'
                         }`}
                       >
                         {pageNum + 1}
@@ -1019,7 +1019,7 @@ export default function TicketsPage() {
                   <button
                     onClick={() => setTicketPage((p) => Math.min(totalPages - 1, p + 1))}
                     disabled={ticketPage >= totalPages - 1}
-                    className="rounded-md border border-discord-border px-3 py-1.5 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="rounded-md border border-discord-border-subtle px-3 py-1.5 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     Next
                   </button>

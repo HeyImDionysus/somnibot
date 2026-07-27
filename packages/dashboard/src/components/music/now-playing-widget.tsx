@@ -80,7 +80,7 @@ export default function NowPlayingWidget() {
 
   if (loading) {
     return (
-      <div className="bg-discord-secondary rounded-lg border border-discord-border p-4 animate-pulse">
+      <div className="bg-discord-secondary rounded-lg border border-discord-border-subtle p-4 animate-pulse">
         <div className="h-4 bg-discord-tertiary rounded w-32 mb-3" />
         <div className="h-8 bg-discord-tertiary rounded w-full" />
       </div>
@@ -89,7 +89,7 @@ export default function NowPlayingWidget() {
 
   if (!status?.enabled) {
     return (
-      <div className="bg-discord-secondary rounded-lg border border-discord-border p-4">
+      <div className="bg-discord-secondary rounded-lg border border-discord-border-subtle p-4">
         <h3 className="text-sm font-semibold text-white mb-2">🎵 Music</h3>
         <p className="text-xs text-discord-text-muted">Music system is disabled</p>
       </div>
@@ -97,9 +97,9 @@ export default function NowPlayingWidget() {
   }
 
   return (
-    <div className="bg-discord-secondary rounded-lg border border-discord-border overflow-hidden">
+    <div className="bg-discord-secondary rounded-lg border border-discord-border-subtle overflow-hidden">
       {/* Header */}
-      <div className="p-4 border-b border-discord-border">
+      <div className="p-4 border-b border-discord-border-subtle">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold text-white">🎵 Now Playing</h3>
           {status.nowPlaying && (
@@ -166,7 +166,7 @@ export default function NowPlayingWidget() {
 
       {/* Recent tracks */}
       {status.recentTracks.length > 0 && (
-        <div className="border-t border-discord-border">
+        <div className="border-t border-discord-border-subtle">
           <div className="px-4 py-2">
             <p className="text-xs font-medium text-discord-text-muted uppercase">Recent</p>
           </div>

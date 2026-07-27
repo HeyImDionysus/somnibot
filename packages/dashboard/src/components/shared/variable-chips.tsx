@@ -148,7 +148,7 @@ export function VariableChips({
             className={`rounded border px-1.5 py-0.5 font-mono transition-colors ${
               state
                 ? 'border-green-500/60 bg-green-500/15 text-green-300'
-                : 'border-discord-border bg-discord-bg-tertiary text-discord-text-secondary hover:border-somni-pink hover:text-discord-text-primary'
+                : 'border-discord-border-subtle bg-discord-bg-tertiary text-discord-text-secondary hover:border-somni-pink hover:text-discord-text-primary'
             }`}
           >
             {state ? (state === 'inserted' ? '✓ inserted' : '✓ copied') : v.key}

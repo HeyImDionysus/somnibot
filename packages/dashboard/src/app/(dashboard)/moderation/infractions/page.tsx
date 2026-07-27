@@ -147,7 +147,7 @@ export default function InfractionsPage() {
         </div>
         <button
           onClick={() => setShowManualWarn(!showManualWarn)}
-          className="rounded-md bg-somni-pink px-4 py-2 text-sm font-semibold text-white hover:bg-somni-pink/80"
+          className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent-hover"
         >
           + Manual Infraction
         </button>
@@ -161,8 +161,8 @@ export default function InfractionsPage() {
 
       {/* Manual Warn Form */}
       {showManualWarn && (
-        <div className="rounded-lg border-2 border-somni-pink/30 bg-discord-bg-secondary p-4 space-y-3">
-          <h3 className="font-semibold text-discord-text-primary">Create Manual Infraction</h3>
+        <div className="rounded-lg border-2 border-discord-accent/30 bg-discord-bg-secondary p-4 space-y-3">
+          <h3 className="font-medium text-discord-text-primary">Create Manual Infraction</h3>
           <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="block text-xs text-discord-text-muted mb-1">Member Discord ID</label>
@@ -171,7 +171,7 @@ export default function InfractionsPage() {
                 value={manualForm.member_id}
                 onChange={(e) => setManualForm({ ...manualForm, member_id: e.target.value })}
                 placeholder="123456789012345678"
-                className="w-full rounded border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
+                className="w-full rounded border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
               />
             </div>
             <div>
@@ -179,7 +179,7 @@ export default function InfractionsPage() {
               <select
                 value={manualForm.type}
                 onChange={(e) => setManualForm({ ...manualForm, type: e.target.value })}
-                className="w-full rounded border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+                className="w-full rounded border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
               >
                 <option value="warn">Warning</option>
                 <option value="mute">Mute</option>
@@ -194,7 +194,7 @@ export default function InfractionsPage() {
                 value={manualForm.reason}
                 onChange={(e) => setManualForm({ ...manualForm, reason: e.target.value })}
                 placeholder="Reason for infraction"
-                className="w-full rounded border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
+                className="w-full rounded border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
               />
             </div>
           </div>
@@ -202,7 +202,7 @@ export default function InfractionsPage() {
             <button
               onClick={handleManualWarn}
               disabled={saving || !manualForm.member_id || !manualForm.reason}
-              className="rounded bg-somni-pink px-4 py-2 text-sm font-semibold text-white hover:bg-somni-pink/80 disabled:opacity-50"
+              className="rounded bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent-hover disabled:opacity-50"
             >
               {saving ? 'Creating...' : 'Create'}
             </button>
@@ -226,7 +226,7 @@ export default function InfractionsPage() {
             setPage(0);
           }}
           placeholder="Filter by member ID..."
-          className="w-64 rounded-md border border-discord-border bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+          className="w-64 rounded-md border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none"
         />
         <label className="flex items-center gap-2 text-sm text-discord-text-muted cursor-pointer">
           <input
@@ -246,18 +246,18 @@ export default function InfractionsPage() {
       {loading ? (
         <TableSkeleton rows={8} />
       ) : infractions.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-lg border border-discord-border bg-discord-bg-secondary py-16">
+        <div className="flex flex-col items-center justify-center rounded-lg border border-discord-border-subtle bg-discord-bg-secondary py-16">
           <span className="text-4xl">📋</span>
-          <h3 className="mt-4 text-lg font-semibold text-discord-text-primary">No Infractions</h3>
+          <h3 className="mt-4 text-lg font-medium text-discord-text-primary">No Infractions</h3>
           <p className="mt-1 text-sm text-discord-text-muted">
             {filterMemberId || activeOnly ? 'No infractions match your filters.' : 'No infractions recorded yet.'}
           </p>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-lg border border-discord-border">
+        <div className="overflow-hidden rounded-lg border border-discord-border-subtle">
           <table className="w-full">
             <thead>
-              <tr className="border-b border-discord-border bg-discord-bg-tertiary">
+              <tr className="border-b border-discord-border-subtle bg-discord-bg-tertiary">
                 <th className="px-4 py-3 text-left text-xs font-medium text-discord-text-muted uppercase">Type</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-discord-text-muted uppercase">Member</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-discord-text-muted uppercase">Moderator</th>
@@ -280,9 +280,9 @@ export default function InfractionsPage() {
                   </td>
                   <td className="px-4 py-3 text-sm text-discord-text-muted">
                     {inf.moderator_id === 'system' ? (
-                      <span className="text-somni-cyan">Auto-Mod</span>
+                      <span className="text-discord-accent">Auto-Mod</span>
                     ) : inf.moderator_id === 'dashboard' ? (
-                      <span className="text-somni-pink">Dashboard</span>
+                      <span className="text-discord-accent">Dashboard</span>
                     ) : (
                       <span className="font-mono">{inf.moderator_id}</span>
                     )}
