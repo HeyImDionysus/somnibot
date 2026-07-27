@@ -41,7 +41,12 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { apiError, dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
-export const PROMOTIONS_DISABLED_MESSAGE =
+// NOT exported. A Next.js App Router route module may only export the HTTP
+// method handlers and Next's own route config keys (`dynamic`, `revalidate`,
+// `runtime`, `maxDuration`, …); any other export fails the route-type check that
+// `next build` generates. Nothing outside this file needs it, and `type-check`
+// does NOT catch this — only a full build does.
+const PROMOTIONS_DISABLED_MESSAGE =
   'Coupons and promotions are disabled: nothing in checkout redeems them, so a '
   + 'discount code created here would never be applied and every customer would '
   + 'still be charged the full price. Existing promotions can be viewed and '
