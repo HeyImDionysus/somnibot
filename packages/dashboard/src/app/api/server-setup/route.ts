@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { readRowBefore, recordAdminChange } from '@/lib/admin-changes';
 
 const serverSetupSchema = z.object({
   action: z.literal('confirm'),
@@ -115,12 +116,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Read the prior flags before flipping them, so the recorded change shows
+    // what the guild looked like beforehand rather than echoing the write.
+    const before = await readRowBefore(
+      admin,
+      'guild',
+      { id: guildId },
+      'setup_completed, setup_confirmed_at',
+    );
+
+    const confirmedAt = new Date().toISOString();
+
     // Mark setup as completed
     const { error } = await admin
       .from('guild')
       .update({
         setup_completed: true,
-        setup_confirmed_at: new Date().toISOString(),
+        setup_confirmed_at: confirmedAt,
         updated_at: new Date().toISOString(),
       })
       .eq('id', guildId);
@@ -136,9 +148,27 @@ export async function POST(request: NextRequest) {
       action: 'setup.confirmed',
       target_type: 'guild',
       target_id: guildId,
-      details: { confirmedAt: new Date().toISOString() },
+      details: { confirmedAt },
       success: true,
     });
+
+    // Not undoable, and deliberately not offered as one: `guild` is absent from
+    // UNDO_TABLE_COLUMNS, so a db undo would be rejected at click time — and
+    // there is no un-confirm path in the product either. An honest sentence
+    // beats a button that 400s.
+    await recordAdminChange({
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'server_setup.confirmed',
+      targetType: 'guild',
+      targetId: guildId,
+      description: 'Confirmed the server setup, unlocking every dashboard feature for this server',
+      before: before ?? undefined,
+      after: { setup_completed: true, setup_confirmed_at: confirmedAt },
+      blastRadius: 'high',
+      undoReason:
+        'confirming setup is a one-way step that opens up the rest of the dashboard — there is no way to un-confirm it',
+    }, admin);
 
     return NextResponse.json({
       success: true,

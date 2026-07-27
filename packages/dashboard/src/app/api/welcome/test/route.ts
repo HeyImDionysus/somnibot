@@ -3,6 +3,12 @@
  *
  * POST: Inserts a `test_welcome` action into bot_action_queue.
  * The bot picks it up, renders the template with mock data, and sends it.
+ *
+ * "Test" describes the CONTENT (mock variables), not the delivery. The bot's
+ * `test_welcome` handler ends in `channel.send(...)` — a genuine message in a
+ * genuine channel that every member there can read. It changes nothing in the
+ * database and nothing in the guild's configuration, but a message now exists
+ * in the server that did not before, so it is recorded, and it is not undoable.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
@@ -10,6 +16,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { recordAdminChange } from '@/lib/admin-changes';
 
 const welcomeTestSchema = z.object({
   channel_id: z.string().regex(/^\d{17,20}$/, 'Must be a Discord snowflake ID'),
@@ -51,6 +58,19 @@ export async function POST(req: NextRequest) {
       { status: 500 },
     );
   }
+
+  await recordAdminChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    action: 'welcome.test_message_sent',
+    targetType: 'channel',
+    targetId: channel_id,
+    description: `Sent a test ${type} message to channel ${channel_id}`,
+    after: { channel_id, type },
+    blastRadius: 'low',
+    undoReason:
+      'the test message is posted in the channel for members to see, and it cannot be unsent from here — delete it in Discord instead',
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }
