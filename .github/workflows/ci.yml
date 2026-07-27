@@ -609,7 +609,30 @@ jobs:
             PREV="$TS"
           done
 
-          # 3. Dangerous operation warnings (non-blocking)
+          # 3. Timestamps must be UNIQUE.
+          #
+          # Supabase records applied migrations in `schema_migrations` keyed by
+          # the 14-digit TIMESTAMP, not the filename. Two migrations sharing a
+          # timestamp therefore cannot both be recorded, and applying the stack
+          # aborts partway with:
+          #
+          #   ERROR: duplicate key value violates unique constraint
+          #          "schema_migrations_pkey" (SQLSTATE 23505)
+          #
+          # Check 2 above does NOT catch this: it only fails on a DESCENDING
+          # timestamp, so equal ones pass cleanly. That is exactly how three
+          # concurrent branches each picked 20260727010000, went green on this
+          # job, and then failed every job that boots a database.
+          DUPES=$(ls "$MIGRATIONS_DIR"/*.sql | xargs -n1 basename | cut -c1-14 | sort | uniq -d)
+          if [ -n "$DUPES" ]; then
+            for ts in $DUPES; do
+              echo "❌ Duplicate timestamp $ts — schema_migrations cannot record both:"
+              ls "$MIGRATIONS_DIR"/${ts}_*.sql | xargs -n1 basename | sed 's/^/     /'
+              ERRORS=$((ERRORS+1))
+            done
+          fi
+
+          # 4. Dangerous operation warnings (non-blocking)
           for f in "$MIGRATIONS_DIR"/*.sql; do
             base=$(basename "$f")
             if grep -qiE '^\s*DROP\s+TABLE\b' "$f" 2>/dev/null; then
@@ -623,7 +646,7 @@ jobs:
             fi
           done
 
-          # 4. Every new SECURITY DEFINER must have SET search_path = ''
+          # 5. Every new SECURITY DEFINER must have SET search_path = ''
           for f in "$MIGRATIONS_DIR"/*.sql; do
             base=$(basename "$f")
             # Find SECURITY DEFINER lines that are NOT comments
