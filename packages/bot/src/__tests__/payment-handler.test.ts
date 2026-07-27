@@ -743,3 +743,145 @@ describe('handleBuyButton — post-checkout destinations (Finding 7)', () => {
     );
   });
 });
+
+describe('handleBuyButton — one live checkout per product (Finding 10)', () => {
+  beforeEach(() => {
+    invalidateBrandKitCache();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  const customer = { id: 'cust-1', guild_id: VICTIM_GUILD, discord_id: 'user-1' };
+
+  function pendingOrder(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'order-live',
+      order_number: 'ORD-LIVE-1',
+      customer_id: 'cust-1',
+      product_id: 'prod-1',
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  function setup(orders: Record<string, unknown>[], options: { orderInsertError?: string } = {}) {
+    const engine = makeQueryEngine({
+      products: [oneTimeProduct],
+      customers: [customer],
+      entitlements: [],
+      orders,
+    }, options);
+    const fetchMock = makePayPalFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    return { ...engine, fetchMock, interaction: makeInteraction() };
+  }
+
+  function lastEmbedText(interaction: { editReply: { mock: { calls: any[] } } }) {
+    return JSON.stringify(interaction.editReply.mock.calls.at(-1)![0]);
+  }
+
+  it('refuses a second checkout while one is still in flight — no PayPal order at all', async () => {
+    const { supabase, inserts, fetchMock, interaction } = setup([pendingOrder()]);
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/v2/checkout/orders'))).toBe(false);
+    expect(inserts.orders ?? []).toHaveLength(0);
+    expect(lastEmbedText(interaction)).toContain('ORD-LIVE-1');
+    expect(lastEmbedText(interaction)).toContain('charged twice');
+  });
+
+  it('lets the buyer retry once the outstanding checkout is past PayPal\'s window', async () => {
+    const sevenHoursAgo = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString();
+    const { supabase, inserts, fetchMock, interaction } = setup([
+      pendingOrder({ created_at: sevenHoursAgo }),
+    ]);
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/v2/checkout/orders'))).toBe(true);
+    expect(inserts.orders ?? []).toHaveLength(1);
+    expect(interaction.editReply).toHaveBeenLastCalledWith(
+      expect.objectContaining({ components: expect.any(Array) }),
+    );
+  });
+
+  it('treats an unreadable checkout history as blocking, never as clear', async () => {
+    const { supabase, interaction } = setup([]);
+    const realFrom = supabase.from.bind(supabase);
+    supabase.from = (table: string) => {
+      if (table !== 'orders') return realFrom(table);
+      const failing: any = {
+        select: () => failing,
+        eq: () => failing,
+        order: () => failing,
+        limit: () => Promise.resolve({ data: null, error: { message: 'connection reset' } }),
+      };
+      return failing;
+    };
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(interaction.editReply).toHaveBeenLastCalledWith({
+      content: expect.stringContaining('You have not been charged'),
+    });
+  });
+
+  it('never exposes an approval link when the pending-checkout unique index rejects the insert', async () => {
+    // The true double-click: both clicks read "clear", the database decides.
+    const { supabase, interaction } = setup([], {
+      orderInsertError: 'duplicate key value violates unique constraint "uniq_orders_pending_one_time_checkout"',
+    });
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(
+      interaction.editReply.mock.calls.some(
+        (call: Array<{ components?: unknown }>) => Array.isArray(call[0]?.components),
+      ),
+    ).toBe(false);
+    expect(lastEmbedText(interaction)).toContain('Checkout Already In Progress');
+  });
+
+  it('does not block a different product', async () => {
+    const { supabase, inserts, interaction } = setup([
+      pendingOrder({ product_id: 'prod-other' }),
+    ]);
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(inserts.orders ?? []).toHaveLength(1);
+  });
+
+  it('does not block a different customer', async () => {
+    const { supabase, inserts, interaction } = setup([
+      pendingOrder({ customer_id: 'cust-other' }),
+    ]);
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(inserts.orders ?? []).toHaveLength(1);
+  });
+});

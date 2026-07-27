@@ -120,6 +120,86 @@ async function cancelUnexposedCheckoutOrder(
 }
 
 /**
+ * How long an in-flight checkout blocks a fresh one for the same
+ * (customer, product).
+ *
+ * PayPal Checkout v2 orders stop being approvable well before this — six hours
+ * is deliberately past that window, so releasing the block cannot free a link
+ * the buyer could still pay. The cost of the conservative bound is that an
+ * abandoned checkout keeps that one product unbuyable for the buyer for up to
+ * six hours; the alternative is releasing it early and re-opening exactly the
+ * double-charge this rail exists to prevent.
+ */
+const STALE_CHECKOUT_AGE_MS = 6 * 60 * 60 * 1000;
+
+type InFlightCheckout =
+  | { state: 'clear' }
+  | { state: 'blocked'; orderNumber: string }
+  | { state: 'unavailable' };
+
+/**
+ * Finding 10: refuse to open a SECOND payment link for a product this customer
+ * already has a live checkout for. Two approval links meant two captures, two
+ * entitlements, and a refund request.
+ *
+ * The authoritative rail is the partial unique index
+ * `uniq_orders_pending_one_time_checkout`, which makes the second one-time
+ * order insert fail atomically. This pre-flight exists to (a) refuse before
+ * spending a PayPal round-trip, (b) give the buyer a message that names the
+ * order, and (c) cover subscription checkouts, which the index deliberately
+ * does not (its recovery insert in the webhook must never be blocked).
+ *
+ * A read ERROR is not "clear": during an outage the live checkout may exist, so
+ * refusing to guess is the only safe answer on the money path.
+ */
+async function inspectInFlightCheckout(
+  supabase: SupabaseClient,
+  customerId: string,
+  productId: string,
+): Promise<InFlightCheckout> {
+  const { data, error } = await supabase
+    .from('orders')
+    .select('id, order_number, created_at')
+    .eq('customer_id', customerId)
+    .eq('product_id', productId)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false })
+    .limit(5);
+
+  if (error) {
+    log.error('Failed to inspect in-flight checkout:', error.message);
+    return { state: 'unavailable' };
+  }
+
+  const rows = (data ?? []) as { id: string; order_number: string; created_at: string }[];
+  const cutoff = Date.now() - STALE_CHECKOUT_AGE_MS;
+  const live = rows.filter((row) => {
+    const createdAt = Date.parse(row.created_at);
+    // An unparseable timestamp is treated as live: never release a block we
+    // cannot prove is safe to release.
+    return !Number.isFinite(createdAt) || createdAt > cutoff;
+  });
+
+  if (live.length > 0) {
+    return { state: 'blocked', orderNumber: live[0].order_number };
+  }
+
+  // Everything outstanding is past the point PayPal would still take it — clear
+  // it so an abandoned checkout does not lock the buyer out permanently.
+  for (const row of rows) {
+    await cancelUnexposedCheckoutOrder(supabase, row.id);
+  }
+  return { state: 'clear' };
+}
+
+/** Does this write error mean the pending-checkout unique index rejected it? */
+function isDuplicateCheckoutViolation(error: { code?: string; message?: string } | null): boolean {
+  if (!error) return false;
+  return error.code === '23505'
+    || (error.message ?? '').includes('uniq_orders_pending_one_time_checkout');
+}
+
+/**
  * Get a PayPal access token using client credentials.
  */
 async function getPayPalToken(
@@ -287,6 +367,30 @@ export async function handleBuyButton(
       });
       return;
     }
+
+    // DOUBLE-CHARGE guard — one live checkout per customer per product.
+    const inFlight = await inspectInFlightCheckout(supabase, existingCustomer.id, productId);
+    if (inFlight.state === 'unavailable') {
+      await replyCheckoutUnavailable(interaction, supabase, guildId);
+      return;
+    }
+    if (inFlight.state === 'blocked') {
+      await interaction.editReply({
+        embeds: [
+          brandedEmbed(brandKit, {
+            intent: 'warning',
+            title: '⏳ Checkout Already In Progress',
+            description:
+              `You already have a checkout open for this product (**${inFlight.orderNumber}**). `
+              + 'Finish paying with the PayPal link you were given, and your purchase will be '
+              + 'delivered automatically.\n\n'
+              + 'A second link would let you be charged twice for the same thing, so it is not '
+              + 'offered. You have not been charged for this click.',
+          }),
+        ],
+      });
+      return;
+    }
   }
 
   // Get or create customer
@@ -414,6 +518,26 @@ export async function handleBuyButton(
       .single();
 
     if (pendingOrderError || !isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
+      // The pending-checkout unique index is the atomic version of the
+      // pre-flight guard above: it is what actually stops a genuine
+      // double-click, where both clicks read "clear" before either inserted.
+      // The link is never exposed, so the losing PayPal order cannot be paid.
+      if (isDuplicateCheckoutViolation(pendingOrderError)) {
+        log.warn('Refused a concurrent second checkout for the same product', { productId });
+        await interaction.editReply({
+          embeds: [
+            brandedEmbed(brandKit, {
+              intent: 'warning',
+              title: '⏳ Checkout Already In Progress',
+              description:
+                'A checkout for this product was just opened. Use that PayPal link to finish — '
+                + 'a second one would let you be charged twice. You have not been charged for '
+                + 'this click.',
+            }),
+          ],
+        });
+        return;
+      }
       log.error('Failed to persist one-time checkout order:', pendingOrderError?.message ?? 'identity mismatch');
       await interaction.editReply({
         content: '❌ Checkout could not be safely recorded. No payment link was opened; please try again.',

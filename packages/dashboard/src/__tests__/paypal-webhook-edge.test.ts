@@ -4,7 +4,7 @@
  * V5 Audit §13.P2a: Covers missing custom_id, refund flow,
  * subscription lifecycle, and unhandled event types.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const { replaySecret } = vi.hoisted(() => {
   const secret = 'test-edge-webhook-replay-secret';
@@ -505,6 +505,10 @@ function createCaptureRecoveryHarness(options: {
       }
       if (table === 'bot_action_queue') return state.queue ? [state.queue] : [];
       if (table === 'license_keys') return state.licenseKey ? [state.licenseKey] : [];
+      // Duplicate-purchase rail (Finding 10): empty by default, so every other
+      // case in this file keeps its existing single-purchase behaviour.
+      if (table === 'entitlements') return state.entitlements ?? [];
+      if (table === 'alerts') return state.alerts ?? [];
       return [];
     };
 
@@ -524,6 +528,10 @@ function createCaptureRecoveryHarness(options: {
       }
       if (operation === 'insert') {
         state.inserts.push({ table, payload: structuredClone(payload) });
+        if (table === 'alerts') {
+          (state.alerts ??= []).push(structuredClone(payload));
+          return { data: payload, error: null };
+        }
         if (table === 'bot_action_queue') {
           if (state.failStageAttempts > 0) {
             state.failStageAttempts -= 1;
@@ -3103,5 +3111,132 @@ describe('PayPal webhook — edge cases', () => {
       expect(state.updates).toEqual([]);
       expect(rpc).not.toHaveBeenCalled();
     });
+  });
+});
+
+/**
+ * Finding 10 — a customer charged twice must not be fulfilled twice, and must
+ * not simply lose the money either.
+ */
+describe('PayPal webhook — duplicate purchase capture', () => {
+  const captureResource = {
+    id: 'CAPTURE-DUPLICATE-1',
+    custom_id: JSON.stringify({
+      guild_id: 'guild-1',
+      product_id: 'product-1',
+      customer_id: 'customer-1',
+      discord_id: 'discord-1',
+    }),
+    amount: { value: '9.99', currency_code: 'USD' },
+    supplementary_data: {
+      related_ids: { order_id: 'PAYPAL-ORDER-RECOVERY-1' },
+    },
+  };
+
+  const priorEntitlement = {
+    id: 'ent-prior',
+    guild_id: 'guild-1',
+    customer_id: 'customer-1',
+    product_id: 'product-1',
+    order_id: 'order-prior',
+    status: 'active',
+    created_at: '2026-07-01T00:00:00.000Z',
+  };
+
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it('records the payment but grants nothing when the customer already owns the product', async () => {
+    const { supabase, state } = createCaptureRecoveryHarness({ withLicense: true });
+    state.entitlements = [priorEntitlement];
+
+    await handlePaymentCaptured(supabase, captureResource);
+
+    // The money is real and stays recorded — never silently swallowed.
+    expect(state.payment).not.toBeNull();
+    expect(state.order.status).toBe('completed');
+
+    // …but nothing is delivered a second time: no fulfilment queued, no
+    // licence key minted, no second entitlement.
+    expect(state.queue).toBeNull();
+    expect(state.licenseKey).toBeNull();
+    expect(state.inserts.filter((i: any) => i.table === 'bot_action_queue')).toHaveLength(0);
+  });
+
+  it('raises a critical operator alert naming the order and the money at stake', async () => {
+    const { supabase, state } = createCaptureRecoveryHarness();
+    state.entitlements = [priorEntitlement];
+
+    await handlePaymentCaptured(supabase, captureResource);
+
+    expect(state.alerts).toHaveLength(1);
+    const alert = state.alerts[0];
+    expect(alert).toMatchObject({
+      guild_id: 'guild-1',
+      alert_type: 'commerce_duplicate_purchase_capture',
+      severity: 'critical',
+    });
+    expect(alert.message).toContain('ORD-RECOVERY-1');
+    expect(alert.message).toMatch(/refund/i);
+    expect(alert.metadata).toMatchObject({
+      order_id: 'order-1',
+      paypal_capture_id: 'CAPTURE-DUPLICATE-1',
+      amount_cents: 999,
+      currency: 'USD',
+      existing_entitlement_id: 'ent-prior',
+    });
+  });
+
+  it('fulfils normally when the only entitlement came from this same order', async () => {
+    const { supabase, state } = createCaptureRecoveryHarness();
+    // A redelivered capture after fulfilment: the entitlement is this order's.
+    state.entitlements = [{ ...priorEntitlement, id: 'ent-self', order_id: 'order-1' }];
+
+    await handlePaymentCaptured(supabase, captureResource);
+
+    expect(state.queue).not.toBeNull();
+    expect(state.alerts ?? []).toHaveLength(0);
+  });
+
+  it.each(['expired', 'revoked', 'cancelled'])(
+    'does not treat a %s entitlement as ownership',
+    async (status) => {
+      const { supabase, state } = createCaptureRecoveryHarness();
+      state.entitlements = [{ ...priorEntitlement, status }];
+
+      await handlePaymentCaptured(supabase, captureResource);
+
+      expect(state.queue).not.toBeNull();
+      expect(state.alerts ?? []).toHaveLength(0);
+    },
+  );
+
+  it('refuses to fulfil when the ownership check itself cannot be answered', async () => {
+    const { supabase, state } = createCaptureRecoveryHarness();
+    const realFrom = supabase.from;
+    supabase.from = (table: string) => {
+      if (table !== 'entitlements') return realFrom(table);
+      const failing: any = {
+        select: () => failing,
+        eq: () => failing,
+        in: () => failing,
+        order: () => failing,
+        limit: () => Promise.resolve({ data: null, error: { message: 'connection reset' } }),
+      };
+      return failing;
+    };
+
+    await expect(handlePaymentCaptured(supabase, captureResource)).rejects.toThrow(
+      /duplicate purchase/i,
+    );
+    // Nothing staged, nothing frozen — the webhook fails loudly and PayPal retries.
+    expect(state.queue).toBeNull();
   });
 });

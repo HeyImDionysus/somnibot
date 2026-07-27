@@ -16,6 +16,7 @@ import {
   type PayPalSaleResource,
 } from '@/lib/types/paypal';
 import { generateLicenseKey, queueFulfillment } from './fulfillment';
+import { findConflictingEntitlement, raiseDuplicatePurchaseAlert } from './duplicate-purchase';
 
 function formatSupabaseError(error: unknown): string {
   if (
@@ -1179,6 +1180,50 @@ export async function handlePaymentCaptured(
       );
       return;
     }
+  }
+
+  // DOUBLE-CHARGE RAIL (Finding 10). The bot's already-purchased guard runs at
+  // buy-click time only, so a customer who completed two checkouts for one
+  // product used to receive two entitlements — the only entitlement uniqueness
+  // is `idx_entitlements_order_id` on order_id, not (customer_id, product_id).
+  //
+  // If they already own it, the money is real and stays recorded (the payment
+  // is still finalized, so the order and payment exist and are refundable
+  // through the normal admin flow), but nothing is fulfilled a second time and
+  // an operator is alerted to refund. Withheld before ANY fulfillment is
+  // staged, so no second entitlement, role set, or licence key is ever minted.
+  //
+  // The grant snapshot is still frozen first — `commerce_finalize_paypal_capture`
+  // refuses a new capture on an unfrozen order, and freezing only records the
+  // sold contract; it grants nothing. This mirrors the amount-mismatch path,
+  // which also freezes and finalizes before returning without staging.
+  const duplicateEntitlement = amountMatches
+    ? await findConflictingEntitlement(supabase, order)
+    : null;
+  if (duplicateEntitlement) {
+    let duplicateFinalization = replayFinalization;
+    if (!duplicateFinalization) {
+      await freezeOrderGrantSnapshot(supabase, order);
+      duplicateFinalization = await finalizePayPalCapture(supabase, {
+        order,
+        paypalCaptureId,
+        amountCents,
+        currency: captureCurrency,
+      });
+    }
+    console.error(
+      `[Webhook] DUPLICATE PURCHASE: order ${order.order_number} captured `
+        + `${amountCents} ${captureCurrency} for a product customer ${order.customer_id} `
+        + `already owns via entitlement ${duplicateEntitlement.id} `
+        + `(order ${duplicateEntitlement.order_id ?? 'none'}). Payment recorded as `
+        + `${duplicateFinalization.order_status}; fulfillment withheld; refund required.`,
+    );
+    await raiseDuplicatePurchaseAlert(supabase, order, duplicateEntitlement, {
+      paypalCaptureId,
+      amountCents,
+      currency: captureCurrency,
+    });
+    return;
   }
 
   // The finalizer requires the sold access contract to be frozen for both
