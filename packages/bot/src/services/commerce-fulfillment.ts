@@ -1830,6 +1830,8 @@ export class CommerceFulfillmentService {
       const user = await this.guild.client.users.fetch(payload.discord_id);
       await user.send({
         content: `Your subscription to **${payload.product_name}** has been cancelled. If this was a mistake, you can re-subscribe in the server store.`,
+        // billing DM — nothing should ping.
+        allowedMentions: { parse: [] },
       });
     } catch {
       // DMs may be disabled — non-fatal
@@ -1906,6 +1908,8 @@ export class CommerceFulfillmentService {
       const user = await this.guild.client.users.fetch(payload.discord_id);
       await user.send({
         content: `⚠️ Your payment for **${payload.product_name}** failed. You have a *${graceDays}-day grace period* before your access is revoked. Please update your payment method on PayPal.`,
+        // billing DM — nothing should ping.
+        allowedMentions: { parse: [] },
       });
     } catch {
       // DMs may be disabled — non-fatal

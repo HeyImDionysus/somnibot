@@ -56,7 +56,7 @@ import { CrossFeatureBridge } from './services/cross-feature-bridge.js';
 import { scheduleReconciliation } from './services/reconciliation.js';
 import { AutoModSync } from './features/discord-native/automod-sync.js';
 import { GuildOnboardingSync } from './features/discord-native/guild-onboarding-sync.js';
-import { startAntiRaidPruner, stopAntiRaidPruner, clearAntiRaidGuildState } from './features/anti-raid/index.js';
+import { startAntiRaidPruner, stopAntiRaidPruner, clearAntiRaidGuildState, resumeRaidState } from './features/anti-raid/index.js';
 import { ForumTicketService } from './features/discord-native/forum-tickets.js';
 import { buildSetupCommand } from './features/setup-wizard/index.js';
 import { startSyncScheduler, type SyncConfig } from './sync/sync-engine.js';
@@ -573,6 +573,22 @@ export async function initGuildFeatures(
     ctx.backgroundInit = Promise.allSettled([backfillWork, warmupWork]).then(() => undefined);
   } catch (err) {
     guildLog.error('Economy system init error', { error: String(err) });
+  }
+
+  // ── Anti-raid recovery ──
+  // Raid mode lives in Valkey with a 5-minute expiry, so a restart mid-raid
+  // used to drop containment AND strand any lockdown at "Very High" with its
+  // invites paused. Rebuild it from the durable record before anything else
+  // starts processing joins.
+  try {
+    const resumed = await resumeRaidState(guild, supabase);
+    if (resumed === 'resumed') {
+      guildLog.warn('Anti-raid: active raid mode resumed after restart');
+    } else if (resumed === 'expired') {
+      guildLog.info('Anti-raid: a raid had expired during downtime — state cleared');
+    }
+  } catch (err) {
+    guildLog.error('Anti-raid resume failed', { error: String(err) });
   }
 
   // ── Entitlement reconciliation ──

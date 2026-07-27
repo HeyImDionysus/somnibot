@@ -435,6 +435,8 @@ export async function generateTranscript(
         await transcriptChannel.send({
           content: `📋 **Transcript — Ticket #${ticket.ticket_number}** (${messages.length} messages)`,
           files: [file],
+          // an archived transcript must not re-ping anyone quoted in it.
+          allowedMentions: { parse: [] },
         });
       }
     }
@@ -449,6 +451,8 @@ export async function generateTranscript(
         await member.send({
           content: `📋 Here's the transcript for your closed ticket #${ticket.ticket_number}:`,
           files: [file],
+          // an archived transcript must not re-ping anyone quoted in it.
+          allowedMentions: { parse: [] },
         });
       } catch {
         log.warn('Could not DM transcript to ticket creator');

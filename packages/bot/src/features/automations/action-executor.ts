@@ -465,6 +465,9 @@ async function executeAction(
       // Post opening message
       await ticketChannel.send({
         content: `🎫 **Ticket #${ticketNumber}** — ${subject}\nCreated for ${ctx.member} by automation.\n\nA staff member will be with you shortly.`,
+        // The ticket creator is mentioned on purpose; the SUBJECT comes from an
+        // automation template and must not be able to ping a role.
+        allowedMentions: { parse: ['users'] },
       });
 
       return { success: true };

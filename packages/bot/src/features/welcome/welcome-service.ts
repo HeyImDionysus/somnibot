@@ -111,7 +111,15 @@ async function sendWelcomeChannelMessage(
       }
     }
 
-    await channel.send({ content: messageText, files });
+    // The welcome text is an OWNER-AUTHORED template. A member ping is the
+    // point of it, but a template containing @everyone/@here or a role mention
+    // would turn every join into a mass ping. Users-only keeps the intended
+    // greeting and drops the escalation.
+    await channel.send({
+      content: messageText,
+      files,
+      allowedMentions: { parse: ['users'] },
+    });
     log.info(`Channel message sent for ${member.user.tag}`);
   } catch (err) {
     log.error('Failed to send channel message:', { error: String(err) });

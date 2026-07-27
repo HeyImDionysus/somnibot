@@ -718,7 +718,12 @@ export async function handleMessageCreateEvent(message: Message, client: SomniCl
           const channel = message.channel;
           if (unlocked.length > 0 && channel.isTextBased() && 'send' in channel) {
             for (const name of unlocked) {
-              channel.send({ content: `🏆 <@${uId}> unlocked the **${name}** achievement!` })
+              channel.send({
+                content: `🏆 <@${uId}> unlocked the **${name}** achievement!`,
+                // The earner's ping is intended; the achievement NAME is
+                // owner-authored and must not be able to ping a role.
+                allowedMentions: { parse: ['users'] },
+              })
                 .catch((e: unknown) => { log.warn('achievement announce failed:', (e as Error)?.message ?? e); });
             }
           }
