@@ -227,9 +227,33 @@ export async function POST(req: NextRequest) {
         p_device_policy: result.config_device_policy || 'evict_oldest',
       });
 
+    // A device fingerprint was supplied and the product is seat-limited, so a
+    // session is REQUIRED for this validation to mean anything. Failing to
+    // establish one used to be logged and swallowed, and execution fell
+    // through to `valid: true, session_id: null` — a machine that validated as
+    // healthy while consuming zero seats and never heartbeating again.
+    //
+    // We cannot answer `valid: true` (we did not grant a seat) and we must not
+    // answer with a verdict (the licence itself is fine). Report it as
+    // undetermined, which the SDK handles non-terminally: an install with a
+    // cached validation keeps working on offline grace while we recover.
     if (deviceError) {
-      console.error('[License] Device validation RPC error:', deviceError.message);
-    } else if (deviceResult?.status === 'over_device_limit') {
+      await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+      return licenseUnavailable('License/validate license_validate_device', deviceError);
+    }
+
+    // Defence in depth against the same class of bug: the RPC answered, but
+    // with no session id and no recognised status. Treat "no seat granted" as
+    // a failure to validate rather than silently issuing a seatless success.
+    if (!deviceResult?.session_id && deviceResult?.status !== 'over_device_limit') {
+      await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+      return licenseUnavailable(
+        'License/validate license_validate_device',
+        { message: `RPC returned no session (status=${String(deviceResult?.status ?? 'null')})` },
+      );
+    }
+
+    if (deviceResult?.status === 'over_device_limit') {
       await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'over_device_limit', clientIp, app_version);
       return NextResponse.json({
         valid: false,
@@ -238,9 +262,10 @@ export async function POST(req: NextRequest) {
         active_devices: deviceResult.active_devices,
         max_devices: deviceResult.max_devices,
       });
-    } else if (deviceResult?.session_id) {
-      sessionId = deviceResult.session_id;
     }
+
+    // Guaranteed non-null by the guard above.
+    sessionId = deviceResult.session_id;
   }
 
   // Fraud checks (non-blocking — fire-and-forget)
