@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
 import { dbError, dbConflictOr500, apiServerError } from '@/lib/api/response';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 const itemSchema = z.object({
   name: z.string().min(1).max(64),
@@ -98,6 +99,19 @@ export async function POST(request: NextRequest) {
     }
 
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'created',
+      action: 'shop.item_created',
+      table: 'economy_items',
+      targetType: 'shop item',
+      targetId: (data as { id?: string } | null)?.id ?? null,
+      label: parsed.name,
+      after: data as Record<string, unknown> | null,
+    }, admin);
+
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
@@ -117,6 +131,8 @@ export async function PATCH(request: NextRequest) {
     const { id, ...parsed } = result.data;
     const admin = createAdminSupabase();
 
+    const before = await readRowBefore(admin, 'economy_items', { id, guild_id: ctx.guildId });
+
     const { data, error } = await admin
       .from('economy_items')
       .update({ ...parsed, updated_at: new Date().toISOString() })
@@ -131,6 +147,21 @@ export async function PATCH(request: NextRequest) {
     }
 
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'updated',
+      action: 'shop.item_updated',
+      table: 'economy_items',
+      targetType: 'shop item',
+      targetId: id,
+      label: (before?.name as string | undefined) ?? parsed.name,
+      before,
+      after: parsed as Record<string, unknown>,
+      match: { id, guild_id: ctx.guildId },
+    }, admin);
+
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
@@ -153,6 +184,10 @@ export async function DELETE(request: NextRequest) {
 
     const admin = createAdminSupabase();
 
+    // Capture the whole row first — once it is gone this record is the only
+    // remaining copy of what the item was.
+    const before = await readRowBefore(admin, 'economy_items', { id, guild_id: ctx.guildId });
+
     const { error } = await admin
       .from('economy_items')
       .delete()
@@ -164,6 +199,20 @@ export async function DELETE(request: NextRequest) {
     }
 
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'deleted',
+      action: 'shop.item_deleted',
+      table: 'economy_items',
+      targetType: 'shop item',
+      targetId: id,
+      label: before?.name as string | undefined,
+      before,
+      blastRadius: 'medium',
+    }, admin);
+
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);

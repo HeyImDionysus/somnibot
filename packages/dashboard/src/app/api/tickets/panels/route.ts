@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
@@ -130,6 +131,19 @@ export async function POST(req: NextRequest) {
 
   await notifyBot('tickets');
 
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'created',
+    action: 'tickets.panel_created',
+    table: 'ticket_panels',
+    targetType: 'ticket panel',
+    targetId: (data as { id?: string } | null)?.id ?? null,
+    label: name,
+    after: data as Record<string, unknown> | null,
+    blastRadius: 'medium',
+  }, supabase);
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -150,6 +164,8 @@ export async function PUT(req: NextRequest) {
 
   updates.updated_at = new Date().toISOString();
 
+  const before = await readRowBefore(supabase, 'ticket_panels', { id: body.id, guild_id: guildId });
+
   const { data, error } = await supabase
     .from('ticket_panels')
     .update(updates)
@@ -163,6 +179,21 @@ export async function PUT(req: NextRequest) {
   }
 
   await notifyBot('tickets');
+
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'updated',
+    action: 'tickets.panel_updated',
+    table: 'ticket_panels',
+    targetType: 'ticket panel',
+    targetId: body.id,
+    label: (before?.name as string | undefined) ?? (updates.name as string | undefined),
+    before,
+    after: updates,
+    match: { id: body.id, guild_id: guildId },
+    blastRadius: 'medium',
+  }, supabase);
 
   return NextResponse.json({ success: true, data });
 }
@@ -183,6 +214,8 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing panel id' }, { status: 400 });
   }
 
+  const before = await readRowBefore(supabase, 'ticket_panels', { id, guild_id: guildId });
+
   const { error } = await supabase
     .from('ticket_panels')
     .delete()
@@ -194,6 +227,19 @@ export async function DELETE(req: NextRequest) {
   }
 
   await notifyBot('tickets');
+
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'deleted',
+    action: 'tickets.panel_deleted',
+    table: 'ticket_panels',
+    targetType: 'ticket panel',
+    targetId: id,
+    label: before?.name as string | undefined,
+    before,
+    blastRadius: 'medium',
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }

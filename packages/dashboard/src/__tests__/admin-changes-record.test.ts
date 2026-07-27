@@ -27,6 +27,7 @@ vi.mock('@/lib/supabase/admin', () => ({
 
 import {
   recordAdminChange,
+  recordCrudChange,
   recordGuildConfigChange,
   readGuildConfigBefore,
   describeSettingChange,
@@ -362,5 +363,133 @@ describe('describeSettingChange', () => {
       .toBe('Changed the welcome enabled and welcome channel id settings');
     expect(describeSettingChange(['a_one', 'b_two', 'c_three']))
       .toBe('Changed 3 settings (a one, b two and c three)');
+  });
+});
+
+describe('recordCrudChange', () => {
+  it('offers a restore for an update, limited to the columns written', async () => {
+    const { admin, inserted } = makeAdmin();
+
+    await recordCrudChange(
+      {
+        guildId: GUILD,
+        actorId: ACTOR,
+        operation: 'updated',
+        action: 'shop.item_updated',
+        table: 'economy_items',
+        targetType: 'shop item',
+        targetId: 'item-1',
+        label: 'Sword',
+        before: { name: 'Sword', price: 100, stock: 5 },
+        after: { price: 250 },
+        match: { id: 'item-1', guild_id: GUILD },
+      },
+      admin,
+    );
+
+    expect(inserted[0].description).toBe('Updated the shop item "Sword" (price)');
+    expect(inserted[0].is_undoable).toBe(true);
+    expect(inserted[0].undo_payload).toMatchObject({
+      table: 'economy_items',
+      data: { price: 100 },
+      match: { id: 'item-1', guild_id: GUILD },
+    });
+  });
+
+  it('cannot undo a creation, and says what to do instead', async () => {
+    const { admin, inserted } = makeAdmin();
+
+    await recordCrudChange(
+      {
+        guildId: GUILD,
+        actorId: ACTOR,
+        operation: 'created',
+        action: 'shop.item_created',
+        table: 'economy_items',
+        targetType: 'shop item',
+        label: 'Shield',
+        after: { name: 'Shield' },
+      },
+      admin,
+    );
+
+    // The undo route replays row UPDATES; it cannot remove a created row.
+    expect(inserted[0].is_undoable).toBe(false);
+    expect(String(inserted[0].description)).toContain('delete it from its page');
+  });
+
+  it('keeps the whole deleted row so the page can still show what was removed', async () => {
+    const { admin, inserted } = makeAdmin();
+    const row = { id: 'item-1', name: 'Sword', price: 100 };
+
+    await recordCrudChange(
+      {
+        guildId: GUILD,
+        actorId: ACTOR,
+        operation: 'deleted',
+        action: 'shop.item_deleted',
+        table: 'economy_items',
+        targetType: 'shop item',
+        targetId: 'item-1',
+        label: 'Sword',
+        before: row,
+      },
+      admin,
+    );
+
+    expect(String(inserted[0].description)).toContain('Deleted the shop item "Sword"');
+    // The row also carries WHY it cannot be undone, so the page never leaves
+    // an owner wondering where the button went.
+    expect(String(inserted[0].description)).toContain('permanently deleted');
+    expect(inserted[0].is_undoable).toBe(false);
+    // Losing the row must not also lose the record of what it was.
+    expect(inserted[0].before_state).toEqual(row);
+  });
+
+  it('does not offer a partial restore when a written column has no prior value', async () => {
+    const { admin, inserted } = makeAdmin();
+
+    await recordCrudChange(
+      {
+        guildId: GUILD,
+        actorId: ACTOR,
+        operation: 'updated',
+        action: 'shop.item_updated',
+        table: 'economy_items',
+        targetType: 'shop item',
+        label: 'Sword',
+        before: { price: 100 },
+        after: { price: 250, stock: 9 },
+        match: { id: 'item-1', guild_id: GUILD },
+      },
+      admin,
+    );
+
+    // Restoring price but not stock would leave the item half-changed.
+    expect(inserted[0].is_undoable).toBe(false);
+  });
+
+  it('ignores identity and bookkeeping columns when describing an update', async () => {
+    const { admin, inserted } = makeAdmin();
+
+    await recordCrudChange(
+      {
+        guildId: GUILD,
+        actorId: ACTOR,
+        operation: 'updated',
+        action: 'shop.item_updated',
+        table: 'economy_items',
+        targetType: 'shop item',
+        label: 'Sword',
+        before: { price: 100 },
+        after: { price: 250, id: 'item-1', guild_id: GUILD, updated_at: 'now' },
+        match: { id: 'item-1', guild_id: GUILD },
+      },
+      admin,
+    );
+
+    expect(inserted[0].description).toBe('Updated the shop item "Sword" (price)');
+    expect((inserted[0].undo_payload as { data: Record<string, unknown> }).data)
+      .toEqual({ price: 100 });
   });
 });

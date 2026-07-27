@@ -272,6 +272,128 @@ export function undoByRestoring(
   return { kind: 'db', table, data: before, match };
 }
 
+/** What a CRUD route did to a row. */
+export type CrudOperation = 'created' | 'updated' | 'deleted';
+
+/**
+ * Record a create/update/delete on a content row (shop item, moderation rule,
+ * ticket panel, scheduled message…).
+ *
+ * Undo is only honest for UPDATES here. The undo route replays a payload as a
+ * row `.update()`, which can restore changed columns but cannot resurrect a
+ * deleted row or remove a created one. So:
+ *
+ *   updated → restore the previous values of exactly the columns written.
+ *   created → not undoable; the owner deletes it from its own page.
+ *   deleted → not undoable, but the ENTIRE deleted row is stored in
+ *             `before_state`, so the page can still show exactly what was
+ *             removed. Losing the row should not also lose the record of it.
+ */
+export async function recordCrudChange(
+  opts: {
+    guildId: string;
+    actorId: string;
+    operation: CrudOperation;
+    /** Machine-readable verb, e.g. 'shop.item_created'. */
+    action: string;
+    /** Table the row lives in — used to build the update-restore undo. */
+    table: string;
+    /** Human noun for the sentence, e.g. 'shop item'. */
+    targetType: string;
+    targetId?: string | null;
+    /** Human name of the specific row, e.g. the item name. */
+    label?: string | null;
+    /** Prior values (update), or the whole row (delete). */
+    before?: Record<string, unknown> | null;
+    /** Written values (create/update). */
+    after?: Record<string, unknown> | null;
+    /** Identity columns locating the row for an update-restore. */
+    match?: Record<string, unknown>;
+    blastRadius?: BlastRadius;
+  },
+  admin?: SupabaseClient,
+): Promise<void> {
+  const name = opts.label ? ` "${opts.label}"` : '';
+  const verb = opts.operation === 'created'
+    ? 'Created'
+    : opts.operation === 'updated' ? 'Updated' : 'Deleted';
+
+  const changedKeys = opts.operation === 'updated' && opts.after
+    ? Object.keys(opts.after).filter((k) => k !== 'id' && k !== 'guild_id' && k !== 'updated_at')
+    : [];
+  const detail = changedKeys.length > 0
+    ? ` (${changedKeys.map(humanizeColumn).join(', ')})`
+    : '';
+
+  const description = `${verb} the ${opts.targetType}${name}${detail}`;
+
+  // Restore is only offered for an update whose prior values we hold for every
+  // column written, and only when the row can be located.
+  const restorable =
+    opts.operation === 'updated'
+    && opts.before != null
+    && opts.match != null
+    && changedKeys.length > 0
+    && changedKeys.every((k) => k in opts.before!);
+
+  const undoReason = opts.operation === 'created'
+    ? `a newly created ${opts.targetType} cannot be removed by an undo — delete it from its page instead`
+    : opts.operation === 'deleted'
+      ? 'the row was permanently deleted, so there is nothing to restore it into'
+      : 'the previous values could not be read, so there is nothing to restore';
+
+  await recordAdminChange(
+    {
+      guildId: opts.guildId,
+      actorId: opts.actorId,
+      action: opts.action,
+      targetType: opts.targetType,
+      targetId: opts.targetId ?? null,
+      description,
+      before: opts.before ?? undefined,
+      after: opts.after ?? undefined,
+      blastRadius: opts.blastRadius ?? 'low',
+      ...(restorable
+        ? {
+            undo: undoByRestoring(
+              opts.table,
+              opts.match!,
+              Object.fromEntries(changedKeys.map((k) => [k, opts.before![k]])),
+            ),
+          }
+        : { undoReason }),
+    },
+    admin,
+  );
+}
+
+/**
+ * Read a content row before a route updates or deletes it.
+ *
+ * Best-effort, exactly like `readGuildConfigBefore`: a failed read downgrades
+ * the recorded change to "not undoable" rather than blocking the mutation.
+ * `columns` defaults to the whole row, which is what a delete wants — the
+ * record of what vanished is the only copy left.
+ */
+export async function readRowBefore(
+  admin: SupabaseClient,
+  table: string,
+  match: Record<string, unknown>,
+  columns = '*',
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    let query = admin.from(table).select(columns);
+    for (const [column, value] of Object.entries(match)) {
+      query = query.eq(column, value as never);
+    }
+    const { data, error } = await query.maybeSingle();
+    if (error) return undefined;
+    return (data as Record<string, unknown> | null) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Describe a change to guild settings in one readable sentence.
  *

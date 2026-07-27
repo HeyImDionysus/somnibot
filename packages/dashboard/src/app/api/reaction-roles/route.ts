@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 const reactionRoleUpdate = z.object({
@@ -122,6 +123,18 @@ export async function POST(req: NextRequest) {
 
   await notifyBot('reaction-roles');
 
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'created',
+    action: 'reaction_roles.entry_created',
+    table: 'reaction_roles',
+    targetType: 'reaction role',
+    targetId: (data as { id?: string } | null)?.id ?? null,
+    label: `${emoji} → role`,
+    after: data as Record<string, unknown> | null,
+  }, supabase);
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -140,6 +153,8 @@ export async function PUT(req: NextRequest) {
 
   const updates = typedPick(body, ['channel_id', 'message_id', 'emoji', 'role_id', 'exclusive_group', 'require_role', 'require_level', 'max_per_group', 'remove_on_unreact', 'log_actions']);
 
+  const before = await readRowBefore(supabase, 'reaction_roles', { id: body.id, guild_id: guildId });
+
   const { data, error } = await supabase
     .from('reaction_roles')
     .update(updates)
@@ -153,6 +168,20 @@ export async function PUT(req: NextRequest) {
   }
 
   await notifyBot('reaction-roles');
+
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'updated',
+    action: 'reaction_roles.entry_updated',
+    table: 'reaction_roles',
+    targetType: 'reaction role',
+    targetId: body.id,
+    label: before?.emoji ? `${String(before.emoji)} → role` : undefined,
+    before,
+    after: updates,
+    match: { id: body.id, guild_id: guildId },
+  }, supabase);
 
   return NextResponse.json({ success: true, data });
 }
@@ -176,6 +205,8 @@ export async function DELETE(req: NextRequest) {
     );
   }
 
+  const before = await readRowBefore(supabase, 'reaction_roles', { id, guild_id: guildId });
+
   const { error } = await supabase
     .from('reaction_roles')
     .delete()
@@ -187,6 +218,18 @@ export async function DELETE(req: NextRequest) {
   }
 
   await notifyBot('reaction-roles');
+
+  await recordCrudChange({
+    guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'deleted',
+    action: 'reaction_roles.entry_deleted',
+    table: 'reaction_roles',
+    targetType: 'reaction role',
+    targetId: id,
+    label: before?.emoji ? `${String(before.emoji)} → role` : undefined,
+    before,
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }
