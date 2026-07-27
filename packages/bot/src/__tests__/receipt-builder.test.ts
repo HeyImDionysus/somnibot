@@ -77,10 +77,12 @@ describe('buildReceiptEmbed', () => {
     expect(warningField!.value).toContain('Save this key');
   });
 
-  it('sets footer to SomniBot Commerce', () => {
+  it('keeps the semantic commerce footer and appends the powered-by attribution', () => {
+    // The receipt is a BUYER-facing surface, so it carries attribution — but the
+    // footer rule appends, never clobbers, so 'SomniBot Commerce' survives.
     const embed = buildReceiptEmbed(baseData);
     const json = embed.toJSON();
-    expect(json.footer?.text).toBe('SomniBot Commerce');
+    expect(json.footer?.text).toBe('SomniBot Commerce • Powered by SomniBot');
   });
 
   it('sets timestamp', () => {

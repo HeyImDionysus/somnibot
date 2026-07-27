@@ -47,6 +47,7 @@ import {
   type ReceiptDeliveryPayload,
 } from './commerce-fulfillment.js';
 import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
+import { resolveBrandKit } from '../features/branding/index.js';
 import { EntitlementService } from '../features/commerce/entitlement-service.js';
 import {
   GiveawayFulfillmentService,
@@ -977,7 +978,7 @@ export async function handleReconcileEntitlementRoles(
 
 async function handleDeliverReceipt(
   guild: Guild,
-  _supabase: SupabaseClient,
+  supabase: SupabaseClient,
   payload: Record<string, unknown>,
 ): Promise<ActionResult> {
   const p = payload as unknown as Partial<ReceiptDeliveryPayload>;
@@ -999,15 +1000,21 @@ async function handleDeliverReceipt(
     parsedOrderDate && !Number.isNaN(parsedOrderDate.getTime()) ? parsedOrderDate : new Date();
 
   try {
+    // Buyer-facing receipt: framed with the owner's white-label kit (cached).
+    const brandKit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name });
     const user = await guild.client.users.fetch(p.discord_id);
-    await deliverReceiptDM(user, {
-      orderNumber: p.order_number,
-      productName: p.product_name,
-      amountCents: p.amount_cents ?? 0,
-      currency: p.currency ?? 'USD',
-      licenseKey: p.license_key_plaintext ?? null,
-      date: orderDate,
-    });
+    await deliverReceiptDM(
+      user,
+      {
+        orderNumber: p.order_number,
+        productName: p.product_name,
+        amountCents: p.amount_cents ?? 0,
+        currency: p.currency ?? 'USD',
+        licenseKey: p.license_key_plaintext ?? null,
+        date: orderDate,
+      },
+      brandKit,
+    );
     return { success: true, data: { orderNumber: p.order_number, delivered: true } };
   } catch (err) {
     const kind = classifyDeliveryError(err);

@@ -42,7 +42,7 @@ import { handleViewProfile, handleWarnUser, handleViewPurchases, handleCreateTic
 import { handleModalSubmit } from '../features/discord-ux/modal-handlers.js';
 import { handleAutocomplete } from '../features/discord-ux/autocomplete.js';
 import { handleHelpCategorySelect } from '../features/help/index.js';
-import { resolveBrandKit } from '../features/branding/brand-kit.js';
+import { applyBrand, resolveBrandKit } from '../features/branding/index.js';
 
 // Feature handler imports — slash commands
 import { handleStoreCommand } from '../features/commerce/store-command.js';
@@ -215,7 +215,10 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
             const queue = await musicMgr.queueManager.getQueue(guildId);
             if (queue) {
               const { buildQueueEmbed } = await import('../features/music/music-embeds.js');
-              const { embeds, components } = buildQueueEmbed(queue, page);
+              const kit = await resolveBrandKit(client.supabase, guildId, {
+                fallbackName: interaction.guild?.name,
+              });
+              const { embeds, components } = buildQueueEmbed(queue, page, kit);
               await interaction.update({ embeds, components });
             } else {
               await interaction.reply({ content: '📭 No active queue.', ephemeral: true });
@@ -606,11 +609,14 @@ async function handleEconomyButton(
       const cfg = await econMgr.loadConfig();
       const result = await econMgr.claimTimedReward(interaction.user.id, 'daily');
       if (result.success) {
+        const kit = await resolveBrandKit(client.supabase, guildId, {
+          fallbackName: interaction.guild?.name,
+        });
         const embed = new EmbedBuilder()
-          .setColor(0x2ecc71)
           .setTitle(`${cfg.currency_emoji} Daily Reward`)
           .setDescription(result.message)
           .setTimestamp();
+        applyBrand(embed, kit, { intent: 'primary' });
         await interaction.editReply({ embeds: [embed] });
       } else {
         await interaction.editReply({ content: result.message });
@@ -622,15 +628,18 @@ async function handleEconomyButton(
       const cfg = await econMgr.loadConfig();
       const wallet = await econMgr.getOrCreateWallet(user.id);
       const netWorth = wallet.wallet + wallet.bank;
+      const kit = await resolveBrandKit(client.supabase, guildId, {
+        fallbackName: interaction.guild?.name,
+      });
       const embed = new EmbedBuilder()
         .setAuthor({ name: `${user.displayName}'s Balance`, iconURL: user.displayAvatarURL() })
-        .setColor(0x5865F2)
         .addFields(
           { name: '💰 Wallet', value: `${cfg.currency_emoji} ${wallet.wallet.toLocaleString()}`, inline: true },
           { name: '🏦 Bank', value: `${cfg.currency_emoji} ${wallet.bank.toLocaleString()} / ${wallet.bank_max.toLocaleString()}`, inline: true },
           { name: '📊 Net Worth', value: `${cfg.currency_emoji} ${netWorth.toLocaleString()}`, inline: true },
         )
         .setTimestamp();
+      applyBrand(embed, kit, { intent: 'info' });
       await interaction.reply({ embeds: [embed], ephemeral: true });
       return;
     }
@@ -643,12 +652,15 @@ async function handleEconomyButton(
           const durStr = item.durability_remaining !== null ? ` [${item.durability_remaining} uses]` : '';
           return `${item.item_emoji} **${item.item_name}** ×${item.quantity}${durStr}`;
         });
+        const kit = await resolveBrandKit(client.supabase, guildId, {
+          fallbackName: interaction.guild?.name,
+        });
         const embed = new EmbedBuilder()
-          .setColor(0x9b59b6)
           .setAuthor({ name: `${interaction.user.displayName}'s Inventory`, iconURL: interaction.user.displayAvatarURL() })
           .setDescription(lines.join('\n'))
           .setFooter({ text: `${items.length} items` })
           .setTimestamp();
+        applyBrand(embed, kit, { intent: 'info' });
         await interaction.reply({ embeds: [embed], ephemeral: true });
       }
       return;
@@ -663,12 +675,15 @@ async function handleEconomyButton(
           const stockStr = item.stock !== null ? ` (${item.stock} left)` : '';
           return `${item.emoji} **${item.name}** — ${cfg.currency_emoji} ${item.price.toLocaleString()}${stockStr}`;
         });
+        const kit = await resolveBrandKit(client.supabase, guildId, {
+          fallbackName: interaction.guild?.name,
+        });
         const embed = new EmbedBuilder()
-          .setColor(0xf39c12)
           .setTitle('🏪 Shop')
           .setDescription(shopLines.join('\n'))
           .setFooter({ text: `${shopItems.length} items • Use /buy <item> to purchase` })
           .setTimestamp();
+        applyBrand(embed, kit, { intent: 'warning' });
         await interaction.reply({ embeds: [embed], ephemeral: true });
       }
       return;

@@ -19,8 +19,35 @@ import {
   EmbedBuilder,
 } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import {
+  applyBrand,
+  defaultBrandKit,
+  resolveBrandKit,
+  type BrandKit,
+} from '../branding/index.js';
 
 const log = createLogger('InteractionHandler');
+
+/**
+ * Best-effort brand kit for the generic error embed: resolves the guild kit
+ * when the interaction happened in a guild and the client carries a Supabase
+ * handle; falls back to the vendor defaults otherwise. Never throws — the
+ * error path must always be able to reply.
+ */
+async function errorBrandKit(interaction: AnyRepliableInteraction): Promise<BrandKit> {
+  try {
+    const supabase = (interaction.client as { supabase?: SupabaseClient }).supabase;
+    if (interaction.guildId && supabase) {
+      return await resolveBrandKit(supabase, interaction.guildId, {
+        fallbackName: interaction.guild?.name,
+      });
+    }
+  } catch {
+    // fall through to defaults
+  }
+  return defaultBrandKit(interaction.guild?.name);
+}
 
 export type AnyRepliableInteraction =
   | CommandInteraction
@@ -68,6 +95,7 @@ export function safeInteractionHandler(
     } catch (err) {
       log.error(`[InteractionHandler:${options.name}] Error:`, err);
 
+      const kit = await errorBrandKit(interaction);
       const errorEmbed = new EmbedBuilder()
         .setTitle('❌ Something went wrong')
         .setDescription(
@@ -75,9 +103,9 @@ export function safeInteractionHandler(
             ? err.message.slice(0, 200)
             : 'An unexpected error occurred. Please try again.',
         )
-        .setColor(0xed4245)
         .setFooter({ text: `Handler: ${options.name}` })
         .setTimestamp();
+      applyBrand(errorEmbed, kit, { intent: 'danger' });
 
       try {
         if (interaction.replied) {

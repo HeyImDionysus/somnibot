@@ -10,6 +10,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('discord.js', () => ({
   EmbedBuilder: vi.fn().mockImplementation(function () {
     return {
+      // Real EmbedBuilder exposes `data`; branded embeds read data.footer.
+      data: {} as Record<string, unknown>,
       setColor: vi.fn().mockReturnThis(),
       setAuthor: vi.fn().mockReturnThis(),
       setTitle: vi.fn().mockReturnThis(),

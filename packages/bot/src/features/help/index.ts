@@ -20,7 +20,18 @@ import {
   ApplicationCommandType,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
-import { SOMNI_PALETTE } from '@somnibot/shared';
+import { applyBrand, defaultBrandKit, resolveBrandKit, type BrandKit } from '../branding/index.js';
+
+/** Resolve the guild's brand kit for a help surface (default kit outside a guild). */
+async function helpBrandKit(
+  client: SomniClient,
+  guildId: string | null,
+  guildName: string | undefined,
+): Promise<BrandKit> {
+  return guildId
+    ? resolveBrandKit(client.supabase, guildId, { fallbackName: guildName })
+    : defaultBrandKit(guildName);
+}
 
 interface CommandCategory {
   name: string;
@@ -153,6 +164,7 @@ export async function handleHelpCommand(
   const registeredCommands = (client as SomniClient)._registeredCommands ?? [];
 
   const categories = buildCategoriesFromRegistry(registeredCommands);
+  const kit = await helpBrandKit(client, interaction.guildId, interaction.guild?.name);
 
   if (specificCommand) {
     // Find the specific command
@@ -161,11 +173,11 @@ export async function handleHelpCommand(
       const found = cat.commands.find((c) => c.name === cmdName || c.name.startsWith(cmdName));
       if (found) {
         const embed = new EmbedBuilder()
-          .setColor(SOMNI_PALETTE.CYAN)
           .setTitle(`${cat.emoji} ${found.name}`)
           .setDescription(found.description)
           .addFields({ name: 'Category', value: cat.name, inline: true })
           .setFooter({ text: 'Use /help to see all commands' });
+        applyBrand(embed, kit, { intent: 'info' });
         await interaction.reply({ embeds: [embed], ephemeral: true });
         return;
       }
@@ -178,7 +190,6 @@ export async function handleHelpCommand(
   const totalCommands = categories.reduce((sum, cat) => sum + cat.commands.length, 0);
 
   const overviewEmbed = new EmbedBuilder()
-    .setColor(SOMNI_PALETTE.CYAN)
     .setTitle('🤖 SomniBot Commands')
     .setDescription(
       `**${totalCommands}** commands across **${categories.length}** categories.\n\nSelect a category below or use \`/help <command>\` for details.`,
@@ -194,8 +205,9 @@ export async function handleHelpCommand(
   }
 
   overviewEmbed.setFooter({
-    text: 'SomniBot • Right-click users/messages for context menu actions',
+    text: `${kit.brandName} • Right-click users/messages for context menu actions`,
   });
+  applyBrand(overviewEmbed, kit, { intent: 'info' });
 
   // Category selector dropdown
   const selectMenu = new StringSelectMenuBuilder()
@@ -234,8 +246,8 @@ export async function handleHelpCategorySelect(
     return;
   }
 
+  const kit = await helpBrandKit(client, interaction.guildId, interaction.guild?.name);
   const embed = new EmbedBuilder()
-    .setColor(SOMNI_PALETTE.CYAN)
     .setTitle(`${category.emoji} ${category.name}`)
     .setDescription(category.description);
 
@@ -244,6 +256,7 @@ export async function handleHelpCategorySelect(
   }
 
   embed.setFooter({ text: 'Use /help to go back to the overview' });
+  applyBrand(embed, kit, { intent: 'info' });
 
   await interaction.update({ embeds: [embed] });
 }

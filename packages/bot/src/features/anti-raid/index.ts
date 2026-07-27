@@ -25,6 +25,13 @@ import { createLogger } from '@somnibot/shared';
 import { randomUUID } from 'node:crypto';
 import { getValkey } from '../../services/valkey.js';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
+import {
+  applyBrand,
+  BRAND_KIT_COLUMNS,
+  brandKitFromConfig,
+  type BrandIntent,
+  type BrandKit,
+} from '../branding/index.js';
 
 const log = createLogger('AntiRaid');
 
@@ -38,6 +45,8 @@ interface AntiRaidConfig {
   anti_raid_ban_delete_seconds: number;
   anti_raid_log_channel_id: string | null;
   mod_log_channel_id: string | null;
+  /** White-label brand kit projected from the same cached guild_config row. */
+  brandKit: BrandKit;
 }
 
 const CONFIG_TTL = 60_000;
@@ -173,7 +182,7 @@ export async function loadConfig(supabase: SupabaseClient, guildId: string): Pro
   const { data } = await supabase
     .from('guild_config')
     .select(
-      'anti_raid_enabled, anti_raid_join_threshold, anti_raid_join_window_seconds, anti_raid_account_age_days, anti_raid_action, anti_raid_auto_unban, anti_raid_ban_delete_seconds, anti_raid_log_channel_id, mod_log_channel_id',
+      `anti_raid_enabled, anti_raid_join_threshold, anti_raid_join_window_seconds, anti_raid_account_age_days, anti_raid_action, anti_raid_auto_unban, anti_raid_ban_delete_seconds, anti_raid_log_channel_id, mod_log_channel_id, ${BRAND_KIT_COLUMNS}`,
     )
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -188,6 +197,7 @@ export async function loadConfig(supabase: SupabaseClient, guildId: string): Pro
     anti_raid_ban_delete_seconds: data?.anti_raid_ban_delete_seconds ?? 86400,
     anti_raid_log_channel_id: data?.anti_raid_log_channel_id ?? null,
     mod_log_channel_id: data?.mod_log_channel_id ?? null,
+    brandKit: brandKitFromConfig(data ?? null, undefined),
   };
   _configCache.set(guildId, { config, time: now });
   // V5 Audit P2-4: Cap the config cache the same way memory fallback Maps are capped
@@ -204,7 +214,11 @@ async function logRaidEvent(
   guild: Guild,
   config: AntiRaidConfig,
   embed: EmbedBuilder,
+  intent: BrandIntent = 'warning',
 ): Promise<void> {
+  // Anti-raid notices are a STAFF surface: brand colors, never the powered-by
+  // attribution. Applied centrally so every raid embed is branded exactly once.
+  applyBrand(embed, config.brandKit, { intent, attribution: false });
   const channelId = config.anti_raid_log_channel_id || config.mod_log_channel_id;
   if (!channelId) return;
 
@@ -344,12 +358,11 @@ export async function processAntiRaid(
       await member.kick(`Anti-raid: Account age ${Math.floor(accountAgeDays)}d < ${config.anti_raid_account_age_days}d minimum`);
 
       const embed = new EmbedBuilder()
-        .setColor(0xFFA500)
         .setTitle('🛡️ Anti-Raid: Young Account Blocked')
         .setDescription(`<@${member.id}> (${member.user.tag}) was kicked — account is ${Math.floor(accountAgeDays)} day(s) old (minimum: ${config.anti_raid_account_age_days}).`)
         .setTimestamp();
 
-      await logRaidEvent(guild, config, embed);
+      await logRaidEvent(guild, config, embed, 'warning');
       // Audit: account-age containment (a kick of a too-new account).
       eventBus?.emit('anti_raid.contained', guild.id, {
         action: 'account_age',
@@ -430,7 +443,6 @@ export async function processAntiRaid(
     await activateRaidMode(guild.id);
 
     const embed = new EmbedBuilder()
-      .setColor(0xFF0000)
       .setTitle('🚨 RAID DETECTED')
       .setDescription(
         `**${joinCount} joins** in the last ${config.anti_raid_join_window_seconds}s (threshold: ${config.anti_raid_join_threshold}).\n\n` +
@@ -438,7 +450,7 @@ export async function processAntiRaid(
       )
       .setTimestamp();
 
-    await logRaidEvent(guild, config, embed);
+    await logRaidEvent(guild, config, embed, 'danger');
     // Audit: raid detection (threshold crossed → raid mode activated).
     eventBus?.emit('anti_raid.detected', guild.id, {
       joinCount,
@@ -468,12 +480,11 @@ export async function processAntiRaid(
         }
 
         const embed = new EmbedBuilder()
-          .setColor(0xFF0000)
           .setTitle(`🛡️ Anti-Raid: Member ${action === 'ban' ? 'Banned' : 'Kicked'}`)
           .setDescription(`<@${member.id}> (${member.user.tag}) was ${action}ed during active raid mode.`)
           .setTimestamp();
 
-        await logRaidEvent(guild, config, embed);
+        await logRaidEvent(guild, config, embed, 'danger');
         // Audit: containment of an individual member during active raid mode.
         eventBus?.emit('anti_raid.contained', guild.id, {
           action,
@@ -495,14 +506,13 @@ export async function processAntiRaid(
             'Grant the bot "Manage Server" permission for anti-raid lockdown to work.',
           );
           const embed = new EmbedBuilder()
-            .setColor(0xFFAA00)
             .setTitle('⚠️ Anti-Raid: Lockdown Failed — Missing Permission')
             .setDescription(
               'The bot needs **Manage Server** permission to activate lockdown mode. ' +
               'Please grant this permission or switch anti-raid action to `kick` or `ban`.',
             )
             .setTimestamp();
-          await logRaidEvent(guild, config, embed);
+          await logRaidEvent(guild, config, embed, 'warning');
           // Failure branch: lockdown could not run — durably alert the owner.
           eventBus?.emit('anti_raid.action_failed', guild.id, {
             action: 'lockdown',
@@ -581,7 +591,6 @@ export async function processAntiRaid(
           }
 
           const embed = new EmbedBuilder()
-            .setColor(0xFF0000)
             .setTitle('🔒 Anti-Raid: Lockdown Activated')
             .setDescription(
               `Server verification level raised to **Very High** (phone verification required).\n` +
@@ -590,7 +599,7 @@ export async function processAntiRaid(
             )
             .setTimestamp();
 
-          await logRaidEvent(guild, config, embed);
+          await logRaidEvent(guild, config, embed, 'danger');
           // Audit: server-level containment (lockdown activated).
           eventBus?.emit('anti_raid.contained', guild.id, {
             action: 'lockdown',
@@ -688,7 +697,6 @@ async function restoreLockdownInvites(guild: Guild, config: AntiRaidConfig, even
     log.info(`Lockdown ended: restored ${restored}/${stored.length} invite(s) for guild ${guild.id}`);
 
     const embed = new EmbedBuilder()
-      .setColor(0x4caf50)
       .setTitle('🔓 Anti-Raid: Invites Restored')
       .setDescription(
         `Lockdown has ended. **${restored}** invite(s) have been recreated with their original settings.\n` +
@@ -696,7 +704,7 @@ async function restoreLockdownInvites(guild: Guild, config: AntiRaidConfig, even
       )
       .setTimestamp();
 
-    await logRaidEvent(guild, config, embed);
+    await logRaidEvent(guild, config, embed, 'primary');
     // Audit: restoration of invites paused during lockdown.
     eventBus?.emit('anti_raid.restored', guild.id, {
       restorationType: 'invites',
@@ -764,14 +772,13 @@ async function processRaidUnbans(guild: Guild, config: AntiRaidConfig, eventBus?
     log.info(`Raid cooldown: auto-unbanned ${unbanned}/${userIds.length} user(s) for guild ${guild.id}`);
 
     const embed = new EmbedBuilder()
-      .setColor(0x4caf50)
       .setTitle('🔓 Anti-Raid: Auto-Unban Complete')
       .setDescription(
         `Raid mode has expired. **${unbanned}** user(s) who were banned during the raid have been automatically unbanned.`,
       )
       .setTimestamp();
 
-    await logRaidEvent(guild, config, embed);
+    await logRaidEvent(guild, config, embed, 'primary');
     // Audit: restoration of members auto-banned during the raid.
     eventBus?.emit('anti_raid.restored', guild.id, {
       restorationType: 'unban',

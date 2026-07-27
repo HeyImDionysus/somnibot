@@ -23,11 +23,15 @@ import { EmbedBuilder, type Client, type Guild } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
 import { writeAuditLog } from '../../services/audit.js';
+import {
+  applyBrand,
+  resolveBrandKit,
+  type BrandIntent,
+  type BrandKit,
+} from '../branding/index.js';
 
 const log = createLogger('TeamInviteSweep');
 
-const BRAND_COLOR = 0xff1493;
-const OWNER_COLOR = 0x5865f2;
 const DEFAULT_INTERVAL_MS = 60_000;
 const BATCH_LIMIT = 50;
 const SWEEPER_ACTOR = 'team-invitation-sweeper';
@@ -137,8 +141,11 @@ export class TeamInvitationSweeper {
       }
 
       try {
+        const kit = await resolveBrandKit(this.supabase, row.guild_id, {
+          fallbackName: guild.name,
+        });
         const user = await this.client.users.fetch(row.discord_id);
-        await user.send({ embeds: [this.buildInviteEmbed(guild, row)] });
+        await user.send({ embeds: [this.buildInviteEmbed(guild, row, kit)] });
         await this.claimDm(row.id, 'sent', 'dm');
       } catch (err) {
         // Invitee's DMs are closed (or the user is unreachable). The invitation
@@ -159,7 +166,7 @@ export class TeamInvitationSweeper {
           errorMessage: String(err),
         });
         await this.notifyOwner(guild, {
-          color: OWNER_COLOR,
+          intent: 'info',
           title: 'Team invitation DM could not be delivered',
           description:
             `Could not DM <@${row.discord_id}> their **${roleNameOf(row)}** dashboard invitation ` +
@@ -217,7 +224,7 @@ export class TeamInvitationSweeper {
       if (!claimed) continue;
 
       await this.notifyOwner(guild, {
-        color: BRAND_COLOR,
+        intent: 'primary',
         title: 'Team invitation accepted',
         description:
           `<@${row.discord_id}> accepted the **${roleNameOf(row)}** invitation for **${guild.name}**. ` +
@@ -258,7 +265,7 @@ export class TeamInvitationSweeper {
       const guild = this.client.guilds.cache.get(row.guild_id);
       if (guild) {
         await this.notifyOwner(guild, {
-          color: OWNER_COLOR,
+          intent: 'info',
           title: 'Team invitation expired',
           description:
             `The **${roleNameOf(row)}** invitation for <@${row.discord_id}> on **${guild.name}** ` +
@@ -270,11 +277,10 @@ export class TeamInvitationSweeper {
 
   // ── Discord helpers ───────────────────────────────────────────────────────
 
-  private buildInviteEmbed(guild: Guild, row: InviteRow): EmbedBuilder {
+  private buildInviteEmbed(guild: Guild, row: InviteRow, kit: BrandKit): EmbedBuilder {
     const roleName = roleNameOf(row);
     const hours = hoursUntil(row.expires_at);
-    return new EmbedBuilder()
-      .setColor(BRAND_COLOR)
+    const embed = new EmbedBuilder()
       .setTitle(`You're invited to help run ${guild.name}`)
       .setDescription(
         `You've been invited to join the **${guild.name}** dashboard team as **${roleName}**.\n\n` +
@@ -285,8 +291,9 @@ export class TeamInvitationSweeper {
         { name: 'Role', value: roleName, inline: true },
         { name: 'Expires in', value: `${hours}h`, inline: true },
       )
-      .setFooter({ text: 'SomniBot • Team invitation' })
+      .setFooter({ text: `${kit.brandName} • Team invitation` })
       .setTimestamp();
+    return applyBrand(embed, kit, { intent: 'primary' });
   }
 
   /**
@@ -296,14 +303,16 @@ export class TeamInvitationSweeper {
    */
   private async notifyOwner(
     guild: Guild,
-    spec: { color: number; title: string; description: string },
+    spec: { intent: BrandIntent; title: string; description: string },
   ): Promise<void> {
+    // Owner/staff mirror: brand the frame, suppress the powered-by attribution.
+    const kit = await resolveBrandKit(this.supabase, guild.id, { fallbackName: guild.name });
     const embed = new EmbedBuilder()
-      .setColor(spec.color)
       .setTitle(spec.title)
       .setDescription(spec.description)
       .setFooter({ text: 'SomniBot • Team' })
       .setTimestamp();
+    applyBrand(embed, kit, { intent: spec.intent, attribution: false });
 
     const { data: cfg } = await this.supabase
       .from('guild_config')

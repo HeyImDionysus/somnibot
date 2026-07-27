@@ -18,6 +18,9 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
 
 vi.mock('discord.js', () => ({
   EmbedBuilder: class {
+    // Real EmbedBuilder always exposes `data` (branded embeds read
+    // data.footer to append attribution without clobbering it).
+    data: Record<string, unknown> = {};
     setColor() { return this; } setTitle() { return this; } setDescription() { return this; }
     setThumbnail() { return this; } setTimestamp() { return this; } setFooter() { return this; }
     addFields() { return this; } setAuthor() { return this; } setImage() { return this; }

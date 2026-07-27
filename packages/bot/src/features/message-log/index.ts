@@ -16,6 +16,13 @@ import {
 import type { SomniClient } from '../../client.js';
 import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert, resolveOwnerAlert } from '../../services/alert-service.js';
+import {
+  applyBrand,
+  BRAND_KIT_COLUMNS,
+  brandKitFromConfig,
+  defaultBrandKit,
+  type BrandKit,
+} from '../branding/index.js';
 
 const log = createLogger('MessageLog');
 
@@ -25,6 +32,8 @@ interface MessageLogConfig {
   message_log_edits_enabled: boolean;
   message_log_deletes_enabled: boolean;
   message_log_ignored_channel_ids: string[];
+  /** White-label brand kit projected from the same cached guild_config row. */
+  brandKit: BrandKit;
 }
 
 const CONFIG_TTL = 60_000;
@@ -139,7 +148,7 @@ export async function loadConfig(client: SomniClient, guildId: string): Promise<
 
   const { data, error } = await client.supabase
     .from('guild_config')
-    .select('message_log_enabled, message_log_channel_id, message_log_edits_enabled, message_log_deletes_enabled, message_log_ignored_channel_ids')
+    .select(`message_log_enabled, message_log_channel_id, message_log_edits_enabled, message_log_deletes_enabled, message_log_ignored_channel_ids, ${BRAND_KIT_COLUMNS}`)
     .eq('guild_id', guildId)
     .maybeSingle();
 
@@ -154,6 +163,7 @@ export async function loadConfig(client: SomniClient, guildId: string): Promise<
       message_log_edits_enabled: true,
       message_log_deletes_enabled: true,
       message_log_ignored_channel_ids: [],
+      brandKit: defaultBrandKit(),
     };
   }
 
@@ -183,6 +193,7 @@ export async function loadConfig(client: SomniClient, guildId: string): Promise<
     message_log_ignored_channel_ids: Array.isArray(data?.message_log_ignored_channel_ids)
       ? (data.message_log_ignored_channel_ids as string[])
       : [],
+    brandKit: brandKitFromConfig(data ?? null, undefined),
   };
   // Emit an audit event when the persisted config actually changed.
   maybeAuditConfigChange(client, guildId, config);
@@ -265,7 +276,6 @@ export async function logMessageEdit(
   const newContent = newMessage.content || '*[Empty]*';
 
   const embed = new EmbedBuilder()
-    .setColor(0xFFA500)
     .setAuthor({
       name: newMessage.author?.tag ?? 'Unknown',
       iconURL: newMessage.author?.displayAvatarURL() ?? undefined,
@@ -288,6 +298,8 @@ export async function logMessageEdit(
   // Skip re-delivered edits (keyed by message id + the edit timestamp).
   if (alreadyPosted(`${newMessage.guild.id}:edit:${newMessage.id}:${newMessage.editedTimestamp ?? ''}`)) return;
 
+  // Staff surface: brand colors, no powered-by attribution.
+  applyBrand(embed, config.brandKit, { intent: 'warning', attribution: false });
   await sendLogEmbed(logChannel, embed);
 }
 
@@ -317,7 +329,6 @@ export async function logMessageDelete(
   const content = message.content || '*[Uncached or empty message]*';
 
   const embed = new EmbedBuilder()
-    .setColor(0xFF0000)
     .setTitle('🗑️ Message Deleted')
     .addFields(
       { name: 'Content', value: truncate(content, 1024) },
@@ -336,6 +347,8 @@ export async function logMessageDelete(
   // Skip re-delivered deletes (keyed by message id).
   if (alreadyPosted(`${message.guild.id}:delete:${message.id}`)) return;
 
+  // Staff surface: brand colors, no powered-by attribution.
+  applyBrand(embed, config.brandKit, { intent: 'danger', attribution: false });
   await sendLogEmbed(logChannel, embed);
 }
 

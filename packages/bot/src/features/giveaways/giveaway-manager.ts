@@ -16,6 +16,7 @@ import { randomInt } from 'node:crypto';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
+import { applyBrand, resolveBrandKit, type BrandKit } from '../branding/index.js';
 
 const log = createLogger('Giveaway');
 
@@ -178,7 +179,7 @@ export class GiveawayManager {
     // Post embed
     const channel = this.guild.channels.cache.get(options.channelId) as TextChannel | undefined;
     if (channel) {
-      const embed = this.buildGiveawayEmbed(giveaway);
+      const embed = await this.buildGiveawayEmbed(giveaway);
       const row = this.buildEntryButton(giveaway);
 
       const msg = await channel.send({ embeds: [embed], components: [row] });
@@ -612,13 +613,14 @@ export class GiveawayManager {
       if (winners.length > 0) {
         const winnerMentions = winners.map((id) => `<@${id}>`).join(', ');
         if (this.cfg.winnerAnnouncementStyle === 'embed') {
+          const kit = await this.brandKit();
           const embed = new EmbedBuilder()
             .setTitle('🎉 Giveaway ended!')
             .setDescription(
               `Prize: **${giveaway.prize}**\n` +
               `Winner${winners.length > 1 ? 's' : ''}: ${winnerMentions}\n\nCongratulations!`,
-            )
-            .setColor(0x57F287);
+            );
+          applyBrand(embed, kit, { intent: 'primary' });
           await channel.send({ content: winnerMentions, embeds: [embed] });
         } else {
           await channel.send({
@@ -626,10 +628,11 @@ export class GiveawayManager {
           });
         }
       } else if (this.cfg.winnerAnnouncementStyle === 'embed') {
+        const kit = await this.brandKit();
         const embed = new EmbedBuilder()
           .setTitle('😔 Giveaway ended!')
-          .setDescription(`Prize: **${giveaway.prize}**\nNo valid entries — no winners selected.`)
-          .setColor(0xED4245);
+          .setDescription(`Prize: **${giveaway.prize}**\nNo valid entries — no winners selected.`);
+        applyBrand(embed, kit, { intent: 'danger' });
         await channel.send({ embeds: [embed] });
       } else {
         await channel.send({
@@ -658,7 +661,7 @@ export class GiveawayManager {
 
     try {
       const msg = await channel.messages.fetch(giveaway.message_id);
-      const embed = this.buildGiveawayEmbed(giveaway);
+      const embed = await this.buildGiveawayEmbed(giveaway);
 
       if (giveaway.status === 'ended' || giveaway.status === 'cancelled') {
         await msg.edit({ embeds: [embed], components: [] });
@@ -671,15 +674,19 @@ export class GiveawayManager {
     }
   }
 
-  private buildGiveawayEmbed(giveaway: GiveawayRow): EmbedBuilder {
+  /** Resolve the guild's white-label brand kit (cached; never throws). */
+  private brandKit(): Promise<BrandKit> {
+    return resolveBrandKit(this.supabase, this.guild.id, { fallbackName: this.guild.name });
+  }
+
+  private async buildGiveawayEmbed(giveaway: GiveawayRow): Promise<EmbedBuilder> {
     const isEnded = giveaway.status === 'ended';
     const isPaused = giveaway.status === 'paused';
     const title = isEnded ? '🎉 Giveaway Ended' : isPaused ? '⏸️ Giveaway Paused' : '🎉 Giveaway';
-    const color = isEnded ? 0x808080 : isPaused ? 0xFFA500 : 0x57F287;
+    const kit = await this.brandKit();
     const embed = new EmbedBuilder()
       .setTitle(title)
       .setDescription(giveaway.prize)
-      .setColor(color)
       .setTimestamp(new Date(giveaway.ends_at));
 
     const fields: Array<{ name: string; value: string; inline: boolean }> = [];
@@ -716,6 +723,12 @@ export class GiveawayManager {
 
     embed.addFields(fields);
     embed.setFooter({ text: isEnded ? 'Giveaway ended' : isPaused ? 'Giveaway paused' : `${giveaway.winner_count} winner(s) • Ends` });
+
+    // Live giveaways carry the brand primary; paused maps to the warning
+    // intent. The gray "ended" state is semantic (inactive), not brandable —
+    // applyBrand still appends the powered-by attribution to the footer.
+    applyBrand(embed, kit, { intent: isPaused ? 'warning' : 'primary' });
+    if (isEnded) embed.setColor(0x808080);
 
     return embed;
   }

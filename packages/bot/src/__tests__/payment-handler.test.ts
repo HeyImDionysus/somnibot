@@ -8,7 +8,7 @@
  * guild's product_id) sorts first on price_cents ASC and hijacks checkout
  * with an attacker-chosen paypal_plan_id.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -27,6 +27,7 @@ vi.mock('../services/audit.js', () => ({
 }));
 
 import { handleBuyButton } from '../features/commerce/payment-handler.js';
+import { invalidateBrandKitCache } from '../features/branding/brand-kit.js';
 
 function makeChain(data: any = null) {
   const chain: any = {};
@@ -524,6 +525,13 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
 });
 
 describe('handleBuyButton — white-label PayPal checkout brand', () => {
+  beforeEach(() => {
+    // Every suite in this file resolves the same guild id, and the brand kit
+    // resolver caches per guild (30s TTL). Without this, an earlier suite's
+    // brand-less row would answer these cases.
+    invalidateBrandKitCache();
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });

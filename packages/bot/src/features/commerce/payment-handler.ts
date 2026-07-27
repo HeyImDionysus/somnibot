@@ -10,20 +10,16 @@
  * The bot handles the Discord interaction side.
  */
 import {
-  EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
   type ButtonInteraction,
-  type Guild,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import { brandedEmbed, resolveBrandKit } from '../branding/index.js';
 
 const log = createLogger('PaymentHandler');
-
-const HOT_PINK = 0xFF1493;
 
 /**
  * Branded degradation for a buy click when a checkout READ fails (database
@@ -149,26 +145,6 @@ async function getPayPalToken(
 }
 
 /**
- * Resolve the owner white-label store brand for buyer-facing surfaces. Falls
- * back to the guild name, then a neutral default — never hardcoded vendor
- * branding.
- */
-async function resolveStoreBrandName(
-  supabase: SupabaseClient,
-  guildId: string,
-  guild: Guild | null,
-): Promise<string> {
-  const { data } = await supabase
-    .from('guild_config')
-    .select('store_brand_name')
-    .eq('guild_id', guildId)
-    .maybeSingle();
-  const configured = typeof data?.store_brand_name === 'string' ? data.store_brand_name.trim() : '';
-  if (configured.length > 0) return configured;
-  return guild?.name ?? 'Store';
-}
-
-/**
  * Handle a store "Buy" button interaction.
  */
 export async function handleBuyButton(
@@ -185,6 +161,13 @@ export async function handleBuyButton(
   const productId = interaction.customId.replace('store:buy:', '');
   const discordId = interaction.user.id;
   const discordUsername = interaction.user.username;
+
+  // Buyer-facing surface: the owner's white-label kit frames every checkout
+  // embed AND supplies the PayPal checkout brand_name. Resolved once per
+  // handler (cached; never throws).
+  const brandKit = await resolveBrandKit(supabase, guildId, {
+    fallbackName: interaction.guild?.name ?? 'Store',
+  });
 
   // Fetch product. A failed READ is not a missing product: during a database
   // outage the product may exist and be buyable, so degrade honestly instead
@@ -258,10 +241,11 @@ export async function handleBuyButton(
     if (existing) {
       await interaction.editReply({
         embeds: [
-          new EmbedBuilder()
-            .setColor(0xFEE75C)
-            .setTitle('⚠️ Already Purchased')
-            .setDescription('You already have an active entitlement for this product.'),
+          brandedEmbed(brandKit, {
+            intent: 'warning',
+            title: '⚠️ Already Purchased',
+            description: 'You already have an active entitlement for this product.',
+          }),
         ],
       });
       return;
@@ -302,7 +286,7 @@ export async function handleBuyButton(
   const returnUrl = `${dashboardUrl}/store?order_complete=true`;
   const cancelUrl = `${dashboardUrl}/store?order_cancelled=true`;
   // White-label: the PayPal checkout brand must be the owner's store brand.
-  const brandName = await resolveStoreBrandName(supabase, guildId, interaction.guild);
+  const brandName = brandKit.brandName;
 
   if (product.type === 'one_time') {
     // Create PayPal order
@@ -398,12 +382,12 @@ export async function handleBuyButton(
 
     await interaction.editReply({
       embeds: [
-        new EmbedBuilder()
-          .setColor(HOT_PINK)
-          .setTitle(`🛒 Purchase: ${product.name}`)
-          .setDescription(
+        brandedEmbed(brandKit, {
+          intent: 'primary',
+          title: `🛒 Purchase: ${product.name}`,
+          description:
             `**Price:** $${price} ${product.currency}\n\nClick the button below to complete your purchase via PayPal.`,
-          ),
+        }),
       ],
       components: [
         new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -535,12 +519,12 @@ export async function handleBuyButton(
 
     await interaction.editReply({
       embeds: [
-        new EmbedBuilder()
-          .setColor(HOT_PINK)
-          .setTitle(`🔄 Subscribe: ${product.name}`)
-          .setDescription(
+        brandedEmbed(brandKit, {
+          intent: 'primary',
+          title: `🔄 Subscribe: ${product.name}`,
+          description:
             `**Plan:** ${plan.name}\n**Price:** $${(plan.price_cents / 100).toFixed(2)} ${plan.currency}/${plan.interval_unit.toLowerCase()}\n\nClick the button below to start your subscription via PayPal.`,
-          ),
+        }),
       ],
       components: [
         new ActionRowBuilder<ButtonBuilder>().addComponents(

@@ -33,6 +33,7 @@ vi.mock('discord.js', () => {
 });
 
 import { handleStoreCommand } from '../features/commerce/store-command.js';
+import { invalidateBrandKitCache } from '../features/branding/brand-kit.js';
 
 const sampleProduct = {
   id: 'prod-1',
@@ -71,7 +72,13 @@ function makeInteraction(guildName?: string) {
 }
 
 describe('handleStoreCommand — white-label branding', () => {
-  beforeEach(() => { embedInstances.length = 0; });
+  beforeEach(() => {
+    embedInstances.length = 0;
+    // Every case below resolves guild 'g1' with a DIFFERENT brand row. The kit
+    // resolver caches per guild (30s TTL), so without this the first case's kit
+    // would answer the rest.
+    invalidateBrandKitCache();
+  });
 
   it('uses the owner store brand as the header title with powered-by footer', async () => {
     const interaction = makeInteraction('Guild Name');

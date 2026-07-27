@@ -25,10 +25,7 @@ import {
 } from '../moderation/infraction-service.js';
 import { executeEscalation, getEscalationAction } from '../moderation/escalation.js';
 import type { EscalationStep } from '@somnibot/shared';
-
-const HOT_PINK = 0xFF1493;
-const RED = 0xFF4444;
-const GREEN = 0x44FF44;
+import { applyBrand, resolveBrandKit } from '../branding/index.js';
 
 export async function handleModalSubmit(
   interaction: ModalSubmitInteraction,
@@ -151,19 +148,24 @@ async function handleWarnModal(
     }
   }
 
-  // Try to DM the user
+  // Try to DM the user — white-label: the member-facing DM carries the owner
+  // brand kit (danger intent + powered-by attribution).
   try {
+    const kit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name });
     const targetUser = await guild.client.users.fetch(targetUserId);
     await targetUser.send({
       embeds: [
-        new EmbedBuilder()
-          .setColor(RED)
-          .setTitle(`⚠️ Warning in ${guild.name}`)
-          .addFields(
-            { name: 'Reason', value: reason },
-            { name: 'Total Warnings', value: totalInfractions.toString() },
-          )
-          .setTimestamp(),
+        applyBrand(
+          new EmbedBuilder()
+            .setTitle(`⚠️ Warning in ${guild.name}`)
+            .addFields(
+              { name: 'Reason', value: reason },
+              { name: 'Total Warnings', value: totalInfractions.toString() },
+            )
+            .setTimestamp(),
+          kit,
+          { intent: 'danger' },
+        ),
       ],
     });
   } catch {
@@ -291,9 +293,9 @@ async function handleTicketFromMessageModal(
     return;
   }
 
-  // Post opening message in the ticket channel
+  // Post opening message in the ticket channel — branded with the owner kit.
+  const kit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name });
   const embed = new EmbedBuilder()
-    .setColor(HOT_PINK)
     .setTitle(`🎫 Ticket #${ticketNumber} — ${subject}`)
     .setDescription(
       `Created by ${interaction.user} from a message in <#${channelId}>` +
@@ -308,6 +310,7 @@ async function handleTicketFromMessageModal(
       },
     )
     .setTimestamp();
+  applyBrand(embed, kit, { intent: 'primary' });
 
   await ticketChannel.send({ embeds: [embed] });
 
@@ -376,8 +379,9 @@ async function handleReportMessageModal(
   if (config?.mod_log_channel_id) {
     const logChannel = guild.channels.cache.get(config.mod_log_channel_id);
     if (logChannel && logChannel.type === ChannelType.GuildText) {
+      // Staff surface (mod log): brand the frame, suppress the attribution.
+      const kit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name });
       const embed = new EmbedBuilder()
-        .setColor(RED)
         .setTitle('🚨 Message Report')
         .addFields(
           { name: 'Reporter', value: `${interaction.user} (${interaction.user.id})`, inline: true },
@@ -392,6 +396,7 @@ async function handleReportMessageModal(
           },
         )
         .setTimestamp();
+      applyBrand(embed, kit, { intent: 'danger', attribution: false });
 
       await (logChannel as TextChannel).send({ embeds: [embed] });
     }

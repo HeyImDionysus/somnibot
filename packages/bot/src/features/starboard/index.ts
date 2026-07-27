@@ -21,6 +21,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
+import { applyBrand, resolveBrandKit } from '../branding/index.js';
 
 const log = createLogger('Starboard');
 
@@ -170,8 +171,8 @@ export async function handleStarboardReaction(
     .eq('source_message_id', message.id)
     .maybeSingle();
 
+  const kit = await resolveBrandKit(supabase, guildId, { fallbackName: guild.name });
   const embed = new EmbedBuilder()
-    .setColor(0xFFAC33)
     .setAuthor({
       name: message.author?.tag ?? 'Unknown',
       iconURL: message.author?.displayAvatarURL() ?? undefined,
@@ -182,6 +183,7 @@ export async function handleStarboardReaction(
       { name: 'Channel', value: `<#${message.channel.id}>`, inline: true },
     )
     .setTimestamp(message.createdAt);
+  applyBrand(embed, kit, { intent: 'warning' });
 
   // Add first image attachment if present
   const imageAttachment = message.attachments.find((a) =>

@@ -11,7 +11,8 @@ import type { Guild } from 'discord.js';
 import { EmbedBuilder } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
-import { SOMNI_PALETTE, createLogger, type PlatformEvent } from '@somnibot/shared';
+import { createLogger, type PlatformEvent } from '@somnibot/shared';
+import { applyBrand, resolveBrandKit } from '../features/branding/index.js';
 import { deterministicUuidV8 } from '../utils/deterministic-uuid.js';
 import {
   codePointLength,
@@ -440,8 +441,11 @@ export class GiveawayFulfillmentService {
   ): Promise<string> {
     const member = await this.guild.members.fetch(winnerId);
 
+    // Event-driven (no interaction): the cached guild name is the brand fallback.
+    const kit = await resolveBrandKit(this.supabase, this.guild.id, {
+      fallbackName: this.guild.name,
+    });
     const embed = new EmbedBuilder()
-      .setColor(SOMNI_PALETTE.CYAN)
       .setTitle('🎉 You Won a Giveaway!')
       .setDescription(
         `Congratulations! You won **${prize}** in **${this.guild.name}**!` +
@@ -451,6 +455,7 @@ export class GiveawayFulfillmentService {
       )
       .setTimestamp()
       .setFooter({ text: this.guild.name, iconURL: this.guild.iconURL() ?? undefined });
+    applyBrand(embed, kit, { intent: 'info' });
 
     const message = await member.send({
       embeds: [embed],

@@ -33,6 +33,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { writeAuditLog } from '../../services/audit.js';
 import { createLogger, type PurgeMemberDataRpcResult } from '@somnibot/shared';
+import { applyBrand, brandedEmbed, resolveBrandKit } from '../branding/index.js';
 
 const log = createLogger('ForgetMe');
 
@@ -65,6 +66,12 @@ export async function handleForgetMeCommand(
 
   const userId = interaction.user.id;
 
+  // White-label: every reply in this flow is framed with the owner's brand
+  // kit (kit resolved once per handler; cached).
+  const kit = await resolveBrandKit(supabase, guildId, {
+    fallbackName: interaction.guild?.name,
+  });
+
   // Show confirmation prompt
   const confirmEmbed = new EmbedBuilder()
     .setTitle('⚠️ Permanent Data Deletion')
@@ -84,8 +91,8 @@ export async function handleForgetMeCommand(
       'The bot will not re-create the deleted record on its own — only if you leave and rejoin.\n\n' +
       '**This cannot be undone.** Are you sure?',
     )
-    .setColor(0xff0000)
     .setFooter({ text: 'This button expires in 30 seconds' });
+  applyBrand(confirmEmbed, kit, { intent: 'danger' });
 
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
@@ -115,9 +122,10 @@ export async function handleForgetMeCommand(
     if (buttonInteraction.customId === 'forgetme_cancel') {
       await buttonInteraction.update({
         embeds: [
-          new EmbedBuilder()
-            .setDescription('✅ Cancelled — your data has not been changed.')
-            .setColor(0x00ff00),
+          brandedEmbed(kit, {
+            intent: 'primary',
+            description: '✅ Cancelled — your data has not been changed.',
+          }),
         ],
         components: [],
       });
@@ -127,9 +135,10 @@ export async function handleForgetMeCommand(
     // User confirmed — execute the purge
     await buttonInteraction.update({
       embeds: [
-        new EmbedBuilder()
-          .setDescription('🔄 Deleting your data... this may take a moment.')
-          .setColor(0xffaa00),
+        brandedEmbed(kit, {
+          intent: 'warning',
+          description: '🔄 Deleting your data... this may take a moment.',
+        }),
       ],
       components: [],
     });
@@ -151,9 +160,10 @@ export async function handleForgetMeCommand(
       log.error(`member_erasures marker write failed for ${userId}:`, markerError.message);
       await interaction.editReply({
         embeds: [
-          new EmbedBuilder()
-            .setDescription('❌ An error occurred while deleting your data. Please contact a server administrator.')
-            .setColor(0xff0000),
+          brandedEmbed(kit, {
+            intent: 'danger',
+            description: '❌ An error occurred while deleting your data. Please contact a server administrator.',
+          }),
         ],
         components: [],
       });
@@ -182,9 +192,10 @@ export async function handleForgetMeCommand(
       log.error(`purge_member_data failed for ${userId}:`, error.message);
       await interaction.editReply({
         embeds: [
-          new EmbedBuilder()
-            .setDescription('❌ An error occurred while deleting your data. Please contact a server administrator.')
-            .setColor(0xff0000),
+          brandedEmbed(kit, {
+            intent: 'danger',
+            description: '❌ An error occurred while deleting your data. Please contact a server administrator.',
+          }),
         ],
         components: [],
       });
@@ -195,9 +206,10 @@ export async function handleForgetMeCommand(
       log.error(`purge_member_data returned a malformed result for ${userId}`);
       await interaction.editReply({
         embeds: [
-          new EmbedBuilder()
-            .setDescription('❌ The deletion request returned an invalid result. Please contact a server administrator.')
-            .setColor(0xff0000),
+          brandedEmbed(kit, {
+            intent: 'danger',
+            description: '❌ The deletion request returned an invalid result. Please contact a server administrator.',
+          }),
         ],
         components: [],
       });
@@ -210,17 +222,20 @@ export async function handleForgetMeCommand(
         : 0;
       await interaction.editReply({
         embeds: [
-          new EmbedBuilder()
-            .setTitle('⏳ Role Cleanup In Progress')
-            .setDescription(
-              'Your deletion request is active. Data that could be removed immediately has been deleted, ' +
-              'but Somnibot is still removing Discord roles it can prove it added. The minimum commerce ' +
-              'identity evidence needed for that cleanup is being retained until it settles.\n\n' +
-              `**Pending cleanup work:** ${pendingCount}\n\n` +
-              'Run `/forgetme` again after the cleanup finishes to erase the retained commerce identity and tombstones.',
-            )
-            .setColor(0xffaa00)
-            .setFooter({ text: 'No completed-deletion audit was recorded yet' }),
+          applyBrand(
+            new EmbedBuilder()
+              .setTitle('⏳ Role Cleanup In Progress')
+              .setDescription(
+                'Your deletion request is active. Data that could be removed immediately has been deleted, ' +
+                'but Somnibot is still removing Discord roles it can prove it added. The minimum commerce ' +
+                'identity evidence needed for that cleanup is being retained until it settles.\n\n' +
+                `**Pending cleanup work:** ${pendingCount}\n\n` +
+                'Run `/forgetme` again after the cleanup finishes to erase the retained commerce identity and tombstones.',
+              )
+              .setFooter({ text: 'No completed-deletion audit was recorded yet' }),
+            kit,
+            { intent: 'warning' },
+          ),
         ],
         components: [],
       });
@@ -244,8 +259,8 @@ export async function handleForgetMeCommand(
           ? `**Deleted:**\n${deletedItems}`
           : 'No data was found to delete.'),
       )
-      .setColor(0x00ff00)
       .setFooter({ text: 'This action is irreversible' });
+    applyBrand(successEmbed, kit, { intent: 'primary' });
 
     await interaction.editReply({
       embeds: [successEmbed],
@@ -272,9 +287,10 @@ export async function handleForgetMeCommand(
     // Timeout — no confirmation received
     await interaction.editReply({
       embeds: [
-        new EmbedBuilder()
-          .setDescription('⏰ Confirmation timed out — your data has not been changed.')
-          .setColor(0x808080),
+        brandedEmbed(kit, {
+          intent: 'info',
+          description: '⏰ Confirmation timed out — your data has not been changed.',
+        }),
       ],
       components: [],
     });

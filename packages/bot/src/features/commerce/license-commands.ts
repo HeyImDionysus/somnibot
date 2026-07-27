@@ -14,13 +14,9 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { hashLicenseKey } from './key-generator.js';
 import { createLogger } from '@somnibot/shared';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import { applyBrand, brandedEmbed, resolveBrandKit } from '../branding/index.js';
 
 const log = createLogger('LicenseCmd');
-
-const HOT_PINK = 0xFF1493;
-const GREEN = 0x57F287;
-const RED = 0xED4245;
 
 /**
  * Branded degradation for license surfaces during a database outage. A failed
@@ -98,6 +94,11 @@ async function handleActivate(
   const rawKey = interaction.options.getString('key', true).trim().toUpperCase();
   const discordId = interaction.user.id;
 
+  // Buyer-facing surface: kit resolved once per handler (cached).
+  const kit = await resolveBrandKit(supabase, guildId, {
+    fallbackName: interaction.guild?.name,
+  });
+
   // Hash the key for lookup
   const keyHash = hashLicenseKey(rawKey);
 
@@ -119,10 +120,11 @@ async function handleActivate(
   if (!licenseKey) {
     await interaction.editReply({
       embeds: [
-        new EmbedBuilder()
-          .setColor(RED)
-          .setTitle('❌ Invalid Key')
-          .setDescription('That license key was not found. Please check the key and try again.'),
+        brandedEmbed(kit, {
+          intent: 'danger',
+          title: '❌ Invalid Key',
+          description: 'That license key was not found. Please check the key and try again.',
+        }),
       ],
     });
     return;
@@ -132,10 +134,11 @@ async function handleActivate(
   if (licenseKey.bound_discord_id !== discordId) {
     await interaction.editReply({
       embeds: [
-        new EmbedBuilder()
-          .setColor(RED)
-          .setTitle('❌ Key Bound to Another User')
-          .setDescription('This license key is bound to a different Discord account and cannot be activated here.'),
+        brandedEmbed(kit, {
+          intent: 'danger',
+          title: '❌ Key Bound to Another User',
+          description: 'This license key is bound to a different Discord account and cannot be activated here.',
+        }),
       ],
     });
     return;
@@ -145,10 +148,11 @@ async function handleActivate(
   if (licenseKey.status === 'active') {
     await interaction.editReply({
       embeds: [
-        new EmbedBuilder()
-          .setColor(0xFEE75C)
-          .setTitle('⚠️ Already Activated')
-          .setDescription('This license key is already active.'),
+        brandedEmbed(kit, {
+          intent: 'warning',
+          title: '⚠️ Already Activated',
+          description: 'This license key is already active.',
+        }),
       ],
     });
     return;
@@ -158,10 +162,11 @@ async function handleActivate(
   if (licenseKey.status !== 'pending_activation') {
     await interaction.editReply({
       embeds: [
-        new EmbedBuilder()
-          .setColor(RED)
-          .setTitle('❌ Cannot Activate')
-          .setDescription(`This key is currently **${licenseKey.status}** and cannot be activated.`),
+        brandedEmbed(kit, {
+          intent: 'danger',
+          title: '❌ Cannot Activate',
+          description: `This key is currently **${licenseKey.status}** and cannot be activated.`,
+        }),
       ],
     });
     return;
@@ -194,10 +199,11 @@ async function handleActivate(
     // (the key is active) without double-granting.
     await interaction.editReply({
       embeds: [
-        new EmbedBuilder()
-          .setColor(0xFEE75C)
-          .setTitle('⚠️ Already Activated')
-          .setDescription('This license key is already active.'),
+        brandedEmbed(kit, {
+          intent: 'warning',
+          title: '⚠️ Already Activated',
+          description: 'This license key is already active.',
+        }),
       ],
     });
     return;
@@ -238,17 +244,20 @@ async function handleActivate(
 
   await interaction.editReply({
     embeds: [
-      new EmbedBuilder()
-        .setColor(GREEN)
-        .setTitle('✅ License Activated!')
-        .setDescription(
-          `Your license for **${licenseKey.products?.name ?? 'Unknown Product'}** has been activated.`,
-        )
-        .addFields(
-          roleIds.length > 0
-            ? { name: 'Roles Granted', value: roleIds.map((r: string) => `<@&${r}>`).join(', ') }
-            : { name: 'Status', value: 'Active' },
-        ),
+      applyBrand(
+        new EmbedBuilder()
+          .setTitle('✅ License Activated!')
+          .setDescription(
+            `Your license for **${licenseKey.products?.name ?? 'Unknown Product'}** has been activated.`,
+          )
+          .addFields(
+            roleIds.length > 0
+              ? { name: 'Roles Granted', value: roleIds.map((r: string) => `<@&${r}>`).join(', ') }
+              : { name: 'Status', value: 'Active' },
+          ),
+        kit,
+        { intent: 'primary' },
+      ),
     ],
   });
 }
@@ -261,6 +270,11 @@ async function handleCheck(
   await interaction.deferReply({ ephemeral: true });
 
   const discordId = interaction.user.id;
+
+  // Buyer-facing surface: kit resolved once per handler (cached).
+  const kit = await resolveBrandKit(supabase, guildId, {
+    fallbackName: interaction.guild?.name,
+  });
 
   // Find customer. Error ≠ "no purchases": a failed read during an outage must
   // degrade, never tell a paying customer their purchases don't exist.
@@ -279,10 +293,11 @@ async function handleCheck(
   if (!customer) {
     await interaction.editReply({
       embeds: [
-        new EmbedBuilder()
-          .setColor(HOT_PINK)
-          .setTitle('📋 Your Entitlements')
-          .setDescription('You have no purchases in this server.'),
+        brandedEmbed(kit, {
+          intent: 'primary',
+          title: '📋 Your Entitlements',
+          description: 'You have no purchases in this server.',
+        }),
       ],
     });
     return;
@@ -306,10 +321,11 @@ async function handleCheck(
   if (!entitlements || entitlements.length === 0) {
     await interaction.editReply({
       embeds: [
-        new EmbedBuilder()
-          .setColor(HOT_PINK)
-          .setTitle('📋 Your Entitlements')
-          .setDescription('You have no active entitlements.'),
+        brandedEmbed(kit, {
+          intent: 'primary',
+          title: '📋 Your Entitlements',
+          description: 'You have no active entitlements.',
+        }),
       ],
     });
     return;
@@ -334,10 +350,11 @@ async function handleCheck(
 
   await interaction.editReply({
     embeds: [
-      new EmbedBuilder()
-        .setColor(HOT_PINK)
-        .setTitle('📋 Your Entitlements')
-        .setDescription(lines.join('\n')),
+      brandedEmbed(kit, {
+        intent: 'primary',
+        title: '📋 Your Entitlements',
+        description: lines.join('\n'),
+      }),
     ],
   });
 }
@@ -377,8 +394,10 @@ async function handleInfo(
     return;
   }
 
+  const kit = await resolveBrandKit(supabase, guildId, {
+    fallbackName: interaction.guild?.name,
+  });
   const embed = new EmbedBuilder()
-    .setColor(HOT_PINK)
     .setTitle('🔑 License Key Info')
     .addFields(
       { name: 'Key', value: `${licenseKey.key_prefix}-****-****-****-${licenseKey.key_suffix}`, inline: true },
@@ -408,5 +427,6 @@ async function handleInfo(
     embed.addFields({ name: `Active Sessions (${sessions.length})`, value: sessionLines.join('\n') });
   }
 
+  applyBrand(embed, kit, { intent: 'primary' });
   await interaction.editReply({ embeds: [embed] });
 }

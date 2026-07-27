@@ -14,6 +14,7 @@ import {
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import { createLogger } from '@somnibot/shared';
+import { applyBrand, resolveBrandKit } from '../branding/index.js';
 
 const log = createLogger('MyData');
 
@@ -48,17 +49,23 @@ export async function handleMyDataCommand(
 
     // Attempt to DM the user
     try {
+      const kit = await resolveBrandKit(client.supabase, guildId, {
+        fallbackName: interaction.guild?.name,
+      });
       const dmChannel = await interaction.user.createDM();
       await dmChannel.send({
         embeds: [
-          new EmbedBuilder()
-            .setTitle('📦 Your Data Export')
-            .setDescription(
-              `Here's all the data we have stored for you on **${interaction.guild?.name ?? 'this server'}**.`,
-            )
-            .setColor(0x5865f2)
-            .setFooter({ text: 'This file contains your personal data — keep it safe.' })
-            .setTimestamp(),
+          applyBrand(
+            new EmbedBuilder()
+              .setTitle('📦 Your Data Export')
+              .setDescription(
+                `Here's all the data we have stored for you on **${interaction.guild?.name ?? 'this server'}**.`,
+              )
+              .setFooter({ text: 'This file contains your personal data — keep it safe.' })
+              .setTimestamp(),
+            kit,
+            { intent: 'info' },
+          ),
         ],
         files: [attachment],
       });

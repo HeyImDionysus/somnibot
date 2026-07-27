@@ -14,7 +14,8 @@ import {
   type ChatInputCommandInteraction,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
-import { SOMNI_PALETTE, createLogger } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+import { applyBrand, resolveBrandKit } from '../branding/index.js';
 import {
   AppealsManager,
   APPEAL_REASON_MAX,
@@ -143,12 +144,15 @@ export async function handleAppealCommand(
       return `${STATUS_BADGE[a.status]} — ${date}\n   Infraction: \`${a.infraction_id.slice(0, 8)}…\`\n   “${reason}”`;
     });
 
+    const kit = await resolveBrandKit(client.supabase, guildId, {
+      fallbackName: interaction.guild?.name,
+    });
     const embed = new EmbedBuilder()
-      .setColor(SOMNI_PALETTE.CYAN)
       .setTitle('📋 Your Appeals')
       .setDescription(lines.join('\n\n'))
       .setFooter({ text: `${appeals.length} appeal(s)` })
       .setTimestamp();
+    applyBrand(embed, kit, { intent: 'info' });
 
     await interaction.editReply({ embeds: [embed] });
     return;

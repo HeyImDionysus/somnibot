@@ -315,6 +315,8 @@ describe('deliver_receipt action', () => {
         productName: 'VIP Pass',
         licenseKey: 'SMNI-AAAA-BBBB-CCCC-DDDD',
       }),
+      // White-label: the receipt DM now renders through the guild's brand kit.
+      expect.objectContaining({ brandName: expect.any(String) }),
     );
     expect(supa.__queueUpdates).toContainEqual(
       expect.objectContaining({ status: 'completed' }),
@@ -610,6 +612,8 @@ describe('deliver_receipt action', () => {
         orderNumber: 'ORD-001',
         licenseKey: 'SMNI-AAAA-BBBB-CCCC-DDDD',
       }),
+      // White-label: the receipt DM now renders through the guild's brand kit.
+      expect.objectContaining({ brandName: expect.any(String) }),
     );
     await vi.waitFor(() => {
       expect(supa.__queueUpdates).toContainEqual(
@@ -696,6 +700,8 @@ describe('deliver_receipt action', () => {
     expect(mockDeliverReceiptDM).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ licenseKey: 'SMNI-AAAA-BBBB-CCCC-DDDD' }),
+      // White-label: the receipt DM now renders through the guild's brand kit.
+      expect.objectContaining({ brandName: expect.any(String) }),
     );
     // …and the queue row's payload still carries it (not mutated by redaction)
     expect(action.payload.license_key_plaintext).toBe('SMNI-AAAA-BBBB-CCCC-DDDD');
@@ -778,6 +784,8 @@ describe('deliver_receipt action', () => {
     expect(mockDeliverReceiptDM).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ date: new Date(orderDate) }),
+      // White-label: the receipt DM now renders through the guild's brand kit.
+      expect.objectContaining({ brandName: expect.any(String) }),
     );
   });
 
