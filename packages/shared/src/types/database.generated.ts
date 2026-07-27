@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 196 migration files in packages/supabase/migrations/
+ * Source: 197 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -426,6 +426,7 @@ export interface DbGuildConfig {
   memory_alert_threshold_mb: number;
   ws_ping_alert_threshold_ms: number;
   webhook_error_rate_threshold: number;
+  diagnostics_guided_mode: boolean;
 }
 
 export interface DbInstanceSettings {

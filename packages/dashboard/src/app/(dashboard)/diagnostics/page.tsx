@@ -9,6 +9,7 @@
 import { DashboardSkeleton } from '@/components/shared/loading-skeleton';
 
 import { useEffect, useState, useCallback } from 'react';
+import { DIAGNOSTICS_GUIDANCE, type GuidedMetric } from '@/lib/diagnostics-guidance';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -24,6 +25,14 @@ interface Alert {
 }
 
 interface DiagnosticsData {
+  /** When true, each metric is shown with a plain-English explanation. */
+  guidedMode?: boolean;
+  /** The owner's configured alert thresholds (what the bot actually alerts on). */
+  thresholds?: {
+    memoryRssMb: number;
+    wsPingMs: number;
+    webhookErrorRate: number;
+  };
   bot: {
     online: boolean;
     uptimeSeconds: number;
@@ -98,6 +107,28 @@ function formatDate(ts: string | null): string {
   return new Date(ts).toLocaleString('en-US', {
     month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
   });
+}
+
+/**
+ * Plain-English explanation of one metric, shown under its raw value when the
+ * owner has guided mode on. Renders nothing when guided mode is off, so the
+ * page stays terse for readers who don't need it.
+ */
+function Guidance({ metric, on }: { metric: GuidedMetric; on: boolean }) {
+  if (!on) return null;
+  const g = DIAGNOSTICS_GUIDANCE[metric];
+  if (!g) return null;
+  return (
+    <div className="mt-2 rounded-md border border-discord-border/60 bg-discord-bg-secondary/40 p-2">
+      <p className="text-xs text-discord-text-secondary">{g.plainLanguage}</p>
+      <p className="mt-1 text-xs text-discord-text-muted">
+        <span className="font-medium text-discord-text-secondary">Normal:</span> {g.healthyRange}
+      </p>
+      <p className="mt-1 text-xs text-discord-text-muted">
+        <span className="font-medium text-discord-text-secondary">If it isn&apos;t:</span> {g.nextStep}
+      </p>
+    </div>
+  );
 }
 
 function StatusDot({ ok, muted = false }: { ok: boolean; muted?: boolean }) {
@@ -176,6 +207,10 @@ export default function DiagnosticsPage() {
   const [whLoading, setWhLoading] = useState(true);
   const [replayingId, setReplayingId] = useState<string | null>(null);
 
+  // Alerting-threshold save state
+  const [savingThresholds, setSavingThresholds] = useState(false);
+  const [thresholdError, setThresholdError] = useState<string | null>(null);
+
   // Alert state
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(true);
@@ -193,6 +228,36 @@ export default function DiagnosticsPage() {
       setAlertsLoading(false);
     }
   }, []);
+
+  /**
+   * Persist one alerting setting. Saves on blur rather than on every keystroke
+   * so a half-typed number ("5" on the way to "512") is never written, and
+   * re-reads afterwards so the field shows what was actually stored.
+   */
+  const saveThresholds = async (patch: Record<string, number | boolean>) => {
+    setSavingThresholds(true);
+    setThresholdError(null);
+    try {
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setThresholdError(
+          (body as { error?: string }).error
+          ?? 'Could not save that value. Check it is inside the allowed range.',
+        );
+        return;
+      }
+      await fetchDiagnostics();
+    } catch {
+      setThresholdError('Could not reach the server to save that setting.');
+    } finally {
+      setSavingThresholds(false);
+    }
+  };
 
   const handleAcknowledgeAlert = async (alertId: string) => {
     try {
@@ -397,6 +462,8 @@ export default function DiagnosticsPage() {
               <span className="text-discord-text-secondary">{diag?.bot.activeVoiceConnections ?? 0}</span>
             </div>
           </div>
+          <Guidance metric="uptime" on={diag?.guidedMode !== false} />
+          <Guidance metric="wsPing" on={diag?.guidedMode !== false} />
         </div>
 
         {/* Memory */}
@@ -419,6 +486,8 @@ export default function DiagnosticsPage() {
               <span className="text-discord-text-secondary">{formatDate(diag?.bot.snapshotAt ?? null)}</span>
             </div>
           </div>
+          <Guidance metric="memory" on={diag?.guidedMode !== false} />
+          <Guidance metric="snapshotStaleness" on={diag?.guidedMode !== false} />
         </div>
 
         {/* Supabase */}
@@ -506,6 +575,68 @@ export default function DiagnosticsPage() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Alerting thresholds — the numbers the bot actually alerts on. */}
+      <div className="rounded-lg bg-discord-bg-secondary p-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="text-lg font-semibold text-discord-text-primary">Alerting</h2>
+            <p className="mt-1 text-sm text-discord-text-muted">
+              When to warn you. Defaults suit a typical server — raise them if you get
+              alerts you don&apos;t care about, lower them to hear about problems sooner.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-2 text-sm text-discord-text-secondary">
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={diag?.guidedMode !== false}
+                onChange={(e) => void saveThresholds({ diagnostics_guided_mode: e.target.checked })}
+                disabled={savingThresholds}
+              />
+              Explain these numbers
+            </label>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 sm:grid-cols-3">
+          <label className="block text-sm">
+            <span className="text-discord-text-muted">Memory warning above (MB)</span>
+            <input
+              type="number" min={64} max={16384}
+              defaultValue={diag?.thresholds?.memoryRssMb ?? 512}
+              onBlur={(e) => void saveThresholds({ memory_alert_threshold_mb: Number(e.target.value) })}
+              disabled={savingThresholds}
+              className="mt-1 w-full rounded-md border border-discord-border bg-discord-bg-primary px-2 py-1 text-discord-text-primary"
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="text-discord-text-muted">Gateway ping warning above (ms)</span>
+            <input
+              type="number" min={50} max={10000}
+              defaultValue={diag?.thresholds?.wsPingMs ?? 500}
+              onBlur={(e) => void saveThresholds({ ws_ping_alert_threshold_ms: Number(e.target.value) })}
+              disabled={savingThresholds}
+              className="mt-1 w-full rounded-md border border-discord-border bg-discord-bg-primary px-2 py-1 text-discord-text-primary"
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="text-discord-text-muted">Webhook failure rate above (0–1)</span>
+            <input
+              type="number" min={0} max={1} step={0.01}
+              defaultValue={diag?.thresholds?.webhookErrorRate ?? 0.25}
+              onBlur={(e) => void saveThresholds({ webhook_error_rate_threshold: Number(e.target.value) })}
+              disabled={savingThresholds}
+              className="mt-1 w-full rounded-md border border-discord-border bg-discord-bg-primary px-2 py-1 text-discord-text-primary"
+            />
+          </label>
+        </div>
+
+        {thresholdError && (
+          <p className="mt-3 text-sm text-red-400">{thresholdError}</p>
+        )}
       </div>
 
       {/* V53 Phase 2: Latency sparklines */}

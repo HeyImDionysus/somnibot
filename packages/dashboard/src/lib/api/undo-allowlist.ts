@@ -257,6 +257,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "member_role_id",
         "message_log_channel_id",
         "message_log_enabled",
+        "diagnostics_guided_mode",
         "memory_alert_threshold_mb",
         "mod_log_channel_id",
         "music_auto_destroy_minutes",
