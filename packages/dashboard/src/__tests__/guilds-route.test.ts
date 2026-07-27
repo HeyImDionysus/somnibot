@@ -164,3 +164,60 @@ describe('GET /api/guilds', () => {
     expect(res.status).toBe(500);
   });
 });
+
+/**
+ * The guild list is 30/min per IP. Before the shared helper, the route read
+ * index 0 of X-Forwarded-For — the value the CLIENT supplied — and fell back to
+ * `x-real-ip`, which a client can also send when the proxy does not set it. So
+ * the limit was defeated by rotating one header.
+ */
+describe('GET /api/guilds — rate-limit bucket cannot be spoofed', () => {
+  /** The bucket key the route handed the limiter on its most recent call. */
+  function lastKey(): string {
+    const calls = (checkRateLimit as ReturnType<typeof vi.fn>).mock.calls;
+    return String(calls.at(-1)?.[0]);
+  }
+
+  beforeEach(() => {
+    (checkRateLimit as ReturnType<typeof vi.fn>).mockResolvedValue({
+      limited: false,
+      remaining: 30,
+      retryAfterMs: 0,
+    });
+    (requireAuth as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      userId: 'user-1',
+      discordId: 'discord-123',
+    });
+    mockFrom.mockReturnValue({
+      select: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue({ data: [], error: null }),
+    });
+  });
+
+  it('keys on the proxy-observed address, not the caller-supplied prefix', async () => {
+    await GET(makeRequest({ 'x-forwarded-for': '9.9.9.9, 198.51.100.2' }) as never);
+    expect(lastKey()).toBe('guilds:list:198.51.100.2');
+  });
+
+  it('gives a rotating forged prefix the same bucket every time', async () => {
+    const keys = new Set<string>();
+    for (const forged of ['1.1.1.1', '2.2.2.2', '3.3.3.3']) {
+      await GET(makeRequest({ 'x-forwarded-for': `${forged}, 198.51.100.2` }) as never);
+      keys.add(lastKey());
+    }
+    expect(keys.size, 'rotating the forged prefix must not split the bucket').toBe(1);
+  });
+
+  it('ignores x-real-ip rather than trusting a header Caddy never sets', async () => {
+    // makeRequest always sets x-forwarded-for, so override it away explicitly.
+    const req = new Request('http://localhost/api/guilds', {
+      method: 'GET',
+      headers: { 'x-real-ip': '203.0.113.9' },
+    });
+    await GET(req as never);
+    expect(lastKey()).toBe('guilds:list:unknown');
+    expect(lastKey()).not.toContain('203.0.113.9');
+  });
+});

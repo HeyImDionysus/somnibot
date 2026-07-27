@@ -101,3 +101,48 @@ describe('POST /api/portal/auth guild scoping', () => {
     expect(insertedSession).toBeNull();
   });
 });
+
+/**
+ * The address recorded on a portal login is not just a rate-limit bucket — it is
+ * persisted as `portal_sessions.ip_address` and written into the commerce audit
+ * trail, which is the record you reach for when investigating account takeover.
+ *
+ * The route previously read index 0 of X-Forwarded-For, i.e. whatever the caller
+ * put there. That meant an attacker could BOTH rotate the header for a fresh
+ * bucket against the 10-per-5-minutes brute-force limit, AND write an address of
+ * their choosing into the evidence. These pin both halves shut.
+ */
+describe('POST /api/portal/auth — recorded client IP cannot be forged', () => {
+  function loginWith(forwardedFor: string) {
+    return POST(new NextRequest('https://dash.example/api/portal/auth', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://dash.example',
+        'x-forwarded-for': forwardedFor,
+      },
+      body: JSON.stringify({ action: 'login', code: 'oauth-code', guild_id: 'guild-B' }),
+    }));
+  }
+
+  it('persists the proxy-observed address, not the caller-supplied prefix', async () => {
+    const res = await loginWith('9.9.9.9, 198.51.100.2');
+
+    expect(res.status).toBe(200);
+    expect(insertedSession).toMatchObject({ ip_address: '198.51.100.2' });
+    // The forged value must not reach the stored record at all.
+    expect(insertedSession?.ip_address).not.toBe('9.9.9.9');
+  });
+
+  it('records the same address however the caller rewrites the prefix', async () => {
+    const recorded = new Set<unknown>();
+    for (const forged of ['1.1.1.1', '2.2.2.2', '3.3.3.3']) {
+      insertedSession = null;
+      await loginWith(`${forged}, 198.51.100.2`);
+      recorded.add(insertedSession?.ip_address);
+    }
+
+    expect(recorded.size, 'forged prefixes must not produce distinct audit addresses').toBe(1);
+    expect([...recorded][0]).toBe('198.51.100.2');
+  });
+});
