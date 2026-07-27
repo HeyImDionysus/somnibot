@@ -7,6 +7,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
 import { dbError } from '@/lib/api/response';
 import { BUILT_IN_TRIVIA_QUESTIONS } from '@somnibot/shared';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 // The bot serves these alongside the guild's custom pack (see shared/constants/
 // trivia.ts). Mapped once at module scope into the page's row shape — synthetic
@@ -71,6 +72,18 @@ export async function POST(request: NextRequest) {
       .single();
     if (error) return dbError(error, 'economy/trivia');
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'created',
+      action: 'economy.trivia_question_created',
+      table: 'economy_trivia_questions',
+      targetType: 'trivia question',
+      targetId: (data as { id?: string } | null)?.id ?? null,
+      label: undefined,
+      after: data as Record<string, unknown> | null,
+    }, supabase);
     return NextResponse.json({ success: true, question: data });
   } catch (e) {
     return authErrorResponse(e);
@@ -88,6 +101,8 @@ export async function PUT(request: NextRequest) {
     if (!result.ok) return result.response;
     const body = result.data;
     const supabase = createAdminSupabase();
+    const before = await readRowBefore(supabase, 'economy_trivia_questions', { id: body.id, guild_id: ctx.guildId });
+
     const { data, error } = await supabase
       .from('economy_trivia_questions')
       .update({
@@ -104,6 +119,26 @@ export async function PUT(request: NextRequest) {
       .single();
     if (error) return dbError(error, 'economy/trivia');
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'updated',
+      action: 'economy.trivia_question_updated',
+      table: 'economy_trivia_questions',
+      targetType: 'trivia question',
+      targetId: body.id,
+      label: (before?.question as string | undefined),
+      before,
+      after: {
+        category: body.category,
+        difficulty: body.difficulty,
+        question: body.question,
+        correct_answer: body.correct_answer,
+        wrong_answers: body.wrong_answers,
+      },
+      match: { id: body.id, guild_id: ctx.guildId },
+    }, supabase);
     return NextResponse.json({ success: true, question: data });
   } catch (e) {
     return authErrorResponse(e);
@@ -120,6 +155,8 @@ export async function DELETE(request: NextRequest) {
     const id = searchParams.get('id');
     if (!id) return NextResponse.json({ error: 'Missing id' }, { status: 400 });
     const supabase = createAdminSupabase();
+    const before = await readRowBefore(supabase, 'economy_trivia_questions', { id: id, guild_id: ctx.guildId });
+
     const { error } = await supabase
       .from('economy_trivia_questions')
       .delete()
@@ -127,6 +164,19 @@ export async function DELETE(request: NextRequest) {
       .eq('guild_id', ctx.guildId);
     if (error) return dbError(error, 'economy/trivia');
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'deleted',
+      action: 'economy.trivia_question_deleted',
+      table: 'economy_trivia_questions',
+      targetType: 'trivia question',
+      targetId: id,
+      label: (before?.question as string | undefined),
+      before,
+      blastRadius: 'medium',
+    }, supabase);
     return NextResponse.json({ success: true });
   } catch (e) {
     return authErrorResponse(e);
