@@ -30,6 +30,10 @@ import {
   loadProductTemporaryRoleIds,
   type PlanWallFields,
 } from '@/lib/api/commerce-income-wall';
+import {
+  ensureLicenseDeliveryConfigOrDisable,
+  requiresLicenseConfig,
+} from '@/lib/api/license-delivery-rail';
 
 // ── PayPal Helpers ─────────────────────────────────────
 
@@ -424,6 +428,14 @@ export async function POST(req: NextRequest) {
     return apiServerError(new Error('product insert returned no row'), 'store/products');
   }
 
+  // Finding 6: a licence-key product with no product_license_config takes the
+  // money and delivers no key. The DB trigger provisions it; verify the rail
+  // actually held for THIS product before reporting the product as created.
+  if (requiresLicenseConfig(delivery_type)) {
+    const rail = await ensureLicenseDeliveryConfigOrDisable(supabase, guildId, data.id);
+    if (!rail.ok) return apiError(rail.message, 500);
+  }
+
   // Persist the exact local IDs and PayPal-backed plan set evaluated above.
   const savedPlans: { id: string; paypalPlanId: string }[] = [];
 
@@ -596,6 +608,13 @@ export async function PUT(req: NextRequest) {
 
   if (error) {
     return commerceWriteError(error);
+  }
+
+  // Finding 6: switching an existing product to licence-key delivery must not
+  // leave it unable to deliver a key either.
+  if (requiresLicenseConfig(updates.delivery_type)) {
+    const rail = await ensureLicenseDeliveryConfigOrDisable(supabase, guildId, id);
+    if (!rail.ok) return apiError(rail.message, 500);
   }
 
   // Notify bot so it hot-reloads product changes

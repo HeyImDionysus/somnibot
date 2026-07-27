@@ -207,6 +207,43 @@ export async function handleBuyButton(
     return;
   }
 
+  // DELIVERABILITY guard — a licence-key product whose product_license_config
+  // row is missing takes the money, grants the entitlement and roles, and
+  // delivers NO key (the capture webhook mints a key only when that row
+  // exists). The database now auto-provisions the config, but this is the
+  // last-mile fence: never open a payment link for a product that provably
+  // cannot deliver what it sells. A read ERROR is not "no config" — during an
+  // outage the config may exist, so degrade honestly instead of refusing a
+  // valid sale.
+  if (product.delivery_type === 'license_key') {
+    const { data: licenseConfig, error: licenseConfigError } = await supabase
+      .from('product_license_config')
+      .select('product_id')
+      .eq('product_id', productId)
+      .maybeSingle();
+
+    if (licenseConfigError) {
+      await replyCheckoutUnavailable(interaction, supabase, guildId);
+      return;
+    }
+
+    if (!licenseConfig) {
+      log.error('Refusing checkout for licence product without licence config:', { productId });
+      await interaction.editReply({
+        embeds: [
+          brandedEmbed(brandKit, {
+            intent: 'warning',
+            title: '⚠️ Temporarily Unavailable',
+            description:
+              'This product is not ready to be delivered yet, so it cannot be purchased right now. '
+              + 'You have not been charged — please contact the server owner.',
+          }),
+        ],
+      });
+      return;
+    }
+  }
+
   // Check if user already has an active entitlement for this product. These
   // reads GUARD real money: proceeding when they error (rather than when they
   // genuinely return nothing) would let an outage bypass the already-purchased

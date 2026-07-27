@@ -579,3 +579,92 @@ describe('handleBuyButton — white-label PayPal checkout brand', () => {
     expect(payload.application_context.brand_name).toBe('Cool Server');
   });
 });
+
+describe('handleBuyButton — licence-key deliverability guard (Finding 6)', () => {
+  beforeEach(() => {
+    invalidateBrandKitCache();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const licenceProduct = {
+    ...oneTimeProduct,
+    id: 'prod-1',
+    name: 'Licensed App',
+    delivery_type: 'license_key',
+  };
+
+  function setupLicence(tables: Record<string, unknown[]>) {
+    const engine = makeQueryEngine({
+      products: [licenceProduct],
+      customers: [{ id: 'cust-1', guild_id: VICTIM_GUILD, discord_id: 'user-1' }],
+      entitlements: [],
+      orders: [],
+      ...tables,
+    });
+    const fetchMock = makePayPalFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    return { ...engine, fetchMock, interaction: makeInteraction() };
+  }
+
+  it('refuses checkout — no PayPal order, no local order — when licence config is missing', async () => {
+    const { supabase, inserts, fetchMock, interaction } = setupLicence({
+      product_license_config: [],
+    });
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    // The money path must never be entered for an undeliverable product.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/v2/checkout/orders'))).toBe(false);
+    expect(inserts.orders ?? []).toHaveLength(0);
+    // …and the buyer is told plainly, with no approval-link component.
+    expect(
+      interaction.editReply.mock.calls.some(
+        (call: Array<{ components?: unknown }>) => Array.isArray(call[0]?.components),
+      ),
+    ).toBe(false);
+    const embed = interaction.editReply.mock.calls.at(-1)![0].embeds[0];
+    expect(JSON.stringify(embed)).toContain('not ready to be delivered');
+  });
+
+  it('allows checkout when the licence config row exists', async () => {
+    const { supabase, inserts, fetchMock, interaction } = setupLicence({
+      product_license_config: [{ product_id: 'prod-1' }],
+    });
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/v2/checkout/orders'))).toBe(true);
+    expect(inserts.orders ?? []).toHaveLength(1);
+    expect(interaction.editReply).toHaveBeenLastCalledWith(
+      expect.objectContaining({ components: expect.any(Array) }),
+    );
+  });
+
+  it('does not gate non-licence delivery types on licence config', async () => {
+    const engine = makeQueryEngine({
+      products: [{ ...oneTimeProduct, delivery_type: 'file' }],
+      customers: [{ id: 'cust-1', guild_id: VICTIM_GUILD, discord_id: 'user-1' }],
+      entitlements: [],
+      orders: [],
+      product_license_config: [],
+    });
+    vi.stubGlobal('fetch', makePayPalFetch());
+    const interaction = makeInteraction();
+
+    await handleBuyButton(
+      interaction, engine.supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(engine.inserts.orders ?? []).toHaveLength(1);
+  });
+});
