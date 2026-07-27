@@ -14,6 +14,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -98,6 +99,18 @@ export async function POST(req: NextRequest) {
 
   await notifyBot('embeds');
 
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'created',
+    action: 'embeds.embed_created',
+    table: 'embed_configs',
+    targetType: 'embed',
+    targetId: (data as { id?: string } | null)?.id ?? null,
+    label: undefined,
+    after: data as Record<string, unknown> | null,
+  }, supabase);
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -125,6 +138,8 @@ export async function PUT(req: NextRequest) {
 
   updates.updated_at = new Date().toISOString();
 
+  const before = await readRowBefore(supabase, 'embed_configs', { id: body.id, guild_id: auth.ctx.guildId });
+
   const { data, error } = await supabase
     .from('embed_configs')
     .update(updates)
@@ -138,6 +153,21 @@ export async function PUT(req: NextRequest) {
   }
 
   await notifyBot('embeds');
+
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'updated',
+    action: 'embeds.embed_updated',
+    table: 'embed_configs',
+    targetType: 'embed',
+    targetId: body.id,
+    label: before?.name as string | undefined,
+
+    before,
+    after: updates as Record<string, unknown>,
+    match: { id: body.id, guild_id: auth.ctx.guildId },
+  }, supabase);
 
   return NextResponse.json({ success: true, data });
 }
@@ -161,6 +191,8 @@ export async function DELETE(req: NextRequest) {
     );
   }
 
+  const before = await readRowBefore(supabase, 'embed_configs', { id: id, guild_id: auth.ctx.guildId });
+
   const { error } = await supabase
     .from('embed_configs')
     .delete()
@@ -172,6 +204,19 @@ export async function DELETE(req: NextRequest) {
   }
 
   await notifyBot('embeds');
+
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'deleted',
+    action: 'embeds.embed_deleted',
+    table: 'embed_configs',
+    targetType: 'embed',
+    targetId: id,
+    label: before?.name as string | undefined,
+
+    before,
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }

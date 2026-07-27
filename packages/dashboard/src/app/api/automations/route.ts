@@ -14,6 +14,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 export async function GET() {
   const auth = await requireGuildOwner();
@@ -117,6 +118,19 @@ export async function POST(req: NextRequest) {
     },
   });
 
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'created',
+    action: 'automations.automation_created',
+    table: 'automations',
+    targetType: 'automation',
+    targetId: (data as { id?: string } | null)?.id ?? null,
+    label: undefined,
+    after: data as Record<string, unknown> | null,
+    blastRadius: 'medium',
+  }, supabase);
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -141,6 +155,8 @@ export async function PUT(req: NextRequest) {
 
   updates.updated_at = new Date().toISOString();
 
+  const before = await readRowBefore(supabase, 'automations', { id: body.id, guild_id: auth.ctx.guildId });
+
   const { data, error } = await supabase
     .from('automations')
     .update(updates)
@@ -163,6 +179,22 @@ export async function PUT(req: NextRequest) {
     },
   });
 
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'updated',
+    action: 'automations.automation_updated',
+    table: 'automations',
+    targetType: 'automation',
+    targetId: body.id,
+    label: before?.name as string | undefined,
+
+    before,
+    after: updates as Record<string, unknown>,
+    match: { id: body.id, guild_id: auth.ctx.guildId },
+    blastRadius: 'medium',
+  }, supabase);
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -183,6 +215,8 @@ export async function DELETE(req: NextRequest) {
   }
 
   // Fetch name before deleting so the audit event has context
+  const before = await readRowBefore(supabase, 'automations', { id: id, guild_id: auth.ctx.guildId });
+
   const { data: existing } = await supabase
     .from('automations')
     .select('name')
@@ -208,6 +242,20 @@ export async function DELETE(req: NextRequest) {
       deletedBy: auth.ctx.discordId,
     },
   });
+
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'deleted',
+    action: 'automations.automation_deleted',
+    table: 'automations',
+    targetType: 'automation',
+    targetId: id,
+    label: before?.name as string | undefined,
+
+    before,
+    blastRadius: 'medium',
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }

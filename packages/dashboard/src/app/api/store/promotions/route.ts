@@ -13,7 +13,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
-
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 export async function GET() {
   const auth = await requireGuildOwner();
@@ -95,6 +95,19 @@ export async function POST(req: NextRequest) {
     return dbError(error, 'store/promotions');
   }
 
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'created',
+    action: 'store.promotion_created',
+    table: 'promotions',
+    targetType: 'promotion',
+    targetId: (data as { id?: string } | null)?.id ?? null,
+    label: undefined,
+    after: data as Record<string, unknown> | null,
+    blastRadius: 'medium',
+  }, supabase);
+
   return NextResponse.json({ success: true, data });
 }
 
@@ -140,6 +153,8 @@ export async function PUT(req: NextRequest) {
     }
   }
 
+  const before = await readRowBefore(supabase, 'promotions', { id, guild_id: auth.ctx.guildId });
+
   const { data, error } = await supabase
     .from('promotions')
     .update({ ...updates, updated_at: new Date().toISOString() })
@@ -151,6 +166,22 @@ export async function PUT(req: NextRequest) {
   if (error) {
     return dbError(error, 'store/promotions');
   }
+
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'updated',
+    action: 'store.promotion_updated',
+    table: 'promotions',
+    targetType: 'promotion',
+    targetId: id,
+    label: before?.code as string | undefined,
+
+    before,
+    after: updates as Record<string, unknown>,
+    match: { id: id, guild_id: auth.ctx.guildId },
+    blastRadius: 'medium',
+  }, supabase);
 
   return NextResponse.json({ success: true, data });
 }
@@ -177,6 +208,8 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Invalid promotion id format' }, { status: 400 });
   }
 
+  const before = await readRowBefore(supabase, 'promotions', { id: id, guild_id: auth.ctx.guildId });
+
   const { error } = await supabase
     .from('promotions')
     .delete()
@@ -186,6 +219,20 @@ export async function DELETE(req: NextRequest) {
   if (error) {
     return dbError(error, 'store/promotions');
   }
+
+  await recordCrudChange({
+    guildId: auth.ctx.guildId,
+    actorId: auth.ctx.discordId,
+    operation: 'deleted',
+    action: 'store.promotion_deleted',
+    table: 'promotions',
+    targetType: 'promotion',
+    targetId: id,
+    label: before?.code as string | undefined,
+
+    before,
+    blastRadius: 'medium',
+  }, supabase);
 
   return NextResponse.json({ success: true });
 }

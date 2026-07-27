@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
 import { dbError, dbConflictOr500 } from '@/lib/api/response';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 const speciesSchema = z.object({
   id: z.string().uuid().optional(),
@@ -76,6 +77,18 @@ export async function POST(request: NextRequest) {
     if (error) return dbConflictOr500(error, 'economy/fishing', 'uq_economy_fish_species_guild_lname',
         'A fish species with that name already exists (names are case-insensitive).');
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'created',
+      action: 'economy.fish_species_created',
+      table: 'economy_fish_species',
+      targetType: 'fish species',
+      targetId: (data as { id?: string } | null)?.id ?? null,
+      label: undefined,
+      after: data as Record<string, unknown> | null,
+    }, supabase);
     return NextResponse.json({ data }, { status: 201 });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
@@ -105,6 +118,8 @@ export async function PUT(request: NextRequest) {
     if (parsed.base_price !== undefined) updateData.base_price = parsed.base_price;
     if (parsed.active !== undefined) updateData.active = parsed.active;
 
+    const before = await readRowBefore(supabase, 'economy_fish_species', { id: parsed.id, guild_id: ctx.guildId });
+
     const { data, error } = await supabase
       .from('economy_fish_species')
       .update(updateData)
@@ -116,6 +131,20 @@ export async function PUT(request: NextRequest) {
     if (error) return dbConflictOr500(error, 'economy/fishing', 'uq_economy_fish_species_guild_lname',
         'A fish species with that name already exists (names are case-insensitive).');
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'updated',
+      action: 'economy.fish_species_updated',
+      table: 'economy_fish_species',
+      targetType: 'fish species',
+      targetId: parsed.id,
+      label: (before?.name as string | undefined),
+      before,
+      after: (updateData ?? {}) as Record<string, unknown>,
+      match: { id: parsed.id, guild_id: ctx.guildId },
+    }, supabase);
     return NextResponse.json({ data });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
@@ -134,6 +163,8 @@ export async function DELETE(request: NextRequest) {
     if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 
     const supabase = createAdminSupabase();
+    const before = await readRowBefore(supabase, 'economy_fish_species', { id: id, guild_id: ctx.guildId });
+
     const { error } = await supabase
       .from('economy_fish_species')
       .delete()
@@ -142,6 +173,19 @@ export async function DELETE(request: NextRequest) {
 
     if (error) return dbError(error, 'economy/fishing');
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'deleted',
+      action: 'economy.fish_species_deleted',
+      table: 'economy_fish_species',
+      targetType: 'fish species',
+      targetId: id,
+      label: (before?.name as string | undefined),
+      before,
+      blastRadius: 'medium',
+    }, supabase);
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);

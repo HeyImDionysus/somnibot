@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
 import { dbError, dbConflictOr500 } from '@/lib/api/response';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 const adventureSchema = z.object({
   id: z.string().uuid().optional(),
@@ -78,6 +79,18 @@ export async function POST(request: NextRequest) {
     if (error) return dbConflictOr500(error, 'economy/adventures', 'uq_economy_adventures_guild_lname',
         'An adventure with that name already exists (names are case-insensitive).');
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'created',
+      action: 'economy.adventure_created',
+      table: 'economy_adventures',
+      targetType: 'adventure',
+      targetId: (data as { id?: string } | null)?.id ?? null,
+      label: undefined,
+      after: data as Record<string, unknown> | null,
+    }, supabase);
     return NextResponse.json({ data }, { status: 201 });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
@@ -108,6 +121,8 @@ export async function PUT(request: NextRequest) {
     if (parsed.max_scenes !== undefined) updateData.max_scenes = parsed.max_scenes;
     if (parsed.active !== undefined) updateData.active = parsed.active;
 
+    const before = await readRowBefore(supabase, 'economy_adventures', { id: parsed.id, guild_id: ctx.guildId });
+
     const { data, error } = await supabase
       .from('economy_adventures')
       .update(updateData)
@@ -119,6 +134,20 @@ export async function PUT(request: NextRequest) {
     if (error) return dbConflictOr500(error, 'economy/adventures', 'uq_economy_adventures_guild_lname',
         'An adventure with that name already exists (names are case-insensitive).');
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'updated',
+      action: 'economy.adventure_updated',
+      table: 'economy_adventures',
+      targetType: 'adventure',
+      targetId: parsed.id,
+      label: (before?.name as string | undefined),
+      before,
+      after: (updateData ?? {}) as Record<string, unknown>,
+      match: { id: parsed.id, guild_id: ctx.guildId },
+    }, supabase);
     return NextResponse.json({ data });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
@@ -137,6 +166,8 @@ export async function DELETE(request: NextRequest) {
     if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 
     const supabase = createAdminSupabase();
+    const before = await readRowBefore(supabase, 'economy_adventures', { id: id, guild_id: ctx.guildId });
+
     const { error } = await supabase
       .from('economy_adventures')
       .delete()
@@ -145,6 +176,19 @@ export async function DELETE(request: NextRequest) {
 
     if (error) return dbError(error, 'economy/adventures');
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      operation: 'deleted',
+      action: 'economy.adventure_deleted',
+      table: 'economy_adventures',
+      targetType: 'adventure',
+      targetId: id,
+      label: (before?.name as string | undefined),
+      before,
+      blastRadius: 'medium',
+    }, supabase);
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);

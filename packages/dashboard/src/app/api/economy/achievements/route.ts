@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 const achSchema = z.object({
   id: z.string().uuid().optional(),
@@ -57,6 +58,18 @@ export async function POST(req: NextRequest) {
       .single();
     if (error) return dbError(error, 'economy/achievements');
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: auth.guildId,
+      actorId: auth.discordId,
+      operation: 'created',
+      action: 'economy.achievement_created',
+      table: 'economy_achievement_defs',
+      targetType: 'achievement',
+      targetId: (data as { id?: string } | null)?.id ?? null,
+      label: (parsed.data as { name?: string }).name,
+      after: data as Record<string, unknown> | null,
+    }, supabase);
     return NextResponse.json({ data });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
@@ -76,6 +89,8 @@ export async function PUT(req: NextRequest) {
 
     const supabase = createAdminSupabase();
     const { id, ...rest } = parsed.data;
+    const before = await readRowBefore(supabase, 'economy_achievement_defs', { id, guild_id: auth.guildId });
+
     const { data, error } = await supabase
       .from('economy_achievement_defs')
       .update(rest)
@@ -85,6 +100,20 @@ export async function PUT(req: NextRequest) {
       .single();
     if (error) return dbError(error, 'economy/achievements');
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: auth.guildId,
+      actorId: auth.discordId,
+      operation: 'updated',
+      action: 'economy.achievement_updated',
+      table: 'economy_achievement_defs',
+      targetType: 'achievement',
+      targetId: id,
+      label: (before?.name as string | undefined) ?? (rest as { name?: string }).name,
+      before,
+      after: rest as Record<string, unknown>,
+      match: { id, guild_id: auth.guildId },
+    }, supabase);
     return NextResponse.json({ data });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
@@ -102,6 +131,9 @@ export async function DELETE(req: NextRequest) {
     if (!id) return NextResponse.json({ error: 'Missing id' }, { status: 400 });
 
     const supabase = createAdminSupabase();
+    // Captured first: the row is hard-deleted, so this is the only copy left.
+    const before = await readRowBefore(supabase, 'economy_achievement_defs', { id, guild_id: auth.guildId });
+
     const { error } = await supabase
       .from('economy_achievement_defs')
       .delete()
@@ -109,6 +141,19 @@ export async function DELETE(req: NextRequest) {
       .eq('guild_id', auth.guildId);
     if (error) return dbError(error, 'economy/achievements');
     await notifyBot('economy');
+
+    await recordCrudChange({
+      guildId: auth.guildId,
+      actorId: auth.discordId,
+      operation: 'deleted',
+      action: 'economy.achievement_deleted',
+      table: 'economy_achievement_defs',
+      targetType: 'achievement',
+      targetId: id,
+      label: before?.name as string | undefined,
+      before,
+      blastRadius: 'medium',
+    }, supabase);
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
