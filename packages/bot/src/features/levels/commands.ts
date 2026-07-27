@@ -283,7 +283,7 @@ export async function handleLeaderboardCommand(
     const offset = page * pageSize;
     const { data: pageData } = await client.supabase
       .from('member_levels')
-      .select('member_id, xp, level')
+      .select('member_id, xp')
       .eq('guild_id', guildId)
       .order('xp', { ascending: false })
       .range(offset, offset + pageSize - 1)
@@ -300,7 +300,15 @@ export async function handleLeaderboardCommand(
     const lines = pageData.map((entry, i) => {
       const pos = offset + i + 1;
       const medal = pos <= 3 ? medals[pos - 1] : `**${pos}.**`;
-      return `${medal} <@${entry.member_id}> — Level ${entry.level} (${entry.xp.toLocaleString()} XP)`;
+      // Level-curve parity: derive the level from the SAME XP shown beside it,
+      // exactly as the rank card does. This was the last surface still trusting
+      // the stored `level` column. After the 20260726126000 backfill the column
+      // and the curve agree, so today this changes nothing — but if any row ever
+      // drifts (a direct write that bypasses increment_member_xp/set_member_xp),
+      // /rank and /leaderboard would report different levels for the same
+      // member, which is precisely the split-brain that migration removed.
+      const derivedLevel = levelProgress(entry.xp).level;
+      return `${medal} <@${entry.member_id}> — Level ${derivedLevel} (${entry.xp.toLocaleString()} XP)`;
     });
 
     embed.setDescription(lines.join('\n')).setFooter({ text: `Page ${page + 1}/${totalPages}` });

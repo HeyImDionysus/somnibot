@@ -165,9 +165,31 @@ async function alertCount(handle: LiveClientHandle): Promise<number | null> {
 /** The text of a captured reply/editReply payload — discord.js accepts either a raw
  *  string or a `{ content }` object, so normalise both (a string payload otherwise
  *  reads as empty). */
+/**
+ * Flatten a reply payload to searchable text.
+ *
+ * Reads embeds as well as `content`. The branding sweep moved several
+ * member-facing surfaces — /leaderboard among them — from plain text to branded
+ * embeds, and a content-only reader silently returns '' for those. Every
+ * Discord-class assertion in this scenario then fails for a product that is
+ * working, which is exactly the kind of false signal that teaches people to
+ * ignore the harness.
+ */
 function payloadText(payload: unknown): string {
   if (typeof payload === 'string') return payload;
-  return String((payload as { content?: string } | undefined)?.content ?? '');
+  const p = payload as {
+    content?: string;
+    embeds?: Array<{ data?: { title?: string; description?: string; footer?: { text?: string } } }>;
+  } | undefined;
+  const parts: string[] = [];
+  if (p?.content) parts.push(p.content);
+  for (const embed of p?.embeds ?? []) {
+    const d = embed?.data;
+    if (d?.title) parts.push(d.title);
+    if (d?.description) parts.push(d.description);
+    if (d?.footer?.text) parts.push(d.footer.text);
+  }
+  return parts.join('\n');
 }
 
 /** Read the last editReply/reply content string a handler produced. */
@@ -543,21 +565,21 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
 
   // Arrange two known standings (A ahead of B), then read them back via the REAL
   // /leaderboard handler (reads member_levels, edits a text reply).
-  await seedMemberLevel(handle, userA, { xp: 200, level: 2, totalMessages: 12 });
+  await seedMemberLevel(handle, userA, { xp: 300, level: 2, totalMessages: 12 });
   await seedMemberLevel(handle, userB, { xp: 50, level: 0, totalMessages: 3 });
 
   const lb = await ctx.runSlash(handle, { commandName: 'leaderboard', userId: userA });
   const content = replyContent(lb);
   const idxA = content.indexOf(userA);
   const idxB = content.indexOf(userB);
-  ctx.expect(idxA >= 0 && idxB >= 0 && idxA < idxB && content.includes('200') && content.includes('Level 2'), {
+  ctx.expect(idxA >= 0 && idxB >= 0 && idxA < idxB && content.includes('300') && content.includes('Level 2'), {
     assertionClass: 'Discord',
     channel: 'captured-reply',
     promise:
       '/leaderboard lists members at the position implied by their recorded member_levels totals (highest XP first), with level + XP.',
     observation:
       `leaderboard reply "${truncate(content)}" — member-a index=${idxA}, member-b index=${idxB} ` +
-      `(a must precede b at 200 XP / Level 2).`,
+      `(a must precede b at 300 XP / Level 2).`,
     impact: 'The /leaderboard reply did not reflect the recorded member_levels standings.',
   });
 
@@ -656,7 +678,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
 
   // A member seeded at level 2 renders at level 2 on /leaderboard (the deterministic
   // standing the config + threshold produce; the accrual + grant paths gate below).
-  await seedMemberLevel(handle, userA, { xp: 200, level: 2, totalMessages: 4 });
+  await seedMemberLevel(handle, userA, { xp: 300, level: 2, totalMessages: 4 });
   const lb = await ctx.runSlash(handle, { commandName: 'leaderboard', userId: userA });
   ctx.expect(replyContent(lb).includes('Level 2') && replyContent(lb).includes(userA), {
     assertionClass: 'Discord',
@@ -854,7 +876,7 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
   if (supabaseFault) {
     const handle = await ctx.bootGuild({ label: 'a', guildConfigOverrides: { levels_enabled: true } });
     const userA = ctx.userId('a');
-    await seedMemberLevel(handle, userA, { xp: 200, level: 2, totalMessages: 12 });
+    await seedMemberLevel(handle, userA, { xp: 300, level: 2, totalMessages: 12 });
 
     // ── Outage window: a REAL severed network path (ECONNREFUSED). ──
     await supabaseFault.sever();
@@ -892,17 +914,17 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
 
     // (3) No corruption: the persisted row is byte-identical after restore.
     const after = await readMemberLevel(handle, userA);
-    ctx.expect(after?.xp === 200 && after?.level === 2 && after?.total_messages === 12, {
+    ctx.expect(after?.xp === 300 && after?.level === 2 && after?.total_messages === 12, {
       assertionClass: 'Discord',
       channel: 'db-observable',
       promise: 'No totals corrupt across the outage window — the persisted member_levels row is unchanged after restoration.',
-      observation: `post-restore member_levels: xp=${after?.xp}/level=${after?.level}/messages=${after?.total_messages} (expected 200/2/12).`,
+      observation: `post-restore member_levels: xp=${after?.xp}/level=${after?.level}/messages=${after?.total_messages} (expected 300/2/12).`,
       impact: 'A database outage corrupted persisted level totals.',
     });
 
     // (4) Recovery: the very next command works against the restored stack.
     const recovered = await ctx.runSlash(handle, { commandName: 'leaderboard', userId: userA });
-    ctx.expect(replyContent(recovered).includes(userA) && replyContent(recovered).includes('200'), {
+    ctx.expect(replyContent(recovered).includes(userA) && replyContent(recovered).includes('300'), {
       assertionClass: 'replay-safety',
       channel: 'captured-reply',
       promise: 'After restoration the very next levels command serves the real standings again (no lingering degradation).',
@@ -1011,7 +1033,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
 
   // Boot #1: seed + snapshot, then shut down.
   const first = await ctx.bootGuild({ guildId, label: 'a', guildConfigOverrides: { levels_enabled: true } });
-  await seedMemberLevel(first, userA, { xp: 450, level: 4, totalMessages: 30, voiceMinutes: 25 });
+  await seedMemberLevel(first, userA, { xp: 800, level: 4, totalMessages: 30, voiceMinutes: 25 });
   const snapshot = await readMemberLevel(first, userA);
   await first.cleanup(); // simulate shutdown
 
@@ -1020,18 +1042,18 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
   const lb = await ctx.runSlash(second, { commandName: 'leaderboard', userId: userA });
   const after = await readMemberLevel(second, userA);
   ctx.expect(
-    after?.xp === snapshot?.xp && after?.level === snapshot?.level && after?.xp === 450 && after?.level === 4,
+    after?.xp === snapshot?.xp && after?.level === snapshot?.level && after?.xp === 800 && after?.level === 4,
     {
       assertionClass: 'Discord',
       channel: 'db-observable',
       promise: 'After a full stack restart, member_levels totals + level match the pre-restart snapshot exactly.',
       observation:
         `pre-restart xp=${snapshot?.xp}/level=${snapshot?.level}; ` +
-        `post-restart xp=${after?.xp}/level=${after?.level} (expected 450/4).`,
+        `post-restart xp=${after?.xp}/level=${after?.level} (expected 800/4).`,
       impact: 'Levels state did not survive a restart — persisted totals were lost or altered.',
     },
   );
-  ctx.expect(replyContent(lb).includes('450') && replyContent(lb).includes('Level 4'), {
+  ctx.expect(replyContent(lb).includes('800') && replyContent(lb).includes('Level 4'), {
     assertionClass: 'Discord',
     channel: 'captured-reply',
     promise: 'Post-restart /leaderboard renders the persisted total.',
