@@ -30,15 +30,43 @@ export async function GET(req: NextRequest) {
   // V11 Audit H-4: Validate and whitelist all query params before passing
   // to Supabase filter methods.
   const VALID_STATUSES = ['active', 'resolved', 'all'] as const;
-  const VALID_SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
+
+  // These are the ONLY three values anything writes to `alerts.severity` —
+  // `OwnerAlertSeverity` in the bot's alert-service, the same union in
+  // alert-manager, and the dashboard's own inserts (which run incident
+  // severities through `toAlertSeverity`, collapsing 'outage' to 'critical').
+  //
+  // The list previously read ['critical','high','medium','low','info'], which
+  // was wrong in both directions and failed silently either way:
+  //   - 'warning' — the MOST written severity, and the one several money-path
+  //     alerts use (paypal_capture_denied, paypal_webhook_processing_error) —
+  //     was rejected. A rejected value falls through to `null` below, so the
+  //     filter was DROPPED and the caller got unfiltered results back rather
+  //     than an error. Asking for warnings returned everything.
+  //   - 'high' / 'medium' / 'low' were accepted but can never match a row, so
+  //     those filters always returned empty.
+  const VALID_SEVERITIES = ['info', 'warning', 'critical'] as const;
 
   const rawStatus = searchParams.get('status') ?? 'active';
   const status = VALID_STATUSES.includes(rawStatus as typeof VALID_STATUSES[number]) ? rawStatus : 'active';
   const alertType = searchParams.get('type')?.slice(0, 64).replace(/[^a-z0-9_.-]/gi, '') || null;
-  const severity = (() => {
-    const raw = searchParams.get('severity');
-    return raw && VALID_SEVERITIES.includes(raw as typeof VALID_SEVERITIES[number]) ? raw : null;
-  })();
+  // An unrecognised severity is REFUSED rather than ignored. Falling through to
+  // `null` dropped the filter and returned every alert — so a caller asking for
+  // one severity silently received all of them and had no way to tell. That
+  // silence is what let the whitelist drift out of step with the writers for as
+  // long as it did. Answering 400 makes the next mismatch immediate and obvious.
+  const rawSeverity = searchParams.get('severity');
+  if (rawSeverity !== null
+      && !VALID_SEVERITIES.includes(rawSeverity as typeof VALID_SEVERITIES[number])) {
+    return NextResponse.json(
+      {
+        error: 'Invalid severity',
+        detail: `severity must be one of: ${VALID_SEVERITIES.join(', ')}`,
+      },
+      { status: 400 },
+    );
+  }
+  const severity = rawSeverity;
   const limit = Math.min(100, Math.max(1, parseInt(searchParams.get('limit') ?? '50', 10)));
 
   let query = supabase
