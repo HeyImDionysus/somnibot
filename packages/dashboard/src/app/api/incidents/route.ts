@@ -83,8 +83,16 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const status = searchParams.get('status');
     const severity = searchParams.get('severity');
-    const page = parseInt(searchParams.get('page') || '1');
-    const pageSize = parseInt(searchParams.get('pageSize') || '50');
+    const rawPage = parseInt(searchParams.get('page') || '1', 10);
+    // A page of 0 or negative produced a negative range offset.
+    const page = Number.isFinite(rawPage) ? Math.max(1, rawPage) : 1;
+    // Clamped: an unbounded pageSize (pageSize=100000 was accepted) lets one
+    // request pull the entire incident history in a single range scan, and a
+    // NaN from a non-numeric value produced a broken range.
+    const rawPageSize = parseInt(searchParams.get('pageSize') || '50', 10);
+    const pageSize = Number.isFinite(rawPageSize)
+      ? Math.min(100, Math.max(1, rawPageSize))
+      : 50;
 
     const admin = createAdminSupabase();
     let query = admin

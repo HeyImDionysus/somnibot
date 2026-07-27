@@ -36,6 +36,7 @@ import {
 } from '../branding/brand-kit.js';
 import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
 import { voice } from '../branding/voice.js';
+import { claimOccurrence } from '../../utils/occurrence-fence.js';
 
 const log = createLogger('Adventures');
 
@@ -629,6 +630,7 @@ export class AdventureManager {
   async startAdventure(
     userId: string,
     adventureType?: string,
+    interactionId?: string,
   ): Promise<{ embed: EmbedBuilder; row: ActionRowBuilder<ButtonBuilder> | null; sessionId: string | null }> {
     // [game-economy-adventures DEPFAIL] Check the READ ERROR first: with the
     // database unreachable the config read fails — degrade with the branded
@@ -709,6 +711,27 @@ export class AdventureManager {
         row: null,
         sessionId: null,
       };
+    }
+
+    // Interaction-scoped fence, claimed BEFORE the ticket is charged. A
+    // redelivered /adventure would otherwise debit a second ticket and open a
+    // second session. FAIL-SAFE: charging twice is worse than refusing.
+    if (interactionId) {
+      const claim = await claimOccurrence(
+        this.valkey,
+        `economy:adventure:idem:${interactionId}`,
+        { onUnavailable: 'decline' },
+      );
+      if (claim === 'replay') {
+        return {
+          embed: brandedEmbed(config.brandKit, {
+            intent: 'warning',
+            description: '⏳ That adventure was already started.',
+          }),
+          row: null,
+          sessionId: null,
+        };
+      }
     }
 
     // Charge ticket cost (atomic RPC prevents race conditions / negative balances)

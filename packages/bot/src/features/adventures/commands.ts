@@ -42,6 +42,7 @@ export async function handleAdventureCommand(
     const { embed, row } = await manager.startAdventure(
       interaction.user.id,
       adventureType,
+      interaction.id,
     );
 
     const replyPayload: any = { embeds: [embed] };
