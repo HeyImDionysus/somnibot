@@ -38,6 +38,7 @@ Validates the license key against the API. Returns cached result if within TTL.
   expires_at?: string | null;
   session_id?: string | null;
   heartbeat_interval_seconds?: number;
+  retryable?: boolean;    // true when the failure is a service fault, not a verdict
   error?: string;
 }
 ```
@@ -58,6 +59,38 @@ the offline grace period hasn't expired. Once the grace window lapses, returns
   next_heartbeat_seconds: number;
 }
 ```
+
+### Verdicts vs. "we don't know"
+
+`valid: false` covers two very different situations, and the SDK keeps them apart.
+
+**Verdicts** — `revoked`, `expired`, `suspended`, `invalid_key`,
+`over_device_limit`, `session_invalidated`. The licence server determined this
+from data it read. Terminal: the cache is cleared and heartbeats stop. Your app
+should stop too.
+
+**Indeterminate** — `service_unavailable`, `rate_limited`, plus any HTTP 5xx,
+any 429, and any response whose body is not parseable JSON (a proxy error page).
+The server could **not** determine the status; this says nothing about whether
+the customer paid. Non-terminal: the SDK keeps its cached validation, keeps the
+heartbeat timer running, and rides the normal offline-grace window, so a
+transient fault self-heals. These statuses are exported as
+`INDETERMINATE_STATUSES` (with the predicate `isIndeterminateResponse`).
+
+```typescript
+import { INDETERMINATE_STATUSES } from '@somnibot/license-sdk';
+
+const res = await license.validate();
+if (!res.valid && INDETERMINATE_STATUSES.includes(res.status)) {
+  // Do not lock the user out and do not show a "licence revoked" message —
+  // this is our outage, not their problem. Retry later.
+}
+```
+
+While the SDK is running on cache during such a fault, `validate()` reports
+`status: 'offline_grace'` and `heartbeat()` reports `status: 'offline'` — the
+same statuses used for a plain network outage, because it is the same situation
+from the licence's point of view.
 
 #### `deactivate(): Promise<DeactivateResponse>`
 

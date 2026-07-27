@@ -19,6 +19,23 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
+/**
+ * 503 for "we could not check" — deliberately distinct from 401/403 ("you may
+ * not") and 404 ("it isn't there"). See `@/lib/api/license-status` for the full
+ * reasoning; this route uses a plain `{ error }` body to match its own shape.
+ * The underlying message is logged, never returned (V11 Re-Audit N-1).
+ */
+function serviceUnavailable(context: string, error: { message: string }): NextResponse {
+  console.error(`[${context}] download check undetermined:`, error.message);
+  return NextResponse.json(
+    {
+      error: 'Could not verify your access right now. This is a temporary server fault — please retry.',
+      retryable: true,
+    },
+    { status: 503, headers: { 'Retry-After': '30' } },
+  );
+}
+
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ productId: string; fileId: string }> },
@@ -71,13 +88,21 @@ export async function GET(
       return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
     }
 
-    const { data: session } = await supabase
+    const { data: session, error: sessionError } = await supabase
       .from('portal_sessions')
       .select('customer_id, guild_id')
       .eq('token_hash', hashToken(token))
       .eq('revoked', false)
       .gt('expires_at', new Date().toISOString())
-      .single();
+      .maybeSingle();
+
+    // A failed read is not an invalid session. Telling a paying customer their
+    // session expired because the database blinked would log them out of the
+    // portal; say "try again" instead. (Same distinction as the licence
+    // endpoints — see @/lib/api/license-status.)
+    if (sessionError) {
+      return serviceUnavailable('Downloads portal session lookup', sessionError);
+    }
 
     if (!session) {
       return NextResponse.json({ error: 'Invalid or expired session' }, { status: 401 });
@@ -107,7 +132,7 @@ export async function GET(
   // candidate set — not an arbitrary `.limit(1)` row — and grant access if ANY
   // of them is still live, so one lapsed grace row cannot mask another that is
   // active or in an unexpired grace window. ──
-  const { data: entitlements } = await supabase
+  const { data: entitlements, error: entitlementError } = await supabase
     .from('entitlements')
     .select('id, status, grace_period_ends_at')
     .eq('customer_id', customerId)
@@ -115,17 +140,29 @@ export async function GET(
     .eq('guild_id', guildId)
     .in('status', ['active', 'grace_period']);
 
+  // "The query failed" is NOT "you have no entitlement". The old code
+  // discarded the error, so a transient database fault told a paying customer
+  // they did not own the product they had just bought — a 403 that reads as an
+  // accusation. Report the fault as a fault.
+  if (entitlementError) {
+    return serviceUnavailable('Downloads entitlement lookup', entitlementError);
+  }
+
   if (!entitlements?.some((e) => isEntitlementAccessLive(e))) {
     return NextResponse.json({ error: 'No active entitlement for this product' }, { status: 403 });
   }
 
   // ── Get the file ──
-  const { data: file } = await supabase
+  const { data: file, error: fileError } = await supabase
     .from('product_files')
     .select('*')
     .eq('id', fileId)
     .eq('product_id', productId)
-    .single();
+    .maybeSingle();
+
+  if (fileError) {
+    return serviceUnavailable('Downloads file lookup', fileError);
+  }
 
   if (!file) {
     return NextResponse.json({ error: 'File not found' }, { status: 404 });

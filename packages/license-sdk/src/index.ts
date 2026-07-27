@@ -57,6 +57,64 @@ export interface SomniLicenseConfig {
   heartbeatIntervalSeconds?: number;
 }
 
+/**
+ * Statuses that mean **"we could not determine this licence's state"** — as
+ * opposed to "this licence is not valid".
+ *
+ * This distinction is deliberate and load-bearing (see the class docs on
+ * `validate`/`heartbeat`). A database blip, an overloaded server, or a rate
+ * limit says nothing about whether the customer paid. Treating those as a
+ * revocation is how a one-second fault turns into "your licence was revoked"
+ * on a paying customer's screen — and, because a failed heartbeat used to
+ * clear the cache and stop the timer, it never recovered on its own.
+ *
+ * Every status listed here is NON-TERMINAL: the SDK keeps its cached
+ * validation, keeps the heartbeat timer running, and falls back to the normal
+ * offline-grace window. Anything not listed here (`revoked`, `expired`,
+ * `suspended`, `invalid_key`, `over_device_limit`, `session_invalidated`, …)
+ * is a real verdict from the licence server and stays terminal.
+ *
+ * The server-side counterparts live in the dashboard's licence routes
+ * (`packages/dashboard/src/lib/api/license-status.ts`); keep the two in sync.
+ */
+export const INDETERMINATE_STATUSES: readonly string[] = [
+  /** Server could not answer (DB fault, dependency down). HTTP 503. */
+  'service_unavailable',
+  /** Too many requests from this IP/key. HTTP 429. Says nothing about the licence. */
+  'rate_limited',
+];
+
+/**
+ * True when a licence-server response means "unknown", not "invalid".
+ *
+ * Also covers the transport-level cases the body cannot describe: any 5xx, a
+ * 429, or a response whose body was not parseable JSON (a proxy error page,
+ * a captive portal, a truncated response). Before this existed the SDK never
+ * checked `res.ok` at all, so a 500 with `{valid:false,status:'revoked'}`
+ * reached the app verbatim as a revocation.
+ */
+export function isIndeterminateResponse(
+  httpStatus: number,
+  body: { status?: string } | null,
+): boolean {
+  if (body === null) return true;
+  if (body.status && INDETERMINATE_STATUSES.includes(body.status)) return true;
+  return httpStatus >= 500 || httpStatus === 429;
+}
+
+/**
+ * The status to report for an indeterminate response.
+ *
+ * Deliberately does NOT echo the body's status unless that status is itself an
+ * indeterminate one. A 5xx body may still claim `revoked` — that is exactly the
+ * shape the dashboard used to return on an RPC error — and passing it through
+ * would reintroduce the bug one layer up.
+ */
+function indeterminateStatus(body: { status?: string } | null): string {
+  if (body?.status && INDETERMINATE_STATUSES.includes(body.status)) return body.status;
+  return 'service_unavailable';
+}
+
 export interface ValidationResponse {
   valid: boolean;
   /**
@@ -64,8 +122,16 @@ export interface ValidationResponse {
    * still valid but the customer's payment failed — access ends at
    * `grace_period_ends_at` unless payment recovers. Apps should surface
    * this to the user (e.g. "update your payment method").
+   *
+   * May also be one of {@link INDETERMINATE_STATUSES} — meaning the licence
+   * status could NOT be determined. Do not treat those as a revocation.
    */
   status: string;
+  /**
+   * Set by the server when the failure is a transient service fault rather
+   * than a verdict on the licence. Apps should retry rather than degrade.
+   */
+  retryable?: boolean;
   entitlement_id?: string;
   features?: string[];
   tier?: string | null;
@@ -85,6 +151,11 @@ export interface ValidationResponse {
 
 export interface HeartbeatResponse {
   valid: boolean;
+  /**
+   * May be one of {@link INDETERMINATE_STATUSES} — the server could not
+   * determine the session's state. Non-terminal: the heartbeat timer keeps
+   * running so the session self-heals when the fault clears.
+   */
   status: string;
   /**
    * Set when a still-valid session's entitlement has entered a payment-failure
@@ -212,7 +283,79 @@ export class SomniLicense {
   }
 
   /**
+   * Parse a response body as JSON, returning null when the body is not JSON.
+   *
+   * A proxy error page, a captive portal, or a truncated response is a
+   * transport failure — not a licence verdict — so it must land on the
+   * indeterminate path rather than throwing into the offline catch (which
+   * would report `network_error` even though the request reached a server).
+   */
+  private async readJson<T>(res: Response): Promise<T | null> {
+    try {
+      return (await res.json()) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Shared fallback for a validation that could not be completed — used by
+   * BOTH the transport catch path (offline) and the indeterminate-response
+   * path (server said "I don't know").
+   *
+   * The two are the same situation from the licence's point of view: we hold
+   * a cached verdict and no fresh one, so the offline grace window decides.
+   * `terminalStatus` is only reported when there is no cache at all to fall
+   * back on.
+   *
+   * Note what this deliberately does NOT do: it never clears the cache or
+   * stops the heartbeat while still inside the grace window. That is the fix
+   * for "a one-second database hiccup permanently stops the client".
+   */
+  private validateFallback(terminalStatus: string, error?: string): ValidationResponse {
+    const graceMs = this.config.offlineGraceMs ?? 86_400_000;
+    const elapsed = this.elapsedSinceAnchor();
+
+    // W2 review: the payment-failure grace deadline is a HARD server-side
+    // stop. If the cached success was a grace_period response and that
+    // deadline has now passed, the offline window must NOT ride it out —
+    // clear the cache and reject exactly as an elapsed offline grace would.
+    if (this.cachedResult?.valid && !this.cachedGraceLapsed() && elapsed < graceMs) {
+      return { ...this.cachedResult, status: 'offline_grace' };
+    }
+
+    // V5-Audit §3.1: Distinguish expired grace from a first-time failure.
+    // If we had a cached result that's now stale, the grace period expired.
+    // Clear the stale cache and stop heartbeats to prevent zombie sessions.
+    if (this.cachedResult) {
+      this.cachedResult = null;
+      this.cachedGraceDeadlineMono = null;
+      this.stopHeartbeat();
+      return { valid: false, status: 'offline_grace_expired' };
+    }
+
+    return {
+      valid: false,
+      status: terminalStatus,
+      retryable: true,
+      ...(error === undefined ? {} : { error }),
+    };
+  }
+
+  /**
    * Validate the license key. Returns cached result if still fresh.
+   *
+   * Three distinct outcomes, deliberately kept apart:
+   *
+   *  1. **Valid** — `{ valid: true }`. Cached, heartbeat started.
+   *  2. **Invalid** — a real verdict from the licence server (`revoked`,
+   *     `expired`, `suspended`, `invalid_key`, `over_device_limit`, …).
+   *     Returned verbatim; the app should stop.
+   *  3. **Indeterminate** — {@link INDETERMINATE_STATUSES}, any 5xx/429, or an
+   *     unparseable body. The server could not answer, which is NOT a verdict.
+   *     The cached validation and the heartbeat timer are both preserved and
+   *     the offline-grace window applies, so a transient fault degrades to
+   *     "keep running on cache" instead of "your licence was revoked".
    */
   async validate(): Promise<ValidationResponse> {
     // Return cache if valid
@@ -235,7 +378,20 @@ export class SomniLicense {
         }),
       });
 
-      const data: ValidationResponse = await res.json();
+      const data = await this.readJson<ValidationResponse>(res);
+
+      // ── Indeterminate: the server could not answer ────────────────────
+      // Deliberately BEFORE the `data.valid` branch and before any state
+      // mutation. Note we do NOT call anchorServerTime() here: re-anchoring on
+      // a failed response would reset `elapsedSinceAnchor()` on every retry,
+      // so a server stuck at 503 would extend the offline grace window forever
+      // instead of letting it expire.
+      if (data === null || isIndeterminateResponse(res.status, data)) {
+        return this.validateFallback(
+          indeterminateStatus(data),
+          data?.error ?? 'License status could not be determined',
+        );
+      }
 
       if (data.valid) {
         this.cachedResult = data;
@@ -292,37 +448,48 @@ export class SomniLicense {
       // Offline — check grace period using monotonic elapsed time
       // V7 Audit §3.P3a: Uses server-time-anchored monotonic clock instead of
       // raw Date.now() to prevent clock-manipulation bypass.
-      const graceMs = this.config.offlineGraceMs ?? 86_400_000;
-      const elapsed = this.elapsedSinceAnchor();
-
-      // W2 review: the payment-failure grace deadline is a HARD server-side
-      // stop. If the cached success was a grace_period response and that
-      // deadline has now passed, the offline window must NOT ride it out —
-      // clear the cache and reject exactly as an elapsed offline grace would.
-      if (this.cachedResult?.valid && !this.cachedGraceLapsed() && elapsed < graceMs) {
-        return { ...this.cachedResult, status: 'offline_grace' };
-      }
-
-      // V5-Audit §3.1: Distinguish expired grace from a first-time network error.
-      // If we had a cached result that's now stale, the grace period expired.
-      // Clear the stale cache and stop heartbeats to prevent zombie sessions.
-      if (this.cachedResult) {
-        this.cachedResult = null;
-        this.cachedGraceDeadlineMono = null;
-        this.stopHeartbeat();
-        return { valid: false, status: 'offline_grace_expired' };
-      }
-
-      return {
-        valid: false,
-        status: 'network_error',
-        error: err instanceof Error ? err.message : 'Network error',
-      };
+      return this.validateFallback(
+        'network_error',
+        err instanceof Error ? err.message : 'Network error',
+      );
     }
   }
 
   /**
+   * Shared fallback for a heartbeat that could not be completed — used by both
+   * the transport catch path and the indeterminate-response path.
+   *
+   * While the offline grace window is open the session is reported as still
+   * alive and, critically, the heartbeat timer is LEFT RUNNING so the session
+   * resumes on its own once the fault clears. Only a genuinely elapsed grace
+   * window tears the session down.
+   */
+  private heartbeatFallback(terminalStatus: string): HeartbeatResponse {
+    // V5 Audit §3.2: Check grace period instead of unconditionally returning valid.
+    const graceMs = this.config.offlineGraceMs ?? 86_400_000;
+    const elapsed = this.elapsedSinceAnchor();
+    // W2 review: same hard stop as validate()'s offline path — a lapsed
+    // payment-grace deadline overrides the offline window, so a heartbeat
+    // cannot keep a session alive past the server-side grace cutoff.
+    if (this.cachedResult?.valid && !this.cachedGraceLapsed() && elapsed < graceMs) {
+      return { valid: true, status: 'offline', next_heartbeat_seconds: 300 };
+    }
+    this.cachedResult = null;
+    this.cachedGraceDeadlineMono = null;
+    this.stopHeartbeat();
+    return { valid: false, status: terminalStatus, next_heartbeat_seconds: 0 };
+  }
+
+  /**
    * Send a heartbeat to keep the session alive.
+   *
+   * A `valid: false` heartbeat is terminal — it clears the cache and stops the
+   * timer — so it must only ever be reached for a REAL verdict. An
+   * indeterminate response ({@link INDETERMINATE_STATUSES}, 5xx, 429,
+   * unparseable body) is routed to {@link heartbeatFallback} instead, which
+   * keeps the timer alive. That is the difference between a database blip
+   * costing a paying customer one heartbeat and costing them the whole session
+   * until the app is restarted.
    */
   async heartbeat(): Promise<HeartbeatResponse> {
     if (!this.sessionId) {
@@ -339,7 +506,14 @@ export class SomniLicense {
         }),
       });
 
-      const data: HeartbeatResponse = await res.json();
+      const data = await this.readJson<HeartbeatResponse>(res);
+
+      // ── Indeterminate: the server could not answer ────────────────────
+      // Same reasoning as validate(): no state is torn down, no server-time
+      // re-anchor, and the heartbeat timer keeps ticking.
+      if (data === null || isIndeterminateResponse(res.status, data)) {
+        return this.heartbeatFallback(indeterminateStatus(data));
+      }
 
       // V7 Audit §3.P3a — refresh server time anchor on successful heartbeat
       if (data.valid) {
@@ -413,20 +587,9 @@ export class SomniLicense {
 
       return data;
     } catch {
-      // V5 Audit §3.2: Check grace period instead of unconditionally returning valid.
-      // A network error during heartbeat should still respect the offline grace window.
-      const graceMs = this.config.offlineGraceMs ?? 86_400_000;
-      const elapsed = this.elapsedSinceAnchor();
-      // W2 review: same hard stop as validate()'s offline path — a lapsed
-      // payment-grace deadline overrides the offline window, so a heartbeat
-      // cannot keep a session alive past the server-side grace cutoff.
-      if (this.cachedResult?.valid && !this.cachedGraceLapsed() && elapsed < graceMs) {
-        return { valid: true, status: 'offline', next_heartbeat_seconds: 300 };
-      }
-      this.cachedResult = null;
-      this.cachedGraceDeadlineMono = null;
-      this.stopHeartbeat();
-      return { valid: false, status: 'offline_grace_expired', next_heartbeat_seconds: 0 };
+      // A network error during heartbeat should still respect the offline
+      // grace window.
+      return this.heartbeatFallback('offline_grace_expired');
     }
   }
 

@@ -188,14 +188,25 @@ describe('POST /api/license/heartbeat — lapsed grace window is rejected', () =
   function setupHeartbeatMocks(entitlement: { status: string; grace_period_ends_at: string | null }) {
     const mock = createMockSupabase();
     const keysQuery = registerTable(mock, 'license_keys');
-    keysQuery.single.mockResolvedValue({
+    // The route uses `.maybeSingle()` so that "no such key" is data-null and
+    // an `error` means exactly one thing: the read itself failed.
+    keysQuery.maybeSingle.mockResolvedValue({
       data: { id: 'key-1', status: 'active', product_id: PRODUCT_ID },
       error: null,
     });
+    // The route fetches the whole candidate entitlement set (a customer can
+    // hold more than one row per key), so the awaited filter chain resolves —
+    // not a `.single()` terminal.
     const entitlementsQuery = registerTable(mock, 'entitlements');
-    entitlementsQuery.single.mockResolvedValue({ data: entitlement, error: null });
+    entitlementsQuery.then = vi.fn().mockImplementation((resolve) =>
+      resolve?.({ data: [entitlement], error: null, count: null }),
+    );
     const sessionsQuery = registerTable(mock, 'license_sessions');
-    sessionsQuery.single.mockResolvedValue({ data: { id: SESSION_ID, active: true }, error: null });
+    sessionsQuery.maybeSingle.mockResolvedValue({ data: { id: SESSION_ID, active: true }, error: null });
+    // The `last_seen_at` keepalive write is awaited directly off update().eq().
+    sessionsQuery.then = vi.fn().mockImplementation((resolve) =>
+      resolve?.({ data: null, error: null, count: null }),
+    );
     registerTable(mock, 'product_license_config').maybeSingle.mockResolvedValue({
       data: { heartbeat_interval_seconds: 300 },
       error: null,

@@ -13,6 +13,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { parseBody, schemas } from '@/lib/api/validation';
+import { licenseUnavailable } from '@/lib/api/license-status';
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
@@ -95,11 +96,13 @@ export async function POST(req: NextRequest) {
   });
 
   if (lookupError) {
-    console.error('[License] license_validate_lookup RPC error:', lookupError.message);
-    return NextResponse.json(
-      { valid: false, status: 'revoked', error: 'Internal validation error' },
-      { status: 500 },
-    );
+    // The lookup FAILED — we learned nothing about this key. Reporting
+    // 'revoked' here (the old behaviour) told a paying customer their licence
+    // was cancelled because our database blinked, and the SDK treated that as
+    // terminal. Report it as undetermined instead: HTTP 503 +
+    // status 'service_unavailable', which the SDK handles non-terminally.
+    await logValidation(supabase, null, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+    return licenseUnavailable('License/validate license_validate_lookup', lookupError);
   }
 
   const result = lookup as LookupResult;

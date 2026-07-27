@@ -65,6 +65,43 @@ function heartbeatRevoked(): Response {
   return jsonResponse({ valid: false, status: 'revoked', next_heartbeat_seconds: 0 });
 }
 
+// ─── Indeterminate ("we could not determine your licence status") ───
+//
+// These are what the dashboard returns when a query/RPC fails, plus the shapes
+// a proxy can produce. None of them is a verdict on the licence.
+
+/** The pre-fix shape: HTTP 500 whose BODY still claims 'revoked'. */
+function serverError(): Response {
+  return jsonResponse({ valid: false, status: 'revoked', error: 'Internal validation error' }, 500);
+}
+
+/** The post-fix shape from POST /api/license/validate on a DB fault. */
+function validationUnavailable(): Response {
+  return jsonResponse(
+    { valid: false, status: 'service_unavailable', retryable: true, error: 'temporary' },
+    503,
+  );
+}
+
+function heartbeatUnavailable(): Response {
+  return jsonResponse(
+    { valid: false, status: 'service_unavailable', retryable: true, next_heartbeat_seconds: 0 },
+    503,
+  );
+}
+
+function rateLimited(): Response {
+  return jsonResponse({ valid: false, status: 'rate_limited', error: 'Too many requests' }, 429);
+}
+
+/** A reverse proxy's HTML error page — not JSON at all. */
+function proxyErrorPage(): Response {
+  return new Response('<html><body>502 Bad Gateway</body></html>', {
+    status: 502,
+    headers: { 'Content-Type': 'text/html', Date: new Date().toUTCString() },
+  });
+}
+
 function deactivateOk(): Response {
   return jsonResponse({ success: true });
 }
@@ -144,6 +181,151 @@ describe('SomniLicense', () => {
       expect(client.isValid()).toBe(false);
       expect(client.getSessionId()).toBeNull();
       expect(client.getFeatures()).toEqual([]);
+    });
+  });
+
+  // ────────── indeterminate vs terminal ──────────
+  //
+  // "We could not determine your licence status" must be a different,
+  // NON-TERMINAL outcome from "this licence is revoked". A transient server
+  // fault must not stop heartbeats permanently or tell a paying customer they
+  // are revoked.
+
+  describe('indeterminate responses are not verdicts', () => {
+    it('does not surface a 500 body claiming "revoked" as a revocation', async () => {
+      // Regression: the SDK never checked res.ok, so the dashboard's
+      // `500 {valid:false,status:'revoked'}` on an RPC error reached the app
+      // verbatim as a revocation.
+      vi.mocked(fetch).mockResolvedValueOnce(serverError());
+      const client = sdk();
+
+      const res = await client.validate();
+      expect(res.status).not.toBe('revoked');
+      expect(res.status).toBe('service_unavailable');
+      expect(res.retryable).toBe(true);
+    });
+
+    it('keeps serving the cached validation through a service fault', async () => {
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())
+        .mockResolvedValueOnce(validationUnavailable());
+      const client = sdk({ cacheTtlMs: 1_000, offlineGraceMs: 3_600_000 });
+
+      await client.validate();
+      vi.advanceTimersByTime(2_000); // TTL expired → real refetch
+
+      const res = await client.validate();
+      expect(res.valid).toBe(true);
+      expect(res.status).toBe('offline_grace');
+      // The cache itself survived — the fault cleared nothing. (isValid() is
+      // TTL-gated and is expected to be false here; the offline-grace window is
+      // what keeps the customer working, exactly as for a network outage.)
+      expect(client.getFeatures()).toEqual(['auto-mod', 'music']);
+      expect(client.getSessionId()).toBe('sess-aaa');
+    });
+
+    it('treats a 429 rate limit as undetermined, not invalid', async () => {
+      // A rate-limited response says nothing about the licence — and
+      // licenseValidate is limited per IP, so a NAT'd office or a
+      // mis-derived client IP must not read as "your licence is bad".
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())
+        .mockResolvedValueOnce(rateLimited());
+      const client = sdk({ cacheTtlMs: 1_000, offlineGraceMs: 3_600_000 });
+
+      await client.validate();
+      vi.advanceTimersByTime(2_000);
+
+      const res = await client.validate();
+      expect(res.valid).toBe(true);
+      expect(res.status).toBe('offline_grace');
+    });
+
+    it('treats an unparseable proxy error page as undetermined', async () => {
+      vi.mocked(fetch).mockResolvedValueOnce(proxyErrorPage());
+      const client = sdk();
+
+      const res = await client.validate();
+      expect(res.valid).toBe(false);
+      expect(res.status).toBe('service_unavailable');
+    });
+
+    it('a service fault does NOT stop the heartbeat timer', async () => {
+      // The core of the bug: heartbeat() treated every `!valid` as terminal,
+      // so one bad response killed the timer until validate() was called
+      // again — which the app has no reason to do.
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk()) // starts a 120s heartbeat
+        .mockResolvedValue(heartbeatUnavailable());
+      const client = sdk();
+
+      await client.validate();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      const hb = await client.heartbeat();
+      expect(hb.valid).toBe(true); // covered by offline grace
+      expect(hb.status).toBe('offline');
+
+      // Timer still armed, and it keeps firing.
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      const before = vi.mocked(fetch).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(130_000);
+      expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThan(before);
+
+      client.destroy();
+    });
+
+    it('recovers on its own once the fault clears', async () => {
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())
+        .mockResolvedValueOnce(heartbeatUnavailable())
+        .mockResolvedValueOnce(heartbeatOk());
+      const client = sdk();
+
+      await client.validate();
+      await client.heartbeat(); // fault
+      const recovered = await client.heartbeat();
+
+      expect(recovered.valid).toBe(true);
+      expect(recovered.status).toBe('active');
+      expect(client.isValid()).toBe(true);
+    });
+
+    it('a real revocation is still terminal', async () => {
+      // The other side of the split: a genuine verdict must keep its teeth.
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())
+        .mockResolvedValueOnce(heartbeatRevoked());
+      const client = sdk();
+
+      await client.validate();
+      expect(client.isValid()).toBe(true);
+
+      const hb = await client.heartbeat();
+      expect(hb.valid).toBe(false);
+      expect(hb.status).toBe('revoked');
+      expect(client.isValid()).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('does not re-anchor server time on a fault (grace still expires)', async () => {
+      // If the SDK anchored server time on failed responses, a server stuck at
+      // 503 would reset the offline window on every retry and the grace period
+      // would never end. The window must keep running down.
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())
+        .mockResolvedValue(validationUnavailable());
+      const client = sdk({ cacheTtlMs: 1_000, offlineGraceMs: 60_000 });
+
+      await client.validate();
+
+      vi.advanceTimersByTime(30_000);
+      expect((await client.validate()).valid).toBe(true); // still inside grace
+
+      vi.advanceTimersByTime(40_000); // 70s total > 60s grace
+      const expired = await client.validate();
+      expect(expired.valid).toBe(false);
+      expect(expired.status).toBe('offline_grace_expired');
     });
   });
 
@@ -856,6 +1038,34 @@ describe('SomniLicense', () => {
       expect(client.isValid()).toBe(false);
       expect(client.getFeatures()).toEqual([]);
       expect(client.getTier()).toBeNull();
+    });
+
+    it('a transient server fault does not end the customer\'s session', async () => {
+      // The whole point, end to end: validate OK, then the licence server has
+      // a bad minute (500 on validate, 503 on heartbeat), then it recovers.
+      // The customer must never be told they are revoked and must never lose
+      // their heartbeat loop.
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())
+        .mockResolvedValueOnce(serverError())
+        .mockResolvedValueOnce(heartbeatUnavailable())
+        .mockResolvedValueOnce(heartbeatOk());
+      const client = sdk({ cacheTtlMs: 1_000, offlineGraceMs: 3_600_000 });
+
+      await client.validate();
+      vi.advanceTimersByTime(2_000); // past the cache TTL, so this really refetches
+
+      const duringFault = await client.validate();
+      expect(duringFault.status).not.toBe('revoked');
+      expect(duringFault.valid).toBe(true); // served from cache
+
+      const hbDuringFault = await client.heartbeat();
+      expect(hbDuringFault.valid).toBe(true);
+      expect(client.getSessionId()).toBe('sess-aaa');
+
+      const hbAfterRecovery = await client.heartbeat();
+      expect(hbAfterRecovery.valid).toBe(true);
+      expect(hbAfterRecovery.status).toBe('active');
     });
 
     it('re-validation after grace expiry starts fresh', async () => {

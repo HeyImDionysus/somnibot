@@ -1064,7 +1064,7 @@ export interface DbLicenseValidation {
   license_key_id: string | null;
   product_id: string | null;
   device_fingerprint: string | null;
-  result: 'valid' | 'invalid_key' | 'expired' | 'suspended' | 'revoked' | 'over_device_limit' | 'product_mismatch';
+  result: 'valid' | 'invalid_key' | 'expired' | 'suspended' | 'revoked' | 'over_device_limit' | 'product_mismatch' | 'cancelled' | 'pending' | 'grace_period' | 'unavailable' | 'rate_limited';
   ip_address: string | null;
   app_version: string | null;
   created_at: string;
