@@ -257,6 +257,27 @@ export async function POST(req: NextRequest) {
       return licenseUnavailable('License/validate license_validate_device', deviceError);
     }
 
+    // A remotely revoked fingerprint is a real terminal device verdict, not a
+    // service fault and not a revocation of the licence key itself. Handle it
+    // before the generic no-session guard so the SDK stops this device instead
+    // of retrying a 503 forever.
+    if (deviceResult?.status === 'session_invalidated') {
+      await logValidation(
+        supabase,
+        result.key_id!,
+        product_id,
+        device_fingerprint,
+        'session_invalidated',
+        clientIp,
+        app_version,
+      );
+      return NextResponse.json({
+        valid: false,
+        status: 'session_invalidated',
+        error: 'This device was revoked by an administrator. Contact the server owner if you need it restored.',
+      });
+    }
+
     // Defence in depth against the same class of bug: the RPC answered, but
     // with no session id and no recognised status. Treat "no seat granted" as
     // a failure to validate rather than silently issuing a seatless success.

@@ -200,6 +200,38 @@ describe('POST /api/license/validate — device outcomes', () => {
     );
   });
 
+  it('keeps an administrator-revoked fingerprint terminal and records the exact verdict', async () => {
+    const { validations } = setup({
+      data: {
+        status: 'session_invalidated',
+        session_id: null,
+        deactivation_reason: 'admin_revoked',
+        active_devices: 2,
+        max_devices: 3,
+        evicted: false,
+      },
+      error: null,
+    });
+
+    const res = await POST(req() as never);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({
+      valid: false,
+      status: 'session_invalidated',
+    });
+    expect(body.session_id).toBeUndefined();
+    expect(body.error).toMatch(/administrator/i);
+    expect(validations.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        result: 'session_invalidated',
+        license_key_id: 'key-1',
+        device_fingerprint: 'device-abc',
+      }),
+    );
+  });
+
   it('still validates a product with no seat tracking, without a session', async () => {
     // config_max_devices null → the RPC is never called and session_id is
     // legitimately null. The "no seat, no success" rule must not break this.

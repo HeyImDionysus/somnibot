@@ -546,14 +546,15 @@ TYPE_OVERRIDES: dict[tuple[str, str], str] = {
     # orders
     ("orders", "status"): "'pending' | 'completed' | 'refunded' | 'disputed' | 'cancelled' | 'pending_review'",
     # license_validations — CHECK widened by
-    # 20260727010000_license_validations_result_undetermined.sql to cover the
+    # 20260727030000_license_validations_result_undetermined.sql to cover the
     # entitlement statuses the validate route already logs verbatim plus the
     # service-fault outcomes ('unavailable' = status could not be determined,
-    # which is deliberately NOT the same as 'revoked').
+    # which is deliberately NOT the same as 'revoked') and the terminal
+    # per-device `session_invalidated` verdict.
     ("license_validations", "result"): (
         "'valid' | 'invalid_key' | 'expired' | 'suspended' | 'revoked'"
         " | 'over_device_limit' | 'product_mismatch' | 'cancelled' | 'pending'"
-        " | 'grace_period' | 'unavailable' | 'rate_limited'"
+        " | 'grace_period' | 'unavailable' | 'rate_limited' | 'session_invalidated'"
     ),
     ("orders", "temporary_role_grants_snapshot"): "Array<{ role_id: string; duration_seconds: number }>",
     # fraud_signals
