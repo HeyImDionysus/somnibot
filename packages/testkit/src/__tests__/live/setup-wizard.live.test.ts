@@ -41,8 +41,42 @@ import { WIZARD_STEPS } from '@somnibot/bot/dist/features/setup-wizard/steps.js'
 const PROGRESS_KEY = 'setup_wizard_progress';
 
 let handle: LiveClientHandle;
-/** Keys this run wrote, cleaned up afterwards so the rig is left as found. */
-const writtenKeys = new Set<string>([PROGRESS_KEY]);
+
+/**
+ * Original value of every key this suite touches, captured BEFORE the first
+ * write so it can be restored exactly.
+ *
+ * This matters more than it looks: the live suites share ONE local database and
+ * run sequentially in a single fork, and `instance_settings` is INSTANCE-wide
+ * state the other 46 domains boot from. An earlier version of this file simply
+ * deleted the keys it had touched — its own 10 tests passed, and then every
+ * domain after it failed with nothing proved. Snapshot-and-restore, never
+ * delete-what-I-think-I-created.
+ *
+ * `undefined` means the key did not exist beforehand and should be removed.
+ */
+const originals = new Map<string, string | null | undefined>();
+
+/**
+ * `storeCredentials` ALSO writes process.env, so the live rig's safety guard
+ * sees whatever this suite sets. Writing PayPal client credentials here made
+ * the loopback guard refuse every domain that ran afterwards — correctly, since
+ * payment credentials without a sandbox base could reach real PayPal. This
+ * suite therefore drives a step with no payment credentials, and still restores
+ * every env var it touches.
+ */
+const originalEnv = new Map<string, string | undefined>();
+
+function rememberEnv(name: string): void {
+  if (!originalEnv.has(name)) originalEnv.set(name, process.env[name]);
+}
+
+function restoreEnv(): void {
+  for (const [name, value] of originalEnv) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+}
 
 async function readSetting(key: string): Promise<string | null> {
   const { data } = await handle.client.supabase
@@ -53,8 +87,19 @@ async function readSetting(key: string): Promise<string | null> {
   return (data as { value?: string } | null)?.value ?? null;
 }
 
+/** Capture a key's current value once, before this suite first modifies it. */
+async function remember(key: string): Promise<void> {
+  if (originals.has(key)) return;
+  const { data } = await handle.client.supabase
+    .from('instance_settings')
+    .select('value')
+    .eq('key', key)
+    .maybeSingle();
+  originals.set(key, data ? ((data as { value?: string }).value ?? null) : undefined);
+}
+
 async function writeSetting(key: string, value: string): Promise<void> {
-  writtenKeys.add(key);
+  await remember(key);
   // `section` is NOT NULL — omitting it makes the upsert fail silently, which
   // is exactly how the first draft of this suite "proved" the wrong thing.
   const { error } = await handle.client.supabase
@@ -65,7 +110,22 @@ async function writeSetting(key: string, value: string): Promise<void> {
 }
 
 async function clearSetting(key: string): Promise<void> {
+  await remember(key);
   await handle.client.supabase.from('instance_settings').delete().eq('key', key);
+}
+
+/** Put every touched key back exactly as it was found. */
+async function restoreAll(): Promise<void> {
+  for (const [key, original] of originals) {
+    if (original === undefined) {
+      await handle.client.supabase.from('instance_settings').delete().eq('key', key);
+    } else {
+      await handle.client.supabase
+        .from('instance_settings')
+        .upsert({ key, value: original, section: 'setup', updated_at: new Date().toISOString() },
+          { onConflict: 'key' });
+    }
+  }
 }
 
 beforeAll(async () => {
@@ -78,8 +138,10 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  for (const key of writtenKeys) await clearSetting(key);
-  await handle?.shutdown?.();
+  // Leave the rig EXACTLY as found — the domains that run after this one boot
+  // from the same instance_settings AND the same process env.
+  await restoreAll();
+  restoreEnv();
 }, 60_000);
 
 describe('wizard progress persistence', () => {
@@ -134,7 +196,7 @@ describe('step ordering', () => {
   it('terminates once every step is accounted for — never loops', async () => {
     // The failure this guards is an owner stuck on a wizard that always has
     // "one more step".
-    const all = WIZARD_STEPS.map((s) => s.id);
+    const all = WIZARD_STEPS.map((step) => step.id);
     expect(getNextStep({ configured: all, skipped: [], lastRun: '' })).toBeNull();
     expect(getNextStep({ configured: [], skipped: all, lastRun: '' })).toBeNull();
   });
@@ -168,16 +230,25 @@ describe('detecting what is already configured', () => {
     // Write the real keys the PayPal step contracts, through the engine's own
     // writer — this is the join the whole wizard depends on: what
     // storeCredentials writes must be what detectConfigured reads.
-    const paypalStep = WIZARD_STEPS.find((s) => s.id === 'paypal')!;
-    const fieldIds = Object.keys(paypalStep.fieldToSettingsKey);
+    // The DEPLOYMENT step deliberately, not PayPal: storeCredentials also sets
+    // process.env, and PAYPAL_CLIENT_ID/SECRET without a sandbox base trips the
+    // loopback guard for every domain that runs after this suite.
+    const step = WIZARD_STEPS.find((s) => s.id === 'deployment')!;
+    const fieldIds = Object.keys(step.fieldToSettingsKey);
     const values = Object.fromEntries(
-      fieldIds.map((f) => [f, `live-test-${randomUUID().slice(0, 8)}`]),
+      fieldIds.map((field: string) => [field, `https://live-test-${randomUUID().slice(0, 8)}.example`]),
     );
 
-    await storeCredentials(handle.client.supabase, paypalStep, values);
-    for (const settingsKey of Object.values(paypalStep.fieldToSettingsKey)) {
-      writtenKeys.add(settingsKey as string);
+    // Capture BEFORE the write — remembering afterwards would snapshot this
+    // test's own values and "restore" them permanently into the shared rig.
+    for (const settingsKey of Object.values(step.fieldToSettingsKey)) {
+      await remember(settingsKey as string);
     }
+    for (const name of ['DASHBOARD_URL', 'PAYPAL_WEBHOOK_ID', 'PAYPAL_WEBHOOK_URL']) {
+      rememberEnv(name);
+    }
+
+    await storeCredentials(handle.client.supabase, step, values);
 
     const after = await detectConfigured(handle.client.supabase);
 
@@ -185,7 +256,7 @@ describe('detecting what is already configured', () => {
     // disagree, the wizard either re-asks for something it has or skips
     // something it does not.
     expect(after.size).toBeGreaterThanOrEqual(before.size);
-    const firstKey = Object.values(paypalStep.fieldToSettingsKey)[0] as string;
+    const firstKey = Object.values(step.fieldToSettingsKey)[0] as string;
     const stored = await readSetting(firstKey);
     expect(stored, `storeCredentials must reach instance_settings (${firstKey})`).toBeTruthy();
   });
@@ -193,12 +264,12 @@ describe('detecting what is already configured', () => {
   it('does not treat an empty-string credential as configured', async () => {
     // A blank value is the shape a half-finished step leaves behind; counting
     // it as done would strand the instance with an unusable credential.
-    const paypalStep = WIZARD_STEPS.find((s) => s.id === 'paypal')!;
-    for (const settingsKey of Object.values(paypalStep.fieldToSettingsKey)) {
+    const step = WIZARD_STEPS.find((s) => s.id === 'deployment')!;
+    for (const settingsKey of Object.values(step.fieldToSettingsKey)) {
       await writeSetting(settingsKey as string, '');
     }
 
     const detected = await detectConfigured(handle.client.supabase);
-    expect(detected.has('paypal')).toBe(false);
+    expect(detected.has('deployment')).toBe(false);
   });
 });
