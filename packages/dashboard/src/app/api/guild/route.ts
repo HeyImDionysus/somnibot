@@ -29,6 +29,12 @@ const guildConfigPatchSchema = z.object({
   temp_channels_enabled: z.boolean().optional(),
   scheduled_messages_enabled: z.boolean().optional(),
   giveaways_enabled: z.boolean().optional(),
+  // Diagnostics alert thresholds. Ranges MUST mirror the guild_config CHECK
+  // constraints (migration 20260727000000) or a valid-looking payload dies as
+  // a raw 23514 instead of a readable validation error.
+  memory_alert_threshold_mb: z.number().int().min(64).max(16384).optional(),
+  ws_ping_alert_threshold_ms: z.number().int().min(50).max(10000).optional(),
+  webhook_error_rate_threshold: z.number().min(0).max(1).optional(),
   // V17: New fields
   no_xp_role_id: z.string().nullable().optional(),
   anti_raid_enabled: z.boolean().optional(),

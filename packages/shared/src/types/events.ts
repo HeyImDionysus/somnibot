@@ -438,6 +438,8 @@ export interface PlatformEventMap {
   'ticket.transcript_failed': { ticketId: string; ticketNumber: number; error: string };
   'custom_command.denied': { commandId: string; commandName: string; userId: string; channelId: string; reason: 'missing_allowed_role' | 'denied_role' | 'channel_not_allowed' | 'channel_denied' };
   'custom_command.invoked': { commandId: string; commandName: string; userId: string; channelId: string; actionCount: number };
+  /** A custom command ran but one or more of its actions threw — the member saw an error, not the command output. */
+  'custom_command.degraded': { commandId: string; commandName: string; userId: string; channelId: string; actionCount: number; failedActions: number; failedTypes: string[] };
   'diagnostics.alert_raised': { alertType: string; severity: 'info' | 'warning' | 'critical'; title: string; message: string };
   'diagnostics.alert_resolved': { alertType: string };
   'diagnostics.snapshot_failed': { stage: 'write' | 'collect'; error: string };
@@ -448,6 +450,8 @@ export interface PlatformEventMap {
   'quest.completed': { userId: string; questId: string; actionType: string; progress: number };
   'casino.bet_settled': { userId: string; game: string; net: number; loss: number };
   'achievement.unlocked': { userId: string; achievementId: string; name: string; rewardCurrency: number; rewardXp: number };
+  /** A member met an achievement's criteria but the unlock or its reward could not be granted. */
+  'achievement.unlock_failed': { userId: string; achievementId: string; name: string; stage: 'unlock' | 'currency' | 'xp' };
   'prestige.performed': { userId: string; newLevel: number; newMultiplier: number };
   'adventure.started': { userId: string; adventureId: string; adventureName: string; ticketCost: number; sessionId: string | null };
   'adventure.completed': { userId: string; sessionId: string; status: string; currency: number; lootCount: number };

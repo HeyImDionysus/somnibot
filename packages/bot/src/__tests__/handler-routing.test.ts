@@ -757,8 +757,16 @@ describe('handler interaction routing', () => {
     });
     await setup2.fire('interactionCreate', interaction);
     // guild_config.music_enabled is not false here (default chain omits it), so the
-    // decline is the distinct infrastructure/startup message, not the disabled notice.
-    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('temporarily unavailable') }));
+    // decline is the distinct infrastructure/startup notice, not the disabled one.
+    // It is a BRANDED embed like its sibling — this path used to be the only
+    // music decline rendered as bare plain text.
+    const call = (interaction.reply as any).mock.calls[0][0];
+    expect(call.ephemeral).toBe(true);
+    expect(call.embeds).toHaveLength(1);
+    const desc = String(call.embeds[0].data.description);
+    expect(desc).toContain('not reachable');
+    // Still distinguishable from the owner-disabled notice.
+    expect(desc).not.toContain('switched off in');
   });
 
   it('music command replies with a branded, guild-named notice when music_enabled=false', async () => {

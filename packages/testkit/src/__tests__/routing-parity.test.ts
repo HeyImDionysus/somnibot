@@ -175,12 +175,15 @@ describe('routing parity: synthetic builders ↔ real handleInteraction', () => 
     deleteManager?: string;
     storeDisabled?: boolean;
     expected: string;
+    /** This branch replies with a branded embed rather than plain content. */
+    asEmbed?: boolean;
   }> = [
     { command: 'voice', deleteManager: 'tempChannelManager', expected: 'not enabled' },
     { command: 'giveaway', deleteManager: 'giveawayManager', expected: 'not enabled' },
-    // Music enabled but the player manager is missing → the infra-gap "temporarily
-    // unavailable" branch (the disabled case renders a branded "switched off" embed instead).
-    { command: 'play', deleteManager: 'musicPlayer', expected: 'unavailable' },
+    // Music enabled but the player manager is missing → the infra-gap branch.
+    // Both music declines are branded embeds now (the disabled one says
+    // "switched off"; this one says the audio service is not reachable).
+    { command: 'play', deleteManager: 'musicPlayer', expected: 'not reachable', asEmbed: true },
     { command: 'balance', deleteManager: 'economy', expected: 'not enabled' },
     { command: 'trivia', deleteManager: 'trivia', expected: 'not enabled' },
     { command: 'poll', deleteManager: 'polls', expected: 'not enabled' },
@@ -201,12 +204,18 @@ describe('routing parity: synthetic builders ↔ real handleInteraction', () => 
 
   it.each(gatedSlashProbes)(
     'routes gated slash /$command to its own branch (deterministic "$expected" reply)',
-    async ({ command, deleteManager, storeDisabled, expected }) => {
+    async ({ command, deleteManager, storeDisabled, expected, asEmbed }) => {
       const setup = makeClient({ storeEnabled: !storeDisabled });
       if (deleteManager) setup.managers.delete(deleteManager);
       const interaction = buildSlashInteraction({ commandName: command, client: setup.client });
       await handleInteraction(interaction as any, setup.client);
       const reply = interaction.captured.find('reply');
+      if (asEmbed) {
+        const embeds = (reply?.payload as { embeds?: Array<{ data?: { description?: string } }> })?.embeds;
+        expect(embeds).toHaveLength(1);
+        expect(String(embeds?.[0]?.data?.description)).toContain(expected);
+        return;
+      }
       expect(reply?.payload).toMatchObject({ content: expect.stringContaining(expected) });
     },
   );

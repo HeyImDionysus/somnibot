@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 195 migration files in packages/supabase/migrations/
+ * Source: 196 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -423,6 +423,9 @@ export interface DbGuildConfig {
   brand_primary_color: number | null;
   brand_accent_color: number | null;
   brand_voice_preset: 'default' | 'professional' | 'friendly' | 'playful';
+  memory_alert_threshold_mb: number;
+  ws_ping_alert_threshold_ms: number;
+  webhook_error_rate_threshold: number;
 }
 
 export interface DbInstanceSettings {

@@ -9,6 +9,7 @@ import { eventBus } from '../../services/event-bus.js';
 import { handleLevelUp } from '../levels/level-announcer.js';
 import { brandKitFromConfig } from '../branding/brand-kit.js';
 import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('Achievements');
 
@@ -149,7 +150,11 @@ export class AchievementsManager {
         .select('id');
 
       if (insErr) {
+        // A failed unlock used to be log-only: the member met the criteria,
+        // earned nothing, and nobody was told. Surface it instead — the next
+        // check re-evaluates the same criteria, so the badge is not lost.
         log.error(`Failed to unlock achievement ${def.id} for ${userId}:`, insErr.message);
+        await this.reportUnlockFailure(guildId, userId, def, 'unlock', insErr.message);
         continue;
       }
       // No returned row → the achievement was already unlocked; do not re-reward.
@@ -159,7 +164,10 @@ export class AchievementsManager {
         const { error: rewardErr } = await this.supabase.rpc('economy_add_balance', {
           p_guild_id: guildId, p_user_id: userId, p_amount: def.reward_currency,
         });
-        if (rewardErr) log.error(`Failed to award ${def.reward_currency} to ${userId}:`, rewardErr.message);
+        if (rewardErr) {
+          log.error(`Failed to award ${def.reward_currency} to ${userId}:`, rewardErr.message);
+          await this.reportUnlockFailure(guildId, userId, def, 'currency', rewardErr.message);
+        }
       }
 
       // Pay reward_xp through the levels system's own award path — the same
@@ -181,6 +189,10 @@ export class AchievementsManager {
           });
           if (xpErr || !xpResult) {
             log.error(`Failed to award ${def.reward_xp} XP to ${userId}:`, xpErr?.message ?? 'increment_member_xp returned null');
+            await this.reportUnlockFailure(
+              guildId, userId, def, 'xp',
+              xpErr?.message ?? 'increment_member_xp returned null',
+            );
           } else {
             rewardXp = def.reward_xp as number;
             if (this.guild && this.guild.id === guildId && xpResult.new_level > xpResult.old_level) {
@@ -210,6 +222,46 @@ export class AchievementsManager {
       return def.name;
     }
     return null;
+  }
+
+  /**
+   * Report an achievement that could not be fully granted.
+   *
+   * Emits the audit event and raises a deduped owner alert. The badge itself
+   * is not lost: `checkAchievements` re-evaluates the same criteria on the
+   * next qualifying action, so a transient database failure self-heals — but
+   * a persistent one now shows up on the Alerts page instead of only in logs.
+   */
+  private async reportUnlockFailure(
+    guildId: string,
+    userId: string,
+    def: { id: string; name: string },
+    stage: 'unlock' | 'currency' | 'xp',
+    detail: string,
+  ): Promise<void> {
+    eventBus.emit('achievement.unlock_failed', guildId, {
+      userId,
+      achievementId: def.id,
+      name: def.name,
+      stage,
+    });
+
+    try {
+      await raiseOwnerAlert(this.supabase, guildId, {
+        alertType: 'achievement_grant_failing',
+        severity: 'warning',
+        title: 'Achievement rewards are not being granted',
+        message:
+          `Could not complete the "${def.name}" achievement for a member (stage: ${stage}). `
+          + 'Members are meeting the criteria without receiving the badge or its reward. '
+          + `Detail: ${detail}`,
+        metadata: { achievement_id: def.id, achievement_name: def.name, stage, user_id: userId },
+        ...(this.guild ? { guild: this.guild } : {}),
+      });
+    } catch (e: unknown) {
+      // Alerting must never break the unlock loop it is reporting on.
+      log.warn('achievement failure alert failed:', (e as Error)?.message ?? e);
+    }
   }
 
   // ── Prestige ────────────────────────────────────────────

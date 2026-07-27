@@ -15,6 +15,9 @@ import type { DbCustomCommand } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
 import { eventBus } from '../../services/event-bus.js';
 import { writeAuditLog } from '../../services/audit.js';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
+import { defaultBrandKit, resolveBrandKit } from '../branding/brand-kit.js';
+import { brandedEmbed } from '../branding/branded-embed.js';
 
 const log = createLogger('CommandEngine');
 
@@ -193,6 +196,11 @@ export async function handleCustomCommand(
   }
 
   let replied = false;
+  // Per-action failures used to be swallowed here: if the very action that was
+  // supposed to reply threw, the run still fell through to "✅ Command
+  // executed." and emitted custom_command.invoked. The member was told their
+  // command worked when nothing had happened. Track failures instead.
+  const failedActions: string[] = [];
 
   for (const action of actions) {
     try {
@@ -278,7 +286,45 @@ export async function handleCustomCommand(
       }
     } catch (err) {
       log.error(`Action ${action.type} failed:`, err);
+      failedActions.push(action.type);
     }
+  }
+
+  const kit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name })
+    .catch(() => defaultBrandKit(guild.name));
+
+  if (failedActions.length > 0) {
+    // Say what actually happened. If nothing replied, this IS the reply; if
+    // something already did, add an ephemeral note rather than overwriting it.
+    const notice = brandedEmbed(kit, {
+      intent: 'danger',
+      description: failedActions.length === actions.length
+        ? `❌ /${cmd.name} could not run. Nothing was applied — please try again, or ask an admin to check the command.`
+        : `⚠️ /${cmd.name} only partly ran — ${failedActions.length} of ${actions.length} steps failed. An admin has been notified.`,
+    });
+
+    if (!replied) {
+      await interaction.reply({ embeds: [notice], ephemeral: true }).catch(() => {});
+    } else {
+      await interaction.followUp({ embeds: [notice], ephemeral: true }).catch(() => {});
+    }
+
+    // A degraded run is NOT an invocation success — emit its own event so the
+    // audit trail and the Commands page can show which step is failing.
+    eventBus.emit('custom_command.degraded', guild.id, {
+      commandId: cmd.id,
+      commandName: cmd.name,
+      userId: interaction.user.id,
+      channelId: interaction.channelId,
+      actionCount: actions.length,
+      failedActions: failedActions.length,
+      failedTypes: [...new Set(failedActions)],
+    });
+
+    await raiseCustomCommandFailingAlert(supabase, guild.id, cmd, failedActions)
+      .catch((e: unknown) => log.warn('custom command alert failed:', (e as Error)?.message ?? e));
+
+    return true;
   }
 
   // If no action replied, send a default
@@ -296,6 +342,32 @@ export async function handleCustomCommand(
   });
 
   return true;
+}
+
+/**
+ * Raise (once per command per window) an owner alert naming the failing
+ * command and which action types threw, so a broken custom command surfaces
+ * on the Alerts page instead of only in bot logs.
+ *
+ * Deduped per command id: a popular broken command must not flood the table.
+ */
+async function raiseCustomCommandFailingAlert(
+  supabase: SupabaseClient,
+  guildId: string,
+  cmd: DbCustomCommand,
+  failedActions: string[],
+): Promise<void> {
+  const types = [...new Set(failedActions)].join(', ');
+  await raiseOwnerAlert(supabase, guildId, {
+    alertType: 'custom_command_failing',
+    severity: 'warning',
+    title: `Custom command /${cmd.name} is failing`,
+    message:
+      `${failedActions.length} action(s) failed while running /${cmd.name} (${types}). `
+      + 'Members are seeing an error instead of the command output. '
+      + 'Check the command on the Commands page.',
+    metadata: { command_id: cmd.id, command_name: cmd.name, failed_types: [...new Set(failedActions)] },
+  });
 }
 
 /**
