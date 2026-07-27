@@ -42,6 +42,12 @@ interface TicketPanel {
   transcript_channel_id: string | null;
   dm_transcript_to_creator: boolean;
   max_open_per_user: number;
+  /** Hours of silence before the member is nudged. 0 = never. */
+  inactivity_warn_hours: number;
+  /** Hours of silence before the ticket auto-closes. 0 = never. */
+  inactivity_close_hours: number;
+  /** Ask the member to rate their experience when the ticket closes. */
+  feedback_prompt_enabled: boolean;
   introduction_message: string | null;
   active: boolean;
   created_at: string;
@@ -196,6 +202,9 @@ export default function TicketsPage() {
       transcript_channel_id: null,
       dm_transcript_to_creator: false,
       max_open_per_user: 3,
+      inactivity_warn_hours: 0,
+      inactivity_close_hours: 0,
+      feedback_prompt_enabled: false,
       introduction_message: null,
       active: true,
       created_at: '',
@@ -211,6 +220,18 @@ export default function TicketsPage() {
   const savePanel = async () => {
     if (!editingPanel) return;
     clearMessages();
+
+    // Guard the one combination that is silently useless: closing at or before
+    // the warning means the member is never actually nudged before the ticket
+    // shuts. Caught here so the owner gets a sentence, not a saved-but-broken
+    // panel.
+    const warnHours = editingPanel.inactivity_warn_hours ?? 0;
+    const closeHours = editingPanel.inactivity_close_hours ?? 0;
+    if (warnHours > 0 && closeHours > 0 && closeHours <= warnHours) {
+      setError('Auto-close must be later than the warning, or the ticket closes before anyone is nudged.');
+      return;
+    }
+
     setSaving(true);
 
     try {
@@ -421,7 +442,67 @@ export default function TicketsPage() {
                 DM transcript to creator
               </label>
             </div>
+            {/* Inactivity handling: the bot and API have supported these since
+                the tickets lifecycle work; the panel editor never exposed them,
+                so no owner could actually turn them on. */}
+            <div>
+              <label className="block text-sm font-medium text-discord-text-primary mb-1">
+                Warn after (hours of silence)
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={720}
+                value={editingPanel.inactivity_warn_hours ?? 0}
+                onChange={(e) => setEditingPanel({
+                  ...editingPanel,
+                  inactivity_warn_hours: Math.max(0, parseInt(e.target.value) || 0),
+                })}
+                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+              />
+              <p className="mt-1 text-xs text-discord-text-muted">0 disables the nudge.</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-discord-text-primary mb-1">
+                Auto-close after (hours of silence)
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={720}
+                value={editingPanel.inactivity_close_hours ?? 0}
+                onChange={(e) => setEditingPanel({
+                  ...editingPanel,
+                  inactivity_close_hours: Math.max(0, parseInt(e.target.value) || 0),
+                })}
+                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+              />
+              <p className="mt-1 text-xs text-discord-text-muted">
+                0 disables auto-close. Must be longer than the warning, or the ticket
+                would close before anyone is nudged.
+              </p>
+            </div>
+            <div className="flex items-end">
+              <label className="flex items-center gap-2 text-sm text-discord-text-primary cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={editingPanel.feedback_prompt_enabled ?? false}
+                  onChange={(e) => setEditingPanel({ ...editingPanel, feedback_prompt_enabled: e.target.checked })}
+                  className="rounded"
+                />
+                Ask for feedback on close
+              </label>
+            </div>
           </div>
+
+          {editingPanel.inactivity_close_hours > 0
+            && editingPanel.inactivity_warn_hours > 0
+            && editingPanel.inactivity_close_hours <= editingPanel.inactivity_warn_hours && (
+            <p className="text-sm text-red-400">
+              Auto-close must be later than the warning — right now the ticket would close
+              at or before the member is nudged.
+            </p>
+          )}
 
           <div>
             <RolePicker

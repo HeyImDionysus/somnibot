@@ -32,6 +32,16 @@ const guildConfigPatchSchema = z.object({
   // Diagnostics alert thresholds. Ranges MUST mirror the guild_config CHECK
   // constraints (migration 20260727000000) or a valid-looking payload dies as
   // a raw 23514 instead of a readable validation error.
+  // Team invitation controls (migration 20260723193000). Ranges mirror the DB
+  // CHECKs so an out-of-range value is a readable 400, not a raw 23514.
+  team_direct_assignment_enabled: z.boolean().optional(),
+  team_invite_dm_enabled: z.boolean().optional(),
+  team_max_pending_invitations: z.number().int().min(1).max(100).optional(),
+  team_invitation_expiry_ms: z.number().int().min(3_600_000).max(2_592_000_000).optional(),
+  // Fraud notification routing (migration 20260723120100). The bot mirrors
+  // critical fraud signals to this channel and optionally DMs the owner.
+  fraud_staff_alert_channel_id: z.string().nullable().optional(),
+  fraud_owner_dm_on_critical: z.boolean().optional(),
   diagnostics_guided_mode: z.boolean().optional(),
   memory_alert_threshold_mb: z.number().int().min(64).max(16384).optional(),
   ws_ping_alert_threshold_ms: z.number().int().min(50).max(10000).optional(),
