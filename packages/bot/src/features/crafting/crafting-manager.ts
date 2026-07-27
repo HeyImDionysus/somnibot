@@ -23,6 +23,7 @@ import {
 } from '../branding/brand-kit.js';
 import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
 import { voice } from '../branding/voice.js';
+import { claimOccurrence } from '../../utils/occurrence-fence.js';
 
 const log = createLogger('Crafting');
 
@@ -180,7 +181,11 @@ export class CraftingManager {
     return { embed };
   }
 
-  async craft(userId: string, recipeName: string): Promise<{ embed: EmbedBuilder }> {
+  async craft(
+    userId: string,
+    recipeName: string,
+    interactionId?: string,
+  ): Promise<{ embed: EmbedBuilder }> {
     const config = await this.getConfig();
     if (!config.economy_crafting_enabled) {
       return {
@@ -217,6 +222,26 @@ export class CraftingManager {
           description: `❌ Recipe "**${recipeName}**" not found. Use \`/recipes\` to see available recipes.`,
         }),
       };
+    }
+
+    // Interaction-scoped fence, independent of the cooldown clock. The cooldown
+    // only absorbs a redelivery WITHIN its window; one arriving after it
+    // elapses would consume materials and grant a second output. FAIL-SAFE:
+    // duplicating crafted items is worse than refusing a legitimate craft.
+    if (interactionId) {
+      const claim = await claimOccurrence(
+        this.valkey,
+        `economy:craft:idem:${interactionId}`,
+        { onUnavailable: 'decline' },
+      );
+      if (claim === 'replay') {
+        return {
+          embed: brandedEmbed(config.brandKit, {
+            intent: 'warning',
+            description: '⏳ That craft was already processed.',
+          }),
+        };
+      }
     }
 
     // V49-M1: Atomic cooldown via SET PX NX — prevents two concurrent

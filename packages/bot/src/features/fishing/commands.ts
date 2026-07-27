@@ -33,7 +33,7 @@ export async function handleFishingCommand(
 
   switch (sub) {
     case 'cast': {
-      const { embed } = await manager.fish(interaction.user.id);
+      const { embed } = await manager.fish(interaction.user.id, interaction.id);
       await interaction.editReply({ embeds: [embed] });
       break;
     }

@@ -33,7 +33,7 @@ export async function handleCraftingCommand(
 
   if (interaction.commandName === 'craft') {
     const itemName = interaction.options.getString('item', true);
-    const { embed } = await manager.craft(interaction.user.id, itemName);
+    const { embed } = await manager.craft(interaction.user.id, itemName, interaction.id);
     await interaction.editReply({ embeds: [embed] });
   }
 }

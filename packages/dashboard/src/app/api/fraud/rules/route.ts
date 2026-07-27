@@ -16,7 +16,15 @@ import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 const fraudRuleCreate = z.object({
   name: z.string().min(1).max(100).trim(),
   description: z.string().max(500).optional().nullable(),
-  rule_type: z.string().min(1).max(64),
+  // MUST mirror the fraud_rules CHECK constraint (20260518200000). A free
+  // string accepted here died later as a raw 23514 the owner could not act on.
+  rule_type: z.enum([
+    'velocity_limit',
+    'device_limit',
+    'ip_block',
+    'amount_threshold',
+    'pattern_match',
+  ]),
   enabled: z.boolean().default(true),
   config: z.record(z.unknown()).default({}),
   auto_action: z.string().max(32).default('flag'),

@@ -26,6 +26,7 @@ import {
 } from '../branding/brand-kit.js';
 import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
 import { voice } from '../branding/voice.js';
+import { claimOccurrence } from '../../utils/occurrence-fence.js';
 
 const log = createLogger('Fishing');
 
@@ -360,7 +361,10 @@ export class FishingManager {
 
   // ── Fish! ─────────────────────────────────────────────
 
-  async fish(userId: string): Promise<{ embed: EmbedBuilder; cooldownKey: string }> {
+  async fish(
+    userId: string,
+    interactionId?: string,
+  ): Promise<{ embed: EmbedBuilder; cooldownKey: string }> {
     const config = await this.getConfig();
     if (!config.economy_fishing_enabled) {
       return {
@@ -370,6 +374,27 @@ export class FishingManager {
         }),
         cooldownKey: '',
       };
+    }
+
+    // Interaction-scoped fence, independent of the cooldown clock below. The
+    // cooldown only absorbs a redelivery WITHIN its window; one arriving after
+    // it elapses would re-roll the catch and credit a second payout.
+    // FAIL-SAFE: paying twice is worse than refusing a legitimate cast.
+    if (interactionId) {
+      const claim = await claimOccurrence(
+        this.valkey,
+        `fishing:idem:${interactionId}`,
+        { onUnavailable: 'decline' },
+      );
+      if (claim === 'replay') {
+        return {
+          embed: brandedEmbed(config.brandKit, {
+            intent: 'warning',
+            description: '⏳ That cast was already processed.',
+          }),
+          cooldownKey: '',
+        };
+      }
     }
 
     // V48-M1: atomic SET NX cooldown claim. Without this, two concurrent
