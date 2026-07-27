@@ -47,17 +47,22 @@ function makeSupabase(rows: Row[]) {
   };
 }
 
-/** Emit one event through a live AuditService and return the flushed rows. */
-async function rowsFor(type: string, data: Record<string, unknown>, guildId = 'g1'): Promise<Row[]> {
+/** Emit events through a live AuditService and return the flushed rows. */
+async function rowsForAll(events: Array<[string, Record<string, unknown>]>, guildId = 'g1'): Promise<Row[]> {
   const rows: Row[] = [];
   const bus = new FakeBus();
   const service = new AuditService(guildId, makeSupabase(rows) as never, bus as never);
   service.start();
-  bus.emit(type, guildId, data);
+  for (const [type, data] of events) bus.emit(type, guildId, data);
   service.stop(); // stop() forces a final flush
   // stop()'s flush is fire-and-forget; drain the microtask queue.
   await new Promise((r) => setTimeout(r, 0));
   return rows;
+}
+
+/** Emit one event through a live AuditService and return the flushed rows. */
+function rowsFor(type: string, data: Record<string, unknown>, guildId = 'g1'): Promise<Row[]> {
+  return rowsForAll([[type, data]], guildId);
 }
 
 describe('rail A rows — music', () => {
@@ -101,5 +106,164 @@ describe('rail A rows — music', () => {
     expect(applied!.success).toBe(true);
     expect(denied!.success).toBe(false);
     expect(applied!.details).toMatchObject({ userId: 'u1', action: 'volume', value: 80 });
+  });
+});
+
+/**
+ * Auto-mod moved from rail B (a direct writeAuditLog per violation, inline in
+ * the message pipeline) to rail A. These pin the ROW that migration must keep
+ * byte-identical: same action strings, category, actor, target and details as
+ * the direct writes produced. If a future edit drifts any of them, the
+ * dashboard filter and the fleet's `automod.%` query silently stop matching.
+ */
+describe('rail A rows — automod (migrated from the direct rail)', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  const base = {
+    messageId: 'm1',
+    channelId: 'c1',
+    memberId: 'u1',
+    rule: 'No links',
+    ruleType: 'invite',
+    violation: 'discord.gg/x',
+  };
+
+  it('observe mode writes automod.observe.<action> against the MESSAGE', async () => {
+    const rows = await rowsFor('automod.observed', { ...base, wouldAction: 'ban' });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      guild_id: 'g1',
+      action: 'automod.observe.ban',
+      category: 'moderation',
+      actor_type: 'bot',
+      actor_id: 'automod',
+      target_type: 'message',
+      target_id: 'm1',
+      success: true,
+    });
+    expect(rows[0]!.details).toEqual({
+      rule: 'No links',
+      ruleType: 'invite',
+      violation: 'discord.gg/x',
+      wouldAction: 'ban',
+      channelId: 'c1',
+    });
+  });
+
+  it('every observe action keeps its own automod.observe.<action> string', async () => {
+    const rows = await rowsForAll(
+      (['delete', 'warn', 'mute', 'kick', 'ban'] as const).map((wouldAction, i) => [
+        'automod.observed',
+        { ...base, messageId: `m${i}`, wouldAction },
+      ]),
+    );
+
+    expect(rows.map((r) => r.action)).toEqual([
+      'automod.observe.delete',
+      'automod.observe.warn',
+      'automod.observe.mute',
+      'automod.observe.kick',
+      'automod.observe.ban',
+    ]);
+  });
+
+  it('enforced delete targets the MESSAGE and carries the channel', async () => {
+    const [row] = await rowsFor('automod.enforced', { ...base, action: 'delete' });
+
+    expect(row).toMatchObject({
+      action: 'automod.delete',
+      category: 'moderation',
+      actor_type: 'bot',
+      actor_id: 'automod',
+      target_type: 'message',
+      target_id: 'm1',
+    });
+    expect(row!.details).toEqual({
+      rule: 'No links',
+      ruleType: 'invite',
+      violation: 'discord.gg/x',
+      channelId: 'c1',
+    });
+  });
+
+  it('enforced warn targets the MEMBER and carries the infraction', async () => {
+    const [row] = await rowsFor('automod.enforced', {
+      ...base, action: 'warn', infractionId: 'inf1', activeWarnings: 3,
+    });
+
+    expect(row).toMatchObject({ action: 'automod.warn', target_type: 'member', target_id: 'u1' });
+    expect(row!.details).toEqual({
+      rule: 'No links',
+      ruleType: 'invite',
+      violation: 'discord.gg/x',
+      infractionId: 'inf1',
+      activeWarnings: 3,
+    });
+  });
+
+  it('enforced mute targets the MEMBER and carries the duration', async () => {
+    const [row] = await rowsFor('automod.enforced', { ...base, action: 'mute', durationMinutes: 10 });
+
+    expect(row).toMatchObject({ action: 'automod.mute', target_type: 'member', target_id: 'u1' });
+    expect(row!.details).toEqual({
+      rule: 'No links',
+      ruleType: 'invite',
+      violation: 'discord.gg/x',
+      durationMinutes: 10,
+    });
+  });
+
+  it('enforced kick and ban target the MEMBER with the plain rule details', async () => {
+    const rows = await rowsForAll([
+      ['automod.enforced', { ...base, messageId: 'ma', action: 'kick' }],
+      ['automod.enforced', { ...base, messageId: 'mb', action: 'ban' }],
+    ]);
+
+    expect(rows.map((r) => r.action)).toEqual(['automod.kick', 'automod.ban']);
+    for (const row of rows) {
+      expect(row).toMatchObject({ target_type: 'member', target_id: 'u1' });
+      expect(row.details).toEqual({
+        rule: 'No links', ruleType: 'invite', violation: 'discord.gg/x',
+      });
+    }
+  });
+
+  it('every automod row still matches the `automod.%` action prefix the fleet queries', async () => {
+    const rows = await rowsForAll([
+      ['automod.observed', { ...base, messageId: 'm1', wouldAction: 'delete' }],
+      ['automod.enforced', { ...base, messageId: 'm2', action: 'delete' }],
+      ['automod.enforced', { ...base, messageId: 'm3', action: 'warn' }],
+      ['automod.enforced', { ...base, messageId: 'm4', action: 'mute' }],
+      ['automod.enforced', { ...base, messageId: 'm5', action: 'kick' }],
+      ['automod.enforced', { ...base, messageId: 'm6', action: 'ban' }],
+    ]);
+
+    expect(rows).toHaveLength(6);
+    expect(rows.every((r) => String(r.action).startsWith('automod.'))).toBe(true);
+  });
+
+  it('a redelivered messageCreate collapses onto ONE row (occurrence key)', async () => {
+    const rows = await rowsForAll([
+      ['automod.enforced', { ...base, action: 'ban' }],
+      ['automod.enforced', { ...base, action: 'ban' }],
+    ]);
+
+    // The batched rail can re-flush a failed batch; without an occurrence key
+    // that would duplicate rows the direct rail never duplicated.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.occurrence_key).toBe('automod.ban:m1');
+  });
+
+  it('scopes rows to the AuditService’s own guild', async () => {
+    const rows: Row[] = [];
+    const bus = new FakeBus();
+    const service = new AuditService('g1', makeSupabase(rows) as never, bus as never);
+    service.start();
+    bus.emit('automod.enforced', 'other-guild', { ...base, action: 'ban' });
+    service.stop();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(rows).toHaveLength(0);
   });
 });

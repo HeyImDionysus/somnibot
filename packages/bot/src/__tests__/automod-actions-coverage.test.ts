@@ -115,7 +115,7 @@ describe('executeAutoModAction', () => {
       await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig as any);
       expect(msg.delete).toHaveBeenCalled();
       expect(mockPostModLogEntry).toHaveBeenCalled();
-      expect(mockWriteAuditLog).toHaveBeenCalled();
+      expect(client.eventBus.emit).toHaveBeenCalledWith('automod.enforced', 'g1', expect.anything());
     });
 
     it('handles non-deletable message', async () => {
@@ -142,7 +142,7 @@ describe('executeAutoModAction', () => {
       const rule = makeRule({ action: 'delete' });
       await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig as any);
       // Should not throw
-      expect(mockWriteAuditLog).toHaveBeenCalled();
+      expect(client.eventBus.emit).toHaveBeenCalledWith('automod.enforced', 'g1', expect.anything());
     });
   });
 
@@ -214,18 +214,18 @@ describe('executeAutoModAction', () => {
       );
     });
 
-    it('logs audit with infraction details', async () => {
+    it('logs audit with infraction details (rail A)', async () => {
       const client = makeClient();
       const msg = makeMessage();
       const rule = makeRule({ action: 'warn' });
       await executeAutoModAction(client as any, msg as any, rule as any, 'bad word', defaultModConfig as any);
-      expect(mockWriteAuditLog).toHaveBeenCalledWith(
-        client.supabase,
-        expect.objectContaining({
-          action: 'automod.warn',
-          details: expect.objectContaining({ infractionId: 'inf1' }),
-        }),
+      expect(client.eventBus.emit).toHaveBeenCalledWith(
+        'automod.enforced',
+        'g1',
+        expect.objectContaining({ action: 'warn', infractionId: 'inf1' }),
       );
+      // The migration removed automod's last direct-rail write.
+      expect(mockWriteAuditLog).not.toHaveBeenCalled();
     });
   });
 
@@ -272,7 +272,7 @@ describe('executeAutoModAction', () => {
       const msg = makeMessage(member);
       const rule = makeRule({ action: 'mute' });
       await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig as any);
-      expect(mockWriteAuditLog).toHaveBeenCalled(); // doesn't throw
+      expect(client.eventBus.emit).toHaveBeenCalledWith('automod.enforced', 'g1', expect.anything()); // doesn't throw
     });
 
     it('deletes message before muting', async () => {
@@ -328,7 +328,7 @@ describe('executeAutoModAction', () => {
       const msg = makeMessage(member);
       const rule = makeRule({ action: 'kick' });
       await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig as any);
-      expect(mockWriteAuditLog).toHaveBeenCalled(); // doesn't throw
+      expect(client.eventBus.emit).toHaveBeenCalledWith('automod.enforced', 'g1', expect.anything()); // doesn't throw
     });
   });
 
@@ -376,7 +376,7 @@ describe('executeAutoModAction', () => {
       const msg = makeMessage(member);
       const rule = makeRule({ action: 'ban' });
       await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig as any);
-      expect(mockWriteAuditLog).toHaveBeenCalled();
+      expect(client.eventBus.emit).toHaveBeenCalledWith('automod.enforced', 'g1', expect.anything());
     });
 
     it('deletes message before banning', async () => {

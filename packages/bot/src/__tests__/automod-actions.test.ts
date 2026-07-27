@@ -22,10 +22,6 @@ vi.mock('discord.js', () => ({
   PermissionFlagsBits: { ManageMessages: 8192n },
 }));
 
-vi.mock('../services/audit.js', () => ({
-  writeAuditLog: vi.fn(async () => {}),
-}));
-
 import { executeAutoModAction } from '../features/moderation/automod-actions.js';
 
 function makeMember() {

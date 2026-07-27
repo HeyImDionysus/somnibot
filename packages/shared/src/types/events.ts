@@ -427,6 +427,19 @@ export interface PlatformEventMap {
   'webhook.received': WebhookReceivedData;
   'webhook.replayed': WebhookReplayedData;
   // ── Observability audit wave (2026-07-23): per-feature audit events ──
+  /**
+   * Auto-mod audit events (rail A — the batched event rail). Auto-mod runs on
+   * every message, so its audit writes are the hottest in the bot; they are
+   * batched rather than written inline like a config change. `messageId` is
+   * the occurrence identity: the engine executes at most one rule per message,
+   * so a redelivered messageCreate collapses onto the same row instead of
+   * duplicating it.
+   *
+   * `automod.observed` is a would-be action in the shipped observe mode
+   * (nothing is touched); `automod.enforced` is an applied one.
+   */
+  'automod.observed': { messageId: string; channelId: string; memberId: string; rule: string; ruleType: string; violation: string; wouldAction: 'delete' | 'warn' | 'mute' | 'kick' | 'ban' };
+  'automod.enforced': { messageId: string; channelId: string; memberId: string; rule: string; ruleType: string; violation: string; action: 'delete' | 'warn' | 'mute' | 'kick' | 'ban'; infractionId?: string; activeWarnings?: number; durationMinutes?: number };
   'anti_raid.detected': { joinCount: number; threshold: number; windowSeconds: number; action: string };
   'anti_raid.contained': { action: 'kick' | 'ban' | 'lockdown' | 'account_age'; userId?: string; username?: string; reason: string; invitesPaused?: number };
   'anti_raid.restored': { restorationType: 'unban' | 'invites' | 'verification'; count: number };

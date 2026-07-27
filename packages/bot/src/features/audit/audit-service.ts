@@ -19,7 +19,14 @@ const log = createLogger('AuditService');
 // ── Action mapping ──────────────────────────────────────
 
 interface AuditMapping {
-  action: string;
+  /**
+   * The audit_logs `action`. A per-event resolver (like `targetType` below)
+   * lets ONE event type carry a family of actions that differ only by a
+   * payload field — e.g. automod's `automod.delete` / `automod.warn` /
+   * `automod.observe.mute`, which would otherwise need ten near-identical
+   * mappings and ten event types for one feature.
+   */
+  action: string | ((data: Record<string, unknown>) => string);
   category: string;
   /** Static target type, or a per-event resolver for dual-target events. */
   targetType?: string | ((data: Record<string, unknown>) => string | undefined);
@@ -466,6 +473,61 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorId: (d) => d.replayedBy as string,
     details: (d) => ({ eventType: d.eventType, replayCount: d.replayCount }),
   },
+  // ── Auto-mod (rail A) ──
+  // Auto-mod evaluates EVERY message, so these are the hottest audit writes in
+  // the bot; they ride the batched event rail rather than a direct per-message
+  // insert. `action` resolves per event so one mapping covers the whole
+  // family (automod.delete / automod.warn / … / automod.observe.<action>) with
+  // the exact strings the dashboard and the fleet's `automod.%` query expect.
+  'automod.observed': {
+    action: (d) => `automod.observe.${d.wouldAction as string}`,
+    category: 'moderation',
+    targetType: 'message',
+    actorType: 'bot',
+    actorId: () => 'automod',
+    targetId: (d) => d.messageId as string,
+    details: (d) => ({
+      rule: d.rule,
+      ruleType: d.ruleType,
+      violation: d.violation,
+      wouldAction: d.wouldAction,
+      channelId: d.channelId,
+    }),
+    // At most one rule executes per message, so the message id is this
+    // detection's once-only identity: a redelivered messageCreate collapses
+    // onto the same row instead of duplicating it.
+    occurrenceId: (d) => d.messageId as string | undefined,
+    correlationId: (d) => `automod-${d.messageId as string}`,
+  },
+  'automod.enforced': {
+    action: (d) => `automod.${d.action as string}`,
+    category: 'moderation',
+    // 'delete' targets the offending MESSAGE; every other action targets the
+    // MEMBER it was applied to (this is the rail-B shape, preserved exactly).
+    targetType: (d) => (d.action === 'delete' ? 'message' : 'member'),
+    actorType: 'bot',
+    actorId: () => 'automod',
+    targetId: (d) => (d.action === 'delete' ? d.messageId : d.memberId) as string,
+    details: (d) => {
+      const details: Record<string, unknown> = {
+        rule: d.rule,
+        ruleType: d.ruleType,
+        violation: d.violation,
+      };
+      // Only the branches that carried extra context on the direct rail add
+      // it here — an absent key must stay absent, not become undefined.
+      if (d.action === 'delete') details.channelId = d.channelId;
+      if (d.action === 'warn') {
+        details.infractionId = d.infractionId;
+        details.activeWarnings = d.activeWarnings;
+      }
+      if (d.action === 'mute') details.durationMinutes = d.durationMinutes;
+      return details;
+    },
+    occurrenceId: (d) => d.messageId as string | undefined,
+    correlationId: (d) => `automod-${d.messageId as string}`,
+  },
+
   // ── Observability audit wave (2026-07-23): per-feature audit events ──
   'anti_raid.detected': {
     action: 'anti_raid.detected',
@@ -1294,11 +1356,13 @@ export class AuditService {
         ? data.occurrenceId
         : undefined);
 
+    const action = typeof mapping.action === 'function' ? mapping.action(data) : mapping.action;
+
     const entry: Record<string, unknown> = {
       guild_id: event.guildId,
       actor_type: mapping.actorType,
       actor_id: mapping.actorId?.(data) ?? (mapping.actorType === 'system' ? 'system' : 'bot'),
-      action: mapping.action,
+      action,
       category: mapping.category,
       target_type:
         (typeof mapping.targetType === 'function' ? mapping.targetType(data) : mapping.targetType) ?? null,
@@ -1307,7 +1371,7 @@ export class AuditService {
       before_state: beforeState,
       after_state: mapping.afterState?.(data) ?? null,
       correlation_id: mapping.correlationId?.(data) ?? null,
-      occurrence_key: occurrence ? `${mapping.action}:${occurrence}` : null,
+      occurrence_key: occurrence ? `${action}:${occurrence}` : null,
       success: mapping.success ?? true,
       // Keep every queued entry's key set identical to log()'s — PostgREST
       // bulk inserts require homogeneous objects in one batch.

@@ -28,10 +28,6 @@ vi.mock('../features/moderation/mod-log.js', () => ({
   postModLogEntry: vi.fn(async () => {}),
 }));
 
-vi.mock('../services/audit.js', () => ({
-  writeAuditLog: vi.fn(async () => {}),
-}));
-
 import { executeAutoModAction } from '../features/moderation/automod-actions.js';
 import { createInfraction } from '../features/moderation/infraction-service.js';
 import { executeEscalation } from '../features/moderation/escalation.js';

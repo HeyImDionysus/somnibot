@@ -26,15 +26,12 @@ vi.mock('../features/moderation/mod-log.js', () => ({
   postModLogEntry: vi.fn(async () => {}),
 }));
 
-vi.mock('../services/audit.js', () => ({
-  writeAuditLog: vi.fn(async () => {}),
-}));
+
 
 import { executeAutoModAction } from '../features/moderation/automod-actions.js';
 import { createInfraction, getActiveWarningCount } from '../features/moderation/infraction-service.js';
 import { executeEscalation } from '../features/moderation/escalation.js';
 import { postModLogEntry } from '../features/moderation/mod-log.js';
-import { writeAuditLog } from '../services/audit.js';
 
 function makeRule(overrides: Record<string, any> = {}): any {
   return {
@@ -106,13 +103,17 @@ describe('executeAutoModAction — observe mode (shipped default)', () => {
     expect(createInfraction).not.toHaveBeenCalled();
   });
 
-  it('logs the would-be violation to the mod log + audit trail', async () => {
+  it('logs the would-be violation to the mod log + audit trail (rail A)', async () => {
     const msg = makeMessage();
     const client = makeClient();
     await executeAutoModAction(client, msg, makeRule({ action: 'ban' }), 'violation', observeConfig);
     expect(postModLogEntry).toHaveBeenCalledWith(client, expect.objectContaining({ action: 'ban' }));
-    expect(writeAuditLog).toHaveBeenCalledWith(client.supabase, expect.objectContaining({
-      action: 'automod.observe.ban',
+    // Audited via the batched event rail — AuditService maps automod.observed
+    // to the automod.observe.<action> row (see audit-rail-a-rows.test.ts).
+    expect(client.eventBus.emit).toHaveBeenCalledWith('automod.observed', 'g1', expect.objectContaining({
+      wouldAction: 'ban',
+      messageId: msg.id,
+      rule: 'Test Rule',
     }));
   });
 });
@@ -135,12 +136,14 @@ describe('executeAutoModAction — delete action', () => {
     expect(postModLogEntry).toHaveBeenCalledWith(client, expect.objectContaining({ action: 'delete' }));
   });
 
-  it('writes audit log', async () => {
+  it('writes audit log via the event rail', async () => {
     const msg = makeMessage();
     const client = makeClient();
     await executeAutoModAction(client, msg, makeRule({ action: 'delete' }), 'violation', modConfig);
-    expect(writeAuditLog).toHaveBeenCalledWith(client.supabase, expect.objectContaining({
-      action: 'automod.delete',
+    expect(client.eventBus.emit).toHaveBeenCalledWith('automod.enforced', 'g1', expect.objectContaining({
+      action: 'delete',
+      messageId: msg.id,
+      channelId: msg.channel.id,
     }));
   });
 
@@ -155,7 +158,7 @@ describe('executeAutoModAction — delete action', () => {
     const msg = makeMessage({ member: null });
     const client = makeClient();
     await executeAutoModAction(client, msg, makeRule({ action: 'delete' }), 'violation', modConfig);
-    expect(writeAuditLog).not.toHaveBeenCalled();
+    expect(client.eventBus.emit).not.toHaveBeenCalled();
   });
 });
 

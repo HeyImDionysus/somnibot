@@ -49,6 +49,9 @@ function makeClient(rules: unknown[] = [], overrides: Record<string, unknown> = 
   return {
     valkey,
     supabase,
+    // Auto-mod audits on the batched event rail, so every enforcement branch
+    // (including delete, which used to write directly) needs the bus.
+    eventBus: { emit: vi.fn() },
     fetchInvite: vi.fn().mockResolvedValue({ guild: { id: 'g1' } }),
     ...overrides,
   };

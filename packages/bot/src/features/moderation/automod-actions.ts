@@ -17,10 +17,38 @@ import {
 } from './infraction-service.js';
 import { executeEscalation } from './escalation.js';
 import { postModLogEntry } from './mod-log.js';
-import { writeAuditLog } from '../../services/audit.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('AutoModActions');
+
+/**
+ * Record an APPLIED auto-mod action on the append-only trail (rail A — the
+ * batched event rail; AuditService maps `automod.enforced` to the
+ * `automod.<action>` row). Auto-mod evaluates every message, so this is the
+ * hottest audit writer in the bot: batching it keeps a per-message DB insert
+ * out of the message pipeline, and the message id doubles as the occurrence
+ * key so a redelivered messageCreate cannot write the row twice.
+ */
+function emitEnforced(
+  client: SomniClient,
+  message: Message,
+  memberId: string,
+  rule: DbAutomodRule,
+  violationReason: string,
+  action: 'delete' | 'warn' | 'mute' | 'kick' | 'ban',
+  extra: { infractionId?: string; activeWarnings?: number; durationMinutes?: number } = {},
+): void {
+  client.eventBus.emit('automod.enforced', message.guild!.id, {
+    messageId: message.id,
+    channelId: message.channel.id,
+    memberId,
+    rule: rule.name,
+    ruleType: rule.type,
+    violation: violationReason,
+    action,
+    ...extra,
+  });
+}
 
 /**
  * Execute the action configured for an auto-mod rule violation.
@@ -64,26 +92,15 @@ export async function executeAutoModAction(
     } catch (err) {
       log.error('Failed to post observe mod-log entry:', err);
     }
-    try {
-      await writeAuditLog(client.supabase, {
-        guildId: message.guild!.id,
-        actorType: 'bot',
-        actorId: 'automod',
-        action: `automod.observe.${rule.action}`,
-        category: 'moderation',
-        targetType: 'message',
-        targetId: message.id,
-        details: {
-          rule: rule.name,
-          ruleType: rule.type,
-          violation: violationReason,
-          wouldAction: rule.action,
-          channelId: message.channel.id,
-        },
-      });
-    } catch (err) {
-      log.error('Failed to write observe audit log:', err);
-    }
+    client.eventBus.emit('automod.observed', message.guild!.id, {
+      messageId: message.id,
+      channelId: message.channel.id,
+      memberId: member.id,
+      rule: rule.name,
+      ruleType: rule.type,
+      violation: violationReason,
+      wouldAction: rule.action,
+    });
     return false; // nothing enforced — the message pipeline must continue
   }
 
@@ -114,21 +131,7 @@ export async function executeAutoModAction(
         });
       }
 
-      await writeAuditLog(client.supabase, {
-        guildId: message.guild!.id,
-        actorType: 'bot',
-        actorId: 'automod',
-        action: 'automod.delete',
-        category: 'moderation',
-        targetType: 'message',
-        targetId: message.id,
-        details: {
-          rule: rule.name,
-          ruleType: rule.type,
-          violation: violationReason,
-          channelId: message.channel.id,
-        },
-      });
+      emitEnforced(client, message, member.id, rule, violationReason, 'delete');
       break;
     }
 
@@ -206,21 +209,9 @@ export async function executeAutoModAction(
         });
       }
 
-      await writeAuditLog(client.supabase, {
-        guildId: message.guild!.id,
-        actorType: 'bot',
-        actorId: 'automod',
-        action: 'automod.warn',
-        category: 'moderation',
-        targetType: 'member',
-        targetId: member.id,
-        details: {
-          rule: rule.name,
-          ruleType: rule.type,
-          violation: violationReason,
-          infractionId: infraction?.id,
-          activeWarnings,
-        },
+      emitEnforced(client, message, member.id, rule, violationReason, 'warn', {
+        infractionId: infraction?.id,
+        activeWarnings,
       });
       break;
     }
@@ -272,21 +263,7 @@ export async function executeAutoModAction(
         });
       }
 
-      await writeAuditLog(client.supabase, {
-        guildId: message.guild!.id,
-        actorType: 'bot',
-        actorId: 'automod',
-        action: 'automod.mute',
-        category: 'moderation',
-        targetType: 'member',
-        targetId: member.id,
-        details: {
-          rule: rule.name,
-          ruleType: rule.type,
-          violation: violationReason,
-          durationMinutes,
-        },
-      });
+      emitEnforced(client, message, member.id, rule, violationReason, 'mute', { durationMinutes });
       break;
     }
 
@@ -340,16 +317,7 @@ export async function executeAutoModAction(
         });
       }
 
-      await writeAuditLog(client.supabase, {
-        guildId: message.guild!.id,
-        actorType: 'bot',
-        actorId: 'automod',
-        action: 'automod.kick',
-        category: 'moderation',
-        targetType: 'member',
-        targetId: member.id,
-        details: { rule: rule.name, ruleType: rule.type, violation: violationReason },
-      });
+      emitEnforced(client, message, member.id, rule, violationReason, 'kick');
       break;
     }
 
@@ -403,16 +371,7 @@ export async function executeAutoModAction(
         });
       }
 
-      await writeAuditLog(client.supabase, {
-        guildId: message.guild!.id,
-        actorType: 'bot',
-        actorId: 'automod',
-        action: 'automod.ban',
-        category: 'moderation',
-        targetType: 'member',
-        targetId: member.id,
-        details: { rule: rule.name, ruleType: rule.type, violation: violationReason },
-      });
+      emitEnforced(client, message, member.id, rule, violationReason, 'ban');
       break;
     }
   }
