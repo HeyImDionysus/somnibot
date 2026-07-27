@@ -498,6 +498,17 @@ export const rateLimits = {
   portalData: (tokenHash: string) =>
     checkRateLimit(`portal:data:${tokenHash}`, 30, 60_000),
 
+  /**
+   * Licence key rotation — 3 per day per customer.
+   *
+   * Deliberately tight: each rotation invalidates the customer's current key
+   * and issues a new one by DM. A loop here would strand a paying customer
+   * with a key they never received, so the limit is low enough that a
+   * mistake is recoverable by hand.
+   */
+  portalRotate: (customerId: string) =>
+    checkRateLimit(`portal:rotate:${customerId}`, 3, 86_400_000),
+
   /** V5 Audit P2-1: File downloads — 30 per 5 min per customer */
   portalDownload: (customerId: string) =>
     checkRateLimit(`portal:download:${customerId}`, 30, 300_000),
