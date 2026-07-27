@@ -30,6 +30,7 @@ const ALLOWED_TABLES = [
   'infractions',
   'incidents',
   'action_queue_dlq',
+  'commerce_portal_requests',
 ] as const;
 
 type AllowedTable = (typeof ALLOWED_TABLES)[number];
@@ -60,6 +61,9 @@ const OWNER_ONLY_TABLES: ReadonlySet<AllowedTable> = new Set([
   'orders',
   'giveaways',
   'infractions',
+  // commerce_portal_requests → /api/commerce/requests gates GET on
+  // requireGuildOwner(); these rows name customers and their orders.
+  'commerce_portal_requests',
 ]);
 
 /**
@@ -136,6 +140,10 @@ async function countForTable(
     query = query.eq('status', 'active');
   } else if (table === 'incidents') {
     query = query.in('status', ['open', 'investigating', 'identified', 'monitoring']);
+  } else if (table === 'commerce_portal_requests') {
+    // Only requests still awaiting a decision — the badge is a to-do count, so
+    // decided requests must not keep it lit.
+    query = query.eq('status', 'pending');
   } else if (table === 'action_queue_dlq') {
     // Pending = not yet acknowledged and not yet retried. Uses the admin
     // (service role) client — the table is intentionally service_role-only.
