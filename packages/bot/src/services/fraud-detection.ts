@@ -26,25 +26,82 @@ interface CreateSignalParams {
   auto_action?: string;
 }
 
+interface FraudSignalReceipt {
+  signal_id: string;
+  created: boolean;
+  guild_id: string;
+  signal_type: FraudSignalType;
+  entity_type: string;
+  entity_id: string;
+  status: 'open';
+  severity: FraudSeverity;
+}
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const FRAUD_SEVERITY_RANK: Record<FraudSeverity, number> = {
+  low: 1,
+  medium: 2,
+  high: 3,
+  critical: 4,
+};
+
+function isFraudSeverity(value: unknown): value is FraudSeverity {
+  return typeof value === 'string'
+    && Object.prototype.hasOwnProperty.call(FRAUD_SEVERITY_RANK, value);
+}
+
+function isExactSignalReceipt(
+  value: unknown,
+  guildId: string,
+  params: CreateSignalParams,
+): value is FraudSignalReceipt {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const receipt = value as Partial<FraudSignalReceipt>;
+  if (
+    typeof receipt.signal_id !== 'string'
+    || !UUID_PATTERN.test(receipt.signal_id)
+    || typeof receipt.created !== 'boolean'
+    || receipt.guild_id !== guildId
+    || receipt.signal_type !== params.signal_type
+    || receipt.entity_type !== params.entity_type
+    || receipt.entity_id !== params.entity_id
+    || receipt.status !== 'open'
+    || !isFraudSeverity(receipt.severity)
+  ) {
+    return false;
+  }
+
+  return receipt.created
+    ? receipt.severity === params.severity
+    : FRAUD_SEVERITY_RANK[receipt.severity] >= FRAUD_SEVERITY_RANK[params.severity];
+}
+
 // ── Signal Creation ────────────────────────────────────────
 
 async function createSignal(ctx: FraudContext, params: CreateSignalParams): Promise<void> {
-  const { error } = await ctx.supabase.from('fraud_signals').insert({
-    guild_id: ctx.guildId,
-    ...params,
-    status: 'open',
+  const { data, error } = await ctx.supabase.rpc('fraud_upsert_open_signal_receipt', {
+    p_guild_id: ctx.guildId,
+    p_signal_type: params.signal_type,
+    p_severity: params.severity,
+    p_entity_type: params.entity_type,
+    p_entity_id: params.entity_id,
+    p_discord_id: params.discord_id,
+    p_description: params.description,
+    p_evidence: params.evidence,
+    p_auto_action: params.auto_action ?? null,
   });
 
-  if (error) {
-    // 23505 = an OPEN signal for this (guild, signal_type, entity) already
-    // exists (uniq_open_signal_entity partial index). A re-delivered webhook or
-    // re-run detector must not duplicate the signal OR re-alert the owner —
-    // treat the conflict as an idempotent no-op. Any other insert error is a
-    // genuine failure; do not emit a fraud alert we didn't durably record.
+  if (error || !isExactSignalReceipt(data, ctx.guildId, params)) {
+    // Alerts are evidence of a durable NEW signal. An RPC failure or a receipt
+    // that does not prove this exact identity must therefore fail closed.
     return;
   }
 
-  // Notify owner via event bus only when a NEW signal was actually recorded.
+  // A refresh advances detector evidence/last_observed_at without re-alerting.
+  if (!data.created) return;
+
   ctx.eventBus?.emit('fraud.detected', ctx.guildId, {
     signal: params.signal_type,
     severity: params.severity,
