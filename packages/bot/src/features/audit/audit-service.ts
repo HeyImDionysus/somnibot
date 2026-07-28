@@ -1333,7 +1333,13 @@ export class AuditService {
    * lands and the window has been recorded as `audit.flush_failed`). Keyed by
    * its start time so the recovery row is written exactly once per window.
    */
-  private flushOutage: { attempts: number; firstFailedAt: string; lastError: string } | null = null;
+  private flushOutage: {
+    attempts: number;
+    firstFailedAt: string;
+    lastError: string;
+    recoveredEntries: number;
+    recoveryGuildId: string | null;
+  } | null = null;
   /**
    * Last-known guild_config values — the BEFORE side of config.updated
    * diffs. Loaded once at start() (i.e. before any config change this
@@ -1663,6 +1669,7 @@ export class AuditService {
           pendingEnqueues: this.pendingEnqueues.size,
           activeGapWindows: this.activeGapWindows.size,
           frozenGapWindows: this.pendingGapWindows.size,
+          pendingFlushRecovery: this.flushOutage !== null,
         };
         log.error('Audit shutdown drain stalled with finite work still pending', residue);
         throw new Error(
@@ -1678,6 +1685,7 @@ export class AuditService {
       || this.pendingEnqueues.size > 0
       || this.activeGapWindows.size > 0
       || this.pendingGapWindows.size > 0
+      || this.flushOutage !== null
     );
   }
 
@@ -1748,7 +1756,14 @@ export class AuditService {
       await Promise.all([...this.pendingEnqueues]);
     }
     if (this.queue.length === 0) {
-      return this.flushGapWindows();
+      let progressed = await this.flushGapWindows();
+      if (this.flushOutage && this.flushOutage.recoveredEntries > 0) {
+        const outage = this.flushOutage;
+        this.flushOutage = null;
+        await this.recordFlushRecovery([], outage);
+        progressed = this.flushOutage === null || progressed;
+      }
+      return progressed;
     }
 
     const batch = this.queue.splice(0, this.queue.length);
@@ -1771,6 +1786,8 @@ export class AuditService {
         attempts: (this.flushOutage?.attempts ?? 0) + 1,
         firstFailedAt: this.flushOutage?.firstFailedAt ?? new Date().toISOString(),
         lastError: writeError,
+        recoveredEntries: this.flushOutage?.recoveredEntries ?? 0,
+        recoveryGuildId: this.flushOutage?.recoveryGuildId ?? null,
       };
       // Keep the oldest failed rows first while retaining a hard memory bound.
       this.queue.unshift(...batch);
@@ -1793,7 +1810,17 @@ export class AuditService {
     // again — record the outage window exactly once, keyed on its start so a
     // retry/restart cannot duplicate it.
     if (this.flushOutage) {
-      const outage = this.flushOutage;
+      const outage = {
+        ...this.flushOutage,
+        recoveredEntries: this.flushOutage.recoveredEntries + batch.length,
+        recoveryGuildId:
+          (batch.find((entry) => typeof entry.guild_id === 'string')?.guild_id as
+            | string
+            | undefined)
+          ?? this.flushOutage.recoveryGuildId
+          ?? this.guildId
+          ?? null,
+      };
       this.flushOutage = null;
       await this.recordFlushRecovery(batch, outage);
     }
@@ -1907,14 +1934,24 @@ export class AuditService {
    */
   private async recordFlushRecovery(
     batch: Array<Record<string, unknown>>,
-    outage: { attempts: number; firstFailedAt: string; lastError: string },
+    outage: {
+      attempts: number;
+      firstFailedAt: string;
+      lastError: string;
+      recoveredEntries: number;
+      recoveryGuildId: string | null;
+    },
   ): Promise<void> {
     // Attribute the window to a guild present in the recovered batch (the rows
     // that were stuck), falling back to this service's own guild.
     const guildId =
-      (batch.find((e) => typeof e.guild_id === 'string')?.guild_id as string | undefined)
+      outage.recoveryGuildId
+      ?? (batch.find((e) => typeof e.guild_id === 'string')?.guild_id as string | undefined)
       ?? this.guildId;
-    if (!guildId) return;
+    if (!guildId) {
+      this.flushOutage = outage;
+      return;
+    }
     try {
       const { error } = await this.supabase.from('audit_logs').upsert(
         [{
@@ -1930,7 +1967,7 @@ export class AuditService {
             attempts: outage.attempts,
             firstFailedAt: outage.firstFailedAt,
             recoveredAt: new Date().toISOString(),
-            recoveredEntries: batch.length,
+            recoveredEntries: outage.recoveredEntries,
           },
         }],
         { onConflict: 'guild_id,occurrence_key', ignoreDuplicates: true },

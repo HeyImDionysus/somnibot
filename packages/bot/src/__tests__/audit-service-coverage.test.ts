@@ -542,6 +542,65 @@ describe('AuditService', () => {
       await service.stop();
       expect(internals.queue).toHaveLength(0);
     });
+
+    it('does not finish shutdown until a failed flush-recovery row is durably retried', async () => {
+      supabase._upsertMock
+        .mockResolvedValueOnce({ error: { message: 'audit store temporarily unavailable' } })
+        .mockResolvedValueOnce({ error: null })
+        .mockResolvedValueOnce({ error: { message: 'recovery row temporarily unavailable' } })
+        .mockResolvedValueOnce({ error: null });
+
+      await service.log({
+        action: 'must.record.outage',
+        actorType: 'bot',
+        actorId: 'bot1',
+      });
+
+      await service.stop();
+
+      const recoveryRows = supabase._upsertMock.mock.calls
+        .flatMap(([rows]) => rows as Array<Record<string, any>>)
+        .filter((row) => row.action === 'audit.flush_failed');
+      expect(recoveryRows).toHaveLength(2);
+      expect(recoveryRows[1]?.occurrence_key).toBe(recoveryRows[0]?.occurrence_key);
+      expect(recoveryRows[1]?.details).toMatchObject({
+        attempts: 1,
+        recoveredEntries: 1,
+      });
+
+      const internals = service as unknown as {
+        flushOutage: unknown;
+      };
+      expect(internals.flushOutage).toBeNull();
+    });
+
+    it('rejects with the recovery marker retained when that marker stays unavailable', async () => {
+      supabase._upsertMock
+        .mockResolvedValueOnce({ error: { message: 'audit store temporarily unavailable' } })
+        .mockResolvedValueOnce({ error: null })
+        .mockResolvedValue({ error: { message: 'recovery row remains unavailable' } });
+
+      await service.log({
+        action: 'must.retain.outage',
+        actorType: 'bot',
+        actorId: 'bot1',
+      });
+
+      await expect(service.stop()).rejects.toThrow(/stalled with residue/);
+
+      const internals = service as unknown as {
+        queue: Array<Record<string, unknown>>;
+        flushOutage: {
+          recoveredEntries: number;
+        } | null;
+      };
+      expect(internals.queue).toHaveLength(0);
+      expect(internals.flushOutage).toMatchObject({ recoveredEntries: 1 });
+
+      supabase._upsertMock.mockResolvedValue({ error: null });
+      await service.stop();
+      expect(internals.flushOutage).toBeNull();
+    });
   });
 
   describe('manual log', () => {
