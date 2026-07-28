@@ -79,6 +79,12 @@ function installDirectSimulator(
 
   const execute = async (query: string): Promise<void> => {
     const claimToken = query.match(/claim:v1:[a-f0-9]{64}:[0-9a-f-]{36}/i)?.[0];
+    const targetProbeFilename = query.match(
+      /__somnibot_migration_target_probe_v1__:[0-9a-f-]{36}/i,
+    )?.[0];
+    const targetProbeChecksum = query.match(
+      /target-binding-probe:v1:[0-9a-f-]{36}/i,
+    )?.[0];
     const filenameEquals = quotedValues(
       query,
       /filename\s*=\s*'((?:''|[^'])*)'/gi,
@@ -89,6 +95,42 @@ function installDirectSimulator(
     );
 
     if (query.includes('CREATE TABLE IF NOT EXISTS public.schema_migrations')) {
+      return;
+    }
+
+    if (
+      query.includes('$migration_runner_target_probe_write$')
+      && targetProbeFilename
+      && targetProbeChecksum
+    ) {
+      if (mirrorControlToRest) {
+        const existing = state.find((row) => row.filename === targetProbeFilename);
+        if (!existing) {
+          state.push({
+            filename: targetProbeFilename,
+            checksum: targetProbeChecksum,
+            success: false,
+            applied_at: '2026-07-28T12:00:00.000Z',
+            duration_ms: 0,
+          });
+        }
+      }
+      return;
+    }
+
+    if (
+      query.includes('$migration_runner_target_probe_cleanup$')
+      && targetProbeFilename
+      && targetProbeChecksum
+    ) {
+      if (mirrorControlToRest) {
+        const index = state.findIndex((row) => (
+          row.filename === targetProbeFilename
+          && row.checksum === targetProbeChecksum
+          && !row.success
+        ));
+        if (index >= 0) state.splice(index, 1);
+      }
       return;
     }
 
@@ -255,13 +297,13 @@ describe('migration runner direct-Postgres execution', () => {
 
     expect(result.errors).toEqual([]);
     expect(result.applied).toEqual([MIGRATION]);
-    expect(clients).toHaveLength(3); // bootstrap, claim CAS, execution
-    expect(clients[2].queries).toHaveLength(4);
-    expect(clients[2].queries[0]).toContain('$migration_runner_claim_proof$');
-    expect(clients[2].queries[1]).toContain('DO $fraud_index_recovery$');
-    expect(clients[2].queries[2].trimStart()).toMatch(/^CREATE INDEX CONCURRENTLY/);
-    expect(clients[2].queries[3]).toContain('DO $fraud_index_postflight$');
-    expect(clients[2].queries[3]).toContain('$migration_runner_history$');
+    expect(clients).toHaveLength(5); // bootstrap, binding write/cleanup, claim CAS, execution
+    expect(clients[4].queries).toHaveLength(4);
+    expect(clients[4].queries[0]).toContain('$migration_runner_claim_proof$');
+    expect(clients[4].queries[1]).toContain('DO $fraud_index_recovery$');
+    expect(clients[4].queries[2].trimStart()).toMatch(/^CREATE INDEX CONCURRENTLY/);
+    expect(clients[4].queries[3]).toContain('DO $fraud_index_postflight$');
+    expect(clients[4].queries[3]).toContain('$migration_runner_history$');
     expect(state[0]).toMatchObject({
       checksum: canonical(source),
       success: true,
@@ -285,11 +327,11 @@ describe('migration runner direct-Postgres execution', () => {
 
     expect(result.applied).toEqual([]);
     expect(result.errors[0]).toMatch(/concurrent build failed/i);
-    expect(clients[2].queries).toHaveLength(3);
-    expect(clients[2].queries.some((query) => (
+    expect(clients[4].queries).toHaveLength(3);
+    expect(clients[4].queries.some((query) => (
       query.includes('DO $fraud_index_postflight$')
     ))).toBe(false);
-    expect(clients[3].queries[0]).toContain('success = false');
+    expect(clients[5].queries[0]).toContain('success = false');
     expect(state[0]).toMatchObject({
       checksum: canonical(source),
       success: false,
@@ -306,10 +348,34 @@ describe('migration runner direct-Postgres execution', () => {
     const result = await runMigrations();
 
     expect(result.applied).toEqual([]);
-    expect(result.errors[0]).toMatch(/claim was not persisted/i);
-    expect(clients).toHaveLength(2); // bootstrap and ambiguous claim insert only
+    expect(result.errors[0]).toMatch(/SQL.*REST.*target binding/i);
+    expect(clients).toHaveLength(3); // bootstrap and binding write/cleanup only
     expect(clients.flatMap((client) => client.queries).some((query) => (
       query.includes('CREATE TABLE wrong_target_probe')
+    ))).toBe(false);
+  });
+
+  it('fails closed before trusting all-success REST history from a different target', async () => {
+    const ordinarySource = 'CREATE TABLE wrong_target_success_probe (id bigint);';
+    mocks.readdirSync.mockReturnValue(['001_wrong_target_success.sql']);
+    mocks.readFileSync.mockReturnValue(ordinarySource);
+    const state: HistoryRow[] = [{
+      filename: '001_wrong_target_success.sql',
+      checksum: canonical(ordinarySource),
+      success: true,
+      applied_at: '2026-07-28T12:00:00.000Z',
+      duration_ms: 5,
+    }];
+    const clients = installDirectSimulator(state, { mirrorControlToRest: false });
+
+    const result = await runMigrations();
+
+    expect(result.ran).toBe(false);
+    expect(result.applied).toEqual([]);
+    expect(result.skipped).toEqual([]);
+    expect(result.errors[0]).toMatch(/SQL.*REST.*target binding/i);
+    expect(clients.flatMap((client) => client.queries).some((query) => (
+      query.includes('CREATE TABLE wrong_target_success_probe')
     ))).toBe(false);
   });
 });

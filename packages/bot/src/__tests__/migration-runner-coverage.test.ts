@@ -46,6 +46,9 @@ interface HistoryRow {
 interface SimulatorOptions {
   bootstrapFailure?: boolean;
   historyFailure?: boolean;
+  targetProbeWriteFailureAfterCommit?: boolean;
+  targetProbeReadFailure?: boolean;
+  targetProbeCleanupFailure?: boolean;
   claimFailureAfterCommit?: boolean;
   sourceFailure?: 'before-commit' | 'after-commit';
 }
@@ -94,6 +97,8 @@ function createManagementSimulator(
   const queries: string[] = [];
   const dbNowMs = Date.parse('2026-07-28T12:00:00.000Z');
   const dbNow = () => new Date(dbNowMs).toISOString();
+  let targetProbeReadFailuresRemaining =
+    options.targetProbeReadFailure ? 1 : 0;
 
   mocks.fetch.mockImplementation(async (
     input: string | URL | Request,
@@ -102,10 +107,21 @@ function createManagementSimulator(
     const url = String(input);
 
     if (url.includes('/rest/v1/schema_migrations')) {
-      if (options.historyFailure) return failure(503, 'history unavailable');
-
       const parsed = new URL(url);
       const filenameFilter = parsed.searchParams.get('filename');
+      const requestedFilename = filenameFilter?.startsWith('eq.')
+        ? filenameFilter.slice(3)
+        : undefined;
+      const isTargetProbeRead = requestedFilename?.startsWith(
+        '__somnibot_migration_target_probe_v1__:',
+      ) ?? false;
+      if (isTargetProbeRead && targetProbeReadFailuresRemaining > 0) {
+        targetProbeReadFailuresRemaining -= 1;
+        throw new Error('target probe REST response lost');
+      }
+      if (options.historyFailure && !isTargetProbeRead) {
+        return failure(503, 'history unavailable');
+      }
       const selected = filenameFilter?.startsWith('eq.')
         ? state.filter((row) => row.filename === filenameFilter.slice(3))
         : [...state].sort((a, b) => a.filename.localeCompare(b.filename));
@@ -152,6 +168,12 @@ function createManagementSimulator(
     }
 
     const claimToken = query.match(/claim:v1:[a-f0-9]{64}:[0-9a-f-]{36}/i)?.[0];
+    const targetProbeFilename = query.match(
+      /__somnibot_migration_target_probe_v1__:[0-9a-f-]{36}/i,
+    )?.[0];
+    const targetProbeChecksum = query.match(
+      /target-binding-probe:v1:[0-9a-f-]{36}/i,
+    )?.[0];
     const filenameEquals = quotedValues(
       query,
       /filename\s*=\s*'((?:''|[^'])*)'/gi,
@@ -160,6 +182,53 @@ function createManagementSimulator(
       query,
       /checksum\s*=\s*'((?:''|[^'])*)'/gi,
     );
+
+    if (
+      query.includes('$migration_runner_target_probe_write$')
+      && targetProbeFilename
+      && targetProbeChecksum
+    ) {
+      for (let index = state.length - 1; index >= 0; index -= 1) {
+        const row = state[index];
+        if (
+          row.filename.startsWith('__somnibot_migration_target_probe_v1__:')
+          && row.checksum.startsWith('target-binding-probe:v1:')
+          && !row.success
+          && Date.parse(row.applied_at) < dbNowMs - 10 * 60 * 1000
+        ) {
+          state.splice(index, 1);
+        }
+      }
+      if (!state.some((row) => row.filename === targetProbeFilename)) {
+        state.push({
+          filename: targetProbeFilename,
+          checksum: targetProbeChecksum,
+          success: false,
+          applied_at: dbNow(),
+          duration_ms: 0,
+        });
+      }
+      return options.targetProbeWriteFailureAfterCommit
+        ? failure(504, 'target probe response lost after commit')
+        : okJson({});
+    }
+
+    if (
+      query.includes('$migration_runner_target_probe_cleanup$')
+      && targetProbeFilename
+      && targetProbeChecksum
+    ) {
+      if (options.targetProbeCleanupFailure) {
+        return failure(500, 'target probe cleanup rejected');
+      }
+      const index = state.findIndex((row) => (
+        row.filename === targetProbeFilename
+        && row.checksum === targetProbeChecksum
+        && !row.success
+      ));
+      if (index >= 0) state.splice(index, 1);
+      return okJson({});
+    }
 
     if (
       query.includes('INSERT INTO public.schema_migrations')
@@ -362,6 +431,124 @@ describe('runMigrations claim and execution safety', () => {
     );
     expect(JSON.parse(String((durationCall?.[1] as RequestInit).body)))
       .toEqual({ duration_ms: expect.any(Number) });
+  });
+
+  it('proves a matching Management-only SQL and REST target before an up-to-date result', async () => {
+    const source = 'CREATE TABLE runner_probe (id bigint);';
+    const simulator = createManagementSimulator([{
+      filename: '001_init.sql',
+      checksum: canonical(source),
+      success: true,
+      applied_at: '2026-07-28T11:00:00.000Z',
+      duration_ms: 1,
+    }]);
+
+    const result = await runMigrations();
+
+    expect(result.errors).toEqual([]);
+    expect(result.applied).toEqual([]);
+    expect(result.skipped).toEqual(['001_init.sql']);
+    expect(simulator.sourceQueries()).toHaveLength(0);
+    expect(simulator.queries.some((query) => (
+      query.includes('$migration_runner_target_probe_write$')
+    ))).toBe(true);
+    expect(simulator.queries.some((query) => (
+      query.includes('$migration_runner_target_probe_cleanup$')
+    ))).toBe(true);
+    expect(simulator.rows.some((row) => (
+      row.filename.startsWith('__somnibot_migration_target_probe_v1__:')
+    ))).toBe(false);
+  });
+
+  it('accepts an ambiguous target-probe write only after exact REST proof', async () => {
+    const simulator = createManagementSimulator([], {
+      targetProbeWriteFailureAfterCommit: true,
+    });
+
+    const result = await runMigrations();
+
+    expect(result.errors).toEqual([]);
+    expect(result.applied).toEqual(['001_init.sql']);
+    expect(simulator.sourceQueries()).toHaveLength(1);
+    expect(simulator.rows.some((row) => (
+      row.filename.startsWith('__somnibot_migration_target_probe_v1__:')
+    ))).toBe(false);
+  });
+
+  it('fails closed after an ambiguous target-probe REST read even when cleanup succeeds', async () => {
+    const simulator = createManagementSimulator([], {
+      targetProbeReadFailure: true,
+    });
+
+    const result = await runMigrations();
+
+    expect(result.ran).toBe(false);
+    expect(result.errors[0]).toMatch(/target binding could not be read/i);
+    expect(simulator.sourceQueries()).toHaveLength(0);
+    expect(simulator.rows).toEqual([]);
+  });
+
+  it('fails closed while a target-probe cleanup remains visible', async () => {
+    const simulator = createManagementSimulator([], {
+      targetProbeCleanupFailure: true,
+    });
+
+    const result = await runMigrations();
+
+    expect(result.ran).toBe(false);
+    expect(result.errors[0]).toMatch(/cleanup was not verified/i);
+    expect(simulator.sourceQueries()).toHaveLength(0);
+    expect(simulator.rows).toHaveLength(1);
+    expect(simulator.rows[0]?.filename).toMatch(
+      /^__somnibot_migration_target_probe_v1__:/,
+    );
+    expect(simulator.rows[0]?.success).toBe(false);
+  });
+
+  it('reaps only stale rows in the reserved target-probe namespace', async () => {
+    const source = 'CREATE TABLE runner_probe (id bigint);';
+    const staleProbeId = '00000000-0000-4000-8000-000000000001';
+    const unrelatedClaim =
+      `claim:v1:${canonical(source)}:00000000-0000-4000-8000-000000000002`;
+    const simulator = createManagementSimulator([
+      {
+        filename: `__somnibot_migration_target_probe_v1__:${staleProbeId}`,
+        checksum: `target-binding-probe:v1:${staleProbeId}`,
+        success: false,
+        applied_at: '2026-07-28T11:00:00.000Z',
+        duration_ms: 0,
+      },
+      {
+        filename: 'unrelated_claim.sql',
+        checksum: unrelatedClaim,
+        success: false,
+        applied_at: '2026-07-28T11:00:00.000Z',
+        duration_ms: 0,
+      },
+      {
+        filename: '001_init.sql',
+        checksum: canonical(source),
+        success: true,
+        applied_at: '2026-07-28T11:00:00.000Z',
+        duration_ms: 1,
+      },
+    ]);
+
+    const result = await runMigrations();
+
+    expect(result.errors).toEqual([]);
+    expect(result.skipped).toEqual(['001_init.sql']);
+    expect(simulator.rows.some((row) => (
+      row.filename === `__somnibot_migration_target_probe_v1__:${staleProbeId}`
+    ))).toBe(false);
+    expect(simulator.rows).toContainEqual(expect.objectContaining({
+      filename: 'unrelated_claim.sql',
+      checksum: unrelatedClaim,
+      success: false,
+    }));
+    expect(simulator.queries.some((query) => (
+      query.includes("applied_at < now() - interval '10 minutes'")
+    ))).toBe(true);
   });
 
   it('places the success CAS before the sole outer COMMIT', async () => {

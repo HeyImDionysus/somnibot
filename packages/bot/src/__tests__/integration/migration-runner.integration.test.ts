@@ -372,4 +372,64 @@ INSERT INTO public.runner_execution_log (marker) VALUES ('executed');
     `;
     expect(probe).toHaveLength(1);
   });
+
+  it('binds direct SQL to REST and reaps only stale reserved probes', async () => {
+    if (!sql) throw new Error('Isolated database was not initialized');
+    const filename = '20260728000400_runner_target_binding.sql';
+    const source = 'CREATE TABLE public.runner_target_binding_probe (id bigint);';
+    const staleProbeId = '00000000-0000-4000-8000-000000000010';
+    const unrelatedClaim =
+      `claim:v1:${canonical(source)}:00000000-0000-4000-8000-000000000011`;
+    selectMigration(filename, source);
+
+    await sql`
+      INSERT INTO public.schema_migrations (
+        filename,
+        checksum,
+        applied_at,
+        duration_ms,
+        success
+      )
+      VALUES
+        (
+          ${filename},
+          ${canonical(source)},
+          now() - interval '1 minute',
+          ${1},
+          ${true}
+        ),
+        (
+          ${`__somnibot_migration_target_probe_v1__:${staleProbeId}`},
+          ${`target-binding-probe:v1:${staleProbeId}`},
+          now() - interval '11 minutes',
+          ${0},
+          ${false}
+        ),
+        (
+          ${'unrelated_runner_claim.sql'},
+          ${unrelatedClaim},
+          now() - interval '11 minutes',
+          ${0},
+          ${false}
+        )
+    `;
+
+    const result = await runMigrations();
+
+    expect(result.errors).toEqual([]);
+    expect(result.ran).toBe(false);
+    expect(result.skipped).toEqual([filename]);
+    const [{ probeCount }] = await sql<Array<{ probeCount: number }>>`
+      SELECT count(*)::int AS "probeCount"
+        FROM public.schema_migrations
+       WHERE filename LIKE '__somnibot_migration_target_probe_v1__:%'
+    `;
+    expect(probeCount).toBe(0);
+    const [claim] = await sql<Array<Pick<HistoryRow, 'checksum' | 'success'>>>`
+      SELECT checksum, success
+        FROM public.schema_migrations
+       WHERE filename = 'unrelated_runner_claim.sql'
+    `;
+    expect(claim).toEqual({ checksum: unrelatedClaim, success: false });
+  });
 });

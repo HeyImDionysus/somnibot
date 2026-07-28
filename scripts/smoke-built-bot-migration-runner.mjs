@@ -61,6 +61,42 @@ globalThis.fetch = async (input, init = {}) => {
     const { query } = JSON.parse(String(init.body));
 
     const claimToken = query.match(/claim:v1:[a-f0-9]{64}:[0-9a-f-]{36}/i)?.[0];
+    const targetProbeFilename = query.match(
+      /__somnibot_migration_target_probe_v1__:[0-9a-f-]{36}/i,
+    )?.[0];
+    const targetProbeChecksum = query.match(
+      /target-binding-probe:v1:[0-9a-f-]{36}/i,
+    )?.[0];
+    if (
+      query.includes('$migration_runner_target_probe_write$')
+      && targetProbeFilename
+      && targetProbeChecksum
+    ) {
+      if (!migrationHistory.some((row) => row.filename === targetProbeFilename)) {
+        migrationHistory.push({
+          filename: targetProbeFilename,
+          checksum: targetProbeChecksum,
+          applied_at: '2026-07-28T00:00:02.000Z',
+          duration_ms: 0,
+          success: false,
+        });
+      }
+      return okResponse();
+    }
+
+    if (
+      query.includes('$migration_runner_target_probe_cleanup$')
+      && targetProbeFilename
+      && targetProbeChecksum
+    ) {
+      migrationHistory = migrationHistory.filter((row) => !(
+        row.filename === targetProbeFilename
+        && row.checksum === targetProbeChecksum
+        && row.success === false
+      ));
+      return okResponse();
+    }
+
     if (
       claimToken
       && query.includes('UPDATE public.schema_migrations')
@@ -151,6 +187,11 @@ try {
   if (migrationHistory[0]?.success !== true) {
     throw new Error('Built migration runner did not atomically finalize failed history');
   }
+  if (migrationHistory.some((row) => (
+    row.filename.startsWith('__somnibot_migration_target_probe_v1__:')
+  ))) {
+    throw new Error('Built migration runner left a target-binding probe row behind');
+  }
 
   const migrationQueryCount = migrationQueries.length;
   const secondRun = await runMigrations();
@@ -162,6 +203,11 @@ try {
   }
   if (migrationQueries.length !== migrationQueryCount) {
     throw new Error('Built migration runner re-executed a successful migration');
+  }
+  if (migrationHistory.some((row) => (
+    row.filename.startsWith('__somnibot_migration_target_probe_v1__:')
+  ))) {
+    throw new Error('Built migration runner second run left a target-binding probe row behind');
   }
 
   console.log(

@@ -59,6 +59,11 @@ interface HistoryReadResult {
   error?: string;
 }
 
+interface TargetBindingResult {
+  success: boolean;
+  error?: string;
+}
+
 interface ClaimAcquired {
   status: 'acquired';
   token: string;
@@ -78,6 +83,11 @@ const APPROVED_NONTRANSACTIONAL_SHA256 =
 const CLAIM_PREFIX = 'claim:v1:';
 const CLAIM_LEASE_MS = 5 * 60 * 1000;
 const CLAIM_HEARTBEAT_MS = 60 * 1000;
+const TARGET_BINDING_PROBE_FILENAME_PREFIX =
+  '__somnibot_migration_target_probe_v1__:';
+const TARGET_BINDING_PROBE_CHECKSUM_PREFIX =
+  'target-binding-probe:v1:';
+const TARGET_BINDING_PROBE_STALE_MINUTES = 10;
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -721,7 +731,11 @@ async function getAppliedMigrations(
       };
     }
 
-    return { success: true, rows: (await res.json()) as AppliedMigration[] };
+    const rows = (await res.json()) as AppliedMigration[];
+    return {
+      success: true,
+      rows: rows.filter((row) => !isTargetBindingProbeFilename(row.filename)),
+    };
   } catch (err) {
     return {
       success: false,
@@ -767,6 +781,169 @@ async function readMigrationHistoryRow(
       error: `Migration history row read failed: ${String(err)}`,
     };
   }
+}
+
+function isTargetBindingProbeFilename(filename: string): boolean {
+  return filename.startsWith(TARGET_BINDING_PROBE_FILENAME_PREFIX);
+}
+
+async function cleanupTargetBindingProbe(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  filename: string,
+  checksum: string,
+  bindingWasVisible: boolean,
+): Promise<TargetBindingResult> {
+  const cleanupWrite = await executeControlSql(
+    supabaseUrl,
+    `
+DO $migration_runner_target_probe_cleanup$
+BEGIN
+  DELETE FROM public.schema_migrations
+   WHERE filename = ${sqlLiteral(filename)}
+     AND checksum = ${sqlLiteral(checksum)}
+     AND success = false;
+
+  IF EXISTS (
+    SELECT 1
+      FROM public.schema_migrations
+     WHERE filename = ${sqlLiteral(filename)}
+       AND checksum = ${sqlLiteral(checksum)}
+       AND success = false
+  ) THEN
+    RAISE EXCEPTION 'Migration target-binding probe cleanup failed';
+  END IF;
+END
+$migration_runner_target_probe_cleanup$;
+`,
+    'Migration target-binding probe cleanup',
+  );
+
+  const cleanupRead = await readMigrationHistoryRow(
+    supabaseUrl,
+    serviceRoleKey,
+    filename,
+  );
+  const restVerifiedAbsent = cleanupRead.success && cleanupRead.row === undefined;
+  if (
+    restVerifiedAbsent
+    && (cleanupWrite.success || bindingWasVisible)
+  ) {
+    return { success: true };
+  }
+
+  const details = [
+    cleanupWrite.success ? undefined : cleanupWrite.error,
+    cleanupRead.success
+      ? cleanupRead.row
+        ? 'reserved probe row is still visible through REST'
+        : 'cleanup outcome is ambiguous across unbound targets'
+      : cleanupRead.error,
+  ].filter((detail): detail is string => Boolean(detail));
+  return {
+    success: false,
+    error: `Migration SQL/REST target-binding probe cleanup was not verified: ${details.join('; ')}`,
+  };
+}
+
+/**
+ * Bind the selected SQL executor to the REST history target before any
+ * successful history row can be trusted. The random reserved row contains no
+ * credentials, is never a migration filename, and is removed by an exact
+ * token CAS. Old crashed probes are reaped only inside this reserved namespace
+ * and only after a database-timed stale interval.
+ */
+async function verifySqlRestTargetBinding(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+): Promise<TargetBindingResult> {
+  const probeId = randomUUID();
+  const filename = `${TARGET_BINDING_PROBE_FILENAME_PREFIX}${probeId}`;
+  const checksum = `${TARGET_BINDING_PROBE_CHECKSUM_PREFIX}${probeId}`;
+  const write = await executeControlSql(
+    supabaseUrl,
+    `
+DO $migration_runner_target_probe_write$
+BEGIN
+  DELETE FROM public.schema_migrations
+   WHERE left(filename, ${TARGET_BINDING_PROBE_FILENAME_PREFIX.length})
+           = ${sqlLiteral(TARGET_BINDING_PROBE_FILENAME_PREFIX)}
+     AND left(checksum, ${TARGET_BINDING_PROBE_CHECKSUM_PREFIX.length})
+           = ${sqlLiteral(TARGET_BINDING_PROBE_CHECKSUM_PREFIX)}
+     AND success = false
+     AND applied_at IS NOT NULL
+     AND applied_at < now() - interval '${TARGET_BINDING_PROBE_STALE_MINUTES} minutes';
+
+  INSERT INTO public.schema_migrations (
+    filename,
+    checksum,
+    applied_at,
+    duration_ms,
+    success
+  )
+  VALUES (
+    ${sqlLiteral(filename)},
+    ${sqlLiteral(checksum)},
+    now(),
+    0,
+    false
+  )
+  ON CONFLICT (filename) DO NOTHING;
+
+  IF NOT EXISTS (
+    SELECT 1
+      FROM public.schema_migrations
+     WHERE filename = ${sqlLiteral(filename)}
+       AND checksum = ${sqlLiteral(checksum)}
+       AND success = false
+  ) THEN
+    RAISE EXCEPTION 'Migration target-binding probe collision';
+  END IF;
+END
+$migration_runner_target_probe_write$;
+`,
+    'Migration target-binding probe write',
+  );
+
+  // A failed transport can still mean the probe committed, so only the exact
+  // REST reread decides whether the SQL and REST surfaces are bound.
+  const read = await readMigrationHistoryRow(
+    supabaseUrl,
+    serviceRoleKey,
+    filename,
+  );
+  const exactVisible = Boolean(
+    read.success
+    && read.row?.filename === filename
+    && read.row.checksum === checksum
+    && read.row.success === false,
+  );
+  const cleanup = await cleanupTargetBindingProbe(
+    supabaseUrl,
+    serviceRoleKey,
+    filename,
+    checksum,
+    exactVisible,
+  );
+
+  if (!read.success) {
+    return {
+      success: false,
+      error: `Migration SQL/REST target binding could not be read: ${read.error}${cleanup.success ? '' : `; ${cleanup.error}`}`,
+    };
+  }
+  if (!exactVisible) {
+    const mismatch = read.row
+      ? 'REST returned a conflicting reserved probe row'
+      : 'the SQL-written probe was not visible through REST';
+    return {
+      success: false,
+      error: `Migration SQL/REST target binding failed: ${mismatch}${write.success ? '' : `; ${write.error}`}${cleanup.success ? '' : `; ${cleanup.error}`}`,
+    };
+  }
+  if (!cleanup.success) return cleanup;
+
+  return { success: true };
 }
 
 function checksumEncodings(sql: string): {
@@ -1236,6 +1413,18 @@ export async function runMigrations(): Promise<MigrationResult> {
   const bootstrapped = await ensureTrackingTable(supabaseUrl, serviceRoleKey);
   if (!bootstrapped) {
     const error = 'Could not bootstrap migration tracking table; refusing to execute untracked SQL';
+    log.error(error);
+    return { ran: false, applied: [], skipped: [], errors: [error], checksumDrift: [] };
+  }
+
+  // Prove that the selected SQL executor and REST history surface reach the
+  // same database before trusting any success row or declaring "up to date".
+  const targetBinding = await verifySqlRestTargetBinding(
+    supabaseUrl,
+    serviceRoleKey,
+  );
+  if (!targetBinding.success) {
+    const error = `${targetBinding.error}; refusing to trust migration history`;
     log.error(error);
     return { ran: false, applied: [], skipped: [], errors: [error], checksumDrift: [] };
   }
