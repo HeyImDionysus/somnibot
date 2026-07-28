@@ -130,6 +130,69 @@ describe('runMigrations', () => {
     expect(result.applied).toEqual([]);
   });
 
+  it('retries a failed history row and upserts it to success', async () => {
+    process.env.MIGRATIONS_DIR = '/migrations';
+    mockReaddirSync.mockReturnValue(['001_retry.sql']);
+    mockReadFileSync.mockReturnValue('SELECT 1;');
+
+    mockFetch
+      .mockResolvedValueOnce({ ok: true }) // bootstrap
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          { filename: '001_retry.sql', checksum: 'failed-checksum', success: false },
+        ],
+      })
+      .mockResolvedValueOnce({ ok: true }) // retry SQL
+      .mockResolvedValueOnce({ ok: true }); // history upsert
+
+    const result = await runMigrations();
+
+    expect(result.applied).toEqual(['001_retry.sql']);
+    expect(result.skipped).toEqual([]);
+    expect(result.errors).toEqual([]);
+
+    const [historyUrl, historyRequest] = mockFetch.mock.calls[3] as [string, RequestInit];
+    expect(historyUrl).toContain('on_conflict=filename');
+    expect(historyRequest.headers).toMatchObject({
+      Prefer: expect.stringContaining('resolution=merge-duplicates'),
+    });
+    expect(JSON.parse(String(historyRequest.body))).toMatchObject({
+      filename: '001_retry.sql',
+      success: true,
+    });
+  });
+
+  it('runs ordinary/CIC/ordinary batches sequentially through the Management API', async () => {
+    process.env.MIGRATIONS_DIR = '/migrations';
+    mockReaddirSync.mockReturnValue(['001_concurrent_index.sql']);
+    mockReadFileSync.mockReturnValue(`
+      DO $pre$ BEGIN PERFORM 'before;still-before'; END $pre$;
+      CREATE INDEX CONCURRENTLY idx_example ON example (id);
+      DO $post$ BEGIN PERFORM 'after;still-after'; END $post$;
+    `);
+
+    mockFetch
+      .mockResolvedValueOnce({ ok: true }) // bootstrap
+      .mockResolvedValueOnce({ ok: true, json: async () => [] }) // history
+      .mockResolvedValueOnce({ ok: true }) // preflight
+      .mockResolvedValueOnce({ ok: true }) // CREATE INDEX CONCURRENTLY
+      .mockResolvedValueOnce({ ok: true }) // postflight
+      .mockResolvedValueOnce({ ok: true }); // history upsert
+
+    const result = await runMigrations();
+
+    expect(result.applied).toEqual(['001_concurrent_index.sql']);
+    const migrationQueries = mockFetch.mock.calls
+      .slice(2, 5)
+      .map(([, request]) => JSON.parse(String((request as RequestInit).body)).query as string);
+    expect(migrationQueries).toHaveLength(3);
+    expect(migrationQueries[0]).toContain('DO $pre$');
+    expect(migrationQueries[0]).not.toContain('CREATE INDEX CONCURRENTLY');
+    expect(migrationQueries[1].trimStart()).toMatch(/^CREATE INDEX CONCURRENTLY/);
+    expect(migrationQueries[2]).toContain('DO $post$');
+  });
+
   it('detects checksum drift', async () => {
     process.env.MIGRATIONS_DIR = '/migrations';
     mockReaddirSync.mockReturnValue(['001_init.sql']);

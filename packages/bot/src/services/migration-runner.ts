@@ -115,31 +115,339 @@ function extractProjectRef(url: string): string | null {
   return match?.[1] ?? null;
 }
 
+function dollarQuoteDelimiterAt(sql: string, index: number): string | null {
+  if (sql[index] !== '$') return null;
+  if (/[A-Za-z0-9_$]/.test(sql[index - 1] ?? '')) return null;
+
+  const closingDollar = sql.indexOf('$', index + 1);
+  if (closingDollar < 0) return null;
+
+  const tag = sql.slice(index + 1, closingDollar);
+  if (tag.length > 0 && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(tag)) {
+    return null;
+  }
+
+  return sql.slice(index, closingDollar + 1);
+}
+
+function isEscapeStringStart(sql: string, quoteIndex: number): boolean {
+  const previous = sql[quoteIndex - 1];
+  const beforePrevious = sql[quoteIndex - 2];
+  const identifierBeforePrevious = sql[quoteIndex - 2]?.match(/[A-Za-z0-9_$]/);
+  const identifierBeforeUnicodePrefix = sql[quoteIndex - 3]?.match(/[A-Za-z0-9_$]/);
+
+  return (
+    ((previous === 'E' || previous === 'e') && !identifierBeforePrevious)
+    || (
+      previous === '&'
+      && (beforePrevious === 'U' || beforePrevious === 'u')
+      && !identifierBeforeUnicodePrefix
+    )
+  );
+}
+
+/**
+ * Split at SQL statement terminators without treating semicolons inside
+ * PostgreSQL lexical constructs as boundaries. Collecting keyword tokens in
+ * the same pass keeps classification subject to exactly the same lexer.
+ */
+function lexTopLevelSqlStatements(
+  sql: string,
+): Array<{ sql: string; tokens: string[] }> {
+  const statements: Array<{ sql: string; tokens: string[] }> = [];
+  let statementStart = 0;
+  let tokens: string[] = [];
+  let index = 0;
+  let state: 'normal' | 'single-quote' | 'double-quote' | 'dollar-quote' | 'line-comment' | 'block-comment' = 'normal';
+  let escapeString = false;
+  let dollarDelimiter = '';
+  let blockCommentDepth = 0;
+
+  while (index < sql.length) {
+    const current = sql[index];
+    const next = sql[index + 1];
+
+    if (state === 'line-comment') {
+      if (current === '\n' || current === '\r') state = 'normal';
+      index += 1;
+      continue;
+    }
+
+    if (state === 'block-comment') {
+      if (current === '/' && next === '*') {
+        blockCommentDepth += 1;
+        index += 2;
+      } else if (current === '*' && next === '/') {
+        blockCommentDepth -= 1;
+        index += 2;
+        if (blockCommentDepth === 0) state = 'normal';
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (state === 'single-quote') {
+      if (current === '\'' && next === '\'') {
+        index += 2;
+      } else if (escapeString && current === '\\') {
+        index += Math.min(2, sql.length - index);
+      } else if (current === '\'') {
+        state = 'normal';
+        index += 1;
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (state === 'double-quote') {
+      if (current === '"' && next === '"') {
+        index += 2;
+      } else if (current === '"') {
+        state = 'normal';
+        index += 1;
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (state === 'dollar-quote') {
+      if (sql.startsWith(dollarDelimiter, index)) {
+        index += dollarDelimiter.length;
+        state = 'normal';
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (current === '-' && next === '-') {
+      state = 'line-comment';
+      index += 2;
+    } else if (current === '/' && next === '*') {
+      state = 'block-comment';
+      blockCommentDepth = 1;
+      index += 2;
+    } else if (current === '\'') {
+      state = 'single-quote';
+      escapeString = isEscapeStringStart(sql, index);
+      index += 1;
+    } else if (current === '"') {
+      state = 'double-quote';
+      index += 1;
+    } else if (current === '$') {
+      const delimiter = dollarQuoteDelimiterAt(sql, index);
+      if (delimiter) {
+        state = 'dollar-quote';
+        dollarDelimiter = delimiter;
+        index += delimiter.length;
+      } else {
+        index += 1;
+      }
+    } else if (current === ';') {
+      statements.push({ sql: sql.slice(statementStart, index + 1), tokens });
+      statementStart = index + 1;
+      tokens = [];
+      index += 1;
+    } else if (/[A-Za-z_]/.test(current ?? '')) {
+      const tokenStart = index;
+      index += 1;
+      while (/[A-Za-z0-9_$]/.test(sql[index] ?? '')) index += 1;
+      tokens.push(sql.slice(tokenStart, index).toUpperCase());
+    } else {
+      index += 1;
+    }
+  }
+
+  if (state === 'single-quote') throw new Error('Unterminated SQL string literal');
+  if (state === 'double-quote') throw new Error('Unterminated quoted SQL identifier');
+  if (state === 'dollar-quote') {
+    throw new Error(`Unterminated dollar-quoted string ${dollarDelimiter}`);
+  }
+  if (state === 'block-comment') throw new Error('Unterminated SQL block comment');
+
+  if (statementStart < sql.length) {
+    statements.push({ sql: sql.slice(statementStart), tokens });
+  }
+
+  return statements;
+}
+
+function isCreateIndexConcurrently(tokens: string[]): boolean {
+  if (tokens[0] !== 'CREATE') return false;
+
+  let indexKeyword = 1;
+  if (tokens[indexKeyword] === 'UNIQUE') indexKeyword += 1;
+
+  return tokens[indexKeyword] === 'INDEX'
+    && tokens[indexKeyword + 1] === 'CONCURRENTLY';
+}
+
+function unsupportedTransactionStatement(tokens: string[]): string | null {
+  const [first, second] = tokens;
+
+  if (first === 'VACUUM' || first === 'CLUSTER' || first === 'REINDEX' || first === 'CHECKPOINT') {
+    return tokens.slice(0, 4).join(' ');
+  }
+  if (first === 'DISCARD' && second === 'ALL') return 'DISCARD ALL';
+  if (first === 'ALTER' && second === 'SYSTEM') return 'ALTER SYSTEM';
+  if (first === 'CREATE' && (second === 'DATABASE' || second === 'TABLESPACE' || second === 'SUBSCRIPTION')) {
+    return `CREATE ${second}`;
+  }
+  if (first === 'DROP' && (second === 'DATABASE' || second === 'TABLESPACE' || second === 'SUBSCRIPTION')) {
+    return `DROP ${second}`;
+  }
+  if (first === 'DROP' && second === 'INDEX' && tokens.includes('CONCURRENTLY')) {
+    return 'DROP INDEX CONCURRENTLY';
+  }
+  if (
+    first === 'CREATE'
+    && (
+      second === 'INDEX'
+      || (second === 'UNIQUE' && tokens[2] === 'INDEX')
+    )
+    && tokens.includes('CONCURRENTLY')
+  ) {
+    return tokens.slice(0, 4).join(' ');
+  }
+
+  return null;
+}
+
+function explicitTransactionControlStatement(tokens: string[]): string | null {
+  const [first, second, third, fourth] = tokens;
+
+  if (
+    first === 'BEGIN'
+    || first === 'COMMIT'
+    || first === 'END'
+    || first === 'ROLLBACK'
+    || first === 'ABORT'
+    || first === 'SAVEPOINT'
+    || first === 'RELEASE'
+  ) {
+    return tokens.slice(0, 2).join(' ');
+  }
+  if (first === 'START' && second === 'TRANSACTION') return 'START TRANSACTION';
+  if (first === 'PREPARE' && second === 'TRANSACTION') return 'PREPARE TRANSACTION';
+  if (first === 'SET' && second === 'TRANSACTION') return 'SET TRANSACTION';
+  if (
+    first === 'SET'
+    && second === 'SESSION'
+    && third === 'CHARACTERISTICS'
+    && fourth === 'AS'
+    && tokens[4] === 'TRANSACTION'
+  ) {
+    return 'SET SESSION CHARACTERISTICS AS TRANSACTION';
+  }
+
+  return null;
+}
+
+/**
+ * Preserve the existing one-query implicit transaction for ordinary migration
+ * files. Only files containing CREATE INDEX CONCURRENTLY are segmented, with
+ * each concurrent index build sent alone and surrounding statements kept in
+ * the largest possible transaction batches.
+ */
+export function planMigrationSql(sql: string): string[] {
+  const statements = lexTopLevelSqlStatements(sql);
+  const hasConcurrentIndex = statements.some(({ tokens }) => (
+    isCreateIndexConcurrently(tokens)
+  ));
+  const classified = statements.map((statement) => {
+    const { tokens } = statement;
+    const concurrentIndex = isCreateIndexConcurrently(tokens);
+    const unsupported = concurrentIndex ? null : unsupportedTransactionStatement(tokens);
+    if (unsupported) {
+      throw new Error(`Unsupported transaction-incompatible statement: ${unsupported}`);
+    }
+    const transactionControl = hasConcurrentIndex
+      ? explicitTransactionControlStatement(tokens)
+      : null;
+    if (transactionControl) {
+      throw new Error(
+        `Unsupported explicit transaction control in concurrent-index migration: ${transactionControl}`,
+      );
+    }
+    return { ...statement, concurrentIndex, executable: tokens.length > 0 };
+  });
+
+  if (!hasConcurrentIndex) {
+    return [sql];
+  }
+
+  const batches: string[] = [];
+  let transactionalBatch = '';
+  let transactionalBatchExecutable = false;
+
+  const flushTransactionalBatch = (): void => {
+    if (transactionalBatchExecutable) {
+      batches.push(transactionalBatch);
+    }
+    transactionalBatch = '';
+    transactionalBatchExecutable = false;
+  };
+
+  for (const item of classified) {
+    if (item.concurrentIndex) {
+      flushTransactionalBatch();
+      batches.push(item.sql);
+    } else {
+      transactionalBatch += item.sql;
+      transactionalBatchExecutable ||= item.executable;
+    }
+  }
+  flushTransactionalBatch();
+
+  return batches;
+}
+
 // ── SQL Execution ───────────────────────────────────────────
 
 async function executeSql(
   supabaseUrl: string,
   serviceRoleKey: string,
   sql: string,
-  _migrationName: string,
+  migrationName: string,
 ): Promise<{ success: boolean; error?: string }> {
+  let batches: string[];
+  try {
+    batches = planMigrationSql(sql);
+  } catch (err) {
+    return { success: false, error: `Migration SQL planning error: ${String(err)}` };
+  }
+
   // Strategy 1: Supabase Management API
   const accessToken = process.env.SUPABASE_ACCESS_TOKEN;
   const projectRef = extractProjectRef(supabaseUrl);
 
   if (accessToken && projectRef) {
-    const res = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/database/query`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ query: sql }),
-    });
+    try {
+      for (let index = 0; index < batches.length; index += 1) {
+        const res = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/database/query`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ query: batches[index] }),
+        });
 
-    if (res.ok) return { success: true };
-    const errText = await res.text();
-    return { success: false, error: `Management API error (${res.status}): ${errText}` };
+        if (!res.ok) {
+          const errText = await res.text();
+          return {
+            success: false,
+            error: `Management API error (${res.status}) in ${migrationName} batch ${index + 1}/${batches.length}: ${errText}`,
+          };
+        }
+      }
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: `Management API request failed: ${String(err)}` };
+    }
   }
 
   // Strategy 2: Direct connection via postgres package + SUPABASE_DB_URL
@@ -147,9 +455,16 @@ async function executeSql(
   if (dbUrl) {
     try {
       const { default: postgres } = await import('postgres');
-      const sqlClient = postgres(dbUrl);
-      await sqlClient.unsafe(sql);
-      await sqlClient.end();
+      // One backend for every batch preserves session-scoped settings and
+      // advisory locks across the ordinary / CIC / ordinary sequence.
+      const sqlClient = postgres(dbUrl, { max: 1 });
+      try {
+        for (const batch of batches) {
+          await sqlClient.unsafe(batch);
+        }
+      } finally {
+        await sqlClient.end();
+      }
       return { success: true };
     } catch (err) {
       return { success: false, error: `Direct DB error: ${err}` };
@@ -219,17 +534,29 @@ async function recordMigration(
   checksum: string,
   durationMs: number,
   success: boolean,
-): Promise<void> {
-  await fetch(`${supabaseUrl}/rest/v1/schema_migrations`, {
-    method: 'POST',
-    headers: {
-      apikey: serviceRoleKey,
-      Authorization: `Bearer ${serviceRoleKey}`,
-      'Content-Type': 'application/json',
-      Prefer: 'resolution=merge-duplicates',
-    },
-    body: JSON.stringify({ filename, checksum, duration_ms: durationMs, success }),
-  });
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${supabaseUrl}/rest/v1/schema_migrations?on_conflict=filename`, {
+      method: 'POST',
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates',
+      },
+      body: JSON.stringify({ filename, checksum, duration_ms: durationMs, success }),
+    });
+
+    if (res.ok) return { success: true };
+
+    const details = await res.text();
+    return {
+      success: false,
+      error: `Migration history upsert failed (${res.status}): ${details}`,
+    };
+  } catch (err) {
+    return { success: false, error: `Migration history upsert failed: ${String(err)}` };
+  }
 }
 
 // ── Main Entry Point ────────────────────────────────────────
@@ -292,7 +619,7 @@ export async function runMigrations(): Promise<MigrationResult> {
 
     const existing = appliedMap.get(file);
 
-    if (existing) {
+    if (existing?.success) {
       // Already applied — check for checksum drift.
       //
       // Stored checksums are a mix of historical formats: before hashing was
@@ -314,11 +641,20 @@ export async function runMigrations(): Promise<MigrationResult> {
           createHash('sha256').update(sql, 'utf-8').digest('hex'),
           createHash('sha256').update(sql.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n'), 'utf-8').digest('hex'),
         ];
-        // Only for records of successful applies — the upsert would otherwise
-        // flip a failed migration's success flag to true.
-        if (existing.success && legacyHashes.includes(existing.checksum)) {
-          await recordMigration(supabaseUrl, serviceRoleKey, file, checksum, 0, true);
-          log.info(`Checksum record upgraded to canonical form: ${file}`);
+        if (legacyHashes.includes(existing.checksum)) {
+          const historyResult = await recordMigration(
+            supabaseUrl,
+            serviceRoleKey,
+            file,
+            checksum,
+            0,
+            true,
+          );
+          if (historyResult.success) {
+            log.info(`Checksum record upgraded to canonical form: ${file}`);
+          } else {
+            log.warn(`Could not upgrade checksum record for ${file}: ${historyResult.error}`);
+          }
         } else {
           log.warn(`️  Checksum drift: ${file} (applied: ${existing.checksum.slice(0, 8)}… current: ${checksum.slice(0, 8)}…)`);
           result.checksumDrift.push(file);
@@ -326,6 +662,10 @@ export async function runMigrations(): Promise<MigrationResult> {
       }
       result.skipped.push(file);
       continue;
+    }
+
+    if (existing) {
+      log.warn(`Retrying previously failed migration: ${file}`);
     }
 
     // Run this migration
@@ -337,12 +677,36 @@ export async function runMigrations(): Promise<MigrationResult> {
     const durationMs = Date.now() - startMs;
 
     if (execResult.success) {
-      result.applied.push(file);
-      await recordMigration(supabaseUrl, serviceRoleKey, file, checksum, durationMs, true);
-      log.info(`${file} (${durationMs}ms)`);
+      const historyResult = await recordMigration(
+        supabaseUrl,
+        serviceRoleKey,
+        file,
+        checksum,
+        durationMs,
+        true,
+      );
+      if (historyResult.success) {
+        result.applied.push(file);
+        log.info(`${file} (${durationMs}ms)`);
+      } else {
+        const error = `${file}: migration applied but ${historyResult.error}`;
+        result.errors.push(error);
+        log.error(error);
+        break;
+      }
     } else {
       result.errors.push(`${file}: ${execResult.error}`);
-      await recordMigration(supabaseUrl, serviceRoleKey, file, checksum, durationMs, false);
+      const historyResult = await recordMigration(
+        supabaseUrl,
+        serviceRoleKey,
+        file,
+        checksum,
+        durationMs,
+        false,
+      );
+      if (!historyResult.success) {
+        result.errors.push(`${file}: ${historyResult.error}`);
+      }
       log.error(`${file}: ${execResult.error}`);
       break; // Stop on first error — migrations are ordered
     }

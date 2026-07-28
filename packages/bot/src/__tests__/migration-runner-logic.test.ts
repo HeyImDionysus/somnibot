@@ -6,9 +6,11 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { planMigrationSql } from '../services/migration-runner.js';
 
 // ── Checksum utility (mirrors what the runner uses) ──
 
@@ -125,5 +127,94 @@ describe('Migration Runner — tracking logic', () => {
     expect(results).toEqual(['m1.sql: OK', 'm2.sql: ERROR']);
     // m3.sql should never have been attempted
     expect(results).not.toContain('m3.sql: OK');
+  });
+});
+
+describe('Migration Runner — SQL execution planning', () => {
+  it('keeps ordinary migrations atomic as one unchanged query', () => {
+    const source = `
+      CREATE TABLE "semi;colon" (value TEXT);
+      INSERT INTO "semi;colon" VALUES ('it''s; still one literal');
+    `;
+
+    expect(planMigrationSql(source)).toEqual([source]);
+  });
+
+  it('splits only around top-level CREATE INDEX CONCURRENTLY', () => {
+    const source = `
+      -- a comment with a semicolon ;
+      DO $pre$
+      BEGIN
+        PERFORM 'inside;dollar';
+        PERFORM E'escaped\\';still-inside';
+        /* outer ; /* nested ; */ still outer */
+      END
+      $pre$;
+      SELECT 'second ordinary; statement before';
+
+      CREATE /* between keywords ; */ UNIQUE INDEX CONCURRENTLY idx_example
+        ON "semi;table" ("semi;column")
+        WHERE value = 'open;critical';
+
+      SELECT 'first ordinary; statement after';
+      DO $post$
+      BEGIN
+        EXECUTE 'SELECT ''identifier;value'';';
+      END
+      $post$;
+    `;
+
+    const batches = planMigrationSql(source);
+
+    expect(batches).toHaveLength(3);
+    expect(batches[0]).toContain('PERFORM E');
+    expect(batches[0]).toContain('second ordinary; statement before');
+    expect(batches[0]).not.toContain('CREATE /* between keywords');
+    expect(batches[1]).toContain('CREATE /* between keywords ; */ UNIQUE INDEX CONCURRENTLY');
+    expect(batches[1]).not.toContain('DO $post$');
+    expect(batches[2]).toContain('DO $post$');
+    expect(batches[2]).toContain('first ordinary; statement after');
+  });
+
+  it('segments the complete fraud observation index migration as DO / CIC / DO', () => {
+    const source = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        '../../../supabase/migrations',
+        '20260727034400_fraud_signal_observation_index.sql',
+      ),
+      'utf8',
+    );
+
+    const batches = planMigrationSql(source);
+
+    expect(batches).toHaveLength(3);
+    expect(batches[0]).toContain('DO $fraud_index_recovery$');
+    expect(batches[1].trimStart()).toMatch(/^CREATE INDEX CONCURRENTLY/);
+    expect(batches[2]).toContain('DO $fraud_index_postflight$');
+  });
+
+  it.each([
+    'DROP INDEX CONCURRENTLY idx_example;',
+    'REINDEX INDEX CONCURRENTLY idx_example;',
+    'VACUUM public.example;',
+    'CREATE DATABASE example;',
+    "ALTER SYSTEM SET work_mem = '64MB';",
+  ])('fails closed for unsupported transaction-incompatible SQL: %s', (statement) => {
+    expect(() => planMigrationSql(`${statement}\nCREATE INDEX CONCURRENTLY idx ON t (id);`))
+      .toThrow(/unsupported transaction-incompatible statement/i);
+  });
+
+  it('fails closed on an unterminated dollar-quoted body', () => {
+    expect(() => planMigrationSql('DO $broken$ BEGIN PERFORM 1; END;'))
+      .toThrow(/unterminated dollar-quoted string/i);
+  });
+
+  it('fails closed when explicit transaction control would wrap the CIC batch', () => {
+    expect(() => planMigrationSql(`
+      BEGIN;
+      CREATE INDEX CONCURRENTLY idx_example ON example (id);
+      COMMIT;
+    `)).toThrow(/unsupported explicit transaction control/i);
   });
 });
