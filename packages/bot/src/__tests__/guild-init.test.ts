@@ -83,15 +83,20 @@ vi.mock('../services/alert-service.js', () => ({
 }));
 
 import { destroyGuildServices } from '../guild-init.js';
+import { unregisterEconomyManager } from '../features/economy/index.js';
 
 describe('guild-init', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('destroyGuildServices works on empty context (no services)', async () => {
     const ctx = { guildId: 'guild-1', getManager: vi.fn(() => null) };
-    destroyGuildServices(ctx as any);
+    await destroyGuildServices(ctx as any);
     expect(ctx.getManager).toHaveBeenCalledWith('_services');
   });
 
-  it('destroyGuildServices calls shutdown on services', () => {
+  it('destroyGuildServices calls shutdown on services', async () => {
     const services = {
       syncStop: vi.fn(),
       configWatcher: { stop: vi.fn() },
@@ -104,7 +109,108 @@ describe('guild-init', () => {
       guildId: 'guild-1',
       getManager: vi.fn(() => services),
     };
-    destroyGuildServices(ctx as any);
-      expect(ctx.getManager).toHaveBeenCalledWith('_services');
+    await destroyGuildServices(ctx as any);
+    expect(ctx.getManager).toHaveBeenCalledWith('_services');
+  });
+
+  it('awaits an asynchronous audit-service drain before destruction completes', async () => {
+    let release!: () => void;
+    const auditStopped = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const auditService = { stop: vi.fn(() => auditStopped) };
+    const ctx = {
+      guildId: 'guild-1',
+      getManager: vi.fn(() => ({ auditService })),
+    };
+
+    let completed = false;
+    const destroying = Promise.resolve(destroyGuildServices(ctx as any))
+      .then(() => { completed = true; });
+    await Promise.resolve();
+    expect(auditService.stop).toHaveBeenCalledOnce();
+    expect(completed).toBe(false);
+
+    release();
+    await destroying;
+    expect(completed).toBe(true);
+  });
+
+  it('settles producer shutdown before stopping and draining audit', async () => {
+    let releaseProducer!: () => void;
+    const producerStopped = new Promise<void>((resolve) => {
+      releaseProducer = resolve;
+    });
+    const order: string[] = [];
+    const notificationService = {
+      stop: vi.fn(() => {
+        order.push('producer');
+        return producerStopped;
+      }),
+    };
+    const auditService = {
+      stop: vi.fn(async () => {
+        order.push('audit');
+      }),
+    };
+    const ctx = {
+      guildId: 'guild-1',
+      getManager: vi.fn((name: string) => (
+        name === '_services' ? { notificationService, auditService } : null
+      )),
+    };
+
+    const destroying = destroyGuildServices(ctx as any);
+    await Promise.resolve();
+    expect(order).toEqual(['producer']);
+    expect(auditService.stop).not.toHaveBeenCalled();
+
+    releaseProducer();
+    await destroying;
+    expect(order).toEqual(['producer', 'audit']);
+  });
+
+  it('retains manager registrations when the final audit drain fails', async () => {
+    const producerStop = vi.fn();
+    const auditService = {
+      stop: vi.fn().mockRejectedValue(new Error('audit residue remains')),
+    };
+    const ctx = {
+      guildId: 'guild-1',
+      getManager: vi.fn((name: string) => (
+        name === '_services'
+          ? { configWatcher: { stop: producerStop }, auditService }
+          : null
+      )),
+    };
+
+    await expect(destroyGuildServices(ctx as any)).rejects.toThrow(
+      /Failed to stop 1 guild service/,
+    );
+
+    expect(producerStop).toHaveBeenCalledOnce();
+    expect(auditService.stop).toHaveBeenCalledOnce();
+    expect(unregisterEconomyManager).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a synchronous producer stop failure after draining audit', async () => {
+    const producerStop = vi.fn(() => {
+      throw new Error('producer stop failed');
+    });
+    const auditService = { stop: vi.fn().mockResolvedValue(undefined) };
+    const ctx = {
+      guildId: 'guild-1',
+      getManager: vi.fn((name: string) => (
+        name === '_services'
+          ? { configWatcher: { stop: producerStop }, auditService }
+          : null
+      )),
+    };
+
+    await expect(destroyGuildServices(ctx as any)).rejects.toThrow(
+      /Failed to stop 1 guild service/,
+    );
+    expect(auditService.stop).toHaveBeenCalledOnce();
+    expect(unregisterEconomyManager).not.toHaveBeenCalled();
   });
 });

@@ -232,27 +232,72 @@ describe('music audit events', () => {
     expect(emitted).not.toContain('music.control_applied');
   });
 
-  it('audits a persisted queue add even when initial playback setup fails', async () => {
+  it('waits for the populated queue save before one audit, even when playback later fails', async () => {
+    let releasePopulatedSave!: () => void;
+    const populatedSave = new Promise<void>((resolve) => {
+      releasePopulatedSave = resolve;
+    });
     queueSpies.getQueue.mockResolvedValue(null);
     queueSpies.createQueue.mockReturnValue({
       guildId: 'g1', entries: [], currentIndex: 0, volume: 50, voiceChannelId: 'vc1',
     });
+    queueSpies.saveQueue
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(() => populatedSave);
     player.node.rest.resolve.mockResolvedValue({
       loadType: 'search',
       data: [{ encoded: 'enc', info: { title: 'Song', author: 'Artist', length: 1000, uri: 'u', isStream: false } }],
     });
     player.playTrack.mockRejectedValue(new Error('playback failed'));
 
-    await expect(
-      manager.play('song', 'u1', { id: 'vc1' } as never, { id: 'tc1' } as never),
-    ).rejects.toThrow('playback failed');
+    const playing = manager.play(
+      'song',
+      'u1',
+      { id: 'vc1' } as never,
+      { id: 'tc1' } as never,
+    );
+    await vi.waitFor(() => expect(queueSpies.saveQueue).toHaveBeenCalledTimes(2));
 
-    expect(queueSpies.saveQueue).toHaveBeenCalled();
-    expect(eventBus.emit).toHaveBeenCalledWith(
+    expect(queueSpies.saveQueue.mock.calls[1]![0]).toMatchObject({
+      entries: [expect.objectContaining({ title: 'Song', requestedBy: 'u1' })],
+    });
+    expect(eventBus.emit.mock.calls.filter((call) => call[0] === 'music.queued')).toHaveLength(0);
+
+    releasePopulatedSave();
+    await expect(playing).rejects.toThrow('playback failed');
+
+    const queued = eventBus.emit.mock.calls.filter((call) => call[0] === 'music.queued');
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toEqual([
       'music.queued',
       'g1',
       expect.objectContaining({ userId: 'u1', title: 'Song', trackCount: 1 }),
-    );
+    ]);
+    expect(queueSpies.saveQueue.mock.invocationCallOrder[1])
+      .toBeLessThan(eventBus.emit.mock.invocationCallOrder[0]!);
+    expect(eventBus.emit.mock.invocationCallOrder[0])
+      .toBeLessThan(player.playTrack.mock.invocationCallOrder[0]!);
+  });
+
+  it('does not audit or start playback when the populated queue save rejects', async () => {
+    queueSpies.getQueue.mockResolvedValue(null);
+    queueSpies.createQueue.mockReturnValue({
+      guildId: 'g1', entries: [], currentIndex: 0, volume: 50, voiceChannelId: 'vc1',
+    });
+    queueSpies.saveQueue
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('queue write failed'));
+    player.node.rest.resolve.mockResolvedValue({
+      loadType: 'search',
+      data: [{ encoded: 'enc', info: { title: 'Song', author: 'Artist', length: 1000, uri: 'u', isStream: false } }],
+    });
+
+    await expect(
+      manager.play('song', 'u1', { id: 'vc1' } as never, { id: 'tc1' } as never),
+    ).rejects.toThrow('queue write failed');
+
+    expect(eventBus.emit.mock.calls.filter((call) => call[0] === 'music.queued')).toHaveLength(0);
+    expect(player.playTrack).not.toHaveBeenCalled();
   });
 
   it('emits ONE music.queued for a whole playlist add, naming the playlist', async () => {

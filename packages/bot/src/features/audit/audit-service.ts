@@ -13,10 +13,13 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import type { PlatformEvent } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
+import { randomUUID } from 'node:crypto';
 
 const log = createLogger('AuditService');
 
 // ── Action mapping ──────────────────────────────────────
+
+type AuditActorType = 'user' | 'bot' | 'system' | 'webhook' | 'automation';
 
 interface AuditMapping {
   /**
@@ -30,7 +33,7 @@ interface AuditMapping {
   category: string;
   /** Static target type, or a per-event resolver for dual-target events. */
   targetType?: string | ((data: Record<string, unknown>) => string | undefined);
-  actorType: 'user' | 'bot' | 'system' | 'webhook' | 'automation';
+  actorType: AuditActorType | ((data: Record<string, unknown>) => AuditActorType);
   /** Extract target ID from event data */
   targetId?: (data: Record<string, unknown>) => string | undefined;
   /** Extract actor ID from event data */
@@ -1016,13 +1019,19 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     targetType: 'track',
     actorType: 'user',
     targetId: (d) => d.requestedBy as string,
+    actorId: (d) => d.userId as string,
     details: (d) => ({ userId: d.userId, method: d.method, title: d.title, author: d.author, requester: d.requestedBy, queueEnded: d.queueEnded }),
   },
   'music.stopped': {
     action: 'music.stopped',
     category: 'music',
     targetType: 'music_session',
-    actorType: 'user',
+    actorType: (d) => (
+      typeof d.userId === 'string' && d.userId.length > 0 ? 'user' : 'system'
+    ),
+    actorId: (d) => (
+      typeof d.userId === 'string' && d.userId.length > 0 ? d.userId : 'music-player'
+    ),
     details: (d) => ({ userId: d.userId, reason: d.reason, trackCount: d.trackCount }),
   },
   'music.denied': {
@@ -1041,6 +1050,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     targetType: 'music_queue',
     actorType: 'user',
     targetId: (d) => d.userId as string,
+    actorId: (d) => d.userId as string,
     details: (d) => ({ userId: d.userId, reason: d.reason, limit: d.limit }),
     success: false,
   },
@@ -1265,6 +1275,27 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
 
 // ── AuditService ────────────────────────────────────────
 
+type AuditGapKind = 'capacity' | 'mapping';
+
+interface MutableAuditGapWindow {
+  kind: AuditGapKind;
+  occurrenceKey: string;
+  count: number;
+  firstObservedAt: string;
+  lastObservedAt: string;
+  sources: Set<string>;
+  eventTypes: Set<string>;
+  actions: Set<string>;
+  errors: Set<string>;
+  labelsTruncated: boolean;
+}
+
+interface FrozenAuditGapWindow {
+  kind: AuditGapKind;
+  occurrenceKey: string;
+  row: Readonly<Record<string, unknown>>;
+}
+
 export class AuditService {
   // The exempt EventBus lane must not become an unbounded memory bypass.
   // Keep both buffered rows and outstanding async mapping work finite. At
@@ -1272,23 +1303,25 @@ export class AuditService {
   private static readonly MAX_BUFFERED_ENTRIES = 5_000;
   private static readonly MAX_PENDING_ENQUEUES = 5_000;
   private static readonly MAX_CAPACITY_LABELS = 20;
+  private static readonly MAX_STOP_DRAIN_STALLS = 3;
   private guildId: string;
   private supabase: SupabaseClient;
   private eventBus: PlatformEventBus;
   private queue: Array<Record<string, unknown>> = [];
   private droppedAtCapacity = 0;
-  private capacityExhaustion: {
-    count: number;
-    firstDroppedAt: string;
-    lastDroppedAt: string;
-    sources: Set<string>;
-    eventTypes: Set<string>;
-    actions: Set<string>;
-    labelsTruncated: boolean;
-    version: number;
-  } | null = null;
+  /**
+   * At most one mutable and one frozen window per gap kind. A frozen window
+   * never changes after its INSERT begins; observations arriving concurrently
+   * aggregate into the next mutable window and therefore receive a distinct
+   * occurrence key. Failed INSERTs retain the same frozen row/key for retry.
+   */
+  private activeGapWindows = new Map<AuditGapKind, MutableAuditGapWindow>();
+  private pendingGapWindows = new Map<AuditGapKind, FrozenAuditGapWindow>();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
-  private flushInProgress: Promise<void> | null = null;
+  private flushInProgress: Promise<boolean> | null = null;
+  private stopInProgress: Promise<void> | null = null;
+  private acceptingEntries = true;
+  private eventHandler: ((event: PlatformEvent) => void) | null = null;
   /**
    * Event→entry enqueue operations still in flight (the config.changed
    * before-snapshot path awaits a lookup). flush() drains these first so a
@@ -1327,11 +1360,19 @@ export class AuditService {
    * Start listening to all platform events and logging them.
    */
   start(): void {
+    if (this.eventHandler) return;
+    if (this.stopInProgress) {
+      log.warn('Cannot start while the previous stop drain is still running');
+      return;
+    }
+    this.acceptingEntries = true;
+
     // Prime the before-snapshot baseline for config.updated diffs.
     this.snapshotLoad = this.loadGuildConfigSnapshot();
 
     // Listen to every event
-    this.eventBus.onAny((event: PlatformEvent) => {
+    this.eventHandler = (event: PlatformEvent) => {
+      if (!this.acceptingEntries) return;
       // V11 Audit H-1: Only log events for our guild. The event bus is a
       // process-level singleton and AuditService is per-guild, so without
       // this filter every guild's AuditService writes entries for ALL guilds,
@@ -1349,16 +1390,20 @@ export class AuditService {
       const op: Promise<void> = this.enqueueFromEvent(event, mapping)
         .catch((err: unknown) => {
           log.error(`Failed to queue audit entry for ${event.type}:`, err);
+          this.recordMappingFailure(event.type, err);
         })
         .finally(() => {
           this.pendingEnqueues.delete(op);
         });
       this.pendingEnqueues.add(op);
-    }, { backpressureExempt: true });
+    };
+    this.eventBus.onAny(this.eventHandler, { backpressureExempt: true });
 
     // Flush queue every 5 seconds to batch inserts
     this.flushTimer = setInterval(() => {
-      void this.flush();
+      void this.flush().catch((err: unknown) => {
+        log.error('Unexpected audit flush failure:', err);
+      });
     }, 5000);
 
     log.info('Started — listening to all platform events (with before/after diffs)');
@@ -1385,31 +1430,7 @@ export class AuditService {
     },
     count = 1,
   ): void {
-    const now = new Date().toISOString();
-    const exhaustion = this.capacityExhaustion ?? {
-      count: 0,
-      firstDroppedAt: now,
-      lastDroppedAt: now,
-      sources: new Set<string>(),
-      eventTypes: new Set<string>(),
-      actions: new Set<string>(),
-      labelsTruncated: false,
-      version: 0,
-    };
-    this.capacityExhaustion = exhaustion;
-    exhaustion.count += count;
-    exhaustion.lastDroppedAt = now;
-    exhaustion.sources.add(context.source);
-    exhaustion.version++;
-
-    const addLabel = (set: Set<string>, label: string | undefined) => {
-      if (!label || set.has(label)) return;
-      if (set.size < AuditService.MAX_CAPACITY_LABELS) set.add(label);
-      else exhaustion.labelsTruncated = true;
-    };
-    addLabel(exhaustion.eventTypes, context.eventType);
-    addLabel(exhaustion.actions, context.action);
-    for (const action of context.actions ?? []) addLabel(exhaustion.actions, action);
+    this.recordGapObservation('capacity', context, count);
 
     const previous = this.droppedAtCapacity;
     this.droppedAtCapacity += count;
@@ -1418,6 +1439,60 @@ export class AuditService {
         `Audit capacity exhausted at ${context.source}; dropped ${this.droppedAtCapacity} row(s) total`,
       );
     }
+  }
+
+  private recordMappingFailure(eventType: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.recordGapObservation('mapping', {
+      source: 'event mapping',
+      eventType,
+      errors: [message.slice(0, 500)],
+    });
+  }
+
+  /**
+   * Coalesce observations into one finite mutable window per kind. The window
+   * is detached and frozen before any database await, so concurrent arrivals
+   * cannot mutate the row being inserted.
+   */
+  private recordGapObservation(
+    kind: AuditGapKind,
+    context: {
+      source: string;
+      eventType?: string;
+      action?: string;
+      actions?: string[];
+      errors?: string[];
+    },
+    count = 1,
+  ): void {
+    const now = new Date().toISOString();
+    const window = this.activeGapWindows.get(kind) ?? {
+      kind,
+      occurrenceKey: `audit.${kind === 'capacity' ? 'capacity_exhausted' : 'mapping_failed'}:${randomUUID()}`,
+      count: 0,
+      firstObservedAt: now,
+      lastObservedAt: now,
+      sources: new Set<string>(),
+      eventTypes: new Set<string>(),
+      actions: new Set<string>(),
+      errors: new Set<string>(),
+      labelsTruncated: false,
+    };
+    this.activeGapWindows.set(kind, window);
+    window.count += count;
+    window.lastObservedAt = now;
+
+    const addLabel = (set: Set<string>, label: string | undefined) => {
+      if (!label || set.has(label)) return;
+      if (set.size < AuditService.MAX_CAPACITY_LABELS) set.add(label);
+      else window.labelsTruncated = true;
+    };
+    addLabel(window.sources, context.source);
+    addLabel(window.eventTypes, context.eventType);
+    addLabel(window.actions, context.action);
+    for (const action of context.actions ?? []) addLabel(window.actions, action);
+    for (const error of context.errors ?? []) addLabel(window.errors, error);
   }
 
   /** Map one platform event to an audit entry and queue it (occurrence-deduped). */
@@ -1438,11 +1513,13 @@ export class AuditService {
         : undefined);
 
     const action = typeof mapping.action === 'function' ? mapping.action(data) : mapping.action;
+    const actorType =
+      typeof mapping.actorType === 'function' ? mapping.actorType(data) : mapping.actorType;
 
     const entry: Record<string, unknown> = {
       guild_id: event.guildId,
-      actor_type: mapping.actorType,
-      actor_id: mapping.actorId?.(data) ?? (mapping.actorType === 'system' ? 'system' : 'bot'),
+      actor_type: actorType,
+      actor_id: mapping.actorId?.(data) ?? (actorType === 'system' ? 'system' : 'bot'),
       action,
       category: mapping.category,
       target_type:
@@ -1528,14 +1605,80 @@ export class AuditService {
   /**
    * Stop the audit service.
    */
-  stop(): void {
+  stop(): Promise<void> {
+    if (this.stopInProgress) return this.stopInProgress;
+    this.acceptingEntries = false;
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
       this.flushTimer = null;
     }
-    // Final flush
-    void this.flush();
-    log.info('Stopped');
+    if (this.eventHandler) {
+      // PlatformEventBus now guarantees offAny(). The runtime guard preserves
+      // compatibility with small test doubles while still removing the exact
+      // retained production handler.
+      const offAny = (this.eventBus as PlatformEventBus & {
+        offAny?: (handler: (event: PlatformEvent) => void | Promise<void>) => void;
+      }).offAny;
+      if (typeof offAny === 'function') {
+        offAny.call(this.eventBus, this.eventHandler);
+      }
+      this.eventHandler = null;
+    }
+
+    const operation = this.drainForStop()
+      .then(() => {
+        log.info('Stopped');
+      })
+      .catch((err: unknown) => {
+        log.error('Stop failed; audit residue retained for retry', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      })
+      .finally(() => {
+        if (this.stopInProgress === operation) this.stopInProgress = null;
+      });
+    this.stopInProgress = operation;
+    return operation;
+  }
+
+  /**
+   * Wait for an already-active write, then keep taking serialized trailing
+   * passes until all accepted mappings, rows, and immutable gap windows land.
+   * A permanently unavailable database cannot hang shutdown forever: after a
+   * small number of no-progress retries, the finite in-memory residue is
+   * surfaced loudly and left intact rather than silently discarded.
+   */
+  private async drainForStop(): Promise<void> {
+    await this.flush();
+
+    let stalledPasses = 0;
+    while (this.hasPendingAuditWork()) {
+      const progressed = await this.flush();
+      if (!this.hasPendingAuditWork()) return;
+      stalledPasses = progressed ? 0 : stalledPasses + 1;
+      if (stalledPasses >= AuditService.MAX_STOP_DRAIN_STALLS) {
+        const residue = {
+          queuedRows: this.queue.length,
+          pendingEnqueues: this.pendingEnqueues.size,
+          activeGapWindows: this.activeGapWindows.size,
+          frozenGapWindows: this.pendingGapWindows.size,
+        };
+        log.error('Audit shutdown drain stalled with finite work still pending', residue);
+        throw new Error(
+          `Audit shutdown drain stalled with residue ${JSON.stringify(residue)}`,
+        );
+      }
+    }
+  }
+
+  private hasPendingAuditWork(): boolean {
+    return (
+      this.queue.length > 0
+      || this.pendingEnqueues.size > 0
+      || this.activeGapWindows.size > 0
+      || this.pendingGapWindows.size > 0
+    );
   }
 
   /**
@@ -1557,6 +1700,10 @@ export class AuditService {
     success?: boolean;
     errorMessage?: string;
   }): Promise<void> {
+    if (!this.acceptingEntries) {
+      log.warn(`Ignored audit log after shutdown began: ${entry.action}`);
+      return;
+    }
     this.enqueue({
       guild_id: this.guildId,
       actor_type: entry.actorType,
@@ -1586,7 +1733,7 @@ export class AuditService {
    * silently skipped instead of duplicating the row. Keyless entries keep
    * plain insert semantics (NULL keys never conflict).
    */
-  private flush(): Promise<void> {
+  private flush(): Promise<boolean> {
     if (this.flushInProgress) return this.flushInProgress;
     const operation = this.flushBatch().finally(() => {
       if (this.flushInProgress === operation) this.flushInProgress = null;
@@ -1595,31 +1742,35 @@ export class AuditService {
     return operation;
   }
 
-  private async flushBatch(): Promise<void> {
+  private async flushBatch(): Promise<boolean> {
     // Never outrun an entry still being resolved (config before-snapshot).
     if (this.pendingEnqueues.size > 0) {
       await Promise.all([...this.pendingEnqueues]);
     }
     if (this.queue.length === 0) {
-      await this.recordCapacityRecovery();
-      return;
+      return this.flushGapWindows();
     }
 
     const batch = this.queue.splice(0, this.queue.length);
+    let writeError: string | null = null;
+    try {
+      const { error } = await this.supabase
+        .from('audit_logs')
+        .upsert(batch, { onConflict: 'guild_id,occurrence_key', ignoreDuplicates: true });
+      writeError = error?.message ?? null;
+    } catch (err) {
+      writeError = err instanceof Error ? err.message : String(err);
+    }
 
-    const { error } = await this.supabase
-      .from('audit_logs')
-      .upsert(batch, { onConflict: 'guild_id,occurrence_key', ignoreDuplicates: true });
-
-    if (error) {
-      log.error(`Failed to flush ${batch.length} entries:`, error.message);
+    if (writeError) {
+      log.error(`Failed to flush ${batch.length} entries:`, writeError);
       // Remember the outage window so it can be recorded once the ledger is
       // writable again — a batch that silently retried would leave the gap
       // invisible in the very trail that is supposed to explain it.
       this.flushOutage = {
         attempts: (this.flushOutage?.attempts ?? 0) + 1,
         firstFailedAt: this.flushOutage?.firstFailedAt ?? new Date().toISOString(),
-        lastError: error.message,
+        lastError: writeError,
       };
       // Keep the oldest failed rows first while retaining a hard memory bound.
       this.queue.unshift(...batch);
@@ -1635,7 +1786,7 @@ export class AuditService {
           overflowEntries.length,
         );
       }
-      return;
+      return false;
     }
 
     // The batch landed. If earlier attempts failed, the ledger is writable
@@ -1646,61 +1797,104 @@ export class AuditService {
       this.flushOutage = null;
       await this.recordFlushRecovery(batch, outage);
     }
-    await this.recordCapacityRecovery();
+    await this.flushGapWindows();
+    return true;
   }
 
   /**
-   * Persist the reserved/coalesced capacity-gap row after the ledger recovers.
-   * A normal upsert updates the same occurrence if more drops arrive while the
-   * write is in flight; the aggregate is cleared only once the written version
-   * is still current.
+   * Detach each active window into an immutable row, then INSERT it with
+   * ON CONFLICT DO NOTHING. `service_role` deliberately has no UPDATE grant on
+   * audit_logs, so a normal merge-upsert is both semantically wrong and unable
+   * to persist in production.
    */
-  private async recordCapacityRecovery(): Promise<void> {
-    const exhaustion = this.capacityExhaustion;
-    if (!exhaustion) return;
-    const version = exhaustion.version;
-    const details = {
-      count: exhaustion.count,
-      firstDroppedAt: exhaustion.firstDroppedAt,
-      lastDroppedAt: exhaustion.lastDroppedAt,
-      sources: [...exhaustion.sources].sort(),
-      eventTypes: [...exhaustion.eventTypes].sort(),
-      actions: [...exhaustion.actions].sort(),
-      labelsTruncated: exhaustion.labelsTruncated,
-      recoveredAt: new Date().toISOString(),
-      bufferedEntryLimit: AuditService.MAX_BUFFERED_ENTRIES,
-      pendingEnqueueLimit: AuditService.MAX_PENDING_ENQUEUES,
-    };
+  private async flushGapWindows(): Promise<boolean> {
+    this.freezeActiveGapWindows();
+    let progressed = false;
 
-    try {
-      const { error } = await this.supabase.from('audit_logs').upsert(
-        [{
-          guild_id: this.guildId,
-          actor_type: 'system',
-          actor_id: 'audit-service',
-          action: 'audit.capacity_exhausted',
-          category: 'system',
-          target_type: 'audit_buffer',
-          target_id: this.guildId,
-          details,
-          before_state: null,
-          after_state: null,
-          correlation_id: null,
-          occurrence_key: `audit.capacity_exhausted:${exhaustion.firstDroppedAt}`,
-          success: false,
-          error_message: 'Detailed audit rows were dropped at the finite buffer limit',
-        }],
-        { onConflict: 'guild_id,occurrence_key' },
-      );
-      if (error) {
-        log.warn('Could not record audit.capacity_exhausted:', error.message);
-        return;
+    for (const kind of ['capacity', 'mapping'] as const) {
+      const frozen = this.pendingGapWindows.get(kind);
+      if (!frozen) continue;
+      try {
+        const { error } = await this.supabase.from('audit_logs').upsert(
+          [frozen.row],
+          { onConflict: 'guild_id,occurrence_key', ignoreDuplicates: true },
+        );
+        if (error) {
+          log.warn(`Could not record ${String(frozen.row.action)}:`, error.message);
+          continue;
+        }
+        if (this.pendingGapWindows.get(kind) === frozen) {
+          this.pendingGapWindows.delete(kind);
+          progressed = true;
+        }
+      } catch (err) {
+        log.warn(
+          `Could not record ${String(frozen.row.action)}:`,
+          err instanceof Error ? err.message : String(err),
+        );
       }
-      if (this.capacityExhaustion === exhaustion && exhaustion.version === version) {
-        this.capacityExhaustion = null;
-      }
-    } catch (err) {
-      log.warn('Could not record audit.capacity_exhausted:', (err as Error)?.message ?? err);
+    }
+    return progressed;
+  }
+
+  private freezeActiveGapWindows(): void {
+    for (const kind of ['capacity', 'mapping'] as const) {
+      if (this.pendingGapWindows.has(kind)) continue;
+      const active = this.activeGapWindows.get(kind);
+      if (!active) continue;
+
+      // Delete before constructing/handing off the row. Any observation that
+      // arrives from this point onward necessarily creates a new window/key.
+      this.activeGapWindows.delete(kind);
+      const action =
+        kind === 'capacity' ? 'audit.capacity_exhausted' : 'audit.mapping_failed';
+      const details = kind === 'capacity'
+        ? {
+            count: active.count,
+            firstDroppedAt: active.firstObservedAt,
+            lastDroppedAt: active.lastObservedAt,
+            sources: Object.freeze([...active.sources].sort()),
+            eventTypes: Object.freeze([...active.eventTypes].sort()),
+            actions: Object.freeze([...active.actions].sort()),
+            labelsTruncated: active.labelsTruncated,
+            recoveredAt: new Date().toISOString(),
+            bufferedEntryLimit: AuditService.MAX_BUFFERED_ENTRIES,
+            pendingEnqueueLimit: AuditService.MAX_PENDING_ENQUEUES,
+          }
+        : {
+            count: active.count,
+            firstFailedAt: active.firstObservedAt,
+            lastFailedAt: active.lastObservedAt,
+            sources: Object.freeze([...active.sources].sort()),
+            eventTypes: Object.freeze([...active.eventTypes].sort()),
+            actions: Object.freeze([...active.actions].sort()),
+            errors: Object.freeze([...active.errors].sort()),
+            labelsTruncated: active.labelsTruncated,
+            recoveredAt: new Date().toISOString(),
+          };
+      const row = Object.freeze({
+        guild_id: this.guildId,
+        actor_type: 'system',
+        actor_id: 'audit-service',
+        action,
+        category: 'system',
+        target_type: kind === 'capacity' ? 'audit_buffer' : 'platform_event',
+        target_id: this.guildId,
+        details: Object.freeze(details),
+        before_state: null,
+        after_state: null,
+        correlation_id: null,
+        occurrence_key: active.occurrenceKey,
+        success: false,
+        error_message: kind === 'capacity'
+          ? 'Detailed audit rows were dropped at the finite buffer limit'
+          : 'A platform event could not be mapped into an audit row',
+      });
+      this.pendingGapWindows.set(kind, {
+        kind,
+        occurrenceKey: active.occurrenceKey,
+        row,
+      });
     }
   }
 

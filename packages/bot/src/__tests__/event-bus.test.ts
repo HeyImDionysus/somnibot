@@ -148,6 +148,19 @@ describe('PlatformEventBus', () => {
     }
   });
 
+  it('offAny removes the exact backpressure-exempt listener', () => {
+    const auditHandler = vi.fn();
+    eventBus.onAny(auditHandler, { backpressureExempt: true });
+
+    eventBus.offAny(auditHandler);
+    eventBus.emit('member.joined', 'g1', {
+      discordId: 'u1',
+      guildId: 'g1',
+    } as any);
+
+    expect(auditHandler).not.toHaveBeenCalled();
+  });
+
   it('manually removing listener after first call emulates once', async () => {
     const handler = vi.fn();
     const wrapper = (...args: unknown[]) => {

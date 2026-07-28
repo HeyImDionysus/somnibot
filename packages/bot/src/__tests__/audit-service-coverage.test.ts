@@ -5,6 +5,7 @@
  * queue batching, flush, start/stop lifecycle.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -39,11 +40,25 @@ function makeEventBus() {
     onAny: vi.fn((handler: (event: any) => Promise<void>) => {
       handlers.push(handler);
     }),
+    offAny: vi.fn((handler: (event: any) => Promise<void>) => {
+      const index = handlers.indexOf(handler);
+      if (index >= 0) handlers.splice(index, 1);
+    }),
     _emit: async (event: any) => {
-      for (const h of handlers) await h(event);
+      for (const h of [...handlers]) await h(event);
     },
     _handlers: handlers,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 // ── Tests ────────────────────────────────────────────────
@@ -60,8 +75,8 @@ describe('AuditService', () => {
     service = new AuditService('g1', supabase as any, eventBus as any);
   });
 
-  afterEach(() => {
-    service.stop();
+  afterEach(async () => {
+    await service.stop().catch(() => undefined);
   });
 
   describe('constructor', () => {
@@ -113,6 +128,16 @@ describe('AuditService', () => {
         .filter((row) => row.action === 'audit.capacity_exhausted');
       expect(capacityRows).toHaveLength(2);
       expect(capacityRows[0]!.occurrence_key).toBe(capacityRows[1]!.occurrence_key);
+      const capacityCalls = supabase._upsertMock.mock.calls
+        .filter(([rows]) => (rows as Array<Record<string, any>>)
+          .some((row) => row.action === 'audit.capacity_exhausted'));
+      expect(capacityCalls).toHaveLength(2);
+      for (const [, options] of capacityCalls) {
+        expect(options).toMatchObject({
+          onConflict: 'guild_id,occurrence_key',
+          ignoreDuplicates: true,
+        });
+      }
       expect(capacityRows[1]!.details).toMatchObject({
         count: 1,
         sources: ['buffered audit row'],
@@ -147,6 +172,86 @@ describe('AuditService', () => {
         eventTypes: [],
         actions: ['manual.at_capacity'],
       });
+    });
+
+    it('freezes later capacity drops into a distinct immutable window', async () => {
+      const firstWrite = deferred<{ error: null }>();
+      supabase._upsertMock
+        .mockImplementationOnce(() => firstWrite.promise)
+        .mockResolvedValue({ error: null });
+
+      const internals = service as unknown as {
+        recordCapacityDrop: (
+          context: { source: string; action?: string },
+          count?: number,
+        ) => void;
+        flush: () => Promise<void>;
+      };
+
+      internals.recordCapacityDrop({ source: 'manual audit log', action: 'first' });
+      const firstFlush = internals.flush();
+      expect(supabase._upsertMock).toHaveBeenCalledOnce();
+
+      // This arrives after the first immutable row has been handed to the DB.
+      internals.recordCapacityDrop({ source: 'manual audit log', action: 'second' });
+      firstWrite.resolve({ error: null });
+      await firstFlush;
+      await internals.flush();
+
+      const capacityRows = supabase._upsertMock.mock.calls
+        .flatMap(([rows]) => rows as Array<Record<string, any>>)
+        .filter((row) => row.action === 'audit.capacity_exhausted');
+      expect(capacityRows).toHaveLength(2);
+      expect(capacityRows[0]!.occurrence_key).not.toBe(capacityRows[1]!.occurrence_key);
+      expect(capacityRows.map((row) => row.details.count)).toEqual([1, 1]);
+      expect(capacityRows.map((row) => row.details.actions)).toEqual([['first'], ['second']]);
+    });
+
+    it('turns a mapping exception into a durable append-only gap row', async () => {
+      service.start();
+      await eventBus._emit({
+        type: 'config.changed',
+        guildId: 'g1',
+        data: null,
+      });
+
+      const internals = service as unknown as { flush: () => Promise<void> };
+      await internals.flush();
+
+      const mappingCall = supabase._upsertMock.mock.calls.find(([rows]) =>
+        (rows as Array<Record<string, any>>)
+          .some((row) => row.action === 'audit.mapping_failed'));
+      expect(mappingCall).toBeDefined();
+      expect(mappingCall?.[0]).toEqual([
+        expect.objectContaining({
+          actor_type: 'system',
+          actor_id: 'audit-service',
+          action: 'audit.mapping_failed',
+          success: false,
+          occurrence_key: expect.stringMatching(/^audit\.mapping_failed:/),
+          details: expect.objectContaining({
+            count: 1,
+            eventTypes: ['config.changed'],
+          }),
+        }),
+      ]);
+      expect(mappingCall?.[1]).toMatchObject({
+        onConflict: 'guild_id,occurrence_key',
+        ignoreDuplicates: true,
+      });
+    });
+
+    it('matches the append-only production grant with DO NOTHING gap writes', () => {
+      const migration = readFileSync(
+        new URL(
+          '../../../supabase/migrations/20260713030000_audit_logs_anonymize_purge.sql',
+          import.meta.url,
+        ),
+        'utf8',
+      );
+      expect(migration).toMatch(
+        /REVOKE UPDATE,\s*DELETE,\s*TRUNCATE,\s*REFERENCES,\s*TRIGGER\s+ON public\.audit_logs FROM service_role;/,
+      );
     });
 
     it('maps member.joined event to audit entry', async () => {
@@ -357,6 +462,86 @@ describe('AuditService', () => {
     it('handles stop when not started', () => {
       service.stop();
     });
+
+    it('unsubscribes and drains a row queued behind an active flush', async () => {
+      const firstWrite = deferred<{ error: null }>();
+      supabase._upsertMock
+        .mockImplementationOnce(() => firstWrite.promise)
+        .mockResolvedValue({ error: null });
+      service.start();
+      await service.log({
+        action: 'before.stop',
+        actorType: 'bot',
+        actorId: 'bot1',
+      });
+
+      const internals = service as unknown as { flush: () => Promise<void> };
+      const registeredHandler = eventBus._handlers[0];
+      const activeFlush = internals.flush();
+      expect(supabase._upsertMock).toHaveBeenCalledOnce();
+
+      await service.log({
+        action: 'during.stop',
+        actorType: 'bot',
+        actorId: 'bot1',
+      });
+      const stopped = Promise.resolve(service.stop());
+      firstWrite.resolve({ error: null });
+      await activeFlush;
+      await stopped;
+
+      expect(eventBus.offAny).toHaveBeenCalledWith(registeredHandler);
+      const actions = supabase._upsertMock.mock.calls
+        .flatMap(([rows]) => rows as Array<Record<string, unknown>>)
+        .map((row) => row.action)
+        .filter((action) => action === 'before.stop' || action === 'during.stop');
+      expect(actions).toEqual(['before.stop', 'during.stop']);
+    });
+
+    it('does not duplicate keyless rows after a stop and restart', async () => {
+      service.start();
+      await Promise.resolve(service.stop());
+      service.start();
+      await eventBus._emit({
+        type: 'member.joined',
+        guildId: 'g1',
+        data: { discordId: 'u1', username: 'User', isReturning: false },
+      });
+
+      const internals = service as unknown as { flush: () => Promise<void> };
+      await internals.flush();
+
+      const rows = supabase._upsertMock.mock.calls
+        .flatMap(([batch]) => batch as Array<Record<string, unknown>>)
+        .filter((row) => row.action === 'member.joined');
+      expect(rows).toHaveLength(1);
+      await Promise.resolve(service.stop());
+    });
+
+    it('rejects instead of falsely completing when persistent write failure leaves residue', async () => {
+      supabase._upsertMock.mockResolvedValue({
+        error: { message: 'audit store remains unavailable' },
+      });
+      await service.log({
+        action: 'must.survive.shutdown',
+        actorType: 'bot',
+        actorId: 'bot1',
+      });
+
+      await expect(service.stop()).rejects.toThrow(/stalled with residue/);
+
+      const internals = service as unknown as {
+        queue: Array<Record<string, unknown>>;
+      };
+      expect(internals.queue).toHaveLength(1);
+      expect(internals.queue[0]?.action).toBe('must.survive.shutdown');
+
+      // The rejected stop keeps finite residue available for an explicit
+      // retry instead of reporting success and letting its owner discard it.
+      supabase._upsertMock.mockResolvedValue({ error: null });
+      await service.stop();
+      expect(internals.queue).toHaveLength(0);
+    });
   });
 
   describe('manual log', () => {
@@ -434,13 +619,14 @@ describe('AuditService', () => {
         actorId: 'bot1',
       });
 
-      // Use stop() to trigger flush - it clears interval first then flushes
-      service.stop();
-      // wait for async flush
-      await new Promise((r) => process.nextTick(r));
+      // A failed drain must retain the row and reject rather than report a
+      // successful shutdown while finite residue remains.
+      await expect(service.stop()).rejects.toThrow(/stalled with residue/);
 
       // Entry should be re-queued
       expect(supabase._upsertMock).toHaveBeenCalled();
+      supabase._upsertMock.mockResolvedValue({ error: null });
+      await service.stop();
     });
 
     it('batches multiple entries in one flush', async () => {

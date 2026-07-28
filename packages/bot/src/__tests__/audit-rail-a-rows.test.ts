@@ -24,6 +24,10 @@ class FakeBus {
   onAny(handler: (e: unknown) => void): void {
     this.any.push(handler);
   }
+  offAny(handler: (e: unknown) => void): void {
+    const index = this.any.indexOf(handler);
+    if (index >= 0) this.any.splice(index, 1);
+  }
   emit(type: string, guildId: string, data: unknown): void {
     for (const h of this.any) h({ type, guildId, timestamp: Date.now(), data });
   }
@@ -54,9 +58,7 @@ async function rowsForAll(events: Array<[string, Record<string, unknown>]>, guil
   const service = new AuditService(guildId, makeSupabase(rows) as never, bus as never);
   service.start();
   for (const [type, data] of events) bus.emit(type, guildId, data);
-  service.stop(); // stop() forces a final flush
-  // stop()'s flush is fire-and-forget; drain the microtask queue.
-  await new Promise((r) => setTimeout(r, 0));
+  await service.stop();
   return rows;
 }
 
@@ -108,6 +110,39 @@ describe('rail A rows — music', () => {
     expect(applied!.success).toBe(true);
     expect(denied!.success).toBe(false);
     expect(applied!.details).toMatchObject({ userId: 'u1', action: 'volume', value: 80 });
+  });
+
+  it('attributes skip and capacity rejection to the member who caused them', async () => {
+    const [skipped, rejected] = await rowsForAll([
+      ['music.skipped', {
+        userId: 'u1',
+        method: 'vote',
+        title: 'Song',
+        author: 'Artist',
+        requestedBy: 'u9',
+        queueEnded: false,
+      }],
+      ['music.capacity_rejected', {
+        userId: 'u2',
+        reason: 'queue_full',
+        limit: 500,
+      }],
+    ]);
+
+    expect(skipped).toMatchObject({ actor_type: 'user', actor_id: 'u1' });
+    expect(rejected).toMatchObject({ actor_type: 'user', actor_id: 'u2' });
+  });
+
+  it('uses a member actor for command stops and a system actor for automatic stops', async () => {
+    const [command, autoLeave, connectionLost] = await rowsForAll([
+      ['music.stopped', { userId: 'u1', reason: 'command', trackCount: 2 }],
+      ['music.stopped', { userId: undefined, reason: 'auto_leave', trackCount: 1 }],
+      ['music.stopped', { userId: undefined, reason: 'connection_lost', trackCount: 3 }],
+    ]);
+
+    expect(command).toMatchObject({ actor_type: 'user', actor_id: 'u1' });
+    expect(autoLeave).toMatchObject({ actor_type: 'system', actor_id: 'music-player' });
+    expect(connectionLost).toMatchObject({ actor_type: 'system', actor_id: 'music-player' });
   });
 });
 
@@ -263,8 +298,7 @@ describe('rail A rows — automod (migrated from the direct rail)', () => {
     const service = new AuditService('g1', makeSupabase(rows) as never, bus as never);
     service.start();
     bus.emit('automod.enforced', 'other-guild', { ...base, action: 'ban' });
-    service.stop();
-    await new Promise((r) => setTimeout(r, 0));
+    await service.stop();
 
     expect(rows).toHaveLength(0);
   });

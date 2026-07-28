@@ -130,6 +130,18 @@ class PlatformEventBus {
   }
 
   /**
+   * Remove an all-events listener.
+   *
+   * Keep the WeakSet in lockstep with EventEmitter: otherwise a stopped
+   * AuditService can stay reachable through `*` and be invoked again after
+   * the guild is re-initialized.
+   */
+  offAny(handler: (event: PlatformEvent) => void | Promise<void>): void {
+    this.emitter.off('*', handler as (...args: unknown[]) => void);
+    this.backpressureExemptAnyListeners.delete(handler);
+  }
+
+  /**
    * Remove a listener.
    */
   off<T extends PlatformEventType>(

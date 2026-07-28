@@ -21,7 +21,7 @@ import { connectValkey } from './services/valkey.js';
 import { startDeployListener } from './deploy/deploy-listener.js';
 import { GuildRouter } from './guild-router.js';
 import { runMigrations } from './services/migration-runner.js';
-import { initGuildFeatures, registerGuildCommands, destroyGuildServices } from './guild-init.js';
+import { initGuildFeatures, registerGuildCommands } from './guild-init.js';
 import { startHealthServer, setAwaitingSetup } from './services/health-server.js';
 import { startDashboardSupervisor, stopDashboardSupervisor } from './services/dashboard-supervisor.js';
 import { HeartbeatService } from './services/heartbeat.js';
@@ -395,15 +395,18 @@ async function main(): Promise<void> {
   });
 
   // ── Guild removed: destroy context ──
-  client.on('guildDelete', (guild) => {
+  client.on('guildDelete', async (guild) => {
     log.info('Bot removed from guild', { name: guild.name, id: guild.id });
     // In setup-verification mode the router is an empty placeholder with no
     // contexts to tear down.
     if (!client.router) return;
-    const ctx = client.router.getContextSync(guild.id);
-    if (ctx) {
-      destroyGuildServices(ctx);
-      client.router.remove(guild.id);
+    try {
+      await client.router.remove(guild.id);
+    } catch (err) {
+      log.error('Failed to destroy removed guild context', {
+        guildId: guild.id,
+        error: String(err),
+      });
     }
   });
 
@@ -488,9 +491,10 @@ function startSetupCompletionWatcher(
     }
     botLevelServices.heartbeat = null;
     try {
-      client.router?.destroyAll();
+      await client.router?.destroyAll();
     } catch (err) {
       log.warn('Failed tearing down placeholder router during transition', { error: String(err) });
+      return;
     }
 
     // Reload the freshly-finalized settings BEFORE the in-process full boot.
@@ -575,12 +579,14 @@ async function runFullBoot(
   // it, leaking its eviction interval for the life of the process. Destroy
   // before replacing — the crons calling client.router.all() stay safe because
   // a destroyed router simply has no contexts, and the real router is
-  // installed synchronously below (no await in between).
+  // installed below only after the prior router's async drains complete.
   if (client.router) {
     try {
-      client.router.destroyAll();
+      await client.router.destroyAll();
     } catch (err) {
       log.warn('Failed tearing down previous GuildRouter before full boot', { error: String(err) });
+      fullBootStarted = false;
+      return;
     }
   }
 
