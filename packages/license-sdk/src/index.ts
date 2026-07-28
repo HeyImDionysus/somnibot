@@ -200,6 +200,13 @@ export class SomniLicense {
   private cacheExpiry: number = 0;
   private sessionId: string | null = null;
   /**
+   * Revision of the latest definitive response that established the current
+   * session as live: a successful valid validation or heartbeat. A terminal
+   * heartbeat started before that evidence is stale even when the server reused
+   * the same session row/id. Indeterminate/offline fallbacks do not advance it.
+   */
+  private latestLiveSessionRevision = 0;
+  /**
    * Validation and deactivation both mutate the same server-side session
    * lifecycle. Dispatch them in invocation order so response timing cannot make
    * their database commit order diverge, including when validation reactivates
@@ -465,6 +472,7 @@ export class SomniLicense {
           return this.blockedValidationResponse();
         }
 
+        this.latestLiveSessionRevision = operation.revision;
         this.cachedResult = data;
         this.sessionId = data.session_id ?? null;
 
@@ -615,6 +623,7 @@ export class SomniLicense {
           return this.blockedHeartbeatResponse();
         }
 
+        this.latestLiveSessionRevision = operation.revision;
         this.anchorServerTime(res);
         // W2: the entitlement may have ENTERED grace after the initial
         // validation (payment failed mid-session). The heartbeat now reports
@@ -678,7 +687,7 @@ export class SomniLicense {
           }
         }
       } else {
-        this.applyTerminalSessionOperation(operation, sessionId);
+        this.applyTerminalHeartbeatOperation(operation, sessionId);
       }
 
       return data;
@@ -899,6 +908,19 @@ export class SomniLicense {
   }
 
   /**
+   * Ignore a terminal heartbeat that started before the definitive validation
+   * or heartbeat which established the current live session state. Session ids
+   * alone cannot express this because the server may reactivate the same row.
+   */
+  private applyTerminalHeartbeatOperation(
+    operation: OperationToken,
+    operationSessionId: string,
+  ): void {
+    if (operation.revision < this.latestLiveSessionRevision) return;
+    this.applyTerminalSessionOperation(operation, operationSessionId);
+  }
+
+  /**
    * Apply terminal teardown only to the session the operation targeted.
    *
    * This preserves terminal heartbeat/deactivation semantics for the current
@@ -955,6 +977,7 @@ export class SomniLicense {
     this.cachedResult = null;
     this.cacheExpiry = 0;
     this.sessionId = null;
+    this.latestLiveSessionRevision = 0;
     this.cachedGraceDeadlineMono = null;
     this.serverTimeAnchor = null;
     this.stopHeartbeat();
