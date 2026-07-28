@@ -21,9 +21,10 @@ let migrationHistory = [{
   checksum: migrationChecksum,
   applied_at: '2026-07-28T00:00:00.000Z',
   duration_ms: 1,
-  success: false,
+  success: true,
 }];
 const migrationQueries = [];
+const databaseQueries = [];
 
 function jsonResponse(body) {
   return {
@@ -59,6 +60,7 @@ globalThis.fetch = async (input, init = {}) => {
   }
   if (url.includes('/database/query')) {
     const { query } = JSON.parse(String(init.body));
+    databaseQueries.push(query);
 
     const claimToken = query.match(/claim:v1:[a-f0-9]{64}:[0-9a-f-]{36}/i)?.[0];
     const targetProbeFilename = query.match(
@@ -158,34 +160,48 @@ delete process.env.DATABASE_URL;
 
 let failed = false;
 try {
-  const { runMigrations } = await import(migrationRunnerUrl);
-  const recovered = await runMigrations();
-  if (recovered.errors.some((error) => error.includes('__dirname'))) {
-    throw new Error(`Built migration runner still references __dirname: ${recovered.errors.join('; ')}`);
+  const { planMigrationSql, runMigrations } = await import(migrationRunnerUrl);
+  const plannedBatches = planMigrationSql(migrationSource, migrationName);
+  if (plannedBatches.length !== 3) {
+    throw new Error(`Built migration runner planned ${plannedBatches.length} migration batches instead of 3`);
   }
-  if (recovered.errors.length > 0) {
-    throw new Error(`Built migration runner returned errors: ${recovered.errors.join('; ')}`);
-  }
-  if (recovered.applied.length !== 1 || recovered.applied[0] !== migrationName) {
-    throw new Error(`Built migration runner did not retry ${migrationName}`);
-  }
-  if (migrationQueries.length !== 3) {
-    throw new Error(`Built migration runner sent ${migrationQueries.length} migration queries instead of 3`);
-  }
-  if (!migrationQueries[0].includes('DO $fraud_index_recovery$')) {
+  if (!plannedBatches[0].includes('DO $fraud_index_recovery$')) {
     throw new Error('Built migration runner did not preserve the recovery DO batch');
   }
-  if (!migrationQueries[1].trimStart().startsWith('CREATE INDEX CONCURRENTLY')) {
+  if (!plannedBatches[1].trimStart().startsWith('CREATE INDEX CONCURRENTLY')) {
     throw new Error('Built migration runner did not isolate CREATE INDEX CONCURRENTLY');
   }
-  if (!migrationQueries[2].includes('DO $fraud_index_postflight$')) {
+  if (!plannedBatches[2].includes('DO $fraud_index_postflight$')) {
     throw new Error('Built migration runner did not preserve the postflight DO batch');
   }
-  if (!migrationQueries[2].includes('$migration_runner_history$')) {
-    throw new Error('Built migration runner did not finalize history in the postflight batch');
+
+  for (const unsupportedSql of [
+    'VACUUM public.example;',
+    "CREATE SUBSCRIPTION example CONNECTION 'host=example' PUBLICATION example;",
+  ]) {
+    let rejected = false;
+    try {
+      planMigrationSql(unsupportedSql, 'unsupported.sql');
+    } catch (error) {
+      rejected = String(error).includes('Transaction-incompatible SQL');
+    }
+    if (!rejected) {
+      throw new Error(`Built migration runner accepted unsupported standalone SQL: ${unsupportedSql}`);
+    }
   }
-  if (migrationHistory[0]?.success !== true) {
-    throw new Error('Built migration runner did not atomically finalize failed history');
+
+  const successful = await runMigrations();
+  if (successful.errors.some((error) => error.includes('__dirname'))) {
+    throw new Error(`Built migration runner still references __dirname: ${successful.errors.join('; ')}`);
+  }
+  if (successful.errors.length > 0) {
+    throw new Error(`Built migration runner returned errors for successful history: ${successful.errors.join('; ')}`);
+  }
+  if (successful.ran || successful.applied.length > 0 || successful.skipped[0] !== migrationName) {
+    throw new Error('Built migration runner did not skip canonical successful history');
+  }
+  if (migrationQueries.length !== 0) {
+    throw new Error('Built migration runner executed migration source for successful history');
   }
   if (migrationHistory.some((row) => (
     row.filename.startsWith('__somnibot_migration_target_probe_v1__:')
@@ -193,26 +209,39 @@ try {
     throw new Error('Built migration runner left a target-binding probe row behind');
   }
 
-  const migrationQueryCount = migrationQueries.length;
-  const secondRun = await runMigrations();
-  if (secondRun.errors.length > 0) {
-    throw new Error(`Built migration runner second run returned errors: ${secondRun.errors.join('; ')}`);
+  migrationHistory[0].success = false;
+  migrationHistory[0].applied_at = '2026-07-28T00:00:03.000Z';
+  const databaseQueryBaseline = databaseQueries.length;
+  const pending = await runMigrations();
+  if (pending.ran || pending.applied.length > 0) {
+    throw new Error('Built migration runner executed a pending migration without a direct database connection');
   }
-  if (secondRun.ran || secondRun.applied.length > 0 || secondRun.skipped[0] !== migrationName) {
-    throw new Error(`Built migration runner did not skip successful history on the second run`);
+  if (
+    pending.errors.length !== 1
+    || !pending.errors[0].includes('A direct database connection is required')
+  ) {
+    throw new Error(`Built migration runner did not reject Management-only pending source: ${pending.errors.join('; ')}`);
   }
-  if (migrationQueries.length !== migrationQueryCount) {
-    throw new Error('Built migration runner re-executed a successful migration');
+  const pendingQueries = databaseQueries.slice(databaseQueryBaseline);
+  if (pendingQueries.some((query) => (
+    query.includes('claim:v1:')
+    || query.includes('$migration_runner_claim_proof$')
+    || query.includes('$migration_runner_history$')
+  ))) {
+    throw new Error('Built migration runner claimed or completed history before rejecting Management-only source');
+  }
+  if (migrationQueries.length !== 0) {
+    throw new Error('Built migration runner sent source SQL through the Management API');
   }
   if (migrationHistory.some((row) => (
     row.filename.startsWith('__somnibot_migration_target_probe_v1__:')
   ))) {
-    throw new Error('Built migration runner second run left a target-binding probe row behind');
+    throw new Error('Built migration runner pending rejection left a target-binding probe row behind');
   }
 
   console.log(
-    `Built migration runner smoke passed: recovered=${recovered.applied.length}, ` +
-    `batches=${migrationQueries.length}, secondRunSkipped=${secondRun.skipped.length}`,
+    `Built migration runner smoke passed: plannerBatches=${plannedBatches.length}, ` +
+    `managementSkipped=${successful.skipped.length}, pendingRejected=${pending.errors.length}`,
   );
 } catch (error) {
   failed = true;

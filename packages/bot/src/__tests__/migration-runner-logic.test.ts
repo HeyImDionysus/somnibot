@@ -244,13 +244,27 @@ describe('Migration Runner — SQL execution planning', () => {
 
   it.each([
     'DROP INDEX CONCURRENTLY idx_example;',
+    'REINDEX INDEX idx_example;',
     'REINDEX INDEX CONCURRENTLY idx_example;',
+    'REINDEX SCHEMA public;',
     'VACUUM public.example;',
+    'CLUSTER;',
+    'CLUSTER (VERBOSE);',
+    'CLUSTER partitioned_table;',
     'CREATE DATABASE example;',
+    'DROP DATABASE example;',
+    "CREATE TABLESPACE example LOCATION '/var/lib/postgresql/example';",
+    'DROP TABLESPACE example;',
+    'ALTER DATABASE example SET TABLESPACE fastspace;',
     "ALTER SYSTEM SET work_mem = '64MB';",
+    'DISCARD ALL;',
+    "CREATE SUBSCRIPTION example CONNECTION 'host=publisher' PUBLICATION app;",
+    'ALTER SUBSCRIPTION example REFRESH PUBLICATION;',
+    'DROP SUBSCRIPTION example;',
+    'ALTER TABLE parent DETACH PARTITION child CONCURRENTLY;',
   ])('fails closed for unsupported transaction-incompatible SQL: %s', (statement) => {
-    expect(() => planMigrationSql(`${statement}\nCREATE INDEX CONCURRENTLY idx ON t (id);`))
-      .toThrow(/approved nontransactional migration profile/i);
+    expect(() => planMigrationSql(statement, '001_unapproved_nontransactional.sql'))
+      .toThrow(/transaction-incompatible.*approved nontransactional migration profile/i);
   });
 
   it('fails closed on an unterminated dollar-quoted body', () => {

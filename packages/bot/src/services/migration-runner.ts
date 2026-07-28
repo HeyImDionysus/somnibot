@@ -43,6 +43,7 @@ interface LexedSqlStatement {
 }
 
 interface MigrationSqlPlan {
+  executionMode: 'ordinary' | 'outer-transaction' | 'approved-nontransactional';
   batches: string[];
   completion:
     | { mode: 'append-to-last-batch' }
@@ -339,6 +340,68 @@ function isCreateIndexConcurrently(tokens: string[]): boolean {
     && tokens[indexKeyword + 1] === 'CONCURRENTLY';
 }
 
+function transactionIncompatibleStatement(tokens: string[]): string | null {
+  const [first, second] = tokens;
+
+  if (first === 'VACUUM') return 'VACUUM';
+  if (first === 'CLUSTER') {
+    // Database-wide CLUSTER and CLUSTER on a partitioned table cannot run in
+    // a transaction. Whether a named relation is partitioned is live catalog
+    // state, so the closed migration profile rejects the whole command family.
+    return 'CLUSTER';
+  }
+  if (first === 'DISCARD' && second === 'ALL') return 'DISCARD ALL';
+  if (
+    (first === 'CREATE' || first === 'DROP')
+    && (second === 'DATABASE' || second === 'TABLESPACE')
+  ) {
+    return `${first} ${second}`;
+  }
+  if (first === 'ALTER' && second === 'SYSTEM') return 'ALTER SYSTEM';
+  if (
+    first === 'ALTER'
+    && second === 'DATABASE'
+    && tokens.some((token, index) => token === 'SET' && tokens[index + 1] === 'TABLESPACE')
+  ) {
+    return 'ALTER DATABASE SET TABLESPACE';
+  }
+  if (
+    first === 'DROP'
+    && second === 'INDEX'
+    && tokens.includes('CONCURRENTLY')
+  ) {
+    return 'DROP INDEX CONCURRENTLY';
+  }
+  if (first === 'REINDEX') {
+    // REINDEX SCHEMA/DATABASE/SYSTEM and every concurrent form are always
+    // nontransactional. INDEX/TABLE also become nontransactional when their
+    // target is partitioned, which cannot be proven from migration text.
+    return 'REINDEX';
+  }
+  if (
+    (first === 'CREATE' || first === 'ALTER' || first === 'DROP')
+    && second === 'SUBSCRIPTION'
+  ) {
+    // Subscription transaction safety depends on options and live catalog
+    // state (replication slots and refresh behavior), so the closed migration
+    // profile rejects the whole command family before a claim is acquired.
+    return `${first} SUBSCRIPTION`;
+  }
+  if (
+    first === 'ALTER'
+    && second === 'TABLE'
+    && tokens.some((token, index) => (
+      token === 'DETACH'
+      && tokens[index + 1] === 'PARTITION'
+      && tokens.slice(index + 2).includes('CONCURRENTLY')
+    ))
+  ) {
+    return 'ALTER TABLE DETACH PARTITION CONCURRENTLY';
+  }
+
+  return null;
+}
+
 function explicitTransactionControlStatement(tokens: string[]): string | null {
   const [first, second, third, fourth] = tokens;
 
@@ -376,10 +439,9 @@ function explicitTransactionControlStatement(tokens: string[]): string | null {
  * transaction, and accepting an unrecognised one before a later CIC batch can
  * commit a side effect before the migration is recorded.
  *
- * Ordinary files stay one simple-query message. PostgreSQL executes the
- * statements in one implicit transaction unless the file contains explicit
- * transaction control. Existing migrations with one outer BEGIN/COMMIT
- * envelope are preserved; the history CAS is inserted inside that envelope.
+ * Ordinary files run inside an explicit runner-owned transaction. Existing
+ * migrations with one outer BEGIN/COMMIT envelope keep that exact boundary;
+ * the history CAS is inserted before their final COMMIT.
  */
 function createMigrationSqlPlan(
   sql: string,
@@ -410,9 +472,19 @@ function createMigrationSqlPlan(
     }
 
     return {
+      executionMode: 'approved-nontransactional',
       batches: executable.map(({ statement }) => statement.sql),
       completion: { mode: 'append-to-last-batch' },
     };
+  }
+
+  const transactionIncompatible = executable
+    .map(({ statement }) => transactionIncompatibleStatement(statement.tokens))
+    .find((statement): statement is string => statement !== null);
+  if (transactionIncompatible) {
+    throw new Error(
+      `Transaction-incompatible SQL (${transactionIncompatible}) is allowed only by the exact approved nontransactional migration profile`,
+    );
   }
 
   const transactionControls = executable
@@ -425,6 +497,7 @@ function createMigrationSqlPlan(
 
   if (transactionControls.length === 0) {
     return {
+      executionMode: 'ordinary',
       batches: [sql],
       completion: { mode: 'append-to-last-batch' },
     };
@@ -451,6 +524,7 @@ function createMigrationSqlPlan(
   }
 
   return {
+    executionMode: 'outer-transaction',
     batches: [sql],
     completion: {
       mode: 'before-final-commit',
@@ -498,6 +572,35 @@ export function planMigrationSql(
 
 // ── SQL Execution ───────────────────────────────────────────
 
+function directDatabaseUrl(): string | undefined {
+  return process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
+}
+
+function migrationAdvisoryLockParts(migrationName: string): [number, number] {
+  const digest = createHash('sha256')
+    .update(`somnibot:migration-runner:${migrationName}`, 'utf8')
+    .digest();
+  return [digest.readInt32BE(0), digest.readInt32BE(4)];
+}
+
+function buildMigrationAdvisoryLockSql(migrationName: string): string {
+  const [classId, objectId] = migrationAdvisoryLockParts(migrationName);
+  return `SELECT pg_catalog.pg_advisory_lock(${classId}, ${objectId});`;
+}
+
+function buildMigrationAdvisoryUnlockSql(migrationName: string): string {
+  const [classId, objectId] = migrationAdvisoryLockParts(migrationName);
+  return `
+DO $migration_runner_advisory_unlock$
+BEGIN
+  IF NOT pg_catalog.pg_advisory_unlock(${classId}, ${objectId}) THEN
+    RAISE EXCEPTION 'Migration runner advisory lock was not held by this session';
+  END IF;
+END
+$migration_runner_advisory_unlock$;
+`.trim();
+}
+
 async function executeSql(
   supabaseUrl: string,
   serviceRoleKey: string,
@@ -506,80 +609,178 @@ async function executeSql(
   preparedPlan?: MigrationSqlPlan,
   completionSql?: string,
   claimProofSql?: string,
+  assertClaimHealthy?: () => Promise<void>,
 ): Promise<{ success: boolean; error?: string }> {
+  let plan: MigrationSqlPlan;
   let batches: string[];
   try {
-    const plan = preparedPlan ?? createMigrationSqlPlan(sql, migrationName);
+    plan = preparedPlan ?? createMigrationSqlPlan(sql, migrationName);
     batches = materializeMigrationBatches(plan, completionSql);
   } catch (err) {
     return { success: false, error: `Migration SQL planning error: ${String(err)}` };
   }
 
-  // Prefer the configured direct connection. `postgres.unsafe` with no
-  // parameters uses the PostgreSQL simple-query protocol, so an ordinary
-  // multi-statement batch and its history CAS share one implicit transaction.
-  // One max:1 client serializes 034400's preflight / CIC / postflight; the
-  // approved profile is self-contained and does not depend on cross-batch
-  // session state (important when the URL points at a transaction pooler).
-  const dbUrl = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
+  const isClaimedSource = completionSql !== undefined || claimProofSql !== undefined;
+  if (isClaimedSource && (!completionSql || !claimProofSql)) {
+    return {
+      success: false,
+      error: 'Claimed migration execution requires both ownership proof and completion CAS SQL',
+    };
+  }
+
+  // Claimed source is deliberately direct-only. A reserved Postgres.js
+  // connection pins one physical session so the session advisory lock covers
+  // ownership proof, every source batch, and the success CAS.
+  const dbUrl = directDatabaseUrl();
   if (dbUrl) {
     try {
       const { default: postgres } = await import('postgres');
       const sqlClient = postgres(dbUrl, { max: 1 });
       try {
-        if (claimProofSql) {
-          await sqlClient.unsafe(claimProofSql);
+        if (!isClaimedSource) {
+          for (const batch of batches) {
+            await sqlClient.unsafe(batch);
+          }
+          return { success: true };
         }
-        for (const batch of batches) {
-          await sqlClient.unsafe(batch);
+        if (!claimProofSql || !completionSql) {
+          throw new Error(
+            'Claimed migration execution requires both ownership proof and completion CAS SQL',
+          );
         }
+        const ownershipProofSql = claimProofSql;
+        const successCompletionSql = completionSql;
+
+        const reserved = await sqlClient.reserve();
+        let lockHeld = false;
+        let transactionOpen = false;
+        let executionError: unknown;
+        let cleanupError: unknown;
+        try {
+          await reserved.unsafe(buildMigrationAdvisoryLockSql(migrationName));
+          lockHeld = true;
+
+          const proveCurrentOwnership = async (): Promise<void> => {
+            await assertClaimHealthy?.();
+            await reserved.unsafe(ownershipProofSql);
+          };
+
+          if (plan.executionMode === 'approved-nontransactional') {
+            for (let index = 0; index < plan.batches.length; index += 1) {
+              await proveCurrentOwnership();
+              const batch = plan.batches[index];
+              const isFinalBatch = index === plan.batches.length - 1;
+              if (isFinalBatch) {
+                await reserved.unsafe('BEGIN;');
+                transactionOpen = true;
+                await reserved.unsafe(`${batch}\n${successCompletionSql}`);
+                await reserved.unsafe('COMMIT;');
+                transactionOpen = false;
+              } else {
+                await reserved.unsafe(batch);
+              }
+            }
+          } else if (plan.executionMode === 'outer-transaction') {
+            if (plan.completion.mode !== 'before-final-commit') {
+              throw new Error('Outer transaction plan is missing its final COMMIT boundary');
+            }
+            const { statements, finalCommitIndex } = plan.completion;
+            const sourceBeforeCommit = statements
+              .slice(0, finalCommitIndex)
+              .map((statement) => statement.sql)
+              .join('');
+            const finalCommitAndTrailing = statements
+              .slice(finalCommitIndex)
+              .map((statement) => statement.sql)
+              .join('');
+
+            await proveCurrentOwnership();
+            transactionOpen = true;
+            await reserved.unsafe(sourceBeforeCommit);
+            await proveCurrentOwnership();
+            await reserved.unsafe(successCompletionSql);
+            await reserved.unsafe(finalCommitAndTrailing);
+            transactionOpen = false;
+          } else {
+            await proveCurrentOwnership();
+            await reserved.unsafe('BEGIN;');
+            transactionOpen = true;
+            await reserved.unsafe(plan.batches[0]);
+            await proveCurrentOwnership();
+            await reserved.unsafe(successCompletionSql);
+            await reserved.unsafe('COMMIT;');
+            transactionOpen = false;
+          }
+        } catch (err) {
+          executionError = err;
+          if (transactionOpen) {
+            try {
+              await reserved.unsafe('ROLLBACK;');
+            } catch (rollbackError) {
+              executionError = new Error(
+                `${String(err)}; migration rollback failed: ${String(rollbackError)}`,
+              );
+            }
+          }
+        } finally {
+          if (lockHeld) {
+            try {
+              await reserved.unsafe(buildMigrationAdvisoryUnlockSql(migrationName));
+            } catch (err) {
+              cleanupError = err;
+            }
+          }
+          reserved.release();
+        }
+
+        if (executionError && cleanupError) {
+          throw new Error(
+            `${String(executionError)}; advisory unlock failed: ${String(cleanupError)}`,
+          );
+        }
+        if (executionError) throw executionError;
+        if (cleanupError) throw cleanupError;
+        return { success: true };
       } finally {
         await sqlClient.end();
       }
-      return { success: true };
     } catch (err) {
-      return { success: false, error: `Direct DB error: ${err}` };
+      return { success: false, error: `Direct DB error: ${String(err)}` };
     }
   }
 
-  // Fallback: Supabase's raw Management SQL endpoint. Each plan batch is one
-  // request. Ordinary SQL and its history CAS therefore remain in one request,
-  // while the approved CIC profile intentionally uses three idempotent
-  // requests. The current postgres-meta implementation forwards that SQL once
-  // to node-postgres pool.query without parameters (a PostgreSQL Simple Query,
-  // whose multi-statement implicit transaction is server-defined). Direct DB
-  // remains preferred because this endpoint is Beta and that implementation
-  // detail is not a published Supabase transaction guarantee.
+  if (isClaimedSource) {
+    return {
+      success: false,
+      error: 'A direct database connection is required for claimed migration source execution; set SUPABASE_DB_URL or DATABASE_URL',
+    };
+  }
+
+  // The Management API remains available only for bootstrap and other
+  // single-request, runner-owned control operations. Its Beta endpoint does
+  // not contractually guarantee a pinned session or a multi-statement
+  // transaction boundary for migration source plus history completion.
   const accessToken = process.env.SUPABASE_ACCESS_TOKEN;
   const projectRef = extractProjectRef(supabaseUrl);
 
   if (accessToken && projectRef) {
     try {
-      const requests = claimProofSql
-        ? [{ sql: claimProofSql, label: 'claim proof' }, ...batches.map((sql, index) => ({
-          sql,
-          label: `batch ${index + 1}/${batches.length}`,
-        }))]
-        : batches.map((sql, index) => ({
-          sql,
-          label: `batch ${index + 1}/${batches.length}`,
-        }));
-
-      for (const request of requests) {
+      for (let index = 0; index < batches.length; index += 1) {
+        const batch = batches[index];
         const res = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/database/query`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ query: request.sql }),
+          body: JSON.stringify({ query: batch }),
         });
 
         if (!res.ok) {
           const errText = await res.text();
           return {
             success: false,
-            error: `Management API error (${res.status}) in ${migrationName} ${request.label}: ${errText}`,
+            error: `Management API error (${res.status}) in ${migrationName} batch ${index + 1}/${batches.length}: ${errText}`,
           };
         }
       }
@@ -1193,14 +1394,50 @@ async function renewMigrationClaim(
   claimToken: string,
   canonical: string,
 ): Promise<{ success: boolean; error?: string }> {
+  const before = await readMigrationHistoryRow(
+    supabaseUrl,
+    serviceRoleKey,
+    filename,
+  );
+  if (!before.success) {
+    return { success: false, error: before.error };
+  }
+  if (before.row?.checksum === canonical && before.row.success === true) {
+    return { success: true };
+  }
+  if (before.row?.checksum !== claimToken || before.row.success !== false) {
+    return {
+      success: false,
+      error: 'Migration claim heartbeat lost ownership before renewal',
+    };
+  }
+  const beforeLeaseMs = Date.parse(before.row.applied_at ?? '');
+  if (!Number.isFinite(beforeLeaseMs)) {
+    return {
+      success: false,
+      error: 'Migration claim heartbeat cannot prove the current lease timestamp',
+    };
+  }
+
   const write = await executeControlSql(
     supabaseUrl,
     `
-UPDATE public.schema_migrations
-   SET applied_at = now()
- WHERE filename = ${sqlLiteral(filename)}
-   AND checksum = ${sqlLiteral(claimToken)}
-   AND success = false;
+DO $migration_runner_heartbeat$
+BEGIN
+  UPDATE public.schema_migrations
+     SET applied_at = GREATEST(
+       clock_timestamp(),
+       applied_at + interval '1 millisecond'
+     )
+   WHERE filename = ${sqlLiteral(filename)}
+     AND checksum = ${sqlLiteral(claimToken)}
+     AND success = false;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Migration claim heartbeat lost ownership';
+  END IF;
+END
+$migration_runner_heartbeat$;
 `,
     'Migration claim heartbeat',
   );
@@ -1217,11 +1454,18 @@ UPDATE public.schema_migrations
       error: `${writeError ? `${writeError}; ` : ''}${verified.error}`,
     };
   }
-  if (
-    (verified.row?.checksum === claimToken && verified.row.success === false)
-    || (verified.row?.checksum === canonical && verified.row.success === true)
-  ) {
+  if (verified.row?.checksum === canonical && verified.row.success === true) {
     return { success: true };
+  }
+  if (verified.row?.checksum === claimToken && verified.row.success === false) {
+    const renewedLeaseMs = Date.parse(verified.row.applied_at ?? '');
+    if (Number.isFinite(renewedLeaseMs) && renewedLeaseMs > beforeLeaseMs) {
+      return { success: true };
+    }
+    return {
+      success: false,
+      error: `${writeError ? `${writeError}; ` : ''}Migration claim heartbeat lease timestamp did not advance`,
+    };
   }
   return {
     success: false,
@@ -1235,7 +1479,10 @@ function startClaimHeartbeat(
   filename: string,
   claimToken: string,
   canonical: string,
-): { stop: () => Promise<string | undefined> } {
+): {
+  assertHealthy: () => Promise<void>;
+  stop: () => Promise<string | undefined>;
+} {
   let heartbeatError: string | undefined;
   let heartbeatInFlight = Promise.resolve();
   const timer = setInterval(() => {
@@ -1254,6 +1501,10 @@ function startClaimHeartbeat(
   timer.unref?.();
 
   return {
+    assertHealthy: async () => {
+      await heartbeatInFlight;
+      if (heartbeatError) throw new Error(heartbeatError);
+    },
     stop: async () => {
       clearInterval(timer);
       await heartbeatInFlight;
@@ -1526,6 +1777,15 @@ export async function runMigrations(): Promise<MigrationResult> {
       break;
     }
 
+    if (!directDatabaseUrl()) {
+      const error =
+        `${file}: A direct database connection is required for pending migration source execution; `
+        + 'set SUPABASE_DB_URL or DATABASE_URL';
+      result.errors.push(error);
+      log.error(error);
+      break;
+    }
+
     const claim = await acquireMigrationClaim(
       supabaseUrl,
       serviceRoleKey,
@@ -1581,6 +1841,7 @@ export async function runMigrations(): Promise<MigrationResult> {
       plan,
       completionSql,
       claimProofSql,
+      heartbeat.assertHealthy,
     );
     const durationMs = Date.now() - startMs;
     const heartbeatError = await heartbeat.stop();

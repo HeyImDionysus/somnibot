@@ -41,6 +41,12 @@ interface HistoryRow {
 interface DirectClient {
   queries: string[];
   unsafe: ReturnType<typeof vi.fn>;
+  reserve: ReturnType<typeof vi.fn>;
+  reserved: {
+    queries: string[];
+    unsafe: ReturnType<typeof vi.fn>;
+    release: ReturnType<typeof vi.fn>;
+  };
   end: ReturnType<typeof vi.fn>;
 }
 
@@ -72,6 +78,16 @@ function installDirectSimulator(
   options: {
     mirrorControlToRest?: boolean;
     failConcurrentIndex?: boolean;
+    failOuterSource?: boolean;
+    failHeartbeatWrite?: boolean;
+    loseClaimAfterPreflight?: boolean;
+    claimFailureAfterCommit?: boolean;
+    commitFailureAfterCommit?: boolean;
+    heartbeatWritten?: () => void;
+    sourceGate?: {
+      started: () => void;
+      wait: Promise<void>;
+    };
   } = {},
 ): DirectClient[] {
   const clients: DirectClient[] = [];
@@ -94,6 +110,22 @@ function installDirectSimulator(
       /checksum\s*=\s*'((?:''|[^'])*)'/gi,
     );
 
+    if (
+      options.sourceGate
+      && query.includes('CREATE TABLE heartbeat_probe')
+    ) {
+      options.sourceGate.started();
+      await options.sourceGate.wait;
+    }
+
+    if (options.failOuterSource && query.includes('CREATE TABLE outer_rollback_probe')) {
+      throw new Error('outer source failed');
+    }
+
+    if (options.commitFailureAfterCommit && query.trim() === 'COMMIT;') {
+      throw new Error('commit response lost after commit');
+    }
+
     if (query.includes('CREATE TABLE IF NOT EXISTS public.schema_migrations')) {
       return;
     }
@@ -114,6 +146,9 @@ function installDirectSimulator(
             duration_ms: 0,
           });
         }
+      }
+      if (options.claimFailureAfterCommit) {
+        throw new Error('claim response lost after commit');
       }
       return;
     }
@@ -169,6 +204,9 @@ function installDirectSimulator(
           row.applied_at = '2026-07-28T12:00:00.000Z';
         }
       }
+      if (options.claimFailureAfterCommit) {
+        throw new Error('claim response lost after commit');
+      }
       return;
     }
 
@@ -179,6 +217,45 @@ function installDirectSimulator(
         && !row.success
       ));
       if (!owned) throw new Error('claim proof failed');
+      return;
+    }
+
+    if (
+      query.includes('UPDATE public.schema_migrations')
+      && query.includes('SET applied_at')
+      && !query.includes('SET checksum =')
+      && !query.includes('$migration_runner_history$')
+    ) {
+      if (options.failHeartbeatWrite) {
+        throw new Error('heartbeat write failed before commit');
+      }
+      const row = state.find((item) => (
+        item.filename === filenameEquals[0]
+        && item.checksum === checksumEquals[0]
+        && !item.success
+      ));
+      if (row) {
+        row.applied_at = '2026-07-28T12:01:00.000Z';
+        options.heartbeatWritten?.();
+      }
+      return;
+    }
+
+    if (
+      query.includes('DO $fraud_index_recovery$')
+      && options.loseClaimAfterPreflight
+    ) {
+      const row = state.find((item) => (
+        item.filename === MIGRATION
+        && item.checksum.startsWith('claim:v1:')
+        && !item.success
+      ));
+      if (row) {
+        const claimedChecksum = row.checksum.split(':')[2] ?? '';
+        row.checksum =
+          `claim:v1:${claimedChecksum}:00000000-0000-4000-8000-000000000099`;
+        row.applied_at = '2026-07-28T12:01:00.000Z';
+      }
       return;
     }
 
@@ -219,12 +296,22 @@ function installDirectSimulator(
   };
 
   mocks.postgres.mockImplementation(() => {
+    const reserved = {
+      queries: [] as string[],
+      unsafe: vi.fn(async (query: string) => {
+        reserved.queries.push(query);
+        await execute(query);
+      }),
+      release: vi.fn(),
+    };
     const client: DirectClient = {
       queries: [],
       unsafe: vi.fn(async (query: string) => {
         client.queries.push(query);
         await execute(query);
       }),
+      reserve: vi.fn(async () => reserved),
+      reserved,
       end: vi.fn(async () => undefined),
     };
     clients.push(client);
@@ -280,10 +367,11 @@ describe('migration runner direct-Postgres execution', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     process.env = { ...originalEnv };
   });
 
-  it('uses one direct client for claim proof and the exact DO/CIC/DO sequence', async () => {
+  it('holds one reserved session advisory lock and reproves ownership before every DO/CIC/DO batch', async () => {
     const state: HistoryRow[] = [{
       filename: MIGRATION,
       checksum: canonical(source),
@@ -298,12 +386,22 @@ describe('migration runner direct-Postgres execution', () => {
     expect(result.errors).toEqual([]);
     expect(result.applied).toEqual([MIGRATION]);
     expect(clients).toHaveLength(5); // bootstrap, binding write/cleanup, claim CAS, execution
-    expect(clients[4].queries).toHaveLength(4);
-    expect(clients[4].queries[0]).toContain('$migration_runner_claim_proof$');
-    expect(clients[4].queries[1]).toContain('DO $fraud_index_recovery$');
-    expect(clients[4].queries[2].trimStart()).toMatch(/^CREATE INDEX CONCURRENTLY/);
-    expect(clients[4].queries[3]).toContain('DO $fraud_index_postflight$');
-    expect(clients[4].queries[3]).toContain('$migration_runner_history$');
+    const execution = clients[4];
+    expect(execution.queries).toEqual([]);
+    expect(execution.reserve).toHaveBeenCalledOnce();
+    expect(execution.reserved.queries).toHaveLength(10);
+    expect(execution.reserved.queries[0]).toContain('pg_advisory_lock');
+    expect(execution.reserved.queries[1]).toContain('$migration_runner_claim_proof$');
+    expect(execution.reserved.queries[2]).toContain('DO $fraud_index_recovery$');
+    expect(execution.reserved.queries[3]).toContain('$migration_runner_claim_proof$');
+    expect(execution.reserved.queries[4].trimStart()).toMatch(/^CREATE INDEX CONCURRENTLY/);
+    expect(execution.reserved.queries[5]).toContain('$migration_runner_claim_proof$');
+    expect(execution.reserved.queries[6].trim()).toBe('BEGIN;');
+    expect(execution.reserved.queries[7]).toContain('DO $fraud_index_postflight$');
+    expect(execution.reserved.queries[7]).toContain('$migration_runner_history$');
+    expect(execution.reserved.queries[8].trim()).toBe('COMMIT;');
+    expect(execution.reserved.queries[9]).toContain('pg_advisory_unlock');
+    expect(execution.reserved.release).toHaveBeenCalledOnce();
     expect(state[0]).toMatchObject({
       checksum: canonical(source),
       success: true,
@@ -327,15 +425,272 @@ describe('migration runner direct-Postgres execution', () => {
 
     expect(result.applied).toEqual([]);
     expect(result.errors[0]).toMatch(/concurrent build failed/i);
-    expect(clients[4].queries).toHaveLength(3);
-    expect(clients[4].queries.some((query) => (
+    expect(clients[4].reserved.queries.some((query) => (
       query.includes('DO $fraud_index_postflight$')
     ))).toBe(false);
+    expect(clients[4].reserved.queries.at(-1)).toContain('pg_advisory_unlock');
+    expect(clients[4].reserved.release).toHaveBeenCalledOnce();
     expect(clients[5].queries[0]).toContain('success = false');
     expect(state[0]).toMatchObject({
       checksum: canonical(source),
       success: false,
     });
+  });
+
+  it('wraps ordinary source and completion CAS in an explicit transaction on the locked session', async () => {
+    const ordinarySource = 'CREATE TABLE ordinary_probe (id bigint);';
+    mocks.readdirSync.mockReturnValue(['001_ordinary.sql']);
+    mocks.readFileSync.mockReturnValue(ordinarySource);
+    const state: HistoryRow[] = [{
+      filename: '001_ordinary.sql',
+      checksum: canonical(ordinarySource),
+      success: false,
+      applied_at: '2026-07-28T11:00:00.000Z',
+      duration_ms: 1,
+    }];
+    const clients = installDirectSimulator(state);
+
+    const result = await runMigrations();
+
+    expect(result.errors).toEqual([]);
+    expect(result.applied).toEqual(['001_ordinary.sql']);
+    const queries = clients[4].reserved.queries;
+    const lock = queries.findIndex((query) => query.includes('pg_advisory_lock'));
+    const proof = queries.findIndex((query) => query.includes('$migration_runner_claim_proof$'));
+    const begin = queries.findIndex((query) => query.trim() === 'BEGIN;');
+    const sourceQuery = queries.findIndex((query) => query.includes('CREATE TABLE ordinary_probe'));
+    const completion = queries.findIndex((query) => query.includes('$migration_runner_history$'));
+    const commit = queries.findIndex((query) => query.trim() === 'COMMIT;');
+    const unlock = queries.findIndex((query) => query.includes('pg_advisory_unlock'));
+    expect(lock).toBeLessThan(proof);
+    expect(proof).toBeLessThan(begin);
+    expect(begin).toBeLessThan(sourceQuery);
+    expect(sourceQuery).toBeLessThan(completion);
+    expect(completion).toBeLessThan(commit);
+    expect(commit).toBeLessThan(unlock);
+    expect(clients[4].reserved.release).toHaveBeenCalledOnce();
+    expect(clients[3].queries[0]).toContain('SET checksum =');
+    expect(clients[3].queries[0]).toContain(canonical(ordinarySource));
+  });
+
+  it('keeps a source-provided outer BEGIN open until the separate completion CAS commits', async () => {
+    const outerSource = 'BEGIN;\nCREATE TABLE outer_probe (id bigint);\nCOMMIT;';
+    mocks.readdirSync.mockReturnValue(['001_outer.sql']);
+    mocks.readFileSync.mockReturnValue(outerSource);
+    const state: HistoryRow[] = [{
+      filename: '001_outer.sql',
+      checksum: canonical(outerSource),
+      success: false,
+      applied_at: '2026-07-28T11:00:00.000Z',
+      duration_ms: 1,
+    }];
+    const clients = installDirectSimulator(state);
+
+    const result = await runMigrations();
+
+    expect(result.errors).toEqual([]);
+    expect(result.applied).toEqual(['001_outer.sql']);
+    const queries = clients[4].reserved.queries;
+    const sourceQuery = queries.findIndex((query) => query.includes('CREATE TABLE outer_probe'));
+    const completion = queries.findIndex((query) => query.includes('$migration_runner_history$'));
+    const commit = queries.findIndex((query) => query.trim() === 'COMMIT;');
+    expect(queries[sourceQuery].trimStart()).toMatch(/^BEGIN;/);
+    expect(queries[sourceQuery]).not.toMatch(/COMMIT;/);
+    expect(sourceQuery).toBeLessThan(completion);
+    expect(completion).toBeLessThan(commit);
+  });
+
+  it('rolls back a failed outer-BEGIN source on the same reserved session before unlock', async () => {
+    const outerSource =
+      'BEGIN;\nCREATE TABLE outer_rollback_probe (id bigint);\nCOMMIT;';
+    mocks.readdirSync.mockReturnValue(['001_outer_rollback.sql']);
+    mocks.readFileSync.mockReturnValue(outerSource);
+    const state: HistoryRow[] = [{
+      filename: '001_outer_rollback.sql',
+      checksum: canonical(outerSource),
+      success: false,
+      applied_at: '2026-07-28T11:00:00.000Z',
+      duration_ms: 1,
+    }];
+    const clients = installDirectSimulator(state, { failOuterSource: true });
+
+    const result = await runMigrations();
+
+    expect(result.applied).toEqual([]);
+    expect(result.errors[0]).toMatch(/outer source failed/i);
+    const execution = clients[4];
+    expect(execution.reserve).toHaveBeenCalledOnce();
+    expect(execution.queries).toEqual([]);
+    const sourceQuery = execution.reserved.queries.findIndex((query) => (
+      query.includes('CREATE TABLE outer_rollback_probe')
+    ));
+    const rollback = execution.reserved.queries.findIndex((query) => (
+      query.trim() === 'ROLLBACK;'
+    ));
+    const unlock = execution.reserved.queries.findIndex((query) => (
+      query.includes('pg_advisory_unlock')
+    ));
+    expect(sourceQuery).toBeLessThan(rollback);
+    expect(rollback).toBeLessThan(unlock);
+    expect(execution.reserved.queries.some((query) => (
+      query.includes('$migration_runner_history$')
+    ))).toBe(false);
+    expect(execution.reserved.release).toHaveBeenCalledOnce();
+    expect(state[0]).toMatchObject({
+      checksum: canonical(outerSource),
+      success: false,
+    });
+  });
+
+  it('continues after an ambiguous claim response only when REST proves the exact owner token', async () => {
+    const ordinarySource = 'CREATE TABLE ambiguous_claim_probe (id bigint);';
+    mocks.readdirSync.mockReturnValue(['001_ambiguous_claim.sql']);
+    mocks.readFileSync.mockReturnValue(ordinarySource);
+    const state: HistoryRow[] = [];
+    installDirectSimulator(state, { claimFailureAfterCommit: true });
+
+    const result = await runMigrations();
+
+    expect(result.errors).toEqual([]);
+    expect(result.applied).toEqual(['001_ambiguous_claim.sql']);
+    expect(state[0]).toMatchObject({
+      filename: '001_ambiguous_claim.sql',
+      checksum: canonical(ordinarySource),
+      success: true,
+    });
+  });
+
+  it('confirms durable success after the direct COMMIT response is lost', async () => {
+    const ordinarySource = 'CREATE TABLE ambiguous_commit_probe (id bigint);';
+    mocks.readdirSync.mockReturnValue(['001_ambiguous_commit.sql']);
+    mocks.readFileSync.mockReturnValue(ordinarySource);
+    const state: HistoryRow[] = [{
+      filename: '001_ambiguous_commit.sql',
+      checksum: canonical(ordinarySource),
+      success: false,
+      applied_at: '2026-07-28T11:00:00.000Z',
+      duration_ms: 1,
+    }];
+    installDirectSimulator(state, { commitFailureAfterCommit: true });
+
+    const result = await runMigrations();
+
+    expect(result.errors).toEqual([]);
+    expect(result.applied).toEqual(['001_ambiguous_commit.sql']);
+    expect(state[0]).toMatchObject({
+      checksum: canonical(ordinarySource),
+      success: true,
+    });
+  });
+
+  it('stops before CIC when ownership is lost after the approved preflight batch', async () => {
+    const state: HistoryRow[] = [{
+      filename: MIGRATION,
+      checksum: canonical(source),
+      success: false,
+      applied_at: '2026-07-28T11:00:00.000Z',
+      duration_ms: 1,
+    }];
+    const clients = installDirectSimulator(state, { loseClaimAfterPreflight: true });
+
+    const result = await runMigrations();
+
+    expect(result.applied).toEqual([]);
+    expect(result.errors[0]).toMatch(/claim proof failed/i);
+    expect(clients[4].reserved.queries.some((query) => (
+      query.trimStart().startsWith('CREATE INDEX CONCURRENTLY')
+    ))).toBe(false);
+    expect(clients[4].reserved.queries.at(-1)).toContain('pg_advisory_unlock');
+    expect(state[0].checksum).toContain('00000000-0000-4000-8000-000000000099');
+  });
+
+  it('fails closed when a heartbeat write fails and the live lease timestamp does not advance', async () => {
+    vi.useFakeTimers();
+    const ordinarySource = 'CREATE TABLE heartbeat_probe (id bigint);';
+    mocks.readdirSync.mockReturnValue(['001_heartbeat.sql']);
+    mocks.readFileSync.mockReturnValue(ordinarySource);
+    const state: HistoryRow[] = [{
+      filename: '001_heartbeat.sql',
+      checksum: canonical(ordinarySource),
+      success: false,
+      applied_at: '2026-07-28T11:00:00.000Z',
+      duration_ms: 1,
+    }];
+    let sourceStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      sourceStarted = resolve;
+    });
+    let releaseSource!: () => void;
+    const sourceWait = new Promise<void>((resolve) => {
+      releaseSource = resolve;
+    });
+    const clients = installDirectSimulator(state, {
+      failHeartbeatWrite: true,
+      sourceGate: {
+        started: sourceStarted,
+        wait: sourceWait,
+      },
+    });
+
+    const pending = runMigrations();
+    await started;
+    await vi.advanceTimersByTimeAsync(60_000);
+    releaseSource();
+    const result = await pending;
+
+    expect(result.applied).toEqual([]);
+    expect(result.errors[0]).toMatch(/heartbeat.*lease timestamp.*advance/i);
+    expect(state[0]).toMatchObject({
+      checksum: canonical(ordinarySource),
+      success: false,
+    });
+    expect(clients[4].reserved.queries.some((query) => (
+      query.includes('$migration_runner_history$')
+    ))).toBe(false);
+  });
+
+  it('renews a long-running claim on schedule only after the live lease timestamp advances', async () => {
+    vi.useFakeTimers();
+    const ordinarySource = 'CREATE TABLE heartbeat_probe (id bigint);';
+    mocks.readdirSync.mockReturnValue(['001_heartbeat.sql']);
+    mocks.readFileSync.mockReturnValue(ordinarySource);
+    const state: HistoryRow[] = [{
+      filename: '001_heartbeat.sql',
+      checksum: canonical(ordinarySource),
+      success: false,
+      applied_at: '2026-07-28T11:00:00.000Z',
+      duration_ms: 1,
+    }];
+    let sourceStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      sourceStarted = resolve;
+    });
+    let releaseSource!: () => void;
+    const sourceWait = new Promise<void>((resolve) => {
+      releaseSource = resolve;
+    });
+    let heartbeatWritten!: () => void;
+    const heartbeatAdvanced = new Promise<void>((resolve) => {
+      heartbeatWritten = resolve;
+    });
+    installDirectSimulator(state, {
+      heartbeatWritten,
+      sourceGate: {
+        started: sourceStarted,
+        wait: sourceWait,
+      },
+    });
+
+    const pending = runMigrations();
+    await started;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await heartbeatAdvanced;
+    expect(state[0].applied_at).toBe('2026-07-28T12:01:00.000Z');
+    releaseSource();
+    const result = await pending;
+
+    expect(result.errors).toEqual([]);
+    expect(result.applied).toEqual(['001_heartbeat.sql']);
   });
 
   it('executes zero source SQL when the direct target does not mirror REST history', async () => {
@@ -349,7 +704,8 @@ describe('migration runner direct-Postgres execution', () => {
 
     expect(result.applied).toEqual([]);
     expect(result.errors[0]).toMatch(/SQL.*REST.*target binding/i);
-    expect(clients).toHaveLength(3); // bootstrap and binding write/cleanup only
+    expect(clients.every((client) => client.reserve.mock.calls.length === 0))
+      .toBe(true);
     expect(clients.flatMap((client) => client.queries).some((query) => (
       query.includes('CREATE TABLE wrong_target_probe')
     ))).toBe(false);

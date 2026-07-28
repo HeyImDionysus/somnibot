@@ -42,11 +42,19 @@ function okJson(body: unknown): Response {
 
 describe('migration runner against real Postgres', () => {
   const originalEnv = { ...process.env };
-  const databaseName = `somnibot_runner_${process.pid}_${Date.now()}`;
+  const databaseName =
+    process.env.MIGRATION_RUNNER_TEST_DATABASE
+    ?? `somnibot_runner_${process.pid}_${Date.now()}`;
+  if (!/^somnibot_runner_[a-z0-9_]+$/.test(databaseName)) {
+    throw new Error(
+      'MIGRATION_RUNNER_TEST_DATABASE must be a lowercase somnibot_runner_* identifier',
+    );
+  }
   const migrationDirs: string[] = [];
   let adminSql: Sql | undefined;
   let sql: Sql | undefined;
   let approvedSource = '';
+  let databaseCreated = false;
 
   function selectMigration(filename: string, source: string): void {
     const dir = mkdtempSync(
@@ -79,6 +87,7 @@ describe('migration runner against real Postgres', () => {
   beforeAll(async () => {
     adminSql = postgres(getTestDbUrl(), { max: 1 });
     await adminSql.unsafe(`CREATE DATABASE "${databaseName}"`);
+    databaseCreated = true;
     await adminSql.unsafe(
       `ALTER DATABASE "${databaseName}" SET statement_timeout TO '15s'`,
     );
@@ -201,10 +210,22 @@ describe('migration runner against real Postgres', () => {
       await sql?.end();
     } finally {
       try {
-        if (adminSql) {
+        if (adminSql && databaseCreated) {
           await adminSql.unsafe(
             `DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`,
           );
+          const [{ exists }] = await adminSql<Array<{ exists: boolean }>>`
+            SELECT EXISTS (
+              SELECT 1
+                FROM pg_catalog.pg_database
+               WHERE datname = ${databaseName}
+            ) AS exists
+          `;
+          if (exists) {
+            throw new Error(
+              `Disposable migration-runner database still exists: ${databaseName}`,
+            );
+          }
         }
       } finally {
         await adminSql?.end();
@@ -277,7 +298,9 @@ DELETE FROM public.schema_migrations
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const result = await runMigrations();
       expect(result.applied).toEqual([]);
-      expect(result.errors[0]).toMatch(/claim was lost before commit/i);
+      expect(result.errors[0]).toMatch(
+        /migration claim is not present on the selected SQL target/i,
+      );
 
       const table = await sql`
         SELECT 1

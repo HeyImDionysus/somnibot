@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   readdirSync: vi.fn(),
@@ -31,9 +31,6 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
 vi.stubGlobal('fetch', mocks.fetch);
 
 import { runMigrations } from '../services/migration-runner.js';
-
-const APPROVED_MIGRATION =
-  '20260727034400_fraud_signal_observation_index.sql';
 
 interface HistoryRow {
   filename: string;
@@ -367,20 +364,6 @@ function createManagementSimulator(
 
 describe('runMigrations claim and execution safety', () => {
   const originalEnv = { ...process.env };
-  let approvedSource = '';
-
-  beforeAll(async () => {
-    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
-    const actualPath = await vi.importActual<typeof import('node:path')>('node:path');
-    approvedSource = actualFs.readFileSync(
-      actualPath.resolve(
-        process.cwd(),
-        '../supabase/migrations',
-        APPROVED_MIGRATION,
-      ),
-      'utf8',
-    );
-  });
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -406,31 +389,16 @@ describe('runMigrations claim and execution safety', () => {
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
 
-  it('claims and completes an ordinary migration in one source query', async () => {
+  it('refuses pending source execution when only the Management API is configured', async () => {
     const simulator = createManagementSimulator([]);
 
     const result = await runMigrations();
 
-    expect(result.errors).toEqual([]);
-    expect(result.applied).toEqual(['001_init.sql']);
-    expect(simulator.sourceQueries()).toHaveLength(1);
-    expect(simulator.sourceQueries()[0]).toContain('CREATE TABLE runner_probe');
-    expect(simulator.sourceQueries()[0]).toContain('UPDATE public.schema_migrations');
-    expect(simulator.rows[0]).toMatchObject({
-      filename: '001_init.sql',
-      checksum: canonical('CREATE TABLE runner_probe (id bigint);'),
-      success: true,
-    });
-    const durationCall = mocks.fetch.mock.calls.find(([input, init]) => (
-      String(input).includes('success=eq.true')
-      && (init as RequestInit | undefined)?.method === 'PATCH'
-    ));
-    expect(durationCall).toBeDefined();
-    expect(String(durationCall?.[0])).toContain(
-      `checksum=eq.${canonical('CREATE TABLE runner_probe (id bigint);')}`,
-    );
-    expect(JSON.parse(String((durationCall?.[1] as RequestInit).body)))
-      .toEqual({ duration_ms: expect.any(Number) });
+    expect(result.applied).toEqual([]);
+    expect(result.errors[0]).toMatch(/direct database connection.*required/i);
+    expect(simulator.sourceQueries()).toHaveLength(0);
+    expect(simulator.queries.filter((query) => query.includes('claim:v1:')))
+      .toHaveLength(0);
   });
 
   it('proves a matching Management-only SQL and REST target before an up-to-date result', async () => {
@@ -461,15 +429,22 @@ describe('runMigrations claim and execution safety', () => {
   });
 
   it('accepts an ambiguous target-probe write only after exact REST proof', async () => {
-    const simulator = createManagementSimulator([], {
+    const source = 'CREATE TABLE runner_probe (id bigint);';
+    const simulator = createManagementSimulator([{
+      filename: '001_init.sql',
+      checksum: canonical(source),
+      success: true,
+      applied_at: '2026-07-28T11:00:00.000Z',
+      duration_ms: 1,
+    }], {
       targetProbeWriteFailureAfterCommit: true,
     });
 
     const result = await runMigrations();
 
     expect(result.errors).toEqual([]);
-    expect(result.applied).toEqual(['001_init.sql']);
-    expect(simulator.sourceQueries()).toHaveLength(1);
+    expect(result.skipped).toEqual(['001_init.sql']);
+    expect(simulator.sourceQueries()).toHaveLength(0);
     expect(simulator.rows.some((row) => (
       row.filename.startsWith('__somnibot_migration_target_probe_v1__:')
     ))).toBe(false);
@@ -551,19 +526,6 @@ describe('runMigrations claim and execution safety', () => {
     ))).toBe(true);
   });
 
-  it('places the success CAS before the sole outer COMMIT', async () => {
-    const source = 'BEGIN;\nCREATE TABLE runner_probe (id bigint);\nCOMMIT;';
-    mocks.readFileSync.mockReturnValue(source);
-    const simulator = createManagementSimulator([]);
-
-    const result = await runMigrations();
-
-    expect(result.errors).toEqual([]);
-    const sourceQuery = simulator.sourceQueries()[0];
-    expect(sourceQuery.indexOf('UPDATE public.schema_migrations'))
-      .toBeLessThan(sourceQuery.lastIndexOf('COMMIT;'));
-  });
-
   it('requires checksum equality before retrying a failed row', async () => {
     const simulator = createManagementSimulator([{
       filename: '001_init.sql',
@@ -580,27 +542,6 @@ describe('runMigrations claim and execution safety', () => {
     expect(simulator.sourceQueries()).toHaveLength(0);
     expect(simulator.queries.filter((query) => query.includes('claim:v1:')))
       .toHaveLength(0);
-  });
-
-  it('retries a compatible failed row through an exact claim CAS', async () => {
-    const source = 'CREATE TABLE runner_probe (id bigint);';
-    const simulator = createManagementSimulator([{
-      filename: '001_init.sql',
-      checksum: canonical(source),
-      success: false,
-      applied_at: '2026-07-28T11:00:00.000Z',
-      duration_ms: 1,
-    }]);
-
-    const result = await runMigrations();
-
-    expect(result.errors).toEqual([]);
-    expect(result.applied).toEqual(['001_init.sql']);
-    expect(simulator.queries.some((query) => (
-      query.includes('UPDATE public.schema_migrations')
-      && query.includes(`checksum = '${canonical(source)}'`)
-      && query.includes('claim:v1:')
-    ))).toBe(true);
   });
 
   it('rejects unapproved CIC before acquiring a claim or executing source', async () => {
@@ -636,98 +577,6 @@ describe('runMigrations claim and execution safety', () => {
     expect(simulator.sourceQueries()).toHaveLength(0);
   });
 
-  it('lets only one of two concurrent runners execute the migration', async () => {
-    const simulator = createManagementSimulator([]);
-
-    const [first, second] = await Promise.all([
-      runMigrations(),
-      runMigrations(),
-    ]);
-
-    expect(simulator.sourceQueries()).toHaveLength(1);
-    expect([...first.applied, ...second.applied]).toEqual(['001_init.sql']);
-    expect(
-      first.errors.some((error) => /claimed by another runner/i.test(error))
-      || second.errors.some((error) => /claimed by another runner/i.test(error)),
-    ).toBe(true);
-  });
-
-  it('executes after an ambiguous claim response only when reread proves ownership', async () => {
-    const simulator = createManagementSimulator([], {
-      claimFailureAfterCommit: true,
-    });
-
-    const result = await runMigrations();
-
-    expect(result.errors).toEqual([]);
-    expect(result.applied).toEqual(['001_init.sql']);
-    expect(simulator.sourceQueries()).toHaveLength(1);
-  });
-
-  it('never downgrades success after an ambiguous source response', async () => {
-    const simulator = createManagementSimulator([], {
-      sourceFailure: 'after-commit',
-    });
-
-    const result = await runMigrations();
-
-    expect(result.errors).toEqual([]);
-    expect(result.applied).toEqual(['001_init.sql']);
-    expect(simulator.rows[0]).toMatchObject({
-      checksum: canonical('CREATE TABLE runner_probe (id bigint);'),
-      success: true,
-    });
-  });
-
-  it('uses database time, not a skewed client clock, for stale takeover', async () => {
-    const source = 'CREATE TABLE runner_probe (id bigint);';
-    const checksum = canonical(source);
-    const otherClaim =
-      `claim:v1:${checksum}:00000000-0000-4000-8000-000000000001`;
-    const simulator = createManagementSimulator([{
-      filename: '001_init.sql',
-      checksum: otherClaim,
-      success: false,
-      applied_at: '2026-07-28T11:59:00.000Z',
-      duration_ms: 0,
-    }]);
-    vi.spyOn(Date, 'now').mockReturnValue(
-      Date.parse('2099-01-01T00:00:00.000Z'),
-    );
-
-    const result = await runMigrations();
-
-    expect(result.errors[0]).toMatch(/claimed by another runner/i);
-    expect(simulator.sourceQueries()).toHaveLength(0);
-    expect(simulator.rows[0].checksum).toBe(otherClaim);
-    expect(simulator.queries.some((query) => (
-      query.includes("applied_at < now() - interval '5 minutes'")
-    ))).toBe(true);
-  });
-
-  it('executes only the approved DO/CIC/DO profile and finalizes in postflight', async () => {
-    mocks.readdirSync.mockReturnValue([APPROVED_MIGRATION]);
-    mocks.readFileSync.mockReturnValue(approvedSource);
-    const simulator = createManagementSimulator([{
-      filename: APPROVED_MIGRATION,
-      checksum: canonical(approvedSource),
-      success: false,
-      applied_at: '2026-07-28T11:00:00.000Z',
-      duration_ms: 1,
-    }]);
-
-    const result = await runMigrations();
-
-    expect(result.errors).toEqual([]);
-    const sourceQueries = simulator.queries.filter((query) => (
-      query.includes('DO $fraud_index_recovery$')
-      || query.trimStart().startsWith('CREATE INDEX CONCURRENTLY')
-      || query.includes('DO $fraud_index_postflight$')
-    ));
-    expect(sourceQueries).toHaveLength(3);
-    expect(sourceQueries[0]).toContain('DO $fraud_index_recovery$');
-    expect(sourceQueries[1].trimStart()).toMatch(/^CREATE INDEX CONCURRENTLY/);
-    expect(sourceQueries[2]).toContain('DO $fraud_index_postflight$');
-    expect(sourceQueries[2]).toContain('$migration_runner_history$');
-  });
+  // Claimed source, concurrency, takeover, and ambiguous direct-commit behavior
+  // are covered by migration-runner-direct.test.ts and the real-Postgres suite.
 });
