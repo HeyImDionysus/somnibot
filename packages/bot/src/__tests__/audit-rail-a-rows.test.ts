@@ -103,6 +103,8 @@ describe('rail A rows — music', () => {
     expect(applied!.category).toBe(denied!.category);
     expect(applied!.target_type).toBe(denied!.target_type);
     expect(applied!.target_id).toBe(denied!.target_id);
+    expect(applied!.actor_id).toBe('u1');
+    expect(denied!.actor_id).toBe('u1');
     expect(applied!.success).toBe(true);
     expect(denied!.success).toBe(false);
     expect(applied!.details).toMatchObject({ userId: 'u1', action: 'volume', value: 80 });

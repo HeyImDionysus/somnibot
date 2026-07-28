@@ -510,7 +510,7 @@ export interface PlatformEventMap {
    * the applied setting where one exists. Skip and stop are NOT emitted here —
    * they keep their richer dedicated events.
    */
-  'music.control_applied': { userId?: string; action: string; value?: string | number | null };
+  'music.control_applied': { userId: string; action: string; value?: string | number | null };
   'music.skipped': { userId?: string; method: 'dj_force' | 'vote' | 'self' | 'priority'; title: string; author: string; requestedBy: string; queueEnded: boolean };
   'music.stopped': { userId?: string; reason: 'command' | 'auto_leave' | 'inactivity' | 'connection_lost'; trackCount: number };
   'music.denied': { userId: string; action: string };

@@ -146,6 +146,26 @@ describe('music audit events', () => {
     expect(eventBus.emit).toHaveBeenCalledWith('music.denied', 'g1', { userId: 'u1', action: 'volume' });
   });
 
+  it('uses the same canonical control vocabulary for denied music buttons', async () => {
+    vi.spyOn(manager, 'isDJ').mockResolvedValue(false);
+
+    for (const buttonId of [
+      'music:pause_resume',
+      'music:stop',
+      'music:shuffle',
+      'music:loop',
+      'music:vol_down',
+      'music:vol_up',
+    ]) {
+      await manager.handleButton(buttonId, 'u1');
+    }
+
+    const actions = eventBus.emit.mock.calls
+      .filter((call) => call[0] === 'music.denied')
+      .map((call) => (call[2] as { action: string }).action);
+    expect(actions).toEqual(['pause', 'stop', 'shuffle', 'loop', 'volume', 'volume']);
+  });
+
   it('emits music.capacity_rejected when the queue is full', async () => {
     queueSpies.getQueue.mockResolvedValue({
       guildId: 'g1',
@@ -210,6 +230,29 @@ describe('music audit events', () => {
     // play() re-applies the queue's stored volume; that restore is not a
     // member control change and must leave no audit row.
     expect(emitted).not.toContain('music.control_applied');
+  });
+
+  it('audits a persisted queue add even when initial playback setup fails', async () => {
+    queueSpies.getQueue.mockResolvedValue(null);
+    queueSpies.createQueue.mockReturnValue({
+      guildId: 'g1', entries: [], currentIndex: 0, volume: 50, voiceChannelId: 'vc1',
+    });
+    player.node.rest.resolve.mockResolvedValue({
+      loadType: 'search',
+      data: [{ encoded: 'enc', info: { title: 'Song', author: 'Artist', length: 1000, uri: 'u', isStream: false } }],
+    });
+    player.playTrack.mockRejectedValue(new Error('playback failed'));
+
+    await expect(
+      manager.play('song', 'u1', { id: 'vc1' } as never, { id: 'tc1' } as never),
+    ).rejects.toThrow('playback failed');
+
+    expect(queueSpies.saveQueue).toHaveBeenCalled();
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'music.queued',
+      'g1',
+      expect.objectContaining({ userId: 'u1', title: 'Song', trackCount: 1 }),
+    );
   });
 
   it('emits ONE music.queued for a whole playlist add, naming the playlist', async () => {
@@ -280,6 +323,27 @@ describe('music audit events', () => {
       'g1',
       { userId: 'u1', action: 'volume', value: 80 },
     );
+  });
+
+  it('does not invent a member control audit for an internal caller without userId', async () => {
+    queueSpies.getQueue.mockResolvedValue({ guildId: 'g1', entries: [], currentIndex: 0, volume: 50, loopMode: 'off' });
+
+    await manager.setVolume('g1', 80);
+
+    expect(eventBus.emit.mock.calls.filter((call) => call[0] === 'music.control_applied'))
+      .toHaveLength(0);
+  });
+
+  it('emits exactly one combined filter control result', () => {
+    manager.auditFilterActionApplied('u1', 'bassboost', 1.2, 0.8, 1.1);
+
+    const applied = eventBus.emit.mock.calls.filter((call) => call[0] === 'music.control_applied');
+    expect(applied).toHaveLength(1);
+    expect(applied[0]![2]).toEqual({
+      userId: 'u1',
+      action: 'filter',
+      value: 'preset: bassboost, speed: 1.2x, pitch: 0.8x, rate: 1.1x',
+    });
   });
 
   it('records ONE control row when cycleLoopMode delegates to setLoopMode', async () => {

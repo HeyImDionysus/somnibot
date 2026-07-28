@@ -71,13 +71,84 @@ describe('AuditService', () => {
   });
 
   describe('start', () => {
-    it('registers onAny handler and starts flush timer', () => {
+    it('registers a backpressure-exempt onAny handler and starts flush timer', () => {
       service.start();
-      expect(eventBus.onAny).toHaveBeenCalledOnce();
+      expect(eventBus.onAny).toHaveBeenCalledWith(
+        expect.any(Function),
+        { backpressureExempt: true },
+      );
     });
   });
 
   describe('event handling via onAny', () => {
+    it('bounds the exempt audit buffer under a sustained event burst', async () => {
+      service.start();
+
+      for (let i = 0; i < 5_001; i++) {
+        await eventBus._emit({
+          type: 'member.joined',
+          guildId: 'g1',
+          data: { discordId: `u${i}`, username: `User${i}`, isReturning: false },
+        });
+      }
+
+      const internals = service as unknown as {
+        queue: Array<Record<string, unknown>>;
+        pendingEnqueues: Set<Promise<void>>;
+        droppedAtCapacity: number;
+        flush: () => Promise<void>;
+      };
+      expect(internals.queue).toHaveLength(5_000);
+      expect(internals.pendingEnqueues.size).toBe(0);
+      expect(internals.droppedAtCapacity).toBe(1);
+
+      supabase._upsertMock
+        .mockResolvedValueOnce({ error: null })
+        .mockResolvedValueOnce({ error: { message: 'capacity row temporarily unavailable' } })
+        .mockResolvedValueOnce({ error: null });
+      await internals.flush();
+      await internals.flush();
+      const capacityRows = supabase._upsertMock.mock.calls
+        .flatMap(([rows]) => rows as Array<Record<string, any>>)
+        .filter((row) => row.action === 'audit.capacity_exhausted');
+      expect(capacityRows).toHaveLength(2);
+      expect(capacityRows[0]!.occurrence_key).toBe(capacityRows[1]!.occurrence_key);
+      expect(capacityRows[1]!.details).toMatchObject({
+        count: 1,
+        sources: ['buffered audit row'],
+        eventTypes: ['member.joined'],
+        actions: [],
+        bufferedEntryLimit: 5_000,
+        pendingEnqueueLimit: 5_000,
+      });
+    });
+
+    it('routes a manual-log capacity loss through the same durable gap row', async () => {
+      const internals = service as unknown as {
+        queue: Array<Record<string, unknown>>;
+        flush: () => Promise<void>;
+      };
+      internals.queue.length = 5_000;
+
+      await service.log({
+        action: 'manual.at_capacity',
+        actorType: 'bot',
+        actorId: 'bot1',
+      });
+      internals.queue.length = 0;
+      await internals.flush();
+
+      const capacityRow = supabase._upsertMock.mock.calls
+        .flatMap(([rows]) => rows as Array<Record<string, any>>)
+        .find((row) => row.action === 'audit.capacity_exhausted');
+      expect(capacityRow?.details).toMatchObject({
+        count: 1,
+        sources: ['manual audit log'],
+        eventTypes: [],
+        actions: ['manual.at_capacity'],
+      });
+    });
+
     it('maps member.joined event to audit entry', async () => {
       service.start();
       await eventBus._emit({
@@ -352,7 +423,7 @@ describe('AuditService', () => {
       expect(supabase.from).not.toHaveBeenCalledWith('audit_logs');
     });
 
-    it('re-queues entries on flush error (up to 500)', async () => {
+    it('re-queues entries on flush error within the bounded buffer', async () => {
       supabase._upsertMock.mockResolvedValue({ error: { message: 'DB error' } });
       supabase.from.mockReturnValue({ upsert: supabase._upsertMock });
 

@@ -16,9 +16,12 @@ const log = createLogger('EventBus');
  */
 class PlatformEventBus {
   private emitter = new EventEmitter();
+  private backpressureExemptAnyListeners = new WeakSet<
+    (event: PlatformEvent) => void | Promise<void>
+  >();
   // V11 Audit M-5: Backpressure — track in-flight async handlers and
-  // drop events when the queue exceeds MAX_IN_FLIGHT to prevent OOM
-  // under sustained event bursts (e.g. raid join floods).
+  // drop non-exempt listeners when the queue exceeds MAX_IN_FLIGHT to prevent
+  // OOM under sustained event bursts (e.g. raid join floods).
   private inFlight = 0;
   private static readonly MAX_IN_FLIGHT = 500;
 
@@ -49,9 +52,27 @@ class PlatformEventBus {
 
     log.info(`${type} in guild ${guildId}`);
 
-    // V11 Audit M-5: Drop events when too many handlers are in flight.
+    // Audit ingestion is deliberately synchronous at this boundary: its
+    // listener only enqueues work into AuditService's finite,
+    // occurrence-deduped buffer. Dispatch it before the general backpressure
+    // gate so audit evidence is not silently discarded at MAX_IN_FLIGHT.
+    const anyListeners = this.emitter.rawListeners('*') as Array<
+      (e: PlatformEvent) => void | Promise<void>
+    >;
+    for (const listener of anyListeners) {
+      if (!this.backpressureExemptAnyListeners.has(listener)) continue;
+      try {
+        void Promise.resolve(listener(event as PlatformEvent)).catch((err: unknown) => {
+          log.error('Listener error on backpressure-exempt *:', err);
+        });
+      } catch (err) {
+        log.error('Listener error on backpressure-exempt *:', err);
+      }
+    }
+
+    // V11 Audit M-5: Drop non-exempt listeners when too many handlers are in flight.
     if (this.inFlight >= PlatformEventBus.MAX_IN_FLIGHT) {
-      log.warn(`Backpressure: dropping ${type} — ${this.inFlight} handlers in flight`);
+      log.warn(`Backpressure: dropping non-exempt listeners for ${type} — ${this.inFlight} handlers in flight`);
       return;
     }
 
@@ -60,6 +81,7 @@ class PlatformEventBus {
         (e: PlatformEvent) => void | Promise<void>
       >;
       for (const listener of listeners) {
+        if (eventName === '*' && this.backpressureExemptAnyListeners.has(listener)) continue;
         this.inFlight++;
         setImmediate(async () => {
           try {
@@ -99,8 +121,12 @@ class PlatformEventBus {
    */
   onAny(
     handler: (event: PlatformEvent) => void | Promise<void>,
+    options: { backpressureExempt?: boolean } = {},
   ): void {
     this.emitter.on('*', handler as (...args: unknown[]) => void);
+    if (options.backpressureExempt) {
+      this.backpressureExemptAnyListeners.add(handler);
+    }
   }
 
   /**
@@ -111,6 +137,7 @@ class PlatformEventBus {
     handler: (event: PlatformEvent<T, PlatformEventMap[T]>) => void | Promise<void>,
   ): void {
     this.emitter.off(type, handler as (...args: unknown[]) => void);
+    this.backpressureExemptAnyListeners.delete(handler as (event: PlatformEvent) => void | Promise<void>);
   }
 }
 

@@ -267,12 +267,27 @@ export class MusicPlayerManager {
     action: string,
     value?: string | number | null,
   ): void {
-    if (context.internal) return;
+    if (context.internal || !context.userId) return;
     this.eventBus.emit('music.control_applied', this.guild.id, {
       userId: context.userId,
       action,
       value: value ?? null,
     });
+  }
+
+  /** Record one truthful member audit for the filter state this action applied. */
+  auditFilterActionApplied(
+    userId: string,
+    preset: FilterPreset,
+    speed?: number,
+    pitch?: number,
+    rate?: number,
+  ): void {
+    const parts = [`preset: ${preset}`];
+    if (speed !== undefined) parts.push(`speed: ${Math.max(0.1, Math.min(3.0, speed))}x`);
+    if (pitch !== undefined) parts.push(`pitch: ${Math.max(0.1, Math.min(3.0, pitch))}x`);
+    if (rate !== undefined) parts.push(`rate: ${Math.max(0.1, Math.min(3.0, rate))}x`);
+    this.auditControlApplied({ userId }, 'filter', parts.join(', '));
   }
 
   /**
@@ -434,6 +449,23 @@ export class MusicPlayerManager {
     queue.entries.push(...addedEntries);
     await this.queueManager.saveQueue(queue);
 
+    // Audit the persisted ADD side of the shared queue before playback setup.
+    // music.skipped / music.stopped record only removals, so without this the
+    // trail shows tracks leaving a queue nothing was ever recorded as entering.
+    // One row per accepted /play (single track or whole playlist), matching how
+    // one skip = one row.
+    const firstAdded = addedEntries[0]!;
+    this.eventBus.emit('music.queued', this.guild.id, {
+      userId,
+      title: addedEntries.length === 1 ? firstAdded.title : (playlistName ?? firstAdded.title),
+      author: firstAdded.author,
+      uri: firstAdded.uri ?? null,
+      trackCount: addedEntries.length,
+      playlistName: playlistName ?? null,
+      queueLength: queue.entries.length,
+      sessionStarted: isNewQueue,
+    });
+
     // If this is the first track (or queue was empty), start playing
     const shouldPlay = isNewQueue || queue.entries.length === addedEntries.length ||
       !player.track;
@@ -447,22 +479,6 @@ export class MusicPlayerManager {
         await this.setVolume(this.guild.id, queue.volume, { internal: true });
       }
     }
-
-    // Audit the ADD side of the shared queue. music.skipped / music.stopped
-    // record only removals, so without this the trail shows tracks leaving a
-    // queue nothing was ever recorded as entering. One row per accepted /play
-    // (single track or whole playlist), matching how one skip = one row.
-    const firstAdded = addedEntries[0]!;
-    this.eventBus.emit('music.queued', this.guild.id, {
-      userId,
-      title: addedEntries.length === 1 ? firstAdded.title : (playlistName ?? firstAdded.title),
-      author: firstAdded.author,
-      uri: firstAdded.uri ?? null,
-      trackCount: addedEntries.length,
-      playlistName: playlistName ?? null,
-      queueLength: queue.entries.length,
-      sessionStarted: isNewQueue,
-    });
 
     // Reset inactivity timer
     this.resetInactivityTimer(this.guild.id);
@@ -889,7 +905,7 @@ export class MusicPlayerManager {
     switch (buttonId) {
       case 'music:pause_resume': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:pause_resume'); return { message: '❌ You need the DJ role to do that' }; }
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'pause'); return { message: '❌ You need the DJ role to do that' }; }
         const result = await this.togglePause(guildId, { userId });
         return { message: result.message };
       }
@@ -904,32 +920,32 @@ export class MusicPlayerManager {
       }
       case 'music:stop': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:stop'); return { message: '❌ You need the DJ role to stop playback' }; }
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'stop'); return { message: '❌ You need the DJ role to stop playback' }; }
         const result = await this.stop(guildId, { userId, reason: 'command' });
         return { message: result.message };
       }
       case 'music:shuffle': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:shuffle'); return { message: '❌ You need the DJ role to shuffle' }; }
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'shuffle'); return { message: '❌ You need the DJ role to shuffle' }; }
         const result = await this.shuffle(guildId, { userId });
         return { message: result.message };
       }
       case 'music:loop': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:loop'); return { message: '❌ You need the DJ role to change loop mode' }; }
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'loop'); return { message: '❌ You need the DJ role to change loop mode' }; }
         const result = await this.cycleLoopMode(guildId, { userId });
         return { message: result.message };
       }
       // V53 Phase 3 (3.6): Volume buttons
       case 'music:vol_down': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:vol_down'); return { message: '❌ You need the DJ role to change volume' }; }
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'volume'); return { message: '❌ You need the DJ role to change volume' }; }
         const result = await this.setVolume(guildId, Math.max(0, (await this.queueManager.getQueue(guildId))?.volume ?? 50) - 10, { userId });
         return { message: result.message };
       }
       case 'music:vol_up': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:vol_up'); return { message: '❌ You need the DJ role to change volume' }; }
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'volume'); return { message: '❌ You need the DJ role to change volume' }; }
         const result = await this.setVolume(guildId, Math.min(100, ((await this.queueManager.getQueue(guildId))?.volume ?? 50) + 10), { userId });
         return { message: result.message };
       }

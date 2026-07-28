@@ -58,6 +58,7 @@ function mp(overrides: any = {}) {
     togglePause: vi.fn().mockResolvedValue({ success: true, message: 'Toggled' }),
     applyFilter: vi.fn().mockResolvedValue({ success: true, message: 'Filter applied' }),
     applyCustomSpeed: vi.fn().mockResolvedValue({ success: true, message: 'Speed set' }),
+    auditFilterActionApplied: vi.fn(),
     isDJ: vi.fn().mockResolvedValue(true),
     auditPermissionDenied: vi.fn(),
     getPlayerPosition: vi.fn().mockReturnValue(45000),
@@ -326,6 +327,55 @@ describe('handleMusicCommand', () => {
     const i = mi('filter', { num: 1.5 });
     await handleMusicCommand(i as any, p as any);
     expect(p.applyCustomSpeed).toHaveBeenCalled();
+  });
+
+  it('filter — combines preset and custom values into one member audit', async () => {
+    const p = mp();
+    const i = mi('filter', { str: 'bassboost', num: 1.5 });
+
+    await handleMusicCommand(i as any, p as any);
+
+    expect(p.applyFilter).toHaveBeenCalledWith('g1', 'bassboost', { internal: true });
+    expect(p.applyCustomSpeed).toHaveBeenCalledWith(
+      'g1',
+      1.5,
+      1.5,
+      1.5,
+      { internal: true },
+    );
+    expect(p.auditFilterActionApplied).toHaveBeenCalledOnce();
+    expect(p.auditFilterActionApplied).toHaveBeenCalledWith(
+      'u1',
+      'bassboost',
+      1.5,
+      1.5,
+      1.5,
+    );
+  });
+
+  it('filter — audits the applied preset once when the custom half returns a failure', async () => {
+    const p = mp({
+      applyCustomSpeed: vi.fn().mockResolvedValue({ success: false, message: 'Player disappeared' }),
+    });
+    const i = mi('filter', { str: 'bassboost', num: 1.5 });
+
+    await handleMusicCommand(i as any, p as any);
+
+    expect(p.auditFilterActionApplied).toHaveBeenCalledOnce();
+    expect(p.auditFilterActionApplied).toHaveBeenCalledWith('u1', 'bassboost');
+  });
+
+  it('filter — audits the applied preset once when the custom half throws', async () => {
+    const p = mp({
+      applyCustomSpeed: vi.fn().mockRejectedValue(new Error('filter transport failed')),
+    });
+    const i = mi('filter', { str: 'bassboost', num: 1.5 });
+
+    await expect(handleMusicCommand(i as any, p as any))
+      .rejects.toThrow('filter transport failed');
+
+    expect(p.auditFilterActionApplied).toHaveBeenCalledOnce();
+    expect(p.auditFilterActionApplied).toHaveBeenCalledWith('u1', 'bassboost');
   });
 
   it('filter — non-DJ denied', async () => {

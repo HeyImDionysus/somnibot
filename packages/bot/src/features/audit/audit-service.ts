@@ -1007,6 +1007,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     targetType: 'music_control',
     actorType: 'user',
     targetId: (d) => d.action as string,
+    actorId: (d) => d.userId as string,
     details: (d) => ({ userId: d.userId, action: d.action, value: d.value }),
   },
   'music.skipped': {
@@ -1030,6 +1031,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     targetType: 'music_control',
     actorType: 'user',
     targetId: (d) => d.action as string,
+    actorId: (d) => d.userId as string,
     details: (d) => ({ userId: d.userId, action: d.action }),
     success: false,
   },
@@ -1264,11 +1266,29 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
 // ── AuditService ────────────────────────────────────────
 
 export class AuditService {
+  // The exempt EventBus lane must not become an unbounded memory bypass.
+  // Keep both buffered rows and outstanding async mapping work finite. At
+  // capacity the loss is coalesced into a durable ledger gap row.
+  private static readonly MAX_BUFFERED_ENTRIES = 5_000;
+  private static readonly MAX_PENDING_ENQUEUES = 5_000;
+  private static readonly MAX_CAPACITY_LABELS = 20;
   private guildId: string;
   private supabase: SupabaseClient;
   private eventBus: PlatformEventBus;
   private queue: Array<Record<string, unknown>> = [];
+  private droppedAtCapacity = 0;
+  private capacityExhaustion: {
+    count: number;
+    firstDroppedAt: string;
+    lastDroppedAt: string;
+    sources: Set<string>;
+    eventTypes: Set<string>;
+    actions: Set<string>;
+    labelsTruncated: boolean;
+    version: number;
+  } | null = null;
   private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private flushInProgress: Promise<void> | null = null;
   /**
    * Event→entry enqueue operations still in flight (the config.changed
    * before-snapshot path awaits a lookup). flush() drains these first so a
@@ -1321,6 +1341,11 @@ export class AuditService {
       const mapping = EVENT_TO_AUDIT[event.type];
       if (!mapping) return; // untracked event type
 
+      if (this.pendingEnqueues.size >= AuditService.MAX_PENDING_ENQUEUES) {
+        this.recordCapacityDrop({ source: 'pending event mapping', eventType: event.type });
+        return;
+      }
+
       const op: Promise<void> = this.enqueueFromEvent(event, mapping)
         .catch((err: unknown) => {
           log.error(`Failed to queue audit entry for ${event.type}:`, err);
@@ -1329,7 +1354,7 @@ export class AuditService {
           this.pendingEnqueues.delete(op);
         });
       this.pendingEnqueues.add(op);
-    });
+    }, { backpressureExempt: true });
 
     // Flush queue every 5 seconds to batch inserts
     this.flushTimer = setInterval(() => {
@@ -1337,6 +1362,62 @@ export class AuditService {
     }, 5000);
 
     log.info('Started — listening to all platform events (with before/after diffs)');
+  }
+
+  /** Keep audit buffering finite and reserve a coalesced ledger gap record. */
+  private enqueue(
+    entry: Record<string, unknown>,
+    capacityContext: { source: string; eventType?: string; action?: string },
+  ): void {
+    if (this.queue.length >= AuditService.MAX_BUFFERED_ENTRIES) {
+      this.recordCapacityDrop(capacityContext);
+      return;
+    }
+    this.queue.push(entry);
+  }
+
+  private recordCapacityDrop(
+    context: {
+      source: string;
+      eventType?: string;
+      action?: string;
+      actions?: string[];
+    },
+    count = 1,
+  ): void {
+    const now = new Date().toISOString();
+    const exhaustion = this.capacityExhaustion ?? {
+      count: 0,
+      firstDroppedAt: now,
+      lastDroppedAt: now,
+      sources: new Set<string>(),
+      eventTypes: new Set<string>(),
+      actions: new Set<string>(),
+      labelsTruncated: false,
+      version: 0,
+    };
+    this.capacityExhaustion = exhaustion;
+    exhaustion.count += count;
+    exhaustion.lastDroppedAt = now;
+    exhaustion.sources.add(context.source);
+    exhaustion.version++;
+
+    const addLabel = (set: Set<string>, label: string | undefined) => {
+      if (!label || set.has(label)) return;
+      if (set.size < AuditService.MAX_CAPACITY_LABELS) set.add(label);
+      else exhaustion.labelsTruncated = true;
+    };
+    addLabel(exhaustion.eventTypes, context.eventType);
+    addLabel(exhaustion.actions, context.action);
+    for (const action of context.actions ?? []) addLabel(exhaustion.actions, action);
+
+    const previous = this.droppedAtCapacity;
+    this.droppedAtCapacity += count;
+    if (previous === 0 || Math.floor(previous / 1_000) !== Math.floor(this.droppedAtCapacity / 1_000)) {
+      log.error(
+        `Audit capacity exhausted at ${context.source}; dropped ${this.droppedAtCapacity} row(s) total`,
+      );
+    }
   }
 
   /** Map one platform event to an audit entry and queue it (occurrence-deduped). */
@@ -1387,7 +1468,7 @@ export class AuditService {
       return;
     }
 
-    this.queue.push(entry);
+    this.enqueue(entry, { source: 'buffered audit row', eventType: event.type });
   }
 
   /**
@@ -1476,7 +1557,7 @@ export class AuditService {
     success?: boolean;
     errorMessage?: string;
   }): Promise<void> {
-    this.queue.push({
+    this.enqueue({
       guild_id: this.guildId,
       actor_type: entry.actorType,
       actor_id: entry.actorId,
@@ -1491,7 +1572,7 @@ export class AuditService {
       occurrence_key: entry.occurrenceKey ?? null,
       success: entry.success ?? true,
       error_message: entry.errorMessage ?? null,
-    });
+    }, { source: 'manual audit log', action: entry.action });
   }
 
   /**
@@ -1505,12 +1586,24 @@ export class AuditService {
    * silently skipped instead of duplicating the row. Keyless entries keep
    * plain insert semantics (NULL keys never conflict).
    */
-  private async flush(): Promise<void> {
+  private flush(): Promise<void> {
+    if (this.flushInProgress) return this.flushInProgress;
+    const operation = this.flushBatch().finally(() => {
+      if (this.flushInProgress === operation) this.flushInProgress = null;
+    });
+    this.flushInProgress = operation;
+    return operation;
+  }
+
+  private async flushBatch(): Promise<void> {
     // Never outrun an entry still being resolved (config before-snapshot).
     if (this.pendingEnqueues.size > 0) {
       await Promise.all([...this.pendingEnqueues]);
     }
-    if (this.queue.length === 0) return;
+    if (this.queue.length === 0) {
+      await this.recordCapacityRecovery();
+      return;
+    }
 
     const batch = this.queue.splice(0, this.queue.length);
 
@@ -1528,9 +1621,19 @@ export class AuditService {
         firstFailedAt: this.flushOutage?.firstFailedAt ?? new Date().toISOString(),
         lastError: error.message,
       };
-      // Re-queue on failure (max 500 to prevent memory leak)
-      if (this.queue.length < 500) {
-        this.queue.unshift(...batch);
+      // Keep the oldest failed rows first while retaining a hard memory bound.
+      this.queue.unshift(...batch);
+      if (this.queue.length > AuditService.MAX_BUFFERED_ENTRIES) {
+        const overflowEntries = this.queue.splice(AuditService.MAX_BUFFERED_ENTRIES);
+        this.recordCapacityDrop(
+          {
+            source: 'failed flush requeue',
+            actions: overflowEntries
+              .map((entry) => entry.action)
+              .filter((action): action is string => typeof action === 'string'),
+          },
+          overflowEntries.length,
+        );
       }
       return;
     }
@@ -1542,6 +1645,62 @@ export class AuditService {
       const outage = this.flushOutage;
       this.flushOutage = null;
       await this.recordFlushRecovery(batch, outage);
+    }
+    await this.recordCapacityRecovery();
+  }
+
+  /**
+   * Persist the reserved/coalesced capacity-gap row after the ledger recovers.
+   * A normal upsert updates the same occurrence if more drops arrive while the
+   * write is in flight; the aggregate is cleared only once the written version
+   * is still current.
+   */
+  private async recordCapacityRecovery(): Promise<void> {
+    const exhaustion = this.capacityExhaustion;
+    if (!exhaustion) return;
+    const version = exhaustion.version;
+    const details = {
+      count: exhaustion.count,
+      firstDroppedAt: exhaustion.firstDroppedAt,
+      lastDroppedAt: exhaustion.lastDroppedAt,
+      sources: [...exhaustion.sources].sort(),
+      eventTypes: [...exhaustion.eventTypes].sort(),
+      actions: [...exhaustion.actions].sort(),
+      labelsTruncated: exhaustion.labelsTruncated,
+      recoveredAt: new Date().toISOString(),
+      bufferedEntryLimit: AuditService.MAX_BUFFERED_ENTRIES,
+      pendingEnqueueLimit: AuditService.MAX_PENDING_ENQUEUES,
+    };
+
+    try {
+      const { error } = await this.supabase.from('audit_logs').upsert(
+        [{
+          guild_id: this.guildId,
+          actor_type: 'system',
+          actor_id: 'audit-service',
+          action: 'audit.capacity_exhausted',
+          category: 'system',
+          target_type: 'audit_buffer',
+          target_id: this.guildId,
+          details,
+          before_state: null,
+          after_state: null,
+          correlation_id: null,
+          occurrence_key: `audit.capacity_exhausted:${exhaustion.firstDroppedAt}`,
+          success: false,
+          error_message: 'Detailed audit rows were dropped at the finite buffer limit',
+        }],
+        { onConflict: 'guild_id,occurrence_key' },
+      );
+      if (error) {
+        log.warn('Could not record audit.capacity_exhausted:', error.message);
+        return;
+      }
+      if (this.capacityExhaustion === exhaustion && exhaustion.version === version) {
+        this.capacityExhaustion = null;
+      }
+    } catch (err) {
+      log.warn('Could not record audit.capacity_exhausted:', (err as Error)?.message ?? err);
     }
   }
 

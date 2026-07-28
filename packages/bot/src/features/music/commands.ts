@@ -568,9 +568,11 @@ async function handleFilter(
   const speed = interaction.options.getNumber('speed');
   const pitch = interaction.options.getNumber('pitch');
   const rate = interaction.options.getNumber('rate');
+  const hasCustomTimescale = speed !== null || pitch !== null || rate !== null;
+  const isCombinedFilter = Boolean(preset && hasCustomTimescale);
 
   // If neither preset nor custom values provided, show current filters
-  if (!preset && speed === null && pitch === null && rate === null) {
+  if (!preset && !hasCustomTimescale) {
     const active = musicPlayer.getActiveFilters(guildId);
     await interaction.reply({
       embeds: [buildFilterEmbed('🎛️ Current audio filters', active)],
@@ -580,7 +582,11 @@ async function handleFilter(
 
   // Apply preset first (if given)
   if (preset) {
-    const result = await musicPlayer.applyFilter(guildId, preset, { userId: interaction.user.id });
+    const result = await musicPlayer.applyFilter(
+      guildId,
+      preset,
+      isCombinedFilter ? { internal: true } : { userId: interaction.user.id },
+    );
     if (!result.success) {
       await interaction.reply({
         embeds: [buildMusicErrorEmbed(result.message)],
@@ -590,7 +596,7 @@ async function handleFilter(
     }
 
     // If only preset, respond with it
-    if (speed === null && pitch === null && rate === null) {
+    if (!hasCustomTimescale) {
       const active = musicPlayer.getActiveFilters(guildId);
       await interaction.reply({
         embeds: [buildFilterEmbed(result.message, active)],
@@ -600,20 +606,40 @@ async function handleFilter(
   }
 
   // Apply custom timescale (speed/pitch/rate)
-  if (speed !== null || pitch !== null || rate !== null) {
-    const result = await musicPlayer.applyCustomSpeed(
-      guildId,
-      speed ?? undefined,
-      pitch ?? undefined,
-      rate ?? undefined,
-      { userId: interaction.user.id },
-    );
+  if (hasCustomTimescale) {
+    let result: Awaited<ReturnType<MusicPlayerManager['applyCustomSpeed']>>;
+    try {
+      result = await musicPlayer.applyCustomSpeed(
+        guildId,
+        speed ?? undefined,
+        pitch ?? undefined,
+        rate ?? undefined,
+        isCombinedFilter ? { internal: true } : { userId: interaction.user.id },
+      );
+    } catch (err) {
+      // The preset already landed. If the second half fails unexpectedly,
+      // record that truthful partial result before propagating the error.
+      if (preset) musicPlayer.auditFilterActionApplied(interaction.user.id, preset);
+      throw err;
+    }
     if (!result.success) {
+      // The preset already landed even though the custom half could not.
+      if (preset) musicPlayer.auditFilterActionApplied(interaction.user.id, preset);
       await interaction.reply({
         embeds: [buildMusicErrorEmbed(result.message)],
         ephemeral: true,
       });
       return;
+    }
+
+    if (preset) {
+      musicPlayer.auditFilterActionApplied(
+        interaction.user.id,
+        preset,
+        speed ?? undefined,
+        pitch ?? undefined,
+        rate ?? undefined,
+      );
     }
 
     const active = musicPlayer.getActiveFilters(guildId);
