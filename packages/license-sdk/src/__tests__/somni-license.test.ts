@@ -354,70 +354,23 @@ describe('SomniLicense', () => {
       expect(offline.status).not.toBe('offline_grace');
     });
 
-    it('does not let an older validation success overwrite a terminal validation', async () => {
-      const olderValidResponse = deferred<Response>();
-      const terminalResponse = deferred<Response>();
-      vi.mocked(fetch)
-        .mockImplementationOnce(() => olderValidResponse.promise)
-        .mockImplementationOnce(() => terminalResponse.promise);
-      const client = sdk();
-
-      const olderValidation = client.validate();
-      const terminalValidation = client.validate();
-
-      terminalResponse.resolve(validationSessionInvalidated());
-      expect(await terminalValidation).toMatchObject({
-        valid: false,
-        status: 'session_invalidated',
-      });
-
-      olderValidResponse.resolve(validationOk());
-      expect(await olderValidation).toMatchObject({
-        valid: false,
-        status: 'session_invalidated',
-      });
-      expect(client.isValid()).toBe(false);
-      expect(client.getSessionId()).toBeNull();
-      expect(client.getFeatures()).toEqual([]);
-      expect(vi.getTimerCount()).toBe(0);
-    });
-
-    it('keeps a later terminal validation authoritative when the valid response arrives first', async () => {
+    it('waits to dispatch a later terminal validation until the first validation settles', async () => {
       const validResponse = deferred<Response>();
       const terminalResponse = deferred<Response>();
       vi.mocked(fetch)
         .mockImplementationOnce(() => validResponse.promise)
         .mockImplementationOnce(() => terminalResponse.promise);
-      const client = sdk();
+      const client = sdk({ cacheTtlMs: 0 });
 
       const validValidation = client.validate();
       const terminalValidation = client.validate();
 
+      expect(fetch).toHaveBeenCalledTimes(1);
+
       validResponse.resolve(validationOk());
       expect((await validValidation).valid).toBe(true);
-      expect(client.isValid()).toBe(true);
-
-      terminalResponse.resolve(validationSessionInvalidated());
-      expect((await terminalValidation).valid).toBe(false);
-      expect(client.isValid()).toBe(false);
-      expect(client.getSessionId()).toBeNull();
-      expect(vi.getTimerCount()).toBe(0);
-    });
-
-    it('keeps a terminal validation authoritative when it completes after a newer success', async () => {
-      const terminalResponse = deferred<Response>();
-      const newerValidResponse = deferred<Response>();
-      vi.mocked(fetch)
-        .mockImplementationOnce(() => terminalResponse.promise)
-        .mockImplementationOnce(() => newerValidResponse.promise);
-      const client = sdk();
-
-      const terminalValidation = client.validate();
-      const newerValidation = client.validate();
-
-      newerValidResponse.resolve(validationOk());
-      expect((await newerValidation).valid).toBe(true);
-      expect(client.isValid()).toBe(true);
+      await Promise.resolve();
+      expect(fetch).toHaveBeenCalledTimes(2);
 
       terminalResponse.resolve(validationSessionInvalidated());
       expect((await terminalValidation).valid).toBe(false);
@@ -427,26 +380,76 @@ describe('SomniLicense', () => {
       expect(vi.getTimerCount()).toBe(0);
     });
 
-    it('does not let a pending newer validation resurrect after a terminal validation completes first', async () => {
+    it('evaluates the validation cache when a queued call begins', async () => {
+      const validResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockImplementationOnce(() => validResponse.promise);
+      const client = sdk();
+
+      const firstValidation = client.validate();
+      const queuedValidation = client.validate();
+
+      validResponse.resolve(validationOk());
+      const firstResult = await firstValidation;
+      const queuedResult = await queuedValidation;
+
+      expect(firstResult.valid).toBe(true);
+      expect(queuedResult).toEqual(firstResult);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(client.isValid()).toBe(true);
+      client.destroy();
+    });
+
+    it('allows a later queued validation to recover after an earlier terminal verdict', async () => {
       const terminalResponse = deferred<Response>();
-      const newerValidResponse = deferred<Response>();
+      const laterValidResponse = deferred<Response>();
       vi.mocked(fetch)
         .mockImplementationOnce(() => terminalResponse.promise)
-        .mockImplementationOnce(() => newerValidResponse.promise);
+        .mockImplementationOnce(() => laterValidResponse.promise);
       const client = sdk();
 
       const terminalValidation = client.validate();
-      const newerValidation = client.validate();
+      const laterValidation = client.validate();
+
+      expect(fetch).toHaveBeenCalledTimes(1);
 
       terminalResponse.resolve(validationSessionInvalidated());
       expect((await terminalValidation).valid).toBe(false);
-      expect(client.getSessionId()).toBeNull();
+      await Promise.resolve();
+      expect(fetch).toHaveBeenCalledTimes(2);
 
-      newerValidResponse.resolve(validationOk());
-      expect(await newerValidation).toMatchObject({
+      laterValidResponse.resolve(
+        validationOk({ session_id: 'sess-b', tier: 'business' }),
+      );
+      expect((await laterValidation).valid).toBe(true);
+      expect(client.isValid()).toBe(true);
+      expect(client.getSessionId()).toBe('sess-b');
+      expect(client.getTier()).toBe('business');
+      client.destroy();
+    });
+
+    it('does not dispatch a queued validation after destroy', async () => {
+      const validationResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockImplementationOnce(() => validationResponse.promise);
+      const client = sdk();
+
+      const inFlightValidation = client.validate();
+      const queuedValidation = client.validate();
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      client.destroy();
+      validationResponse.resolve(validationOk());
+
+      expect(await inFlightValidation).toMatchObject({
         valid: false,
-        status: 'session_invalidated',
+        status: 'destroyed',
       });
+      expect(await queuedValidation).toMatchObject({
+        valid: false,
+        status: 'destroyed',
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
       expect(client.isValid()).toBe(false);
       expect(client.getSessionId()).toBeNull();
       expect(client.getFeatures()).toEqual([]);
@@ -1353,7 +1356,7 @@ describe('SomniLicense', () => {
       expect(client.getSessionId()).toBeNull();
     });
 
-    it('does not let a delayed deactivation for session A clear a newer revalidated session B', async () => {
+    it('releases queued revalidation after a failed deactivation without clearing the session', async () => {
       const deactivationResponse = deferred<Response>();
       const revalidationResponse = deferred<Response>();
       vi.mocked(fetch)
@@ -1366,15 +1369,20 @@ describe('SomniLicense', () => {
 
       const deactivation = client.deactivate();
       const revalidation = client.validate();
+
+      expect(fetch).toHaveBeenCalledTimes(2);
+      deactivationResponse.resolve(deactivateUnavailable());
+      expect((await deactivation).success).toBe(false);
+      expect(client.getSessionId()).toBe('sess-a');
+      expect(client.getFeatures()).toEqual(['auto-mod', 'music']);
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      await Promise.resolve();
+      expect(fetch).toHaveBeenCalledTimes(3);
 
       revalidationResponse.resolve(
         validationOk({ session_id: 'sess-b', tier: 'business' }),
       );
       expect((await revalidation).valid).toBe(true);
-      expect(client.getSessionId()).toBe('sess-b');
-
-      deactivationResponse.resolve(deactivateOk());
-      expect((await deactivation).success).toBe(true);
 
       expect(client.getSessionId()).toBe('sess-b');
       expect(client.getTier()).toBe('business');
@@ -1383,7 +1391,7 @@ describe('SomniLicense', () => {
       client.destroy();
     });
 
-    it('does not let a delayed deactivation clear a newer reactivation that reused the same session row', async () => {
+    it('waits to dispatch same-row revalidation until earlier deactivation settles', async () => {
       const deactivationResponse = deferred<Response>();
       const revalidationResponse = deferred<Response>();
       vi.mocked(fetch)
@@ -1397,14 +1405,24 @@ describe('SomniLicense', () => {
       const deactivation = client.deactivate();
       const revalidation = client.validate();
 
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(fetch).mock.calls[1]?.[0]).toBe(
+        'https://dash.test/api/license/deactivate',
+      );
+
+      deactivationResponse.resolve(deactivateOk());
+      expect((await deactivation).success).toBe(true);
+      await Promise.resolve();
+
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(vi.mocked(fetch).mock.calls[2]?.[0]).toBe(
+        'https://dash.test/api/license/validate',
+      );
+
       revalidationResponse.resolve(
         validationOk({ session_id: 'sess-a', tier: 'business' }),
       );
       expect((await revalidation).valid).toBe(true);
-      expect(client.getSessionId()).toBe('sess-a');
-
-      deactivationResponse.resolve(deactivateOk());
-      expect((await deactivation).success).toBe(true);
 
       expect(client.getSessionId()).toBe('sess-a');
       expect(client.getTier()).toBe('business');
@@ -1413,7 +1431,7 @@ describe('SomniLicense', () => {
       client.destroy();
     });
 
-    it('keeps a later-started deactivation authoritative over an earlier same-row revalidation', async () => {
+    it('waits to dispatch same-row deactivation until earlier revalidation settles', async () => {
       const revalidationResponse = deferred<Response>();
       const deactivationResponse = deferred<Response>();
       vi.mocked(fetch)
@@ -1427,11 +1445,22 @@ describe('SomniLicense', () => {
       const revalidation = client.validate();
       const deactivation = client.deactivate();
 
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(fetch).mock.calls[1]?.[0]).toBe(
+        'https://dash.test/api/license/validate',
+      );
+
       revalidationResponse.resolve(
         validationOk({ session_id: 'sess-a', tier: 'business' }),
       );
       expect((await revalidation).valid).toBe(true);
       expect(client.getTier()).toBe('business');
+      await Promise.resolve();
+
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(vi.mocked(fetch).mock.calls[2]?.[0]).toBe(
+        'https://dash.test/api/license/deactivate',
+      );
 
       deactivationResponse.resolve(deactivateOk());
       expect((await deactivation).success).toBe(true);
@@ -1442,32 +1471,30 @@ describe('SomniLicense', () => {
       expect(vi.getTimerCount()).toBe(0);
     });
 
-    it('does not let a pending revalidation resurrect after session A deactivation completes first', async () => {
+    it('waits to evaluate no-session deactivation until a queued validation settles', async () => {
+      const validationResponse = deferred<Response>();
       const deactivationResponse = deferred<Response>();
-      const revalidationResponse = deferred<Response>();
       vi.mocked(fetch)
-        .mockResolvedValueOnce(validationOk({ session_id: 'sess-a' }))
-        .mockImplementationOnce(() => deactivationResponse.promise)
-        .mockImplementationOnce(() => revalidationResponse.promise);
-      const client = sdk({ cacheTtlMs: 1_000 });
-      await client.validate();
-      vi.advanceTimersByTime(2_000);
+        .mockImplementationOnce(() => validationResponse.promise)
+        .mockImplementationOnce(() => deactivationResponse.promise);
+      const client = sdk();
 
+      const validation = client.validate();
       const deactivation = client.deactivate();
-      const revalidation = client.validate();
+
+      expect(fetch).toHaveBeenCalledTimes(1);
+      validationResponse.resolve(validationOk({ session_id: 'sess-a' }));
+      expect((await validation).valid).toBe(true);
+      await Promise.resolve();
+      expect(fetch).toHaveBeenCalledTimes(2);
+
+      const [, init] = vi.mocked(fetch).mock.calls[1]!;
+      expect(JSON.parse(init!.body as string)).toMatchObject(
+        { session_id: 'sess-a' },
+      );
 
       deactivationResponse.resolve(deactivateOk());
       expect((await deactivation).success).toBe(true);
-      expect(client.getSessionId()).toBeNull();
-
-      revalidationResponse.resolve(
-        validationOk({ session_id: 'sess-b', tier: 'business' }),
-      );
-      expect(await revalidation).toMatchObject({
-        valid: false,
-        status: 'session_invalidated',
-      });
-
       expect(client.getSessionId()).toBeNull();
       expect(client.getTier()).toBeNull();
       expect(client.isValid()).toBe(false);

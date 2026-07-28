@@ -200,11 +200,13 @@ export class SomniLicense {
   private cacheExpiry: number = 0;
   private sessionId: string | null = null;
   /**
-   * Revision of the last successful network validation that established the
-   * current local session lifecycle. The server may reactivate the same
-   * license_sessions row/id, so sessionId alone is not a lifecycle identity.
+   * Validation and deactivation both mutate the same server-side session
+   * lifecycle. Dispatch them in invocation order so response timing cannot make
+   * their database commit order diverge, including when validation reactivates
+   * the same license_sessions row/id.
    */
-  private sessionActivationRevision = 0;
+  private lifecycleQueue: Array<() => void> = [];
+  private lifecycleBusy = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   /**
    * Every async operation receives a monotonically increasing revision when it
@@ -401,7 +403,15 @@ export class SomniLicense {
    *     the offline-grace window applies, so a transient fault degrades to
    *     "keep running on cache" instead of "your licence was revoked".
    */
-  async validate(): Promise<ValidationResponse> {
+  validate(): Promise<ValidationResponse> {
+    if (this.disposed) {
+      return Promise.resolve(this.blockedValidationResponse());
+    }
+
+    return this.enqueueLifecycle(() => this.validateLifecycle());
+  }
+
+  private async validateLifecycle(): Promise<ValidationResponse> {
     if (this.disposed) {
       return this.blockedValidationResponse();
     }
@@ -455,7 +465,6 @@ export class SomniLicense {
           return this.blockedValidationResponse();
         }
 
-        this.sessionActivationRevision = operation.revision;
         this.cachedResult = data;
         this.sessionId = data.session_id ?? null;
 
@@ -686,7 +695,15 @@ export class SomniLicense {
   /**
    * Deactivate this device (e.g., on app uninstall).
    */
-  async deactivate(): Promise<DeactivateResponse> {
+  deactivate(): Promise<DeactivateResponse> {
+    if (this.disposed) {
+      return Promise.resolve(this.blockedDeactivateResponse());
+    }
+
+    return this.enqueueLifecycle(() => this.deactivateLifecycle());
+  }
+
+  private async deactivateLifecycle(): Promise<DeactivateResponse> {
     if (this.disposed) {
       return this.blockedDeactivateResponse();
     }
@@ -713,7 +730,7 @@ export class SomniLicense {
       }
 
       if (res.ok && data.success) {
-        this.applyDeactivationOperation(operation, sessionId);
+        this.applyTerminalSessionOperation(operation, sessionId);
         return data;
       }
 
@@ -784,6 +801,55 @@ export class SomniLicense {
   // ── Private ──────────────────────────────
 
   /**
+   * Run validation/deactivation lifecycle work in invocation order.
+   *
+   * The first operation starts immediately to preserve the public methods'
+   * existing dispatch timing. Later operations wait for the prior result to
+   * settle. Both fulfillment and rejection advance the queue, while an
+   * unexpected error still rejects the original caller's promise.
+   */
+  private enqueueLifecycle<T>(work: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const run = (): void => {
+        this.lifecycleBusy = true;
+
+        let operation: Promise<T>;
+        try {
+          operation = work();
+        } catch (error) {
+          operation = Promise.reject(error);
+        }
+
+        void operation.then(
+          (value) => {
+            resolve(value);
+            this.advanceLifecycleQueue();
+          },
+          (error: unknown) => {
+            reject(error);
+            this.advanceLifecycleQueue();
+          },
+        );
+      };
+
+      if (this.lifecycleBusy) {
+        this.lifecycleQueue.push(run);
+      } else {
+        run();
+      }
+    });
+  }
+
+  private advanceLifecycleQueue(): void {
+    const next = this.lifecycleQueue.shift();
+    if (next) {
+      next();
+    } else {
+      this.lifecycleBusy = false;
+    }
+  }
+
+  /**
    * Allocate a revision and capture the terminal epoch before the operation's
    * first asynchronous gap.
    */
@@ -851,25 +917,6 @@ export class SomniLicense {
     this.applyTerminalOperation(operation);
   }
 
-  /**
-   * Apply successful deactivation unless a later-started validation has already
-   * established a newer lifecycle, even when the server reused the same row/id.
-   */
-  private applyDeactivationOperation(
-    operation: OperationToken,
-    operationSessionId: string,
-  ): void {
-    if (this.disposed || operation.terminalEpoch !== this.terminalEpoch) return;
-    if (
-      this.sessionId !== operationSessionId
-      || this.sessionActivationRevision > operation.revision
-    ) {
-      this.claimOperation(operation);
-      return;
-    }
-    this.applyTerminalOperation(operation);
-  }
-
   private blockedValidationResponse(): ValidationResponse {
     if (this.disposed) {
       return {
@@ -908,7 +955,6 @@ export class SomniLicense {
     this.cachedResult = null;
     this.cacheExpiry = 0;
     this.sessionId = null;
-    this.sessionActivationRevision = 0;
     this.cachedGraceDeadlineMono = null;
     this.serverTimeAnchor = null;
     this.stopHeartbeat();

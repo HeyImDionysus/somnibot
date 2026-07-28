@@ -96,6 +96,13 @@ from the licence's point of view.
 
 Deactivates the current device session, freeing a device slot.
 
+`validate()` and `deactivate()` share an invocation-ordered lifecycle queue. If
+they overlap, the later call does not inspect cached/session state or dispatch
+its request until the earlier call settles. This keeps API commit order aligned
+with caller order even when validation reactivates the same server-side session
+row. A failed deactivation preserves the session and still releases the queue.
+Heartbeats continue independently under the session/terminal safeguards.
+
 After `destroy()` this returns `{ success: false, error: 'SomniLicense instance has been destroyed' }`
 without making a network request.
 
