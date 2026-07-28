@@ -199,6 +199,12 @@ export class SomniLicense {
   private cachedResult: ValidationResponse | null = null;
   private cacheExpiry: number = 0;
   private sessionId: string | null = null;
+  /**
+   * Revision of the last successful network validation that established the
+   * current local session lifecycle. The server may reactivate the same
+   * license_sessions row/id, so sessionId alone is not a lifecycle identity.
+   */
+  private sessionActivationRevision = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   /**
    * Every async operation receives a monotonically increasing revision when it
@@ -449,6 +455,7 @@ export class SomniLicense {
           return this.blockedValidationResponse();
         }
 
+        this.sessionActivationRevision = operation.revision;
         this.cachedResult = data;
         this.sessionId = data.session_id ?? null;
 
@@ -706,7 +713,7 @@ export class SomniLicense {
       }
 
       if (res.ok && data.success) {
-        this.applyTerminalSessionOperation(operation, sessionId);
+        this.applyDeactivationOperation(operation, sessionId);
         return data;
       }
 
@@ -844,6 +851,25 @@ export class SomniLicense {
     this.applyTerminalOperation(operation);
   }
 
+  /**
+   * Apply successful deactivation unless a later-started validation has already
+   * established a newer lifecycle, even when the server reused the same row/id.
+   */
+  private applyDeactivationOperation(
+    operation: OperationToken,
+    operationSessionId: string,
+  ): void {
+    if (this.disposed || operation.terminalEpoch !== this.terminalEpoch) return;
+    if (
+      this.sessionId !== operationSessionId
+      || this.sessionActivationRevision > operation.revision
+    ) {
+      this.claimOperation(operation);
+      return;
+    }
+    this.applyTerminalOperation(operation);
+  }
+
   private blockedValidationResponse(): ValidationResponse {
     if (this.disposed) {
       return {
@@ -882,6 +908,7 @@ export class SomniLicense {
     this.cachedResult = null;
     this.cacheExpiry = 0;
     this.sessionId = null;
+    this.sessionActivationRevision = 0;
     this.cachedGraceDeadlineMono = null;
     this.serverTimeAnchor = null;
     this.stopHeartbeat();

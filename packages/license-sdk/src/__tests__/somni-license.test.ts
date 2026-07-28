@@ -1383,6 +1383,65 @@ describe('SomniLicense', () => {
       client.destroy();
     });
 
+    it('does not let a delayed deactivation clear a newer reactivation that reused the same session row', async () => {
+      const deactivationResponse = deferred<Response>();
+      const revalidationResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk({ session_id: 'sess-a' }))
+        .mockImplementationOnce(() => deactivationResponse.promise)
+        .mockImplementationOnce(() => revalidationResponse.promise);
+      const client = sdk({ cacheTtlMs: 1_000 });
+      await client.validate();
+      vi.advanceTimersByTime(2_000);
+
+      const deactivation = client.deactivate();
+      const revalidation = client.validate();
+
+      revalidationResponse.resolve(
+        validationOk({ session_id: 'sess-a', tier: 'business' }),
+      );
+      expect((await revalidation).valid).toBe(true);
+      expect(client.getSessionId()).toBe('sess-a');
+
+      deactivationResponse.resolve(deactivateOk());
+      expect((await deactivation).success).toBe(true);
+
+      expect(client.getSessionId()).toBe('sess-a');
+      expect(client.getTier()).toBe('business');
+      expect(client.isValid()).toBe(true);
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      client.destroy();
+    });
+
+    it('keeps a later-started deactivation authoritative over an earlier same-row revalidation', async () => {
+      const revalidationResponse = deferred<Response>();
+      const deactivationResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk({ session_id: 'sess-a' }))
+        .mockImplementationOnce(() => revalidationResponse.promise)
+        .mockImplementationOnce(() => deactivationResponse.promise);
+      const client = sdk({ cacheTtlMs: 1_000 });
+      await client.validate();
+      vi.advanceTimersByTime(2_000);
+
+      const revalidation = client.validate();
+      const deactivation = client.deactivate();
+
+      revalidationResponse.resolve(
+        validationOk({ session_id: 'sess-a', tier: 'business' }),
+      );
+      expect((await revalidation).valid).toBe(true);
+      expect(client.getTier()).toBe('business');
+
+      deactivationResponse.resolve(deactivateOk());
+      expect((await deactivation).success).toBe(true);
+
+      expect(client.getSessionId()).toBeNull();
+      expect(client.getTier()).toBeNull();
+      expect(client.isValid()).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
     it('does not let a pending revalidation resurrect after session A deactivation completes first', async () => {
       const deactivationResponse = deferred<Response>();
       const revalidationResponse = deferred<Response>();
