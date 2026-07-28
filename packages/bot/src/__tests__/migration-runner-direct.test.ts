@@ -88,6 +88,10 @@ function installDirectSimulator(
       started: () => void;
       wait: Promise<void>;
     };
+    postflightGate?: {
+      started: () => void;
+      wait: Promise<void>;
+    };
   } = {},
 ): DirectClient[] {
   const clients: DirectClient[] = [];
@@ -116,6 +120,14 @@ function installDirectSimulator(
     ) {
       options.sourceGate.started();
       await options.sourceGate.wait;
+    }
+
+    if (
+      options.postflightGate
+      && query.includes('DO $fraud_index_postflight$')
+    ) {
+      options.postflightGate.started();
+      await options.postflightGate.wait;
     }
 
     if (options.failOuterSource && query.includes('CREATE TABLE outer_rollback_probe')) {
@@ -371,6 +383,35 @@ describe('migration runner direct-Postgres execution', () => {
     process.env = { ...originalEnv };
   });
 
+  it('rejects a Supabase transaction-pooler URL before any claim or source SQL', async () => {
+    process.env.SUPABASE_DB_URL =
+      'postgresql://postgres.runner-proof:secret@aws-0-us-east-1.pooler.supabase.com:6543/postgres';
+    const state: HistoryRow[] = [{
+      filename: MIGRATION,
+      checksum: canonical(source),
+      success: false,
+      applied_at: '2026-07-28T11:00:00.000Z',
+      duration_ms: 1,
+    }];
+    const clients = installDirectSimulator(state);
+
+    const result = await runMigrations();
+
+    expect(result.ran).toBe(false);
+    expect(result.applied).toEqual([]);
+    expect(result.errors[0]).toMatch(/transaction pool|session|direct/i);
+    expect(clients).toEqual([]);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+
+    process.env.SUPABASE_DB_URL =
+      'postgresql://postgres.runner-proof:secret@aws-0-us-east-1.pooler.supabase.com:5432/postgres?PgBouncer=true';
+    const markedResult = await runMigrations();
+    expect(markedResult.ran).toBe(false);
+    expect(markedResult.errors[0]).toMatch(/transaction pool|session|direct/i);
+    expect(clients).toEqual([]);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
   it('holds one reserved session advisory lock and reproves ownership before every DO/CIC/DO batch', async () => {
     const state: HistoryRow[] = [{
       filename: MIGRATION,
@@ -389,7 +430,7 @@ describe('migration runner direct-Postgres execution', () => {
     const execution = clients[4];
     expect(execution.queries).toEqual([]);
     expect(execution.reserve).toHaveBeenCalledOnce();
-    expect(execution.reserved.queries).toHaveLength(10);
+    expect(execution.reserved.queries).toHaveLength(12);
     expect(execution.reserved.queries[0]).toContain('pg_advisory_lock');
     expect(execution.reserved.queries[1]).toContain('$migration_runner_claim_proof$');
     expect(execution.reserved.queries[2]).toContain('DO $fraud_index_recovery$');
@@ -398,9 +439,11 @@ describe('migration runner direct-Postgres execution', () => {
     expect(execution.reserved.queries[5]).toContain('$migration_runner_claim_proof$');
     expect(execution.reserved.queries[6].trim()).toBe('BEGIN;');
     expect(execution.reserved.queries[7]).toContain('DO $fraud_index_postflight$');
-    expect(execution.reserved.queries[7]).toContain('$migration_runner_history$');
-    expect(execution.reserved.queries[8].trim()).toBe('COMMIT;');
-    expect(execution.reserved.queries[9]).toContain('pg_advisory_unlock');
+    expect(execution.reserved.queries[7]).not.toContain('$migration_runner_history$');
+    expect(execution.reserved.queries[8]).toContain('$migration_runner_claim_proof$');
+    expect(execution.reserved.queries[9]).toContain('$migration_runner_history$');
+    expect(execution.reserved.queries[10].trim()).toBe('COMMIT;');
+    expect(execution.reserved.queries[11]).toContain('pg_advisory_unlock');
     expect(execution.reserved.release).toHaveBeenCalledOnce();
     expect(state[0]).toMatchObject({
       checksum: canonical(source),
@@ -647,6 +690,51 @@ describe('migration runner direct-Postgres execution', () => {
     expect(clients[4].reserved.queries.some((query) => (
       query.includes('$migration_runner_history$')
     ))).toBe(false);
+  });
+
+  it('rolls back without success when heartbeat fails during final postflight', async () => {
+    vi.useFakeTimers();
+    const state: HistoryRow[] = [{
+      filename: MIGRATION,
+      checksum: canonical(source),
+      success: false,
+      applied_at: '2026-07-28T11:00:00.000Z',
+      duration_ms: 1,
+    }];
+    let postflightStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      postflightStarted = resolve;
+    });
+    let releasePostflight!: () => void;
+    const postflightWait = new Promise<void>((resolve) => {
+      releasePostflight = resolve;
+    });
+    const clients = installDirectSimulator(state, {
+      failHeartbeatWrite: true,
+      postflightGate: {
+        started: postflightStarted,
+        wait: postflightWait,
+      },
+    });
+
+    const pending = runMigrations();
+    await started;
+    await vi.advanceTimersByTimeAsync(60_000);
+    releasePostflight();
+    const result = await pending;
+
+    expect(result.applied).toEqual([]);
+    expect(result.errors[0]).toMatch(/heartbeat.*lease timestamp.*advance/i);
+    expect(state[0]).toMatchObject({
+      checksum: canonical(source),
+      success: false,
+    });
+    expect(clients[4].reserved.queries.some((query) => (
+      query.includes('$migration_runner_history$')
+    ))).toBe(false);
+    expect(clients[4].reserved.queries.some((query) => (
+      query.trim() === 'ROLLBACK;'
+    ))).toBe(true);
   });
 
   it('renews a long-running claim on schedule only after the live lease timestamp advances', async () => {

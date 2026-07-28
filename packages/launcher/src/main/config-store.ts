@@ -18,6 +18,7 @@ import { safeStorage } from 'electron';
 import { randomBytes } from 'crypto';
 import { getLavalinkPassword } from './lavalink-manager.js';
 import { buildRuntimeEnvVars, type RuntimeMode } from './runtime-profile.js';
+import { buildDbUrlEnv } from './supabase-db-url.js';
 
 /** V53 Phase 4 (4.3.3): Per-guild config for multi-guild support */
 export interface GuildEntry {
@@ -255,19 +256,6 @@ export function clearConfig(): void {
 /**
  * Build the full env var object for spawning bot + dashboard processes.
  */
-/**
- * Build SUPABASE_DB_URL env entry from the project URL + database password.
- * Returns an empty object when either value is missing or the ref can't be extracted.
- */
-function buildDbUrlEnv(supabaseUrl: string, dbPassword: string): Record<string, string> {
-  if (!dbPassword || !supabaseUrl) return {};
-  const ref = supabaseUrl.match(/https:\/\/([a-z0-9]+)\.supabase\.co/)?.[1];
-  if (!ref) return {};
-  return {
-    SUPABASE_DB_URL: `postgresql://postgres.${ref}:${encodeURIComponent(dbPassword)}@aws-0-us-east-1.pooler.supabase.com:6543/postgres`,
-  };
-}
-
 export function buildEnvVars(
   config: LauncherConfig,
   sessionToken: string,

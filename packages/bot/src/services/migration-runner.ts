@@ -576,6 +576,52 @@ function directDatabaseUrl(): string | undefined {
   return process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
 }
 
+function resolvedSessionDatabaseUrl(): { url?: string; error?: string } {
+  const url = directDatabaseUrl();
+  if (!url) return {};
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return {
+      error:
+        'SUPABASE_DB_URL/DATABASE_URL must be a valid PostgreSQL connection URL',
+    };
+  }
+
+  if (parsed.protocol !== 'postgresql:' && parsed.protocol !== 'postgres:') {
+    return {
+      error:
+        'SUPABASE_DB_URL/DATABASE_URL must use the postgres:// or postgresql:// protocol',
+    };
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  const isSupabasePooler =
+    hostname === 'pooler.supabase.com'
+    || hostname.endsWith('.pooler.supabase.com');
+  const connectionOptions = new Map(
+    [...parsed.searchParams.entries()]
+      .map(([key, value]) => [key.toLowerCase(), value.toLowerCase()]),
+  );
+  const transactionModeMarker =
+    connectionOptions.get('pgbouncer') === 'true'
+    || connectionOptions.get('pool_mode') === 'transaction'
+    || connectionOptions.get('poolmode') === 'transaction';
+
+  if ((isSupabasePooler && parsed.port === '6543') || transactionModeMarker) {
+    return {
+      error:
+        'SUPABASE_DB_URL/DATABASE_URL must use a direct PostgreSQL endpoint '
+        + 'or a session-mode pooler; a transaction pool cannot pin the '
+        + 'advisory-lock session required for migration execution',
+    };
+  }
+
+  return { url };
+}
+
 function migrationAdvisoryLockParts(migrationName: string): [number, number] {
   const digest = createHash('sha256')
     .update(`somnibot:migration-runner:${migrationName}`, 'utf8')
@@ -631,7 +677,11 @@ async function executeSql(
   // Claimed source is deliberately direct-only. A reserved Postgres.js
   // connection pins one physical session so the session advisory lock covers
   // ownership proof, every source batch, and the success CAS.
-  const dbUrl = directDatabaseUrl();
+  const directTarget = resolvedSessionDatabaseUrl();
+  if (directTarget.error) {
+    return { success: false, error: directTarget.error };
+  }
+  const dbUrl = directTarget.url;
   if (dbUrl) {
     try {
       const { default: postgres } = await import('postgres');
@@ -673,7 +723,9 @@ async function executeSql(
               if (isFinalBatch) {
                 await reserved.unsafe('BEGIN;');
                 transactionOpen = true;
-                await reserved.unsafe(`${batch}\n${successCompletionSql}`);
+                await reserved.unsafe(batch);
+                await proveCurrentOwnership();
+                await reserved.unsafe(successCompletionSql);
                 await reserved.unsafe('COMMIT;');
                 transactionOpen = false;
               } else {
@@ -807,7 +859,11 @@ async function executeControlSql(
   sql: string,
   operation: string,
 ): Promise<{ success: boolean; error?: string }> {
-  const dbUrl = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
+  const directTarget = resolvedSessionDatabaseUrl();
+  if (directTarget.error) {
+    return { success: false, error: `${operation}: ${directTarget.error}` };
+  }
+  const dbUrl = directTarget.url;
   if (dbUrl) {
     try {
       const { default: postgres } = await import('postgres');
@@ -1660,6 +1716,18 @@ export async function runMigrations(): Promise<MigrationResult> {
     return { ran: false, applied: [], skipped: [], errors: [], checksumDrift: [] };
   }
 
+  const directTarget = resolvedSessionDatabaseUrl();
+  if (directTarget.error) {
+    log.error(directTarget.error);
+    return {
+      ran: false,
+      applied: [],
+      skipped: [],
+      errors: [directTarget.error],
+      checksumDrift: [],
+    };
+  }
+
   // Bootstrap tracking table
   const bootstrapped = await ensureTrackingTable(supabaseUrl, serviceRoleKey);
   if (!bootstrapped) {
@@ -1777,7 +1845,7 @@ export async function runMigrations(): Promise<MigrationResult> {
       break;
     }
 
-    if (!directDatabaseUrl()) {
+    if (!directTarget.url) {
       const error =
         `${file}: A direct database connection is required for pending migration source execution; `
         + 'set SUPABASE_DB_URL or DATABASE_URL';
