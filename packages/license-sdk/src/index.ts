@@ -87,23 +87,30 @@ export interface SomniLicenseConfig {
  * is a real verdict from the licence server and stays terminal.
  *
  * The server-side counterparts live in the dashboard's licence routes
- * (`packages/dashboard/src/lib/api/license-status.ts`); keep the two in sync.
+ * (`packages/dashboard/src/lib/api/license-status.ts`); keep the shared
+ * statuses in sync. `superseded` is intentionally SDK-local.
  */
 export const INDETERMINATE_STATUSES: readonly string[] = [
   /** Server could not answer (DB fault, dependency down). HTTP 503. */
   'service_unavailable',
   /** Too many requests from this IP/key. HTTP 429. Says nothing about the licence. */
   'rate_limited',
+  /**
+   * SDK-local: this completion lost to newer authoritative state. The server
+   * did not return this status; callers should ignore the stale result.
+   */
+  'superseded',
 ];
 
 /**
- * True when a licence-server response means "unknown", not "invalid".
+ * True when a response/result means "unknown", not "invalid".
  *
  * Also covers the transport-level cases the body cannot describe: any 5xx, a
  * 429, or a response whose body was not parseable JSON (a proxy error page,
  * a captive portal, a truncated response). Before this existed the SDK never
  * checked `res.ok` at all, so a 500 with `{valid:false,status:'revoked'}`
- * reached the app verbatim as a revocation.
+ * reached the app verbatim as a revocation. Callers may also use this helper
+ * to classify the SDK-local `superseded` result.
  */
 export function isIndeterminateResponse(
   httpStatus: number,
@@ -136,12 +143,14 @@ export interface ValidationResponse {
    * this to the user (e.g. "update your payment method").
    *
    * May also be one of {@link INDETERMINATE_STATUSES} — meaning the licence
-   * status could NOT be determined. Do not treat those as a revocation.
+   * status could NOT be determined or this completion was superseded by newer
+   * authoritative state. Do not treat those as a revocation.
    */
   status: string;
   /**
-   * Set by the server when the failure is a transient service fault rather
-   * than a verdict on the licence. Apps should retry rather than degrade.
+   * Set when the failure is a transient service fault, or by the SDK for a
+   * superseded completion, rather than a verdict. Apps should retry rather
+   * than degrade.
    */
   retryable?: boolean;
   entitlement_id?: string;
@@ -165,10 +174,15 @@ export interface HeartbeatResponse {
   valid: boolean;
   /**
    * May be one of {@link INDETERMINATE_STATUSES} — the server could not
-   * determine the session's state. Non-terminal: the heartbeat timer keeps
-   * running so the session self-heals when the fault clears.
+   * determine the session's state, or this completion was superseded by newer
+   * authoritative state. Non-terminal: the heartbeat timer keeps running.
    */
   status: string;
+  /**
+   * Set when the response is non-terminal and the caller may retry. The SDK
+   * uses this for a locally generated `superseded` completion.
+   */
+  retryable?: boolean;
   /**
    * Set when a still-valid session's entitlement has entered a payment-failure
    * grace period (status 'grace_period'): ISO timestamp at which access ends
@@ -178,6 +192,7 @@ export interface HeartbeatResponse {
    */
   grace_period_ends_at?: string | null;
   next_heartbeat_seconds: number;
+  error?: string;
 }
 
 export interface DeactivateResponse {
@@ -383,7 +398,9 @@ export class SomniLicense {
     // If we had a cached result that's now stale, the grace period expired.
     // Clear the stale cache and stop heartbeats to prevent zombie sessions.
     if (this.cachedResult) {
-      this.applyTerminalOperation(operation);
+      if (!this.applyTerminalOperation(operation)) {
+        return this.unappliedValidationResponse(operation);
+      }
       return { valid: false, status: 'offline_grace_expired' };
     }
 
@@ -405,10 +422,10 @@ export class SomniLicense {
    *     `expired`, `suspended`, `invalid_key`, `over_device_limit`, …).
    *     Returned verbatim; the app should stop.
    *  3. **Indeterminate** — {@link INDETERMINATE_STATUSES}, any 5xx/429, or an
-   *     unparseable body. The server could not answer, which is NOT a verdict.
-   *     The cached validation and the heartbeat timer are both preserved and
-   *     the offline-grace window applies, so a transient fault degrades to
-   *     "keep running on cache" instead of "your licence was revoked".
+   *     unparseable body. The server could not answer, or this completion lost
+   *     to newer definitive state; neither is a verdict. The cached validation
+   *     and heartbeat timer are preserved and the offline-grace window applies
+   *     to a service fault.
    */
   validate(): Promise<ValidationResponse> {
     if (this.disposed) {
@@ -457,8 +474,8 @@ export class SomniLicense {
       // so a server stuck at 503 would extend the offline grace window forever
       // instead of letting it expire.
       if (data === null || isIndeterminateResponse(res.status, data)) {
-        if (!this.claimOperation(operation)) {
-          return this.blockedValidationResponse();
+        if (!this.canApplyOperation(operation)) {
+          return this.unappliedValidationResponse(operation);
         }
         return this.validateFallback(
           operation,
@@ -468,10 +485,11 @@ export class SomniLicense {
       }
 
       if (data.valid) {
-        if (!this.claimOperation(operation)) {
-          return this.blockedValidationResponse();
+        if (!this.canApplyOperation(operation)) {
+          return this.unappliedValidationResponse(operation);
         }
 
+        this.markOperationApplied(operation);
         this.latestLiveSessionRevision = operation.revision;
         this.cachedResult = data;
         this.sessionId = data.session_id ?? null;
@@ -525,15 +543,15 @@ export class SomniLicense {
         // server verdict. It must invalidate the prior successful session
         // before returning; otherwise a later outage can resurrect that old
         // cache through validateFallback() as `offline_grace`.
-        if (!this.applyTerminalOperation(operation)) {
-          return this.blockedValidationResponse();
+        if (!this.applyTerminalValidationOperation(operation)) {
+          return this.unappliedValidationResponse(operation);
         }
       }
 
       return data;
     } catch (err) {
-      if (!this.claimOperation(operation)) {
-        return this.blockedValidationResponse();
+      if (!this.canApplyOperation(operation)) {
+        return this.unappliedValidationResponse(operation);
       }
       // Offline — check grace period using monotonic elapsed time
       // V7 Audit §3.P3a: Uses server-time-anchored monotonic clock instead of
@@ -565,7 +583,9 @@ export class SomniLicense {
     if (this.cachedResult?.valid && !this.cachedGraceLapsed() && elapsed < graceMs) {
       return { valid: true, status: 'offline', next_heartbeat_seconds: 300 };
     }
-    this.applyTerminalOperation(operation);
+    if (!this.applyTerminalOperation(operation)) {
+      return this.unappliedHeartbeatResponse(operation);
+    }
     return { valid: false, status: 'offline_grace_expired', next_heartbeat_seconds: 0 };
   }
 
@@ -574,11 +594,12 @@ export class SomniLicense {
    *
    * A `valid: false` heartbeat is terminal — it clears the cache and stops the
    * timer — so it must only ever be reached for a REAL verdict. An
-   * indeterminate response ({@link INDETERMINATE_STATUSES}, 5xx, 429,
+   * indeterminate server response ({@link INDETERMINATE_STATUSES}, 5xx, 429,
    * unparseable body) is routed to {@link heartbeatFallback} instead, which
-   * keeps the timer alive. That is the difference between a database blip
-   * costing a paying customer one heartbeat and costing them the whole session
-   * until the app is restarted.
+   * keeps the timer alive. A stale completion returns SDK-local `superseded`
+   * without mutating current state. That is the difference between a database
+   * blip costing a paying customer one heartbeat and costing them the whole
+   * session until the app is restarted.
    */
   async heartbeat(): Promise<HeartbeatResponse> {
     if (this.disposed) {
@@ -611,18 +632,19 @@ export class SomniLicense {
       // Same reasoning as validate(): no state is torn down, no server-time
       // re-anchor, and the heartbeat timer keeps ticking.
       if (data === null || isIndeterminateResponse(res.status, data)) {
-        if (!this.claimOperation(operation)) {
-          return this.blockedHeartbeatResponse();
+        if (!this.canApplyOperation(operation)) {
+          return this.unappliedHeartbeatResponse(operation);
         }
         return this.heartbeatFallback(operation);
       }
 
       // V7 Audit §3.P3a — refresh server time anchor on successful heartbeat
       if (data.valid) {
-        if (!this.claimOperation(operation)) {
-          return this.blockedHeartbeatResponse();
+        if (!this.canApplyOperation(operation)) {
+          return this.unappliedHeartbeatResponse(operation);
         }
 
+        this.markOperationApplied(operation);
         this.latestLiveSessionRevision = operation.revision;
         this.anchorServerTime(res);
         // W2: the entitlement may have ENTERED grace after the initial
@@ -687,13 +709,15 @@ export class SomniLicense {
           }
         }
       } else {
-        this.applyTerminalHeartbeatOperation(operation, sessionId);
+        if (!this.applyTerminalHeartbeatOperation(operation, sessionId)) {
+          return this.unappliedHeartbeatResponse(operation);
+        }
       }
 
       return data;
     } catch {
-      if (!this.claimOperation(operation)) {
-        return this.blockedHeartbeatResponse();
+      if (!this.canApplyOperation(operation)) {
+        return this.unappliedHeartbeatResponse(operation);
       }
       // A network error during heartbeat should still respect the offline
       // grace window.
@@ -743,7 +767,6 @@ export class SomniLicense {
         return data;
       }
 
-      this.claimOperation(operation);
       return {
         success: false,
         error: data.error ?? `Deactivation failed with HTTP ${res.status}`,
@@ -753,7 +776,6 @@ export class SomniLicense {
         return this.blockedDeactivateResponse();
       }
 
-      this.claimOperation(operation);
       return {
         success: false,
         error: err instanceof Error ? err.message : 'Network error',
@@ -871,40 +893,59 @@ export class SomniLicense {
   }
 
   /**
-   * Claim the right to apply a non-terminal completion.
+   * Check whether a completion may still mutate authoritative local state.
    *
-   * Revisions advance only when a completion actually settles, so an earlier
-   * request can still provide state while a newer request is pending. Once the
-   * newer completion applies, any later-arriving older completion is stale.
+   * This check deliberately does not advance the applied revision. Transport
+   * failures, indeterminate responses, and failed deactivations carry no new
+   * licence state and must not suppress an older definitive completion.
    */
-  private claimOperation(operation: OperationToken): boolean {
-    if (
+  private canApplyOperation(operation: OperationToken): boolean {
+    return !(
       this.disposed
       || operation.terminalEpoch !== this.terminalEpoch
       || operation.revision < this.appliedOperationRevision
-    ) {
-      return false;
-    }
-    this.appliedOperationRevision = operation.revision;
-    return true;
+    );
   }
 
   /**
-   * A terminal licence verdict applies regardless of non-terminal response
-   * ordering. Its revision is folded into the monotonic state before teardown
-   * so older successes cannot resurrect the invalidated licence.
+   * Record that a definitive completion established authoritative state.
+   * Callers must first pass {@link canApplyOperation}.
+   */
+  private markOperationApplied(operation: OperationToken): void {
+    this.appliedOperationRevision = Math.max(
+      this.appliedOperationRevision,
+      operation.revision,
+    );
+  }
+
+  /**
+   * Apply a terminal transition after the caller has enforced any operation-
+   * specific ordering rule. The epoch invalidates every completion already in
+   * flight so older work cannot resurrect the cleared session.
    */
   private applyTerminalOperation(operation: OperationToken): boolean {
     if (this.disposed || operation.terminalEpoch !== this.terminalEpoch) {
       return false;
     }
-    this.appliedOperationRevision = Math.max(
-      this.appliedOperationRevision,
-      operation.revision,
-    );
+    this.markOperationApplied(operation);
     this.terminalEpoch += 1;
     this.clearSessionState();
     return true;
+  }
+
+  /**
+   * A validation verdict is stale when definitive live evidence from a later
+   * invocation has already applied. No-state failures do not advance either
+   * ordering marker, so an older real verdict remains authoritative over them.
+   */
+  private applyTerminalValidationOperation(operation: OperationToken): boolean {
+    if (
+      !this.canApplyOperation(operation)
+      || operation.revision < this.latestLiveSessionRevision
+    ) {
+      return false;
+    }
+    return this.applyTerminalOperation(operation);
   }
 
   /**
@@ -915,9 +956,14 @@ export class SomniLicense {
   private applyTerminalHeartbeatOperation(
     operation: OperationToken,
     operationSessionId: string,
-  ): void {
-    if (operation.revision < this.latestLiveSessionRevision) return;
-    this.applyTerminalSessionOperation(operation, operationSessionId);
+  ): boolean {
+    if (
+      !this.canApplyOperation(operation)
+      || operation.revision < this.latestLiveSessionRevision
+    ) {
+      return false;
+    }
+    return this.applyTerminalSessionOperation(operation, operationSessionId);
   }
 
   /**
@@ -930,13 +976,45 @@ export class SomniLicense {
   private applyTerminalSessionOperation(
     operation: OperationToken,
     operationSessionId: string,
-  ): void {
-    if (this.disposed || operation.terminalEpoch !== this.terminalEpoch) return;
+  ): boolean {
+    if (this.disposed || operation.terminalEpoch !== this.terminalEpoch) return false;
     if (this.sessionId !== operationSessionId) {
-      this.claimOperation(operation);
-      return;
+      return false;
     }
-    this.applyTerminalOperation(operation);
+    return this.applyTerminalOperation(operation);
+  }
+
+  private unappliedValidationResponse(operation: OperationToken): ValidationResponse {
+    if (this.disposed || operation.terminalEpoch !== this.terminalEpoch) {
+      return this.blockedValidationResponse();
+    }
+    return this.supersededValidationResponse();
+  }
+
+  private unappliedHeartbeatResponse(operation: OperationToken): HeartbeatResponse {
+    if (this.disposed || operation.terminalEpoch !== this.terminalEpoch) {
+      return this.blockedHeartbeatResponse();
+    }
+    return this.supersededHeartbeatResponse();
+  }
+
+  private supersededValidationResponse(): ValidationResponse {
+    return {
+      valid: false,
+      status: 'superseded',
+      retryable: true,
+      error: 'Completion superseded by newer authoritative license state',
+    };
+  }
+
+  private supersededHeartbeatResponse(): HeartbeatResponse {
+    return {
+      valid: false,
+      status: 'superseded',
+      retryable: true,
+      error: 'Completion superseded by newer authoritative license state',
+      next_heartbeat_seconds: 300,
+    };
   }
 
   private blockedValidationResponse(): ValidationResponse {

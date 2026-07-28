@@ -29,7 +29,7 @@ Validates the license key against the API. Returns cached result if within TTL.
 ```typescript
 {
   valid: boolean;
-  status: string;         // 'active', 'expired', 'revoked', 'invalid', 'offline_grace', 'network_error', 'destroyed'
+  status: string;         // 'active', 'expired', 'revoked', 'invalid', 'offline_grace', 'network_error', 'superseded', 'destroyed'
   entitlement_id?: string;
   features?: string[];    // Product feature flags
   tier?: string | null;   // License tier
@@ -55,8 +55,10 @@ the offline grace period hasn't expired. Once the grace window lapses, returns
 ```typescript
 {
   valid: boolean;
-  status: string;  // 'active', 'offline', 'offline_grace_expired', ...
+  status: string;  // 'active', 'offline', 'offline_grace_expired', 'superseded', ...
   next_heartbeat_seconds: number;
+  retryable?: boolean;
+  error?: string;
 }
 ```
 
@@ -69,13 +71,21 @@ the offline grace period hasn't expired. Once the grace window lapses, returns
 from data it read. Terminal: the cache is cleared and heartbeats stop. Your app
 should stop too.
 
-**Indeterminate** — `service_unavailable`, `rate_limited`, plus any HTTP 5xx,
-any 429, and any response whose body is not parseable JSON (a proxy error page).
-The server could **not** determine the status; this says nothing about whether
-the customer paid. Non-terminal: the SDK keeps its cached validation, keeps the
-heartbeat timer running, and rides the normal offline-grace window, so a
-transient fault self-heals. These statuses are exported as
-`INDETERMINATE_STATUSES` (with the predicate `isIndeterminateResponse`).
+**Indeterminate** — `service_unavailable`, `rate_limited`, `superseded`, plus
+any HTTP 5xx, any 429, and any response whose body is not parseable JSON (a
+proxy error page). The server could **not** determine the status, or the SDK
+discarded a stale completion because a newer definitive result already won;
+neither says the customer is invalid. Non-terminal: the SDK keeps its cached
+validation, keeps the heartbeat timer running, and rides the normal
+offline-grace window, so a transient fault self-heals. These statuses are
+exported as `INDETERMINATE_STATUSES` (with the predicate
+`isIndeterminateResponse`).
+
+`superseded` is generated only by the SDK; the licence server never returns it.
+It has `retryable: true` and means the operation's result was ignored because
+newer authoritative state was already applied. Callers can distinguish it from
+a server verdict, keep using the SDK's current state, and retry if they still
+need a fresh result.
 
 ```typescript
 import { INDETERMINATE_STATUSES } from '@somnibot/license-sdk';
