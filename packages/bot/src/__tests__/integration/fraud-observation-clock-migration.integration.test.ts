@@ -223,7 +223,9 @@ async function waitForReadyInvalidFixtureIndex(): Promise<IndexCatalogRow> {
   );
 }
 
-async function seedCanceledConcurrentIndexBuild(): Promise<IndexCatalogRow> {
+async function seedCanceledConcurrentIndexBuild(
+  createStatement = indexMigrationFragments().create,
+): Promise<IndexCatalogRow> {
   const blocker = postgres(getTestDbUrl(), { max: 1 });
   const builder = postgres(getTestDbUrl(), { max: 1 });
   let releaseBlockingTransaction = (): void => {};
@@ -270,7 +272,7 @@ async function seedCanceledConcurrentIndexBuild(): Promise<IndexCatalogRow> {
     }
     builderPid = backend.pid;
 
-    buildOutcome = builder.unsafe(indexMigrationFragments().create).then(
+    buildOutcome = builder.unsafe(createStatement).then(
       () => ({ error: undefined }),
       (error: unknown) => ({ error }),
     );
@@ -528,6 +530,41 @@ describe('phased fraud observation-clock legacy migration', () => {
     expect(fixtureIndexAfterValidRetry.oid).toBe(
       fixtureIndexAfterRecovery.oid,
     );
+  });
+
+  it('rejects and preserves a canceled wrong-definition concurrent index', async () => {
+    const fragments = indexMigrationFragments();
+    await dropFixtureTargetIndex();
+    try {
+      const canceledIndex = await seedCanceledConcurrentIndexBuild(
+        `CREATE INDEX CONCURRENTLY idx_fraud_signals_critical_observation
+           ON ${FIXTURE_SCHEMA}.fraud_signals (guild_id, severity DESC)
+          WHERE status = 'open' AND severity = 'critical'`,
+      );
+      expect(canceledIndex).toMatchObject({
+        indisvalid: false,
+        key_columns: ['guild_id', 'severity'],
+        key_options: '0 3',
+        predicate:
+          "status = 'open'::text AND severity = 'critical'::text",
+      });
+
+      const preflightError = await sql.unsafe(fragments.preflight).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(preflightError).toMatchObject({ code: '55000' });
+      expect(String(preflightError)).toMatch(/unexpected definition/);
+
+      const preservedIndex = await indexCatalog(FIXTURE_SCHEMA);
+      expect(preservedIndex).toMatchObject({
+        oid: canceledIndex.oid,
+        indisvalid: false,
+        key_columns: ['guild_id', 'severity'],
+      });
+    } finally {
+      await restoreFixtureTargetIndex();
+    }
   });
 
   it('holds the migration table lock without blocking ordinary row writes', async () => {
@@ -859,13 +896,22 @@ describe('phased fraud observation-clock legacy migration', () => {
     const createPosition = indexMigration.indexOf(
       'CREATE INDEX CONCURRENTLY IF NOT EXISTS',
     );
+    const preflightSql = indexMigration.slice(0, createPosition);
     expect(createPosition).toBeGreaterThan(0);
-    expect(indexMigration.slice(0, createPosition)).toContain(
+    expect(preflightSql).toContain(
       'target_index_valid',
     );
-    expect(indexMigration.slice(0, createPosition)).toContain(
+    expect(preflightSql).toContain(
       'DROP INDEX public.idx_fraud_signals_critical_observation',
     );
+    const rejectWrongDefinition = preflightSql.indexOf(
+      'ELSIF NOT target_index_definition_matches',
+    );
+    const preserveValidIndex = preflightSql.indexOf(
+      'ELSIF target_index_valid',
+    );
+    expect(rejectWrongDefinition).toBeGreaterThan(0);
+    expect(rejectWrongDefinition).toBeLessThan(preserveValidIndex);
     expect(indexMigration.slice(createPosition)).toContain('indisvalid');
     expect(indexMigration.slice(createPosition)).toContain('RAISE EXCEPTION');
     expect(executableSql.match(

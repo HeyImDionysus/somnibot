@@ -12,8 +12,10 @@ DO $fraud_index_recovery$
 DECLARE
   target_index_oid OID;
   target_index_valid BOOLEAN;
+  target_index_ready BOOLEAN;
+  target_index_live BOOLEAN;
   target_index_on_expected_table BOOLEAN;
-  target_index_matches BOOLEAN;
+  target_index_definition_matches BOOLEAN;
 BEGIN
   -- SHARE UPDATE EXCLUSIVE conflicts with another concurrent index build but
   -- not normal INSERT/UPDATE/DELETE traffic. Resolve the catalog row only
@@ -29,11 +31,11 @@ BEGIN
   IF target_index_oid IS NOT NULL THEN
     SELECT
       i.indisvalid,
+      i.indisready,
+      i.indislive,
       i.indrelid = 'public.fraud_signals'::pg_catalog.regclass,
       COALESCE(
-        i.indisready
-        AND i.indislive
-        AND NOT i.indisunique
+        NOT i.indisunique
         AND NOT i.indisexclusion
         AND i.indrelid = 'public.fraud_signals'::pg_catalog.regclass
         AND access_method.amname = 'btree'
@@ -61,8 +63,10 @@ BEGIN
       )
       INTO
         target_index_valid,
+        target_index_ready,
+        target_index_live,
         target_index_on_expected_table,
-        target_index_matches
+        target_index_definition_matches
       FROM pg_catalog.pg_index i
       JOIN pg_catalog.pg_class index_relation
         ON index_relation.oid = i.indexrelid
@@ -92,17 +96,21 @@ BEGIN
       RAISE EXCEPTION
         'public.idx_fraud_signals_critical_observation belongs to an unexpected table'
         USING ERRCODE = '55000';
+    ELSIF NOT target_index_definition_matches THEN
+      RAISE EXCEPTION
+        'public.idx_fraud_signals_critical_observation has an unexpected definition'
+        USING ERRCODE = '55000';
     ELSIF target_index_valid THEN
-      IF NOT target_index_matches THEN
+      IF NOT target_index_ready OR NOT target_index_live THEN
         RAISE EXCEPTION
-          'valid public.idx_fraud_signals_critical_observation has an unexpected definition'
+          'valid public.idx_fraud_signals_critical_observation is not ready and live'
           USING ERRCODE = '55000';
       END IF;
     ELSE
       -- DROP INDEX CONCURRENTLY is also forbidden inside a transaction but is
       -- not a Supabase CLI 2.110 pipeline-incompatible statement. A normal
-      -- drop of this unusable index is legal while the table lock proves no
-      -- concurrent builder still owns it.
+      -- drop of this invalid exact-definition index is legal while the table
+      -- lock proves no concurrent builder still owns it.
       EXECUTE
         'DROP INDEX public.idx_fraud_signals_critical_observation';
     END IF;
