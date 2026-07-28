@@ -341,10 +341,14 @@ describe('checkPaymentPattern', () => {
 describe('checkCriticalThreshold', () => {
   it('does nothing when fewer than 3 critical signals', async () => {
     const { ctx, supabase, eventBus } = createCtx();
-    supabase.from.mockReturnValue(countChain(2));
+    const fraudSignals = countChain(2);
+    supabase.from.mockReturnValue(fraudSignals);
 
     await checkCriticalThreshold(ctx);
     expect(eventBus.emit).not.toHaveBeenCalled();
+    expect(fraudSignals.gte).toHaveBeenCalledWith('last_observed_at', expect.any(String));
+    expect(fraudSignals.gte).not.toHaveBeenCalledWith('created_at', expect.any(String));
+    expect(fraudSignals.gte).not.toHaveBeenCalledWith('updated_at', expect.any(String));
   });
 
   it('does nothing when incident already exists for this burst', async () => {

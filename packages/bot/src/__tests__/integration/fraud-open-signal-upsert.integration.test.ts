@@ -73,7 +73,7 @@ function upsertSignal(
 
 async function rowsFor(entityId = 'key-1') {
   const rows = await service.from('fraud_signals')
-    .select('id,status,severity,discord_id,description,evidence,created_at,updated_at')
+    .select('id,status,severity,discord_id,description,evidence,created_at,updated_at,last_observed_at')
     .eq('guild_id', guildId)
     .eq('signal_type', 'device_abuse')
     .eq('entity_type', 'license_key')
@@ -92,6 +92,23 @@ describe('fraud_upsert_open_signal', () => {
     });
     expect(first.error).toBeNull();
     const firstRow = (await rowsFor())[0]!;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const sameSeverityRefresh = await upsertSignal(service, {
+      severity: 'high',
+      description: '11 devices',
+      evidence: { devices_in_window: 11 },
+    });
+    expect(sameSeverityRefresh.error).toBeNull();
+    expect(sameSeverityRefresh.data).toBe(first.data);
+    const sameSeverityRow = (await rowsFor())[0]!;
+    expect(sameSeverityRow).toMatchObject({
+      severity: 'high',
+      description: '11 devices',
+      evidence: { devices_in_window: 11 },
+    });
+    expect(new Date(sameSeverityRow.last_observed_at).getTime())
+      .toBeGreaterThan(new Date(firstRow.last_observed_at).getTime());
     await new Promise((resolve) => setTimeout(resolve, 5));
 
     const escalated = await upsertSignal(service, {
@@ -123,7 +140,9 @@ describe('fraud_upsert_open_signal', () => {
     });
     expect(new Date(rows[0]!.updated_at).getTime())
       .toBeGreaterThan(new Date(firstRow.updated_at).getTime());
-    expect(rows[0]!.updated_at).toBe(escalatedRow.updated_at);
+    expect(rows[0]!.last_observed_at).toBe(escalatedRow.last_observed_at);
+    expect(new Date(rows[0]!.updated_at).getTime())
+      .toBeGreaterThan(new Date(escalatedRow.updated_at).getTime());
   });
 
   it('serializes concurrent observations into one deterministic critical row', async () => {
@@ -176,6 +195,103 @@ describe('fraud_upsert_open_signal', () => {
         description: 'new observation after closure',
       }),
     ]);
+  });
+
+  it('does not let an operator note make an old critical signal look newly observed', async () => {
+    const created = await upsertSignal(service, {
+      severity: 'critical',
+      entityId: 'operator-note-clock',
+    });
+    expect(created.error).toBeNull();
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const aged = await service.from('fraud_signals').update({
+      last_observed_at: old,
+      updated_at: old,
+    }).eq('id', created.data);
+    expect(aged.error).toBeNull();
+
+    const annotatedAt = new Date().toISOString();
+    const annotated = await service.from('fraud_signals').update({
+      resolution_note: 'operator context only',
+      updated_at: annotatedAt,
+    }).eq('id', created.data);
+    expect(annotated.error).toBeNull();
+
+    const row = (await rowsFor('operator-note-clock'))[0]!;
+    expect(new Date(row.last_observed_at).getTime()).toBe(new Date(old).getTime());
+    expect(new Date(row.updated_at).getTime()).toBe(new Date(annotatedAt).getTime());
+
+    const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const [detectorWindow, genericEditWindow] = await Promise.all([
+      service.from('fraud_signals')
+        .select('*', { count: 'exact', head: true })
+        .eq('id', created.data)
+        .gte('last_observed_at', since),
+      service.from('fraud_signals')
+        .select('*', { count: 'exact', head: true })
+        .eq('id', created.data)
+        .gte('updated_at', since),
+    ]);
+    expect(detectorWindow.error).toBeNull();
+    expect(detectorWindow.count).toBe(0);
+    expect(genericEditWindow.error).toBeNull();
+    expect(genericEditWindow.count).toBe(1);
+  });
+
+  it('uses one observation clock for refreshed dashboard signals and a new bot signal', async () => {
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    for (const entityId of ['mixed-a', 'mixed-b']) {
+      const seeded = await upsertSignal(service, { severity: 'critical', entityId });
+      expect(seeded.error).toBeNull();
+      const aged = await service.from('fraud_signals').update({
+        created_at: old,
+        updated_at: old,
+        last_observed_at: old,
+      }).eq('id', seeded.data);
+      expect(aged.error).toBeNull();
+    }
+
+    for (const entityId of ['mixed-a', 'mixed-b']) {
+      const refreshed = await upsertSignal(service, {
+        severity: 'critical',
+        entityId,
+        description: `refreshed ${entityId}`,
+      });
+      expect(refreshed.error).toBeNull();
+    }
+
+    const botInsert = await service.from('fraud_signals').insert({
+      guild_id: guildId,
+      signal_type: 'payment_pattern',
+      severity: 'critical',
+      entity_type: 'customer',
+      entity_id: 'mixed-bot-new',
+      discord_id: 'discord-1',
+      description: 'new bot critical observation',
+      evidence: { source: 'bot' },
+      status: 'open',
+    });
+    expect(botInsert.error).toBeNull();
+
+    const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const [observationWindow, creationWindow] = await Promise.all([
+      service.from('fraud_signals')
+        .select('*', { count: 'exact', head: true })
+        .eq('guild_id', guildId)
+        .eq('status', 'open')
+        .eq('severity', 'critical')
+        .gte('last_observed_at', since),
+      service.from('fraud_signals')
+        .select('*', { count: 'exact', head: true })
+        .eq('guild_id', guildId)
+        .eq('status', 'open')
+        .eq('severity', 'critical')
+        .gte('created_at', since),
+    ]);
+    expect(observationWindow.error).toBeNull();
+    expect(observationWindow.count).toBe(3);
+    expect(creationWindow.error).toBeNull();
+    expect(creationWindow.count).toBe(1);
   });
 
   it('permits service_role but denies anon and authenticated callers', async () => {

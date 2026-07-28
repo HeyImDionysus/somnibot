@@ -776,7 +776,7 @@ async function checkCriticalFraudThreshold(
     .eq('guild_id', guildId)
     .eq('status', 'open')
     .eq('severity', 'critical')
-    .gte('updated_at', since);
+    .gte('last_observed_at', since);
 
   if (countError) {
     throw new Error(`fraud signal count query failed: ${countError.message}`);

@@ -1365,6 +1365,7 @@ export interface DbFraudSignal {
   resolved_by: string | null;
   resolution_note: string | null;
   updated_at: string;
+  last_observed_at: string;
   // V19 Audit: added missing schema fields
   action: string | null;
   details: Record<string, unknown> | null;

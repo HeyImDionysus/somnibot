@@ -278,7 +278,7 @@ export async function checkCriticalThreshold(
     .eq('guild_id', ctx.guildId)
     .eq('status', 'open')
     .eq('severity', 'critical')
-    .gte('created_at', since);
+    .gte('last_observed_at', since);
 
   if (count && count >= threshold) {
     // Check if we already created an incident for this burst

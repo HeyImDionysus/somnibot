@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 207 migration files in packages/supabase/migrations/
+ * Source: 208 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1272,6 +1272,7 @@ export interface DbFraudSignal {
   resolution_note: string | null;
   status: string;
   updated_at: string;
+  last_observed_at: string | null;
 }
 
 export interface DbFraudRule {

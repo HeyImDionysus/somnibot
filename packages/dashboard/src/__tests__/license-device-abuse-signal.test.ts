@@ -270,15 +270,16 @@ describe('device-abuse signal under the default evict_oldest policy', () => {
     );
   });
 
-  it('counts critical observations by refreshed time, not the original row creation time', async () => {
+  it('counts only detector observations, not row creation or operator-edit time', async () => {
     const { mock, fraudSignals } = setup('guild-refreshed-threshold', seatThrashingRows(20));
 
     await POST(req() as never);
     await vi.waitFor(() => expect(deviceAbuseUpserts(mock)).toHaveLength(1));
 
     await vi.waitFor(() =>
-      expect(fraudSignals.gte).toHaveBeenCalledWith('updated_at', expect.any(String)),
+      expect(fraudSignals.gte).toHaveBeenCalledWith('last_observed_at', expect.any(String)),
     );
     expect(fraudSignals.gte).not.toHaveBeenCalledWith('created_at', expect.any(String));
+    expect(fraudSignals.gte).not.toHaveBeenCalledWith('updated_at', expect.any(String));
   });
 });
