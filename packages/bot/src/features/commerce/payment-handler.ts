@@ -109,21 +109,76 @@ async function freezeCheckoutGrantSnapshot(
   return true;
 }
 
-async function cancelUnexposedCheckoutOrder(
+async function deactivateUnexposedCheckoutOrder(
   supabase: SupabaseClient,
-  orderId: string,
-): Promise<void> {
-  const { error } = await supabase
-    .from('orders')
-    .update({ status: 'cancelled', updated_at: new Date().toISOString() })
-    .eq('id', orderId)
-    .eq('status', 'pending');
-  if (error) log.error('Failed to cancel unexposed checkout order:', error.message);
+  order: PendingCheckoutOrder,
+): Promise<boolean> {
+  const providerKind = order.paypal_order_id ? 'capture' : 'subscription';
+  const providerId = order.paypal_order_id ?? order.paypal_subscription_id;
+  if (!providerId) {
+    log.error('Cannot deactivate checkout without an exact provider identity');
+    return false;
+  }
+
+  const rpcArgs = {
+    p_order_id: order.id,
+    p_guild_id: order.guild_id,
+    p_customer_id: order.customer_id,
+    p_product_id: order.product_id,
+    p_provider_kind: providerKind,
+    p_provider_id: providerId,
+    p_proof_kind: 'approval_link_not_exposed',
+    p_proof_reference: `payment-handler:snapshot-freeze-failed:${order.id}`,
+  };
+
+  // A lost RPC response is outcome-ambiguous. Replay the exact deterministic
+  // proof once: the SQL boundary returns already_deactivated when the first
+  // call committed, without weakening the immutable proof.
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const { data, error } = await supabase.rpc(
+      'commerce_deactivate_pending_checkout',
+      rpcArgs,
+    );
+    if (error) {
+      log.error(
+        `Failed to confirm unexposed checkout deactivation (attempt ${attempt}):`,
+        error.message,
+      );
+      continue;
+    }
+    if (
+      data
+      && typeof data === 'object'
+      && !Array.isArray(data)
+      && (data as Record<string, unknown>).order_id === order.id
+      && (data as Record<string, unknown>).checkout_active === false
+      && ['deactivated', 'already_deactivated'].includes(
+        String((data as Record<string, unknown>).disposition),
+      )
+      && typeof (data as Record<string, unknown>).proof_id === 'string'
+    ) {
+      return true;
+    }
+    log.error(
+      `Unexposed checkout deactivation returned malformed proof identity (attempt ${attempt})`,
+    );
+  }
+  return false;
 }
+
+type CheckoutBlockReason =
+  | 'provider_checkout'
+  | 'paid_hold'
+  | 'paid_fulfillment'
+  | 'active_entitlement';
 
 type InFlightCheckout =
   | { state: 'clear' }
-  | { state: 'blocked'; orderNumber: string }
+  | {
+      state: 'blocked';
+      orderNumber: string | null;
+      reason: CheckoutBlockReason;
+    }
   | { state: 'unavailable' };
 
 /**
@@ -131,11 +186,10 @@ type InFlightCheckout =
  * already has a live checkout for. Two approval links meant two captures, two
  * entitlements, and a refund request.
  *
- * The authoritative rail is the partial unique index
- * `uniq_orders_pending_one_time_checkout`, which covers both one-time and
- * subscription approval links and makes the second active checkout insert fail
- * atomically. Recovery rows deliberately set `checkout_active = false`, so a
- * provider-authoritative webhook can still record a link issued elsewhere.
+ * The service-only inspection RPC can see private paid holds/claims as well as
+ * every still-payable provider row. Its matching INSERT trigger repeats the
+ * decision under the same identity advisory lock used by fulfillment claims,
+ * while the partial unique index serializes ordinary concurrent double-clicks.
  *
  * A read ERROR is not "clear": during an outage the live checkout may exist, so
  * refusing to guess is the only safe answer on the money path.
@@ -148,35 +202,120 @@ type InFlightCheckout =
  */
 async function inspectInFlightCheckout(
   supabase: SupabaseClient,
+  guildId: string,
   customerId: string,
   productId: string,
 ): Promise<InFlightCheckout> {
-  const { data, error } = await supabase
-    .from('orders')
-    .select('id, order_number')
-    .eq('customer_id', customerId)
-    .eq('product_id', productId)
-    .eq('status', 'pending')
-    .eq('checkout_active', true)
-    .order('created_at', { ascending: false })
-    .limit(5);
+  const { data, error } = await supabase.rpc('commerce_inspect_checkout_blocker', {
+    p_guild_id: guildId,
+    p_customer_id: customerId,
+    p_product_id: productId,
+  });
 
   if (error) {
     log.error('Failed to inspect in-flight checkout:', error.message);
     return { state: 'unavailable' };
   }
 
-  const rows = (data ?? []) as { id: string; order_number: string }[];
-  return rows.length > 0
-    ? { state: 'blocked', orderNumber: rows[0].order_number }
-    : { state: 'clear' };
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    log.error('Checkout blocker inspection returned malformed data');
+    return { state: 'unavailable' };
+  }
+  const result = data as Record<string, unknown>;
+  if (
+    result.disposition === 'clear'
+    && result.reason === null
+    && result.order_id === null
+    && result.order_number === null
+  ) {
+    return { state: 'clear' };
+  }
+  if (
+    result.disposition === 'blocked'
+    && ['provider_checkout', 'paid_hold', 'paid_fulfillment', 'active_entitlement']
+      .includes(String(result.reason))
+    && (result.order_number === null || typeof result.order_number === 'string')
+  ) {
+    return {
+      state: 'blocked',
+      orderNumber: result.order_number as string | null,
+      reason: result.reason as CheckoutBlockReason,
+    };
+  }
+  log.error('Checkout blocker inspection returned malformed identity');
+  return { state: 'unavailable' };
 }
 
-/** Does this write error mean the pending-checkout unique index rejected it? */
-function isDuplicateCheckoutViolation(error: { code?: string; message?: string } | null): boolean {
-  if (!error) return false;
-  return error.code === '23505'
-    || (error.message ?? '').includes('uniq_orders_pending_one_time_checkout');
+type CheckoutReservationBlock = {
+  orderNumber: string | null;
+  reason: CheckoutBlockReason;
+};
+
+/**
+ * Classify only the two authoritative checkout-reservation failures. Other
+ * unique violations are persistence failures, not proof that another usable
+ * PayPal link exists.
+ */
+function parseCheckoutReservationBlock(
+  error: { code?: string; message?: string } | null,
+): CheckoutReservationBlock | null {
+  if (!error) return null;
+  const message = error.message ?? '';
+  const triggerBlock = message.match(
+    /commerce_checkout_blocked:\s*(provider_checkout|paid_hold|paid_fulfillment|active_entitlement)\s+order\s+(\S+)/,
+  );
+  if (triggerBlock) {
+    return {
+      reason: triggerBlock[1] as CheckoutBlockReason,
+      orderNumber: triggerBlock[2] === 'unknown' ? null : triggerBlock[2],
+    };
+  }
+  if (message.includes('uniq_orders_pending_one_time_checkout')) {
+    return { reason: 'provider_checkout', orderNumber: null };
+  }
+  return null;
+}
+
+function checkoutBlockCopy(
+  block: CheckoutReservationBlock,
+  subscription: boolean,
+): { title: string; description: string } {
+  const previousOrder = block.orderNumber ? ` (**${block.orderNumber}**)` : '';
+  if (block.reason === 'paid_hold' || block.reason === 'paid_fulfillment') {
+    return {
+      title: '⚠️ Previous Payment Needs Review',
+      description:
+        `A previous payment for this product${previousOrder} still requires delivery `
+        + 'or refund review. A second PayPal link is blocked so you cannot be charged '
+        + 'again while that is unresolved. Contact the server owner; you have not been '
+        + 'charged for this click.',
+    };
+  }
+  if (block.reason === 'active_entitlement') {
+    return {
+      title: '⚠️ Already Purchased',
+      description:
+        'You already have an active entitlement for this product. You have not been '
+        + 'charged for this click.',
+    };
+  }
+  return subscription
+    ? {
+        title: '⏳ Checkout Already In Progress',
+        description:
+          `A subscription checkout for this product is already open${previousOrder}. `
+          + 'Use that PayPal link to finish — a second one could create two paid '
+          + 'subscriptions. You have not been charged for this click.',
+      }
+    : {
+        title: '⏳ Checkout Already In Progress',
+        description:
+          `You already have a checkout open for this product${previousOrder}. `
+          + 'Finish paying with the PayPal link you were given, and your purchase will '
+          + 'be delivered automatically.\n\n'
+          + 'A second link would let you be charged twice for the same thing, so it is '
+          + 'not offered. You have not been charged for this click.',
+      };
 }
 
 /**
@@ -349,23 +488,23 @@ export async function handleBuyButton(
     }
 
     // DOUBLE-CHARGE guard — one live checkout per customer per product.
-    const inFlight = await inspectInFlightCheckout(supabase, existingCustomer.id, productId);
+    const inFlight = await inspectInFlightCheckout(
+      supabase,
+      guildId,
+      existingCustomer.id,
+      productId,
+    );
     if (inFlight.state === 'unavailable') {
       await replyCheckoutUnavailable(interaction, supabase, guildId);
       return;
     }
     if (inFlight.state === 'blocked') {
+      const copy = checkoutBlockCopy(inFlight, product.type === 'subscription');
       await interaction.editReply({
         embeds: [
           brandedEmbed(brandKit, {
             intent: 'warning',
-            title: '⏳ Checkout Already In Progress',
-            description:
-              `You already have a checkout open for this product (**${inFlight.orderNumber}**). `
-              + 'Finish paying with the PayPal link you were given, and your purchase will be '
-              + 'delivered automatically.\n\n'
-              + 'A second link would let you be charged twice for the same thing, so it is not '
-              + 'offered. You have not been charged for this click.',
+            ...copy,
           }),
         ],
       });
@@ -503,17 +642,14 @@ export async function handleBuyButton(
       // pre-flight guard above: it is what actually stops a genuine
       // double-click, where both clicks read "clear" before either inserted.
       // The link is never exposed, so the losing PayPal order cannot be paid.
-      if (isDuplicateCheckoutViolation(pendingOrderError)) {
+      const reservationBlock = parseCheckoutReservationBlock(pendingOrderError);
+      if (reservationBlock) {
         log.warn('Refused a concurrent second checkout for the same product', { productId });
         await interaction.editReply({
           embeds: [
             brandedEmbed(brandKit, {
               intent: 'warning',
-              title: '⏳ Checkout Already In Progress',
-              description:
-                'A checkout for this product was just opened. Use that PayPal link to finish — '
-                + 'a second one would let you be charged twice. You have not been charged for '
-                + 'this click.',
+              ...checkoutBlockCopy(reservationBlock, false),
             }),
           ],
         });
@@ -526,9 +662,11 @@ export async function handleBuyButton(
       return;
     }
     if (!(await freezeCheckoutGrantSnapshot(supabase, pendingOrder))) {
-      await cancelUnexposedCheckoutOrder(supabase, pendingOrder.id);
+      const deactivated = await deactivateUnexposedCheckoutOrder(supabase, pendingOrder);
       await interaction.editReply({
-        content: '❌ Checkout configuration changed before it could be secured. No payment link was opened; please try again.',
+        content: deactivated
+          ? '❌ Checkout configuration changed before it could be secured. No payment link was opened; please try again.'
+          : '❌ Checkout configuration changed before it could be secured. No payment link was opened, but checkout cleanup could not be confirmed. Contact the server owner before trying again.',
       });
       return;
     }
@@ -657,7 +795,8 @@ export async function handleBuyButton(
       .single();
 
     if (pendingOrderError || !isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
-      if (isDuplicateCheckoutViolation(pendingOrderError)) {
+      const reservationBlock = parseCheckoutReservationBlock(pendingOrderError);
+      if (reservationBlock) {
         log.warn('Refused a concurrent second subscription checkout for the same product', {
           productId,
         });
@@ -665,11 +804,7 @@ export async function handleBuyButton(
           embeds: [
             brandedEmbed(brandKit, {
               intent: 'warning',
-              title: '⏳ Checkout Already In Progress',
-              description:
-                'A subscription checkout for this product was just opened. Use that PayPal link '
-                + 'to finish — a second one could create two paid subscriptions. You have not '
-                + 'been charged for this click.',
+              ...checkoutBlockCopy(reservationBlock, true),
             }),
           ],
         });
@@ -682,9 +817,11 @@ export async function handleBuyButton(
       return;
     }
     if (!(await freezeCheckoutGrantSnapshot(supabase, pendingOrder))) {
-      await cancelUnexposedCheckoutOrder(supabase, pendingOrder.id);
+      const deactivated = await deactivateUnexposedCheckoutOrder(supabase, pendingOrder);
       await interaction.editReply({
-        content: '❌ Checkout configuration changed before it could be secured. No subscription link was opened; please try again.',
+        content: deactivated
+          ? '❌ Checkout configuration changed before it could be secured. No subscription link was opened; please try again.'
+          : '❌ Checkout configuration changed before it could be secured. No subscription link was opened, but checkout cleanup could not be confirmed. Contact the server owner before trying again.',
       });
       return;
     }

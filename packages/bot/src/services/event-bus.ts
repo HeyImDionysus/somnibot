@@ -78,6 +78,63 @@ class PlatformEventBus {
   }
 
   /**
+   * Emit a typed platform event and wait for every current listener.
+   *
+   * Intended for commerce and other critical paths where the caller must know
+   * whether all side effects completed. Unlike emit(), listener failures are
+   * propagated after every typed and wildcard listener has settled.
+   */
+  async emitAndWait<T extends PlatformEventType>(
+    type: T,
+    guildId: string,
+    data: PlatformEventMap[T],
+  ): Promise<void> {
+    const event: PlatformEvent<T, PlatformEventMap[T]> = {
+      type,
+      guildId,
+      timestamp: Date.now(),
+      data,
+    };
+    const typedListeners = this.emitter.rawListeners(type) as Array<
+      (e: PlatformEvent) => void | Promise<void>
+    >;
+    const wildcardListeners = this.emitter.rawListeners('*') as Array<
+      (e: PlatformEvent) => void | Promise<void>
+    >;
+    const listeners = [...typedListeners, ...wildcardListeners];
+    const listenerCount = listeners.length;
+
+    log.info(`${type} in guild ${guildId}`);
+
+    if (this.inFlight + listenerCount > PlatformEventBus.MAX_IN_FLIGHT) {
+      const message = `Backpressure: rejecting ${type} — ${this.inFlight} handlers in flight, ${listenerCount} requested`;
+      log.warn(message);
+      throw new Error(message);
+    }
+
+    // Reserve the entire snapshot before any listener can start or another
+    // awaited emission can observe stale capacity.
+    this.inFlight += listenerCount;
+    try {
+      const results = await Promise.allSettled(
+        listeners.map(async (listener) => listener(event as PlatformEvent)),
+      );
+      const failures = results.filter(
+        (result): result is PromiseRejectedResult => result.status === 'rejected',
+      );
+
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures.map((failure) => failure.reason),
+          `${failures.length} listeners failed for ${type}`,
+        );
+      }
+    } finally {
+      this.inFlight -= listenerCount;
+    }
+  }
+
+  /**
    * Listen for a specific event type.
    *
    * V5 Audit §6.2: Warns when listener count exceeds 80 (soft limit)

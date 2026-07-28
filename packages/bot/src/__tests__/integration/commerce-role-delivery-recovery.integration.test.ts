@@ -3766,6 +3766,30 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
         disposition: 'send',
         state: 'sending',
       });
+      const [checkoutProofProduct] = await sqlA<{ id: string }[]>`
+        INSERT INTO public.products (
+          guild_id,
+          name,
+          type,
+          delivery_type,
+          price_cents,
+          currency,
+          active,
+          granted_role_ids,
+          granted_channel_ids
+        ) VALUES (
+          ${guildId},
+          ${nextName('purge-proof-product')},
+          'one_time',
+          'access_pass',
+          100,
+          'USD',
+          true,
+          ARRAY[]::TEXT[],
+          ARRAY[]::TEXT[]
+        )
+        RETURNING id
+      `;
       const checkoutProofProviderId = nextName('purge-proof-provider');
       const [proofOrder] = await sqlA<{ id: string }[]>`
         INSERT INTO public.orders (
@@ -3783,7 +3807,7 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
           ${nextName('purge-proof-order')},
           ${customer!.id}::UUID,
           ${guildId},
-          ${product!.id}::UUID,
+          ${checkoutProofProduct!.id}::UUID,
           ${checkoutProofProviderId},
           100,
           'USD',
@@ -3798,7 +3822,7 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
           ${proofOrder!.id}::UUID,
           ${guildId},
           ${customer!.id}::UUID,
-          ${product!.id}::UUID,
+          ${checkoutProofProduct!.id}::UUID,
           'capture',
           ${checkoutProofProviderId},
           'provider_cancelled',

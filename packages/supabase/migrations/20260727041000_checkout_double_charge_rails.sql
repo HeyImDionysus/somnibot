@@ -26,6 +26,12 @@ BEGIN;
 ALTER TABLE public.orders
   ADD COLUMN IF NOT EXISTS checkout_active BOOLEAN NOT NULL DEFAULT false;
 
+-- An idempotent replay re-ranks historical payable rows below. Remove the
+-- runtime reservation trigger first so that controlled migration repair is not
+-- mistaken for a new buyer checkout; it is recreated after all private rails
+-- and blocker functions are current.
+DROP TRIGGER IF EXISTS commerce_orders_reservation_guard ON public.orders;
+
 -- Keep the flag structurally honest and automatically retire it with every
 -- terminal/non-pending order transition. This trigger performs no privileged
 -- reads, so it remains SECURITY INVOKER.
@@ -34,18 +40,68 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 SET search_path = ''
 AS $$
+DECLARE
+  v_old_protected_payment BOOLEAN := false;
 BEGIN
-  IF NEW.status IS DISTINCT FROM 'pending' THEN
-    NEW.checkout_active := false;
+  IF TG_OP IN ('UPDATE', 'DELETE') THEN
+    v_old_protected_payment := COALESCE((
+      OLD.status IN ('pending', 'completed', 'pending_review')
+      AND (OLD.source = 'purchase' OR OLD.source IS NULL)
+      AND (
+        OLD.paypal_order_id IS NOT NULL
+        OR OLD.paypal_subscription_id IS NOT NULL
+      )
+    ), false);
+  END IF;
+
+  IF TG_OP = 'DELETE' THEN
+    IF v_old_protected_payment
+       AND CURRENT_USER IN ('anon', 'authenticated') THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '42501',
+        MESSAGE = 'authenticated callers cannot delete a provider-payable checkout';
+    END IF;
+    RETURN OLD;
   END IF;
 
   IF TG_OP = 'UPDATE'
-     AND OLD.checkout_active
-     AND NOT NEW.checkout_active
+     AND v_old_protected_payment
      AND CURRENT_USER IN ('anon', 'authenticated') THEN
-    RAISE EXCEPTION USING
-      ERRCODE = '42501',
-      MESSAGE = 'authenticated callers cannot retire an active checkout';
+    IF OLD.checkout_active AND NOT NEW.checkout_active THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '42501',
+        MESSAGE = 'authenticated callers cannot retire an active checkout';
+    END IF;
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.order_number IS DISTINCT FROM OLD.order_number
+       OR NEW.guild_id IS DISTINCT FROM OLD.guild_id
+       OR NEW.customer_id IS DISTINCT FROM OLD.customer_id
+       OR NEW.product_id IS DISTINCT FROM OLD.product_id
+       OR NEW.plan_id IS DISTINCT FROM OLD.plan_id
+       OR NEW.paypal_order_id IS DISTINCT FROM OLD.paypal_order_id
+       OR NEW.paypal_subscription_id IS DISTINCT FROM OLD.paypal_subscription_id
+       OR NEW.amount_cents IS DISTINCT FROM OLD.amount_cents
+       OR NEW.currency IS DISTINCT FROM OLD.currency
+       OR NEW.discount_cents IS DISTINCT FROM OLD.discount_cents
+       OR NEW.promotion_id IS DISTINCT FROM OLD.promotion_id
+       OR NEW.source IS DISTINCT FROM OLD.source
+       OR NEW.status IS DISTINCT FROM OLD.status
+       OR NEW.checkout_active IS DISTINCT FROM OLD.checkout_active
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       OR NEW.delivery_type_snapshot IS DISTINCT FROM OLD.delivery_type_snapshot
+       OR NEW.granted_role_ids_snapshot IS DISTINCT FROM OLD.granted_role_ids_snapshot
+       OR NEW.granted_channel_ids_snapshot IS DISTINCT FROM OLD.granted_channel_ids_snapshot
+       OR NEW.temporary_role_grants_snapshot
+            IS DISTINCT FROM OLD.temporary_role_grants_snapshot
+       OR NEW.grant_snapshot_frozen_at IS DISTINCT FROM OLD.grant_snapshot_frozen_at THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '42501',
+        MESSAGE = 'authenticated callers cannot rewrite a provider-payable checkout';
+    END IF;
+  END IF;
+
+  IF NEW.status IS DISTINCT FROM 'pending' THEN
+    NEW.checkout_active := false;
   END IF;
 
   IF NEW.checkout_active AND NOT (
@@ -74,15 +130,7 @@ REVOKE ALL ON FUNCTION public.commerce_normalize_checkout_active()
 
 DROP TRIGGER IF EXISTS commerce_orders_normalize_checkout_active ON public.orders;
 CREATE TRIGGER commerce_orders_normalize_checkout_active
-  BEFORE INSERT OR UPDATE OF
-    status,
-    source,
-    guild_id,
-    customer_id,
-    product_id,
-    paypal_order_id,
-    paypal_subscription_id,
-    checkout_active
+  BEFORE INSERT OR UPDATE OR DELETE
   ON public.orders
   FOR EACH ROW
   EXECUTE FUNCTION public.commerce_normalize_checkout_active();
@@ -271,6 +319,320 @@ REVOKE ALL ON TABLE public.commerce_checkout_deactivation_proofs
   FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON TABLE public.commerce_fulfillment_outward_intents
   FROM PUBLIC, anon, authenticated, service_role;
+
+-- Resolve every durable reason that makes another approval link unsafe. The
+-- same identity advisory lock is used by paid-fulfillment claim/hold
+-- arbitration, so a checkout reservation and a capture decision cannot both
+-- inspect a stale pre-arbitration snapshot.
+CREATE OR REPLACE FUNCTION public.commerce_find_checkout_blocker(
+  p_guild_id TEXT,
+  p_customer_id UUID,
+  p_product_id UUID,
+  p_exclude_order_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_order public.orders%ROWTYPE;
+  v_claim public.commerce_fulfillment_claims%ROWTYPE;
+  v_prior_order public.orders%ROWTYPE;
+  v_inflight_fulfillment BOOLEAN := false;
+  v_claim_releasable BOOLEAN := false;
+BEGIN
+  IF p_customer_id IS NULL
+     OR p_product_id IS NULL
+     OR p_guild_id IS NULL
+     OR p_guild_id <> pg_catalog.btrim(p_guild_id)
+     OR p_guild_id = '' THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_find_checkout_blocker: exact checkout identity is required';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+      FROM public.customers AS customer
+     WHERE customer.id = p_customer_id
+       AND customer.guild_id = p_guild_id
+  ) OR NOT EXISTS (
+    SELECT 1
+      FROM public.products AS product
+     WHERE product.id = p_product_id
+       AND product.guild_id = p_guild_id
+  ) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_find_checkout_blocker: checkout identity mismatch';
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(
+      p_guild_id || E'\x1f'
+        || p_customer_id::TEXT || E'\x1f'
+        || p_product_id::TEXT,
+      0
+    )
+  );
+
+  -- A hold is permanent until explicit operator repair removes it. Resolving
+  -- its alert alone is not proof that the charge was refunded or delivered.
+  SELECT paid_order.*
+    INTO v_order
+    FROM public.commerce_fulfillment_holds AS held
+    JOIN public.orders AS paid_order
+      ON paid_order.id = held.order_id
+   WHERE held.guild_id = p_guild_id
+     AND held.customer_id = p_customer_id
+     AND held.product_id = p_product_id
+   ORDER BY held.held_at, held.order_id
+   LIMIT 1;
+
+  IF FOUND THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'disposition', 'blocked',
+      'reason', 'paid_hold',
+      'order_id', v_order.id,
+      'order_number', v_order.order_number
+    );
+  END IF;
+
+  -- Every pending provider identity remains payable until provider proof says
+  -- otherwise. Historical inactive duplicates are therefore blockers too;
+  -- checkout_active only chooses the current local arbitration row.
+  SELECT paid_order.*
+    INTO v_order
+    FROM public.orders AS paid_order
+   WHERE paid_order.guild_id = p_guild_id
+     AND paid_order.customer_id = p_customer_id
+     AND paid_order.product_id = p_product_id
+     AND paid_order.id IS DISTINCT FROM p_exclude_order_id
+     AND paid_order.status = 'pending'
+     AND (paid_order.source = 'purchase' OR paid_order.source IS NULL)
+     AND (
+       paid_order.paypal_order_id IS NOT NULL
+       OR paid_order.paypal_subscription_id IS NOT NULL
+     )
+     AND NOT EXISTS (
+       SELECT 1
+         FROM public.commerce_checkout_deactivation_proofs AS proof
+        WHERE proof.order_id = paid_order.id
+     )
+   ORDER BY
+     paid_order.checkout_active DESC,
+     paid_order.created_at,
+     paid_order.id
+   LIMIT 1;
+
+  IF FOUND THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'disposition', 'blocked',
+      'reason', 'provider_checkout',
+      'order_id', v_order.id,
+      'order_number', v_order.order_number
+    );
+  END IF;
+
+  -- Repeat the active-entitlement guard under the identity lock so a grant
+  -- racing the bot's earlier UX check cannot expose another payment link.
+  SELECT paid_order.*
+    INTO v_order
+    FROM public.entitlements AS entitlement
+    LEFT JOIN public.orders AS paid_order
+      ON paid_order.id = entitlement.order_id
+   WHERE entitlement.guild_id = p_guild_id
+     AND entitlement.customer_id = p_customer_id
+     AND entitlement.product_id = p_product_id
+     AND entitlement.status IN ('active', 'pending', 'grace_period', 'suspended')
+   ORDER BY entitlement.created_at, entitlement.id
+   LIMIT 1;
+
+  IF FOUND THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'disposition', 'blocked',
+      'reason', 'active_entitlement',
+      'order_id', v_order.id,
+      'order_number', v_order.order_number
+    );
+  END IF;
+
+  -- Cover capture/activation -> queue/claim gaps. A completed or review-held
+  -- provider order with no entitlement row has not reached a releasable
+  -- outcome, even if its checkout_active flag was normalized to false.
+  SELECT paid_order.*
+    INTO v_order
+    FROM public.orders AS paid_order
+   WHERE paid_order.guild_id = p_guild_id
+     AND paid_order.customer_id = p_customer_id
+     AND paid_order.product_id = p_product_id
+     AND paid_order.status IN ('completed', 'pending_review')
+     AND (paid_order.source = 'purchase' OR paid_order.source IS NULL)
+     AND (
+       paid_order.paypal_order_id IS NOT NULL
+       OR paid_order.paypal_subscription_id IS NOT NULL
+     )
+     AND NOT EXISTS (
+       SELECT 1
+         FROM public.entitlements AS entitlement
+        WHERE entitlement.order_id = paid_order.id
+     )
+   ORDER BY paid_order.created_at, paid_order.id
+   LIMIT 1;
+
+  IF FOUND THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'disposition', 'blocked',
+      'reason', 'paid_fulfillment',
+      'order_id', v_order.id,
+      'order_number', v_order.order_number
+    );
+  END IF;
+
+  SELECT claim.*
+    INTO v_claim
+    FROM public.commerce_fulfillment_claims AS claim
+   WHERE claim.guild_id = p_guild_id
+     AND claim.customer_id = p_customer_id
+     AND claim.product_id = p_product_id;
+
+  IF FOUND THEN
+    SELECT paid_order.*
+      INTO v_prior_order
+      FROM public.orders AS paid_order
+     WHERE paid_order.id = v_claim.order_id;
+
+    SELECT EXISTS (
+      SELECT 1
+        FROM public.bot_action_queue AS queue
+       WHERE queue.payload ->> 'order_id' = v_claim.order_id::TEXT
+         AND queue.action IN ('fulfill_purchase', 'fulfill_subscription')
+         AND queue.status IN ('staged', 'pending', 'processing')
+    ) INTO v_inflight_fulfillment;
+
+    v_claim_releasable := NOT v_inflight_fulfillment
+      AND NOT EXISTS (
+        SELECT 1
+          FROM public.entitlements AS entitlement
+         WHERE entitlement.guild_id = p_guild_id
+           AND entitlement.customer_id = p_customer_id
+           AND entitlement.product_id = p_product_id
+           AND entitlement.status IN ('active', 'pending', 'grace_period', 'suspended')
+      )
+      AND (
+        v_prior_order.status IN ('refunded', 'disputed', 'cancelled')
+        OR (
+          v_prior_order.status = 'completed'
+          AND EXISTS (
+            SELECT 1
+              FROM public.entitlements AS entitlement
+             WHERE entitlement.order_id = v_claim.order_id
+          )
+        )
+      );
+
+    IF NOT v_claim_releasable THEN
+      RETURN pg_catalog.jsonb_build_object(
+        'disposition', 'blocked',
+        'reason', 'paid_fulfillment',
+        'order_id', v_prior_order.id,
+        'order_number', v_prior_order.order_number
+      );
+    END IF;
+  END IF;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'disposition', 'clear',
+    'reason', NULL,
+    'order_id', NULL,
+    'order_number', NULL
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.commerce_find_checkout_blocker(
+  TEXT, UUID, UUID, UUID
+) FROM PUBLIC, anon, authenticated, service_role;
+
+-- Service-only early inspection keeps known blockers away from PayPal
+-- entirely. The trigger below calls the same owner-only resolver again at the
+-- active-order write boundary, which is the authoritative race fence.
+CREATE OR REPLACE FUNCTION public.commerce_inspect_checkout_blocker(
+  p_guild_id TEXT,
+  p_customer_id UUID,
+  p_product_id UUID
+)
+RETURNS JSONB
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+  SELECT public.commerce_find_checkout_blocker(
+    p_guild_id,
+    p_customer_id,
+    p_product_id,
+    NULL
+  );
+$$;
+
+REVOKE ALL ON FUNCTION public.commerce_inspect_checkout_blocker(
+  TEXT, UUID, UUID
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.commerce_inspect_checkout_blocker(
+  TEXT, UUID, UUID
+) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.commerce_guard_checkout_reservation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_blocker JSONB;
+BEGIN
+  IF NOT NEW.checkout_active THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE'
+     AND OLD.checkout_active
+     AND NEW.guild_id IS NOT DISTINCT FROM OLD.guild_id
+     AND NEW.customer_id IS NOT DISTINCT FROM OLD.customer_id
+     AND NEW.product_id IS NOT DISTINCT FROM OLD.product_id THEN
+    RETURN NEW;
+  END IF;
+
+  v_blocker := public.commerce_find_checkout_blocker(
+    NEW.guild_id,
+    NEW.customer_id,
+    NEW.product_id,
+    CASE WHEN TG_OP = 'UPDATE' THEN NEW.id ELSE NULL END
+  );
+
+  IF v_blocker ->> 'disposition' = 'blocked' THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23505',
+      MESSAGE = 'commerce_checkout_blocked: '
+        || COALESCE(v_blocker ->> 'reason', 'unknown')
+        || ' order '
+        || COALESCE(v_blocker ->> 'order_number', 'unknown');
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.commerce_guard_checkout_reservation()
+  FROM PUBLIC, anon, authenticated, service_role;
+
+DROP TRIGGER IF EXISTS commerce_orders_reservation_guard ON public.orders;
+CREATE TRIGGER commerce_orders_reservation_guard
+  BEFORE INSERT OR UPDATE OF checkout_active
+  ON public.orders
+  FOR EACH ROW
+  EXECUTE FUNCTION public.commerce_guard_checkout_reservation();
 
 -- Adopt every currently live paid entitlement and every fulfillment row that a
 -- worker can still apply. DISTINCT ON chooses one deterministic historical
@@ -2048,13 +2410,15 @@ BEGIN
   -- triggers acquire their per-customer advisory locks. A completed capture
   -- payment has a deferred FK to orders(id, status), so a completed parent
   -- cannot be changed on the pending-return path. Lock the parents now, retire
-  -- still-payable pending checkouts immediately, then transition completed
-  -- parents only after exact role cleanup has converged and this same
-  -- transaction will delete the payment children.
+  -- still-payable pending checkouts immediately, and include pending-review
+  -- parents in this first ordered lock set because fulfillment claim/hold
+  -- replay accepts and locks them before its hold row. Then transition
+  -- completed parents only after exact role cleanup has converged and this
+  -- same transaction will delete the payment children.
   PERFORM paid_order.id
     FROM public.orders AS paid_order
    WHERE paid_order.guild_id = p_guild_id
-     AND paid_order.status IN ('pending', 'completed')
+     AND paid_order.status IN ('pending', 'completed', 'pending_review')
    ORDER BY paid_order.id
    FOR UPDATE;
   UPDATE public.orders AS paid_order

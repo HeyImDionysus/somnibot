@@ -89,6 +89,8 @@ const BASE_SCHEMA = `
     paypal_subscription_id TEXT,
     amount_cents INTEGER NOT NULL,
     currency TEXT NOT NULL,
+    discount_cents INTEGER NOT NULL DEFAULT 0,
+    promotion_id UUID,
     source TEXT,
     status TEXT NOT NULL,
     granted_role_ids_snapshot TEXT[] NOT NULL DEFAULT '{}',
@@ -181,6 +183,12 @@ type ClaimResult = {
   winning_order_id: string | null;
   conflicting_entitlement_id: string | null;
   alert_id: string | null;
+};
+type CheckoutBlocker = {
+  disposition: 'clear' | 'blocked';
+  reason: 'provider_checkout' | 'paid_hold' | 'paid_fulfillment' | 'active_entitlement' | null;
+  order_id: string | null;
+  order_number: string | null;
 };
 type Fixture = {
   customerId: string;
@@ -1221,6 +1229,149 @@ describe('checkout migration and atomic fulfillment winner', () => {
     }]);
   }, 45_000);
 
+  it('blocks held/unresolved paid work before a second checkout reservation', async () => {
+    const fixture = await createFixture('capture');
+    const [held] = await sqlObserver<{ result: ClaimResult }[]>`
+      SELECT public.commerce_hold_unknown_delivery_contract(
+        ${fixture.orderA}::UUID,
+        ${GUILD_ID},
+        ${fixture.customerId}::UUID,
+        ${fixture.productId}::UUID,
+        'capture',
+        ${fixture.providerA},
+        999,
+        'USD'
+      ) AS result
+    `;
+    await sqlObserver`
+      UPDATE public.alerts
+         SET resolved = true,
+             updated_at = pg_catalog.clock_timestamp()
+       WHERE id = ${held.result.alert_id}::UUID
+    `;
+
+    const [inspection] = await sqlObserver.begin(async (tx) => {
+      await tx`SET LOCAL ROLE service_role`;
+      return tx<{ result: CheckoutBlocker }[]>`
+        SELECT public.commerce_inspect_checkout_blocker(
+          ${GUILD_ID},
+          ${fixture.customerId}::UUID,
+          ${fixture.productId}::UUID
+        ) AS result
+      `;
+    });
+    expect(inspection.result).toMatchObject({
+      disposition: 'blocked',
+      reason: 'paid_hold',
+      order_id: fixture.orderA,
+    });
+
+    await expect(sqlObserver`
+      INSERT INTO public.orders (
+        order_number,
+        customer_id,
+        guild_id,
+        product_id,
+        paypal_order_id,
+        amount_cents,
+        currency,
+        status,
+        source,
+        checkout_active
+      ) VALUES (
+        ${nextValue('ORD-BLOCKED-CHECKOUT')},
+        ${fixture.customerId}::UUID,
+        ${GUILD_ID},
+        ${fixture.productId}::UUID,
+        ${nextValue('PAYPAL-BLOCKED-CHECKOUT')},
+        999,
+        'USD',
+        'pending',
+        'purchase',
+        true
+      )
+    `).rejects.toMatchObject({
+      code: '23505',
+      message: expect.stringContaining('commerce_checkout_blocked: paid_hold'),
+    });
+  }, 45_000);
+
+  it('allows a new reservation after a prior claim is provably releasable', async () => {
+    const fixture = await createFixture('capture');
+    await sqlObserver`
+      UPDATE public.orders
+         SET status = 'cancelled',
+             updated_at = pg_catalog.clock_timestamp()
+       WHERE id = ${fixture.orderB}::UUID
+    `;
+    const winner = await claim(sqlObserver, fixture, 'A');
+    expect(winner.disposition).toBe('winner');
+    await sqlObserver`
+      INSERT INTO public.entitlements (
+        customer_id,
+        guild_id,
+        product_id,
+        order_id,
+        type,
+        status,
+        source
+      ) VALUES (
+        ${fixture.customerId}::UUID,
+        ${GUILD_ID},
+        ${fixture.productId}::UUID,
+        ${fixture.orderA}::UUID,
+        'one_time',
+        'expired',
+        'purchase'
+      )
+    `;
+
+    const [inspection] = await sqlObserver.begin(async (tx) => {
+      await tx`SET LOCAL ROLE service_role`;
+      return tx<{ result: CheckoutBlocker }[]>`
+        SELECT public.commerce_inspect_checkout_blocker(
+          ${GUILD_ID},
+          ${fixture.customerId}::UUID,
+          ${fixture.productId}::UUID
+        ) AS result
+      `;
+    });
+    expect(inspection.result).toEqual({
+      disposition: 'clear',
+      reason: null,
+      order_id: null,
+      order_number: null,
+    });
+
+    const [reserved] = await sqlObserver<{ id: string; checkout_active: boolean }[]>`
+      INSERT INTO public.orders (
+        order_number,
+        customer_id,
+        guild_id,
+        product_id,
+        paypal_order_id,
+        amount_cents,
+        currency,
+        status,
+        source,
+        checkout_active
+      ) VALUES (
+        ${nextValue('ORD-RELEASABLE-CHECKOUT')},
+        ${fixture.customerId}::UUID,
+        ${GUILD_ID},
+        ${fixture.productId}::UUID,
+        ${nextValue('PAYPAL-RELEASABLE-CHECKOUT')},
+        999,
+        'USD',
+        'pending',
+        'purchase',
+        true
+      )
+      RETURNING id, checkout_active
+    `;
+    expect(reserved.checkout_active).toBe(true);
+  }, 45_000);
+
   it('turns an interrupted outward send into a durable no-resend uncertain state', async () => {
     const fixture = await createFixture('capture');
     const [first] = await sqlObserver<{ result: Record<string, unknown> }[]>`
@@ -1393,14 +1544,137 @@ describe('checkout migration and atomic fulfillment winner', () => {
     expect(evidence).toEqual({ state: 'uncertain', alert_count: 1 });
   }, 45_000);
 
-  it('requires proof-backed retirement and rejects an authenticated direct active flip', async () => {
+  it('requires proof-backed retirement and rejects authenticated payable-order rewrites', async () => {
     const fixture = await createFixture('subscription');
+    await sqlObserver`
+      UPDATE public.orders
+         SET status = 'cancelled',
+             updated_at = pg_catalog.clock_timestamp()
+       WHERE id = ${fixture.orderB}::UUID
+    `;
     await sqlObserver`
       UPDATE public.orders
       SET checkout_active = true
       WHERE id = ${fixture.orderA}::UUID
     `;
-    await sqlObserver`GRANT SELECT, UPDATE ON public.orders TO authenticated`;
+    const [inactivePayable] = await sqlObserver<{ id: string }[]>`
+      INSERT INTO public.orders (
+        order_number,
+        customer_id,
+        guild_id,
+        product_id,
+        plan_id,
+        paypal_subscription_id,
+        amount_cents,
+        currency,
+        status,
+        source,
+        checkout_active
+      ) VALUES (
+        ${nextValue('ORD-INACTIVE-PAYABLE')},
+        ${fixture.customerId}::UUID,
+        ${GUILD_ID},
+        ${fixture.productId}::UUID,
+        (
+          SELECT plan_id
+            FROM public.orders
+           WHERE id = ${fixture.orderA}::UUID
+        ),
+        ${nextValue('SUB-INACTIVE-PAYABLE')},
+        999,
+        'USD',
+        'pending',
+        'purchase',
+        false
+      )
+      RETURNING id
+    `;
+    const completedOrderNumber = nextValue('ORD-COMPLETED-PROTECTED');
+    const reviewOrderNumber = nextValue('ORD-REVIEW-PROTECTED');
+    const completedProviderId = nextValue('SUB-COMPLETED-PROTECTED');
+    const reviewProviderId = nextValue('SUB-REVIEW-PROTECTED');
+    const protectedPaidRows = await sqlObserver<{ id: string; status: string }[]>`
+      INSERT INTO public.orders (
+        order_number,
+        customer_id,
+        guild_id,
+        product_id,
+        plan_id,
+        paypal_subscription_id,
+        amount_cents,
+        currency,
+        status,
+        source,
+        checkout_active
+      ) VALUES
+        (
+          ${completedOrderNumber},
+          ${fixture.customerId}::UUID,
+          ${GUILD_ID},
+          ${fixture.productId}::UUID,
+          (
+            SELECT plan_id
+              FROM public.orders
+             WHERE id = ${fixture.orderA}::UUID
+          ),
+          ${completedProviderId},
+          999,
+          'USD',
+          'completed',
+          'purchase',
+          false
+        ),
+        (
+          ${reviewOrderNumber},
+          ${fixture.customerId}::UUID,
+          ${GUILD_ID},
+          ${fixture.productId}::UUID,
+          (
+            SELECT plan_id
+              FROM public.orders
+             WHERE id = ${fixture.orderA}::UUID
+          ),
+          ${reviewProviderId},
+          999,
+          'USD',
+          'pending_review',
+          'purchase',
+          false
+        )
+      RETURNING id, status
+    `;
+    await sqlObserver`GRANT SELECT, UPDATE, DELETE ON public.orders TO authenticated`;
+
+    await expect(sqlObserver.begin(async (tx) => {
+      await tx`SET LOCAL ROLE authenticated`;
+      await tx`
+        UPDATE public.orders
+        SET paypal_subscription_id = ${nextValue('SUB-TAMPERED')}
+        WHERE id = ${fixture.orderA}::UUID
+          AND status = 'pending'
+      `;
+    })).rejects.toMatchObject({
+      code: '42501',
+      message: expect.stringContaining(
+        'authenticated callers cannot rewrite a provider-payable checkout',
+      ),
+    });
+
+    await expect(sqlObserver.begin(async (tx) => {
+      await tx`SET LOCAL ROLE authenticated`;
+      await tx`
+        UPDATE public.orders
+        SET status = 'cancelled'
+        WHERE id = ${inactivePayable.id}::UUID
+          AND status = 'pending'
+          AND checkout_active = false
+      `;
+    })).rejects.toMatchObject({
+      code: '42501',
+      message: expect.stringContaining(
+        'authenticated callers cannot rewrite a provider-payable checkout',
+      ),
+    });
 
     await expect(sqlObserver.begin(async (tx) => {
       await tx`SET LOCAL ROLE authenticated`;
@@ -1417,6 +1691,49 @@ describe('checkout migration and atomic fulfillment winner', () => {
       ),
     });
 
+    for (const paidRow of protectedPaidRows) {
+      await expect(sqlObserver.begin(async (tx) => {
+        await tx`SET LOCAL ROLE authenticated`;
+        await tx`
+          UPDATE public.orders
+          SET status = 'cancelled'
+          WHERE id = ${paidRow.id}::UUID
+            AND status = ${paidRow.status}
+        `;
+      })).rejects.toMatchObject({
+        code: '42501',
+        message: expect.stringContaining(
+          'authenticated callers cannot rewrite a provider-payable checkout',
+        ),
+      });
+    }
+
+    for (const orderId of [
+      fixture.orderA,
+      inactivePayable.id,
+      ...protectedPaidRows.map((row) => row.id),
+    ]) {
+      await expect(sqlObserver.begin(async (tx) => {
+        await tx`SET LOCAL ROLE authenticated`;
+        await tx`
+          DELETE FROM public.orders
+          WHERE id = ${orderId}::UUID
+        `;
+      })).rejects.toMatchObject({
+        code: '42501',
+        message: expect.stringContaining(
+          'authenticated callers cannot delete a provider-payable checkout',
+        ),
+      });
+    }
+
+    await sqlObserver`
+      DELETE FROM public.orders
+      WHERE id = ${inactivePayable.id}::UUID
+         OR id = ${protectedPaidRows[0]!.id}::UUID
+         OR id = ${protectedPaidRows[1]!.id}::UUID
+    `;
+
     const proofReference = nextValue('provider-cancel-proof');
     const [deactivated] = await sqlObserver<{ result: Record<string, unknown> }[]>`
       SELECT public.commerce_deactivate_pending_checkout(
@@ -1426,7 +1743,7 @@ describe('checkout migration and atomic fulfillment winner', () => {
         ${fixture.productId}::UUID,
         'subscription',
         ${fixture.providerA},
-        'provider_cancelled',
+        'approval_link_not_exposed',
         ${proofReference}
       ) AS result
     `;
@@ -1453,8 +1770,46 @@ describe('checkout migration and atomic fulfillment winner', () => {
     `;
     expect(proof).toEqual({
       checkout_active: false,
-      proof_kind: 'provider_cancelled',
+      proof_kind: 'approval_link_not_exposed',
       proof_reference: proofReference,
+    });
+
+    const replacementProviderId = nextValue('SUB-REPLACEMENT-AFTER-PROOF');
+    const [replacement] = await sqlObserver<{ id: string; checkout_active: boolean }[]>`
+      INSERT INTO public.orders (
+        order_number,
+        customer_id,
+        guild_id,
+        product_id,
+        plan_id,
+        paypal_subscription_id,
+        amount_cents,
+        currency,
+        status,
+        source,
+        checkout_active
+      ) VALUES (
+        ${nextValue('ORD-REPLACEMENT-AFTER-PROOF')},
+        ${fixture.customerId}::UUID,
+        ${GUILD_ID},
+        ${fixture.productId}::UUID,
+        (
+          SELECT plan_id
+            FROM public.orders
+           WHERE id = ${fixture.orderA}::UUID
+        ),
+        ${replacementProviderId},
+        999,
+        'USD',
+        'pending',
+        'purchase',
+        true
+      )
+      RETURNING id, checkout_active
+    `;
+    expect(replacement).toEqual({
+      id: expect.any(String),
+      checkout_active: true,
     });
   }, 45_000);
 
@@ -1627,18 +1982,22 @@ describe('checkout migration and atomic fulfillment winner', () => {
       service_begin_outward_execute: boolean;
       service_resume_outward_execute: boolean;
       service_finish_outward_execute: boolean;
+      service_inspect_checkout_execute: boolean;
+      service_find_checkout_execute: boolean;
       anon_claim_execute: boolean;
       anon_hold_unknown_execute: boolean;
       anon_deactivate_execute: boolean;
       anon_begin_outward_execute: boolean;
       anon_resume_outward_execute: boolean;
       anon_finish_outward_execute: boolean;
+      anon_inspect_checkout_execute: boolean;
       authenticated_claim_execute: boolean;
       authenticated_hold_unknown_execute: boolean;
       authenticated_deactivate_execute: boolean;
       authenticated_begin_outward_execute: boolean;
       authenticated_resume_outward_execute: boolean;
       authenticated_finish_outward_execute: boolean;
+      authenticated_inspect_checkout_execute: boolean;
     }[]>`
       SELECT
         pg_catalog.has_table_privilege(
@@ -1692,6 +2051,16 @@ describe('checkout migration and atomic fulfillment winner', () => {
           'EXECUTE'
         ) AS service_finish_outward_execute,
         pg_catalog.has_function_privilege(
+          'service_role',
+          'public.commerce_inspect_checkout_blocker(text,uuid,uuid)',
+          'EXECUTE'
+        ) AS service_inspect_checkout_execute,
+        pg_catalog.has_function_privilege(
+          'service_role',
+          'public.commerce_find_checkout_blocker(text,uuid,uuid,uuid)',
+          'EXECUTE'
+        ) AS service_find_checkout_execute,
+        pg_catalog.has_function_privilege(
           'anon',
           'public.commerce_claim_paid_fulfillment(uuid,text,uuid,uuid,text,text,integer,text)',
           'EXECUTE'
@@ -1722,6 +2091,11 @@ describe('checkout migration and atomic fulfillment winner', () => {
           'EXECUTE'
         ) AS anon_finish_outward_execute,
         pg_catalog.has_function_privilege(
+          'anon',
+          'public.commerce_inspect_checkout_blocker(text,uuid,uuid)',
+          'EXECUTE'
+        ) AS anon_inspect_checkout_execute,
+        pg_catalog.has_function_privilege(
           'authenticated',
           'public.commerce_claim_paid_fulfillment(uuid,text,uuid,uuid,text,text,integer,text)',
           'EXECUTE'
@@ -1750,7 +2124,12 @@ describe('checkout migration and atomic fulfillment winner', () => {
           'authenticated',
           'public.commerce_finish_fulfillment_outward_intent(uuid,text,text,uuid,text,text)',
           'EXECUTE'
-        ) AS authenticated_finish_outward_execute
+        ) AS authenticated_finish_outward_execute,
+        pg_catalog.has_function_privilege(
+          'authenticated',
+          'public.commerce_inspect_checkout_blocker(text,uuid,uuid)',
+          'EXECUTE'
+        ) AS authenticated_inspect_checkout_execute
     `;
     expect(privileges).toEqual({
       service_claim_select: false,
@@ -1763,18 +2142,22 @@ describe('checkout migration and atomic fulfillment winner', () => {
       service_begin_outward_execute: true,
       service_resume_outward_execute: true,
       service_finish_outward_execute: true,
+      service_inspect_checkout_execute: true,
+      service_find_checkout_execute: false,
       anon_claim_execute: false,
       anon_hold_unknown_execute: false,
       anon_deactivate_execute: false,
       anon_begin_outward_execute: false,
       anon_resume_outward_execute: false,
       anon_finish_outward_execute: false,
+      anon_inspect_checkout_execute: false,
       authenticated_claim_execute: false,
       authenticated_hold_unknown_execute: false,
       authenticated_deactivate_execute: false,
       authenticated_begin_outward_execute: false,
       authenticated_resume_outward_execute: false,
       authenticated_finish_outward_execute: false,
+      authenticated_inspect_checkout_execute: false,
     });
   });
 });

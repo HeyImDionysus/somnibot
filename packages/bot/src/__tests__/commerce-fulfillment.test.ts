@@ -115,13 +115,17 @@ vi.mock('../features/commerce/entitlement-service.js', () => ({
   },
 }));
 
-const { mockDeliverReceiptDM } = vi.hoisted(() => ({
-  mockDeliverReceiptDM: vi.fn(async () => {}),
-}));
+const { mockPrepareReceiptDM, mockPreparedReceiptSend } = vi.hoisted(() => {
+  const preparedSend = vi.fn(async () => {});
+  return {
+    mockPrepareReceiptDM: vi.fn(async () => preparedSend),
+    mockPreparedReceiptSend: preparedSend,
+  };
+});
 
 vi.mock('../features/commerce/receipt-builder.js', () => ({
   sendReceiptDM: vi.fn(async () => true),
-  deliverReceiptDM: mockDeliverReceiptDM,
+  prepareReceiptDM: mockPrepareReceiptDM,
 }));
 
 vi.mock('../services/fraud-detection.js', () => ({
@@ -941,7 +945,12 @@ describe('CommerceFulfillmentService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    eventBus = { emit: vi.fn(), on: vi.fn(), off: vi.fn() };
+    eventBus = {
+      emit: vi.fn(),
+      emitAndWait: vi.fn(async () => {}),
+      on: vi.fn(),
+      off: vi.fn(),
+    };
     service = new CommerceFulfillmentService(makeGuild(), makeSupa() as any, eventBus);
   });
 
@@ -983,6 +992,42 @@ describe('CommerceFulfillmentService', () => {
       expect(mockEnsurePurchaseGrantedRoles).not.toHaveBeenCalled();
     });
 
+    it('marks a rejected awaited purchase listener uncertain instead of sent', async () => {
+      eventBus.emitAndWait.mockRejectedValueOnce(new Error('automation listener failed'));
+      const supabase = makeSupa();
+      service = new CommerceFulfillmentService(makeGuild(), supabase as any, eventBus);
+
+      const result = await fulfillClaimed(service, basePayload);
+
+      expect(result.success).toBe(true);
+      expect(result.eventEmitted).toBe(false);
+      expect(eventBus.emitAndWait).toHaveBeenCalledOnce();
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'commerce_finish_fulfillment_outward_intent',
+        expect.objectContaining({
+          p_intent_kind: 'purchase_completed_event',
+          p_outcome: 'uncertain',
+          p_error: expect.stringContaining('automation listener failed'),
+        }),
+      );
+    });
+
+    it('does not begin a receipt intent when pre-send Discord preparation fails', async () => {
+      mockPrepareReceiptDM.mockRejectedValueOnce(new Error('createDM failed'));
+      const supabase = makeSupa();
+      service = new CommerceFulfillmentService(makeGuild(), supabase as any, eventBus);
+
+      const result = await fulfillClaimed(service, basePayload);
+
+      expect(result.success).toBe(false);
+      expect(result.errors.join(' ')).toContain('createDM failed');
+      expect(mockPreparedReceiptSend).not.toHaveBeenCalled();
+      expect(supabase.rpc).not.toHaveBeenCalledWith(
+        'commerce_begin_fulfillment_outward_intent',
+        expect.objectContaining({ p_intent_kind: 'receipt_dm' }),
+      );
+    });
+
     it.each([
       'purchase_completed_event',
       'receipt_dm',
@@ -999,8 +1044,8 @@ describe('CommerceFulfillmentService', () => {
 
         expect(firstResult.success).toBe(false);
         expect(replayResult.success).toBe(true);
-        expect(eventBus.emit).toHaveBeenCalledTimes(1);
-        expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+        expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
+        expect(mockPreparedReceiptSend).toHaveBeenCalledTimes(1);
         expect(supabase.__intents.get(`order-1:${failedIntentKind}`)?.state)
           .toBe('uncertain');
         expect(supabase.rpc).toHaveBeenCalledWith(
@@ -1043,8 +1088,8 @@ describe('CommerceFulfillmentService', () => {
         receiptSent: true,
         errors: [],
       });
-      expect(eventBus.emit).toHaveBeenCalledTimes(1);
-      expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
+      expect(mockPreparedReceiptSend).toHaveBeenCalledTimes(1);
       expect(supabase.__intents.get('order-1:purchase_completed_event')?.state)
         .toBe('uncertain');
       expect(supabase.__intents.get('order-1:receipt_dm')?.state).toBe('sent');
@@ -1363,7 +1408,7 @@ describe('CommerceFulfillmentService', () => {
       expect(result.success).toBe(false);
       expect(result.errors.join(' ')).toContain('Discord did not confirm role');
       expect(result.eventEmitted).not.toBe(true);
-      expect(mockDeliverReceiptDM).not.toHaveBeenCalled();
+      expect(mockPreparedReceiptSend).not.toHaveBeenCalled();
     });
 
     it('rejects a customer/Discord mismatch before permanent or temporary mutation', async () => {
@@ -1621,7 +1666,11 @@ describe('CommerceFulfillmentService', () => {
       expect(result.success).toBe(false);
       expect(harness.member.roles.add).not.toHaveBeenCalled();
       expect(harness.tempUpdates).toEqual([]);
-      expect(eventBus.emit).not.toHaveBeenCalledWith('purchase.completed', expect.anything(), expect.anything());
+      expect(eventBus.emitAndWait).not.toHaveBeenCalledWith(
+        'purchase.completed',
+        expect.anything(),
+        expect.anything(),
+      );
     });
 
     it('starts the full duration at atomic promotion after a delayed pending retry', async () => {
@@ -2149,7 +2198,7 @@ describe('CommerceFulfillmentService', () => {
       });
       expect(mockGrant).not.toHaveBeenCalled();
       expect(mockBeginRoleDelivery).not.toHaveBeenCalled();
-      expect(eventBus.emit).not.toHaveBeenCalled();
+      expect(eventBus.emitAndWait).not.toHaveBeenCalled();
       expect(guild.members.fetch).not.toHaveBeenCalled();
       expect(guild.client.users.fetch).not.toHaveBeenCalled();
     });
@@ -2179,7 +2228,11 @@ describe('CommerceFulfillmentService', () => {
         roleDeliveryClaim: TEST_ACTION_CLAIM,
       });
       expect(mockEnsurePurchaseGrantedRoles).not.toHaveBeenCalled();
-      expect(eventBus.emit).toHaveBeenCalledWith('subscription.activated', 'guild-1', expect.objectContaining({ status: 'activated' }));
+      expect(eventBus.emitAndWait).toHaveBeenCalledWith(
+        'subscription.activated',
+        'guild-1',
+        expect.objectContaining({ status: 'activated' }),
+      );
     });
 
     it('resumes a lost subscription event marker after role delivery settled without re-emitting', async () => {
@@ -2220,8 +2273,8 @@ describe('CommerceFulfillmentService', () => {
         receiptSent: true,
         errors: [],
       });
-      expect(eventBus.emit).toHaveBeenCalledTimes(1);
-      expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
+      expect(mockPreparedReceiptSend).toHaveBeenCalledTimes(1);
       expect(supabase.__intents.get('order-1:subscription_activated_event')?.state)
         .toBe('uncertain');
       expect(supabase.__intents.get('order-1:receipt_dm')?.state).toBe('sent');
@@ -2324,7 +2377,7 @@ describe('CommerceFulfillmentService', () => {
         expect(result.errors.join(' ')).toContain('frozen snapshot');
         expect(mockGrant).not.toHaveBeenCalled();
         expect(mockBeginRoleDelivery).not.toHaveBeenCalled();
-        expect(eventBus.emit).not.toHaveBeenCalled();
+        expect(eventBus.emitAndWait).not.toHaveBeenCalled();
       },
     );
 
@@ -2348,7 +2401,7 @@ describe('CommerceFulfillmentService', () => {
 
       expect(result.success).toBe(true);
       expect(mockGrant).toHaveBeenCalledOnce();
-      expect(eventBus.emit).toHaveBeenCalled();
+      expect(eventBus.emitAndWait).toHaveBeenCalled();
     });
 
     it('reuses and re-confirms the exact subscription entitlement after a worker replay', async () => {
@@ -2426,8 +2479,8 @@ describe('CommerceFulfillmentService', () => {
 
       expect(result.success).toBe(false);
       expect(result.errors.join(' ')).toContain('became terminal during Discord delivery');
-      expect(eventBus.emit).not.toHaveBeenCalled();
-      expect(mockDeliverReceiptDM).not.toHaveBeenCalled();
+      expect(eventBus.emitAndWait).not.toHaveBeenCalled();
+      expect(mockPreparedReceiptSend).not.toHaveBeenCalled();
     });
 
     it('accepts the exact immutable contract persisted before a dashboard legacy release', async () => {
@@ -2776,7 +2829,12 @@ describe('CommerceFulfillmentService', () => {
   describe('subscription_cancelled', () => {
     it('revokes the exact live subscription entitlement and sends DM', async () => {
       const supa = makeSupa({ entitlements: subscriptionLifecycleEntitlement('active') });
-      eventBus = { emit: vi.fn(), on: vi.fn(), off: vi.fn() };
+      eventBus = {
+        emit: vi.fn(),
+        emitAndWait: vi.fn(async () => {}),
+        on: vi.fn(),
+        off: vi.fn(),
+      };
       service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
 
       const result = await fulfillClaimed(service, subscriptionLifecyclePayload);
@@ -3062,7 +3120,7 @@ describe('CommerceFulfillmentService', () => {
     });
 
     it('blocks automatic replay and preserves an uncertain receipt for manual review', async () => {
-      mockDeliverReceiptDM.mockRejectedValueOnce(
+      mockPreparedReceiptSend.mockRejectedValueOnce(
         Object.assign(new Error('Cannot send messages to this user'), { code: 50007 }),
       );
       const supa = makeRecordingSupa();
@@ -3112,7 +3170,7 @@ describe('CommerceFulfillmentService', () => {
     });
 
     it('tells the operator the key is unrecoverable when even the DLQ write fails', async () => {
-      mockDeliverReceiptDM.mockRejectedValueOnce(new Error('503 Service Unavailable'));
+      mockPreparedReceiptSend.mockRejectedValueOnce(new Error('503 Service Unavailable'));
       const supa = makeRecordingSupa({
         dlqInsertError: { message: 'db unavailable' },
       });

@@ -23,7 +23,7 @@ import {
   type PurchaseRoleDeliveryAttempt,
   type RoleDeliveryActionClaim,
 } from '../features/commerce/entitlement-service.js';
-import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
+import { prepareReceiptDM } from '../features/commerce/receipt-builder.js';
 import { resolveBrandKit } from '../features/branding/index.js';
 import { raiseOwnerAlert } from './alert-service.js';
 import { createLogger, getGracePeriodDays } from '@somnibot/shared';
@@ -881,7 +881,7 @@ export class CommerceFulfillmentService {
     const eventOutcome = await this.runFulfillmentOutwardIntent(
       payload,
       'purchase_completed_event',
-      () => this.eventBus.emit('purchase.completed', payload.guild_id, {
+      () => this.eventBus.emitAndWait('purchase.completed', payload.guild_id, {
         discordId: payload.discord_id,
         orderId: payload.order_id,
         orderNumber: payload.order_number,
@@ -1926,7 +1926,7 @@ export class CommerceFulfillmentService {
     const eventOutcome = await this.runFulfillmentOutwardIntent(
       payload,
       'subscription_activated_event',
-      () => this.eventBus.emit('subscription.activated', payload.guild_id, {
+      () => this.eventBus.emitAndWait('subscription.activated', payload.guild_id, {
         discordId: payload.discord_id,
         productId: payload.product_id,
         planId: payload.plan_id ?? '',
@@ -2180,25 +2180,31 @@ export class CommerceFulfillmentService {
     // date. Captured once so a queued redelivery renders the same date the
     // initial DM would have shown, not the date the retry succeeded.
     const orderDate = new Date();
-    const outward = await this.runFulfillmentOutwardIntent(payload, 'receipt_dm', async () => {
-      // Buyer-facing receipt: framed with the owner's white-label kit (cached).
-      const brandKit = await resolveBrandKit(this.supabase, payload.guild_id, {
-        fallbackName: this.guild.name,
-      });
-      const user = await this.guild.client.users.fetch(payload.discord_id);
-      await deliverReceiptDM(
-        user,
-        {
-          orderNumber: payload.order_number,
-          productName: payload.product_name,
-          amountCents: payload.amount_cents,
-          currency: payload.currency,
-          licenseKey: payload.license_key_plaintext ?? null,
-          date: orderDate,
-        },
-        brandKit,
-      );
+    // Preparation is provably pre-send work. Resolve the user, DM channel,
+    // brand, and one immutable payload before the durable row enters
+    // `sending`; a failure here remains safely retryable instead of becoming a
+    // false "Discord may have accepted it" incident.
+    const brandKit = await resolveBrandKit(this.supabase, payload.guild_id, {
+      fallbackName: this.guild.name,
     });
+    const user = await this.guild.client.users.fetch(payload.discord_id);
+    const deliver = await prepareReceiptDM(
+      user,
+      {
+        orderNumber: payload.order_number,
+        productName: payload.product_name,
+        amountCents: payload.amount_cents,
+        currency: payload.currency,
+        licenseKey: payload.license_key_plaintext ?? null,
+        date: orderDate,
+      },
+      brandKit,
+    );
+    const outward = await this.runFulfillmentOutwardIntent(
+      payload,
+      'receipt_dm',
+      deliver,
+    );
     if (outward.state === 'absent') {
       throw new Error('New receipt outward intent unexpectedly returned absent');
     }

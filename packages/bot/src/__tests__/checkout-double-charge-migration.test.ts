@@ -54,6 +54,9 @@ describe('checkout double-charge migration safety contracts', () => {
     expect(entitlementDelete).toBeGreaterThan(proofDelete);
     expect(orderDelete).toBeGreaterThan(entitlementDelete);
     expect(orderLock).toBeGreaterThan(0);
+    expect(purgeDefinition).toMatch(
+      /paid_order\.status IN\s*\(\s*'pending'\s*,\s*'completed'\s*,\s*'pending_review'\s*\)/i,
+    );
     expect(entitlementCancellation).toBeGreaterThan(orderLock);
     expect(pendingOrderCancellation).toBeGreaterThan(orderLock);
     expect(entitlementCancellation).toBeGreaterThan(pendingOrderCancellation);
@@ -65,9 +68,46 @@ describe('checkout double-charge migration safety contracts', () => {
     expect(migration).toContain('commerce_deactivate_pending_checkout');
     expect(migration).toContain('commerce_checkout_deactivation_proofs');
     expect(migration).toContain('authenticated callers cannot retire an active checkout');
+    expect(migration).toContain(
+      'authenticated callers cannot rewrite a provider-payable checkout',
+    );
+    expect(migration).toContain(
+      'authenticated callers cannot delete a provider-payable checkout',
+    );
+    expect(migration).toMatch(
+      /CREATE TRIGGER commerce_orders_normalize_checkout_active\s+BEFORE INSERT OR UPDATE OR DELETE/i,
+    );
+    expect(migration).toMatch(
+      /OLD\.status IN\s*\(\s*'pending'\s*,\s*'completed'\s*,\s*'pending_review'\s*\)/i,
+    );
     expect(migration).toMatch(
       /REVOKE ALL ON FUNCTION public\.commerce_deactivate_pending_checkout[\s\S]+FROM PUBLIC, anon, authenticated/i,
     );
+  });
+
+  it('blocks durable paid work before and during a new checkout reservation', () => {
+    const blockerDefinition = migration.slice(
+      migration.indexOf(
+        'CREATE OR REPLACE FUNCTION public.commerce_find_checkout_blocker',
+      ),
+      migration.indexOf(
+        'CREATE OR REPLACE FUNCTION public.commerce_inspect_checkout_blocker',
+      ),
+    );
+    expect(blockerDefinition).toContain('pg_advisory_xact_lock');
+    expect(blockerDefinition).toContain('commerce_fulfillment_holds');
+    expect(blockerDefinition).toContain("'paid_hold'");
+    expect(blockerDefinition).toContain("'provider_checkout'");
+    expect(blockerDefinition).toContain("'paid_fulfillment'");
+    expect(blockerDefinition).toContain("paid_order.status IN ('completed', 'pending_review')");
+    expect(blockerDefinition).not.toContain('alert.resolved');
+    expect(migration).toMatch(
+      /GRANT EXECUTE ON FUNCTION public\.commerce_inspect_checkout_blocker\(\s*TEXT,\s*UUID,\s*UUID\s*\) TO service_role/i,
+    );
+    expect(migration).toMatch(
+      /CREATE TRIGGER commerce_orders_reservation_guard\s+BEFORE INSERT OR UPDATE OF checkout_active/i,
+    );
+    expect(migration).toContain('commerce_checkout_blocked');
   });
 
   it('owns durable per-order outward event and receipt intent state', () => {

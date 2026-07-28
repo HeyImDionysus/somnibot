@@ -151,4 +151,114 @@ describe('PlatformEventBus', () => {
     eventBus.off('member.joined', bad as any);
     eventBus.off('member.joined', good);
   });
+
+  it('waits for async listeners to complete', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const calls: string[] = [];
+    const handler = vi.fn(async () => {
+      calls.push('started');
+      await pending;
+      calls.push('finished');
+    });
+    eventBus.on('purchase.completed', handler);
+
+    try {
+      const emitted = eventBus.emitAndWait(
+        'purchase.completed',
+        'g1',
+        { discordId: 'u1', productId: 'p1' } as any,
+      );
+
+      expect(calls).toEqual(['started']);
+      let settled = false;
+      void emitted.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      release();
+      await emitted;
+      expect(calls).toEqual(['started', 'finished']);
+    } finally {
+      release();
+      eventBus.off('purchase.completed', handler);
+    }
+  });
+
+  it('waits for every typed and wildcard listener before rejecting', async () => {
+    const calls: string[] = [];
+    const first = vi.fn(() => {
+      calls.push('typed failure');
+      throw new Error('typed listener failed');
+    });
+    const second = vi.fn(async () => {
+      await Promise.resolve();
+      calls.push('typed success');
+    });
+    const wildcard = vi.fn(() => {
+      calls.push('wildcard failure');
+      throw new Error('wildcard listener failed');
+    });
+
+    eventBus.on('purchase.completed', first);
+    eventBus.on('purchase.completed', second);
+    eventBus.onAny(wildcard);
+
+    try {
+      await expect(eventBus.emitAndWait(
+        'purchase.completed',
+        'g1',
+        { discordId: 'u1', productId: 'p1' } as any,
+      )).rejects.toThrow('2 listeners failed for purchase.completed');
+
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(second).toHaveBeenCalledTimes(1);
+      expect(wildcard).toHaveBeenCalledTimes(1);
+      expect(calls).toEqual([
+        'typed failure',
+        'wildcard failure',
+        'typed success',
+      ]);
+    } finally {
+      eventBus.off('purchase.completed', first);
+      eventBus.off('purchase.completed', second);
+      eventBus.off('*' as any, wildcard as any);
+    }
+  });
+
+  it('rejects before dispatch when awaited listeners exceed remaining capacity', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const handler = vi.fn(() => pending);
+    for (let i = 0; i < 79; i++) {
+      eventBus.on('member.joined', handler);
+    }
+
+    try {
+      for (let i = 0; i < 6; i++) {
+        eventBus.emit('member.joined', 'g1', {
+          discordId: `u${i}`,
+          guildId: 'g1',
+        } as any);
+      }
+
+      await expect(eventBus.emitAndWait('member.joined', 'g1', {
+        discordId: 'overflow',
+        guildId: 'g1',
+      } as any)).rejects.toThrow('Backpressure');
+      expect(handler).not.toHaveBeenCalled();
+    } finally {
+      release();
+      for (let i = 0; i < 79; i++) {
+        eventBus.off('member.joined', handler);
+      }
+      await flush();
+    }
+  });
 });
