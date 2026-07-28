@@ -597,10 +597,12 @@ function resolvedSessionDatabaseUrl(): { url?: string; error?: string } {
     };
   }
 
-  const hostname = parsed.hostname.toLowerCase();
+  const hostname = parsed.hostname.toLowerCase().replace(/\.+$/, '');
   const isSupabasePooler =
     hostname === 'pooler.supabase.com'
     || hostname.endsWith('.pooler.supabase.com');
+  const isSupabaseProjectHost =
+    /^db\.[a-z0-9-]+\.supabase\.co$/.test(hostname);
   const connectionOptions = new Map(
     [...parsed.searchParams.entries()]
       .map(([key, value]) => [key.toLowerCase(), value.toLowerCase()]),
@@ -610,7 +612,13 @@ function resolvedSessionDatabaseUrl(): { url?: string; error?: string } {
     || connectionOptions.get('pool_mode') === 'transaction'
     || connectionOptions.get('poolmode') === 'transaction';
 
-  if ((isSupabasePooler && parsed.port === '6543') || transactionModeMarker) {
+  if (
+    (
+      parsed.port === '6543'
+      && (isSupabasePooler || isSupabaseProjectHost)
+    )
+    || transactionModeMarker
+  ) {
     return {
       error:
         'SUPABASE_DB_URL/DATABASE_URL must use a direct PostgreSQL endpoint '

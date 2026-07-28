@@ -410,6 +410,14 @@ describe('migration runner direct-Postgres execution', () => {
     expect(markedResult.errors[0]).toMatch(/transaction pool|session|direct/i);
     expect(clients).toEqual([]);
     expect(mocks.fetch).not.toHaveBeenCalled();
+
+    process.env.SUPABASE_DB_URL =
+      'postgresql://postgres:secret@db.runnerproof.supabase.co.:6543/postgres';
+    const dedicatedResult = await runMigrations();
+    expect(dedicatedResult.ran).toBe(false);
+    expect(dedicatedResult.errors[0]).toMatch(/transaction pool|session|direct/i);
+    expect(clients).toEqual([]);
+    expect(mocks.fetch).not.toHaveBeenCalled();
   });
 
   it('holds one reserved session advisory lock and reproves ownership before every DO/CIC/DO batch', async () => {
