@@ -43,7 +43,11 @@ import { POST as validatePost } from '@/app/api/license/validate/route';
 import { POST as heartbeatPost } from '@/app/api/license/heartbeat/route';
 import { GET as downloadGet } from '@/app/api/downloads/[productId]/[fileId]/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { createMockSupabase, registerTable, buildRequest } from './helpers';
+import {
+  createMockSupabase,
+  registerTable,
+  buildRequest,
+} from './helpers';
 
 const PRODUCT_ID = '00000000-0000-4000-a000-000000000001';
 const FILE_ID = '00000000-0000-4000-a000-0000000000f1';
@@ -58,6 +62,92 @@ function resolveChain(
   value: { data: unknown; error: unknown },
 ) {
   chain.then = vi.fn().mockImplementation((resolve) => resolve?.({ count: null, ...value }));
+}
+
+type EntitlementFixture = {
+  id: string;
+  license_key_id: string;
+  status: string;
+  grace_period_ends_at: string | null;
+  updated_at: string;
+};
+
+/**
+ * Model PostgREST's response cap as a backend behavior. Filters and ordering
+ * run before the cap, exactly as they do on the server; omitting a bounded
+ * status predicate therefore hides a live row beyond `maxRows`.
+ */
+function createCappedEntitlementQuery(
+  rows: EntitlementFixture[],
+  maxRows = 50,
+  queryError: unknown = null,
+) {
+  const query = registerTable(createMockSupabase(), 'entitlements');
+  const filters: Array<(row: EntitlementFixture) => boolean> = [];
+  const orderings: Array<{
+    column: keyof EntitlementFixture;
+    ascending: boolean;
+  }> = [];
+  let requestedLimit: number | null = null;
+
+  query.eq.mockImplementation((column: keyof EntitlementFixture, value: unknown) => {
+    filters.push((row) => row[column] === value);
+    return query;
+  });
+  query.neq.mockImplementation((column: keyof EntitlementFixture, value: unknown) => {
+    filters.push((row) => row[column] !== value);
+    return query;
+  });
+  query.gt.mockImplementation((column: keyof EntitlementFixture, value: string) => {
+    filters.push((row) => {
+      const candidate = row[column];
+      return typeof candidate === 'string' && candidate > value;
+    });
+    return query;
+  });
+  query.order.mockImplementation((
+    column: keyof EntitlementFixture,
+    options?: { ascending?: boolean },
+  ) => {
+    orderings.push({ column, ascending: options?.ascending ?? true });
+    return query;
+  });
+  query.limit.mockImplementation((count: number) => {
+    requestedLimit = count;
+    return query;
+  });
+
+  function resultRows() {
+    const matched = rows.filter((row) => filters.every((filter) => filter(row)));
+    matched.sort((left, right) => {
+      for (const { column, ascending } of orderings) {
+        const leftValue = left[column] ?? '';
+        const rightValue = right[column] ?? '';
+        const comparison = String(leftValue).localeCompare(String(rightValue));
+        if (comparison !== 0) return ascending ? comparison : -comparison;
+      }
+      return 0;
+    });
+    return matched.slice(0, Math.min(requestedLimit ?? maxRows, maxRows));
+  }
+
+  query.then = vi.fn().mockImplementation((resolve) => resolve?.({
+    data: queryError ? null : resultRows(),
+    error: queryError,
+    count: null,
+  }));
+  query.maybeSingle.mockImplementation(async () => {
+    if (queryError) return { data: null, error: queryError };
+    const matched = resultRows();
+    return {
+      data: matched[0] ?? null,
+      error: matched.length > 1
+        ? { message: 'JSON object requested, multiple rows returned', code: 'PGRST116' }
+        : null,
+    };
+  });
+
+  return query;
 }
 
 let errorSpy: ReturnType<typeof vi.spyOn>;
@@ -156,11 +246,20 @@ describe('POST /api/license/heartbeat — heartbeats survive a transient fault',
       over.key ?? { data: { id: 'key-1', status: 'active', product_id: PRODUCT_ID }, error: null },
     );
 
-    const entitlements = registerTable(mock, 'entitlements');
-    resolveChain(
-      entitlements,
-      over.entitlements ?? { data: [{ status: 'active', grace_period_ends_at: null }], error: null },
-    );
+    const entitlementResult = over.entitlements
+      ?? { data: [{ status: 'active', grace_period_ends_at: null }], error: null };
+    const entitlementRows = (
+      Array.isArray(entitlementResult.data) ? entitlementResult.data : []
+    ).map((candidate, index) => {
+      const row = candidate as Partial<EntitlementFixture>;
+      return {
+        id: row.id ?? `entitlement-${index}`,
+        license_key_id: row.license_key_id ?? 'key-1',
+        status: row.status ?? 'cancelled',
+        grace_period_ends_at: row.grace_period_ends_at ?? null,
+        updated_at: row.updated_at ?? new Date(index).toISOString(),
+      };
+    });
 
     const sessions = registerTable(mock, 'license_sessions');
     sessions.maybeSingle.mockResolvedValue(
@@ -172,8 +271,21 @@ describe('POST /api/license/heartbeat — heartbeats survive a transient fault',
     const config = registerTable(mock, 'product_license_config');
     config.maybeSingle.mockResolvedValue({ data: { heartbeat_interval_seconds: 300 }, error: null });
 
+    mock.from.mockImplementation((table: string) => {
+      if (table === 'entitlements') {
+        return createCappedEntitlementQuery(
+          entitlementRows,
+          Number.MAX_SAFE_INTEGER,
+          entitlementResult.error,
+        );
+      }
+      if (table === 'license_keys') return keys;
+      if (table === 'license_sessions') return sessions;
+      if (table === 'product_license_config') return config;
+      return mock._query;
+    });
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
-    return { mock, keys, entitlements, sessions };
+    return { mock, keys, sessions };
   }
 
   function req() {
@@ -260,29 +372,84 @@ describe('POST /api/license/heartbeat — heartbeats survive a transient fault',
     expect(body.status).toBe('active');
   });
 
-  it('does not truncate a live entitlement that sorts after fifty dead rows', async () => {
-    const rows = [
-      ...Array.from({ length: 50 }, (_, index) => ({
-        status: `dead-${index}`,
-        grace_period_ends_at: null,
-      })),
-      { status: 'active', grace_period_ends_at: null },
-    ];
-    const { entitlements } = setup({
-      entitlements: { data: rows, error: null },
+  function setupCappedEntitlements(rows: EntitlementFixture[]) {
+    const mock = createMockSupabase();
+
+    const keys = registerTable(mock, 'license_keys');
+    keys.maybeSingle.mockResolvedValue({
+      data: { id: 'key-1', status: 'active', product_id: PRODUCT_ID },
+      error: null,
+    });
+    const sessions = registerTable(mock, 'license_sessions');
+    sessions.maybeSingle.mockResolvedValue({
+      data: { id: SESSION_ID, active: true },
+      error: null,
+    });
+    resolveChain(sessions, { data: null, error: null });
+    const config = registerTable(mock, 'product_license_config');
+    config.maybeSingle.mockResolvedValue({
+      data: { heartbeat_interval_seconds: 300 },
+      error: null,
     });
 
-    // Model PostgREST cardinality instead of the helper's usual fluent no-op:
-    // if production calls .limit(50), the live 51st row really is absent.
-    entitlements.limit.mockImplementation((count: number) => {
-      resolveChain(entitlements, { data: rows.slice(0, count), error: null });
-      return entitlements;
+    mock.from.mockImplementation((table: string) => {
+      if (table === 'entitlements') return createCappedEntitlementQuery(rows);
+      if (table === 'license_keys') return keys;
+      if (table === 'license_sessions') return sessions;
+      if (table === 'product_license_config') return config;
+      return mock._query;
     });
+    vi.mocked(createAdminSupabase).mockReturnValue(mock as never);
+  }
+
+  it('finds an active entitlement beyond the backend response cap', async () => {
+    const rows: EntitlementFixture[] = [
+      ...Array.from({ length: 50 }, (_, index) => ({
+        id: `dead-${index}`,
+        license_key_id: 'key-1',
+        status: 'cancelled',
+        grace_period_ends_at: null,
+        updated_at: new Date(index).toISOString(),
+      })),
+      {
+        id: 'live-active',
+        license_key_id: 'key-1',
+        status: 'active',
+        grace_period_ends_at: null,
+        updated_at: new Date(51).toISOString(),
+      },
+    ];
+    setupCappedEntitlements(rows);
 
     const body = await (await heartbeatPost(req() as never)).json();
     expect(body.valid).toBe(true);
     expect(body.status).toBe('active');
-    expect(entitlements.limit).not.toHaveBeenCalled();
+  });
+
+  it('finds an unexpired grace entitlement beyond the backend response cap', async () => {
+    const graceDeadline = new Date(Date.now() + 60_000).toISOString();
+    const rows: EntitlementFixture[] = [
+      ...Array.from({ length: 50 }, (_, index) => ({
+        id: `dead-${index}`,
+        license_key_id: 'key-1',
+        status: 'cancelled',
+        grace_period_ends_at: null,
+        updated_at: new Date(index).toISOString(),
+      })),
+      {
+        id: 'live-grace',
+        license_key_id: 'key-1',
+        status: 'grace_period',
+        grace_period_ends_at: graceDeadline,
+        updated_at: new Date(51).toISOString(),
+      },
+    ];
+    setupCappedEntitlements(rows);
+
+    const body = await (await heartbeatPost(req() as never)).json();
+    expect(body.valid).toBe(true);
+    expect(body.status).toBe('grace_period');
+    expect(body.grace_period_ends_at).toBe(graceDeadline);
   });
 
   it('reports a lapsed payment grace as expired, and an unexpired one as still valid', async () => {

@@ -7,7 +7,7 @@
  *
  * Signed URL params: sig, exp, cid (customer ID), gid (guild ID)
  */
-import { NextRequest, NextResponse } from 'next/server';
+import { after, NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { verifySignedDownloadUrl } from '@/lib/api/signed-url';
@@ -210,6 +210,29 @@ export async function GET(
     }
   }
 
+  /**
+   * Hand delivery back to the caller as soon as the nonce is consumed.
+   * Analytics belongs to the route lifecycle, not the delivery critical path:
+   * Next.js keeps this callback alive after the response is sent, bounded by
+   * the route's platform max duration.
+   */
+  async function deliver(response: NextResponse): Promise<NextResponse> {
+    const replay = await consumeDeliveryNonce();
+    if (replay) return replay;
+
+    try {
+      after(recordDeliveredDownload);
+    } catch (error) {
+      // Scheduling is best-effort too. A missing lifecycle hook must not burn a
+      // nonce and replace a ready redirect with an error.
+      console.error(
+        '[Downloads counter] scheduling failed:',
+        error instanceof Error ? error.message : 'unknown error',
+      );
+    }
+    return response;
+  }
+
   // If external URL, redirect — V6 Audit §2.4: enforce HTTPS
   if (file.external_url) {
     try {
@@ -220,11 +243,7 @@ export async function GET(
           { status: 400 },
         );
       }
-      const response = NextResponse.redirect(externalUrl);
-      const replay = await consumeDeliveryNonce();
-      if (replay) return replay;
-      await recordDeliveredDownload();
-      return response;
+      return deliver(NextResponse.redirect(externalUrl));
     } catch {
       return NextResponse.json({ error: 'Invalid external URL' }, { status: 400 });
     }
@@ -241,11 +260,7 @@ export async function GET(
     }
 
     if (signedUrl?.signedUrl) {
-      const response = NextResponse.redirect(signedUrl.signedUrl);
-      const replay = await consumeDeliveryNonce();
-      if (replay) return replay;
-      await recordDeliveredDownload();
-      return response;
+      return deliver(NextResponse.redirect(signedUrl.signedUrl));
     }
   }
 

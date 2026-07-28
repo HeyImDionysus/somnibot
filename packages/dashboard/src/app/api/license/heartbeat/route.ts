@@ -16,7 +16,6 @@ import { rateLimits } from '@/lib/api/rate-limit';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { licenseUnavailable } from '@/lib/api/license-status';
 import { getClientIp } from '@/lib/api/client-ip';
-import { isEntitlementAccessLive } from '@somnibot/shared';
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
@@ -73,42 +72,101 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // Check entitlement.
-  //
-  // Fetch the whole candidate set rather than `.single()`. A customer can hold
-  // more than one entitlement row for the same key (a re-buy, or an overlapping
-  // manual grant); `.single()` turns that into a PostgREST error, and the old
-  // code discarded the error and reported the customer as `revoked`. Mirrors
-  // the download route's "any live row grants access" rule.
-  const { data: entitlements, error: entitlementError } = await supabase
+  // Check entitlement with bounded server-side selection. Fetching the whole
+  // candidate set is unsafe even without an explicit `.limit()`: PostgREST can
+  // cap response rows, which lets enough dead rows hide a valid one. An active
+  // row always wins; otherwise choose the unexpired grace row with the latest
+  // deadline. Every query returns at most one deterministic row.
+  const { data: activeEntitlement, error: activeEntitlementError } = await supabase
     .from('entitlements')
-    .select('status, grace_period_ends_at')
-    .eq('license_key_id', licenseKey.id);
+    .select('id, status, grace_period_ends_at')
+    .eq('license_key_id', licenseKey.id)
+    .eq('status', 'active')
+    .order('id', { ascending: true })
+    .limit(1)
+    .maybeSingle();
 
-  if (entitlementError) {
-    return licenseUnavailable('License/heartbeat entitlement lookup', entitlementError, HEARTBEAT_EXTRA);
+  if (activeEntitlementError) {
+    return licenseUnavailable(
+      'License/heartbeat active entitlement lookup',
+      activeEntitlementError,
+      HEARTBEAT_EXTRA,
+    );
   }
 
-  const rows = (entitlements ?? []) as { status: string; grace_period_ends_at: string | null }[];
-  // W2: compute the grace window at heartbeat time — a lapsed-but-
-  // unreconciled grace_period row must not keep the session alive until the
-  // next reconciliation sweep. Reject only; reconciliation owns the status
-  // transition (audit trail + role revocation). `isEntitlementAccessLive` is
-  // the shared predicate used by validate + downloads.
-  // Prefer a plainly active row over a grace row, so a customer who holds both
-  // is not warned about a payment failure that another entitlement covers.
-  const live = rows.find((e) => e.status === 'active')
-    ?? rows.find((e) => isEntitlementAccessLive(e));
+  let live = activeEntitlement;
+  const heartbeatAt = new Date().toISOString();
 
   if (!live) {
-    // Prefer the most specific explanation we can justify from the rows we
-    // read: a lapsed payment grace reads as 'expired', otherwise report the
-    // recorded status, and only fall back to 'revoked' when there is genuinely
-    // no entitlement row at all.
-    const lapsedGrace = rows.some((e) => e.status === 'grace_period');
+    const { data: graceEntitlement, error: graceEntitlementError } = await supabase
+      .from('entitlements')
+      .select('id, status, grace_period_ends_at')
+      .eq('license_key_id', licenseKey.id)
+      .eq('status', 'grace_period')
+      .gt('grace_period_ends_at', heartbeatAt)
+      .order('grace_period_ends_at', { ascending: false })
+      .order('id', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (graceEntitlementError) {
+      return licenseUnavailable(
+        'License/heartbeat grace entitlement lookup',
+        graceEntitlementError,
+        HEARTBEAT_EXTRA,
+      );
+    }
+    live = graceEntitlement;
+  }
+
+  if (!live) {
+    // No live row exists. A bounded grace lookup distinguishes a lapsed
+    // payment window from other recorded states; otherwise report the most
+    // recently updated non-live status with an id tie-breaker.
+    const { data: lapsedGrace, error: lapsedGraceError } = await supabase
+      .from('entitlements')
+      .select('id, status')
+      .eq('license_key_id', licenseKey.id)
+      .eq('status', 'grace_period')
+      .order('grace_period_ends_at', { ascending: false })
+      .order('id', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (lapsedGraceError) {
+      return licenseUnavailable(
+        'License/heartbeat lapsed grace lookup',
+        lapsedGraceError,
+        HEARTBEAT_EXTRA,
+      );
+    }
+
+    let recordedStatus: string | null = null;
+    if (!lapsedGrace) {
+      const { data: recordedEntitlement, error: recordedEntitlementError } = await supabase
+        .from('entitlements')
+        .select('id, status')
+        .eq('license_key_id', licenseKey.id)
+        .neq('status', 'active')
+        .neq('status', 'grace_period')
+        .order('updated_at', { ascending: false })
+        .order('id', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      if (recordedEntitlementError) {
+        return licenseUnavailable(
+          'License/heartbeat recorded entitlement lookup',
+          recordedEntitlementError,
+          HEARTBEAT_EXTRA,
+        );
+      }
+      recordedStatus = recordedEntitlement?.status ?? null;
+    }
+
     return NextResponse.json({
       valid: false,
-      status: lapsedGrace ? 'expired' : (rows[0]?.status ?? 'revoked'),
+      status: lapsedGrace ? 'expired' : (recordedStatus ?? 'revoked'),
       next_heartbeat_seconds: 0,
     });
   }

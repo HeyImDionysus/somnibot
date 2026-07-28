@@ -7,6 +7,15 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('next/server', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('next/server')>();
+  return {
+    ...actual,
+    after: vi.fn((callback: () => void | Promise<void>) => {
+      void callback();
+    }),
+  };
+});
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/api/rate-limit', () => ({
   rateLimits: {
@@ -24,7 +33,7 @@ vi.mock('@/lib/api/download-nonce', () => ({
   consumeDownloadNonce: vi.fn(),
 }));
 
-import { NextRequest } from 'next/server';
+import { after, NextRequest } from 'next/server';
 import { GET as downloadGet } from '@/app/api/downloads/[productId]/[fileId]/route';
 import { consumeDownloadNonce } from '@/lib/api/download-nonce';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -141,5 +150,36 @@ describe('GET /api/downloads — nonce delivery boundary', () => {
     expect(consumeDownloadNonce).not.toHaveBeenCalled();
 
     expect((await downloadGet(request() as never, params)).status).toBe(307);
+  });
+
+  it('returns the redirect after nonce consumption even when analytics never settles', async () => {
+    let signalAnalyticsStarted!: () => void;
+    const analyticsStarted = new Promise<void>((resolve) => {
+      signalAnalyticsStarted = resolve;
+    });
+    const hangingAnalytics = new Promise<{ error: null }>(() => {});
+    const mock = mockDownload();
+    mock.rpc.mockImplementation(() => {
+      signalAnalyticsStarted();
+      return hangingAnalytics;
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue(mock as never);
+
+    const responsePromise = downloadGet(request() as never, params);
+    await analyticsStarted;
+
+    const outcome = await Promise.race([
+      responsePromise.then((response) => ({ kind: 'response' as const, response })),
+      new Promise<{ kind: 'blocked' }>((resolve) => {
+        setImmediate(() => resolve({ kind: 'blocked' }));
+      }),
+    ]);
+
+    expect(outcome.kind).toBe('response');
+    if (outcome.kind === 'response') {
+      expect(outcome.response.status).toBe(307);
+      expect(outcome.response.headers.get('location')).toBe('https://storage.example/download');
+    }
+    expect(after).toHaveBeenCalledOnce();
   });
 });
