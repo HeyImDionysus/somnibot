@@ -1,12 +1,10 @@
 /**
  * Client IP derivation — rate limiting must not trust a client-supplied header.
  *
- * `x-forwarded-for.split(',')[0]` reads the value the CLIENT sent. The header is
- * append-only: a client that sends `X-Forwarded-For: 9.9.9.9` and connects to
- * Caddy produces `9.9.9.9, <real ip>`, so index 0 is the attacker's own string.
- * Rotating it defeated `licenseValidate` (30/min) and `licenseFailedAttempt`
- * (5/min) outright and poisoned the `ip_address` column the IP-mismatch fraud
- * signal reads.
+ * `x-forwarded-for.split(',')[0]` trusts the value the client supplied when an
+ * append-only proxy preserves a forged prefix. The shipped Caddy now removes
+ * that ambiguity by emitting one policy-derived address; the dashboard still
+ * enforces a right-counted boundary for custom proxy stacks.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
@@ -38,7 +36,7 @@ afterEach(() => {
 });
 
 describe('getTrustedProxyHops', () => {
-  it('defaults to 1 — Caddy on the VPS, or the public tunnel locally', () => {
+  it('defaults to 1 — the shipped Caddy sends one canonical client address', () => {
     expect(getTrustedProxyHops()).toBe(1);
   });
 
@@ -47,21 +45,36 @@ describe('getTrustedProxyHops', () => {
     expect(getTrustedProxyHops()).toBe(2);
   });
 
-  it('falls back to the default (and warns) on a nonsense value', () => {
+  it('fails closed (and warns) on a nonsense value', () => {
     process.env[TRUSTED_PROXY_HOPS_ENV] = 'yes-please';
-    expect(getTrustedProxyHops()).toBe(1);
+    expect(getTrustedProxyHops()).toBe(0);
     expect(warnSpy).toHaveBeenCalled();
   });
 
-  it('rejects a negative value rather than treating it as an offset', () => {
+  it('fails closed on a negative value rather than treating it as an offset', () => {
     process.env[TRUSTED_PROXY_HOPS_ENV] = '-3';
-    expect(getTrustedProxyHops()).toBe(1);
+    expect(getTrustedProxyHops()).toBe(0);
   });
+
+  it.each(['1.5', '1e2', '0x2', '9007199254740992'])(
+    'accepts only plain decimal integers, not %s',
+    (value) => {
+      process.env[TRUSTED_PROXY_HOPS_ENV] = value;
+      expect(getTrustedProxyHops()).toBe(0);
+      expect(getClientIp(req({ 'x-forwarded-for': REAL_CLIENT })))
+        .toBe(UNKNOWN_CLIENT_IP);
+    },
+  );
 });
 
 describe('getClientIp — one trusted hop (the shipped default)', () => {
+  it('accepts the one canonical address emitted by the shipped Caddy', () => {
+    expect(getClientIp(req({ 'x-forwarded-for': REAL_CLIENT }))).toBe(REAL_CLIENT);
+  });
+
   it('reads the address the proxy appended, not the one the client sent', () => {
-    // Exactly what Caddy produces for a spoofing client.
+    // Defence in depth for a custom append-only proxy. The shipped Caddy
+    // canonicalises this to one address before it reaches the dashboard.
     expect(getClientIp(req({ 'x-forwarded-for': `${SPOOFED}, ${REAL_CLIENT}` })))
       .toBe(REAL_CLIENT);
   });
@@ -83,17 +96,44 @@ describe('getClientIp — one trusted hop (the shipped default)', () => {
     expect(buckets).toEqual(new Set([REAL_CLIENT]));
   });
 
-  it('handles the honest single-entry case', () => {
-    expect(getClientIp(req({ 'x-forwarded-for': REAL_CLIENT }))).toBe(REAL_CLIENT);
+  it('tolerates whitespace around valid entries', () => {
+    expect(getClientIp(req({ 'x-forwarded-for': ` ${SPOOFED} , ${REAL_CLIENT}  ` })))
+      .toBe(REAL_CLIENT);
   });
 
-  it('tolerates whitespace and empty entries', () => {
-    expect(getClientIp(req({ 'x-forwarded-for': ` ${SPOOFED} , , ${REAL_CLIENT}  ` })))
-      .toBe(REAL_CLIENT);
+  it('fails closed on an empty chain entry because filtering it changes hop positions', () => {
+    expect(getClientIp(req({ 'x-forwarded-for': `${SPOOFED}, , ${REAL_CLIENT}` })))
+      .toBe(UNKNOWN_CLIENT_IP);
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it('fails closed when the selected value is not an IP address', () => {
+    expect(getClientIp(req({ 'x-forwarded-for': 'attacker-controlled' })))
+      .toBe(UNKNOWN_CLIENT_IP);
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it.each(['203.0.113.7:443', '[2001:db8::7]', 'unknown'])(
+    'rejects non-canonical address syntax: %s',
+    (value) => {
+      expect(getClientIp(req({ 'x-forwarded-for': value })))
+        .toBe(UNKNOWN_CLIENT_IP);
+      expect(warnSpy).toHaveBeenCalled();
+    },
+  );
+
+  it('accepts a canonical IPv6 address', () => {
+    expect(getClientIp(req({ 'x-forwarded-for': '2001:db8::7' }))).toBe('2001:db8::7');
   });
 });
 
 describe('getClientIp — stacked proxies', () => {
+  it('accepts exactly the configured number of valid entries', () => {
+    process.env[TRUSTED_PROXY_HOPS_ENV] = '2';
+    expect(getClientIp(req({ 'x-forwarded-for': `${REAL_CLIENT}, 10.0.0.5` })))
+      .toBe(REAL_CLIENT);
+  });
+
   it('counts two hops from the right when configured for two', () => {
     process.env[TRUSTED_PROXY_HOPS_ENV] = '2';
     // client -> Cloudflare -> Caddy: `spoof, realClient, cloudflare-edge`
@@ -101,10 +141,11 @@ describe('getClientIp — stacked proxies', () => {
       .toBe(REAL_CLIENT);
   });
 
-  it('falls back to the leftmost entry when the chain is shorter than the hop count', () => {
-    // Every entry came from a trusted proxy, so the leftmost is trustworthy.
+  it('fails closed when the chain is shorter than the configured hop count', () => {
     process.env[TRUSTED_PROXY_HOPS_ENV] = '3';
-    expect(getClientIp(req({ 'x-forwarded-for': REAL_CLIENT }))).toBe(REAL_CLIENT);
+    expect(getClientIp(req({ 'x-forwarded-for': REAL_CLIENT })))
+      .toBe(UNKNOWN_CLIENT_IP);
+    expect(warnSpy).toHaveBeenCalled();
   });
 });
 

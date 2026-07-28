@@ -37,10 +37,9 @@ describe('checkAdminRateLimit', () => {
 
     const response = await checkAdminRateLimit(
       new Request('https://dashboard.test/api/settings', {
-        // X-Forwarded-For is append-only: our proxy appended the address it saw,
-        // so the RIGHTMOST entry is the only trustworthy one. The leading value
-        // is whatever the caller chose to send.
-        headers: { 'x-forwarded-for': '203.0.113.7, 198.51.100.2' },
+        // The shipped Caddy overwrites X-Forwarded-For with one canonical client
+        // address after applying its trusted-proxy policy.
+        headers: { 'x-forwarded-for': '198.51.100.2' },
       }),
     );
 
@@ -136,7 +135,7 @@ describe('checkAdminRateLimit — X-Forwarded-For spoofing', () => {
 
     await checkAdminRateLimit(
       new Request('https://dashboard.test/api/settings', {
-        // client, cdn, caddy — with two trusted hops the client is 3rd from right.
+        // forged prefix, real client, CDN edge — two trusted hops select client.
         headers: { 'x-forwarded-for': '203.0.113.7, 198.51.100.2, 10.0.0.5' },
       }),
     );
@@ -144,12 +143,22 @@ describe('checkAdminRateLimit — X-Forwarded-For spoofing', () => {
     expect(lastBucketKey()).toBe('admin:/api/settings:198.51.100.2');
   });
 
-  it('never lets a forged single-entry header stand in for a real address', async () => {
+  it('fails closed when a declared multi-proxy chain is too short', async () => {
+    process.env[TRUSTED_PROXY_HOPS_ENV] = '2';
     allow();
 
-    // Only one entry and one trusted hop: that entry WAS written by our proxy,
-    // so it is legitimately the client. This documents the boundary — the helper
-    // trusts exactly the configured number of hops, no more and no fewer.
+    await checkAdminRateLimit(
+      new Request('https://dashboard.test/api/settings', {
+        headers: { 'x-forwarded-for': '203.0.113.7' },
+      }),
+    );
+
+    expect(lastBucketKey()).toBe('admin:/api/settings:unknown');
+  });
+
+  it('accepts the canonical single-entry header emitted by shipped Caddy', async () => {
+    allow();
+
     await checkAdminRateLimit(
       new Request('https://dashboard.test/api/settings', {
         headers: { 'x-forwarded-for': '203.0.113.7' },

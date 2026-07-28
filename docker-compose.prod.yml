@@ -57,6 +57,11 @@ services:
   caddy:
     image: caddy:2.9-alpine
     restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+      # Space-separated exact egress CIDRs for a CDN/proxy in front of Caddy.
+      # TEST-NET-1 is an intentionally non-production, fail-safe default.
+      CADDY_TRUSTED_PROXY_CIDRS: ${CADDY_TRUSTED_PROXY_CIDRS:-192.0.2.0/24}
     ports:
       - "80:80"
       - "443:443"
