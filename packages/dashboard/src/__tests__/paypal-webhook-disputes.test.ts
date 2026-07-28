@@ -58,6 +58,7 @@ import {
 } from '@/lib/paypal-webhook-events';
 
 const GUILD_ID = '111111111111111111';
+const SECOND_GUILD_ID = '222222222222222222';
 const CAPTURE_ID = 'CAPTURE-DISPUTED-1';
 const ORDER_UUID = '00000000-0000-4000-8000-000000000001';
 
@@ -363,7 +364,10 @@ describe('handleDisputeEvent', () => {
 
 describe('handleCaptureDenied', () => {
   it('cancels the pending order and alerts', async () => {
-    resolvers['orders.select'] = () => ({ data: { id: ORDER_UUID, status: 'pending' }, error: null });
+    resolvers['orders.select'] = () => ({
+      data: { id: ORDER_UUID, status: 'pending', guild_id: GUILD_ID },
+      error: null,
+    });
     resolvers['orders.update'] = () => ({ data: [{ id: ORDER_UUID }], error: null });
 
     await handleCaptureDenied(supabase as never, deniedCaptureResource());
@@ -384,7 +388,10 @@ describe('handleCaptureDenied', () => {
   });
 
   it('never touches an order that is no longer pending', async () => {
-    resolvers['orders.select'] = () => ({ data: { id: ORDER_UUID, status: 'completed' }, error: null });
+    resolvers['orders.select'] = () => ({
+      data: { id: ORDER_UUID, status: 'completed', guild_id: GUILD_ID },
+      error: null,
+    });
 
     await handleCaptureDenied(supabase as never, deniedCaptureResource());
 
@@ -393,28 +400,49 @@ describe('handleCaptureDenied', () => {
       .toMatchObject({ order_cancelled: false });
   });
 
-  it('scopes the order lookup to the guild the checkout claimed', async () => {
+  it('does not cancel or alert from valid foreign custom data without an exact local order', async () => {
+    process.env.DISCORD_GUILD_ID = GUILD_ID;
     resolvers['orders.select'] = () => ({ data: null, error: null });
 
     await handleCaptureDenied(supabase as never, deniedCaptureResource());
 
     const lookup = opsFor('orders', 'select')[0]!;
-    expect(filterArgs(lookup, 'eq')).toContainEqual(['guild_id', GUILD_ID]);
     expect(filterArgs(lookup, 'eq')).toContainEqual(['paypal_order_id', 'PAYPAL-ORDER-1']);
+    expect(filterArgs(lookup, 'eq').some((args) => args[0] === 'guild_id')).toBe(false);
+    expect(opsFor('orders', 'update')).toHaveLength(0);
+    expect(opsFor('alerts')).toHaveLength(0);
   });
 
-  it('alerts even when custom_id is malformed and no order can be found', async () => {
-    process.env.DISCORD_GUILD_ID = '333333333333333333';
+  it('cancels and alerts in the local order guild when custom_id is malformed', async () => {
+    resolvers['orders.select'] = () => ({
+      data: { id: ORDER_UUID, status: 'pending', guild_id: GUILD_ID },
+      error: null,
+    });
+    resolvers['orders.update'] = () => ({ data: [{ id: ORDER_UUID }], error: null });
 
     await handleCaptureDenied(
       supabase as never,
       deniedCaptureResource({ custom_id: 'not-json' }),
     );
 
-    expect(opsFor('orders')).toHaveLength(0);
+    expect(opsFor('orders', 'select')).toHaveLength(1);
+    expect(opsFor('orders', 'update')).toHaveLength(1);
     expect(opsFor('alerts', 'insert')[0]!.payload).toMatchObject({
-      guild_id: '333333333333333333',
+      guild_id: GUILD_ID,
     });
+  });
+
+  it('fails closed when custom_id claims a different guild than the local order', async () => {
+    resolvers['orders.select'] = () => ({
+      data: { id: ORDER_UUID, status: 'pending', guild_id: SECOND_GUILD_ID },
+      error: null,
+    });
+
+    await expect(
+      handleCaptureDenied(supabase as never, deniedCaptureResource()),
+    ).rejects.toThrow(/guild/i);
+
+    expect(opsFor('orders', 'update')).toHaveLength(0);
   });
 
   it('throws when the capture has no usable provider id', async () => {
@@ -446,7 +474,10 @@ describe('route dispatch', () => {
   });
 
   it('routes PAYMENT.CAPTURE.DENIED to the denied-capture handler', async () => {
-    resolvers['orders.select'] = () => ({ data: { id: ORDER_UUID, status: 'pending' }, error: null });
+    resolvers['orders.select'] = () => ({
+      data: { id: ORDER_UUID, status: 'pending', guild_id: GUILD_ID },
+      error: null,
+    });
     resolvers['orders.update'] = () => ({ data: [{ id: ORDER_UUID }], error: null });
 
     const res = await POST(makeReplay({
@@ -460,6 +491,47 @@ describe('route dispatch', () => {
       '[Webhook] Unhandled event: PAYMENT.CAPTURE.DENIED',
     );
     expect(opsFor('orders', 'update')[0]!.payload).toMatchObject({ status: 'cancelled' });
+  });
+
+  it('keeps an unmatched denied capture unattributed despite valid foreign custom data', async () => {
+    process.env.DISCORD_GUILD_ID = GUILD_ID;
+    resolvers['orders.select'] = () => ({ data: null, error: null });
+
+    const req = new Request('http://localhost/api/paypal/webhook', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'paypal-auth-algo': 'SHA256withRSA',
+        'paypal-cert-url': 'https://example.com/cert',
+        'paypal-transmission-id': 'EVT-DENIED-FOREIGN',
+        'paypal-transmission-sig': 'sig-1',
+        'paypal-transmission-time': new Date().toISOString(),
+      },
+      body: JSON.stringify({
+        id: 'EVT-DENIED-FOREIGN',
+        event_type: 'PAYMENT.CAPTURE.DENIED',
+        resource: deniedCaptureResource(),
+      }),
+    });
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    let res: Response;
+    try {
+      res = await POST(req as never);
+    } finally {
+      global.fetch = originalFetch;
+    }
+
+    expect(res.status).toBe(200);
+    expect(opsFor('orders', 'update')).toHaveLength(0);
+    expect(opsFor('alerts')).toHaveLength(0);
+    // Both route attribution and the handler perform the exact global order
+    // lookup; neither short-circuits through custom_id.
+    expect(opsFor('orders', 'select')).toHaveLength(2);
+    expect(opsFor('webhook_events', 'upsert')[0]!.payload)
+      .not.toHaveProperty('guild_id');
   });
 
   it('attributes a dispute webhook row to the guild that owns the payment', async () => {

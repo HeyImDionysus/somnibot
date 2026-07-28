@@ -184,10 +184,34 @@ async function lookupPaymentGuildId(
   return typeof data?.guild_id === 'string' ? data.guild_id : null;
 }
 
+async function lookupPayPalOrderGuildId(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  paypalOrderId: string,
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from('orders')
+    .select('guild_id')
+    .eq('paypal_order_id', paypalOrderId)
+    .maybeSingle();
+  if (error) {
+    throw new Error(`Failed to resolve PayPal order webhook guild: ${error.message}`);
+  }
+  return typeof data?.guild_id === 'string' ? data.guild_id : null;
+}
+
 async function resolveWebhookGuildId(
   supabase: ReturnType<typeof createAdminSupabase>,
   event: PayPalWebhookEvent,
 ): Promise<string | null> {
+  if (event.event_type === 'PAYMENT.CAPTURE.DENIED') {
+    const supplementary = event.resource.supplementary_data as
+      { related_ids?: { order_id?: unknown } } | undefined;
+    const paypalOrderId = supplementary?.related_ids?.order_id;
+    return typeof paypalOrderId === 'string'
+      ? lookupPayPalOrderGuildId(supabase, paypalOrderId)
+      : null;
+  }
+
   const customIdGuildId = parseCustomIdGuildId(event.resource.custom_id);
   if (customIdGuildId) return customIdGuildId;
 

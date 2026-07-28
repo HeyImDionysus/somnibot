@@ -15,6 +15,7 @@ describe('middleware health access', () => {
     delete process.env.SESSION_TOKEN;
     delete process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE;
     delete process.env.SOMNIBOT_CSP_INLINE_COMPAT;
+    delete process.env.PAYPAL_RECONCILE_SECRET;
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://example.supabase.co';
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'test-key';
 
@@ -112,6 +113,53 @@ describe('middleware health access', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('location')).toBeNull();
     expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
+  it('lets an exact valid scheduler secret reach the reconcile handler without Supabase or CSRF', async () => {
+    process.env.PAYPAL_RECONCILE_SECRET = 'scheduler-secret-value';
+
+    const res = await runWithoutPublicSupabaseEnv('/api/paypal/reconcile', {
+      method: 'POST',
+      headers: { 'x-reconcile-secret': 'scheduler-secret-value' },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
+  it('does not bypass owner auth when the scheduler secret is wrong', async () => {
+    process.env.PAYPAL_RECONCILE_SECRET = 'scheduler-secret-value';
+
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/api/paypal/reconcile', {
+      method: 'POST',
+      headers: { 'x-reconcile-secret': 'wrong-secret-value' },
+    }));
+
+    expect(mockCreateServerClient).toHaveBeenCalled();
+    expect(res.status).toBe(307);
+    expect(res.headers.get('location')).toBe('http://localhost:3000/login');
+  });
+
+  it('keeps authenticated owner reconcile requests behind CSRF', async () => {
+    process.env.PAYPAL_RECONCILE_SECRET = 'scheduler-secret-value';
+    mockCreateServerClient.mockReturnValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: '00000000-0000-4000-8000-000000000001' } },
+        }),
+      },
+    } as unknown as ReturnType<typeof createServerClient>);
+
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/api/paypal/reconcile', {
+      method: 'POST',
+    }));
+
+    expect(mockCreateServerClient).toHaveBeenCalled();
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'Missing CSRF token' });
   });
 
   it('does not bypass remote auth for non-GET /api/health requests', async () => {

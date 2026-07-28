@@ -7,9 +7,9 @@
  * still runs, because the dashboard container has its own healthcheck and
  * restart policy.
  *
- * This adds no infrastructure. It is the same mechanism the bot already uses
- * for its 6-hourly entitlement reconciliation (`setInterval` in a long-lived
- * process), just hosted somewhere that does not depend on the bot being alive.
+ * This adds no infrastructure. A completion-relative timeout starts each pass
+ * six hours after the preceding attempt finishes, hosted somewhere that does
+ * not depend on the bot being alive.
  *
  * Safety properties:
  *   - The pass takes a compare-and-set lease in `instance_settings`, so
@@ -23,6 +23,8 @@
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import {
   DEFAULT_LEASE_MS,
+  recordScheduledReconciliationFailure,
+  resolveScheduledReconciliationFailure,
   runPayPalReconciliation,
 } from '@/lib/paypal-reconciliation';
 
@@ -34,8 +36,9 @@ const INITIAL_DELAY_MS = 5 * 60 * 1000;
 
 let started = false;
 let running = false;
+let nextRun: ReturnType<typeof setTimeout> | null = null;
 
-async function runOnce(): Promise<void> {
+export async function runScheduledPayPalReconciliationOnce(): Promise<void> {
   // Cheap in-process guard on top of the DB lease: no point issuing PayPal
   // requests if this instance's previous pass is still going.
   if (running) return;
@@ -48,12 +51,44 @@ async function runOnce(): Promise<void> {
     });
     if (result.status === 'failed') {
       console.error(`[PayPalReconcile] Scheduled pass failed: ${result.reason}`);
+      const visible = await recordScheduledReconciliationFailure(supabase, result);
+      if (!visible) {
+        console.error(
+          '[PayPalReconcile] Scheduled failure could not be persisted and alerted',
+        );
+      }
+    } else if (result.status === 'completed') {
+      const resolved = await resolveScheduledReconciliationFailure(supabase);
+      if (!resolved) {
+        console.error(
+          '[PayPalReconcile] Completed pass could not resolve the standing scheduler-failure alert',
+        );
+      }
     }
   } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
     console.error(
       '[PayPalReconcile] Scheduled pass threw:',
-      err instanceof Error ? err.message : err,
+      reason,
     );
+    try {
+      const supabase = createAdminSupabase();
+      const visible = await recordScheduledReconciliationFailure(supabase, {
+        status: 'failed',
+        reason,
+        retriable: true,
+      });
+      if (!visible) {
+        console.error(
+          '[PayPalReconcile] Thrown scheduler failure could not be persisted and alerted',
+        );
+      }
+    } catch (visibilityError) {
+      console.error(
+        '[PayPalReconcile] Failed to make thrown scheduler failure visible:',
+        visibilityError instanceof Error ? visibilityError.message : visibilityError,
+      );
+    }
   } finally {
     running = false;
   }
@@ -71,21 +106,35 @@ export function startPayPalReconcileScheduler(): void {
   }
   started = true;
 
-  const initial = setTimeout(() => { void runOnce(); }, INITIAL_DELAY_MS);
-  const interval = setInterval(() => { void runOnce(); }, INTERVAL_MS);
-
-  // Never hold the process open; a shutdown should not wait on a timer.
-  initial.unref?.();
-  interval.unref?.();
+  scheduleNext(INITIAL_DELAY_MS);
 
   console.log(
     `[PayPalReconcile] Scheduler started — first pass in ${INITIAL_DELAY_MS / 60000}m, `
-    + `then every ${INTERVAL_MS / 3600000}h`,
+    + `then ${INTERVAL_MS / 3600000}h after each pass finishes`,
   );
 }
 
-/** Test hook: forget that the scheduler was started. */
+function scheduleNext(delayMs: number): void {
+  nextRun = setTimeout(async () => {
+    nextRun = null;
+    try {
+      await runScheduledPayPalReconciliationOnce();
+    } finally {
+      // Arm only after the attempt settles. A fixed startup-relative interval
+      // can fire 5h55m after the initial +5m claim, hit the 6h DB lease, and
+      // accidentally turn the real cadence into roughly twelve hours.
+      if (started) scheduleNext(INTERVAL_MS);
+    }
+  }, delayMs);
+
+  // Never hold the process open; a shutdown should not wait on a timer.
+  nextRun.unref?.();
+}
+
+/** Test hook: stop the timer and forget that the scheduler was started. */
 export function resetPayPalReconcileSchedulerForTests(): void {
+  if (nextRun) clearTimeout(nextRun);
+  nextRun = null;
   started = false;
   running = false;
 }

@@ -1037,6 +1037,7 @@ export interface DbOrder {
     duration_seconds: number;
   }>;
   grant_snapshot_frozen_at: string | null;
+  commerce_compatible_child_status: 'completed' | 'refunded' | null;
 }
 
 // — Commerce — Licensing —

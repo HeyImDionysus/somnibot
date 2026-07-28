@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 205 migration files in packages/supabase/migrations/
+ * Source: 206 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -980,6 +980,7 @@ export interface DbOrder {
   granted_channel_ids_snapshot: string[];
   temporary_role_grants_snapshot: Array<{ role_id: string; duration_seconds: number }>;
   grant_snapshot_frozen_at: string | null;
+  commerce_compatible_child_status: string | null;
 }
 
 // — Commerce — Licensing —

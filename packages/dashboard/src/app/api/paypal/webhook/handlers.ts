@@ -3184,33 +3184,43 @@ export async function handleCaptureDenied(
 
   // custom_id carries the signed checkout identities; a capture resource keeps
   // it at the root (unlike an Order, which keeps it on the purchase units).
-  let guildId: string | null = null;
+  let claimedGuildId: string | null = null;
   if (isNonEmptyString(capture.custom_id)) {
     try {
       const raw = JSON.parse(capture.custom_id);
       const candidate = raw?.g ?? raw?.guild_id;
-      if (isNonEmptyString(candidate)) guildId = candidate;
+      if (isNonEmptyString(candidate)) claimedGuildId = candidate;
     } catch {
-      /* malformed custom_id — the alert still fires, unattributed */
+      /* malformed custom_id — only an exact local order can authorize effects */
     }
   }
 
   const paypalOrderId = capture.supplementary_data?.related_ids?.order_id ?? null;
 
-  // Resolve the local order, scoped to the guild the checkout claimed.
+  // paypal_order_id is globally unique (partial unique index). Resolve it even
+  // when custom_id is absent/malformed, then derive the tenant from the local
+  // order. custom_id is only a consistency hint; it never grants cross-guild
+  // authority.
+  let guildId: string | null = null;
   let orderId: string | null = null;
   let orderStatus: string | null = null;
-  if (isNonEmptyString(paypalOrderId) && guildId) {
+  if (isNonEmptyString(paypalOrderId)) {
     const { data: order, error } = await supabase
       .from('orders')
-      .select('id, status')
+      .select('id, status, guild_id')
       .eq('paypal_order_id', paypalOrderId)
-      .eq('guild_id', guildId)
       .maybeSingle();
     requireSupabaseSuccess(error, 'Failed to resolve denied capture order');
     if (order) {
+      if (!isNonEmptyString(order.guild_id)) {
+        throw new Error('Denied capture order has no usable guild identity');
+      }
+      if (claimedGuildId && claimedGuildId !== order.guild_id) {
+        throw new Error('Denied capture custom_id guild conflicts with the local order');
+      }
       orderId = order.id as string;
       orderStatus = order.status as string;
+      guildId = order.guild_id;
     }
   }
 
@@ -3218,26 +3228,29 @@ export async function handleCaptureDenied(
   // charged, so a still-pending order will never complete. Only 'pending' is
   // touched, so this can never clobber a completed/refunded/disputed order.
   let orderCancelled = false;
-  if (orderId && orderStatus === 'pending') {
+  if (orderId && guildId && orderStatus === 'pending') {
     const { data: cancelled, error: cancelError } = await supabase
       .from('orders')
       .update({ status: 'cancelled', updated_at: new Date().toISOString() })
       .eq('id', orderId)
+      .eq('guild_id', guildId)
       .eq('status', 'pending')
       .select('id');
     requireSupabaseSuccess(cancelError, 'Failed to cancel denied-capture order');
     orderCancelled = (cancelled?.length ?? 0) > 0;
   }
 
-  await raiseCaptureDeniedAlert(supabase, {
-    captureId,
-    guildId,
-    orderId,
-    paypalOrderId: paypalOrderId ?? null,
-    amountCents,
-    currency,
-    orderCancelled,
-  });
+  if (orderId && guildId) {
+    await raiseCaptureDeniedAlert(supabase, {
+      captureId,
+      guildId,
+      orderId,
+      paypalOrderId: paypalOrderId ?? null,
+      amountCents,
+      currency,
+      orderCancelled,
+    });
+  }
 
   console.log(
     `[Webhook] PAYMENT.CAPTURE.DENIED recorded for capture ${captureId} — ` +

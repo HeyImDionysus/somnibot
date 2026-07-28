@@ -295,8 +295,8 @@ export async function raiseCaptureDeniedAlert(
   supabase: AdminSupabase,
   args: {
     captureId: string;
-    guildId: string | null;
-    orderId: string | null;
+    guildId: string;
+    orderId: string;
     paypalOrderId: string | null;
     /** Integer cents. */
     amountCents: number | null;
@@ -304,9 +304,6 @@ export async function raiseCaptureDeniedAlert(
     orderCancelled: boolean;
   },
 ): Promise<void> {
-  const guildId = resolveAlertGuildId(args.guildId, 'capture denied');
-  if (!guildId) return;
-
   const amountText = args.amountCents !== null && args.currency
     ? ` (${(args.amountCents / 100).toFixed(2)} ${args.currency})`
     : '';
@@ -314,14 +311,12 @@ export async function raiseCaptureDeniedAlert(
   const message =
     `PayPal denied capture ${args.captureId}${amountText}. The buyer was not charged`
     + ' and no entitlement was granted.'
-    + (args.orderId
-      ? args.orderCancelled
-        ? ` Order ${args.orderId} was moved from pending to cancelled.`
-        : ` Order ${args.orderId} was left as-is because it is no longer pending.`
-      : ' No local order matched this capture — reconcile this manually.');
+    + (args.orderCancelled
+      ? ` Order ${args.orderId} was moved from pending to cancelled.`
+      : ` Order ${args.orderId} was left as-is because it is no longer pending.`);
 
   await upsertDedupedAlert(supabase, {
-    guildId,
+    guildId: args.guildId,
     alertType: CAPTURE_DENIED_ALERT_TYPE,
     severity: 'warning',
     title: 'PayPal capture denied',

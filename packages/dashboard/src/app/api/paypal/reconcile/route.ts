@@ -84,12 +84,17 @@ function hasSchedulerSecret(req: NextRequest): boolean {
 
 async function authorize(
   req: NextRequest,
-): Promise<{ ok: true; scheduled: boolean } | { ok: false; response: NextResponse }> {
-  if (hasSchedulerSecret(req)) return { ok: true, scheduled: true };
+): Promise<
+  { ok: true; scheduled: boolean; guildId: string | null }
+  | { ok: false; response: NextResponse }
+> {
+  if (hasSchedulerSecret(req)) {
+    return { ok: true, scheduled: true, guildId: null };
+  }
 
   const auth = await requireGuildOwner();
   if (!auth.ok) return { ok: false, response: auth.response };
-  return { ok: true, scheduled: false };
+  return { ok: true, scheduled: false, guildId: auth.ctx.guildId };
 }
 
 export async function POST(req: NextRequest) {
@@ -111,6 +116,9 @@ export async function POST(req: NextRequest) {
       // multiple dashboard replicas) do not duplicate work. An operator
       // pressing "run now" gets an answer immediately.
       requireLease: auth.scheduled,
+      // The pass and alerts remain global, but an authenticated guild owner
+      // must never receive another tenant's detailed findings.
+      resultGuildId: auth.guildId ?? undefined,
     });
 
     if (result.status === 'failed') {
