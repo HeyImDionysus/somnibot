@@ -4,8 +4,9 @@ Parse SomniBot SQL migrations and generate accurate TypeScript database types.
 v2: Better JSONB handling, CHECK constraint extraction, manual overrides.
 """
 
-import re
+import json
 import os
+import re
 from collections import OrderedDict
 from pathlib import Path
 
@@ -120,6 +121,156 @@ class Table:
 tables: dict[str, Table] = {}
 
 
+PG_IDENTIFIER_PATTERN = (
+    r'(?:"(?:[^"]|"")*"|(?:[^\W\d]|_)(?:\w|\$)*)'
+)
+PG_IDENTIFIER_RE = re.compile(PG_IDENTIFIER_PATTERN)
+
+
+def parse_pg_identifier(raw: str) -> str:
+    """Return the PostgreSQL name represented by one identifier token."""
+    if raw.startswith('"'):
+        return raw[1:-1].replace('""', '"')
+    return raw.lower()
+
+
+def match_pg_identifier(text: str, start: int = 0) -> tuple[str, int] | None:
+    """Match one quoted or unquoted PostgreSQL identifier at ``start``."""
+    match = PG_IDENTIFIER_RE.match(text, start)
+    if match is None:
+        return None
+    return parse_pg_identifier(match.group(0)), match.end()
+
+
+def match_qualified_pg_identifier(
+    text: str, start: int = 0
+) -> tuple[str | None, str, int] | None:
+    """Match ``name`` or ``schema.name`` and preserve both name components."""
+    first = match_pg_identifier(text, start)
+    if first is None:
+        return None
+
+    first_name, end = first
+    cursor = end
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    if cursor >= len(text) or text[cursor] != ".":
+        return None, first_name, end
+
+    cursor += 1
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    second = match_pg_identifier(text, cursor)
+    if second is None:
+        return None
+    second_name, second_end = second
+    return first_name, second_name, second_end
+
+
+def split_top_level(text: str) -> list[str]:
+    """Split comma-separated SQL clauses outside parens and quoted values."""
+    parts = []
+    current = []
+    depth = 0
+    in_single_quote = False
+    in_double_quote = False
+    i = 0
+
+    while i < len(text):
+        ch = text[i]
+        next_ch = text[i + 1] if i + 1 < len(text) else ""
+
+        if in_single_quote:
+            current.append(ch)
+            if ch == "'" and next_ch == "'":
+                current.append(next_ch)
+                i += 2
+                continue
+            if ch == "'":
+                in_single_quote = False
+            i += 1
+            continue
+
+        if in_double_quote:
+            current.append(ch)
+            if ch == '"' and next_ch == '"':
+                current.append(next_ch)
+                i += 2
+                continue
+            if ch == '"':
+                in_double_quote = False
+            i += 1
+            continue
+
+        if ch == "'":
+            in_single_quote = True
+        elif ch == '"':
+            in_double_quote = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+            i += 1
+            continue
+
+        current.append(ch)
+        i += 1
+
+    if current and "".join(current).strip():
+        parts.append("".join(current).strip())
+    return parts
+
+
+def parse_column_definition(name: str, definition: str) -> Column | None:
+    """Parse the type and supported constraints following a column name."""
+    tokens = definition.strip().rstrip(";").rstrip(",").split()
+    if not tokens:
+        return None
+
+    type_end_keywords = {
+        "PRIMARY",
+        "NOT",
+        "NULL",
+        "DEFAULT",
+        "REFERENCES",
+        "CHECK",
+        "UNIQUE",
+        "CONSTRAINT",
+        "ON",
+        "GENERATED",
+    }
+    sql_type_parts = []
+    constraint_start = 0
+
+    for i, tok in enumerate(tokens):
+        upper_tok = tok.upper().rstrip(",")
+        if upper_tok in type_end_keywords:
+            constraint_start = i
+            break
+        sql_type_parts.append(tok.rstrip(","))
+        constraint_start = i + 1
+
+    sql_type = " ".join(sql_type_parts).rstrip(",") or "text"
+    constraints_str = " ".join(tokens[constraint_start:])
+    nullable = "NOT NULL" not in constraints_str.upper()
+    if "PRIMARY KEY" in constraints_str.upper():
+        nullable = False
+
+    default_val = parse_default(constraints_str)
+    if default_val and default_val.upper() != "NULL":
+        nullable = False
+
+    check_vals = None
+    check_match = re.search(r"CHECK\s*\(([^)]+)\)", definition, re.IGNORECASE)
+    if check_match:
+        check_vals = parse_check_values(check_match.group(0))
+
+    return Column(name, sql_type, nullable, default_val, check_vals, default_val)
+
+
 def parse_check_values(text: str) -> list[str] | None:
     """Extract values from CHECK (col IN ('a', 'b', 'c'))."""
     m = re.search(r"IN\s*\(([^)]+)\)", text, re.IGNORECASE)
@@ -153,321 +304,618 @@ def parse_default(constraints_str: str) -> str | None:
 
 def parse_create_table(sql: str):
     """Parse a CREATE TABLE statement."""
-    m = re.match(
-        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\"?\w+\"?\.)?(?:\"?(\w+)\"?)\s*\(",
-        sql, re.IGNORECASE
+    header = re.match(
+        r"\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?",
+        sql,
+        re.IGNORECASE,
     )
-    if not m:
+    if header is None:
         return
 
-    table_name = m.group(1)
+    qualified_name = match_qualified_pg_identifier(sql, header.end())
+    if qualified_name is None:
+        return
+    _, table_name, name_end = qualified_name
+
+    opening_paren = re.match(r"\s*\(", sql[name_end:])
+    if opening_paren is None:
+        return
     if table_name in tables:
         return
-    
+
     table = Table(table_name)
-    
+
     # Extract body between outer parens
     paren_depth = 0
-    start = sql.index('(') + 1
+    start = name_end + opening_paren.end()
     end = len(sql)
-    for i in range(start, len(sql)):
-        if sql[i] == '(':
+    in_single_quote = False
+    in_double_quote = False
+    i = start
+    while i < len(sql):
+        ch = sql[i]
+        next_ch = sql[i + 1] if i + 1 < len(sql) else ""
+        if in_single_quote:
+            if ch == "'" and next_ch == "'":
+                i += 2
+                continue
+            if ch == "'":
+                in_single_quote = False
+            i += 1
+            continue
+        if in_double_quote:
+            if ch == '"' and next_ch == '"':
+                i += 2
+                continue
+            if ch == '"':
+                in_double_quote = False
+            i += 1
+            continue
+        if ch == "'":
+            in_single_quote = True
+        elif ch == '"':
+            in_double_quote = True
+        elif ch == "(":
             paren_depth += 1
-        elif sql[i] == ')':
+        elif ch == ")":
             if paren_depth == 0:
                 end = i
                 break
             paren_depth -= 1
-    
+        i += 1
+
     body = sql[start:end]
     full_text = sql  # Keep for CHECK lookups
-    
-    # Split by top-level commas
-    parts = []
-    current = ""
-    depth = 0
-    for ch in body:
-        if ch == '(':
-            depth += 1
-        elif ch == ')':
-            depth -= 1
-        elif ch == ',' and depth == 0:
-            parts.append(current.strip())
-            current = ""
-            continue
-        current += ch
-    if current.strip():
-        parts.append(current.strip())
-    
+    parts = split_top_level(body)
+
     pk_columns = []
-    
+
     for part in parts:
         part = part.strip()
         if not part:
             continue
-        
+
         upper = part.upper().lstrip()
         if upper.startswith(("PRIMARY KEY", "UNIQUE", "FOREIGN KEY", "CHECK (", "CONSTRAINT", "EXCLUDE USING")):
             if upper.startswith("PRIMARY KEY"):
                 pk_match = re.search(r"PRIMARY\s+KEY\s*\(([^)]+)\)", part, re.IGNORECASE)
                 if pk_match:
-                    pk_columns = [c.strip().strip('"') for c in pk_match.group(1).split(",")]
+                    pk_columns = []
+                    for raw_column in split_top_level(pk_match.group(1)):
+                        identifier = match_pg_identifier(raw_column.strip())
+                        if identifier is not None:
+                            pk_columns.append(identifier[0])
             continue
-        
-        tokens = part.split()
-        if len(tokens) < 2:
+
+        identifier = match_pg_identifier(part)
+        if identifier is None:
             continue
-        
-        col_name = tokens[0].strip('"')
-        if col_name.upper() in ("PRIMARY", "UNIQUE", "FOREIGN", "CHECK", "CONSTRAINT", "INDEX"):
+        col_name, name_end = identifier
+        if (
+            not part.startswith('"')
+            and col_name.upper()
+            in ("PRIMARY", "UNIQUE", "FOREIGN", "CHECK", "CONSTRAINT", "INDEX")
+        ):
             continue
-        
-        # Find type vs constraints boundary
-        type_end_keywords = {"PRIMARY", "NOT", "NULL", "DEFAULT", "REFERENCES", "CHECK", "UNIQUE", "CONSTRAINT", "ON", "GENERATED"}
-        sql_type_parts = []
-        constraint_start = 1
-        
-        for i, tok in enumerate(tokens[1:], 1):
-            upper_tok = tok.upper().rstrip(',')
-            if upper_tok in type_end_keywords:
-                constraint_start = i
-                break
-            sql_type_parts.append(tok)
-            constraint_start = i + 1
-        
-        sql_type = " ".join(sql_type_parts).rstrip(',')
-        if not sql_type:
-            sql_type = "text"
-        
-        constraints_str = " ".join(tokens[constraint_start:])
-        
-        nullable = True
-        if "NOT NULL" in constraints_str.upper():
-            nullable = False
-        if "PRIMARY KEY" in constraints_str.upper():
-            nullable = False
+
+        definition = part[name_end:].strip()
+        col = parse_column_definition(col_name, definition)
+        if col is None:
+            continue
+
+        if "PRIMARY KEY" in definition.upper():
             pk_columns.append(col_name)
-        
-        default_val = parse_default(constraints_str)
-        if default_val and default_val.upper() not in ("NULL",):
-            nullable = False
-        
-        # Check constraint from the column definition
-        check_vals = None
-        check_match = re.search(r"CHECK\s*\(([^)]+)\)", part, re.IGNORECASE)
-        if check_match:
-            check_vals = parse_check_values(check_match.group(0))
-        
+
         # Also look for table-level CHECK referencing this column
-        if not check_vals:
-            check_vals = find_inline_checks(full_text, col_name)
-        
-        col = Column(col_name, sql_type, nullable, default_val, check_vals, default_val)
+        if not col.check:
+            col.check = find_inline_checks(full_text, col_name)
+
         table.add_column(col)
-    
+
     table.pk_columns = pk_columns
     tables[table_name] = table
 
 
-def parse_alter_add_column(sql: str):
-    """Parse ALTER TABLE ... ADD COLUMN [IF NOT EXISTS] ...
-    
-    Handles multi-column ALTER TABLE statements like:
-      ALTER TABLE t ADD COLUMN IF NOT EXISTS a TEXT, ADD COLUMN IF NOT EXISTS b INT;
-    """
-    # Extract table name (tolerating an optional schema qualifier, e.g. public.foo)
-    m = re.match(r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\"?\w+\"?\.)?(?:\"?(\w+)\"?)\s+",
-                 sql, re.IGNORECASE)
-    if not m:
-        return
-
-    table_name = m.group(1)
-    if table_name not in tables:
-        return
-
-    table = tables[table_name]
-
-    # Strip the leading "ALTER TABLE [schema.]<name>" so only the clause list remains.
-    body = re.sub(r"^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\"?\w+\"?\.)?(?:\"?\w+\"?)\s+",
-                  "", sql, count=1, flags=re.IGNORECASE).rstrip().rstrip(';')
-
-    # Split into top-level clauses on commas that are NOT inside parentheses.
-    # This keeps commas inside CHECK (col IN ('a','b')) and type precision like
-    # NUMERIC(3,1) attached to their owning column instead of splitting a clause.
-    clauses = []
-    current = ""
-    depth = 0
-    for ch in body:
-        if ch == '(':
-            depth += 1
-        elif ch == ')':
-            depth -= 1
-        elif ch == ',' and depth == 0:
-            clauses.append(current.strip())
-            current = ""
-            continue
-        current += ch
-    if current.strip():
-        clauses.append(current.strip())
-
-    # Only ADD COLUMN clauses are relevant here; ignore ADD CONSTRAINT / ALTER
-    # COLUMN / DROP etc. which are handled elsewhere (or intentionally not).
-    add_col_re = re.compile(r"^ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s+(.+)$",
-                            re.IGNORECASE | re.DOTALL)
-    for clause in clauses:
-        col_match = add_col_re.match(clause)
-        if not col_match:
-            continue
-        col_name = col_match.group(1).strip('"')
-        rest = col_match.group(2).strip().rstrip(';').rstrip(',')
-
-        if table.has_column(col_name):
-            continue
-
-        tokens = rest.split()
-        if not tokens:
-            continue
-        
-        type_end_keywords = {"PRIMARY", "NOT", "NULL", "DEFAULT", "REFERENCES", "CHECK", "UNIQUE", "CONSTRAINT", "ON", "GENERATED"}
-        sql_type_parts = []
-        constraint_start = 0
-        
-        for i, tok in enumerate(tokens):
-            upper_tok = tok.upper().rstrip(',')
-            if upper_tok in type_end_keywords:
-                constraint_start = i
-                break
-            sql_type_parts.append(tok.rstrip(','))
-            constraint_start = i + 1
-        
-        sql_type = " ".join(sql_type_parts).rstrip(',')
-        if not sql_type:
-            sql_type = "text"
-        
-        constraints_str = " ".join(tokens[constraint_start:])
-        
-        nullable = True
-        if "NOT NULL" in constraints_str.upper():
-            nullable = False
-        
-        default_val = parse_default(constraints_str)
-        if default_val and default_val.upper() not in ("NULL",):
-            nullable = False
-        
-        check_vals = None
-        check_match = re.search(r"CHECK\s*\(([^)]+)\)", rest, re.IGNORECASE)
-        if check_match:
-            check_vals = parse_check_values(check_match.group(0))
-        
-        col = Column(col_name, sql_type, nullable, default_val, check_vals, default_val)
-        table.add_column(col)
-
-
-def parse_alter_add_pk(sql: str):
-    """Parse ALTER TABLE ... ADD PRIMARY KEY (col1, col2)."""
-    m = re.match(
-        r"ALTER\s+TABLE\s+(?:\"?\w+\"?\.)?(?:\"?(\w+)\"?)\s+ADD\s+PRIMARY\s+KEY\s*\(([^)]+)\)",
-        sql, re.IGNORECASE
-    )
-    if not m:
-        return
-    
-    table_name = m.group(1)
-    pk_cols = [c.strip().strip('"') for c in m.group(2).split(",")]
-    
-    if table_name in tables:
-        tables[table_name].pk_columns = pk_cols
-        for col_name in pk_cols:
-            if col_name in tables[table_name].columns:
-                tables[table_name].columns[col_name].nullable = False
-
-
-def parse_alter_drop_column(sql: str):
-    """Parse ALTER TABLE [schema.]t DROP COLUMN [IF EXISTS] col [, DROP COLUMN ...].
-
-    Without this, a column added by an early CREATE TABLE / ADD COLUMN and later
-    removed would linger as a phantom in the generated types (drift vs reality).
-    """
-    m = re.match(
-        r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\"?\w+\"?\.)?(?:\"?(\w+)\"?)\s+",
-        sql, re.IGNORECASE,
-    )
-    if not m:
-        return
-    table_name = m.group(1)
-    table = tables.get(table_name)
-    if table is None:
-        return
-    for dc in re.finditer(
-        r"DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?\"?(\w+)\"?", sql, re.IGNORECASE
-    ):
-        col_name = dc.group(1)
-        if col_name in table.columns:
-            del table.columns[col_name]
-
-
-def parse_alter_column_nullability(sql: str):
-    """Track ALTER COLUMN ... SET/DROP NOT NULL in source order.
-
-    Nullability often changes after the original ADD/CREATE statement. Ignoring
-    that final state makes the generated tripwire claim a database-enforced
-    field is nullable (or the reverse). Unknown tables/columns remain no-ops so
-    conditional compatibility migrations cannot create phantom schema.
-    """
-    m = re.match(
-        r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\"?\w+\"?\.)?(?:\"?(\w+)\"?)\s+",
-        sql, re.IGNORECASE,
-    )
-    if not m:
-        return
-    table = tables.get(m.group(1))
-    if table is None:
-        return
-
-    nullability_re = re.compile(
-        r"ALTER\s+COLUMN\s+\"?(\w+)\"?\s+(SET|DROP)\s+NOT\s+NULL",
+def match_alter_table(sql: str) -> tuple[str | None, Table, str] | None:
+    """Return the known target table and its comma-separated clause body."""
+    header = re.match(
+        r"\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?",
+        sql,
         re.IGNORECASE,
     )
-    for change in nullability_re.finditer(sql):
-        column = table.columns.get(change.group(1))
+    if header is None:
+        return None
+
+    qualified_name = match_qualified_pg_identifier(sql, header.end())
+    if qualified_name is None:
+        return None
+    schema_name, table_name, name_end = qualified_name
+    table = tables.get(table_name)
+    if table is None:
+        return None
+    return schema_name, table, sql[name_end:].strip().rstrip(";")
+
+
+def match_clause_column(
+    clause: str, prefix: str
+) -> tuple[str, str] | None:
+    """Match a column identifier after an ALTER subcommand prefix."""
+    header = re.match(prefix, clause, re.IGNORECASE)
+    if header is None:
+        return None
+    identifier = match_pg_identifier(clause, header.end())
+    if identifier is None:
+        return None
+    name, name_end = identifier
+    return name, clause[name_end:].strip()
+
+
+def apply_alter_add_column(table: Table, clause: str):
+    match = match_clause_column(
+        clause,
+        r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?",
+    )
+    if match is None:
+        return
+    col_name, definition = match
+    if table.has_column(col_name):
+        return
+    column = parse_column_definition(col_name, definition)
+    if column is not None:
+        table.add_column(column)
+
+
+def apply_alter_drop_column(table: Table, clause: str):
+    match = match_clause_column(
+        clause,
+        r"DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?",
+    )
+    if match is None:
+        return
+    table.columns.pop(match[0], None)
+
+
+def apply_alter_column_nullability(table: Table, clause: str):
+    match = match_clause_column(clause, r"ALTER\s+COLUMN\s+")
+    if match is None:
+        return
+    col_name, action = match
+    nullability = re.match(r"(SET|DROP)\s+NOT\s+NULL\b", action, re.IGNORECASE)
+    if nullability is None:
+        return
+    column = table.columns.get(col_name)
+    if column is not None:
+        column.nullable = nullability.group(1).upper() == "DROP"
+
+
+def apply_alter_add_pk(table: Table, clause: str):
+    match = re.match(
+        r"ADD\s+PRIMARY\s+KEY\s*\((.*)\)\s*$",
+        clause,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if match is None:
+        return
+
+    pk_columns = []
+    for raw_column in split_top_level(match.group(1)):
+        identifier = match_pg_identifier(raw_column.strip())
+        if identifier is not None:
+            pk_columns.append(identifier[0])
+    table.pk_columns = pk_columns
+    for col_name in pk_columns:
+        column = table.columns.get(col_name)
         if column is not None:
-            column.nullable = change.group(2).upper() == "DROP"
+            column.nullable = False
 
 
 def process_alter_table(sql: str):
-    """Apply every supported ALTER TABLE schema mutation."""
-    parse_alter_add_column(sql)
-    parse_alter_drop_column(sql)
-    parse_alter_column_nullability(sql)
-    parse_alter_add_pk(sql)
+    """Apply supported ALTER TABLE subcommands in their source order."""
+    matched = match_alter_table(sql)
+    if matched is None:
+        return
+    _, table, body = matched
+
+    for clause in split_top_level(body):
+        if re.match(r"\s*ADD\s+COLUMN\b", clause, re.IGNORECASE):
+            apply_alter_add_column(table, clause)
+        elif re.match(r"\s*DROP\s+COLUMN\b", clause, re.IGNORECASE):
+            apply_alter_drop_column(table, clause)
+        elif re.match(r"\s*ALTER\s+COLUMN\b", clause, re.IGNORECASE):
+            apply_alter_column_nullability(table, clause)
+        elif re.match(r"\s*ADD\s+PRIMARY\s+KEY\b", clause, re.IGNORECASE):
+            apply_alter_add_pk(table, clause)
 
 
 def parse_drop_table(sql: str):
     """Parse DROP TABLE [IF EXISTS] [schema.]t so dropped tables disappear."""
-    for m in re.finditer(
-        r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\"?\w+\"?\.)?\"?(\w+)\"?",
-        sql, re.IGNORECASE,
+    header = re.match(
+        r"\s*DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?",
+        sql,
+        re.IGNORECASE,
+    )
+    if header is None:
+        return
+
+    cursor = header.end()
+    while cursor < len(sql):
+        while cursor < len(sql) and sql[cursor].isspace():
+            cursor += 1
+        qualified_name = match_qualified_pg_identifier(sql, cursor)
+        if qualified_name is None:
+            return
+        _, table_name, cursor = qualified_name
+        tables.pop(table_name, None)
+
+        while cursor < len(sql) and sql[cursor].isspace():
+            cursor += 1
+        if cursor >= len(sql) or sql[cursor] != ",":
+            return
+        cursor += 1
+
+
+PLPGSQL_WORD_RE = re.compile(r"(?:[^\W\d]|_)(?:\w|\$)*")
+DOLLAR_QUOTE_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
+def tokenize_plpgsql(body: str) -> list[tuple[str, str, int, int]]:
+    """Tokenize procedural control words while skipping SQL quoted content."""
+    tokens = []
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "'":
+            i += 1
+            while i < len(body):
+                if body[i] == "'" and i + 1 < len(body) and body[i + 1] == "'":
+                    i += 2
+                    continue
+                if body[i] == "'":
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == '"':
+            i += 1
+            while i < len(body):
+                if body[i] == '"' and i + 1 < len(body) and body[i + 1] == '"':
+                    i += 2
+                    continue
+                if body[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "$":
+            delimiter = DOLLAR_QUOTE_RE.match(body, i)
+            if delimiter is not None:
+                delimiter_text = delimiter.group(0)
+                closing = body.find(delimiter_text, delimiter.end())
+                if closing >= 0:
+                    i = closing + len(delimiter_text)
+                    continue
+        if ch == ";":
+            tokens.append(("semicolon", ch, i, i + 1))
+            i += 1
+            continue
+
+        word = PLPGSQL_WORD_RE.match(body, i)
+        if word is not None:
+            tokens.append(("word", word.group(0).upper(), i, word.end()))
+            i = word.end()
+            continue
+        i += 1
+    return tokens
+
+
+def literal_plpgsql_condition(condition: str) -> bool | None:
+    """Evaluate only syntactically literal TRUE/FALSE procedural conditions."""
+    normalized = condition.strip()
+    while normalized.startswith("(") and normalized.endswith(")"):
+        normalized = normalized[1:-1].strip()
+    if normalized.upper() == "TRUE":
+        return True
+    if normalized.upper() == "FALSE":
+        return False
+    return None
+
+
+SCHEMA_COLUMN_GUARD_RE = re.compile(
+    r"""
+    \A\s*(?P<negated>NOT\s+)?EXISTS\s*\(
+      \s*SELECT\s+1
+      \s+FROM\s+information_schema\s*\.\s*columns
+      \s+WHERE\s+(?P<where>.*)
+    \)\s*\Z
+    """,
+    re.IGNORECASE | re.DOTALL | re.VERBOSE,
+)
+SCHEMA_COLUMN_PREDICATE_RE = re.compile(
+    r"""
+    (?:[A-Za-z_][A-Za-z0-9_$]*\s*\.\s*)?
+    (?P<field>table_schema|table_name|column_name)
+    \s*=\s*'(?P<value>(?:''|[^'])*)'
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def schema_guard_models_column_action(condition: str, alter_sql: str) -> bool:
+    """Recognize the generator's narrow clean-chain ADD/DROP guard model."""
+    guard = SCHEMA_COLUMN_GUARD_RE.fullmatch(condition)
+    if guard is None:
+        return False
+
+    predicates = {}
+    for raw_predicate in re.split(
+        r"\s+AND\s+",
+        guard.group("where").strip(),
+        flags=re.IGNORECASE,
     ):
-        tables.pop(m.group(1), None)
+        predicate = SCHEMA_COLUMN_PREDICATE_RE.fullmatch(raw_predicate.strip())
+        if predicate is None:
+            return False
+        field = predicate.group("field").lower()
+        if field in predicates:
+            return False
+        predicates[field] = predicate.group("value").replace("''", "'")
+
+    if not {"table_name", "column_name"}.issubset(predicates):
+        return False
+
+    matched = match_alter_table(alter_sql)
+    if matched is None:
+        return False
+    schema_name, table, body = matched
+    clauses = split_top_level(body)
+    if len(clauses) != 1 or table.name != predicates["table_name"]:
+        return False
+
+    guard_schema = predicates.get("table_schema")
+    if (
+        (schema_name is None and guard_schema is not None)
+        or (schema_name is not None and schema_name != guard_schema)
+    ):
+        return False
+
+    clause = clauses[0]
+    if guard.group("negated") is not None:
+        column_match = match_clause_column(
+            clause,
+            r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?",
+        )
+    else:
+        column_match = match_clause_column(
+            clause,
+            r"DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?",
+        )
+    return (
+        column_match is not None
+        and column_match[0] == predicates["column_name"]
+    )
+
+
+def procedural_path_allows_alter(frames: list[dict], alter_sql: str) -> bool:
+    """Require branch proof, except for the narrow clean-chain ADD/DROP model."""
+    for frame in frames:
+        if frame["kind"] == "block":
+            continue
+        if frame["kind"] == "if":
+            if frame["active"]:
+                continue
+            if (
+                frame["branch"] == "then"
+                and schema_guard_models_column_action(
+                    frame["condition"],
+                    alter_sql,
+                )
+            ):
+                continue
+        return False
+    return True
+
+
+def pop_control_frame(frames: list[dict], kind: str):
+    """Pop a completed procedural frame and any malformed nested frames."""
+    for index in range(len(frames) - 1, -1, -1):
+        if frames[index]["kind"] == kind:
+            del frames[index:]
+            return
 
 
 def process_do_block(stmt: str):
-    """Extract supported ALTER TABLE column statements nested inside DO $$ ... $$.
+    """Conservatively apply supported ALTERs inside a procedural DO block.
 
-    Idempotent migrations frequently wrap column changes in a
-    `DO $$ BEGIN IF NOT EXISTS (...) THEN ALTER TABLE t ADD COLUMN c ...; END IF; END $$;`
-    guard. The outer statement starts with `DO`, so it is otherwise ignored — but
-    the columns are real. Pull the inner ALTER ... ADD/DROP/ALTER COLUMN statements
-    out (each terminated by `;`), in source order, and feed them to the normal
-    dispatcher.
+    ALTER COLUMN nullability is accepted only on direct or literal-selected
+    paths outside loops, CASE statements, and exception-bearing blocks. The
+    existing clean-chain model for canonical ADD/DROP column existence guards
+    remains so the snapshot does not lose long-standing intended columns.
     """
-    inner_re = re.compile(
-        r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\"?\w+\"?\.)?\"?\w+\"?\s+"
-        r"(?:ADD|DROP|ALTER)\s+COLUMN\b.*?;",
-        re.IGNORECASE | re.DOTALL,
-    )
-    for inner in inner_re.finditer(stmt):
-        process_alter_table(inner.group(0))
+    delimiter = DOLLAR_QUOTE_RE.search(stmt)
+    if delimiter is None:
+        return
+    delimiter_text = delimiter.group(0)
+    body_end = stmt.rfind(delimiter_text)
+    if body_end <= delimiter.end():
+        return
+    body = stmt[delimiter.end():body_end]
+    tokens = tokenize_plpgsql(body)
+
+    frames: list[dict] = []
+    candidates = []
+    at_statement_start = True
+    i = 0
+
+    while i < len(tokens):
+        token_type, value, start, end = tokens[i]
+        if token_type == "semicolon":
+            at_statement_start = True
+            i += 1
+            continue
+        if not at_statement_start:
+            i += 1
+            continue
+
+        if value == "BEGIN":
+            frames.append(
+                {
+                    "kind": "block",
+                    "has_exception": False,
+                    "in_exception": False,
+                }
+            )
+            i += 1
+            at_statement_start = True
+            continue
+
+        if value == "IF":
+            then_index = i + 1
+            while (
+                then_index < len(tokens)
+                and tokens[then_index][1] != "THEN"
+            ):
+                then_index += 1
+            if then_index >= len(tokens):
+                return
+            condition = body[end:tokens[then_index][2]]
+            truth = literal_plpgsql_condition(condition)
+            frames.append(
+                {
+                    "kind": "if",
+                    "condition": condition,
+                    "truth": truth,
+                    "active": truth is True,
+                    "branch": "then",
+                }
+            )
+            i = then_index + 1
+            at_statement_start = True
+            continue
+
+        if value == "ELSIF":
+            for frame in reversed(frames):
+                if frame["kind"] == "if":
+                    frame["active"] = False
+                    frame["branch"] = "elsif"
+                    break
+            then_index = i + 1
+            while (
+                then_index < len(tokens)
+                and tokens[then_index][1] != "THEN"
+            ):
+                then_index += 1
+            i = then_index + 1
+            at_statement_start = True
+            continue
+
+        if value == "ELSE":
+            for frame in reversed(frames):
+                if frame["kind"] == "if":
+                    frame["active"] = frame["truth"] is False
+                    frame["branch"] = "else"
+                    break
+            i += 1
+            at_statement_start = True
+            continue
+
+        if value in ("FOR", "FOREACH", "WHILE"):
+            loop_index = i + 1
+            while (
+                loop_index < len(tokens)
+                and tokens[loop_index][1] != "LOOP"
+            ):
+                loop_index += 1
+            frames.append({"kind": "loop", "active": False})
+            i = loop_index + 1
+            at_statement_start = True
+            continue
+
+        if value == "LOOP":
+            frames.append({"kind": "loop", "active": False})
+            i += 1
+            at_statement_start = True
+            continue
+
+        if value == "CASE":
+            frames.append({"kind": "case", "active": False})
+            i += 1
+            at_statement_start = False
+            continue
+
+        if value == "EXCEPTION":
+            for frame in reversed(frames):
+                if frame["kind"] == "block":
+                    frame["has_exception"] = True
+                    frame["in_exception"] = True
+                    break
+            i += 1
+            at_statement_start = True
+            continue
+
+        if value == "END":
+            closing_kind = "block"
+            next_index = i + 1
+            if next_index < len(tokens):
+                suffix = tokens[next_index][1]
+                if suffix == "IF":
+                    closing_kind = "if"
+                    i = next_index
+                elif suffix == "LOOP":
+                    closing_kind = "loop"
+                    i = next_index
+                elif suffix == "CASE":
+                    closing_kind = "case"
+                    i = next_index
+            pop_control_frame(frames, closing_kind)
+            i += 1
+            at_statement_start = False
+            continue
+
+        if value == "ALTER":
+            semicolon_index = i + 1
+            while (
+                semicolon_index < len(tokens)
+                and tokens[semicolon_index][0] != "semicolon"
+            ):
+                semicolon_index += 1
+            if semicolon_index >= len(tokens):
+                return
+            alter_sql = body[start:tokens[semicolon_index][3]]
+            path_allows_alter = procedural_path_allows_alter(
+                frames,
+                alter_sql,
+            )
+            block_frames = [
+                frame for frame in frames if frame["kind"] == "block"
+            ]
+            in_exception_handler = any(
+                frame["in_exception"] for frame in block_frames
+            )
+            candidates.append(
+                (
+                    alter_sql,
+                    path_allows_alter,
+                    in_exception_handler,
+                    block_frames,
+                )
+            )
+            i = semicolon_index + 1
+            at_statement_start = True
+            continue
+
+        # Skip an unsupported procedural/SQL statement to its terminator. This
+        # prevents CASE/IF words inside ordinary SQL from becoming control flow.
+        while i < len(tokens) and tokens[i][0] != "semicolon":
+            i += 1
+        at_statement_start = True
+
+    for alter_sql, path_allows_alter, in_exception_handler, block_frames in candidates:
+        if (
+            path_allows_alter
+            and not in_exception_handler
+            and not any(frame["has_exception"] for frame in block_frames)
+        ):
+            process_alter_table(alter_sql)
 
 
 def process_migration(filepath: Path):
@@ -508,9 +956,9 @@ def process_migration(filepath: Path):
             parse_drop_table(stmt)
         elif upper.startswith("ALTER TABLE"):
             process_alter_table(stmt)
-        elif upper.startswith("DO") and any(
-            operation in upper
-            for operation in ("ADD COLUMN", "DROP COLUMN", "ALTER COLUMN")
+        elif upper.startswith("DO") and re.search(
+            r"\b(?:ADD|DROP|ALTER)\s+COLUMN\b",
+            upper,
         ):
             # Idempotency-guarded column changes wrapped in DO $$ ... $$.
             process_do_block(stmt)
@@ -703,7 +1151,10 @@ def generate_row_interface(table: Table, name: str) -> str:
             ts_type = TYPE_OVERRIDES[override_key]
         else:
             ts_type = col.to_ts_type()
-        lines.append(f"  {col.name}: {ts_type};")
+        property_name = col.name
+        if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", property_name) is None:
+            property_name = json.dumps(property_name, ensure_ascii=False)
+        lines.append(f"  {property_name}: {ts_type};")
     lines.append("}")
     return "\n".join(lines)
 

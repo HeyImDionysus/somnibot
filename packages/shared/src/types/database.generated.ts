@@ -1245,7 +1245,7 @@ export interface DbPortalSession {
   created_at: string;
   last_used_at: string | null;
   revoked: boolean;
-  token_hash: string;
+  token_hash: string | null;
 }
 
 // — Fraud Controls —
