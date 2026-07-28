@@ -30,7 +30,7 @@ export interface SomniLicenseConfig {
   licenseKey: string;
   /** The product ID this app belongs to */
   productId: string;
-  /** Device fingerprint — unique per device/installation */
+  /** Device fingerprint — unique per device/installation; required when the product enforces a device limit */
   deviceFingerprint?: string;
   /** Human-readable device name */
   deviceName?: string;

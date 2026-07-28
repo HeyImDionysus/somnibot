@@ -137,7 +137,7 @@ Validate a license key and optionally register a device session.
 {
   "license_key": "SMNI-XXXX-XXXX-XXXX-XXXX",
   "product_id": "uuid",
-  "device_fingerprint": "string (optional)",
+  "device_fingerprint": "string (required when device limits are enabled)",
   "device_name": "string (optional)",
   "app_version": "string (optional)"
 }

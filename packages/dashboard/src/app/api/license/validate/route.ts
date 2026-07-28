@@ -229,8 +229,34 @@ export async function POST(req: NextRequest) {
   // recommendation is to keep it: switch specific products to `reject` when a
   // signal says so.
   let sessionId: string | undefined;
+  const seatTrackingEnabled =
+    typeof result.config_max_devices === 'number' && result.config_max_devices > 0;
 
-  if (device_fingerprint && result.config_max_devices) {
+  // Seat enforcement cannot be optional at the caller's discretion. Products
+  // with tracking disabled remain compatible with fingerprint-less clients,
+  // but a tracked product must fail closed instead of granting a seatless,
+  // heartbeat-less validation.
+  if (seatTrackingEnabled && !device_fingerprint) {
+    await logValidation(
+      supabase,
+      result.key_id!,
+      product_id,
+      device_fingerprint,
+      'device_fingerprint_required',
+      clientIp,
+      app_version,
+    );
+    return NextResponse.json(
+      {
+        valid: false,
+        status: 'device_fingerprint_required',
+        error: 'A non-empty device fingerprint is required for this product.',
+      },
+      { status: 400 },
+    );
+  }
+
+  if (device_fingerprint && seatTrackingEnabled) {
     const { data: deviceResult, error: deviceError } = await supabase
       .rpc('license_validate_device', {
         p_license_key_id: result.key_id,
@@ -307,7 +333,7 @@ export async function POST(req: NextRequest) {
   // Fraud checks (non-blocking — fire-and-forget)
   // V11 Audit M-8: Also check critical fraud signal threshold after device/IP checks
   // so accumulated signals auto-create incidents.
-  if (device_fingerprint && result.config_max_devices && result.product_guild_id) {
+  if (device_fingerprint && seatTrackingEnabled && result.product_guild_id) {
     const guildId = result.product_guild_id;
     const maxDevices = result.config_max_devices || 3;
     runFraudChecks(supabase, guildId, result.key_id!, maxDevices, result.customer_discord_id ?? null)

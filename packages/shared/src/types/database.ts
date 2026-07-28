@@ -1134,7 +1134,8 @@ export interface DbLicenseValidation {
     | 'grace_period'
     | 'unavailable'
     | 'rate_limited'
-    | 'session_invalidated';
+    | 'session_invalidated'
+    | 'device_fingerprint_required';
   ip_address: string | null;
   app_version: string | null;
   created_at: string;

@@ -52,17 +52,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Invalid license key' }, { status: 400 });
   }
 
-  // Deactivate the session
-  const { data: deactivated, error } = await supabase
-    .from('license_sessions')
-    .update({
-      active: false,
-      deactivated_at: new Date().toISOString(),
-      deactivation_reason: 'user_deactivated',
-    })
-    .eq('id', session_id)
-    .eq('license_key_id', licenseKey.id)
-    .select('id');
+  // Deactivate atomically in the database. A client still knows its old
+  // session id after an administrator revokes it, so a direct update here
+  // could otherwise rewrite `admin_revoked` to the recoverable
+  // `user_deactivated` state.
+  const { data: deactivated, error } = await supabase.rpc('license_deactivate_device', {
+    p_license_key_id: licenseKey.id,
+    p_session_id: session_id,
+  });
 
   if (error) {
     return dbError(error, 'license/deactivate');
@@ -70,7 +67,7 @@ export async function POST(req: NextRequest) {
 
   // Append-only audit: buyer deactivated a device (app uninstall / cleanup).
   // Only write when a session actually flipped, so a no-op replay is not logged.
-  if (deactivated && deactivated.length > 0) {
+  if (deactivated === true) {
     await writeCommerceAudit(supabase, {
       guildId: licenseKey.guild_id,
       actorType: 'user',

@@ -24,10 +24,6 @@
 -- 3. 'rate_limited' is reserved for the same reason — a throttled caller is an
 --    outcome, not a verdict.
 --
--- 4. `session_invalidated` is the exact per-device verdict returned when an
---    administrator has revoked a fingerprint. It is deliberately distinct
---    from `revoked`, which describes the licence key itself.
---
 -- EXISTING ROWS
 -- -------------
 -- This is a pure WIDENING of the allowed set: every value permitted before is
@@ -60,9 +56,7 @@ ALTER TABLE public.license_validations
     'grace_period',
     -- service faults: an outcome, NOT a verdict on the licence
     'unavailable',
-    'rate_limited',
-    -- terminal per-device verdict (the key itself may still be active)
-    'session_invalidated'
+    'rate_limited'
   ));
 
 COMMIT;

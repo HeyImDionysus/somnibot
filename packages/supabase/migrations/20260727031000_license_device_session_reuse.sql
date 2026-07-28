@@ -29,12 +29,10 @@
 -- THE FIX
 -- -------
 -- Find the row by (key, fingerprint) regardless of `active`, and treat a
--- returning-but-inactive device as a new seat claim only when its deactivation
--- reason is recoverable. An administrator-revoked fingerprint is a durable
--- per-device denial and must never self-heal. Recoverable rows go through the
--- same count/policy/eviction path as a brand-new device and then REUSE their
--- own row (active = true, deactivation fields cleared) instead of trying to
--- insert a duplicate.
+-- returning-but-inactive device as what it is: a NEW SEAT CLAIM by a machine we
+-- have seen before. It goes through the same count/policy/eviction path as a
+-- brand-new device and then REUSES its own row (active = true, deactivation
+-- fields cleared) instead of trying to insert a duplicate.
 --
 -- WHY NOT A PARTIAL UNIQUE INDEX
 -- ------------------------------
@@ -54,8 +52,7 @@
 -- heal by themselves on their next validation: the lookup now finds their row,
 -- the seat claim runs, and the row is reactivated. Their install starts
 -- heartbeating again as soon as it next calls validate() — which is what the
--- SDK does when its cache TTL lapses. Rows carrying `admin_revoked` remain
--- inactive and return the terminal `session_invalidated` verdict.
+-- SDK does when its cache TTL lapses.
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION public.license_validate_device(
@@ -75,7 +72,6 @@ AS $$
 DECLARE
   v_existing_session_id UUID;
   v_existing_active BOOLEAN;
-  v_existing_deactivation_reason TEXT;
   v_session_count INT;
   v_oldest_id UUID;
   v_session_id UUID;
@@ -91,12 +87,11 @@ BEGIN
   -- Look for this device's row REGARDLESS of `active`. The unique constraint
   -- guarantees at most one, so a deactivated row is not "no row" — it is this
   -- device's row, waiting to be reclaimed.
-  SELECT id, active, deactivation_reason
-    INTO v_existing_session_id, v_existing_active, v_existing_deactivation_reason
+  SELECT id, active INTO v_existing_session_id, v_existing_active
     FROM public.license_sessions
     WHERE license_key_id = p_license_key_id
       AND device_fingerprint = p_device_fingerprint
-    FOR UPDATE;
+    LIMIT 1;
 
   IF v_existing_session_id IS NOT NULL AND v_existing_active THEN
     -- Already holds a seat: just refresh it. No limit check — this device is
@@ -117,29 +112,6 @@ BEGIN
     RETURN jsonb_build_object(
       'status', 'existing',
       'session_id', v_existing_session_id,
-      'active_devices', v_session_count,
-      'max_devices', p_max_devices,
-      'evicted', false
-    );
-  END IF;
-
-  -- An administrator revoke is a durable per-device denial, not normal churn.
-  -- The row lock linearizes this decision with the admin update: if the admin
-  -- wins first we observe the reason and refuse; if validation wins first the
-  -- admin update waits and is the final state. We must decide this before seat
-  -- counting so the refused fingerprint cannot evict an unrelated customer
-  -- device under `evict_oldest`.
-  IF v_existing_session_id IS NOT NULL
-     AND v_existing_deactivation_reason = 'admin_revoked' THEN
-    SELECT count(*) INTO v_session_count
-      FROM public.license_sessions
-      WHERE license_key_id = p_license_key_id
-        AND active = true;
-
-    RETURN jsonb_build_object(
-      'status', 'session_invalidated',
-      'session_id', NULL,
-      'deactivation_reason', 'admin_revoked',
       'active_devices', v_session_count,
       'max_devices', p_max_devices,
       'evicted', false
@@ -223,28 +195,7 @@ BEGIN
       device_name = COALESCE(EXCLUDED.device_name, public.license_sessions.device_name),
       app_version = COALESCE(EXCLUDED.app_version, public.license_sessions.app_version),
       ip_address = COALESCE(EXCLUDED.ip_address, public.license_sessions.ip_address)
-    WHERE public.license_sessions.deactivation_reason IS DISTINCT FROM 'admin_revoked'
     RETURNING id INTO v_session_id;
-
-    -- Defensive race fallback. The key-row lock serializes normal callers, but
-    -- a direct concurrent session insert can still reach ON CONFLICT. Its
-    -- predicate refuses to erase an administrator revoke, and a no-row
-    -- RETURNING result identifies that exact case.
-    IF v_session_id IS NULL THEN
-      SELECT count(*) INTO v_session_count
-        FROM public.license_sessions
-        WHERE license_key_id = p_license_key_id
-          AND active = true;
-
-      RETURN jsonb_build_object(
-        'status', 'session_invalidated',
-        'session_id', NULL,
-        'deactivation_reason', 'admin_revoked',
-        'active_devices', v_session_count,
-        'max_devices', p_max_devices,
-        'evicted', false
-      );
-    END IF;
 
     v_status := 'created';
   END IF;

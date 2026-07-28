@@ -11,9 +11,16 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import postgres, { type Sql } from 'postgres';
-import { getTestDbUrl, requireSupabase } from './helpers.js';
+import {
+  getAnonTestClient,
+  getAuthenticatedTestClient,
+  getTestDbUrl,
+  requireSupabase,
+} from './helpers.js';
 
 let supa!: SupabaseClient;
+let anon!: SupabaseClient;
+let authenticated!: SupabaseClient;
 let sql!: Sql;
 
 const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -36,6 +43,8 @@ const POLICIES = ['evict_oldest', 'reject'] as const;
 
 beforeAll(async () => {
   supa = await requireSupabase();
+  anon = getAnonTestClient();
+  authenticated = getAuthenticatedTestClient();
   sql = postgres(getTestDbUrl(), { max: 2 });
 
   const guild = await supa.from('guild').insert({
@@ -147,6 +156,13 @@ async function validateDevice(
     p_ip_address: '203.0.113.99',
     p_max_devices: maxDevices,
     p_device_policy: policy,
+  });
+}
+
+async function deactivateDevice(sessionId: string, client: SupabaseClient = supa) {
+  return client.rpc('license_deactivate_device', {
+    p_license_key_id: licenseKeyId,
+    p_session_id: sessionId,
   });
 }
 
@@ -296,6 +312,130 @@ describe('license_validate_device session reuse', () => {
       id: sessionId,
       active: false,
       deactivation_reason: 'admin_revoked',
+    });
+  });
+
+  it('keeps admin revocation terminal across the client-deactivate then validate sequence', async () => {
+    const sessionId = await seedSession('admin-client-sequence');
+    const revoked = await supa.from('license_sessions').update({
+      active: false,
+      deactivated_at: new Date().toISOString(),
+      deactivation_reason: 'admin_revoked',
+    }).eq('id', sessionId);
+    expect(revoked.error).toBeNull();
+
+    const clientDeactivate = await deactivateDevice(sessionId);
+    expect(clientDeactivate.error).toBeNull();
+    expect(clientDeactivate.data).toBe(false);
+
+    const validation = await validateDevice('admin-client-sequence', 'evict_oldest');
+    expect(validation.error).toBeNull();
+    expect(validation.data).toMatchObject({
+      status: 'session_invalidated',
+      session_id: null,
+      deactivation_reason: 'admin_revoked',
+    });
+    expect((await sessionSnapshot())[0]).toMatchObject({
+      id: sessionId,
+      active: false,
+      deactivation_reason: 'admin_revoked',
+    });
+  });
+
+  it('deactivates an active row exactly once and cannot touch a session under another key id', async () => {
+    const sessionId = await seedSession('client-idempotence');
+
+    const first = await deactivateDevice(sessionId);
+    expect(first.error).toBeNull();
+    expect(first.data).toBe(true);
+    const afterFirst = (await sessionSnapshot())[0];
+    expect(afterFirst).toMatchObject({
+      id: sessionId,
+      active: false,
+      deactivation_reason: 'user_deactivated',
+    });
+
+    const replay = await deactivateDevice(sessionId);
+    expect(replay.error).toBeNull();
+    expect(replay.data).toBe(false);
+    expect((await sessionSnapshot())[0]).toEqual(afterFirst);
+
+    const otherSessionId = await seedSession('wrong-key-guard');
+    const wrongKey = await supa.rpc('license_deactivate_device', {
+      p_license_key_id: productId,
+      p_session_id: otherSessionId,
+    });
+    expect(wrongKey.error).toBeNull();
+    expect(wrongKey.data).toBe(false);
+    expect((await sessionSnapshot()).find((row) => row.id === otherSessionId)).toMatchObject({
+      active: true,
+      deactivation_reason: null,
+    });
+  });
+
+  it('linearizes client deactivation behind an in-flight administrator revoke', async () => {
+    const sessionId = await seedSession('admin-client-race');
+    let releaseAdmin!: () => void;
+    let adminUpdated!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseAdmin = resolve;
+    });
+    const updated = new Promise<void>((resolve) => {
+      adminUpdated = resolve;
+    });
+
+    const adminTransaction = sql.begin(async (tx) => {
+      await tx`
+        UPDATE public.license_sessions
+           SET active = false,
+               deactivated_at = clock_timestamp(),
+               deactivation_reason = 'admin_revoked'
+         WHERE id = ${sessionId}::uuid
+      `;
+      adminUpdated();
+      await release;
+    });
+
+    await updated;
+    let deactivationSettled = false;
+    const clientDeactivate = deactivateDevice(sessionId).then((result) => {
+      deactivationSettled = true;
+      return result;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(deactivationSettled).toBe(false);
+
+    releaseAdmin();
+    await adminTransaction;
+    const result = await clientDeactivate;
+
+    expect(result.error).toBeNull();
+    expect(result.data).toBe(false);
+    expect((await sessionSnapshot())[0]).toMatchObject({
+      id: sessionId,
+      active: false,
+      deactivation_reason: 'admin_revoked',
+    });
+  });
+
+  it('allows service-role client deactivation but denies anon and authenticated callers', async () => {
+    const sessionId = await seedSession('deactivate-permissions');
+
+    const [anonResult, authenticatedResult] = await Promise.all([
+      deactivateDevice(sessionId, anon),
+      deactivateDevice(sessionId, authenticated),
+    ]);
+    expect(anonResult.error).not.toBeNull();
+    expect(authenticatedResult.error).not.toBeNull();
+
+    const serviceResult = await deactivateDevice(sessionId);
+    expect(serviceResult.error).toBeNull();
+    expect(serviceResult.data).toBe(true);
+    expect((await sessionSnapshot())[0]).toMatchObject({
+      id: sessionId,
+      active: false,
+      deactivation_reason: 'user_deactivated',
     });
   });
 });

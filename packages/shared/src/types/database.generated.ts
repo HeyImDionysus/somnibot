@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 205 migration files in packages/supabase/migrations/
+ * Source: 207 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1064,7 +1064,7 @@ export interface DbLicenseValidation {
   license_key_id: string | null;
   product_id: string | null;
   device_fingerprint: string | null;
-  result: 'valid' | 'invalid_key' | 'expired' | 'suspended' | 'revoked' | 'over_device_limit' | 'product_mismatch' | 'cancelled' | 'pending' | 'grace_period' | 'unavailable' | 'rate_limited' | 'session_invalidated';
+  result: 'valid' | 'invalid_key' | 'expired' | 'suspended' | 'revoked' | 'over_device_limit' | 'product_mismatch' | 'cancelled' | 'pending' | 'grace_period' | 'unavailable' | 'rate_limited' | 'session_invalidated' | 'device_fingerprint_required';
   ip_address: string | null;
   app_version: string | null;
   created_at: string;

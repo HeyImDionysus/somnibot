@@ -243,12 +243,34 @@ describe('POST /api/license/validate — device outcomes', () => {
     expect(mock.rpc).not.toHaveBeenCalledWith('license_validate_device', expect.anything());
   });
 
-  it('does not call the device RPC when the client sends no fingerprint', async () => {
+  it('refuses a seat-tracked product when the client sends no fingerprint', async () => {
+    const { mock, validations } = setup({ data: null, error: null });
+
+    const res = await POST(req({ device_fingerprint: undefined }) as never);
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toMatchObject({
+      valid: false,
+      status: 'device_fingerprint_required',
+    });
+    expect(mock.rpc).not.toHaveBeenCalledWith('license_validate_device', expect.anything());
+    expect(validations.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        result: 'device_fingerprint_required',
+        license_key_id: 'key-1',
+      }),
+    );
+  });
+
+  it('rejects a blank fingerprint instead of treating it as absent', async () => {
     const { mock } = setup({ data: null, error: null });
 
-    const body = await (await POST(req({ device_fingerprint: undefined }) as never)).json();
-    expect(body.valid).toBe(true);
-    expect(body.session_id).toBeNull();
+    const res = await POST(req({ device_fingerprint: '   ' }) as never);
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.valid).not.toBe(true);
     expect(mock.rpc).not.toHaveBeenCalledWith('license_validate_device', expect.anything());
   });
 });
