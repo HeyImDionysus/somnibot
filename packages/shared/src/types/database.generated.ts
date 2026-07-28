@@ -1,14 +1,14 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 208 migration files in packages/supabase/migrations/
+ * Source: 212 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
  * database.ts. CI regenerates this file and fails if it differs from the
  * committed copy, forcing a review whenever a migration changes the schema.
  * The generator is a best-effort SQL parser; see the RUNBOOK for its known
- * limitations (no ALTER COLUMN type/nullability tracking, no constraint
+ * limitations (no ALTER COLUMN type tracking, no constraint
  * re-derivation), which is why it is a tripwire rather than the source type.
  */
 
@@ -496,7 +496,7 @@ export interface DbGuildDesiredState {
 }
 
 export interface DbDiscordIdMap {
-  guild_id: string | null;
+  guild_id: string;
   entity_type: 'role' | 'channel' | 'category';
   template_key: string;
   discord_id: string;
@@ -520,7 +520,7 @@ export interface DbGuildLiveState {
 
 export interface DbReactionRole {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   channel_id: string;
   message_id: string;
   emoji: string;
@@ -539,7 +539,7 @@ export interface DbReactionRole {
 
 export interface DbAutomodRule {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   type: 'word_filter' | 'link_filter' | 'invite_filter' | 'spam_filter' | 'duplicate_filter' | 'caps_filter' | 'mention_spam' | 'newline_spam';
   enabled: boolean;
@@ -557,7 +557,7 @@ export interface DbAutomodRule {
 
 export interface DbInfraction {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   member_id: string;
   moderator_id: string;
   type: 'warn' | 'mute' | 'kick' | 'ban';
@@ -592,7 +592,7 @@ export interface DbMessageReport {
 
 export interface DbTicketPanel {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   channel_id: string;
   message_id: string | null;
@@ -619,7 +619,7 @@ export interface DbTicketPanel {
 
 export interface DbTicket {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   panel_id: string | null;
   channel_id: string | null;
   ticket_number: number;
@@ -668,7 +668,7 @@ export interface DbTicketMetric {
 
 export interface DbAutomation {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   description: string | null;
   trigger_type: string;
@@ -691,7 +691,7 @@ export interface DbAutomation {
 export interface DbAutomationExecution {
   id: string;
   automation_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   triggered_by: string;
   trigger_event: string;
   conditions_passed: boolean;
@@ -705,7 +705,7 @@ export interface DbAutomationExecution {
 
 export interface DbCustomCommand {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   description: string;
   actions: Record<string, unknown>[];
@@ -725,7 +725,7 @@ export interface DbCustomCommand {
 
 export interface DbEmbedConfig {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   title: string | null;
   description: string | null;
@@ -748,7 +748,7 @@ export interface DbEmbedConfig {
 // — Levels & XP —
 
 export interface DbMemberLevel {
-  guild_id: string | null;
+  guild_id: string;
   member_id: string;
   xp: number;
   level: number;
@@ -761,7 +761,7 @@ export interface DbMemberLevel {
 
 export interface DbLevelReward {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   level: number;
   role_id: string;
   remove_at_level: number | null;
@@ -771,14 +771,14 @@ export interface DbLevelReward {
 
 export interface DbXpMultiplier {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   role_id: string;
   multiplier: number;
   created_at: string;
 }
 
 export interface DbMemberRankSettings {
-  guild_id: string | null;
+  guild_id: string;
   member_id: string;
   background_url: string | null;
   background_storage_path: string | null;
@@ -794,7 +794,7 @@ export interface DbMemberRankSettings {
 
 export interface DbTempChannelHub {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   hub_channel_id: string;
   category_id: string;
   naming_format: string;
@@ -807,7 +807,7 @@ export interface DbTempChannelHub {
   created_at: string;
   updated_at: string;
   allow_claim: boolean;
-  empty_grace_seconds: number | null;
+  empty_grace_seconds: number;
   room_created_template: string | null;
   control_applied_template: string | null;
   control_denied_template: string | null;
@@ -816,7 +816,7 @@ export interface DbTempChannelHub {
 export interface DbActiveTempChannel {
   channel_id: string;
   text_channel_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   hub_id: string | null;
   owner_id: string;
   created_at: string;
@@ -824,7 +824,7 @@ export interface DbActiveTempChannel {
 
 export interface DbStatsChannel {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   channel_id: string | null;
   stat_type: 'total_members' | 'online_members' | 'bot_count' | 'role_count' | 'channel_count' | 'premium_members' | 'active_tickets' | 'total_xp_earned' | 'highest_level' | 'custom_counter';
   stat_config: Record<string, unknown>;
@@ -840,7 +840,7 @@ export interface DbStatsChannel {
 
 export interface DbScheduledMessage {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   channel_id: string;
   message: string | null;
@@ -865,7 +865,7 @@ export interface DbScheduledMessage {
 
 export interface DbProduct {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   description: string | null;
   type: 'one_time' | 'subscription';
@@ -906,7 +906,7 @@ export interface DbProductFile {
 export interface DbPlan {
   id: string;
   product_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   paypal_plan_id: string | null;
   interval_unit: 'DAY' | 'WEEK' | 'MONTH' | 'YEAR';
@@ -924,7 +924,7 @@ export interface DbPlan {
 export interface DbCustomer {
   id: string;
   user_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   discord_id: string;
   discord_username: string;
   paypal_customer_id: string | null;
@@ -939,7 +939,7 @@ export interface DbCustomer {
 
 export interface DbPromotion {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   type: 'percentage' | 'fixed_amount';
   value: number;
@@ -963,7 +963,7 @@ export interface DbOrder {
   id: string;
   order_number: string;
   customer_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   product_id: string | null;
   plan_id: string | null;
   paypal_order_id: string | null;
@@ -989,7 +989,7 @@ export interface DbLicenseKey {
   order_id: string | null;
   customer_id: string | null;
   product_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   key_hash: string;
   key_prefix: string;
   key_suffix: string;
@@ -1010,7 +1010,7 @@ export interface DbLicenseKey {
 export interface DbEntitlement {
   id: string;
   customer_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   product_id: string | null;
   plan_id: string | null;
   license_key_id: string | null;
@@ -1076,7 +1076,7 @@ export interface DbPayment {
   id: string;
   order_id: string | null;
   customer_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   paypal_payment_id: string | null;
   paypal_event_id: string | null;
   amount_cents: number;
@@ -1093,7 +1093,7 @@ export interface DbPayment {
 
 export interface DbGiveaway {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   channel_id: string;
   message_id: string | null;
   prize: string;
@@ -1222,13 +1222,13 @@ export interface DbDashboardRole {
 export interface DbDashboardUserRole {
   id: string;
   guild_id: string;
-  user_id: string;
+  user_id: string | null;
   role_id: string;
   granted_by: string | null;
   created_at: string;
   assigned_at: string;
   assigned_by: string | null;
-  discord_id: string | null;
+  discord_id: string;
 }
 
 // — Customer Portal —
@@ -1238,14 +1238,14 @@ export interface DbPortalSession {
   guild_id: string;
   customer_id: string | null;
   discord_id: string;
-  session_token: string;
+  session_token: string | null;
   ip_address: string | null;
   user_agent: string | null;
   expires_at: string;
   created_at: string;
   last_used_at: string | null;
   revoked: boolean;
-  token_hash: string | null;
+  token_hash: string;
 }
 
 // — Fraud Controls —
@@ -1272,7 +1272,7 @@ export interface DbFraudSignal {
   resolution_note: string | null;
   status: string;
   updated_at: string;
-  last_observed_at: string | null;
+  last_observed_at: string;
 }
 
 export interface DbFraudRule {
@@ -1311,7 +1311,7 @@ export interface DbIncident {
   duration_seconds: number | null;
   identified_at: string | null;
   impact_summary: string | null;
-  incident_number: number | null;
+  incident_number: number;
   root_cause: string | null;
   source: string | null;
   source_ref_id: string | null;
@@ -1384,9 +1384,9 @@ export interface DbAdminChange {
   id: string;
   guild_id: string;
   actor_id: string;
-  change_type: string;
-  target_table: string;
-  target_id: string;
+  change_type: string | null;
+  target_table: string | null;
+  target_id: string | null;
   before_state: Record<string, unknown> | null;
   after_state: Record<string, unknown> | null;
   description: string | null;

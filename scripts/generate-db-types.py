@@ -406,6 +406,42 @@ def parse_alter_drop_column(sql: str):
             del table.columns[col_name]
 
 
+def parse_alter_column_nullability(sql: str):
+    """Track ALTER COLUMN ... SET/DROP NOT NULL in source order.
+
+    Nullability often changes after the original ADD/CREATE statement. Ignoring
+    that final state makes the generated tripwire claim a database-enforced
+    field is nullable (or the reverse). Unknown tables/columns remain no-ops so
+    conditional compatibility migrations cannot create phantom schema.
+    """
+    m = re.match(
+        r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\"?\w+\"?\.)?(?:\"?(\w+)\"?)\s+",
+        sql, re.IGNORECASE,
+    )
+    if not m:
+        return
+    table = tables.get(m.group(1))
+    if table is None:
+        return
+
+    nullability_re = re.compile(
+        r"ALTER\s+COLUMN\s+\"?(\w+)\"?\s+(SET|DROP)\s+NOT\s+NULL",
+        re.IGNORECASE,
+    )
+    for change in nullability_re.finditer(sql):
+        column = table.columns.get(change.group(1))
+        if column is not None:
+            column.nullable = change.group(2).upper() == "DROP"
+
+
+def process_alter_table(sql: str):
+    """Apply every supported ALTER TABLE schema mutation."""
+    parse_alter_add_column(sql)
+    parse_alter_drop_column(sql)
+    parse_alter_column_nullability(sql)
+    parse_alter_add_pk(sql)
+
+
 def parse_drop_table(sql: str):
     """Parse DROP TABLE [IF EXISTS] [schema.]t so dropped tables disappear."""
     for m in re.finditer(
@@ -416,25 +452,22 @@ def parse_drop_table(sql: str):
 
 
 def process_do_block(stmt: str):
-    """Extract ALTER TABLE ... ADD/DROP COLUMN statements nested inside DO $$ ... $$.
+    """Extract supported ALTER TABLE column statements nested inside DO $$ ... $$.
 
     Idempotent migrations frequently wrap column changes in a
     `DO $$ BEGIN IF NOT EXISTS (...) THEN ALTER TABLE t ADD COLUMN c ...; END IF; END $$;`
     guard. The outer statement starts with `DO`, so it is otherwise ignored — but
-    the columns are real. Pull the inner ALTER ... ADD/DROP COLUMN statements out
-    (each terminated by `;`), in source order, and feed them to the normal parsers.
+    the columns are real. Pull the inner ALTER ... ADD/DROP/ALTER COLUMN statements
+    out (each terminated by `;`), in source order, and feed them to the normal
+    dispatcher.
     """
     inner_re = re.compile(
         r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\"?\w+\"?\.)?\"?\w+\"?\s+"
-        r"(?:ADD|DROP)\s+COLUMN\b.*?;",
+        r"(?:ADD|DROP|ALTER)\s+COLUMN\b.*?;",
         re.IGNORECASE | re.DOTALL,
     )
     for inner in inner_re.finditer(stmt):
-        text = inner.group(0)
-        if re.search(r"\bDROP\s+COLUMN\b", text, re.IGNORECASE):
-            parse_alter_drop_column(text)
-        else:
-            parse_alter_add_column(text)
+        process_alter_table(inner.group(0))
 
 
 def process_migration(filepath: Path):
@@ -474,14 +507,11 @@ def process_migration(filepath: Path):
         elif upper.startswith("DROP TABLE"):
             parse_drop_table(stmt)
         elif upper.startswith("ALTER TABLE"):
-            # A single ALTER may add, drop, and/or set a PK; apply each in order.
-            if "ADD COLUMN" in upper:
-                parse_alter_add_column(stmt)
-            if "DROP COLUMN" in upper:
-                parse_alter_drop_column(stmt)
-            if "ADD PRIMARY KEY" in upper:
-                parse_alter_add_pk(stmt)
-        elif upper.startswith("DO") and ("ADD COLUMN" in upper or "DROP COLUMN" in upper):
+            process_alter_table(stmt)
+        elif upper.startswith("DO") and any(
+            operation in upper
+            for operation in ("ADD COLUMN", "DROP COLUMN", "ALTER COLUMN")
+        ):
             # Idempotency-guarded column changes wrapped in DO $$ ... $$.
             process_do_block(stmt)
 
@@ -901,7 +931,7 @@ def build_types() -> str:
     lines.append(" * database.ts. CI regenerates this file and fails if it differs from the")
     lines.append(" * committed copy, forcing a review whenever a migration changes the schema.")
     lines.append(" * The generator is a best-effort SQL parser; see the RUNBOOK for its known")
-    lines.append(" * limitations (no ALTER COLUMN type/nullability tracking, no constraint")
+    lines.append(" * limitations (no ALTER COLUMN type tracking, no constraint")
     lines.append(" * re-derivation), which is why it is a tripwire rather than the source type.")
     lines.append(" */")
     lines.append("")

@@ -5,35 +5,21 @@
 -- legitimately change it. Using that column for the critical-signal burst
 -- window let three annotations on old signals look like three new detections.
 --
--- Historical rows are conservatively backfilled from `created_at`; an old
--- signal becomes current only after a detector observes it again. New direct
--- detector inserts receive the default, while the partial-index-aware RPC
--- advances the clock only when the incoming observation is at least as severe
--- as the unresolved signal. A delayed weaker observation cannot make an old
--- critical signal look newly critical.
+-- This first phase is metadata-only: add the nullable column, install the
+-- default for new direct inserts, and move detector writes to the new clock.
+-- Historical backfill, validation, NOT NULL hardening, and concurrent index
+-- construction live in later migrations so this brief ACCESS EXCLUSIVE lock is
+-- never retained through a history-table rewrite or index scan.
 -- =============================================================================
 
 ALTER TABLE public.fraud_signals
-  ADD COLUMN last_observed_at TIMESTAMPTZ;
-
-UPDATE public.fraud_signals
-   SET last_observed_at = COALESCE(
-     created_at,
-     updated_at,
-     pg_catalog.clock_timestamp()
-   )
- WHERE last_observed_at IS NULL;
+  ADD COLUMN IF NOT EXISTS last_observed_at TIMESTAMPTZ;
 
 ALTER TABLE public.fraud_signals
-  ALTER COLUMN last_observed_at SET DEFAULT pg_catalog.now(),
-  ALTER COLUMN last_observed_at SET NOT NULL;
+  ALTER COLUMN last_observed_at SET DEFAULT pg_catalog.now();
 
 COMMENT ON COLUMN public.fraud_signals.last_observed_at IS
   'Detector-owned observation time; operator edits must not change this value.';
-
-CREATE INDEX idx_fraud_signals_critical_observation
-  ON public.fraud_signals (guild_id, last_observed_at DESC)
-  WHERE status = 'open' AND severity = 'critical';
 
 CREATE OR REPLACE FUNCTION public.fraud_upsert_open_signal(
   p_guild_id TEXT,
