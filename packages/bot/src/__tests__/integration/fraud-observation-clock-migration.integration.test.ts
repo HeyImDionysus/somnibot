@@ -6,24 +6,28 @@
  * starts. This harness therefore creates the authoritative legacy table shape
  * in an isolated schema, seeds nullable historical timestamps, rewrites only
  * the migrations' explicit `public.` qualifier, and executes the real SQL
- * files in production order. Production tables and migration history are never
- * touched.
+ * files in production order. The index fixture also reproduces a canceled
+ * `CREATE INDEX CONCURRENTLY`: one backend holds a pre-build write open while a
+ * second backend starts the real index statement, then the build is canceled
+ * after PostgreSQL publishes its invalid catalog entry. Production tables and
+ * migration history are never touched.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres, { type Sql } from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { getTestDbUrl, requireSupabase } from './helpers.js';
+import { getTestDbUrl } from './helpers.js';
 
 const FIXTURE_SCHEMA = 'fraud_observation_migration_fixture';
-const MIGRATIONS = [
+const PRE_INDEX_MIGRATIONS = [
   '20260727034000_fraud_signal_observation_clock.sql',
   '20260727034100_fraud_signal_observation_backfill.sql',
   '20260727034200_fraud_signal_observation_not_null_guard.sql',
   '20260727034300_fraud_signal_observation_not_null_validate.sql',
-  '20260727034400_fraud_signal_observation_index.sql',
 ] as const;
+const INDEX_MIGRATION =
+  '20260727034400_fraud_signal_observation_index.sql';
 
 const CREATED_ROW_ID = '10000000-0000-4000-8000-000000000001';
 const UPDATED_ONLY_ROW_ID = '10000000-0000-4000-8000-000000000002';
@@ -33,6 +37,21 @@ const RECENT_OPERATOR_EDIT = '2026-07-27T12:00:00.000Z';
 const CONSERVATIVE_SENTINEL = '1970-01-01T00:00:00.000Z';
 
 let sql: Sql;
+let invalidIndexBeforeRetry: IndexCatalogRow;
+let fixtureIndexAfterRecovery: IndexCatalogRow;
+let fixtureIndexAfterValidRetry: IndexCatalogRow;
+
+interface IndexCatalogRow {
+  oid: string;
+  indisvalid: boolean;
+  indisready: boolean;
+  indisunique: boolean;
+  access_method: string;
+  key_columns: string[];
+  key_options: string;
+  index_definition: string;
+  predicate: string | null;
+}
 
 function migrationSource(filename: string): string {
   const testDir = dirname(fileURLToPath(import.meta.url));
@@ -44,6 +63,219 @@ function migrationSource(filename: string): string {
 
 function isolatedMigration(filename: string): string {
   return migrationSource(filename).replaceAll('public.', `${FIXTURE_SCHEMA}.`);
+}
+
+function indexMigrationFragments(): {
+  preflight: string;
+  create: string;
+  postflight: string;
+} {
+  const source = isolatedMigration(INDEX_MIGRATION);
+  const createStart = source.search(/^CREATE INDEX CONCURRENTLY/m);
+  const createEnd = source.indexOf(';', createStart);
+  if (createStart < 0 || createEnd < 0) {
+    throw new Error(
+      `${INDEX_MIGRATION} must contain one CREATE INDEX CONCURRENTLY statement`,
+    );
+  }
+
+  return {
+    preflight: source.slice(0, createStart).trim(),
+    create: source.slice(createStart, createEnd + 1).trim(),
+    postflight: source.slice(createEnd + 1).trim(),
+  };
+}
+
+function hasExecutableSql(source: string): boolean {
+  return source.replace(/^--.*$/gm, '').trim().length > 0;
+}
+
+async function applyIndexMigration(): Promise<void> {
+  const fragments = indexMigrationFragments();
+  for (const statement of [
+    fragments.preflight,
+    fragments.create,
+    fragments.postflight,
+  ]) {
+    if (hasExecutableSql(statement)) {
+      // Supabase CLI >=2.110 flushes the transaction batch around the
+      // pipeline-incompatible CREATE INDEX CONCURRENTLY statement. Executing
+      // these fragments separately reproduces that boundary without touching
+      // the real migration history table.
+      await sql.unsafe(statement);
+    }
+  }
+}
+
+async function indexCatalog(
+  schema: string,
+): Promise<IndexCatalogRow | undefined> {
+  const [index] = await sql.unsafe<IndexCatalogRow[]>(`
+    SELECT c.oid::TEXT AS oid,
+           i.indisvalid,
+           i.indisready,
+           i.indisunique,
+           am.amname AS access_method,
+           ARRAY(
+             SELECT a.attname
+               FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, position)
+               JOIN pg_catalog.pg_attribute a
+                 ON a.attrelid = i.indrelid
+                AND a.attnum = key.attnum
+              WHERE key.position <= i.indnkeyatts
+              ORDER BY key.position
+           ) AS key_columns,
+           i.indoption::TEXT AS key_options,
+           pg_catalog.pg_get_indexdef(i.indexrelid) AS index_definition,
+           pg_catalog.pg_get_expr(i.indpred, i.indrelid, true) AS predicate
+      FROM pg_catalog.pg_index i
+      JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_catalog.pg_am am ON am.oid = c.relam
+     WHERE n.nspname = '${schema}'
+       AND c.relname = 'idx_fraud_signals_critical_observation'
+  `);
+  return index;
+}
+
+async function waitForInvalidFixtureIndex(): Promise<IndexCatalogRow> {
+  let lastIndex: IndexCatalogRow | undefined;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    lastIndex = await indexCatalog(FIXTURE_SCHEMA);
+    if (lastIndex && !lastIndex.indisvalid) {
+      return lastIndex;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+  throw new Error(
+    'Timed out waiting for the canceled concurrent build to publish an invalid index; ' +
+    `last catalog state: ${JSON.stringify(lastIndex)}`,
+  );
+}
+
+async function seedCanceledConcurrentIndexBuild(): Promise<IndexCatalogRow> {
+  const blocker = postgres(getTestDbUrl(), { max: 1 });
+  const builder = postgres(getTestDbUrl(), { max: 1 });
+  let releaseBlockingTransaction = (): void => {};
+  let markBlockerReady = (): void => {};
+  const holdBlockingTransaction = new Promise<void>((resolvePromise) => {
+    releaseBlockingTransaction = resolvePromise;
+  });
+  const blockerReady = new Promise<void>((resolvePromise) => {
+    markBlockerReady = resolvePromise;
+  });
+  let builderPid: number | undefined;
+  let buildOutcome: Promise<{ error: unknown | undefined }> | undefined;
+
+  const blockerOutcome = blocker.begin(async (transaction) => {
+    await transaction.unsafe(`
+      UPDATE ${FIXTURE_SCHEMA}.fraud_signals
+         SET description = description
+       WHERE id = '${CREATED_ROW_ID}'
+    `);
+    markBlockerReady();
+    await holdBlockingTransaction;
+  }).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+
+  try {
+    await Promise.race([
+      blockerReady,
+      blockerOutcome.then((error) => {
+        if (error !== undefined) {
+          throw error;
+        }
+        throw new Error(
+          'Blocking transaction ended before the index builder started',
+        );
+      }),
+    ]);
+    const [backend] = await builder.unsafe<Array<{ pid: number }>>(
+      'SELECT pg_catalog.pg_backend_pid() AS pid',
+    );
+    if (!backend) {
+      throw new Error('Could not resolve the concurrent-index builder backend');
+    }
+    builderPid = backend.pid;
+
+    buildOutcome = builder.unsafe(indexMigrationFragments().create).then(
+      () => ({ error: undefined }),
+      (error: unknown) => ({ error }),
+    );
+
+    const invalidIndex = await Promise.race([
+      waitForInvalidFixtureIndex(),
+      buildOutcome.then(({ error }) => {
+        if (error !== undefined) {
+          throw error;
+        }
+        throw new Error(
+          'Fixture index build completed before it could be canceled',
+        );
+      }),
+    ]);
+    const [cancellation] = await sql.unsafe<Array<{ canceled: boolean }>>(
+      `SELECT pg_catalog.pg_cancel_backend(${builderPid}) AS canceled`,
+    );
+    if (!cancellation?.canceled) {
+      throw new Error('PostgreSQL refused to cancel the fixture index build');
+    }
+
+    const { error: buildError } = await buildOutcome;
+    if (buildError === undefined) {
+      throw new Error('Fixture index build completed instead of being canceled');
+    }
+    return invalidIndex;
+  } finally {
+    if (builderPid !== undefined) {
+      await sql.unsafe(
+        `SELECT pg_catalog.pg_cancel_backend(${builderPid})`,
+      ).catch(() => undefined);
+    }
+    releaseBlockingTransaction();
+    const blockerError = await blockerOutcome;
+    if (buildOutcome) {
+      await buildOutcome;
+    }
+    await builder.end();
+    await blocker.end();
+    if (blockerError !== undefined) {
+      throw blockerError;
+    }
+  }
+}
+
+function normalizedPredicateTerms(predicate: string | null): string[] {
+  if (!predicate) {
+    return [];
+  }
+  return predicate
+    .replace(/[()]/g, '')
+    .replace(/::text/g, '')
+    .split(/\s+AND\s+/)
+    .map((term) => term.replace(/\s+/g, ''))
+    .sort();
+}
+
+function expectTargetIndex(index: IndexCatalogRow | undefined): void {
+  expect(index).toBeDefined();
+  expect(index).toMatchObject({
+    indisvalid: true,
+    indisready: true,
+    indisunique: false,
+    access_method: 'btree',
+    key_columns: ['guild_id', 'last_observed_at'],
+    key_options: '0 3',
+  });
+  expect(index!.index_definition).toContain(
+    'USING btree (guild_id, last_observed_at DESC)',
+  );
+  expect(normalizedPredicateTerms(index!.predicate)).toEqual([
+    "severity='critical'",
+    "status='open'",
+  ]);
 }
 
 const LEGACY_SCHEMA_AND_ROWS = `
@@ -123,17 +355,22 @@ const LEGACY_SCHEMA_AND_ROWS = `
 
 describe('phased fraud observation-clock legacy migration', () => {
   beforeAll(async () => {
-    await requireSupabase();
     sql = postgres(getTestDbUrl(), { max: 1 });
+    await sql.unsafe('SELECT 1');
 
     await sql.unsafe(`DROP SCHEMA IF EXISTS ${FIXTURE_SCHEMA} CASCADE`);
     await sql.unsafe(LEGACY_SCHEMA_AND_ROWS);
-    for (const migration of MIGRATIONS) {
-      // The concurrent-index migration is intentionally its own one-statement
-      // file, so postgres executes it outside an explicit transaction here just
-      // as Supabase CLI >=2.110 does in production.
+    for (const migration of PRE_INDEX_MIGRATIONS) {
       await sql.unsafe(isolatedMigration(migration));
     }
+
+    invalidIndexBeforeRetry = await seedCanceledConcurrentIndexBuild();
+    await applyIndexMigration();
+    fixtureIndexAfterRecovery = (await indexCatalog(FIXTURE_SCHEMA))!;
+
+    // A safe retry against an already-valid exact index must not replace it.
+    await applyIndexMigration();
+    fixtureIndexAfterValidRetry = (await indexCatalog(FIXTURE_SCHEMA))!;
   }, 60_000);
 
   afterAll(async () => {
@@ -166,7 +403,7 @@ describe('phased fraud observation-clock legacy migration', () => {
     )).toBe(false);
   });
 
-  it('finishes with a defaulted NOT NULL column and a valid partial index', async () => {
+  it('finishes with a defaulted NOT NULL column', async () => {
     const [column] = await sql.unsafe<Array<{
       is_nullable: string;
       column_default: string | null;
@@ -180,24 +417,38 @@ describe('phased fraud observation-clock legacy migration', () => {
     expect(column).toBeDefined();
     expect(column!.is_nullable).toBe('NO');
     expect(column!.column_default).toContain('now()');
-
-    const [index] = await sql.unsafe<Array<{ indisvalid: boolean }>>(`
-      SELECT i.indisvalid
-        FROM pg_catalog.pg_index i
-        JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
-        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = '${FIXTURE_SCHEMA}'
-         AND c.relname = 'idx_fraud_signals_critical_observation'
-    `);
-    expect(index).toEqual({ indisvalid: true });
   });
 
-  it('keeps the concurrent index isolated and every DDL create idempotent', () => {
-    const indexMigration = migrationSource(
-      '20260727034400_fraud_signal_observation_index.sql',
+  it('recovers the invalid index left by a canceled concurrent build and preserves a valid retry', () => {
+    expect(invalidIndexBeforeRetry.indisvalid).toBe(false);
+    expectTargetIndex(fixtureIndexAfterRecovery);
+    expectTargetIndex(fixtureIndexAfterValidRetry);
+    expect(fixtureIndexAfterValidRetry.oid).toBe(
+      fixtureIndexAfterRecovery.oid,
     );
-    const executableSql = indexMigration.replace(/^--.*$/gm, '');
-    expect(indexMigration).toContain('CREATE INDEX CONCURRENTLY IF NOT EXISTS');
+  });
+
+  it('keeps both the public and isolated indexes valid with the exact keys and predicate', async () => {
+    expectTargetIndex(await indexCatalog('public'));
+    expectTargetIndex(await indexCatalog(FIXTURE_SCHEMA));
+  });
+
+  it('guards IF NOT EXISTS with invalid-index recovery and a fail-closed postflight', () => {
+    const indexMigration = migrationSource(INDEX_MIGRATION);
+    const executableSql = indexMigration.replace(/^\s*--.*$/gm, '');
+    const createPosition = indexMigration.indexOf(
+      'CREATE INDEX CONCURRENTLY IF NOT EXISTS',
+    );
+    expect(createPosition).toBeGreaterThan(0);
+    expect(indexMigration.slice(0, createPosition)).toContain(
+      'target_index_valid',
+    );
+    expect(indexMigration.slice(0, createPosition)).toContain(
+      'DROP INDEX public.idx_fraud_signals_critical_observation',
+    );
+    expect(indexMigration.slice(createPosition)).toContain('indisvalid');
+    expect(indexMigration.slice(createPosition)).toContain('RAISE EXCEPTION');
+    expect(executableSql).not.toContain('DROP INDEX CONCURRENTLY');
     expect(executableSql.match(/\bCREATE\s+INDEX\b/gi)).toHaveLength(1);
     expect(migrationSource(
       '20260727034000_fraud_signal_observation_clock.sql',
