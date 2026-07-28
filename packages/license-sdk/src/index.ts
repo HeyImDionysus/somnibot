@@ -340,9 +340,7 @@ export class SomniLicense {
     // If we had a cached result that's now stale, the grace period expired.
     // Clear the stale cache and stop heartbeats to prevent zombie sessions.
     if (this.cachedResult) {
-      this.cachedResult = null;
-      this.cachedGraceDeadlineMono = null;
-      this.stopHeartbeat();
+      this.clearSessionState();
       return { valid: false, status: 'offline_grace_expired' };
     }
 
@@ -453,6 +451,12 @@ export class SomniLicense {
         if (hbInterval && hbInterval > 0) {
           this.startHeartbeat(hbInterval);
         }
+      } else {
+        // A parsed, non-indeterminate `valid:false` response is a terminal
+        // server verdict. It must invalidate the prior successful session
+        // before returning; otherwise a later outage can resurrect that old
+        // cache through validateFallback() as `offline_grace`.
+        this.clearSessionState();
       }
 
       return data;
@@ -486,9 +490,7 @@ export class SomniLicense {
     if (this.cachedResult?.valid && !this.cachedGraceLapsed() && elapsed < graceMs) {
       return { valid: true, status: 'offline', next_heartbeat_seconds: 300 };
     }
-    this.cachedResult = null;
-    this.cachedGraceDeadlineMono = null;
-    this.stopHeartbeat();
+    this.clearSessionState();
     return { valid: false, status: terminalStatus, next_heartbeat_seconds: 0 };
   }
 
@@ -592,9 +594,7 @@ export class SomniLicense {
           }
         }
       } else {
-        this.cachedResult = null;
-        this.cachedGraceDeadlineMono = null;
-        this.stopHeartbeat();
+        this.clearSessionState();
       }
 
       return data;
@@ -626,9 +626,7 @@ export class SomniLicense {
       });
 
       const data: DeactivateResponse = await res.json();
-      this.sessionId = null;
-      this.cachedResult = null;
-      this.cachedGraceDeadlineMono = null;
+      this.clearSessionState();
       return data;
     } catch (err) {
       return {
@@ -677,6 +675,22 @@ export class SomniLicense {
   }
 
   // ── Private ──────────────────────────────
+
+  /**
+   * Tear down every piece of state derived from a successful validation.
+   *
+   * Terminal validation/heartbeat verdicts and elapsed offline grace all use
+   * this transition so no stale cache, session id, deadline, server-time
+   * anchor, or timer can survive independently and later revive the session.
+   */
+  private clearSessionState(): void {
+    this.cachedResult = null;
+    this.cacheExpiry = 0;
+    this.sessionId = null;
+    this.cachedGraceDeadlineMono = null;
+    this.serverTimeAnchor = null;
+    this.stopHeartbeat();
+  }
 
   private startHeartbeat(intervalSeconds: number): void {
     this.stopHeartbeat();

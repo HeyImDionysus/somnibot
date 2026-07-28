@@ -47,6 +47,10 @@ function validationInvalid(): Response {
   return jsonResponse({ valid: false, status: 'invalid_key' });
 }
 
+function validationSessionInvalidated(): Response {
+  return jsonResponse({ valid: false, status: 'session_invalidated' });
+}
+
 function heartbeatOk(next = 120): Response {
   return jsonResponse({ valid: true, status: 'active', next_heartbeat_seconds: next });
 }
@@ -305,7 +309,37 @@ describe('SomniLicense', () => {
       expect(hb.valid).toBe(false);
       expect(hb.status).toBe('revoked');
       expect(client.isValid()).toBe(false);
+      expect(client.getSessionId()).toBeNull();
       expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('a terminal validation clears the prior session and cannot fall back to its valid cache', async () => {
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())
+        .mockResolvedValueOnce(validationSessionInvalidated())
+        .mockRejectedValueOnce(new Error('offline after revocation'));
+      const client = sdk({ cacheTtlMs: 1_000, offlineGraceMs: 3_600_000 });
+
+      await client.validate();
+      expect(client.isValid()).toBe(true);
+      expect(client.getSessionId()).toBe('sess-aaa');
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      vi.advanceTimersByTime(2_000);
+      const revoked = await client.validate();
+      expect(revoked).toMatchObject({
+        valid: false,
+        status: 'session_invalidated',
+      });
+      expect(client.isValid()).toBe(false);
+      expect(client.getSessionId()).toBeNull();
+      expect(client.getFeatures()).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+
+      const offline = await client.validate();
+      expect(offline.valid).toBe(false);
+      expect(offline.status).toBe('network_error');
+      expect(offline.status).not.toBe('offline_grace');
     });
 
     it('does not re-anchor server time on a fault (grace still expires)', async () => {
