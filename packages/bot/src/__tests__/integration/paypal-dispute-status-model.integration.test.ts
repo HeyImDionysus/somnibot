@@ -31,6 +31,48 @@ const LEASE_OWNER_B = '80000000-0000-4000-8000-000000000002';
 
 let sql: Sql;
 
+function deferred<T = void>() {
+  let resolvePromise!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: resolvePromise };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+async function databasePid(client: Sql): Promise<number> {
+  const [backend] = await client.unsafe<Array<{ pid: number }>>(
+    'SELECT pg_backend_pid() AS pid',
+  );
+  if (!backend?.pid) throw new Error('failed to capture database client PID');
+  return backend.pid;
+}
+
+async function waitForDatabaseLock(
+  observer: Sql,
+  backendPid: number,
+  description: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const [activity] = await observer.unsafe<Array<{
+      state: string | null;
+      wait_event_type: string | null;
+    }>>(`
+      SELECT state, wait_event_type
+        FROM pg_catalog.pg_stat_activity
+       WHERE pid = ${backendPid}
+    `);
+    if (activity?.state === 'active' && activity.wait_event_type === 'Lock') return;
+    await delay(10);
+  }
+  throw new Error(`${description} did not reach a PostgreSQL lock wait`);
+}
+
 function createTestSql(): Sql {
   return postgres(getTestDbUrl(), {
     max: 1,
@@ -57,6 +99,7 @@ function migrationSql(schema: string): string {
 function preMigrationSchema(schema: string, includeOldFks = true): string {
   return `
     CREATE SCHEMA ${schema};
+    GRANT USAGE ON SCHEMA ${schema} TO service_role;
 
     CREATE TABLE ${schema}.orders (
       id UUID PRIMARY KEY,
@@ -439,6 +482,155 @@ describe('PayPal disputed-order compatibility migration', () => {
     }
   });
 
+  it('refreshes the DB clock under the inserted row lock after an empty-table wait', async () => {
+    const blocker = createTestSql();
+    const contender = createTestSql();
+    const tableLocked = deferred();
+    const releaseTable = deferred();
+    try {
+      const contenderPid = await databasePid(contender);
+      const blockerWork = blocker.begin(async (transaction) => {
+        await transaction.unsafe(`
+          LOCK TABLE ${FIXTURE_SCHEMA}.paypal_reconciliation_state
+          IN ACCESS EXCLUSIVE MODE
+        `);
+        tableLocked.resolve();
+        await releaseTable.promise;
+      });
+      await tableLocked.promise;
+
+      const acquirePromise = contender.unsafe<Array<{ result: string }>>(`
+        SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_acquire(
+          '${LEASE_OWNER_A}'::UUID,
+          1,
+          0,
+          false
+        ) AS result
+      `).then((rows) => rows);
+      await waitForDatabaseLock(
+        sql,
+        contenderPid,
+        'empty-table lease contender',
+      );
+      await delay(1_250);
+      releaseTable.resolve();
+      await blockerWork;
+
+      const acquired = await acquirePromise;
+      expect(acquired).toEqual([{ result: 'acquired' }]);
+      const state = await sql.unsafe<Array<{
+        owner_token: string;
+        lease_is_active: boolean;
+        remaining_seconds: number;
+      }>>(`
+        SELECT owner_token::TEXT,
+               lease_expires_at > clock_timestamp() AS lease_is_active,
+               EXTRACT(
+                 EPOCH FROM lease_expires_at - clock_timestamp()
+               )::DOUBLE PRECISION AS remaining_seconds
+          FROM ${FIXTURE_SCHEMA}.paypal_reconciliation_state
+      `);
+      expect(state).toEqual([
+        expect.objectContaining({
+          owner_token: LEASE_OWNER_A,
+          lease_is_active: true,
+        }),
+      ]);
+      expect(state[0]!.remaining_seconds).toBeGreaterThan(0.5);
+    } finally {
+      releaseTable.resolve();
+      await Promise.allSettled([
+        blocker.end({ timeout: 5 }),
+        contender.end({ timeout: 5 }),
+      ]);
+    }
+  });
+
+  it('never reports acquired without a fresh row when a conflict row is deleted before locking', async () => {
+    await sql.unsafe(`
+      INSERT INTO ${FIXTURE_SCHEMA}.paypal_reconciliation_state (
+        singleton, state, owner_token, lease_expires_at, completed_at, updated_at
+      ) VALUES (
+        true,
+        'running',
+        '${LEASE_OWNER_A}'::UUID,
+        clock_timestamp() - INTERVAL '1 second',
+        NULL,
+        clock_timestamp() - INTERVAL '1 second'
+      )
+    `);
+    const deleter = createTestSql();
+    const contender = createTestSql();
+    const observer = createTestSql();
+    const rowLocked = deferred();
+    const releaseRow = deferred();
+    let blockerWork: Promise<unknown> | null = null;
+    try {
+      const deleterPid = await databasePid(deleter);
+      const contenderPid = await databasePid(contender);
+      blockerWork = sql.begin(async (transaction) => {
+        await transaction.unsafe(`
+          SELECT singleton
+            FROM ${FIXTURE_SCHEMA}.paypal_reconciliation_state
+           WHERE singleton = true
+           FOR UPDATE
+        `);
+        rowLocked.resolve();
+        await releaseRow.promise;
+      });
+      await rowLocked.promise;
+
+      const deletePromise = deleter.unsafe(`
+        DELETE FROM ${FIXTURE_SCHEMA}.paypal_reconciliation_state
+         WHERE singleton = true
+      `).then((rows) => rows);
+      await waitForDatabaseLock(
+        observer,
+        deleterPid,
+        'reconciliation-state deleter',
+      );
+      const acquirePromise = contender.unsafe<Array<{ result: string }>>(`
+        SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_acquire(
+          '${LEASE_OWNER_B}'::UUID,
+          1,
+          0,
+          false
+        ) AS result
+      `).then((rows) => rows);
+      await waitForDatabaseLock(
+        observer,
+        contenderPid,
+        'reconciliation-state acquire contender',
+      );
+      releaseRow.resolve();
+      await blockerWork;
+      await deletePromise;
+
+      const acquired = await acquirePromise;
+      expect(acquired).toEqual([{ result: 'acquired' }]);
+      const state = await sql.unsafe<Array<{
+        owner_token: string;
+        lease_is_active: boolean;
+      }>>(`
+        SELECT owner_token::TEXT,
+               lease_expires_at > clock_timestamp() AS lease_is_active
+          FROM ${FIXTURE_SCHEMA}.paypal_reconciliation_state
+      `);
+      expect(state).toEqual([{
+        owner_token: LEASE_OWNER_B,
+        lease_is_active: true,
+      }]);
+    } finally {
+      releaseRow.resolve();
+      await Promise.allSettled([
+        ...(blockerWork ? [blockerWork] : []),
+        deleter.end({ timeout: 5 }),
+        contender.end({ timeout: 5 }),
+        observer.end({ timeout: 5 }),
+      ]);
+    }
+  });
+
   it('uses the database clock and lets manual bypass cooldown, never active ownership', async () => {
     const acquired = await sql.unsafe<Array<{ result: string }>>(`
       SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_acquire(
@@ -556,6 +748,9 @@ describe('PayPal disputed-order compatibility migration', () => {
       anon_table: boolean;
       authenticated_table: boolean;
       service_table: boolean;
+      service_insert: boolean;
+      service_update: boolean;
+      service_delete: boolean;
       anon_acquire: boolean;
       authenticated_acquire: boolean;
       service_acquire: boolean;
@@ -576,6 +771,21 @@ describe('PayPal disputed-order compatibility migration', () => {
           '${FIXTURE_SCHEMA}.paypal_reconciliation_state',
           'SELECT'
         ) AS service_table,
+        has_table_privilege(
+          'service_role',
+          '${FIXTURE_SCHEMA}.paypal_reconciliation_state',
+          'INSERT'
+        ) AS service_insert,
+        has_table_privilege(
+          'service_role',
+          '${FIXTURE_SCHEMA}.paypal_reconciliation_state',
+          'UPDATE'
+        ) AS service_update,
+        has_table_privilege(
+          'service_role',
+          '${FIXTURE_SCHEMA}.paypal_reconciliation_state',
+          'DELETE'
+        ) AS service_delete,
         has_function_privilege(
           'anon',
           '${FIXTURE_SCHEMA}.paypal_reconcile_acquire(uuid,integer,integer,boolean)',
@@ -597,9 +807,65 @@ describe('PayPal disputed-order compatibility migration', () => {
       anon_table: false,
       authenticated_table: false,
       service_table: true,
+      service_insert: false,
+      service_update: false,
+      service_delete: false,
       anon_acquire: false,
       authenticated_acquire: false,
       service_acquire: true,
     }]);
+  });
+
+  it('denies direct service_role DML while the definer RPC lifecycle succeeds', async () => {
+    for (const directDml of [
+      `INSERT INTO ${FIXTURE_SCHEMA}.paypal_reconciliation_state (
+         singleton, state, owner_token, lease_expires_at, completed_at
+       ) VALUES (
+         true, 'running', '${LEASE_OWNER_A}'::UUID,
+         clock_timestamp() + INTERVAL '1 minute', NULL
+       )`,
+      `UPDATE ${FIXTURE_SCHEMA}.paypal_reconciliation_state
+          SET updated_at = clock_timestamp()
+        WHERE singleton = true`,
+      `DELETE FROM ${FIXTURE_SCHEMA}.paypal_reconciliation_state
+        WHERE singleton = true`,
+    ]) {
+      await expect(sql.begin(async (transaction) => {
+        await transaction.unsafe('SET LOCAL ROLE service_role');
+        await transaction.unsafe(directDml);
+      })).rejects.toMatchObject({ code: '42501' });
+    }
+
+    await sql.begin(async (transaction) => {
+      await transaction.unsafe('SET LOCAL ROLE service_role');
+      const acquired = await transaction.unsafe<Array<{ result: string }>>(`
+        SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_acquire(
+          '${LEASE_OWNER_A}'::UUID,
+          60,
+          0,
+          false
+        ) AS result
+      `);
+      expect(acquired).toEqual([{ result: 'acquired' }]);
+      const visible = await transaction.unsafe<Array<{ owner_token: string }>>(`
+        SELECT owner_token::TEXT
+          FROM ${FIXTURE_SCHEMA}.paypal_reconciliation_state
+      `);
+      expect(visible).toEqual([{ owner_token: LEASE_OWNER_A }]);
+      const heartbeat = await transaction.unsafe<Array<{ result: boolean }>>(`
+        SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_heartbeat(
+          '${LEASE_OWNER_A}'::UUID,
+          60
+        ) AS result
+      `);
+      expect(heartbeat).toEqual([{ result: true }]);
+      const finalized = await transaction.unsafe<Array<{ result: boolean }>>(`
+        SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_finalize(
+          '${LEASE_OWNER_A}'::UUID,
+          true
+        ) AS result
+      `);
+      expect(finalized).toEqual([{ result: true }]);
+    });
   });
 });

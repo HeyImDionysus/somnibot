@@ -46,6 +46,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import {
   RECONCILE_LAST_RESULT_KEY,
+  recordScheduledReconciliationFailure,
   runPayPalReconciliation,
 } from '@/lib/paypal-reconciliation';
 
@@ -137,6 +138,30 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, ...result });
   } catch (err) {
     console.error('[PayPalReconcile] Pass threw:', err);
+    if (auth.scheduled) {
+      const failure = {
+        status: 'failed' as const,
+        reason: 'scheduled reconciliation unexpectedly threw',
+        retriable: true,
+      };
+      try {
+        const visible = await recordScheduledReconciliationFailure(supabase, failure);
+        if (!visible) {
+          console.error(
+            '[PayPalReconcile] Could not durably record the unexpected scheduled failure',
+          );
+        }
+      } catch (visibilityError) {
+        console.error(
+          '[PayPalReconcile] Unexpected scheduled failure visibility threw:',
+          visibilityError,
+        );
+      }
+      return NextResponse.json(
+        { success: false, ...failure },
+        { status: 503, headers: { 'Retry-After': '300' } },
+      );
+    }
     return NextResponse.json(
       { success: false, error: 'Reconciliation failed' },
       { status: 500 },

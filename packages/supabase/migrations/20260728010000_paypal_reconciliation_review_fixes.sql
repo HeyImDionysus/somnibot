@@ -135,9 +135,8 @@ CREATE TABLE IF NOT EXISTS public.paypal_reconciliation_state (
 
 ALTER TABLE public.paypal_reconciliation_state ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.paypal_reconciliation_state
-  FROM PUBLIC, anon, authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE
-  ON TABLE public.paypal_reconciliation_state TO service_role;
+  FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT ON TABLE public.paypal_reconciliation_state TO service_role;
 
 CREATE OR REPLACE FUNCTION public.paypal_reconcile_acquire(
   p_owner_token UUID,
@@ -151,10 +150,13 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_now TIMESTAMPTZ := pg_catalog.clock_timestamp();
+  v_now TIMESTAMPTZ;
   v_state TEXT;
   v_lease_expires_at TIMESTAMPTZ;
   v_completed_at TIMESTAMPTZ;
+  v_inserted BOOLEAN;
+  v_updated INTEGER;
+  v_attempts INTEGER := 0;
 BEGIN
   IF p_owner_token IS NULL
      OR p_lease_seconds IS NULL
@@ -168,58 +170,77 @@ BEGIN
       USING ERRCODE = '22023';
   END IF;
 
-  INSERT INTO public.paypal_reconciliation_state (
-    singleton,
-    state,
-    owner_token,
-    lease_expires_at,
-    completed_at,
-    updated_at
-  )
-  VALUES (
-    true,
-    'running',
-    p_owner_token,
-    v_now + pg_catalog.make_interval(secs => p_lease_seconds),
-    NULL,
-    v_now
-  )
-  ON CONFLICT (singleton) DO NOTHING;
+  LOOP
+    v_attempts := v_attempts + 1;
+    INSERT INTO public.paypal_reconciliation_state (
+      singleton,
+      state,
+      owner_token,
+      lease_expires_at,
+      completed_at,
+      updated_at
+    )
+    VALUES (
+      true,
+      'running',
+      p_owner_token,
+      pg_catalog.clock_timestamp()
+        + pg_catalog.make_interval(secs => p_lease_seconds),
+      NULL,
+      pg_catalog.clock_timestamp()
+    )
+    ON CONFLICT (singleton) DO NOTHING;
+    v_inserted := FOUND;
 
-  IF FOUND THEN
+    SELECT state, lease_expires_at, completed_at
+      INTO v_state, v_lease_expires_at, v_completed_at
+      FROM public.paypal_reconciliation_state
+     WHERE singleton = true
+     FOR UPDATE;
+    IF NOT FOUND THEN
+      -- A failure finalizer can delete the singleton after ON CONFLICT observes
+      -- it but before this contender reaches the row lock. Retry the insert;
+      -- never report ownership for a row that does not exist.
+      IF v_attempts >= 4 THEN
+        RAISE EXCEPTION 'PayPal reconciliation state changed too often to acquire'
+          USING ERRCODE = '40001';
+      END IF;
+      CONTINUE;
+    END IF;
+
+    -- Both the empty-table insert and conflict paths can wait behind another
+    -- transaction. Refresh only while holding the singleton row lock.
+    v_now := pg_catalog.clock_timestamp();
+
+    IF NOT v_inserted
+       AND v_state = 'running'
+       AND v_lease_expires_at > v_now THEN
+      RETURN 'busy';
+    END IF;
+
+    IF NOT v_inserted
+       AND v_state = 'completed'
+       AND NOT p_bypass_cooldown
+       AND v_completed_at + pg_catalog.make_interval(secs => p_cooldown_seconds) > v_now THEN
+      RETURN 'cooldown';
+    END IF;
+
+    UPDATE public.paypal_reconciliation_state
+       SET state = 'running',
+           owner_token = p_owner_token,
+           lease_expires_at =
+             v_now + pg_catalog.make_interval(secs => p_lease_seconds),
+           completed_at = NULL,
+           updated_at = v_now
+     WHERE singleton = true;
+    GET DIAGNOSTICS v_updated = ROW_COUNT;
+    IF v_updated <> 1 THEN
+      RAISE EXCEPTION 'PayPal reconciliation acquisition did not mutate one row'
+        USING ERRCODE = '40001';
+    END IF;
+
     RETURN 'acquired';
-  END IF;
-
-  SELECT state, lease_expires_at, completed_at
-    INTO v_state, v_lease_expires_at, v_completed_at
-    FROM public.paypal_reconciliation_state
-   WHERE singleton = true
-   FOR UPDATE;
-  -- The insert/select above can wait behind another transaction. Refresh only
-  -- after the singleton row is locked so expiry and cooldown use current DB
-  -- time rather than the time at which this contender began waiting.
-  v_now := pg_catalog.clock_timestamp();
-
-  IF v_state = 'running' AND v_lease_expires_at > v_now THEN
-    RETURN 'busy';
-  END IF;
-
-  IF v_state = 'completed'
-     AND NOT p_bypass_cooldown
-     AND v_completed_at + pg_catalog.make_interval(secs => p_cooldown_seconds) > v_now THEN
-    RETURN 'cooldown';
-  END IF;
-
-  UPDATE public.paypal_reconciliation_state
-     SET state = 'running',
-         owner_token = p_owner_token,
-         lease_expires_at =
-           v_now + pg_catalog.make_interval(secs => p_lease_seconds),
-         completed_at = NULL,
-         updated_at = v_now
-   WHERE singleton = true;
-
-  RETURN 'acquired';
+  END LOOP;
 END;
 $$;
 
