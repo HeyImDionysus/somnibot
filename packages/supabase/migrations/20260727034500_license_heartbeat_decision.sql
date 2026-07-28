@@ -129,7 +129,10 @@ AS $$
   ),
   touched_session AS MATERIALIZED (
     UPDATE public.license_sessions AS session
-       SET last_seen_at = decision.decision_at
+       SET last_seen_at = GREATEST(
+         COALESCE(session.last_seen_at, decision.decision_at),
+         decision.decision_at
+       )
       FROM key_snapshot AS key,
            entitlement_decision AS decision
      WHERE session.id = p_session_id

@@ -400,6 +400,12 @@ describe('license_heartbeat_decision migration contract', () => {
     );
     expect(HEARTBEAT_MIGRATION).toContain('session.active = true');
     expect(HEARTBEAT_MIGRATION).toContain(
+      'COALESCE(session.last_seen_at, decision.decision_at)',
+    );
+    expect(HEARTBEAT_MIGRATION).toMatch(
+      /SET last_seen_at = GREATEST\(\s*COALESCE\(session\.last_seen_at,\s*decision\.decision_at\),\s*decision\.decision_at\s*\)/,
+    );
+    expect(HEARTBEAT_MIGRATION).toContain(
       'GRANT EXECUTE ON FUNCTION public.license_heartbeat_decision(TEXT, UUID)',
     );
     expect(HEARTBEAT_MIGRATION).toContain('TO service_role;');

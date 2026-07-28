@@ -16,7 +16,9 @@ import { getTestDbUrl } from './helpers.js';
 const FIXTURE_SCHEMA = 'license_heartbeat_decision_fixture';
 const MIGRATION = '20260727034500_license_heartbeat_decision.sql';
 const DECISION_AT = '2026-07-27T12:00:00.000Z';
+const NEWER_DECISION_AT = '2026-07-27T12:00:01.000Z';
 const OLD_LAST_SEEN = '2020-01-01T00:00:00.000Z';
+const CLOCK_PAUSE_LOCK = 40_234_500;
 
 const KEY_A = '10000000-0000-4000-8000-000000000001';
 const KEY_B = '10000000-0000-4000-8000-000000000002';
@@ -60,20 +62,45 @@ const FIXTURE_SCHEMA_SQL = `
   CREATE SCHEMA ${FIXTURE_SCHEMA};
 
   CREATE TABLE ${FIXTURE_SCHEMA}.clock_control (
-    decision_at TIMESTAMPTZ NOT NULL
+    decision_at TIMESTAMPTZ NOT NULL,
+    pause_backend_pid INTEGER,
+    pause_lock_key BIGINT
   );
   INSERT INTO ${FIXTURE_SCHEMA}.clock_control (decision_at)
   VALUES ('${DECISION_AT}');
 
   CREATE FUNCTION ${FIXTURE_SCHEMA}.fixture_clock()
   RETURNS TIMESTAMPTZ
-  LANGUAGE sql
+  LANGUAGE plpgsql
   VOLATILE
   SET search_path = ''
   AS $$
-    SELECT decision_at
-    FROM ${FIXTURE_SCHEMA}.clock_control
-    LIMIT 1
+  DECLARE
+    captured_at TIMESTAMPTZ;
+    backend_pause_lock BIGINT;
+  BEGIN
+    SELECT
+      control.decision_at,
+      CASE
+        WHEN control.pause_backend_pid = pg_catalog.pg_backend_pid()
+          THEN control.pause_lock_key
+      END
+      INTO captured_at, backend_pause_lock
+      FROM ${FIXTURE_SCHEMA}.clock_control AS control
+      LIMIT 1;
+
+    IF backend_pause_lock IS NOT NULL THEN
+      -- The shipped function keeps its 500ms lock timeout. Only the test clock's
+      -- explicit barrier gets a wider ceiling so slow CI cannot make this
+      -- deterministic interleaving flaky; restore the production value before
+      -- the heartbeat reaches any production row lock.
+      PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
+      PERFORM pg_catalog.pg_advisory_xact_lock(backend_pause_lock);
+      PERFORM pg_catalog.set_config('lock_timeout', '500ms', true);
+    END IF;
+
+    RETURN captured_at;
+  END
   $$;
 
   CREATE TABLE ${FIXTURE_SCHEMA}.license_keys (
@@ -100,7 +127,7 @@ const FIXTURE_SCHEMA_SQL = `
     id UUID PRIMARY KEY,
     license_key_id UUID NOT NULL,
     active BOOLEAN NOT NULL,
-    last_seen_at TIMESTAMPTZ NOT NULL
+    last_seen_at TIMESTAMPTZ
   );
 `;
 
@@ -108,6 +135,17 @@ async function setDecisionClock(value: string) {
   await sql.unsafe(`
     UPDATE ${FIXTURE_SCHEMA}.clock_control
        SET decision_at = '${value}'
+  `);
+}
+
+async function setClockPause(
+  backendPid: number | null,
+  lockKey: number | null,
+): Promise<void> {
+  await sql.unsafe(`
+    UPDATE ${FIXTURE_SCHEMA}.clock_control
+       SET pause_backend_pid = ${backendPid ?? 'NULL'},
+           pause_lock_key = ${lockKey ?? 'NULL'}
   `);
 }
 
@@ -218,6 +256,7 @@ describe('license_heartbeat_decision real-Postgres fixture', () => {
         ${FIXTURE_SCHEMA}.license_keys
     `);
     await setDecisionClock(DECISION_AT);
+    await setClockPause(null, null);
   });
 
   afterAll(async () => {
@@ -398,6 +437,148 @@ describe('license_heartbeat_decision real-Postgres fixture', () => {
     const after = await heartbeatDecision(KEY_A, SESSION_A);
     expect(after).toMatchObject({ status: 'expired', session_touched: false });
     expect(new Date(after.decided_at).toISOString()).toBe(afterDeadline);
+  });
+
+  it('touches a null last_seen_at without replacing a newer stored timestamp', async () => {
+    const futureLastSeen = '2026-07-27T12:00:02.000Z';
+    await seedKeyAndSession(KEY_A, SESSION_A);
+    await sql.unsafe(`
+      INSERT INTO ${FIXTURE_SCHEMA}.entitlements (
+        id,
+        license_key_id,
+        status,
+        grace_period_ends_at,
+        updated_at
+      ) VALUES (
+        '30000000-0000-4000-8000-000000000033',
+        '${KEY_A}',
+        'active',
+        NULL,
+        '${DECISION_AT}'
+      );
+      UPDATE ${FIXTURE_SCHEMA}.license_sessions
+         SET last_seen_at = NULL
+       WHERE id = '${SESSION_A}'::UUID
+    `);
+
+    const nullTouch = await heartbeatDecision(KEY_A, SESSION_A);
+    expect(nullTouch).toMatchObject({ status: 'active', session_touched: true });
+    expect((await sessionState(SESSION_A))!.last_seen_at.toISOString()).toBe(
+      DECISION_AT,
+    );
+
+    await sql.unsafe(`
+      UPDATE ${FIXTURE_SCHEMA}.license_sessions
+         SET last_seen_at = '${futureLastSeen}'
+       WHERE id = '${SESSION_A}'::UUID
+    `);
+    const olderDecision = await heartbeatDecision(KEY_A, SESSION_A);
+    expect(new Date(olderDecision.decided_at).toISOString()).toBe(DECISION_AT);
+    expect((await sessionState(SESSION_A))!.last_seen_at.toISOString()).toBe(
+      futureLastSeen,
+    );
+  });
+
+  it('never regresses last_seen_at when an older heartbeat finishes after a newer one', async () => {
+    await seedKeyAndSession(KEY_A, SESSION_A);
+    await sql.unsafe(`
+      INSERT INTO ${FIXTURE_SCHEMA}.entitlements (
+        id,
+        license_key_id,
+        status,
+        grace_period_ends_at,
+        updated_at
+      ) VALUES (
+        '30000000-0000-4000-8000-000000000032',
+        '${KEY_A}',
+        'active',
+        NULL,
+        '${DECISION_AT}'
+      )
+    `);
+
+    let releaseClockBarrier!: () => void;
+    let clockBarrierLocked!: () => void;
+    const releaseBarrier = new Promise<void>((resolve) => {
+      releaseClockBarrier = resolve;
+    });
+    const barrierLocked = new Promise<void>((resolve) => {
+      clockBarrierLocked = resolve;
+    });
+    const clockBarrier = sql.begin(async (tx) => {
+      await tx.unsafe(
+        `SELECT pg_catalog.pg_advisory_xact_lock(${CLOCK_PAUSE_LOCK})`,
+      );
+      clockBarrierLocked();
+      await releaseBarrier;
+    });
+    await barrierLocked;
+
+    let startOlderHeartbeat!: () => void;
+    let olderBackendReady!: (pid: number) => void;
+    const startOlder = new Promise<void>((resolve) => {
+      startOlderHeartbeat = resolve;
+    });
+    const olderBackend = new Promise<number>((resolve) => {
+      olderBackendReady = resolve;
+    });
+    const olderHeartbeat = sql.begin(async (tx) => {
+      const [backend] = await tx.unsafe<Array<{ pid: number }>>(
+        'SELECT pg_catalog.pg_backend_pid() AS pid',
+      );
+      if (!backend) throw new Error('Older heartbeat backend pid was unavailable');
+      olderBackendReady(backend.pid);
+      await startOlder;
+
+      const [row] = await tx.unsafe<Array<{ decision: HeartbeatDecision }>>(`
+        SELECT ${FIXTURE_SCHEMA}.license_heartbeat_decision(
+          '${keyHashFor(KEY_A)}'::TEXT,
+          '${SESSION_A}'::UUID
+        ) AS decision
+      `);
+      if (!row) throw new Error('Older heartbeat decision returned no row');
+      return row.decision;
+    });
+
+    const olderBackendPid = await olderBackend;
+    let newerDecision!: HeartbeatDecision;
+    try {
+      await setClockPause(olderBackendPid, CLOCK_PAUSE_LOCK);
+      startOlderHeartbeat();
+      await waitForBackendLock(olderBackendPid);
+
+      // The older backend has captured DECISION_AT and is now paused inside the
+      // fixture clock, before the production session UPDATE takes its row lock.
+      await setDecisionClock(NEWER_DECISION_AT);
+      newerDecision = await heartbeatDecision(KEY_A, SESSION_A);
+
+      expect(new Date(newerDecision.decided_at).toISOString()).toBe(
+        NEWER_DECISION_AT,
+      );
+      expect(newerDecision).toMatchObject({
+        status: 'active',
+        session_touched: true,
+      });
+      expect((await sessionState(SESSION_A))!.last_seen_at.toISOString()).toBe(
+        NEWER_DECISION_AT,
+      );
+    } finally {
+      // Both resolvers are idempotent. Releasing them in cleanup prevents a
+      // failed assertion from stranding either transaction.
+      startOlderHeartbeat();
+      releaseClockBarrier();
+      await Promise.allSettled([clockBarrier, olderHeartbeat]);
+    }
+
+    const olderDecision = await olderHeartbeat;
+    expect(new Date(olderDecision.decided_at).toISOString()).toBe(DECISION_AT);
+    expect(olderDecision).toMatchObject({
+      status: 'active',
+      session_touched: true,
+    });
+    expect((await sessionState(SESSION_A))!.last_seen_at.toISOString()).toBe(
+      NEWER_DECISION_AT,
+    );
   });
 
   it('waits for payment recovery and observes one post-transition entitlement state', async () => {
