@@ -1337,9 +1337,14 @@ export class AuditService {
     attempts: number;
     firstFailedAt: string;
     lastError: string;
-    recoveredEntries: number;
-    recoveryGuildId: string | null;
   } | null = null;
+  /**
+   * Immutable recovery rows whose INSERT response failed or was ambiguous.
+   * Retaining the exact row matters because audit_logs is append-only and the
+   * idempotency key may already have committed even when the client saw an
+   * error. Later audit batches must never rewrite this payload.
+   */
+  private pendingFlushRecoveries: Array<Readonly<Record<string, unknown>>> = [];
   /**
    * Last-known guild_config values — the BEFORE side of config.updated
    * diffs. Loaded once at start() (i.e. before any config change this
@@ -1669,7 +1674,8 @@ export class AuditService {
           pendingEnqueues: this.pendingEnqueues.size,
           activeGapWindows: this.activeGapWindows.size,
           frozenGapWindows: this.pendingGapWindows.size,
-          pendingFlushRecovery: this.flushOutage !== null,
+          activeFlushOutage: this.flushOutage !== null,
+          pendingFlushRecoveryRows: this.pendingFlushRecoveries.length,
         };
         log.error('Audit shutdown drain stalled with finite work still pending', residue);
         throw new Error(
@@ -1686,6 +1692,7 @@ export class AuditService {
       || this.activeGapWindows.size > 0
       || this.pendingGapWindows.size > 0
       || this.flushOutage !== null
+      || this.pendingFlushRecoveries.length > 0
     );
   }
 
@@ -1757,12 +1764,7 @@ export class AuditService {
     }
     if (this.queue.length === 0) {
       let progressed = await this.flushGapWindows();
-      if (this.flushOutage && this.flushOutage.recoveredEntries > 0) {
-        const outage = this.flushOutage;
-        this.flushOutage = null;
-        await this.recordFlushRecovery([], outage);
-        progressed = this.flushOutage === null || progressed;
-      }
+      progressed = await this.flushPendingRecoveries() || progressed;
       return progressed;
     }
 
@@ -1786,8 +1788,6 @@ export class AuditService {
         attempts: (this.flushOutage?.attempts ?? 0) + 1,
         firstFailedAt: this.flushOutage?.firstFailedAt ?? new Date().toISOString(),
         lastError: writeError,
-        recoveredEntries: this.flushOutage?.recoveredEntries ?? 0,
-        recoveryGuildId: this.flushOutage?.recoveryGuildId ?? null,
       };
       // Keep the oldest failed rows first while retaining a hard memory bound.
       this.queue.unshift(...batch);
@@ -1810,21 +1810,32 @@ export class AuditService {
     // again — record the outage window exactly once, keyed on its start so a
     // retry/restart cannot duplicate it.
     if (this.flushOutage) {
-      const outage = {
-        ...this.flushOutage,
-        recoveredEntries: this.flushOutage.recoveredEntries + batch.length,
-        recoveryGuildId:
-          (batch.find((entry) => typeof entry.guild_id === 'string')?.guild_id as
-            | string
-            | undefined)
-          ?? this.flushOutage.recoveryGuildId
-          ?? this.guildId
-          ?? null,
-      };
+      const outage = this.flushOutage;
       this.flushOutage = null;
-      await this.recordFlushRecovery(batch, outage);
+      const guildId =
+        (batch.find((entry) => typeof entry.guild_id === 'string')?.guild_id as
+          | string
+          | undefined)
+        ?? this.guildId;
+      this.pendingFlushRecoveries.push(Object.freeze({
+        guild_id: guildId,
+        actor_type: 'system',
+        actor_id: 'audit-service',
+        action: 'audit.flush_failed',
+        category: 'system',
+        success: false,
+        error_message: outage.lastError,
+        occurrence_key: `audit.flush_failed:${outage.firstFailedAt}`,
+        details: Object.freeze({
+          attempts: outage.attempts,
+          firstFailedAt: outage.firstFailedAt,
+          recoveredAt: new Date().toISOString(),
+          recoveredEntries: batch.length,
+        }),
+      }));
     }
     await this.flushGapWindows();
+    await this.flushPendingRecoveries();
     return true;
   }
 
@@ -1926,59 +1937,33 @@ export class AuditService {
   }
 
   /**
-   * Write the `audit.flush_failed` row describing a completed outage window.
-   * Best-effort by construction: it is written directly (not queued) so it
-   * cannot re-enter the failing batch, and a failure here only restores the
-   * pending-outage marker so the next successful flush tries again — it must
-   * never throw into the flush loop or drop the caller's real audit entries.
+   * Retry each already-frozen `audit.flush_failed` row byte-for-byte. A failed
+   * or ambiguous append may already have committed, so ON CONFLICT DO NOTHING
+   * is the only safe acknowledgement path.
    */
-  private async recordFlushRecovery(
-    batch: Array<Record<string, unknown>>,
-    outage: {
-      attempts: number;
-      firstFailedAt: string;
-      lastError: string;
-      recoveredEntries: number;
-      recoveryGuildId: string | null;
-    },
-  ): Promise<void> {
-    // Attribute the window to a guild present in the recovered batch (the rows
-    // that were stuck), falling back to this service's own guild.
-    const guildId =
-      outage.recoveryGuildId
-      ?? (batch.find((e) => typeof e.guild_id === 'string')?.guild_id as string | undefined)
-      ?? this.guildId;
-    if (!guildId) {
-      this.flushOutage = outage;
-      return;
-    }
-    try {
-      const { error } = await this.supabase.from('audit_logs').upsert(
-        [{
-          guild_id: guildId,
-          actor_type: 'system',
-          actor_id: 'audit-service',
-          action: 'audit.flush_failed',
-          category: 'system',
-          success: false,
-          error_message: outage.lastError,
-          occurrence_key: `audit.flush_failed:${outage.firstFailedAt}`,
-          details: {
-            attempts: outage.attempts,
-            firstFailedAt: outage.firstFailedAt,
-            recoveredAt: new Date().toISOString(),
-            recoveredEntries: outage.recoveredEntries,
-          },
-        }],
-        { onConflict: 'guild_id,occurrence_key', ignoreDuplicates: true },
-      );
-      if (error) {
-        log.warn('Could not record audit.flush_failed:', error.message);
-        this.flushOutage = outage; // try again after the next successful flush
+  private async flushPendingRecoveries(): Promise<boolean> {
+    let progressed = false;
+    for (const row of [...this.pendingFlushRecoveries]) {
+      let writeError: string | null = null;
+      try {
+        const { error } = await this.supabase.from('audit_logs').upsert(
+          [row],
+          { onConflict: 'guild_id,occurrence_key', ignoreDuplicates: true },
+        );
+        writeError = error?.message ?? null;
+      } catch (err) {
+        writeError = err instanceof Error ? err.message : String(err);
       }
-    } catch (err) {
-      log.warn('Could not record audit.flush_failed:', (err as Error)?.message ?? err);
-      this.flushOutage = outage;
+
+      if (writeError) {
+        log.warn('Could not record audit.flush_failed:', writeError);
+        continue;
+      }
+
+      const index = this.pendingFlushRecoveries.indexOf(row);
+      if (index >= 0) this.pendingFlushRecoveries.splice(index, 1);
+      progressed = true;
     }
+    return progressed;
   }
 }

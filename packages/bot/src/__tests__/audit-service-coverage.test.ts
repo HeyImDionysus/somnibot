@@ -562,7 +562,7 @@ describe('AuditService', () => {
         .flatMap(([rows]) => rows as Array<Record<string, any>>)
         .filter((row) => row.action === 'audit.flush_failed');
       expect(recoveryRows).toHaveLength(2);
-      expect(recoveryRows[1]?.occurrence_key).toBe(recoveryRows[0]?.occurrence_key);
+      expect(recoveryRows[1]).toEqual(recoveryRows[0]);
       expect(recoveryRows[1]?.details).toMatchObject({
         attempts: 1,
         recoveredEntries: 1,
@@ -570,8 +570,46 @@ describe('AuditService', () => {
 
       const internals = service as unknown as {
         flushOutage: unknown;
+        pendingFlushRecoveries: Array<Record<string, unknown>>;
       };
       expect(internals.flushOutage).toBeNull();
+      expect(internals.pendingFlushRecoveries).toEqual([]);
+    });
+
+    it('retries the exact frozen recovery row without folding in a later batch', async () => {
+      supabase._upsertMock
+        .mockResolvedValueOnce({ error: { message: 'batch A temporarily unavailable' } })
+        .mockResolvedValueOnce({ error: null })
+        .mockResolvedValueOnce({ error: { message: 'recovery marker ambiguously failed' } })
+        .mockResolvedValueOnce({ error: null })
+        .mockResolvedValueOnce({ error: null });
+
+      const internals = service as unknown as {
+        flush: () => Promise<void>;
+      };
+      await service.log({
+        action: 'batch.a',
+        actorType: 'bot',
+        actorId: 'bot1',
+      });
+      await internals.flush();
+      await internals.flush();
+
+      await service.log({
+        action: 'batch.b',
+        actorType: 'bot',
+        actorId: 'bot1',
+      });
+      await internals.flush();
+
+      const recoveryRows = supabase._upsertMock.mock.calls
+        .flatMap(([rows]) => rows as Array<Record<string, any>>)
+        .filter((row) => row.action === 'audit.flush_failed');
+      expect(recoveryRows).toHaveLength(2);
+      expect(recoveryRows[1]).toEqual(recoveryRows[0]);
+      expect(recoveryRows[0]?.details).toMatchObject({
+        recoveredEntries: 1,
+      });
     });
 
     it('rejects with the recovery marker retained when that marker stays unavailable', async () => {
@@ -590,16 +628,19 @@ describe('AuditService', () => {
 
       const internals = service as unknown as {
         queue: Array<Record<string, unknown>>;
-        flushOutage: {
-          recoveredEntries: number;
-        } | null;
+        flushOutage: unknown;
+        pendingFlushRecoveries: Array<Record<string, any>>;
       };
       expect(internals.queue).toHaveLength(0);
-      expect(internals.flushOutage).toMatchObject({ recoveredEntries: 1 });
+      expect(internals.flushOutage).toBeNull();
+      expect(internals.pendingFlushRecoveries).toHaveLength(1);
+      expect(internals.pendingFlushRecoveries[0]?.details)
+        .toMatchObject({ recoveredEntries: 1 });
 
       supabase._upsertMock.mockResolvedValue({ error: null });
       await service.stop();
       expect(internals.flushOutage).toBeNull();
+      expect(internals.pendingFlushRecoveries).toEqual([]);
     });
   });
 
