@@ -99,9 +99,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   let consumed = false;
   vi.mocked(consumeDownloadNonce).mockImplementation(async () => {
-    if (consumed) return false;
+    if (consumed) return 'replay';
     consumed = true;
-    return true;
+    return 'consumed';
   });
 });
 
@@ -150,6 +150,23 @@ describe('GET /api/downloads — nonce delivery boundary', () => {
     expect(consumeDownloadNonce).not.toHaveBeenCalled();
 
     expect((await downloadGet(request() as never, params)).status).toBe(307);
+  });
+
+  it('fails retryably instead of treating an unavailable nonce store as a replay', async () => {
+    vi.mocked(createAdminSupabase).mockReturnValue(mockDownload() as never);
+    vi.mocked(consumeDownloadNonce)
+      .mockResolvedValueOnce('unavailable')
+      .mockResolvedValueOnce('consumed')
+      .mockResolvedValueOnce('replay');
+
+    const unavailable = await downloadGet(request() as never, params);
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toMatchObject({
+      retryable: true,
+    });
+
+    expect((await downloadGet(request() as never, params)).status).toBe(307);
+    expect((await downloadGet(request() as never, params)).status).toBe(410);
   });
 
   it('returns the redirect after nonce consumption even when analytics never settles', async () => {

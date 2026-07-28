@@ -67,6 +67,7 @@ async function startValkeyFixture(
 ): Promise<ValkeyFixture> {
   const sockets = new Set<Socket>();
   const commands: string[][] = [];
+  const values = new Map<string, string>();
   let pingReplies = 0;
   let ignoredPing = false;
   const server = createServer((socket) => {
@@ -109,8 +110,21 @@ async function startValkeyFixture(
           }
           pingReplies += 1;
           socket.write('+PONG\r\n');
+        } else if (name === 'SET') {
+          const [key, value, ...setOptions] = args;
+          const nx = setOptions.some((option) => option.toUpperCase() === 'NX');
+          if (!key || value === undefined) {
+            socket.write('-ERR invalid SET\r\n');
+          } else if (nx && values.has(key)) {
+            socket.write('$-1\r\n');
+          } else {
+            values.set(key, value);
+            socket.write('+OK\r\n');
+          }
         } else if (name === 'GET' && args[0] === 'somnibot:heartbeat:bot') {
           socket.write(bulk(heartbeat));
+        } else if (name === 'GET' && args[0] && values.has(args[0])) {
+          socket.write(bulk(values.get(args[0])!));
         } else {
           socket.write('$-1\r\n');
         }
@@ -175,6 +189,72 @@ afterEach(() => {
 });
 
 describe('rate-limit Valkey authentication', () => {
+  it('atomically consumes a single-use key in shared Valkey', async () => {
+    const fixture = await startValkeyFixture('nonce value', '{}');
+    process.env.VALKEY_URL = fixture.url;
+
+    try {
+      const { consumeSingleUseValkeyKey } = await import('@/lib/api/rate-limit');
+
+      await expect(
+        consumeSingleUseValkeyKey('ratelimit:download:nonce:one', 330),
+      ).resolves.toBe('consumed');
+      await expect(
+        consumeSingleUseValkeyKey('ratelimit:download:nonce:one', 330),
+      ).resolves.toBe('replay');
+
+      expect(fixture.commands).toEqual([
+        ['AUTH', 'nonce value'],
+        ['SET', 'ratelimit:download:nonce:one', '1', 'NX', 'EX', '330'],
+        ['SET', 'ratelimit:download:nonce:one', '1', 'NX', 'EX', '330'],
+        ['GET', 'ratelimit:download:nonce:one'],
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('fails closed when shared Valkey disappears after consumption', async () => {
+    const fixture = await startValkeyFixture('outage value', '{}');
+    process.env.VALKEY_URL = fixture.url;
+    const { consumeSingleUseValkeyKey } = await import('@/lib/api/rate-limit');
+
+    await expect(
+      consumeSingleUseValkeyKey('download:nonce:outage', 330),
+    ).resolves.toBe('consumed');
+    await fixture.close();
+
+    await expect(
+      consumeSingleUseValkeyKey('download:nonce:outage', 330),
+    ).resolves.toBe('unavailable');
+  });
+
+  it('recovers from an unavailable store without creating local nonce state', async () => {
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const { consumeSingleUseValkeyKey } = await import('@/lib/api/rate-limit');
+
+    await expect(
+      consumeSingleUseValkeyKey('download:nonce:recovery', 330),
+    ).resolves.toBe('unavailable');
+
+    const fixture = await startValkeyFixture('recovery value', '{}');
+    process.env.VALKEY_URL = fixture.url;
+    now += 5_001;
+
+    try {
+      await expect(
+        consumeSingleUseValkeyKey('download:nonce:recovery', 330),
+      ).resolves.toBe('consumed');
+      await expect(
+        consumeSingleUseValkeyKey('download:nonce:recovery', 330),
+      ).resolves.toBe('replay');
+    } finally {
+      vi.restoreAllMocks();
+      await fixture.close();
+    }
+  });
+
   it('authenticates passworded Valkey URLs before health PING and heartbeat GET', async () => {
     const heartbeat = JSON.stringify({ timestamp: Date.now() });
     const fixture = await startValkeyFixture('s3cret value', heartbeat);

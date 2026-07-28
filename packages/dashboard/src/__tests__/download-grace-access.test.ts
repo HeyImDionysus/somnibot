@@ -27,7 +27,7 @@ vi.mock('@/lib/api/signed-url', () => ({
   verifySignedDownloadUrl: vi.fn(() => ({ customerId: 'cust-1', guildId: 'guild-1', nonce: undefined })),
 }));
 vi.mock('@/lib/api/download-nonce', () => ({
-  consumeDownloadNonce: vi.fn().mockResolvedValue(true),
+  consumeDownloadNonce: vi.fn().mockResolvedValue('consumed'),
 }));
 
 import { NextRequest } from 'next/server';

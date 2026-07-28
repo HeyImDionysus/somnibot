@@ -452,6 +452,40 @@ export async function checkValkeyHealth(): Promise<boolean> {
   }
 }
 
+export type SingleUseValkeyResult = 'consumed' | 'replay' | 'unavailable';
+
+/**
+ * Atomically consume a security-sensitive single-use key in shared Valkey.
+ *
+ * Unlike rate limiting, this deliberately has no per-process memory fallback:
+ * switching between independent stores would make a consumed token fresh
+ * again during an outage, recovery, or request to another replica.
+ */
+export async function consumeSingleUseValkeyKey(
+  key: string,
+  ttlSeconds: number,
+): Promise<SingleUseValkeyResult> {
+  if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0) return 'unavailable';
+  if (!await ensureValkeyReady()) return 'unavailable';
+
+  try {
+    const ttl = Math.max(1, Math.ceil(ttlSeconds));
+    const reply = await sendCommand('SET', key, '1', 'NX', 'EX', ttl);
+    if (reply === 'OK') return 'consumed';
+
+    if (reply !== null) return 'unavailable';
+
+    // RESP null is the normal SET NX reply for an existing key, but the
+    // lightweight client also resolves transport/server failures as null.
+    // Confirm the authoritative key before calling this a replay; otherwise
+    // fail closed as unavailable.
+    const existing = await sendCommand('GET', key);
+    return typeof existing === 'string' ? 'replay' : 'unavailable';
+  } catch {
+    return 'unavailable';
+  }
+}
+
 /**
  * V10 Audit §7: Read a raw Valkey key value. Used by the health endpoint
  * to check bot heartbeat without exposing the internal sendCommand.

@@ -175,12 +175,18 @@ export async function GET(
    */
   async function consumeDeliveryNonce(): Promise<NextResponse | null> {
     if (!deliveryNonce) return null;
-    const consumed = await consumeDownloadNonce(
+    const nonceResult = await consumeDownloadNonce(
       deliveryNonce.value,
       deliveryNonce.expiresAtUnix,
     );
-    if (!consumed) {
+    if (nonceResult === 'replay') {
       return NextResponse.json({ error: 'Download link has already been used' }, { status: 410 });
+    }
+    if (nonceResult === 'unavailable') {
+      return serviceUnavailable(
+        'Downloads nonce consumption',
+        { message: 'Authoritative nonce store is unavailable' },
+      );
     }
     return null;
   }
