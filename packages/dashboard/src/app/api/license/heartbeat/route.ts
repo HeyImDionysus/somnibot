@@ -24,6 +24,50 @@ function sha256(input: string): string {
 /** Heartbeat responses always carry this field, so 503s must too. */
 const HEARTBEAT_EXTRA = { next_heartbeat_seconds: 0 };
 
+const HEARTBEAT_ENTITLEMENT_STATUSES = new Set([
+  'active',
+  'grace_period',
+  'pending_activation',
+  'expired',
+  'suspended',
+  'cancelled',
+  'pending',
+  'revoked',
+  'session_invalidated',
+]);
+
+type HeartbeatEntitlementDecision = {
+  status: string;
+  grace_period_ends_at: string | null;
+  decided_at: string;
+  candidate_count: number;
+  session_touched: boolean;
+  next_heartbeat_seconds: number;
+};
+
+function isHeartbeatEntitlementDecision(
+  value: unknown,
+): value is HeartbeatEntitlementDecision {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.status === 'string'
+    && HEARTBEAT_ENTITLEMENT_STATUSES.has(candidate.status)
+    && (
+      candidate.grace_period_ends_at === null
+      || typeof candidate.grace_period_ends_at === 'string'
+    )
+    && typeof candidate.decided_at === 'string'
+    && typeof candidate.candidate_count === 'number'
+    && Number.isInteger(candidate.candidate_count)
+    && candidate.candidate_count >= 0
+    && typeof candidate.session_touched === 'boolean'
+    && typeof candidate.next_heartbeat_seconds === 'number'
+    && Number.isInteger(candidate.next_heartbeat_seconds)
+    && candidate.next_heartbeat_seconds >= 0
+  );
+}
+
 export async function POST(req: NextRequest) {
   const supabase = createAdminSupabase();
 
@@ -51,182 +95,83 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Verify key. `maybeSingle` so "no such key" is data-null rather than an
-  // error — which leaves `keyError` meaning exactly one thing: the read failed.
+  // Authenticate the presented hash inside the same statement that makes the
+  // entitlement/session decision. Resolving an id first would let key rotation
+  // change key_hash between statements while the stale presented key remained
+  // authenticated by that id.
   const keyHash = sha256(license_key);
-  const { data: licenseKey, error: keyError } = await supabase
-    .from('license_keys')
-    .select('id, status, product_id')
-    .eq('key_hash', keyHash)
-    .maybeSingle();
+  // Decide key + entitlement precedence and conditionally touch the session in
+  // one database statement.
+  // Separate active/grace/fallback reads can tear when payment recovery changes
+  // a row from grace_period to active between requests. Likewise, a separate
+  // session SELECT then UPDATE can touch a row deactivated in between. The RPC
+  // locks the decision rows, conditionally updates only an active session, and
+  // owns the decision clock.
+  const {
+    data: entitlementDecision,
+    error: entitlementDecisionError,
+  } = await supabase.rpc('license_heartbeat_decision', {
+    p_key_hash: keyHash,
+    p_session_id: session_id,
+  });
 
-  if (keyError) {
-    return licenseUnavailable('License/heartbeat key lookup', keyError, HEARTBEAT_EXTRA);
-  }
-
-  if (!licenseKey || licenseKey.status !== 'active') {
-    return NextResponse.json({
-      valid: false,
-      status: licenseKey?.status ?? 'revoked',
-      next_heartbeat_seconds: 0,
-    });
-  }
-
-  // Check entitlement with bounded server-side selection. Fetching the whole
-  // candidate set is unsafe even without an explicit `.limit()`: PostgREST can
-  // cap response rows, which lets enough dead rows hide a valid one. An active
-  // row always wins; otherwise choose the unexpired grace row with the latest
-  // deadline. Every query returns at most one deterministic row.
-  const { data: activeEntitlement, error: activeEntitlementError } = await supabase
-    .from('entitlements')
-    .select('id, status, grace_period_ends_at')
-    .eq('license_key_id', licenseKey.id)
-    .eq('status', 'active')
-    .order('id', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (activeEntitlementError) {
+  if (entitlementDecisionError) {
     return licenseUnavailable(
-      'License/heartbeat active entitlement lookup',
-      activeEntitlementError,
+      'License/heartbeat entitlement decision',
+      entitlementDecisionError,
       HEARTBEAT_EXTRA,
     );
   }
 
-  let live = activeEntitlement;
-  const heartbeatAt = new Date().toISOString();
-
-  if (!live) {
-    const { data: graceEntitlement, error: graceEntitlementError } = await supabase
-      .from('entitlements')
-      .select('id, status, grace_period_ends_at')
-      .eq('license_key_id', licenseKey.id)
-      .eq('status', 'grace_period')
-      .gt('grace_period_ends_at', heartbeatAt)
-      .order('grace_period_ends_at', { ascending: false })
-      .order('id', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-
-    if (graceEntitlementError) {
-      return licenseUnavailable(
-        'License/heartbeat grace entitlement lookup',
-        graceEntitlementError,
-        HEARTBEAT_EXTRA,
-      );
-    }
-    live = graceEntitlement;
+  // A successful PostgREST call with an unexpected payload is still not a
+  // licence verdict. Fail soft instead of turning malformed/missing RPC output
+  // into a terminal revocation.
+  if (!isHeartbeatEntitlementDecision(entitlementDecision)) {
+    return licenseUnavailable(
+      'License/heartbeat entitlement decision',
+      { message: 'RPC returned an invalid entitlement decision payload' },
+      HEARTBEAT_EXTRA,
+    );
   }
 
-  if (!live) {
-    // No live row exists. A bounded grace lookup distinguishes a lapsed
-    // payment window from other recorded states; otherwise report the most
-    // recently updated non-live status with an id tie-breaker.
-    const { data: lapsedGrace, error: lapsedGraceError } = await supabase
-      .from('entitlements')
-      .select('id, status')
-      .eq('license_key_id', licenseKey.id)
-      .eq('status', 'grace_period')
-      .order('grace_period_ends_at', { ascending: false })
-      .order('id', { ascending: true })
-      .limit(1)
-      .maybeSingle();
+  const liveDecision = (
+    entitlementDecision.status === 'active'
+    || entitlementDecision.status === 'grace_period'
+  );
+  if (
+    liveDecision !== entitlementDecision.session_touched
+    || (
+      entitlementDecision.status === 'grace_period'
+      && entitlementDecision.grace_period_ends_at === null
+    )
+  ) {
+    return licenseUnavailable(
+      'License/heartbeat entitlement decision',
+      { message: 'RPC returned an inconsistent entitlement/session decision' },
+      HEARTBEAT_EXTRA,
+    );
+  }
 
-    if (lapsedGraceError) {
-      return licenseUnavailable(
-        'License/heartbeat lapsed grace lookup',
-        lapsedGraceError,
-        HEARTBEAT_EXTRA,
-      );
-    }
-
-    let recordedStatus: string | null = null;
-    if (!lapsedGrace) {
-      const { data: recordedEntitlement, error: recordedEntitlementError } = await supabase
-        .from('entitlements')
-        .select('id, status')
-        .eq('license_key_id', licenseKey.id)
-        .neq('status', 'active')
-        .neq('status', 'grace_period')
-        .order('updated_at', { ascending: false })
-        .order('id', { ascending: true })
-        .limit(1)
-        .maybeSingle();
-
-      if (recordedEntitlementError) {
-        return licenseUnavailable(
-          'License/heartbeat recorded entitlement lookup',
-          recordedEntitlementError,
-          HEARTBEAT_EXTRA,
-        );
-      }
-      recordedStatus = recordedEntitlement?.status ?? null;
-    }
-
+  if (
+    !liveDecision
+  ) {
     return NextResponse.json({
       valid: false,
-      status: lapsedGrace ? 'expired' : (recordedStatus ?? 'revoked'),
+      status: entitlementDecision.status,
       next_heartbeat_seconds: 0,
     });
   }
 
-  // Update session last_seen_at
-  const { data: session, error: sessionError } = await supabase
-    .from('license_sessions')
-    .select('id, active')
-    .eq('id', session_id)
-    .eq('license_key_id', licenseKey.id)
-    .maybeSingle();
-
-  if (sessionError) {
-    return licenseUnavailable('License/heartbeat session lookup', sessionError, HEARTBEAT_EXTRA);
-  }
-
-  if (!session || !session.active) {
-    return NextResponse.json({
-      valid: false,
-      status: 'session_invalidated',
-      next_heartbeat_seconds: 0,
-    });
-  }
-
-  // The whole point of a heartbeat is to record liveness. If the write fails
-  // the session did NOT stay alive — the reaper will time it out — so report
-  // the fault rather than a false "all good" the client would trust.
-  const { error: touchError } = await supabase
-    .from('license_sessions')
-    .update({ last_seen_at: new Date().toISOString() })
-    .eq('id', session_id);
-
-  if (touchError) {
-    return licenseUnavailable('License/heartbeat session touch', touchError, HEARTBEAT_EXTRA);
-  }
-
-  // Get heartbeat interval from config. Non-fatal: a missing/unreadable config
-  // only costs us the tuned interval, and the 300s default is safe.
-  const { data: config, error: configError } = await supabase
-    .from('product_license_config')
-    .select('heartbeat_interval_seconds')
-    .eq('product_id', licenseKey.product_id)
-    .maybeSingle();
-
-  if (configError) {
-    console.error('[License/heartbeat] config lookup failed (using default interval):', configError.message);
-  }
-
-  // W2 codex round 3: an entitlement can enter grace AFTER the initial
-  // validation (payment fails mid-session). The lapsed-deadline branch above
-  // already rejects an EXPIRED grace window; here the window is still open, so
-  // the session stays valid — but surface `grace_period` (and the deadline)
-  // instead of masking it as 'active'. Apps that monitor license health via
-  // heartbeats would otherwise never see the payment-failure warning until a
-  // separate validation happened.
-  const inGracePeriod = live.status === 'grace_period';
+  // An entitlement can enter grace after initial validation. The RPC already
+  // rejected a strictly lapsed window and atomically touched this active
+  // session; surface the still-live grace state instead of masking it as active.
+  const inGracePeriod = entitlementDecision.status === 'grace_period';
   return NextResponse.json({
     valid: true,
     status: inGracePeriod ? 'grace_period' : 'active',
-    grace_period_ends_at: inGracePeriod ? live.grace_period_ends_at : null,
-    next_heartbeat_seconds: config?.heartbeat_interval_seconds ?? 300,
+    grace_period_ends_at: inGracePeriod
+      ? entitlementDecision.grace_period_ends_at
+      : null,
+    next_heartbeat_seconds: entitlementDecision.next_heartbeat_seconds,
   });
 }

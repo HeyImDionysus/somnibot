@@ -187,49 +187,26 @@ describe('POST /api/license/validate — lapsed grace window is rejected', () =>
 describe('POST /api/license/heartbeat — lapsed grace window is rejected', () => {
   function setupHeartbeatMocks(entitlement: { status: string; grace_period_ends_at: string | null }) {
     const mock = createMockSupabase();
-    const keysQuery = registerTable(mock, 'license_keys');
-    // The route uses `.maybeSingle()` so that "no such key" is data-null and
-    // an `error` means exactly one thing: the read itself failed.
-    keysQuery.maybeSingle.mockResolvedValue({
-      data: { id: 'key-1', status: 'active', product_id: PRODUCT_ID },
+    const decisionAt = new Date().toISOString();
+    const status = (
+      entitlement.status === 'grace_period'
+      && entitlement.grace_period_ends_at !== null
+      && entitlement.grace_period_ends_at < decisionAt
+    ) ? 'expired' : entitlement.status;
+    const live = status === 'active' || status === 'grace_period';
+    mock.rpc.mockResolvedValue({
+      data: {
+        entitlement_id: 'ent-1',
+        status,
+        grace_period_ends_at: entitlement.grace_period_ends_at,
+        decided_at: decisionAt,
+        candidate_count: 1,
+        session_touched: live,
+        next_heartbeat_seconds: 300,
+      },
       error: null,
     });
-    // Heartbeat uses bounded status-specific existence queries. Model the
-    // active lookup first, then live-grace, then lapsed-grace when needed.
-    const entitlementsQuery = registerTable(mock, 'entitlements');
-    if (entitlement.status === 'active') {
-      entitlementsQuery.maybeSingle.mockResolvedValue({
-        data: { id: 'ent-1', ...entitlement },
-        error: null,
-      });
-    } else {
-      const graceIsLive = Boolean(
-        entitlement.grace_period_ends_at
-        && entitlement.grace_period_ends_at > new Date().toISOString(),
-      );
-      entitlementsQuery.maybeSingle
-        .mockResolvedValueOnce({ data: null, error: null })
-        .mockResolvedValueOnce({
-          data: graceIsLive ? { id: 'ent-1', ...entitlement } : null,
-          error: null,
-        });
-      if (!graceIsLive) {
-        entitlementsQuery.maybeSingle.mockResolvedValueOnce({
-          data: { id: 'ent-1', ...entitlement },
-          error: null,
-        });
-      }
-    }
     const sessionsQuery = registerTable(mock, 'license_sessions');
-    sessionsQuery.maybeSingle.mockResolvedValue({ data: { id: SESSION_ID, active: true }, error: null });
-    // The `last_seen_at` keepalive write is awaited directly off update().eq().
-    sessionsQuery.then = vi.fn().mockImplementation((resolve) =>
-      resolve?.({ data: null, error: null, count: null }),
-    );
-    registerTable(mock, 'product_license_config').maybeSingle.mockResolvedValue({
-      data: { heartbeat_interval_seconds: 300 },
-      error: null,
-    });
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
     return { sessionsQuery };
   }

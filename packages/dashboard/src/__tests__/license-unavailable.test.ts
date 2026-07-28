@@ -56,14 +56,6 @@ const SESSION_ID = '00000000-0000-4000-a000-0000000000s1'.replace('s1', 'e1');
 /** A PostgREST-shaped failure. Supabase builders resolve, they do not reject. */
 const DB_DOWN = { message: 'could not connect to server: Connection refused', code: '08006' };
 
-/** Make an awaited (non-terminal) filter chain resolve with a given payload. */
-function resolveChain(
-  chain: ReturnType<typeof registerTable>,
-  value: { data: unknown; error: unknown },
-) {
-  chain.then = vi.fn().mockImplementation((resolve) => resolve?.({ count: null, ...value }));
-}
-
 type EntitlementFixture = {
   id: string;
   license_key_id: string;
@@ -71,84 +63,6 @@ type EntitlementFixture = {
   grace_period_ends_at: string | null;
   updated_at: string;
 };
-
-/**
- * Model PostgREST's response cap as a backend behavior. Filters and ordering
- * run before the cap, exactly as they do on the server; omitting a bounded
- * status predicate therefore hides a live row beyond `maxRows`.
- */
-function createCappedEntitlementQuery(
-  rows: EntitlementFixture[],
-  maxRows = 50,
-  queryError: unknown = null,
-) {
-  const query = registerTable(createMockSupabase(), 'entitlements');
-  const filters: Array<(row: EntitlementFixture) => boolean> = [];
-  const orderings: Array<{
-    column: keyof EntitlementFixture;
-    ascending: boolean;
-  }> = [];
-  let requestedLimit: number | null = null;
-
-  query.eq.mockImplementation((column: keyof EntitlementFixture, value: unknown) => {
-    filters.push((row) => row[column] === value);
-    return query;
-  });
-  query.neq.mockImplementation((column: keyof EntitlementFixture, value: unknown) => {
-    filters.push((row) => row[column] !== value);
-    return query;
-  });
-  query.gt.mockImplementation((column: keyof EntitlementFixture, value: string) => {
-    filters.push((row) => {
-      const candidate = row[column];
-      return typeof candidate === 'string' && candidate > value;
-    });
-    return query;
-  });
-  query.order.mockImplementation((
-    column: keyof EntitlementFixture,
-    options?: { ascending?: boolean },
-  ) => {
-    orderings.push({ column, ascending: options?.ascending ?? true });
-    return query;
-  });
-  query.limit.mockImplementation((count: number) => {
-    requestedLimit = count;
-    return query;
-  });
-
-  function resultRows() {
-    const matched = rows.filter((row) => filters.every((filter) => filter(row)));
-    matched.sort((left, right) => {
-      for (const { column, ascending } of orderings) {
-        const leftValue = left[column] ?? '';
-        const rightValue = right[column] ?? '';
-        const comparison = String(leftValue).localeCompare(String(rightValue));
-        if (comparison !== 0) return ascending ? comparison : -comparison;
-      }
-      return 0;
-    });
-    return matched.slice(0, Math.min(requestedLimit ?? maxRows, maxRows));
-  }
-
-  query.then = vi.fn().mockImplementation((resolve) => resolve?.({
-    data: queryError ? null : resultRows(),
-    error: queryError,
-    count: null,
-  }));
-  query.maybeSingle.mockImplementation(async () => {
-    if (queryError) return { data: null, error: queryError };
-    const matched = resultRows();
-    return {
-      data: matched[0] ?? null,
-      error: matched.length > 1
-        ? { message: 'JSON object requested, multiple rows returned', code: 'PGRST116' }
-        : null,
-    };
-  });
-
-  return query;
-}
 
 let errorSpy: ReturnType<typeof vi.spyOn>;
 
@@ -229,9 +143,80 @@ describe('POST /api/license/validate — a failed lookup is not a revocation', (
 // ───────────────────────── heartbeat ─────────────────────────
 
 describe('POST /api/license/heartbeat — heartbeats survive a transient fault', () => {
+  function atomicDecision(
+    rows: EntitlementFixture[],
+    key: { id: string; status: string } | null,
+    session: { active: boolean } | null,
+  ) {
+    const decisionAt = new Date().toISOString();
+    let chosen: EntitlementFixture | undefined;
+
+    if (key?.status === 'active') {
+      chosen = rows
+        .filter((row) => row.status === 'active')
+        .sort((left, right) => left.id.localeCompare(right.id))[0];
+      chosen ??= rows
+        .filter((row) => (
+          row.status === 'grace_period'
+          && row.grace_period_ends_at !== null
+          && !(row.grace_period_ends_at < decisionAt)
+        ))
+        .sort((left, right) => (
+          right.grace_period_ends_at!.localeCompare(left.grace_period_ends_at!)
+          || left.id.localeCompare(right.id)
+        ))[0];
+      chosen ??= rows
+        .filter((row) => row.status === 'grace_period')
+        .sort((left, right) => (
+          (right.grace_period_ends_at ?? '').localeCompare(left.grace_period_ends_at ?? '')
+          || left.id.localeCompare(right.id)
+        ))[0];
+      chosen ??= rows
+        .filter((row) => row.status !== 'active' && row.status !== 'grace_period')
+        .sort((left, right) => (
+          right.updated_at.localeCompare(left.updated_at)
+          || left.id.localeCompare(right.id)
+        ))[0];
+    }
+
+    let status = key?.status ?? 'revoked';
+    if (key?.status === 'active') {
+      if (!chosen) {
+        status = 'revoked';
+      } else if (
+        chosen.status === 'grace_period'
+        && chosen.grace_period_ends_at === null
+      ) {
+        status = 'malformed';
+      } else if (
+        chosen.status === 'grace_period'
+        && chosen.grace_period_ends_at! < decisionAt
+      ) {
+        status = 'expired';
+      } else {
+        status = chosen.status;
+      }
+    }
+
+    const liveEntitlement = status === 'active' || status === 'grace_period';
+    const sessionTouched = liveEntitlement && session?.active === true;
+    if (liveEntitlement && !sessionTouched) status = 'session_invalidated';
+
+    return {
+      entitlement_id: chosen?.id ?? null,
+      status,
+      grace_period_ends_at: chosen?.grace_period_ends_at ?? null,
+      decided_at: decisionAt,
+      candidate_count: key ? rows.length : 0,
+      session_touched: sessionTouched,
+      next_heartbeat_seconds: 300,
+    };
+  }
+
   /**
-   * @param over  Per-table overrides. Any table left out gets the happy path,
-   *              so each test states only the thing that is broken.
+   * Model the consolidated RPC result. Any internal read/touch error rejects
+   * the whole database statement, so each override states which dependency
+   * made the decision indeterminate.
    */
   function setup(over: {
     key?: { data: unknown; error: unknown };
@@ -240,12 +225,8 @@ describe('POST /api/license/heartbeat — heartbeats survive a transient fault',
     touch?: { error: unknown };
   } = {}) {
     const mock = createMockSupabase();
-
-    const keys = registerTable(mock, 'license_keys');
-    keys.maybeSingle.mockResolvedValue(
-      over.key ?? { data: { id: 'key-1', status: 'active', product_id: PRODUCT_ID }, error: null },
-    );
-
+    const keyResult = over.key
+      ?? { data: { id: 'key-1', status: 'active', product_id: PRODUCT_ID }, error: null };
     const entitlementResult = over.entitlements
       ?? { data: [{ status: 'active', grace_period_ends_at: null }], error: null };
     const entitlementRows = (
@@ -260,32 +241,25 @@ describe('POST /api/license/heartbeat — heartbeats survive a transient fault',
         updated_at: row.updated_at ?? new Date(index).toISOString(),
       };
     });
-
-    const sessions = registerTable(mock, 'license_sessions');
-    sessions.maybeSingle.mockResolvedValue(
-      over.session ?? { data: { id: SESSION_ID, active: true }, error: null },
-    );
-    // The `last_seen_at` write: update(...).eq(...) is awaited directly.
-    resolveChain(sessions, { data: null, error: over.touch?.error ?? null });
-
-    const config = registerTable(mock, 'product_license_config');
-    config.maybeSingle.mockResolvedValue({ data: { heartbeat_interval_seconds: 300 }, error: null });
-
-    mock.from.mockImplementation((table: string) => {
-      if (table === 'entitlements') {
-        return createCappedEntitlementQuery(
+    const sessionResult = over.session
+      ?? { data: { id: SESSION_ID, active: true }, error: null };
+    const rpcError = keyResult.error
+      ?? entitlementResult.error
+      ?? sessionResult.error
+      ?? over.touch?.error
+      ?? null;
+    mock.rpc.mockResolvedValue({
+      data: rpcError
+        ? null
+        : atomicDecision(
           entitlementRows,
-          Number.MAX_SAFE_INTEGER,
-          entitlementResult.error,
-        );
-      }
-      if (table === 'license_keys') return keys;
-      if (table === 'license_sessions') return sessions;
-      if (table === 'product_license_config') return config;
-      return mock._query;
+          keyResult.data as { id: string; status: string } | null,
+          sessionResult.data as { active: boolean } | null,
+        ),
+      error: rpcError,
     });
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
-    return { mock, keys, sessions };
+    return mock;
   }
 
   function req() {
@@ -372,37 +346,16 @@ describe('POST /api/license/heartbeat — heartbeats survive a transient fault',
     expect(body.status).toBe('active');
   });
 
-  function setupCappedEntitlements(rows: EntitlementFixture[]) {
-    const mock = createMockSupabase();
-
-    const keys = registerTable(mock, 'license_keys');
-    keys.maybeSingle.mockResolvedValue({
-      data: { id: 'key-1', status: 'active', product_id: PRODUCT_ID },
-      error: null,
+  function setupManyEntitlements(rows: EntitlementFixture[]) {
+    return setup({
+      entitlements: {
+        data: rows,
+        error: null,
+      },
     });
-    const sessions = registerTable(mock, 'license_sessions');
-    sessions.maybeSingle.mockResolvedValue({
-      data: { id: SESSION_ID, active: true },
-      error: null,
-    });
-    resolveChain(sessions, { data: null, error: null });
-    const config = registerTable(mock, 'product_license_config');
-    config.maybeSingle.mockResolvedValue({
-      data: { heartbeat_interval_seconds: 300 },
-      error: null,
-    });
-
-    mock.from.mockImplementation((table: string) => {
-      if (table === 'entitlements') return createCappedEntitlementQuery(rows);
-      if (table === 'license_keys') return keys;
-      if (table === 'license_sessions') return sessions;
-      if (table === 'product_license_config') return config;
-      return mock._query;
-    });
-    vi.mocked(createAdminSupabase).mockReturnValue(mock as never);
   }
 
-  it('finds an active entitlement beyond the backend response cap', async () => {
+  it('finds an active entitlement after 50 dead rows without a client-side scan', async () => {
     const rows: EntitlementFixture[] = [
       ...Array.from({ length: 50 }, (_, index) => ({
         id: `dead-${index}`,
@@ -419,14 +372,15 @@ describe('POST /api/license/heartbeat — heartbeats survive a transient fault',
         updated_at: new Date(51).toISOString(),
       },
     ];
-    setupCappedEntitlements(rows);
+    const mock = setupManyEntitlements(rows);
 
     const body = await (await heartbeatPost(req() as never)).json();
     expect(body.valid).toBe(true);
     expect(body.status).toBe('active');
+    expect(mock.from).not.toHaveBeenCalledWith('entitlements');
   });
 
-  it('finds an unexpired grace entitlement beyond the backend response cap', async () => {
+  it('finds an unexpired grace entitlement after 50 dead rows without a client-side scan', async () => {
     const graceDeadline = new Date(Date.now() + 60_000).toISOString();
     const rows: EntitlementFixture[] = [
       ...Array.from({ length: 50 }, (_, index) => ({
@@ -444,12 +398,13 @@ describe('POST /api/license/heartbeat — heartbeats survive a transient fault',
         updated_at: new Date(51).toISOString(),
       },
     ];
-    setupCappedEntitlements(rows);
+    const mock = setupManyEntitlements(rows);
 
     const body = await (await heartbeatPost(req() as never)).json();
     expect(body.valid).toBe(true);
     expect(body.status).toBe('grace_period');
     expect(body.grace_period_ends_at).toBe(graceDeadline);
+    expect(mock.from).not.toHaveBeenCalledWith('entitlements');
   });
 
   it('reports a lapsed payment grace as expired, and an unexpired one as still valid', async () => {
