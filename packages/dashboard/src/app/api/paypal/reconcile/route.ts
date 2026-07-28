@@ -112,10 +112,12 @@ export async function POST(req: NextRequest) {
 
   try {
     const result = await runPayPalReconciliation(supabase, {
-      // A scheduled caller respects the lease so overlapping schedulers (or
-      // multiple dashboard replicas) do not duplicate work. An operator
-      // pressing "run now" gets an answer immediately.
-      requireLease: auth.scheduled,
+      // Every caller shares the same active-owner fence. An operator may
+      // bypass only the completed cadence, never a running owner.
+      bypassCooldown: !auth.scheduled,
+      // External schedulers use the same durable failure/alert lifecycle as
+      // the in-process scheduler; owner responses stay request-local.
+      scheduledVisibility: auth.scheduled,
       // The pass and alerts remain global, but an authenticated guild owner
       // must never receive another tenant's detailed findings.
       resultGuildId: auth.guildId ?? undefined,

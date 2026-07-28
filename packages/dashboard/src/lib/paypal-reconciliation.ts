@@ -19,6 +19,7 @@
  */
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { getPayPalRuntimeConfig, getPayPalTokenResult } from '@/lib/paypal';
+import { randomUUID } from 'node:crypto';
 
 type AdminSupabase = ReturnType<typeof createAdminSupabase>;
 
@@ -27,6 +28,7 @@ type AdminSupabase = ReturnType<typeof createAdminSupabase>;
 export const DEFAULT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 export const DEFAULT_SETTLEMENT_LAG_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_LEASE_MS = 6 * 60 * 60 * 1000;
+export const DEFAULT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
 const PROVIDER_PAGE_SIZE = 500;
 const PROVIDER_MAX_PAGES = 40;
@@ -35,7 +37,6 @@ const EXACT_LOOKUP_CHUNK_SIZE = 100;
 export const LOCAL_SCAN_MAX_ROWS = 20_000;
 const MAX_REPORTED_IDS = 25;
 
-export const RECONCILE_LEASE_KEY = 'paypal_reconcile_lease_at';
 export const RECONCILE_LAST_RESULT_KEY = 'paypal_reconcile_last_result';
 export const RECONCILE_ALERT_TYPE = 'paypal_reconciliation_mismatch';
 export const RECONCILE_FAILURE_ALERT_TYPE = 'paypal_reconciliation_failure';
@@ -83,6 +84,7 @@ export interface MissingLocalPayment {
 }
 
 export interface MissingProviderPayment {
+  kind: 'payment' | 'order';
   orderId: string;
   orderNumber: string | null;
   guildId: string;
@@ -141,8 +143,12 @@ export interface PayPalReconciliationOptions {
   windowMs?: number;
   settlementLagMs?: number;
   now?: number;
-  requireLease?: boolean;
   leaseMs?: number;
+  cooldownMs?: number;
+  /** Manual owner runs may skip completed cadence, but never an active owner. */
+  bypassCooldown?: boolean;
+  /** Scheduler triggers persist failures and resolve their standing alert. */
+  scheduledVisibility?: boolean;
   /** Limit the returned findings to one owner tenant; the pass still checks all guilds. */
   resultGuildId?: string;
 }
@@ -179,6 +185,13 @@ interface LocalCustomerIdentityRow {
   id: string;
   guild_id: string;
   discord_id: string;
+}
+
+interface LocalPaymentIdentityRow {
+  id: string;
+  order_id: string | null;
+  guild_id: string | null;
+  paypal_payment_id: string | null;
 }
 
 interface AttributedProviderTransaction {
@@ -311,11 +324,14 @@ function readTransaction(entry: unknown): ProviderTransactionParse {
   }
   const record = info as Record<string, unknown>;
 
-  if (record.transaction_status !== 'S') return { kind: 'ignored' };
   if (
-    typeof record.transaction_event_code !== 'string'
-    || !SUPPORTED_EVENT_CODES.has(record.transaction_event_code)
-  ) {
+    typeof record.transaction_status !== 'string'
+    || !/^[A-Z]$/.test(record.transaction_status)
+    || typeof record.transaction_event_code !== 'string'
+    || !/^T\d{4}$/.test(record.transaction_event_code)
+  ) return { kind: 'malformed' };
+  if (record.transaction_status !== 'S') return { kind: 'ignored' };
+  if (!SUPPORTED_EVENT_CODES.has(record.transaction_event_code)) {
     return { kind: 'ignored' };
   }
   if (!isProviderId(record.transaction_id)) return { kind: 'malformed' };
@@ -363,13 +379,6 @@ function readTransaction(entry: unknown): ProviderTransactionParse {
   };
 }
 
-function sameProviderTransaction(
-  left: ProviderTransaction,
-  right: ProviderTransaction,
-): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
 export async function fetchProviderTransactions(
   apiBase: string,
   token: string,
@@ -380,8 +389,10 @@ export async function fetchProviderTransactions(
   | { ok: false; retriable: boolean; reason: string }
 > {
   const transactions: ProviderTransaction[] = [];
-  const seen = new Map<string, ProviderTransaction>();
+  const seen = new Set<string>();
   let expectedTotalPages: number | null = null;
+  let expectedTotalItems: number | null = null;
+  let rawItemsSeen = 0;
 
   for (let page = 1; page <= PROVIDER_MAX_PAGES; page++) {
     const params = new URLSearchParams({
@@ -425,9 +436,17 @@ export async function fetchProviderTransactions(
       };
     }
 
-    let body: { transaction_details?: unknown; total_pages?: unknown };
+    let body: Record<string, unknown>;
     try {
-      body = await response.json();
+      const parsed: unknown = await response.json();
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return {
+          ok: false,
+          retriable: false,
+          reason: 'transaction search returned a malformed envelope',
+        };
+      }
+      body = parsed as Record<string, unknown>;
     } catch {
       return {
         ok: false,
@@ -436,12 +455,45 @@ export async function fetchProviderTransactions(
       };
     }
 
+    const details = body.transaction_details;
+    const responsePage = body.page;
     const totalPages = body.total_pages;
+    const totalItems = body.total_items;
     if (
-      typeof totalPages !== 'number'
+      !Array.isArray(details)
+      || typeof responsePage !== 'number'
+      || !Number.isSafeInteger(responsePage)
+      || responsePage < 1
+      || typeof totalPages !== 'number'
       || !Number.isSafeInteger(totalPages)
-      || totalPages < 1
+      || totalPages < 0
+      || typeof totalItems !== 'number'
+      || !Number.isSafeInteger(totalItems)
+      || totalItems < 0
     ) {
+      return {
+        ok: false,
+        retriable: false,
+        reason: 'transaction search returned a malformed envelope',
+      };
+    }
+    if (responsePage !== page) {
+      return {
+        ok: false,
+        retriable: false,
+        reason: 'transaction search returned an unexpected page number',
+      };
+    }
+    if (totalItems === 0) {
+      return page === 1 && totalPages === 0 && details.length === 0
+        ? { ok: true, transactions: [] }
+        : {
+            ok: false,
+            retriable: false,
+            reason: 'transaction search returned incoherent zero-result pagination',
+          };
+    }
+    if (totalPages < 1 || page > totalPages) {
       return {
         ok: false,
         retriable: false,
@@ -463,18 +515,23 @@ export async function fetchProviderTransactions(
       };
     }
     expectedTotalPages = totalPages;
-
-    if (
-      body.transaction_details !== undefined
-      && !Array.isArray(body.transaction_details)
-    ) {
+    if (expectedTotalItems !== null && totalItems !== expectedTotalItems) {
       return {
         ok: false,
         retriable: false,
-        reason: 'transaction search returned malformed transaction details',
+        reason: 'transaction search returned inconsistent total_items metadata',
       };
     }
-    const details = body.transaction_details ?? [];
+    expectedTotalItems = totalItems;
+    rawItemsSeen += details.length;
+    if (rawItemsSeen > totalItems) {
+      return {
+        ok: false,
+        retriable: false,
+        reason: 'transaction search returned more items than total_items',
+      };
+    }
+
     for (const entry of details) {
       const parsed = readTransaction(entry);
       if (parsed.kind === 'ignored') continue;
@@ -486,22 +543,26 @@ export async function fetchProviderTransactions(
         };
       }
       const transaction = parsed.transaction;
-      const prior = seen.get(transaction.transactionId);
-      if (prior) {
-        if (!sameProviderTransaction(prior, transaction)) {
-          return {
-            ok: false,
-            retriable: false,
-            reason: 'transaction search returned conflicting duplicate transaction ids',
-          };
-        }
-        continue;
+      if (seen.has(transaction.transactionId)) {
+        return {
+          ok: false,
+          retriable: false,
+          reason: 'transaction search returned duplicate transaction ids',
+        };
       }
-      seen.set(transaction.transactionId, transaction);
+      seen.add(transaction.transactionId);
       transactions.push(transaction);
     }
 
-    if (page >= totalPages) return { ok: true, transactions };
+    if (page >= totalPages) {
+      return rawItemsSeen === totalItems
+        ? { ok: true, transactions }
+        : {
+            ok: false,
+            retriable: false,
+            reason: 'transaction search item count is incomplete',
+          };
+    }
     if (details.length === 0) {
       return {
         ok: false,
@@ -520,72 +581,134 @@ export async function fetchProviderTransactions(
 
 // ── Lease ownership ────────────────────────────────────────────────────────
 
+export type ReconcileLeaseAcquireResult =
+  | { status: 'acquired' | 'busy' | 'cooldown' }
+  | { status: 'error'; reason: string };
+
+type ReconcileLeaseMutationResult =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+function durationSeconds(valueMs: number, label: string): number | null {
+  if (!Number.isSafeInteger(valueMs) || valueMs < 0) return null;
+  const seconds = Math.ceil(valueMs / 1000);
+  const maximum = label === 'lease' ? 86_400 : 604_800;
+  return seconds <= maximum && (label !== 'lease' || seconds >= 1)
+    ? seconds
+    : null;
+}
+
 export async function acquireReconcileLease(
   supabase: AdminSupabase,
+  ownerToken: string,
   leaseMs: number,
-  nowMs: number,
-): Promise<boolean> {
-  const { data: existing, error } = await supabase
-    .from('instance_settings')
-    .select('value')
-    .eq('key', RECONCILE_LEASE_KEY)
-    .maybeSingle();
-  if (error) {
-    console.error('[PayPalReconcile] Failed to read lease:', error.message);
-    return false;
+  cooldownMs: number,
+  bypassCooldown: boolean,
+): Promise<ReconcileLeaseAcquireResult> {
+  const leaseSeconds = durationSeconds(leaseMs, 'lease');
+  const cooldownSeconds = durationSeconds(cooldownMs, 'cooldown');
+  if (leaseSeconds === null || cooldownSeconds === null) {
+    return { status: 'error', reason: 'invalid reconciliation lease duration' };
   }
 
-  if (!existing) {
-    const { error: insertError } = await supabase.from('instance_settings').insert({
-      key: RECONCILE_LEASE_KEY,
-      value: String(nowMs),
-      section: 'commerce',
+  try {
+    const { data, error } = await supabase.rpc('paypal_reconcile_acquire', {
+      p_owner_token: ownerToken,
+      p_lease_seconds: leaseSeconds,
+      p_cooldown_seconds: cooldownSeconds,
+      p_bypass_cooldown: bypassCooldown,
     });
-    return !insertError;
+    if (error) {
+      return {
+        status: 'error',
+        reason: `reconciliation lease acquisition failed: ${error.message}`,
+      };
+    }
+    if (data === 'acquired' || data === 'busy' || data === 'cooldown') {
+      return { status: data };
+    }
+    return {
+      status: 'error',
+      reason: 'reconciliation lease acquisition returned an invalid result',
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      reason: `reconciliation lease acquisition failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
   }
-
-  const priorMs = Number(existing.value);
-  if (Number.isFinite(priorMs) && nowMs - priorMs < leaseMs) return false;
-
-  const { data: claimed, error: claimError } = await supabase
-    .from('instance_settings')
-    .update({ value: String(nowMs), updated_at: new Date(nowMs).toISOString() })
-    .eq('key', RECONCILE_LEASE_KEY)
-    .eq('value', existing.value)
-    .select('key');
-  if (claimError) {
-    console.error('[PayPalReconcile] Failed to claim lease:', claimError.message);
-    return false;
-  }
-  return (claimed?.length ?? 0) > 0;
 }
 
 /**
- * Release only the lease value this pass claimed. A newer replica's lease can
- * never be cleared by an older failed pass.
+ * Extend only the exact active owner's lease. False means the owner expired or
+ * was replaced; RPC/storage errors are distinguishable from contention.
  */
-export async function releaseReconcileLease(
+export async function heartbeatReconcileLease(
   supabase: AdminSupabase,
-  claimedAtMs: number,
-): Promise<boolean> {
+  ownerToken: string,
+  leaseMs: number,
+): Promise<ReconcileLeaseMutationResult> {
+  const leaseSeconds = durationSeconds(leaseMs, 'lease');
+  if (leaseSeconds === null) {
+    return { ok: false, reason: 'invalid reconciliation heartbeat duration' };
+  }
   try {
     const { data, error } = await supabase
-      .from('instance_settings')
-      .update({ value: '0', updated_at: new Date().toISOString() })
-      .eq('key', RECONCILE_LEASE_KEY)
-      .eq('value', String(claimedAtMs))
-      .select('key');
+      .rpc('paypal_reconcile_heartbeat', {
+        p_owner_token: ownerToken,
+        p_lease_seconds: leaseSeconds,
+      });
     if (error) {
-      console.error('[PayPalReconcile] Failed to release lease:', error.message);
-      return false;
+      return {
+        ok: false,
+        reason: `reconciliation lease heartbeat failed: ${error.message}`,
+      };
     }
-    return (data?.length ?? 0) > 0;
+    return data === true
+      ? { ok: true }
+      : { ok: false, reason: 'reconciliation lease ownership was lost' };
   } catch (error) {
-    console.error(
-      '[PayPalReconcile] Failed to release lease:',
-      error instanceof Error ? error.message : error,
-    );
-    return false;
+    return {
+      ok: false,
+      reason: `reconciliation lease heartbeat failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+}
+
+/**
+ * Finalize only the exact active owner. Success enters completed cooldown;
+ * every non-success outcome releases the row for an immediate retry.
+ */
+export async function finalizeReconcileLease(
+  supabase: AdminSupabase,
+  ownerToken: string,
+  succeeded: boolean,
+): Promise<ReconcileLeaseMutationResult> {
+  try {
+    const { data, error } = await supabase.rpc('paypal_reconcile_finalize', {
+      p_owner_token: ownerToken,
+      p_succeeded: succeeded,
+    });
+    if (error) {
+      return {
+        ok: false,
+        reason: `reconciliation lease finalization failed: ${error.message}`,
+      };
+    }
+    return data === true
+      ? { ok: true }
+      : { ok: false, reason: 'reconciliation lease finalization lost ownership' };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `reconciliation lease finalization failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
   }
 }
 
@@ -915,6 +1038,75 @@ async function loadDurableAttributionOrders(
   return { ok: true, rows: [...deduped.values()] };
 }
 
+/**
+ * Find durable PayPal payment identities for candidate orders without applying
+ * the reconciliation creation window. This keeps the order-level fallback
+ * limited to commerce where the payment identity write is genuinely absent,
+ * rather than merely older than the current provider-search window.
+ */
+async function loadOrderPaymentIdentities(
+  supabase: AdminSupabase,
+  orderIds: string[],
+): Promise<ScanResult<LocalPaymentIdentityRow>> {
+  const requested = [...new Set(orderIds)];
+  if (requested.length === 0) return { ok: true, rows: [] };
+
+  const rows: LocalPaymentIdentityRow[] = [];
+  for (const group of chunks(requested, EXACT_LOOKUP_CHUNK_SIZE)) {
+    let from = 0;
+    while (true) {
+      const remaining = LOCAL_SCAN_MAX_ROWS - rows.length;
+      if (remaining <= 0) {
+        const { data: overflow, error: overflowError } = await supabase
+          .from('payments')
+          .select('id')
+          .eq('provider', 'paypal')
+          .not('paypal_payment_id', 'is', null)
+          .in('order_id', group)
+          .order('id', { ascending: true })
+          .range(from, from);
+        if (overflowError) {
+          return {
+            ok: false,
+            retriable: true,
+            reason: `local payment identity overflow probe failed: ${overflowError.message}`,
+          };
+        }
+        if ((overflow?.length ?? 0) > 0) {
+          return {
+            ok: false,
+            retriable: false,
+            reason: `local payment identity lookup exceeded ${LOCAL_SCAN_MAX_ROWS} rows`,
+          };
+        }
+        break;
+      }
+
+      const pageSize = Math.min(LOCAL_PAGE_SIZE, remaining);
+      const { data, error } = await supabase
+        .from('payments')
+        .select('id, order_id, guild_id, paypal_payment_id')
+        .eq('provider', 'paypal')
+        .not('paypal_payment_id', 'is', null)
+        .in('order_id', group)
+        .order('id', { ascending: true })
+        .range(from, from + pageSize - 1);
+      if (error) {
+        return {
+          ok: false,
+          retriable: true,
+          reason: `local payment identity lookup failed: ${error.message}`,
+        };
+      }
+      const page = (data ?? []) as LocalPaymentIdentityRow[];
+      rows.push(...page);
+      if (page.length < pageSize) break;
+      from += pageSize;
+    }
+  }
+  return { ok: true, rows };
+}
+
 async function loadCustomerIdentities(
   supabase: AdminSupabase,
   customerIds: string[],
@@ -1069,10 +1261,13 @@ async function raiseMismatchAlert(
   }
   if (result.missingProviderPayments.length > 0) {
     parts.push(
-      `${result.missingProviderPayments.length} settled order(s) have no matching PayPal transaction: `
+      `${result.missingProviderPayments.length} settled local payment/order record(s) `
+      + 'have no matching PayPal transaction: '
       + summarise(
         result.missingProviderPayments,
-        (item) => item.orderNumber ?? item.orderId,
+        (item) => item.paypalPaymentIds[0]
+          ? `${item.orderNumber ?? item.orderId} [${item.paypalPaymentIds[0]}]`
+          : item.orderNumber ?? item.orderId,
       ),
     );
   }
@@ -1308,6 +1503,31 @@ export async function resolveScheduledReconciliationFailure(
   return allResolved;
 }
 
+async function applyScheduledVisibility(
+  supabase: AdminSupabase,
+  result: PayPalReconciliationResult,
+): Promise<PayPalReconciliationResult> {
+  if (result.status === 'failed') {
+    return await recordScheduledReconciliationFailure(supabase, result)
+      ? result
+      : {
+          status: 'failed',
+          reason: `scheduler failure visibility failed after: ${result.reason}`,
+          retriable: true,
+        };
+  }
+  if (result.status === 'completed') {
+    return await resolveScheduledReconciliationFailure(supabase)
+      ? result
+      : {
+          status: 'failed',
+          reason: 'scheduler success could not resolve its standing failure alert',
+          retriable: true,
+        };
+  }
+  return result;
+}
+
 // ── Reconciliation pass ────────────────────────────────────────────────────
 
 async function runPass(
@@ -1315,6 +1535,7 @@ async function runPass(
   nowMs: number,
   windowStartMs: number,
   windowEndMs: number,
+  heartbeat: () => Promise<PayPalReconciliationFailure | null>,
   resultGuildId?: string,
 ): Promise<PayPalReconciliationResult> {
   const config = await getPayPalRuntimeConfig();
@@ -1336,6 +1557,8 @@ async function runPass(
   if (!provider.ok) {
     return { status: 'failed', reason: provider.reason, retriable: provider.retriable };
   }
+  const providerHeartbeatFailure = await heartbeat();
+  if (providerHeartbeatFailure) return providerHeartbeatFailure;
 
   const windowStart = new Date(windowStartMs).toISOString();
   const windowEnd = new Date(windowEndMs).toISOString();
@@ -1451,6 +1674,8 @@ async function runPass(
   const customersById = new Map(
     customerIdentityScan.rows.map((customer) => [customer.id, customer]),
   );
+  const localHeartbeatFailure = await heartbeat();
+  if (localHeartbeatFailure) return localHeartbeatFailure;
 
   const attributed: AttributedProviderTransaction[] = [];
   for (const transaction of provider.transactions) {
@@ -1537,7 +1762,7 @@ async function runPass(
       attributed.push({
         transaction,
         guildId: authoritativeOrder.guild_id,
-        referencedOrderId: authoritativeOrder.id,
+        referencedOrderId: referencedOrder?.id ?? null,
       });
       continue;
     }
@@ -1599,7 +1824,7 @@ async function runPass(
   }
 
   const providerIds = new Set(attributed.map((item) => item.transaction.transactionId));
-  const providerOrderIds = new Set(
+  const providerReferenceOrderIds = new Set(
     attributed
       .map((item) => item.referencedOrderId)
       .filter((id): id is string => id !== null),
@@ -1623,17 +1848,75 @@ async function runPass(
     }
   }
   const missingProviderPayments: MissingProviderPayment[] = [];
+  const durablePaymentIdentityScan = await loadOrderPaymentIdentities(
+    supabase,
+    [...ordersForMissingProvider.keys()],
+  );
+  if (!durablePaymentIdentityScan.ok) {
+    return {
+      status: 'failed',
+      reason: durablePaymentIdentityScan.reason,
+      retriable: durablePaymentIdentityScan.retriable,
+    };
+  }
+  const durablePaymentIdentityOrderIds = new Set<string>();
+  for (const identity of durablePaymentIdentityScan.rows) {
+    const order = identity.order_id
+      ? ordersForMissingProvider.get(identity.order_id)
+      : undefined;
+    if (
+      typeof identity.id !== 'string'
+      || identity.id.length === 0
+      || !order
+      || identity.guild_id !== order.guild_id
+      || !isProviderId(identity.paypal_payment_id)
+    ) {
+      return {
+        status: 'failed',
+        reason: 'malformed local PayPal payment identity row',
+        retriable: false,
+      };
+    }
+    durablePaymentIdentityOrderIds.add(order.id);
+  }
+  const identityHeartbeatFailure = await heartbeat();
+  if (identityHeartbeatFailure) return identityHeartbeatFailure;
+
+  // Reverse-reconcile every settled local PayPal payment by its own provider
+  // identity. An ODR/SUB reference, or a matching sibling payment on the same
+  // order, cannot prove that this distinct capture/sale exists at PayPal.
+  for (const payment of payments) {
+    const order = ordersById.get(payment.order_id as string);
+    if (!isSettledPair(payment, order)) continue;
+    const paymentId = payment.paypal_payment_id as string;
+    if (providerIds.has(paymentId)) continue;
+    missingProviderPayments.push({
+      kind: 'payment',
+      orderId: payment.order_id as string,
+      orderNumber: order?.order_number ?? null,
+      guildId: payment.guild_id as string,
+      paypalPaymentIds: [paymentId],
+      amountCents: payment.amount_cents,
+      currency: normalizeCurrency(payment.currency) as string,
+      createdAt: payment.created_at,
+    });
+  }
+
+  // Keep a separate order-level detector only for completed commerce whose
+  // local provider-payment row/write is wholly absent. Once any local PayPal
+  // payment identity exists, the payment-level path above owns the comparison.
   for (const order of ordersForMissingProvider.values()) {
     if (!['completed', 'disputed', 'refunded'].includes(order.status)) continue;
-    const paymentIds = paymentsByOrder.get(order.id) ?? [];
-    if (providerOrderIds.has(order.id) || paymentIds.some((id) => providerIds.has(id))) {
-      continue;
-    }
+    if (
+      durablePaymentIdentityOrderIds.has(order.id)
+      || providerReferenceOrderIds.has(order.id)
+    ) continue;
     missingProviderPayments.push({
+      kind: 'order',
       orderId: order.id,
       orderNumber: order.order_number,
       guildId: order.guild_id as string,
-      paypalPaymentIds: paymentIds,
+      paypalPaymentIds: [],
       amountCents: order.amount_cents,
       currency: normalizeCurrency(order.currency) as string,
       createdAt: order.created_at,
@@ -1667,6 +1950,8 @@ async function runPass(
   }
 
   let divergenceGuilds = 0;
+  const alertHeartbeatFailure = await heartbeat();
+  if (alertHeartbeatFailure) return alertHeartbeatFailure;
   for (const guildId of guildScan.rows) {
     const scoped = resultForGuild(
       result,
@@ -1734,38 +2019,82 @@ export async function runPayPalReconciliation(
     return { status: 'skipped', reason: 'reconciliation window is empty' };
   }
 
-  let leaseOwned = false;
-  let completed = false;
-  if (options.requireLease) {
-    leaseOwned = await acquireReconcileLease(
-      supabase,
-      options.leaseMs ?? DEFAULT_LEASE_MS,
-      nowMs,
-    );
-    if (!leaseOwned) {
-      return { status: 'skipped', reason: 'another pass ran recently' };
-    }
+  const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
+  const cooldownMs = options.cooldownMs ?? DEFAULT_COOLDOWN_MS;
+  const ownerToken = randomUUID();
+  const acquisition = await acquireReconcileLease(
+    supabase,
+    ownerToken,
+    leaseMs,
+    cooldownMs,
+    options.bypassCooldown ?? true,
+  );
+  if (acquisition.status === 'error') {
+    const failure: PayPalReconciliationFailure = {
+      status: 'failed',
+      reason: acquisition.reason,
+      retriable: true,
+    };
+    return options.scheduledVisibility
+      ? applyScheduledVisibility(supabase, failure)
+      : failure;
+  }
+  if (acquisition.status === 'busy') {
+    return { status: 'skipped', reason: 'another reconciliation pass is running' };
+  }
+  if (acquisition.status === 'cooldown') {
+    return { status: 'skipped', reason: 'another reconciliation pass completed recently' };
   }
 
+  let result: PayPalReconciliationResult;
   try {
-    const result = await runPass(
+    result = await runPass(
       supabase,
       nowMs,
       windowStartMs,
       windowEndMs,
+      async () => {
+        const heartbeat = await heartbeatReconcileLease(
+          supabase,
+          ownerToken,
+          leaseMs,
+        );
+        return heartbeat.ok
+          ? null
+          : {
+              status: 'failed',
+              reason: heartbeat.reason,
+              retriable: true,
+            };
+      },
       options.resultGuildId,
     );
-    completed = result.status === 'completed';
-    return result;
   } catch (error) {
-    return {
+    result = {
       status: 'failed',
       reason: error instanceof Error ? error.message : 'reconciliation threw',
       retriable: true,
     };
-  } finally {
-    if (leaseOwned && !completed) {
-      await releaseReconcileLease(supabase, nowMs);
-    }
   }
+
+  if (options.scheduledVisibility) {
+    result = await applyScheduledVisibility(supabase, result);
+  }
+
+  const finalization = await finalizeReconcileLease(
+    supabase,
+    ownerToken,
+    result.status === 'completed',
+  );
+  if (!finalization.ok) {
+    const failure: PayPalReconciliationFailure = {
+      status: 'failed',
+      reason: finalization.reason,
+      retriable: true,
+    };
+    return options.scheduledVisibility
+      ? applyScheduledVisibility(supabase, failure)
+      : failure;
+  }
+  return result;
 }

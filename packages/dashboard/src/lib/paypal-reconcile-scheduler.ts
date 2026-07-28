@@ -12,9 +12,9 @@
  * not depend on the bot being alive.
  *
  * Safety properties:
- *   - The pass takes a compare-and-set lease in `instance_settings`, so
- *     multiple dashboard replicas (or an external scheduler hitting
- *     POST /api/paypal/reconcile at the same time) cannot duplicate work.
+ *   - Every trigger takes the same DB-clock, exact-owner RPC lease, so multiple
+ *     dashboard replicas, owner run-now requests, and external schedulers
+ *     cannot duplicate work.
  *   - The timer is `unref()`d, so it never keeps the process alive.
  *   - Every failure is swallowed and logged. Reconciliation must never be able
  *     to take the dashboard down.
@@ -22,9 +22,9 @@
  */
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import {
+  DEFAULT_COOLDOWN_MS,
   DEFAULT_LEASE_MS,
   recordScheduledReconciliationFailure,
-  resolveScheduledReconciliationFailure,
   runPayPalReconciliation,
 } from '@/lib/paypal-reconciliation';
 
@@ -46,24 +46,13 @@ export async function runScheduledPayPalReconciliationOnce(): Promise<void> {
   try {
     const supabase = createAdminSupabase();
     const result = await runPayPalReconciliation(supabase, {
-      requireLease: true,
       leaseMs: DEFAULT_LEASE_MS,
+      cooldownMs: DEFAULT_COOLDOWN_MS,
+      bypassCooldown: false,
+      scheduledVisibility: true,
     });
     if (result.status === 'failed') {
       console.error(`[PayPalReconcile] Scheduled pass failed: ${result.reason}`);
-      const visible = await recordScheduledReconciliationFailure(supabase, result);
-      if (!visible) {
-        console.error(
-          '[PayPalReconcile] Scheduled failure could not be persisted and alerted',
-        );
-      }
-    } else if (result.status === 'completed') {
-      const resolved = await resolveScheduledReconciliationFailure(supabase);
-      if (!resolved) {
-        console.error(
-          '[PayPalReconcile] Completed pass could not resolve the standing scheduler-failure alert',
-        );
-      }
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);

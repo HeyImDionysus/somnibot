@@ -2145,6 +2145,15 @@ export interface DbPaymentRefunds {
   paypal_resource_type: string | null;
 }
 
+export interface DbPaypalReconciliationState {
+  singleton: boolean;
+  state: 'running' | 'completed';
+  owner_token: string | null;
+  lease_expires_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+}
+
 export interface DbPollOptions {
   id: string;
   poll_id: string;

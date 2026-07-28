@@ -13,9 +13,9 @@ vi.mock('@/lib/supabase/admin', () => ({
 
 vi.mock('@/lib/paypal-reconciliation', () => ({
   DEFAULT_LEASE_MS: 6 * 60 * 60 * 1000,
+  DEFAULT_COOLDOWN_MS: 6 * 60 * 60 * 1000,
   runPayPalReconciliation: mocks.run,
   recordScheduledReconciliationFailure: mocks.recordFailure,
-  resolveScheduledReconciliationFailure: mocks.resolveFailure,
 }));
 
 import {
@@ -37,7 +37,7 @@ describe('PayPal reconciliation scheduler failure visibility', () => {
     vi.useRealTimers();
   });
 
-  it('persists and alerts a returned monitor failure', async () => {
+  it('delegates returned-failure visibility to the shared scheduled pass', async () => {
     const failed = {
       status: 'failed' as const,
       reason: 'transaction search returned 503',
@@ -48,11 +48,12 @@ describe('PayPal reconciliation scheduler failure visibility', () => {
     await runScheduledPayPalReconciliationOnce();
 
     expect(mocks.run).toHaveBeenCalledWith(mocks.supabase, {
-      requireLease: true,
       leaseMs: 6 * 60 * 60 * 1000,
+      cooldownMs: 6 * 60 * 60 * 1000,
+      bypassCooldown: false,
+      scheduledVisibility: true,
     });
-    expect(mocks.recordFailure).toHaveBeenCalledWith(mocks.supabase, failed);
-    expect(mocks.resolveFailure).not.toHaveBeenCalled();
+    expect(mocks.recordFailure).not.toHaveBeenCalled();
   });
 
   it('persists and alerts a thrown monitor failure instead of logging only', async () => {
@@ -70,7 +71,7 @@ describe('PayPal reconciliation scheduler failure visibility', () => {
     );
   });
 
-  it('resolves standing scheduler-failure alerts after a completed pass', async () => {
+  it('delegates successful alert resolution to the shared scheduled pass', async () => {
     mocks.run.mockResolvedValue({
       status: 'completed',
       windowStart: '2026-07-20T00:00:00.000Z',
@@ -86,7 +87,6 @@ describe('PayPal reconciliation scheduler failure visibility', () => {
 
     await runScheduledPayPalReconciliationOnce();
 
-    expect(mocks.resolveFailure).toHaveBeenCalledWith(mocks.supabase);
     expect(mocks.recordFailure).not.toHaveBeenCalled();
   });
 

@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres, { type Sql } from 'postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getTestDbUrl } from './helpers.js';
 
 const FIXTURE_SCHEMA = 'paypal_dispute_status_fixture';
@@ -26,8 +26,21 @@ const LICENSE_ID = '70000000-0000-4000-8000-000000000001';
 const CUSTOMER_ID = '20000000-0000-4000-8000-000000000001';
 const PRODUCT_ID = '10000000-0000-4000-8000-000000000001';
 const GUILD_ID = '111111111111111111';
+const LEASE_OWNER_A = '80000000-0000-4000-8000-000000000001';
+const LEASE_OWNER_B = '80000000-0000-4000-8000-000000000002';
 
 let sql: Sql;
+
+function createTestSql(): Sql {
+  return postgres(getTestDbUrl(), {
+    max: 1,
+    connect_timeout: 5,
+    connection: {
+      lock_timeout: 5_000,
+      statement_timeout: 30_000,
+    },
+  });
+}
 
 function migrationSource(): string {
   const testDir = dirname(fileURLToPath(import.meta.url));
@@ -185,7 +198,7 @@ const EXISTING_VALID_ROWS = `
 
 describe('PayPal disputed-order compatibility migration', () => {
   beforeAll(async () => {
-    sql = postgres(getTestDbUrl(), { max: 1 });
+    sql = createTestSql();
     // This proof needs PostgreSQL DDL/catalog behavior, not PostgREST. Verify
     // the direct local database connection so a missing service-role API key
     // cannot incorrectly report that PostgreSQL itself is unavailable.
@@ -199,9 +212,16 @@ describe('PayPal disputed-order compatibility migration', () => {
 
   afterAll(async () => {
     if (!sql) return;
-    await sql.unsafe(`DROP SCHEMA IF EXISTS ${FIXTURE_SCHEMA} CASCADE`);
-    await sql.unsafe(`DROP SCHEMA IF EXISTS ${DIRTY_SCHEMA} CASCADE`);
-    await sql.end();
+    try {
+      await sql.unsafe(`DROP SCHEMA IF EXISTS ${FIXTURE_SCHEMA} CASCADE`);
+      await sql.unsafe(`DROP SCHEMA IF EXISTS ${DIRTY_SCHEMA} CASCADE`);
+    } finally {
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  beforeEach(async () => {
+    await sql.unsafe(`DELETE FROM ${FIXTURE_SCHEMA}.paypal_reconciliation_state`);
   });
 
   it('validated every pre-existing-row FK and preserved its deferrability mode', async () => {
@@ -365,7 +385,7 @@ describe('PayPal disputed-order compatibility migration', () => {
       );
     `);
 
-    const applySql = postgres(getTestDbUrl(), { max: 1 });
+    const applySql = createTestSql();
     try {
       await expect(
         applySql.unsafe(migrationSql(DIRTY_SCHEMA)),
@@ -376,8 +396,210 @@ describe('PayPal disputed-order compatibility migration', () => {
         // The driver may already have closed the failed explicit transaction.
       }
     } finally {
-      await applySql.end();
-      await sql.unsafe(`DROP SCHEMA IF EXISTS ${DIRTY_SCHEMA} CASCADE`);
+      try {
+        await applySql.end({ timeout: 5 });
+      } finally {
+        await sql.unsafe(`DROP SCHEMA IF EXISTS ${DIRTY_SCHEMA} CASCADE`);
+      }
     }
+  });
+
+  it('atomically grants one active owner and reports the concurrent loser busy', async () => {
+    const competitor = createTestSql();
+    try {
+      const acquire = (connection: Sql, owner: string) => connection.unsafe<Array<{
+        result: string;
+      }>>(`
+        SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_acquire(
+          '${owner}'::UUID,
+          120,
+          21600,
+          false
+        ) AS result
+      `);
+      const [left, right] = await Promise.all([
+        acquire(sql, LEASE_OWNER_A),
+        acquire(competitor, LEASE_OWNER_B),
+      ]);
+
+      expect([left[0]!.result, right[0]!.result].sort())
+        .toEqual(['acquired', 'busy']);
+      const state = await sql.unsafe<Array<{
+        state: string;
+        owner_token: string;
+      }>>(`
+        SELECT state, owner_token::TEXT
+          FROM ${FIXTURE_SCHEMA}.paypal_reconciliation_state
+      `);
+      expect(state).toHaveLength(1);
+      expect(state[0]!.state).toBe('running');
+      expect([LEASE_OWNER_A, LEASE_OWNER_B]).toContain(state[0]!.owner_token);
+    } finally {
+      await competitor.end({ timeout: 5 });
+    }
+  });
+
+  it('uses the database clock and lets manual bypass cooldown, never active ownership', async () => {
+    const acquired = await sql.unsafe<Array<{ result: string }>>(`
+      SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_acquire(
+        '${LEASE_OWNER_A}'::UUID,
+        120,
+        21600,
+        false
+      ) AS result
+    `);
+    expect(acquired[0]!.result).toBe('acquired');
+
+    const timing = await sql.unsafe<Array<{
+      remaining_seconds: number;
+    }>>(`
+      SELECT EXTRACT(
+        EPOCH FROM lease_expires_at - clock_timestamp()
+      )::DOUBLE PRECISION AS remaining_seconds
+        FROM ${FIXTURE_SCHEMA}.paypal_reconciliation_state
+    `);
+    expect(timing[0]!.remaining_seconds).toBeGreaterThan(115);
+    expect(timing[0]!.remaining_seconds).toBeLessThanOrEqual(120);
+
+    const busyManual = await sql.unsafe<Array<{ result: string }>>(`
+      SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_acquire(
+        '${LEASE_OWNER_B}'::UUID,
+        120,
+        21600,
+        true
+      ) AS result
+    `);
+    expect(busyManual[0]!.result).toBe('busy');
+
+    const finalized = await sql.unsafe<Array<{ result: boolean }>>(`
+      SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_finalize(
+        '${LEASE_OWNER_A}'::UUID,
+        true
+      ) AS result
+    `);
+    expect(finalized[0]!.result).toBe(true);
+
+    const scheduledCooldown = await sql.unsafe<Array<{ result: string }>>(`
+      SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_acquire(
+        '${LEASE_OWNER_B}'::UUID,
+        120,
+        21600,
+        false
+      ) AS result
+    `);
+    expect(scheduledCooldown[0]!.result).toBe('cooldown');
+
+    const manualBypass = await sql.unsafe<Array<{ result: string }>>(`
+      SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_acquire(
+        '${LEASE_OWNER_B}'::UUID,
+        120,
+        21600,
+        true
+      ) AS result
+    `);
+    expect(manualBypass[0]!.result).toBe('acquired');
+  });
+
+  it('heartbeats and finalizes only for the exact active owner', async () => {
+    await sql.unsafe(`
+      SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_acquire(
+        '${LEASE_OWNER_A}'::UUID,
+        60,
+        21600,
+        false
+      )
+    `);
+
+    const wrongHeartbeat = await sql.unsafe<Array<{ result: boolean }>>(`
+      SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_heartbeat(
+        '${LEASE_OWNER_B}'::UUID,
+        120
+      ) AS result
+    `);
+    const wrongFinalize = await sql.unsafe<Array<{ result: boolean }>>(`
+      SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_finalize(
+        '${LEASE_OWNER_B}'::UUID,
+        true
+      ) AS result
+    `);
+    expect(wrongHeartbeat[0]!.result).toBe(false);
+    expect(wrongFinalize[0]!.result).toBe(false);
+
+    const rightHeartbeat = await sql.unsafe<Array<{ result: boolean }>>(`
+      SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_heartbeat(
+        '${LEASE_OWNER_A}'::UUID,
+        120
+      ) AS result
+    `);
+    const rightFinalize = await sql.unsafe<Array<{ result: boolean }>>(`
+      SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_finalize(
+        '${LEASE_OWNER_A}'::UUID,
+        false
+      ) AS result
+    `);
+    expect(rightHeartbeat[0]!.result).toBe(true);
+    expect(rightFinalize[0]!.result).toBe(true);
+
+    const retry = await sql.unsafe<Array<{ result: string }>>(`
+      SELECT ${FIXTURE_SCHEMA}.paypal_reconcile_acquire(
+        '${LEASE_OWNER_B}'::UUID,
+        120,
+        21600,
+        false
+      ) AS result
+    `);
+    expect(retry[0]!.result).toBe('acquired');
+  });
+
+  it('exposes lease state and RPCs to service_role only', async () => {
+    const privileges = await sql.unsafe<Array<{
+      anon_table: boolean;
+      authenticated_table: boolean;
+      service_table: boolean;
+      anon_acquire: boolean;
+      authenticated_acquire: boolean;
+      service_acquire: boolean;
+    }>>(`
+      SELECT
+        has_table_privilege(
+          'anon',
+          '${FIXTURE_SCHEMA}.paypal_reconciliation_state',
+          'SELECT'
+        ) AS anon_table,
+        has_table_privilege(
+          'authenticated',
+          '${FIXTURE_SCHEMA}.paypal_reconciliation_state',
+          'SELECT'
+        ) AS authenticated_table,
+        has_table_privilege(
+          'service_role',
+          '${FIXTURE_SCHEMA}.paypal_reconciliation_state',
+          'SELECT'
+        ) AS service_table,
+        has_function_privilege(
+          'anon',
+          '${FIXTURE_SCHEMA}.paypal_reconcile_acquire(uuid,integer,integer,boolean)',
+          'EXECUTE'
+        ) AS anon_acquire,
+        has_function_privilege(
+          'authenticated',
+          '${FIXTURE_SCHEMA}.paypal_reconcile_acquire(uuid,integer,integer,boolean)',
+          'EXECUTE'
+        ) AS authenticated_acquire,
+        has_function_privilege(
+          'service_role',
+          '${FIXTURE_SCHEMA}.paypal_reconcile_acquire(uuid,integer,integer,boolean)',
+          'EXECUTE'
+        ) AS service_acquire
+    `);
+
+    expect(privileges).toEqual([{
+      anon_table: false,
+      authenticated_table: false,
+      service_table: true,
+      anon_acquire: false,
+      authenticated_acquire: false,
+      service_acquire: true,
+    }]);
   });
 });

@@ -29,12 +29,12 @@ vi.mock('@/lib/api/admin-rate-limit', () => ({
 import {
   runPayPalReconciliation,
   acquireReconcileLease,
-  releaseReconcileLease,
+  heartbeatReconcileLease,
+  finalizeReconcileLease,
   parseAmountToCents,
   fetchProviderTransactions,
   RECONCILE_ALERT_TYPE,
   RECONCILE_FAILURE_ALERT_TYPE,
-  RECONCILE_LEASE_KEY,
   RECONCILE_LAST_RESULT_KEY,
   LOCAL_SCAN_MAX_ROWS,
   recordScheduledReconciliationFailure,
@@ -61,9 +61,14 @@ interface RecordedOp {
 }
 
 type Resolver = (op: RecordedOp) => { data: unknown; error: unknown };
+type RpcResolver = (
+  args: Record<string, unknown>,
+) => { data: unknown; error: unknown };
 
 let ops: RecordedOp[] = [];
 let resolvers: Record<string, Resolver> = {};
+let rpcOps: Array<{ functionName: string; args: Record<string, unknown> }> = [];
+let rpcResolvers: Record<string, RpcResolver> = {};
 
 const CHAIN_METHODS = [
   'select', 'eq', 'is', 'in', 'neq', 'gt', 'lt', 'gte', 'lte',
@@ -111,7 +116,26 @@ function makeSupabase() {
     return chain;
   };
 
-  return { from: vi.fn(from), rpc: vi.fn().mockResolvedValue({ data: null, error: null }) };
+  const rpc = vi.fn(async (
+    functionName: string,
+    args: Record<string, unknown>,
+  ) => {
+    rpcOps.push({ functionName, args });
+    const resolver = rpcResolvers[functionName];
+    if (resolver) return resolver(args);
+    if (functionName === 'paypal_reconcile_acquire') {
+      return { data: 'acquired', error: null };
+    }
+    if (
+      functionName === 'paypal_reconcile_heartbeat'
+      || functionName === 'paypal_reconcile_finalize'
+    ) {
+      return { data: true, error: null };
+    }
+    return { data: null, error: null };
+  });
+
+  return { from: vi.fn(from), rpc };
 }
 
 function opsFor(table: string, op?: RecordedOp['op']) {
@@ -165,7 +189,30 @@ function txn(spec: TxnSpec) {
 }
 
 function scriptPayPal(
-  pages: Array<{ transaction_details: unknown[]; total_pages?: number }>,
+  pages: Array<{
+    transaction_details: unknown[];
+    page?: number;
+    total_pages?: number;
+    total_items?: number;
+  }>,
+  options: { tokenStatus?: number; searchStatus?: number } = {},
+) {
+  const defaultTotalItems = pages.reduce(
+    (total, page) => total + page.transaction_details.length,
+    0,
+  );
+  const quietZero = pages.length === 1 && defaultTotalItems === 0;
+  const envelopes = pages.map((page, index) => ({
+    transaction_details: page.transaction_details,
+    page: page.page ?? index + 1,
+    total_pages: quietZero ? 0 : page.total_pages ?? pages.length,
+    total_items: quietZero ? 0 : page.total_items ?? defaultTotalItems,
+  }));
+  scriptRawPayPal(envelopes, options);
+}
+
+function scriptRawPayPal(
+  envelopes: unknown[],
   options: { tokenStatus?: number; searchStatus?: number } = {},
 ) {
   let pageIndex = 0;
@@ -182,9 +229,9 @@ function scriptPayPal(
       if (options.searchStatus && options.searchStatus !== 200) {
         return new Response('{}', { status: options.searchStatus });
       }
-      const page = pages[Math.min(pageIndex++, pages.length - 1)]!;
+      const page = envelopes[Math.min(pageIndex++, envelopes.length - 1)]!;
       return new Response(
-        JSON.stringify({ total_pages: page.total_pages ?? pages.length, ...page }),
+        JSON.stringify(page),
         { status: 200 },
       );
     }
@@ -200,8 +247,10 @@ let errorSpy: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   vi.clearAllMocks();
   ops = [];
+  rpcOps = [];
   transactionSearchCalls = [];
   resolvers = {};
+  rpcResolvers = {};
   process.env = { ...originalEnv };
   // Fully env-sourced PayPal config so config load never reads Supabase.
   process.env.PAYPAL_API_BASE = 'https://api-m.sandbox.paypal.com';
@@ -342,14 +391,25 @@ describe('parseAmountToCents', () => {
 // ── Provider fetch ──────────────────────────────────────────────────────────
 
 describe('fetchProviderTransactions', () => {
-  it('paginates and de-duplicates', async () => {
+  it('accepts PayPal quiet-zero only as page 1 / 0 pages / 0 items / empty details', async () => {
+    scriptRawPayPal([{
+      transaction_details: [],
+      page: 1,
+      total_pages: 0,
+      total_items: 0,
+    }]);
+
+    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
+
+    expect(result).toEqual({ ok: true, transactions: [] });
+    expect(transactionSearchCalls).toHaveLength(1);
+  });
+
+  it('paginates only when every envelope page and total is coherent', async () => {
     scriptPayPal([
       { transaction_details: [txn({ id: 'T1', value: '1.00' })], total_pages: 2 },
       {
-        transaction_details: [
-          txn({ id: 'T1', value: '1.00' }),
-          txn({ id: 'T2', value: '2.00' }),
-        ],
+        transaction_details: [txn({ id: 'T2', value: '2.00' })],
         total_pages: 2,
       },
     ]);
@@ -360,6 +420,156 @@ describe('fetchProviderTransactions', () => {
     if (!result.ok) return;
     expect(result.transactions.map((t) => t.transactionId)).toEqual(['T1', 'T2']);
     expect(transactionSearchCalls).toHaveLength(2);
+  });
+
+  it.each([
+    {
+      label: 'missing transaction_details',
+      envelope: { page: 1, total_pages: 0, total_items: 0 },
+    },
+    {
+      label: 'missing page',
+      envelope: { transaction_details: [], total_pages: 0, total_items: 0 },
+    },
+    {
+      label: 'missing total_pages',
+      envelope: { transaction_details: [], page: 1, total_items: 0 },
+    },
+    {
+      label: 'missing total_items',
+      envelope: { transaction_details: [], page: 1, total_pages: 0 },
+    },
+    {
+      label: 'non-numeric metadata',
+      envelope: {
+        transaction_details: [],
+        page: '1',
+        total_pages: 0,
+        total_items: 0,
+      },
+    },
+    {
+      label: 'incoherent quiet-zero metadata',
+      envelope: {
+        transaction_details: [],
+        page: 1,
+        total_pages: 1,
+        total_items: 0,
+      },
+    },
+  ])('fails closed on a provider envelope with $label', async ({ envelope }) => {
+    scriptRawPayPal([envelope]);
+
+    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
+
+    expect(result).toMatchObject({
+      ok: false,
+      retriable: false,
+      reason: expect.stringMatching(/envelope|pagination/i),
+    });
+  });
+
+  it('fails closed when PayPal repeats a page number', async () => {
+    scriptRawPayPal([
+      {
+        transaction_details: [txn({ id: 'PAGE-ONE', value: '1.00' })],
+        page: 1,
+        total_pages: 2,
+        total_items: 2,
+      },
+      {
+        transaction_details: [txn({ id: 'PAGE-TWO', value: '2.00' })],
+        page: 1,
+        total_pages: 2,
+        total_items: 2,
+      },
+    ]);
+
+    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
+
+    expect(result).toMatchObject({
+      ok: false,
+      retriable: false,
+      reason: expect.stringMatching(/page|pagination/i),
+    });
+  });
+
+  it('fails closed when totals change or the final item count is incomplete', async () => {
+    scriptRawPayPal([
+      {
+        transaction_details: [txn({ id: 'COUNT-ONE', value: '1.00' })],
+        page: 1,
+        total_pages: 2,
+        total_items: 3,
+      },
+      {
+        transaction_details: [txn({ id: 'COUNT-TWO', value: '2.00' })],
+        page: 2,
+        total_pages: 2,
+        total_items: 3,
+      },
+    ]);
+
+    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
+
+    expect(result).toMatchObject({
+      ok: false,
+      retriable: false,
+      reason: expect.stringMatching(/count|items|incomplete/i),
+    });
+  });
+
+  it.each([
+    {
+      label: 'total_pages',
+      second: { total_pages: 3, total_items: 2 },
+    },
+    {
+      label: 'total_items',
+      second: { total_pages: 2, total_items: 3 },
+    },
+  ])('fails closed when $label changes between pages', async ({ second }) => {
+    scriptRawPayPal([
+      {
+        transaction_details: [txn({ id: 'STABLE-ONE', value: '1.00' })],
+        page: 1,
+        total_pages: 2,
+        total_items: 2,
+      },
+      {
+        transaction_details: [txn({ id: 'STABLE-TWO', value: '2.00' })],
+        page: 2,
+        ...second,
+      },
+    ]);
+
+    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
+
+    expect(result).toMatchObject({
+      ok: false,
+      retriable: false,
+      reason: expect.stringMatching(/inconsistent/i),
+    });
+  });
+
+  it('fails closed on an exact duplicate provider transaction id', async () => {
+    scriptRawPayPal([{
+      transaction_details: [
+        txn({ id: 'DUPLICATE-EXACT', value: '9.99' }),
+        txn({ id: 'DUPLICATE-EXACT', value: '9.99' }),
+      ],
+      page: 1,
+      total_pages: 1,
+      total_items: 2,
+    }]);
+
+    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
+
+    expect(result).toMatchObject({
+      ok: false,
+      retriable: false,
+      reason: expect.stringMatching(/duplicate transaction/i),
+    });
   });
 
   it('ignores fees and payouts outside the Checkout/subscription allowlist', async () => {
@@ -407,6 +617,45 @@ describe('fetchProviderTransactions', () => {
     });
   });
 
+  it.each([
+    {
+      label: 'missing status',
+      mutate: (record: Record<string, unknown>) => {
+        delete record.transaction_status;
+      },
+    },
+    {
+      label: 'non-string status',
+      mutate: (record: Record<string, unknown>) => {
+        record.transaction_status = 1;
+      },
+    },
+    {
+      label: 'missing event code',
+      mutate: (record: Record<string, unknown>) => {
+        delete record.transaction_event_code;
+      },
+    },
+    {
+      label: 'non-string event code',
+      mutate: (record: Record<string, unknown>) => {
+        record.transaction_event_code = 6;
+      },
+    },
+  ])('fails closed when a provider row has $label', async ({ mutate }) => {
+    const entry = txn({ id: 'MALFORMED-CLASSIFIER', value: '9.99' });
+    mutate(entry.transaction_info as Record<string, unknown>);
+    scriptPayPal([{ transaction_details: [entry] }]);
+
+    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
+
+    expect(result).toMatchObject({
+      ok: false,
+      retriable: false,
+      reason: expect.stringMatching(/malformed/i),
+    });
+  });
+
   it('fails closed on conflicting duplicate provider transaction ids', async () => {
     scriptPayPal([{
       transaction_details: [
@@ -421,7 +670,7 @@ describe('fetchProviderTransactions', () => {
     expect(result).toMatchObject({
       ok: false,
       retriable: false,
-      reason: expect.stringMatching(/conflicting duplicate/i),
+      reason: expect.stringMatching(/duplicate transaction/i),
     });
   });
 
@@ -882,6 +1131,155 @@ describe('runPayPalReconciliation', () => {
       expect.objectContaining({ orderId: ORDER_UUID, orderNumber: 'ORD-1001' }),
     ]);
     expect(opsFor('alerts', 'insert')[0]!.payload!.message).toContain('ORD-1001');
+  });
+
+  it('checks an in-window renewal payment even when its order predates the window', async () => {
+    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    const oldOrder = {
+      id: ORDER_UUID,
+      order_number: 'ORD-OLD-SUBSCRIPTION',
+      guild_id: GUILD_ID,
+      customer_id: CUSTOMER_UUID,
+      product_id: PRODUCT_UUID,
+      plan_id: '30000000-0000-4000-8000-000000000001',
+      amount_cents: 999,
+      currency: 'USD',
+      status: 'completed',
+      source: 'purchase',
+      paypal_order_id: null,
+      paypal_subscription_id: 'SUB-OLD-ORDER',
+      created_at: '2025-01-01T00:00:00.000Z',
+    };
+    withLedger({
+      payments: [{
+        id: 'renewal-payment',
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_payment_id: 'SALE-RENEWAL-MISSING',
+        amount_cents: 999,
+        currency: 'USD',
+        status: 'completed',
+        created_at: '2026-07-20T10:00:00.000Z',
+      }],
+      orders: [oldOrder],
+      inferOrders: false,
+    });
+    resolvers['orders'] = (op) => {
+      const exactOrderLookup = filterArgs(op, 'in')
+        .some((args) =>
+          args[0] === 'id'
+          && (args[1] as string[]).includes(ORDER_UUID),
+        );
+      return { data: exactOrderLookup ? [oldOrder] : [], error: null };
+    };
+
+    const result = await runPayPalReconciliation(supabase as never);
+
+    expect(result.status).toBe('completed');
+    if (result.status !== 'completed') return;
+    expect(result.missingProviderPayments).toEqual([
+      expect.objectContaining({
+        orderId: ORDER_UUID,
+        paypalPaymentIds: ['SALE-RENEWAL-MISSING'],
+      }),
+    ]);
+  });
+
+  it('does not let one matching sibling payment mask another missing provider id', async () => {
+    scriptPayPal([{
+      transaction_details: [txn({
+        id: 'CAPTURE-SIBLING-PRESENT',
+        value: '9.99',
+        customField: null,
+        referenceId: `PAYPAL-${ORDER_UUID}`,
+        referenceType: 'ODR',
+      })],
+      total_pages: 1,
+    }]);
+    withLedger({
+      payments: [
+        {
+          id: 'sibling-present',
+          order_id: ORDER_UUID,
+          guild_id: GUILD_ID,
+          paypal_payment_id: 'CAPTURE-SIBLING-PRESENT',
+          amount_cents: 999,
+          currency: 'USD',
+          status: 'completed',
+          created_at: '2026-07-20T10:00:00.000Z',
+        },
+        {
+          id: 'sibling-missing',
+          order_id: ORDER_UUID,
+          guild_id: GUILD_ID,
+          paypal_payment_id: 'CAPTURE-SIBLING-MISSING',
+          amount_cents: 999,
+          currency: 'USD',
+          status: 'completed',
+          created_at: '2026-07-20T11:00:00.000Z',
+        },
+      ],
+      orders: [{
+        id: ORDER_UUID,
+        order_number: 'ORD-SIBLINGS',
+        guild_id: GUILD_ID,
+        amount_cents: 999,
+        created_at: '2026-07-20T10:00:00.000Z',
+      }],
+    });
+
+    const result = await runPayPalReconciliation(supabase as never);
+
+    expect(result.status).toBe('completed');
+    if (result.status !== 'completed') return;
+    expect(result.missingProviderPayments).toEqual([
+      expect.objectContaining({
+        orderId: ORDER_UUID,
+        paypalPaymentIds: ['CAPTURE-SIBLING-MISSING'],
+      }),
+    ]);
+  });
+
+  it('does not use the order fallback when an older provider-payment identity exists', async () => {
+    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    withLedger({
+      payments: [],
+      orders: [{
+        id: ORDER_UUID,
+        order_number: 'ORD-OLDER-PAYMENT',
+        guild_id: GUILD_ID,
+        amount_cents: 999,
+        source: 'purchase',
+        paypal_order_id: null,
+        paypal_subscription_id: null,
+        created_at: '2026-07-20T10:00:00.000Z',
+      }],
+    });
+    resolvers['payments'] = (op) => {
+      const isDurableIdentityLookup = filterArgs(op, 'in')
+        .some((args) =>
+          args[0] === 'order_id'
+          && (args[1] as string[]).includes(ORDER_UUID),
+        );
+      return {
+        data: isDurableIdentityLookup
+          ? [{
+              id: 'older-payment',
+              order_id: ORDER_UUID,
+              guild_id: GUILD_ID,
+              paypal_payment_id: 'CAPTURE-OLDER-IDENTITY',
+            }]
+          : [],
+        error: null,
+      };
+    };
+
+    const result = await runPayPalReconciliation(supabase as never);
+
+    expect(result.status).toBe('completed');
+    if (result.status !== 'completed') return;
+    expect(result.localPayments).toBe(0);
+    expect(result.missingProviderPayments).toEqual([]);
   });
 
   it('flags a completed purchase whose local provider identity write was lost', async () => {
@@ -1505,98 +1903,111 @@ describe('runPayPalReconciliation', () => {
 // ── Lease ───────────────────────────────────────────────────────────────────
 
 describe('acquireReconcileLease', () => {
-  it('inserts the lease row on a first-ever run', async () => {
-    resolvers['instance_settings.select'] = () => ({ data: null, error: null });
-    resolvers['instance_settings.insert'] = () => ({ data: null, error: null });
+  it.each(['acquired', 'busy', 'cooldown'] as const)(
+    'returns the typed %s database result without an application timestamp',
+    async (status) => {
+      rpcResolvers['paypal_reconcile_acquire'] = () => ({ data: status, error: null });
 
-    await expect(acquireReconcileLease(supabase as never, 1000, 5000)).resolves.toBe(true);
-    expect(opsFor('instance_settings', 'insert')[0]!.payload)
-      .toMatchObject({ key: RECONCILE_LEASE_KEY });
-  });
+      await expect(acquireReconcileLease(
+        supabase as never,
+        '80000000-0000-4000-8000-000000000001',
+        120_000,
+        21_600_000,
+        true,
+      )).resolves.toEqual({ status });
 
-  it('refuses when a pass ran inside the lease window', async () => {
-    resolvers['instance_settings.select'] = () => ({ data: { value: '4500' }, error: null });
+      expect(rpcOps[0]).toEqual({
+        functionName: 'paypal_reconcile_acquire',
+        args: {
+          p_owner_token: '80000000-0000-4000-8000-000000000001',
+          p_lease_seconds: 120,
+          p_cooldown_seconds: 21_600,
+          p_bypass_cooldown: true,
+        },
+      });
+      expect(rpcOps[0]!.args).not.toHaveProperty('p_now');
+    },
+  );
 
-    await expect(acquireReconcileLease(supabase as never, 1000, 5000)).resolves.toBe(false);
-    expect(opsFor('instance_settings', 'update')).toHaveLength(0);
-  });
-
-  it('claims with a compare-and-set once the lease expires', async () => {
-    resolvers['instance_settings.select'] = () => ({ data: { value: '1000' }, error: null });
-    resolvers['instance_settings.update'] = () => ({ data: [{ key: RECONCILE_LEASE_KEY }], error: null });
-
-    await expect(acquireReconcileLease(supabase as never, 1000, 5000)).resolves.toBe(true);
-
-    const claim = opsFor('instance_settings', 'update')[0]!;
-    // The prior value is part of the predicate — that is what makes it atomic.
-    expect(filterArgs(claim, 'eq')).toContainEqual(['value', '1000']);
-  });
-
-  it('lets the racing loser skip instead of duplicating the pass', async () => {
-    resolvers['instance_settings.select'] = () => ({ data: { value: '1000' }, error: null });
-    resolvers['instance_settings.update'] = () => ({ data: [], error: null });
-
-    await expect(acquireReconcileLease(supabase as never, 1000, 5000)).resolves.toBe(false);
-  });
-
-  it('fails closed when the lease cannot be read', async () => {
-    resolvers['instance_settings.select'] = () => ({ data: null, error: { message: 'boom' } });
-
-    await expect(acquireReconcileLease(supabase as never, 1000, 5000)).resolves.toBe(false);
-  });
-
-  it('releases only the lease value owned by this pass', async () => {
-    resolvers['instance_settings.update'] = () => ({
-      data: [{ key: RECONCILE_LEASE_KEY }],
-      error: null,
+  it('returns a distinct error result when the atomic acquisition RPC fails', async () => {
+    rpcResolvers['paypal_reconcile_acquire'] = () => ({
+      data: null,
+      error: { message: 'storage down' },
     });
 
-    await expect(releaseReconcileLease(supabase as never, 5000)).resolves.toBe(true);
-
-    const release = opsFor('instance_settings', 'update')[0]!;
-    expect(filterArgs(release, 'eq')).toContainEqual(['key', RECONCILE_LEASE_KEY]);
-    expect(filterArgs(release, 'eq')).toContainEqual(['value', '5000']);
+    await expect(acquireReconcileLease(
+      supabase as never,
+      '80000000-0000-4000-8000-000000000001',
+      120_000,
+      21_600_000,
+      false,
+    )).resolves.toMatchObject({
+      status: 'error',
+      reason: expect.stringMatching(/acquisition.*storage down/i),
+    });
   });
 
-  it('promptly releases a claimed lease after a provider failure', async () => {
+  it('heartbeats and finalizes with the same opaque owner token', async () => {
+    const ownerToken = '80000000-0000-4000-8000-000000000001';
+
+    await expect(
+      heartbeatReconcileLease(supabase as never, ownerToken, 120_000),
+    ).resolves.toEqual({ ok: true });
+    await expect(
+      finalizeReconcileLease(supabase as never, ownerToken, true),
+    ).resolves.toEqual({ ok: true });
+
+    expect(rpcOps).toEqual([
+      {
+        functionName: 'paypal_reconcile_heartbeat',
+        args: { p_owner_token: ownerToken, p_lease_seconds: 120 },
+      },
+      {
+        functionName: 'paypal_reconcile_finalize',
+        args: { p_owner_token: ownerToken, p_succeeded: true },
+      },
+    ]);
+  });
+
+  it('fails closed when an exact-owner heartbeat or finalization is rejected', async () => {
+    rpcResolvers['paypal_reconcile_heartbeat'] = () => ({ data: false, error: null });
+    rpcResolvers['paypal_reconcile_finalize'] = () => ({ data: false, error: null });
+    const ownerToken = '80000000-0000-4000-8000-000000000001';
+
+    await expect(
+      heartbeatReconcileLease(supabase as never, ownerToken, 120_000),
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/ownership.*lost/i),
+    });
+    await expect(
+      finalizeReconcileLease(supabase as never, ownerToken, false),
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/lost ownership/i),
+    });
+  });
+
+  it('finalizes a provider failure as unsuccessful for immediate retry', async () => {
     scriptPayPal([], { tokenStatus: 503 });
-    resolvers['instance_settings.select'] = () => ({ data: null, error: null });
-    resolvers['instance_settings.insert'] = () => ({ data: null, error: null });
-    resolvers['instance_settings.update'] = () => ({
-      data: [{ key: RECONCILE_LEASE_KEY }],
-      error: null,
-    });
 
-    const result = await runPayPalReconciliation(supabase as never, {
-      requireLease: true,
-      now: 5000,
-    });
+    const result = await runPayPalReconciliation(supabase as never);
 
     expect(result.status).toBe('failed');
-    const release = opsFor('instance_settings', 'update')
-      .find((op) => filterArgs(op, 'eq').some((args) => args[0] === 'value'));
-    expect(release).toBeDefined();
-    expect(filterArgs(release!, 'eq')).toContainEqual(['value', '5000']);
+    expect(
+      rpcOps.find((op) => op.functionName === 'paypal_reconcile_finalize')?.args,
+    ).toMatchObject({ p_succeeded: false });
   });
 
-  it('treats a returned last-result upsert error as a failed pass and releases the lease', async () => {
+  it('treats a returned last-result upsert error as a failed pass and releases ownership', async () => {
     scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
     withLedger({});
-    resolvers['instance_settings.select'] = () => ({ data: null, error: null });
-    resolvers['instance_settings.insert'] = () => ({ data: null, error: null });
     resolvers['instance_settings.upsert'] = () => ({
       data: null,
       error: { message: 'bookkeeping down' },
     });
-    resolvers['instance_settings.update'] = () => ({
-      data: [{ key: RECONCILE_LEASE_KEY }],
-      error: null,
-    });
 
-    const result = await runPayPalReconciliation(supabase as never, {
-      requireLease: true,
-      now: 5000,
-    });
+    const result = await runPayPalReconciliation(supabase as never);
 
     expect(result).toMatchObject({
       status: 'failed',
@@ -1604,9 +2015,8 @@ describe('acquireReconcileLease', () => {
       reason: expect.stringMatching(/last result/i),
     });
     expect(
-      opsFor('instance_settings', 'update')
-        .some((op) => filterArgs(op, 'eq').some((args) => args[0] === 'value')),
-    ).toBe(true);
+      rpcOps.find((op) => op.functionName === 'paypal_reconcile_finalize')?.args,
+    ).toMatchObject({ p_succeeded: false });
   });
 });
 
@@ -1628,8 +2038,60 @@ describe('POST /api/paypal/reconcile', () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ success: true, status: 'completed' });
-    // An operator pressing "run now" is not blocked by the schedule lease.
-    expect(opsFor('instance_settings', 'update')).toHaveLength(0);
+    expect(
+      rpcOps.find((op) => op.functionName === 'paypal_reconcile_acquire')?.args,
+    ).toMatchObject({ p_bypass_cooldown: true });
+    expect(
+      rpcOps.find((op) => op.functionName === 'paypal_reconcile_finalize')?.args,
+    ).toMatchObject({ p_succeeded: true });
+  });
+
+  it('does not let owner run-now overlap an active scheduled owner, regardless of app clock', async () => {
+    rpcResolvers['paypal_reconcile_acquire'] = () => ({
+      data: 'busy',
+      error: null,
+    });
+    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    withLedger({});
+
+    const res = await POST(request());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({
+      success: true,
+      status: 'skipped',
+      reason: expect.stringMatching(/running|active/i),
+    });
+    expect(transactionSearchCalls).toHaveLength(0);
+    expect(rpcOps).toEqual([
+      expect.objectContaining({
+        functionName: 'paypal_reconcile_acquire',
+        args: expect.objectContaining({ p_bypass_cooldown: true }),
+      }),
+    ]);
+    expect(rpcOps[0]!.args).not.toHaveProperty('p_now');
+  });
+
+  it('reports lease storage failure as retriable instead of skipped contention', async () => {
+    rpcResolvers['paypal_reconcile_acquire'] = () => ({
+      data: null,
+      error: { message: 'lease database unavailable' },
+    });
+    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    withLedger({});
+
+    const res = await POST(request());
+    const body = await res.json();
+
+    expect(res.status).toBe(503);
+    expect(body).toMatchObject({
+      success: false,
+      status: 'failed',
+      retriable: true,
+      reason: expect.stringMatching(/lease.*unavailable|acquire/i),
+    });
+    expect(transactionSearchCalls).toHaveLength(0);
   });
 
   it('returns only the authenticated owner guild findings', async () => {
@@ -1703,7 +2165,7 @@ describe('POST /api/paypal/reconcile', () => {
     expect(res.status).toBe(401);
   });
 
-  it('accepts the scheduler secret and takes the lease', async () => {
+  it('accepts the scheduler secret and takes the shared owner fence', async () => {
     process.env.PAYPAL_RECONCILE_SECRET = 'super-secret-value';
     (requireGuildOwner as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: false,
@@ -1711,14 +2173,80 @@ describe('POST /api/paypal/reconcile', () => {
     });
     scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
     withLedger({});
-    resolvers['instance_settings.select'] = () => ({ data: null, error: null });
-    resolvers['instance_settings.insert'] = () => ({ data: null, error: null });
 
     const res = await POST(request({ 'x-reconcile-secret': 'super-secret-value' }));
 
     expect(res.status).toBe(200);
-    expect(opsFor('instance_settings', 'insert')[0]!.payload)
-      .toMatchObject({ key: RECONCILE_LEASE_KEY });
+    expect(
+      rpcOps.find((op) => op.functionName === 'paypal_reconcile_acquire')?.args,
+    ).toMatchObject({ p_bypass_cooldown: false });
+  });
+
+  it('lets owner run-now bypass completed cooldown but keeps the scheduler on cadence', async () => {
+    process.env.PAYPAL_RECONCILE_SECRET = 'super-secret-value';
+    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    withLedger({});
+    rpcResolvers['paypal_reconcile_acquire'] = (args) => ({
+      data: args.p_bypass_cooldown === true ? 'acquired' : 'cooldown',
+      error: null,
+    });
+
+    const owner = await POST(request());
+    const scheduled = await POST(request({
+      'x-reconcile-secret': 'super-secret-value',
+    }));
+
+    expect(await owner.json()).toMatchObject({ status: 'completed' });
+    expect(await scheduled.json()).toMatchObject({
+      status: 'skipped',
+      reason: expect.stringMatching(/cooldown|recent/i),
+    });
+    expect(
+      rpcOps
+        .filter((op) => op.functionName === 'paypal_reconcile_acquire')
+        .map((op) => op.args.p_bypass_cooldown),
+    ).toEqual([true, false]);
+  });
+
+  it('records and alerts an external scheduler failure before returning it', async () => {
+    process.env.PAYPAL_RECONCILE_SECRET = 'super-secret-value';
+    scriptPayPal([], { tokenStatus: 503 });
+    withLedger({ guildIds: [GUILD_ID, SECOND_GUILD_ID] });
+
+    const res = await POST(request({
+      'x-reconcile-secret': 'super-secret-value',
+    }));
+
+    expect(res.status).toBe(503);
+    expect(
+      opsFor('instance_settings', 'upsert')
+        .some((op) => String(op.payload?.value).includes('"status":"failed"')),
+    ).toBe(true);
+    const failureAlerts = opsFor('alerts', 'insert')
+      .filter((op) => op.payload?.alert_type === RECONCILE_FAILURE_ALERT_TYPE);
+    expect(failureAlerts.map((op) => op.payload?.guild_id).sort())
+      .toEqual([GUILD_ID, SECOND_GUILD_ID].sort());
+  });
+
+  it('resolves scheduler-failure alerts after an external scheduler success', async () => {
+    process.env.PAYPAL_RECONCILE_SECRET = 'super-secret-value';
+    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    withLedger({ guildIds: [GUILD_ID, SECOND_GUILD_ID] });
+
+    const res = await POST(request({
+      'x-reconcile-secret': 'super-secret-value',
+    }));
+
+    expect(res.status).toBe(200);
+    const failureResolutions = opsFor('alerts', 'update')
+      .filter((op) =>
+        filterArgs(op, 'eq')
+          .some((args) =>
+            args[0] === 'alert_type'
+            && args[1] === RECONCILE_FAILURE_ALERT_TYPE,
+          ),
+      );
+    expect(failureResolutions).toHaveLength(2);
   });
 
   it('accepts the scheduler secret as a bearer token', async () => {
