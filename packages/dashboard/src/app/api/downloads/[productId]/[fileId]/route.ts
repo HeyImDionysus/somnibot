@@ -46,6 +46,7 @@ export async function GET(
   // ── Auth: prefer signed URL, fall back to portal token header ──
   let customerId: string;
   let guildId: string;
+  let deliveryNonce: { value: string; expiresAtUnix: number } | null = null;
 
   const sig = req.nextUrl.searchParams.get('sig');
   const exp = req.nextUrl.searchParams.get('exp');
@@ -61,13 +62,11 @@ export async function GET(
       return NextResponse.json({ error: 'Invalid or expired download link' }, { status: 401 });
     }
 
-    // Single-use enforcement: each nonce can only be consumed once.
-    // If the nonce was already used, reject the request.
     if (verified.nonce) {
-      const consumed = await consumeDownloadNonce(verified.nonce, parseInt(exp, 10));
-      if (!consumed) {
-        return NextResponse.json({ error: 'Download link has already been used' }, { status: 410 });
-      }
+      deliveryNonce = {
+        value: verified.nonce,
+        expiresAtUnix: Number.parseInt(exp, 10),
+      };
     }
 
     customerId = verified.customerId;
@@ -168,16 +167,48 @@ export async function GET(
     return NextResponse.json({ error: 'File not found' }, { status: 404 });
   }
 
-  // Atomically increment download counter via RPC (avoids race conditions)
-  await supabase.rpc('increment_download_count', { p_file_id: fileId }).then(async ({ error }) => {
-    if (error) {
-      // Fallback: non-atomic increment if RPC doesn't exist
-      await supabase
+  /**
+   * Consume a signed-link nonce only once every dependency check has succeeded
+   * and a redirect target is ready. A 429/503, missing file, invalid URL, or
+   * storage-signing failure is retryable with the same link; a delivered link
+   * is not.
+   */
+  async function consumeDeliveryNonce(): Promise<NextResponse | null> {
+    if (!deliveryNonce) return null;
+    const consumed = await consumeDownloadNonce(
+      deliveryNonce.value,
+      deliveryNonce.expiresAtUnix,
+    );
+    if (!consumed) {
+      return NextResponse.json({ error: 'Download link has already been used' }, { status: 410 });
+    }
+    return null;
+  }
+
+  /**
+   * Delivery must not turn into an error after nonce consumption merely
+   * because an analytics counter is unavailable. Keep the atomic RPC, retain
+   * the legacy fallback, and make both explicitly best-effort.
+   */
+  async function recordDeliveredDownload(): Promise<void> {
+    try {
+      const { error } = await supabase.rpc('increment_download_count', { p_file_id: fileId });
+      if (!error) return;
+
+      const { error: fallbackError } = await supabase
         .from('product_files')
         .update({ download_count: (file.download_count ?? 0) + 1 })
         .eq('id', fileId);
+      if (fallbackError) {
+        console.error('[Downloads counter] fallback update failed:', fallbackError.message);
+      }
+    } catch (error) {
+      console.error(
+        '[Downloads counter] update failed:',
+        error instanceof Error ? error.message : 'unknown error',
+      );
     }
-  });
+  }
 
   // If external URL, redirect — V6 Audit §2.4: enforce HTTPS
   if (file.external_url) {
@@ -189,7 +220,11 @@ export async function GET(
           { status: 400 },
         );
       }
-      return NextResponse.redirect(file.external_url);
+      const response = NextResponse.redirect(externalUrl);
+      const replay = await consumeDeliveryNonce();
+      if (replay) return replay;
+      await recordDeliveredDownload();
+      return response;
     } catch {
       return NextResponse.json({ error: 'Invalid external URL' }, { status: 400 });
     }
@@ -197,12 +232,20 @@ export async function GET(
 
   // If Supabase storage path, generate signed URL
   if (file.file_path) {
-    const { data: signedUrl } = await supabase.storage
+    const { data: signedUrl, error: signedUrlError } = await supabase.storage
       .from('product_files')
       .createSignedUrl(file.file_path, 3600); // 1 hour
 
+    if (signedUrlError) {
+      return serviceUnavailable('Downloads storage signing', signedUrlError);
+    }
+
     if (signedUrl?.signedUrl) {
-      return NextResponse.redirect(signedUrl.signedUrl);
+      const response = NextResponse.redirect(signedUrl.signedUrl);
+      const replay = await consumeDeliveryNonce();
+      if (replay) return replay;
+      await recordDeliveredDownload();
+      return response;
     }
   }
 

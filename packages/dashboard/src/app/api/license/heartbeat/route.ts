@@ -83,8 +83,7 @@ export async function POST(req: NextRequest) {
   const { data: entitlements, error: entitlementError } = await supabase
     .from('entitlements')
     .select('status, grace_period_ends_at')
-    .eq('license_key_id', licenseKey.id)
-    .limit(50);
+    .eq('license_key_id', licenseKey.id);
 
   if (entitlementError) {
     return licenseUnavailable('License/heartbeat entitlement lookup', entitlementError, HEARTBEAT_EXTRA);

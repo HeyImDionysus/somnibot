@@ -260,6 +260,31 @@ describe('POST /api/license/heartbeat — heartbeats survive a transient fault',
     expect(body.status).toBe('active');
   });
 
+  it('does not truncate a live entitlement that sorts after fifty dead rows', async () => {
+    const rows = [
+      ...Array.from({ length: 50 }, (_, index) => ({
+        status: `dead-${index}`,
+        grace_period_ends_at: null,
+      })),
+      { status: 'active', grace_period_ends_at: null },
+    ];
+    const { entitlements } = setup({
+      entitlements: { data: rows, error: null },
+    });
+
+    // Model PostgREST cardinality instead of the helper's usual fluent no-op:
+    // if production calls .limit(50), the live 51st row really is absent.
+    entitlements.limit.mockImplementation((count: number) => {
+      resolveChain(entitlements, { data: rows.slice(0, count), error: null });
+      return entitlements;
+    });
+
+    const body = await (await heartbeatPost(req() as never)).json();
+    expect(body.valid).toBe(true);
+    expect(body.status).toBe('active');
+    expect(entitlements.limit).not.toHaveBeenCalled();
+  });
+
   it('reports a lapsed payment grace as expired, and an unexpired one as still valid', async () => {
     const past = new Date(Date.now() - 60_000).toISOString();
     setup({ entitlements: { data: [{ status: 'grace_period', grace_period_ends_at: past }], error: null } });
