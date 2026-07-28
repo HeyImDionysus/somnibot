@@ -425,6 +425,66 @@ function createCaptureRecoveryHarness(options: {
       state.legacySubscriptionContract ??= candidate;
       return { data: structuredClone(state.legacySubscriptionContract), error: null };
     }
+    if (name === 'commerce_hold_unknown_delivery_contract') {
+      if (state.failClaimAttempts > 0) {
+        state.failClaimAttempts -= 1;
+        return { data: null, error: { message: 'claim database unavailable', code: '08006' } };
+      }
+      if (state.failAlertInsertAttempts > 0) {
+        state.failAlertInsertAttempts -= 1;
+        return {
+          data: null,
+          error: { message: 'unknown delivery alert unavailable', code: '08006' },
+        };
+      }
+
+      const existingAlert = (state.alerts ?? []).find(
+        (alert: any) =>
+          alert.alert_type === 'commerce_unknown_delivery_contract'
+          && alert.metadata?.order_id === state.order.id
+          && alert.resolved !== true,
+      );
+      state.fulfillmentClaimOrderId ??= state.order.id;
+      state.fulfillmentHold = {
+        winning_order_id: state.order.id,
+        conflicting_entitlement_id: null,
+        hold_reason: 'unknown_delivery_contract',
+      };
+      const alert = existingAlert ?? {
+        id: 'alert-unknown-delivery',
+        guild_id: state.order.guild_id,
+        alert_type: 'commerce_unknown_delivery_contract',
+        severity: 'critical',
+        title: 'Paid order requires manual delivery review',
+        message: 'Paid order has no immutable delivery contract.',
+        resolved: false,
+        metadata: {
+          order_id: state.order.id,
+          order_number: state.order.order_number,
+          customer_id: state.order.customer_id,
+          product_id: state.order.product_id,
+          provider_kind: args.p_provider_kind,
+          provider_id: args.p_provider_id,
+          amount_cents: args.p_amount_cents,
+          currency: args.p_currency,
+          winning_order_id: state.order.id,
+          existing_entitlement_id: null,
+          hold_reason: 'unknown_delivery_contract',
+          required_action: 'manual_fulfillment_or_refund',
+        },
+      };
+      if (!existingAlert) (state.alerts ??= []).push(alert);
+      return {
+        data: {
+          order_id: state.order.id,
+          disposition: 'held',
+          winning_order_id: state.order.id,
+          conflicting_entitlement_id: null,
+          alert_id: alert.id,
+        },
+        error: null,
+      };
+    }
     if (name === 'commerce_claim_paid_fulfillment') {
       if (state.failClaimAttempts > 0) {
         state.failClaimAttempts -= 1;
@@ -2363,7 +2423,7 @@ describe('PayPal webhook — edge cases', () => {
       },
     );
 
-    it('treats a duplicate legacy completed capture without a frozen snapshot as a no-op', async () => {
+    it('atomically claims and holds a legacy completed capture with no frozen snapshot', async () => {
       const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
       try {
         const { supabase, state, rpc } = createCaptureRecoveryHarness();
@@ -2383,10 +2443,27 @@ describe('PayPal webhook — edge cases', () => {
         expect(state.queue).toBeNull();
         expect(state.licenseKey).toBeNull();
         expect(state.totalsApplied).toBe(0);
-        expect(state.inserts).toEqual([]);
-        expect(state.updates).toEqual([]);
         expect(rpc.mock.calls.map(([name]) => name)).toEqual([
           'commerce_finalize_paypal_capture',
+          'commerce_hold_unknown_delivery_contract',
+        ]);
+        expect(state.fulfillmentClaimOrderId).toBe(state.order.id);
+        expect(state.fulfillmentHold).toMatchObject({
+          winning_order_id: state.order.id,
+          conflicting_entitlement_id: null,
+          hold_reason: 'unknown_delivery_contract',
+        });
+        expect(state.alerts).toEqual([
+          expect.objectContaining({
+            alert_type: 'commerce_unknown_delivery_contract',
+            severity: 'critical',
+            metadata: expect.objectContaining({
+              order_id: state.order.id,
+              provider_kind: 'capture',
+              provider_id: 'CAPTURE-RECOVERY-1',
+              required_action: 'manual_fulfillment_or_refund',
+            }),
+          }),
         ]);
         expect(infoSpy).toHaveBeenCalledWith(
           expect.stringContaining('Exact legacy capture replay has no frozen grant snapshot'),
@@ -2616,7 +2693,7 @@ describe('PayPal webhook — edge cases', () => {
       expect(getSubscriptionAmount).toHaveBeenCalledTimes(1);
     });
 
-    it('treats an exact legacy completed subscription replay without a grant snapshot as a no-op', async () => {
+    it('atomically claims and holds a legacy completed subscription with no grant snapshot', async () => {
       const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
       try {
         const { supabase, state, rpc } = createCaptureRecoveryHarness({ subscription: true });
@@ -2642,9 +2719,27 @@ describe('PayPal webhook — edge cases', () => {
         });
         expect(state.frozenSnapshot).toBeNull();
         expect(state.queue).toBeNull();
-        expect(state.inserts).toEqual([]);
-        expect(state.updates).toEqual([]);
-        expect(rpc).not.toHaveBeenCalled();
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+          'commerce_hold_unknown_delivery_contract',
+        ]);
+        expect(state.fulfillmentClaimOrderId).toBe(state.order.id);
+        expect(state.fulfillmentHold).toMatchObject({
+          winning_order_id: state.order.id,
+          conflicting_entitlement_id: null,
+          hold_reason: 'unknown_delivery_contract',
+        });
+        expect(state.alerts).toEqual([
+          expect.objectContaining({
+            alert_type: 'commerce_unknown_delivery_contract',
+            severity: 'critical',
+            metadata: expect.objectContaining({
+              order_id: state.order.id,
+              provider_kind: 'subscription',
+              provider_id: 'SUB-RECOVERY-1',
+              required_action: 'manual_fulfillment_or_refund',
+            }),
+          }),
+        ]);
         expect(getSubscriptionAmount).toHaveBeenCalledTimes(1);
         expect(infoSpy).toHaveBeenCalledWith(
           expect.stringContaining('Exact legacy subscription replay has no durable grant contract'),
@@ -2674,7 +2769,7 @@ describe('PayPal webhook — edge cases', () => {
           state.plan = null;
         },
       },
-    ])('keeps an exact legacy no-contract replay mutation-free after $label', async ({ mutateCatalog }) => {
+    ])('keeps an exact legacy no-contract replay access-free and held after $label', async ({ mutateCatalog }) => {
       const { supabase, state, rpc } = createCaptureRecoveryHarness({ subscription: true });
       state.order.status = 'completed';
       state.order.grant_snapshot_frozen_at = null;
@@ -2700,7 +2795,13 @@ describe('PayPal webhook — edge cases', () => {
       expect(state.queue).toBeNull();
       expect(state.inserts).toEqual([]);
       expect(state.updates).toEqual([]);
-      expect(rpc).not.toHaveBeenCalled();
+      expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+        'commerce_hold_unknown_delivery_contract',
+      ]);
+      expect(state.fulfillmentHold).toMatchObject({
+        winning_order_id: state.order.id,
+        hold_reason: 'unknown_delivery_contract',
+      });
       expect(getSubscriptionAmount).toHaveBeenCalledTimes(1);
     });
 
@@ -3462,7 +3563,7 @@ describe('PayPal webhook — frozen licence delivery contract', () => {
   });
 
   it('records and holds a legacy paid capture instead of guessing a missing delivery contract', async () => {
-    const { supabase, state } = createCaptureRecoveryHarness({ withLicense: true });
+    const { supabase, state, rpc } = createCaptureRecoveryHarness({ withLicense: true });
     state.order.delivery_type_snapshot = null;
 
     await handlePaymentCaptured(supabase, captureResource);
@@ -3471,6 +3572,12 @@ describe('PayPal webhook — frozen licence delivery contract', () => {
     expect(state.order.status).toBe('completed');
     expect(state.queue).toBeNull();
     expect(state.licenseKey).toBeNull();
+    expect(rpc.mock.calls
+      .map(([name]) => name)
+      .filter((name) =>
+        name === 'commerce_claim_paid_fulfillment'
+        || name === 'commerce_hold_unknown_delivery_contract'))
+      .toEqual(['commerce_hold_unknown_delivery_contract']);
     expect(state.alerts).toContainEqual(expect.objectContaining({
       alert_type: 'commerce_unknown_delivery_contract',
       severity: 'critical',
@@ -3478,8 +3585,8 @@ describe('PayPal webhook — frozen licence delivery contract', () => {
     }));
   });
 
-  it('repairs a missing unknown-delivery alert from a pending_review subscription replay', async () => {
-    const { supabase, state } = createCaptureRecoveryHarness({
+  it('rolls back claim and hold when the atomic unknown-delivery alert cannot persist', async () => {
+    const { supabase, state, rpc } = createCaptureRecoveryHarness({
       subscription: true,
       withLicense: true,
       failAlertInsertAttempts: 1,
@@ -3488,16 +3595,29 @@ describe('PayPal webhook — frozen licence delivery contract', () => {
 
     await expect(
       handleSubscriptionActivated(supabase, subscriptionResource),
-    ).rejects.toThrow('Failed to persist delivery-contract alert');
+    ).rejects.toThrow('Failed to hold unknown delivery contract');
 
-    expect(state.order.status).toBe('pending_review');
+    expect(state.order.status).toBe('pending');
     expect(state.queue).toBeNull();
     expect(state.alerts ?? []).toHaveLength(0);
+    expect(state.fulfillmentClaimOrderId).toBeNull();
+    expect(state.fulfillmentHold).toBeNull();
+    expect(rpc.mock.calls
+      .map(([name]) => name)
+      .filter((name) =>
+        name === 'commerce_claim_paid_fulfillment'
+        || name === 'commerce_hold_unknown_delivery_contract'))
+      .toEqual(['commerce_hold_unknown_delivery_contract']);
 
     await handleSubscriptionActivated(supabase, subscriptionResource);
 
-    expect(state.order.status).toBe('pending_review');
+    expect(state.order.status).toBe('pending');
     expect(state.queue).toBeNull();
+    expect(state.fulfillmentClaimOrderId).toBe(state.order.id);
+    expect(state.fulfillmentHold).toMatchObject({
+      winning_order_id: state.order.id,
+      hold_reason: 'unknown_delivery_contract',
+    });
     expect(state.alerts).toContainEqual(expect.objectContaining({
       alert_type: 'commerce_unknown_delivery_contract',
       severity: 'critical',

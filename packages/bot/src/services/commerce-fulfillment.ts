@@ -241,7 +241,7 @@ export interface FulfillmentResult {
   success: boolean;
   entitlementId?: string;
   receiptSent?: boolean;
-  /** Set when the receipt DM failed and a persistent re-delivery was queued. */
+  /** False when receipt delivery is uncertain and automatic re-delivery is blocked. */
   receiptRetryQueued?: boolean;
   /** Durable database arbitration withheld this duplicate paid order. */
   paidFulfillmentHeld?: boolean;
@@ -249,14 +249,23 @@ export interface FulfillmentResult {
   errors: string[];
 }
 
-// ── Receipt Delivery Retry ─────────────────────────────────
-// A paid customer's receipt/license-key DM must never fail silently. When
-// the initial DM attempt fails, delivery is re-queued through
-// `bot_action_queue` (the existing persistent retry infrastructure: backoff,
-// max attempts, stale recovery). The queue handler classifies failures —
-// transient ones retry, permanent ones (DMs disabled) don't burn retries —
-// and final failures are dead-lettered to `action_queue_dlq` plus surfaced
-// via an `alerts` row so the dashboard shows "delivery failed, act manually".
+type FulfillmentOutwardIntentKind =
+  | 'purchase_completed_event'
+  | 'subscription_activated_event'
+  | 'receipt_dm';
+
+interface FulfillmentOutwardResult {
+  state: 'absent' | 'sent' | 'uncertain';
+  externalError?: unknown;
+}
+
+// ── Receipt Delivery Recovery ──────────────────────────────
+// A paid customer's receipt/license-key DM must never fail silently, but an
+// external timeout cannot prove Discord rejected the message. An uncertain
+// attempt is therefore never re-queued automatically. The full payload is
+// preserved in `action_queue_dlq` for deliberate operator reconciliation and
+// a critical alert explains that the original acceptance must be checked
+// before any manual retry.
 
 /** bot_action_queue action used for persistent receipt re-delivery. */
 export const RECEIPT_DELIVERY_ACTION = 'deliver_receipt';
@@ -279,17 +288,6 @@ export interface ReceiptDeliveryPayload {
 }
 
 export type DeliveryFailureKind = 'permanent' | 'transient';
-
-// Bounded in-process retry for the bot_action_queue insert in
-// queueReceiptRedelivery. The queue row is what carries the plaintext
-// license key into the retry pipeline — only its hash is stored at rest in
-// `license_keys` — so losing the insert loses the key. Worth a few quick
-// attempts before falling back to the dead-letter queue.
-const QUEUE_INSERT_MAX_ATTEMPTS = 3;
-const QUEUE_INSERT_BACKOFF_MS = [500, 2_000];
-
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
 
 // Discord REST error codes for which retrying a DM can never succeed:
 // 50007 = Cannot send messages to this user (DMs disabled / bot blocked)
@@ -314,8 +312,8 @@ export function classifyDeliveryError(err: unknown): DeliveryFailureKind {
  * Write the operator-visible alert for a receipt delivery failure. The
  * dashboard surfaces `alerts` rows; the message tells the operator the
  * recovery path that actually works: the full delivery payload (including
- * the plaintext license key) is preserved in the dead-letter queue, so the
- * delivery can be retried from the dashboard or the key resent manually.
+ * the plaintext license key) is preserved in the dead-letter queue, but the
+ * original attempt must be reconciled before any deliberate manual resend.
  * The customer portal is NOT a recovery path — license_keys stores only
  * hash/prefix/suffix, and the portal displays only the masked key.
  */
@@ -342,8 +340,9 @@ export async function writeReceiptDeliveryAlert(
 ): Promise<void> {
   const payloadPreserved = opts.payloadPreserved ?? true;
   const recovery = payloadPreserved
-    ? 'The full delivery payload (including the license key) is preserved in the dead-letter queue — ' +
-      'retry the delivery from the dashboard DLQ, or use the preserved key to deliver it through ' +
+    ? 'The full delivery payload (including the license key) is preserved in the dead-letter queue. ' +
+      'Automatic retry is blocked because the original attempt may have been accepted. Reconcile that ' +
+      'attempt before deliberately retrying from the dashboard DLQ or delivering the preserved key through ' +
       'another channel. Note: the customer portal shows only a masked key, so it cannot be used for recovery.'
     : 'The delivery payload could NOT be preserved in the dead-letter queue (database write failed), ' +
       'so the plaintext key is unrecoverable — revoke the license key for this order and reissue it manually.';
@@ -369,6 +368,7 @@ export async function writeReceiptDeliveryAlert(
       attempts: opts.attempts,
       lastError: opts.lastError,
       payloadPreserved,
+      acceptanceUncertain: true,
     },
     guild: opts.guild,
   });
@@ -665,6 +665,116 @@ export class CommerceFulfillmentService {
     return claim.disposition as 'winner' | 'held';
   }
 
+  private async runFulfillmentOutwardIntent(
+    payload: FulfillmentPayload,
+    intentKind: FulfillmentOutwardIntentKind,
+    effect: () => void | Promise<void>,
+    resumeExistingOnly = false,
+  ): Promise<FulfillmentOutwardResult> {
+    const { data: beginData, error: beginError } = await this.supabase.rpc(
+      resumeExistingOnly
+        ? 'commerce_resume_fulfillment_outward_intent'
+        : 'commerce_begin_fulfillment_outward_intent',
+      {
+        p_order_id: payload.order_id,
+        p_guild_id: payload.guild_id,
+        p_intent_kind: intentKind,
+      },
+    );
+    if (beginError) {
+      throw new Error(`Failed to begin fulfillment outward intent: ${beginError.message}`);
+    }
+    if (!beginData || typeof beginData !== 'object' || Array.isArray(beginData)) {
+      throw new Error('Fulfillment outward intent begin returned malformed data');
+    }
+    const begin = beginData as Record<string, unknown>;
+    if (
+      resumeExistingOnly
+      && begin.order_id === payload.order_id
+      && begin.intent_kind === intentKind
+      && begin.disposition === 'absent'
+      && begin.state === null
+      && begin.attempt_token === null
+      && begin.alert_id === null
+    ) {
+      return { state: 'absent' };
+    }
+    if (
+      begin.order_id !== payload.order_id
+      || begin.intent_kind !== intentKind
+      || !['send', 'sent', 'uncertain'].includes(String(begin.disposition))
+      || !['sending', 'sent', 'uncertain'].includes(String(begin.state))
+    ) {
+      throw new Error('Fulfillment outward intent begin returned malformed identity');
+    }
+    if (begin.disposition === 'sent' && begin.state === 'sent') {
+      return { state: 'sent' };
+    }
+    if (begin.disposition === 'uncertain' && begin.state === 'uncertain') {
+      return { state: 'uncertain' };
+    }
+    if (
+      begin.disposition !== 'send'
+      || begin.state !== 'sending'
+      || typeof begin.attempt_token !== 'string'
+      || begin.attempt_token.length === 0
+      || begin.alert_id !== null
+    ) {
+      throw new Error('Fulfillment outward intent begin returned inconsistent state');
+    }
+
+    let outcome: 'sent' | 'uncertain' = 'sent';
+    let externalError: unknown;
+    try {
+      await effect();
+    } catch (error) {
+      outcome = 'uncertain';
+      externalError = error;
+    }
+
+    const errorDetail = externalError instanceof Error
+      ? externalError.message
+      : externalError === undefined
+        ? null
+        : String(externalError);
+    const { data: finishData, error: finishError } = await this.supabase.rpc(
+      'commerce_finish_fulfillment_outward_intent',
+      {
+        p_order_id: payload.order_id,
+        p_guild_id: payload.guild_id,
+        p_intent_kind: intentKind,
+        p_attempt_token: begin.attempt_token,
+        p_outcome: outcome,
+        p_error: outcome === 'uncertain'
+          ? `external effect did not return acceptance: ${errorDetail ?? 'unknown error'}`
+          : null,
+      },
+    );
+    if (finishError) {
+      // The external effect may already have been accepted. Leave the durable
+      // row in `sending`; the queue retry converts it to `uncertain` and skips
+      // the effect instead of guessing and sending twice.
+      throw new Error(`Failed to finish fulfillment outward intent: ${finishError.message}`);
+    }
+    if (!finishData || typeof finishData !== 'object' || Array.isArray(finishData)) {
+      throw new Error('Fulfillment outward intent finish returned malformed data');
+    }
+    const finish = finishData as Record<string, unknown>;
+    if (
+      finish.order_id !== payload.order_id
+      || finish.intent_kind !== intentKind
+      || !['sent', 'uncertain'].includes(String(finish.state))
+      || (outcome === 'sent' && finish.state !== 'sent')
+      || (outcome === 'uncertain' && finish.state !== 'uncertain')
+    ) {
+      throw new Error('Fulfillment outward intent finish returned malformed identity');
+    }
+    return {
+      state: finish.state as 'sent' | 'uncertain',
+      ...(externalError === undefined ? {} : { externalError }),
+    };
+  }
+
   // ── One-Time Purchase ────────────────────────────────────
 
   private async handleOneTimePurchase(
@@ -759,23 +869,42 @@ export class CommerceFulfillmentService {
     }
 
     // 2. Commit durable provenance before mutating any temporary Discord role.
-    if (roleDeliveryAlreadySettled) return;
-    await this.applyTemporaryRoleGrants(payload, temporaryRoleGrants);
+    // A confirmed role-delivery replay may be a legacy action from before
+    // outward intents existed. Resume only when an existing event row proves
+    // this handler had entered the new crash-fenced delivery path.
+    if (!roleDeliveryAlreadySettled) {
+      await this.applyTemporaryRoleGrants(payload, temporaryRoleGrants);
+    }
 
-    // 3. Emit purchase.completed event (noncritical consumers only)
-    this.eventBus.emit('purchase.completed', payload.guild_id, {
-      discordId: payload.discord_id,
-      orderId: payload.order_id,
-      orderNumber: payload.order_number,
-      productId: payload.product_id,
-      productName: payload.product_name,
-      amount: payload.amount_cents,
-      currency: payload.currency,
-    });
-    result.eventEmitted = true;
+    // 3. Emit purchase.completed once. A crash after listener acceptance but
+    // before the sent marker becomes a manual-review `uncertain`, never resend.
+    const eventOutcome = await this.runFulfillmentOutwardIntent(
+      payload,
+      'purchase_completed_event',
+      () => this.eventBus.emit('purchase.completed', payload.guild_id, {
+        discordId: payload.discord_id,
+        orderId: payload.order_id,
+        orderNumber: payload.order_number,
+        productId: payload.product_id,
+        productName: payload.product_name,
+        amount: payload.amount_cents,
+        currency: payload.currency,
+      }),
+      roleDeliveryAlreadySettled,
+    );
+    if (eventOutcome.state === 'absent') return;
+    result.eventEmitted = eventOutcome.state === 'sent';
+    if (eventOutcome.externalError) {
+      log.error('Purchase event delivery is uncertain; automatic replay blocked', {
+        order: payload.order_number,
+        detail: eventOutcome.externalError,
+      });
+    }
 
     // 4. Send receipt DM
     await this.sendReceipt(payload, result);
+
+    if (roleDeliveryAlreadySettled) return;
 
     // 5. Run fraud checks (non-blocking — don't fail fulfillment)
     this.runFraudChecks(payload).catch((err) =>
@@ -1793,23 +1922,34 @@ export class CommerceFulfillmentService {
       }
     }
 
-    // delivery_confirmed is written only after the original handler finished
-    // its event and receipt steps. It is therefore the durable replay marker:
-    // a queue-finalization retry must not emit/send them a second time.
-    if (roleDeliveryAlreadySettled) return;
-
-    // 2. Emit subscription.activated event
-    this.eventBus.emit('subscription.activated', payload.guild_id, {
-      discordId: payload.discord_id,
-      productId: payload.product_id,
-      planId: payload.plan_id ?? '',
-      lifecycleId: this.requireExecutionContext().actionId,
-      status: 'activated',
-    });
-    result.eventEmitted = true;
+    // 2. Emit subscription.activated once under the same crash fence.
+    const eventOutcome = await this.runFulfillmentOutwardIntent(
+      payload,
+      'subscription_activated_event',
+      () => this.eventBus.emit('subscription.activated', payload.guild_id, {
+        discordId: payload.discord_id,
+        productId: payload.product_id,
+        planId: payload.plan_id ?? '',
+        lifecycleId: this.requireExecutionContext().actionId,
+        status: 'activated',
+      }),
+      roleDeliveryAlreadySettled,
+    );
+    // A missing row is an action completed before outward intents existed.
+    // Preserve the old delivery-confirmed dedupe boundary in that case.
+    if (eventOutcome.state === 'absent') return;
+    result.eventEmitted = eventOutcome.state === 'sent';
+    if (eventOutcome.externalError) {
+      log.error('Subscription event delivery is uncertain; automatic replay blocked', {
+        order: payload.order_number,
+        detail: eventOutcome.externalError,
+      });
+    }
 
     // 3. Send receipt DM
     await this.sendReceipt(payload, result);
+
+    if (roleDeliveryAlreadySettled) return;
 
     // Run fraud checks (non-blocking — don't fail fulfillment)
     this.runFraudChecks(payload).catch((err) =>
@@ -2032,21 +2172,15 @@ export class CommerceFulfillmentService {
   // ── Receipt DM ───────────────────────────────────────────
 
   /**
-   * Deliver the receipt/license-key DM. Failures are never dropped silently:
-   * the delivery is re-queued through `bot_action_queue` for persistent retry
-   * (see handleDeliverReceipt in action-queue.ts for backoff, permanent-vs-
-   * transient classification, and dead-letter + alert on final failure).
-   *
-   * A delivery failure intentionally does NOT fail the fulfillment itself —
-   * the entitlement is already granted, and retrying the whole fulfillment
-   * action would double-grant it. Only the delivery is retried.
+   * Deliver the receipt/license-key DM under a durable external-effect fence.
+   * Any ambiguous response becomes `uncertain` and blocks automatic resend.
    */
   private async sendReceipt(payload: FulfillmentPayload, result: FulfillmentResult): Promise<void> {
     // Fulfillment runs immediately after payment, so "now" is the order
     // date. Captured once so a queued redelivery renders the same date the
     // initial DM would have shown, not the date the retry succeeded.
     const orderDate = new Date();
-    try {
+    const outward = await this.runFulfillmentOutwardIntent(payload, 'receipt_dm', async () => {
       // Buyer-facing receipt: framed with the owner's white-label kit (cached).
       const brandKit = await resolveBrandKit(this.supabase, payload.guild_id, {
         fallbackName: this.guild.name,
@@ -2064,28 +2198,31 @@ export class CommerceFulfillmentService {
         },
         brandKit,
       );
-      result.receiptSent = true;
-    } catch (err) {
+    });
+    if (outward.state === 'absent') {
+      throw new Error('New receipt outward intent unexpectedly returned absent');
+    }
+    result.receiptSent = outward.state === 'sent';
+    if (outward.state === 'uncertain') {
+      result.receiptRetryQueued = await this.preserveUncertainReceiptForManualReview(
+        payload,
+        outward.externalError,
+        orderDate,
+      );
       const redacted = payload.discord_id ? `***${payload.discord_id.slice(-4)}` : 'unknown';
-      log.error('Failed to send receipt', { user: redacted, detail: err });
-      result.receiptSent = false;
-      result.receiptRetryQueued = await this.queueReceiptRedelivery(payload, err, orderDate);
+      log.error('Receipt delivery is uncertain; automatic replay blocked', {
+        user: redacted,
+        detail: outward.externalError,
+      });
     }
   }
 
   /**
-   * Queue a persistent re-delivery of the receipt DM via `bot_action_queue`.
-   *
-   * The queue row is the only at-rest copy of the plaintext license key
-   * (`license_keys` stores hash/prefix/suffix only), so the insert itself is
-   * retried with a short backoff. If it still fails, the delivery payload is
-   * preserved in `action_queue_dlq` — dashboard-visible and manually
-   * retryable via the existing DLQ retry flow, and the same table/shape the
-   * queue's own final-failure path writes, so this adds no new exposure
-   * surface — and an operator alert is written. The alert itself never
-   * contains the key.
+   * Preserve an uncertain receipt payload without scheduling an automatic
+   * resend. The external call may have been accepted before its response was
+   * lost, so only an operator may decide whether a manual DLQ retry is safe.
    */
-  private async queueReceiptRedelivery(
+  private async preserveUncertainReceiptForManualReview(
     payload: FulfillmentPayload,
     deliveryError: unknown,
     orderDate: Date,
@@ -2102,59 +2239,31 @@ export class CommerceFulfillmentService {
       order_date: orderDate.toISOString(),
     };
 
-    let lastQueueError: unknown;
-    for (let attempt = 1; attempt <= QUEUE_INSERT_MAX_ATTEMPTS; attempt++) {
-      try {
-        const { error } = await this.supabase.from('bot_action_queue').insert({
-          guild_id: payload.guild_id,
-          action: RECEIPT_DELIVERY_ACTION,
-          payload: deliveryPayload,
-          status: 'pending',
-        });
-        if (error) throw new Error(error.message);
-        log.info('Queued receipt re-delivery', { order: payload.order_number });
-        return true;
-      } catch (queueErr) {
-        lastQueueError = queueErr;
-        log.warn('Receipt re-delivery queue insert failed', {
-          order: payload.order_number,
-          attempt,
-          detail: queueErr,
-        });
-        if (attempt < QUEUE_INSERT_MAX_ATTEMPTS) {
-          await sleep(QUEUE_INSERT_BACKOFF_MS[attempt - 1] ?? 2_000);
-        }
-      }
-    }
-
-    log.error('Failed to queue receipt re-delivery', {
-      order: payload.order_number,
-      detail: lastQueueError,
-    });
-
-    // Preserve the full delivery payload (including the plaintext key) in
-    // the dead-letter queue so the operator can retry the delivery from the
-    // dashboard instead of the key being unrecoverable.
     let payloadPreserved = false;
     try {
-      const queueMsg =
-        lastQueueError instanceof Error ? lastQueueError.message : String(lastQueueError);
+      const deliveryMessage = deliveryError instanceof Error
+        ? deliveryError.message
+        : deliveryError === undefined
+          ? 'outward intent resumed in uncertain state'
+          : String(deliveryError);
       const { error } = await this.supabase.from('action_queue_dlq').insert({
         guild_id: payload.guild_id,
         action: RECEIPT_DELIVERY_ACTION,
         payload: deliveryPayload,
         error_message:
-          `Failed to queue receipt re-delivery after ${QUEUE_INSERT_MAX_ATTEMPTS} attempts: ${queueMsg}`,
+          `Receipt delivery acceptance is uncertain; automatic retry blocked: ${deliveryMessage}`,
         retry_count: 0,
         max_retries: 0,
       });
       if (error) throw new Error(error.message);
       payloadPreserved = true;
-      log.info('Dead-lettered receipt re-delivery payload', { order: payload.order_number });
+      log.info('Preserved uncertain receipt payload for manual review', {
+        order: payload.order_number,
+      });
     } catch (dlqErr) {
       // Last resort is the alert below: it references the order, and the
       // hashed key for that order can still be manually revoked + reissued.
-      log.error('Failed to dead-letter receipt re-delivery', {
+      log.error('Failed to preserve uncertain receipt payload', {
         order: payload.order_number,
         detail: dlqErr,
       });
@@ -2171,6 +2280,7 @@ export class CommerceFulfillmentService {
       payloadPreserved,
       guild: this.guild,
     });
+    // The DLQ is a manual reconciliation surface, never an automatic retry.
     return false;
   }
 

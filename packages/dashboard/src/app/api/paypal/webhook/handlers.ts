@@ -16,8 +16,10 @@ import {
   type PayPalSaleResource,
 } from '@/lib/types/paypal';
 import { generateLicenseKey, queueFulfillment } from './fulfillment';
-import { claimPaidFulfillment } from './duplicate-purchase';
-import { raiseUnknownDeliveryContractAlert } from './license-delivery-review';
+import {
+  claimPaidFulfillment,
+  holdUnknownDeliveryContract,
+} from './duplicate-purchase';
 
 function formatSupabaseError(error: unknown): string {
   if (
@@ -750,33 +752,6 @@ async function freezeOrderGrantSnapshot(
   };
 }
 
-async function holdSubscriptionOrderForReview(
-  supabase: AdminSupabase,
-  order: CommerceOrderRow,
-): Promise<void> {
-  if (order.status === 'pending_review' || order.status === 'completed') return;
-  if (order.status !== 'pending') {
-    throw new Error(`Subscription review hold rejected order status ${order.status}`);
-  }
-
-  const { data, error } = await supabase
-    .from('orders')
-    .update({
-      status: 'pending_review',
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', order.id)
-    .eq('guild_id', order.guild_id)
-    .eq('status', 'pending')
-    .select('id')
-    .maybeSingle();
-  requireSupabaseSuccess(error, 'Failed to hold subscription order for review');
-  if (!data || data.id !== order.id) {
-    throw new Error('Subscription review hold lost its state race');
-  }
-  order.status = 'pending_review';
-}
-
 async function adoptLegacySubscriptionGrantContract(
   supabase: AdminSupabase,
   order: CommerceOrderRow,
@@ -1273,6 +1248,12 @@ export async function handlePaymentCaptured(
         `[Webhook] Exact legacy capture replay has no frozen grant snapshot; ` +
           `skipping fulfillment recovery for ${order.order_number}`,
       );
+      await holdUnknownDeliveryContract(supabase, order, {
+        kind: 'capture',
+        id: paypalCaptureId,
+        amountCents,
+        currency: captureCurrency,
+      });
       return;
     }
   }
@@ -1297,26 +1278,6 @@ export async function handlePaymentCaptured(
     currency: captureCurrency,
   })) return;
 
-  if (amountMatches) {
-    // The database claim is the atomic double-fulfillment boundary. It must run
-    // before a random licence key or staged queue payload is created. Historical
-    // PayPal links can arrive concurrently, so a JavaScript entitlement read is
-    // not sufficient serialization.
-    const claim = await claimPaidFulfillment(supabase, order, {
-      kind: 'capture',
-      id: paypalCaptureId,
-      amountCents,
-      currency: captureCurrency,
-    });
-    if (claim.disposition === 'held') {
-      console.error(
-        `[Webhook] DUPLICATE PURCHASE: order ${order.order_number} lost fulfillment `
-          + `claim to ${claim.winning_order_id ?? 'an existing entitlement'}; payment `
-          + `recorded, critical alert ${claim.alert_id} persisted, fulfillment withheld.`,
-      );
-      return;
-    }
-  }
   const expected: FulfillmentExpectation = {
     idempotencyKey: `paypal:capture:${paypalCaptureId}:fulfill_purchase`,
     action: 'fulfill_purchase',
@@ -1353,13 +1314,34 @@ export async function handlePaymentCaptured(
     && !staged
     && snapshot.delivery_type_snapshot === null
   ) {
-    await raiseUnknownDeliveryContractAlert(supabase, order, {
+    await holdUnknownDeliveryContract(supabase, order, {
       kind: 'capture',
       id: paypalCaptureId,
       amountCents,
       currency: captureCurrency,
     });
     return;
+  }
+  if (amountMatches) {
+    // The database claim is the atomic double-fulfillment boundary. It must run
+    // before a random licence key or staged queue payload is created. Historical
+    // PayPal links can arrive concurrently, so a JavaScript entitlement read is
+    // not sufficient serialization. Unknown delivery contracts use the wrapper
+    // above instead so claim + permanent hold + alert are one transaction.
+    const claim = await claimPaidFulfillment(supabase, order, {
+      kind: 'capture',
+      id: paypalCaptureId,
+      amountCents,
+      currency: captureCurrency,
+    });
+    if (claim.disposition === 'held') {
+      console.error(
+        `[Webhook] DUPLICATE PURCHASE: order ${order.order_number} lost fulfillment `
+          + `claim to ${claim.winning_order_id ?? 'an existing entitlement'}; payment `
+          + `recorded, critical alert ${claim.alert_id} persisted, fulfillment withheld.`,
+      );
+      return;
+    }
   }
   if (amountMatches && !staged) {
     const productName = await requireProductDisplayName(
@@ -1656,13 +1638,31 @@ export async function handleSubscriptionActivated(
       `[Webhook] Exact legacy subscription replay has no durable grant contract; ` +
         `skipping fulfillment recovery for ${order.order_number}`,
     );
+    await holdUnknownDeliveryContract(supabase, order, {
+      kind: 'subscription',
+      id: subscriptionId,
+      amountCents: financial.amountCents,
+      currency: financial.currency,
+    });
+    return;
+  }
+
+  if (!staged && deliveryTypeSnapshot === null) {
+    await holdUnknownDeliveryContract(supabase, order, {
+      kind: 'subscription',
+      id: subscriptionId,
+      amountCents: financial.amountCents,
+      currency: financial.currency,
+    });
     return;
   }
 
   // An older inactive-but-still-payable approval link can activate concurrently
   // with another historical order. The database chooses one durable winner,
   // atomically holds every loser in pending_review, and persists its critical
-  // operator alert before this handler can stage any fulfillment.
+  // operator alert before this handler can stage any fulfillment. Unknown
+  // delivery contracts use the wrapper above instead so no claim-only crash
+  // window can exist.
   const claim = await claimPaidFulfillment(supabase, order, {
     kind: 'subscription',
     id: subscriptionId,
@@ -1675,17 +1675,6 @@ export async function handleSubscriptionActivated(
         + `claim to ${claim.winning_order_id ?? 'an existing entitlement'}; critical `
         + `alert ${claim.alert_id} persisted and fulfillment withheld.`,
     );
-    return;
-  }
-
-  if (!staged && deliveryTypeSnapshot === null) {
-    await holdSubscriptionOrderForReview(supabase, order);
-    await raiseUnknownDeliveryContractAlert(supabase, order, {
-      kind: 'subscription',
-      id: subscriptionId,
-      amountCents: financial.amountCents,
-      currency: financial.currency,
-    });
     return;
   }
 

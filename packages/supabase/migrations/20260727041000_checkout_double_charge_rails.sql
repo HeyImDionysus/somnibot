@@ -39,6 +39,15 @@ BEGIN
     NEW.checkout_active := false;
   END IF;
 
+  IF TG_OP = 'UPDATE'
+     AND OLD.checkout_active
+     AND NOT NEW.checkout_active
+     AND CURRENT_USER IN ('anon', 'authenticated') THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'authenticated callers cannot retire an active checkout';
+  END IF;
+
   IF NEW.checkout_active AND NOT (
     NEW.status = 'pending'
     AND (NEW.source = 'purchase' OR NEW.source IS NULL)
@@ -110,7 +119,10 @@ WITH ranked AS (
     paid_order.id,
     row_number() OVER (
       PARTITION BY paid_order.customer_id, paid_order.product_id
-      ORDER BY paid_order.created_at DESC, paid_order.id DESC
+      ORDER BY
+        paid_order.checkout_active DESC,
+        paid_order.created_at DESC,
+        paid_order.id DESC
     ) AS rank
   FROM public.orders AS paid_order
   WHERE paid_order.status = 'pending'
@@ -145,6 +157,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS uniq_alerts_unresolved_duplicate_purchase
   WHERE alert_type = 'commerce_duplicate_purchase_capture'
     AND resolved = false;
 
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_alerts_unresolved_unknown_delivery
+  ON public.alerts (guild_id, ((metadata ->> 'order_id')))
+  WHERE alert_type = 'commerce_unknown_delivery_contract'
+    AND resolved = false;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_alerts_unresolved_outward_uncertain
+  ON public.alerts (
+    guild_id,
+    ((metadata ->> 'order_id')),
+    ((metadata ->> 'intent_kind'))
+  )
+  WHERE alert_type = 'commerce_fulfillment_outward_uncertain'
+    AND resolved = false;
+
 -- Checkout insertion prevents new duplicate approval links, but historical links
 -- can still be paid concurrently. A read-before-write entitlement check cannot
 -- serialize those webhooks: both can observe "no entitlement" before either
@@ -173,15 +199,77 @@ CREATE TABLE IF NOT EXISTS public.commerce_fulfillment_holds (
   conflicting_entitlement_id UUID REFERENCES public.entitlements(id) ON DELETE RESTRICT,
   provider_kind TEXT NOT NULL CHECK (provider_kind IN ('capture', 'subscription')),
   provider_id TEXT NOT NULL,
+  hold_reason TEXT NOT NULL DEFAULT 'duplicate_paid_fulfillment'
+    CHECK (hold_reason IN ('duplicate_paid_fulfillment', 'unknown_delivery_contract')),
   held_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
+);
+
+ALTER TABLE public.commerce_fulfillment_holds
+  ADD COLUMN IF NOT EXISTS hold_reason TEXT NOT NULL
+  DEFAULT 'duplicate_paid_fulfillment';
+ALTER TABLE public.commerce_fulfillment_holds
+  DROP CONSTRAINT IF EXISTS commerce_fulfillment_holds_hold_reason_check;
+ALTER TABLE public.commerce_fulfillment_holds
+  ADD CONSTRAINT commerce_fulfillment_holds_hold_reason_check
+  CHECK (hold_reason IN ('duplicate_paid_fulfillment', 'unknown_delivery_contract'));
+
+CREATE TABLE IF NOT EXISTS public.commerce_checkout_deactivation_proofs (
+  id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+  order_id UUID NOT NULL UNIQUE REFERENCES public.orders(id) ON DELETE RESTRICT,
+  guild_id TEXT NOT NULL,
+  customer_id UUID NOT NULL,
+  product_id UUID NOT NULL,
+  provider_kind TEXT NOT NULL CHECK (provider_kind IN ('capture', 'subscription')),
+  provider_id TEXT NOT NULL,
+  proof_kind TEXT NOT NULL CHECK (
+    proof_kind IN (
+      'provider_cancelled',
+      'provider_expired',
+      'approval_link_not_exposed',
+      'operator_verified_unpayable'
+    )
+  ),
+  proof_reference TEXT NOT NULL,
+  proved_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
+);
+
+CREATE TABLE IF NOT EXISTS public.commerce_fulfillment_outward_intents (
+  order_id UUID NOT NULL REFERENCES public.orders(id) ON DELETE RESTRICT,
+  guild_id TEXT NOT NULL,
+  intent_kind TEXT NOT NULL CHECK (
+    intent_kind IN (
+      'purchase_completed_event',
+      'subscription_activated_event',
+      'receipt_dm'
+    )
+  ),
+  state TEXT NOT NULL CHECK (state IN ('sending', 'sent', 'uncertain')),
+  attempt_token UUID,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+  sent_at TIMESTAMPTZ,
+  uncertain_at TIMESTAMPTZ,
+  last_error TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+  PRIMARY KEY (order_id, intent_kind),
+  CHECK (
+    (state = 'sending' AND attempt_token IS NOT NULL AND sent_at IS NULL AND uncertain_at IS NULL)
+    OR (state = 'sent' AND attempt_token IS NULL AND sent_at IS NOT NULL AND uncertain_at IS NULL)
+    OR (state = 'uncertain' AND attempt_token IS NULL AND sent_at IS NULL AND uncertain_at IS NOT NULL)
+  )
 );
 
 ALTER TABLE public.commerce_fulfillment_claims ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.commerce_fulfillment_holds ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.commerce_checkout_deactivation_proofs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.commerce_fulfillment_outward_intents ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE public.commerce_fulfillment_claims
   FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON TABLE public.commerce_fulfillment_holds
+  FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON TABLE public.commerce_checkout_deactivation_proofs
+  FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON TABLE public.commerce_fulfillment_outward_intents
   FROM PUBLIC, anon, authenticated, service_role;
 
 -- Adopt every currently live paid entitlement and every fulfillment row that a
@@ -583,6 +671,661 @@ BEGIN
 END;
 $$;
 
+-- An active provider approval link can be retired only through a trusted
+-- evidence-bearing boundary. Authenticated owners retain normal order CRUD,
+-- but the trigger above prevents them from directly clearing the money rail.
+CREATE OR REPLACE FUNCTION public.commerce_deactivate_pending_checkout(
+  p_order_id UUID,
+  p_guild_id TEXT,
+  p_customer_id UUID,
+  p_product_id UUID,
+  p_provider_kind TEXT,
+  p_provider_id TEXT,
+  p_proof_kind TEXT,
+  p_proof_reference TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_order public.orders%ROWTYPE;
+  v_proof public.commerce_checkout_deactivation_proofs%ROWTYPE;
+BEGIN
+  IF p_order_id IS NULL
+     OR p_customer_id IS NULL
+     OR p_product_id IS NULL
+     OR p_guild_id IS NULL
+     OR p_guild_id = ''
+     OR p_guild_id <> pg_catalog.btrim(p_guild_id)
+     OR p_provider_kind NOT IN ('capture', 'subscription')
+     OR p_provider_id IS NULL
+     OR p_provider_id !~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$'
+     OR p_proof_kind NOT IN (
+       'provider_cancelled',
+       'provider_expired',
+       'approval_link_not_exposed',
+       'operator_verified_unpayable'
+     )
+     OR p_proof_reference IS NULL
+     OR p_proof_reference = ''
+     OR p_proof_reference <> pg_catalog.btrim(p_proof_reference)
+     OR pg_catalog.length(p_proof_reference) > 255 THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_deactivate_pending_checkout: exact provider proof is required';
+  END IF;
+
+  SELECT paid_order.*
+    INTO v_order
+    FROM public.orders AS paid_order
+   WHERE paid_order.id = p_order_id
+   FOR UPDATE;
+
+  IF NOT FOUND
+     OR v_order.guild_id IS DISTINCT FROM p_guild_id
+     OR v_order.customer_id IS DISTINCT FROM p_customer_id
+     OR v_order.product_id IS DISTINCT FROM p_product_id
+     OR v_order.status IS DISTINCT FROM 'pending'
+     OR NOT COALESCE((v_order.source = 'purchase' OR v_order.source IS NULL), false)
+     OR (
+       p_provider_kind = 'capture'
+       AND (
+         v_order.paypal_order_id IS DISTINCT FROM p_provider_id
+         OR v_order.paypal_subscription_id IS NOT NULL
+       )
+     )
+     OR (
+       p_provider_kind = 'subscription'
+       AND (
+         v_order.paypal_subscription_id IS DISTINCT FROM p_provider_id
+         OR v_order.paypal_order_id IS NOT NULL
+       )
+     ) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_deactivate_pending_checkout: pending checkout identity mismatch';
+  END IF;
+
+  SELECT proof.*
+    INTO v_proof
+    FROM public.commerce_checkout_deactivation_proofs AS proof
+   WHERE proof.order_id = v_order.id
+   FOR UPDATE;
+
+  IF FOUND THEN
+    IF v_proof.guild_id IS DISTINCT FROM p_guild_id
+       OR v_proof.customer_id IS DISTINCT FROM p_customer_id
+       OR v_proof.product_id IS DISTINCT FROM p_product_id
+       OR v_proof.provider_kind IS DISTINCT FROM p_provider_kind
+       OR v_proof.provider_id IS DISTINCT FROM p_provider_id
+       OR v_proof.proof_kind IS DISTINCT FROM p_proof_kind
+       OR v_proof.proof_reference IS DISTINCT FROM p_proof_reference
+       OR v_order.checkout_active THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '23514',
+        MESSAGE = 'commerce_deactivate_pending_checkout: immutable proof replay mismatch';
+    END IF;
+
+    RETURN pg_catalog.jsonb_build_object(
+      'order_id', v_order.id,
+      'checkout_active', false,
+      'disposition', 'already_deactivated',
+      'proof_id', v_proof.id
+    );
+  END IF;
+
+  IF NOT v_order.checkout_active THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_deactivate_pending_checkout: inactive checkout has no durable proof';
+  END IF;
+
+  INSERT INTO public.commerce_checkout_deactivation_proofs (
+    order_id,
+    guild_id,
+    customer_id,
+    product_id,
+    provider_kind,
+    provider_id,
+    proof_kind,
+    proof_reference
+  ) VALUES (
+    v_order.id,
+    v_order.guild_id,
+    v_order.customer_id,
+    v_order.product_id,
+    p_provider_kind,
+    p_provider_id,
+    p_proof_kind,
+    p_proof_reference
+  )
+  RETURNING * INTO v_proof;
+
+  UPDATE public.orders AS paid_order
+     SET checkout_active = false,
+         updated_at = pg_catalog.clock_timestamp()
+   WHERE paid_order.id = v_order.id
+     AND paid_order.status = 'pending'
+     AND paid_order.checkout_active = true
+  RETURNING paid_order.* INTO v_order;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '40001',
+      MESSAGE = 'commerce_deactivate_pending_checkout: active checkout transition raced';
+  END IF;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'order_id', v_order.id,
+    'checkout_active', false,
+    'disposition', 'deactivated',
+    'proof_id', v_proof.id
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.commerce_deactivate_pending_checkout(
+  UUID, TEXT, UUID, UUID, TEXT, TEXT, TEXT, TEXT
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.commerce_deactivate_pending_checkout(
+  UUID, TEXT, UUID, UUID, TEXT, TEXT, TEXT, TEXT
+) TO service_role;
+
+-- A worker must reserve each externally visible event/DM before performing it.
+-- A surviving `sending` row on retry means the prior process may have reached
+-- the external system; retry converts it to `uncertain` and never auto-sends.
+CREATE OR REPLACE FUNCTION public.commerce_begin_fulfillment_outward_intent(
+  p_order_id UUID,
+  p_guild_id TEXT,
+  p_intent_kind TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_order public.orders%ROWTYPE;
+  v_intent public.commerce_fulfillment_outward_intents%ROWTYPE;
+  v_attempt_token UUID := pg_catalog.gen_random_uuid();
+  v_alert_id UUID;
+  v_message TEXT;
+  v_metadata JSONB;
+BEGIN
+  IF p_order_id IS NULL
+     OR p_guild_id IS NULL
+     OR p_guild_id = ''
+     OR p_guild_id <> pg_catalog.btrim(p_guild_id)
+     OR p_intent_kind NOT IN (
+       'purchase_completed_event',
+       'subscription_activated_event',
+       'receipt_dm'
+     ) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_begin_fulfillment_outward_intent: exact intent identity is required';
+  END IF;
+
+  SELECT paid_order.*
+    INTO v_order
+    FROM public.orders AS paid_order
+   WHERE paid_order.id = p_order_id
+   FOR KEY SHARE;
+
+  IF NOT FOUND
+     OR v_order.guild_id IS DISTINCT FROM p_guild_id
+     OR NOT COALESCE((v_order.source = 'purchase' OR v_order.source IS NULL), false)
+     OR v_order.status NOT IN ('completed', 'pending_review') THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_begin_fulfillment_outward_intent: paid order identity mismatch';
+  END IF;
+
+  INSERT INTO public.commerce_fulfillment_outward_intents (
+    order_id,
+    guild_id,
+    intent_kind,
+    state,
+    attempt_token
+  ) VALUES (
+    v_order.id,
+    v_order.guild_id,
+    p_intent_kind,
+    'sending',
+    v_attempt_token
+  )
+  ON CONFLICT (order_id, intent_kind) DO NOTHING
+  RETURNING * INTO v_intent;
+
+  IF FOUND THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'order_id', v_intent.order_id,
+      'intent_kind', v_intent.intent_kind,
+      'disposition', 'send',
+      'state', v_intent.state,
+      'attempt_token', v_intent.attempt_token,
+      'alert_id', NULL
+    );
+  END IF;
+
+  SELECT intent.*
+    INTO v_intent
+    FROM public.commerce_fulfillment_outward_intents AS intent
+   WHERE intent.order_id = v_order.id
+     AND intent.intent_kind = p_intent_kind
+   FOR UPDATE;
+
+  IF NOT FOUND OR v_intent.guild_id IS DISTINCT FROM v_order.guild_id THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '40001',
+      MESSAGE = 'commerce_begin_fulfillment_outward_intent: durable intent disappeared';
+  END IF;
+
+  IF v_intent.state = 'sent' THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'order_id', v_intent.order_id,
+      'intent_kind', v_intent.intent_kind,
+      'disposition', 'sent',
+      'state', v_intent.state,
+      'attempt_token', NULL,
+      'alert_id', NULL
+    );
+  END IF;
+
+  IF v_intent.state = 'sending' THEN
+    UPDATE public.commerce_fulfillment_outward_intents AS intent
+       SET state = 'uncertain',
+           attempt_token = NULL,
+           uncertain_at = pg_catalog.clock_timestamp(),
+           last_error = 'worker resumed while prior external acceptance was unresolved',
+           updated_at = pg_catalog.clock_timestamp()
+     WHERE intent.order_id = v_intent.order_id
+       AND intent.intent_kind = v_intent.intent_kind
+       AND intent.state = 'sending'
+    RETURNING intent.* INTO v_intent;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '40001',
+        MESSAGE = 'commerce_begin_fulfillment_outward_intent: sending transition raced';
+    END IF;
+  END IF;
+
+  v_message := 'Paid order ' || v_order.order_number || ' has an uncertain '
+    || p_intent_kind || ' delivery. A prior worker may have reached the external '
+    || 'system, so automatic resend is blocked. Inspect the exact order and '
+    || 'manually reconcile before retrying or refunding.';
+  v_metadata := pg_catalog.jsonb_build_object(
+    'source', 'commerce_fulfillment_worker',
+    'order_id', v_order.id,
+    'order_number', v_order.order_number,
+    'intent_kind', p_intent_kind,
+    'required_action', 'manual_reconcile_before_resend_or_refund'
+  );
+
+  UPDATE public.alerts AS alert
+     SET severity = 'critical',
+         title = 'Paid fulfillment delivery may already have been accepted',
+         message = v_message,
+         metadata = v_metadata,
+         updated_at = pg_catalog.clock_timestamp()
+   WHERE alert.guild_id = v_order.guild_id
+     AND alert.alert_type = 'commerce_fulfillment_outward_uncertain'
+     AND alert.resolved = false
+     AND alert.metadata ->> 'order_id' = v_order.id::TEXT
+     AND alert.metadata ->> 'intent_kind' = p_intent_kind
+  RETURNING alert.id INTO v_alert_id;
+
+  IF v_alert_id IS NULL THEN
+    INSERT INTO public.alerts (
+      guild_id, alert_type, severity, title, message, metadata
+    ) VALUES (
+      v_order.guild_id,
+      'commerce_fulfillment_outward_uncertain',
+      'critical',
+      'Paid fulfillment delivery may already have been accepted',
+      v_message,
+      v_metadata
+    )
+    ON CONFLICT DO NOTHING
+    RETURNING id INTO v_alert_id;
+  END IF;
+
+  IF v_alert_id IS NULL THEN
+    SELECT alert.id
+      INTO v_alert_id
+      FROM public.alerts AS alert
+     WHERE alert.guild_id = v_order.guild_id
+       AND alert.alert_type = 'commerce_fulfillment_outward_uncertain'
+       AND alert.resolved = false
+       AND alert.metadata ->> 'order_id' = v_order.id::TEXT
+       AND alert.metadata ->> 'intent_kind' = p_intent_kind
+     ORDER BY alert.created_at, alert.id
+     LIMIT 1;
+  END IF;
+
+  IF v_alert_id IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '40001',
+      MESSAGE = 'commerce_begin_fulfillment_outward_intent: uncertain alert was not persisted';
+  END IF;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'order_id', v_intent.order_id,
+    'intent_kind', v_intent.intent_kind,
+    'disposition', 'uncertain',
+    'state', v_intent.state,
+    'attempt_token', NULL,
+    'alert_id', v_alert_id
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.commerce_begin_fulfillment_outward_intent(
+  UUID, TEXT, TEXT
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.commerce_begin_fulfillment_outward_intent(
+  UUID, TEXT, TEXT
+) TO service_role;
+
+-- A confirmed role-delivery replay must not create a fresh outward intent:
+-- the action may predate this table and its event/receipt already ran. When a
+-- row does exist, it proves the crash-fenced path had started, so lock it and
+-- delegate to the normal begin transition (including sending -> uncertain).
+CREATE OR REPLACE FUNCTION public.commerce_resume_fulfillment_outward_intent(
+  p_order_id UUID,
+  p_guild_id TEXT,
+  p_intent_kind TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_order public.orders%ROWTYPE;
+  v_intent public.commerce_fulfillment_outward_intents%ROWTYPE;
+BEGIN
+  IF p_order_id IS NULL
+     OR p_guild_id IS NULL
+     OR p_guild_id = ''
+     OR p_guild_id <> pg_catalog.btrim(p_guild_id)
+     OR p_intent_kind NOT IN (
+       'purchase_completed_event',
+       'subscription_activated_event',
+       'receipt_dm'
+     ) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_resume_fulfillment_outward_intent: exact intent identity is required';
+  END IF;
+
+  SELECT paid_order.*
+    INTO v_order
+    FROM public.orders AS paid_order
+   WHERE paid_order.id = p_order_id
+   FOR KEY SHARE;
+
+  IF NOT FOUND
+     OR v_order.guild_id IS DISTINCT FROM p_guild_id
+     OR NOT COALESCE((v_order.source = 'purchase' OR v_order.source IS NULL), false)
+     OR v_order.status NOT IN ('completed', 'pending_review') THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_resume_fulfillment_outward_intent: paid order identity mismatch';
+  END IF;
+
+  SELECT intent.*
+    INTO v_intent
+    FROM public.commerce_fulfillment_outward_intents AS intent
+   WHERE intent.order_id = v_order.id
+     AND intent.intent_kind = p_intent_kind
+   FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'order_id', v_order.id,
+      'intent_kind', p_intent_kind,
+      'disposition', 'absent',
+      'state', NULL,
+      'attempt_token', NULL,
+      'alert_id', NULL
+    );
+  END IF;
+
+  IF v_intent.guild_id IS DISTINCT FROM v_order.guild_id THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_resume_fulfillment_outward_intent: durable intent identity mismatch';
+  END IF;
+
+  RETURN public.commerce_begin_fulfillment_outward_intent(
+    v_order.id,
+    v_order.guild_id,
+    p_intent_kind
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.commerce_resume_fulfillment_outward_intent(
+  UUID, TEXT, TEXT
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.commerce_resume_fulfillment_outward_intent(
+  UUID, TEXT, TEXT
+) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.commerce_finish_fulfillment_outward_intent(
+  p_order_id UUID,
+  p_guild_id TEXT,
+  p_intent_kind TEXT,
+  p_attempt_token UUID,
+  p_outcome TEXT,
+  p_error TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_order public.orders%ROWTYPE;
+  v_intent public.commerce_fulfillment_outward_intents%ROWTYPE;
+  v_alert_id UUID;
+  v_message TEXT;
+  v_metadata JSONB;
+BEGIN
+  IF p_order_id IS NULL
+     OR p_guild_id IS NULL
+     OR p_guild_id = ''
+     OR p_guild_id <> pg_catalog.btrim(p_guild_id)
+     OR p_intent_kind NOT IN (
+       'purchase_completed_event',
+       'subscription_activated_event',
+       'receipt_dm'
+     )
+     OR p_attempt_token IS NULL
+     OR p_outcome NOT IN ('sent', 'uncertain')
+     OR (p_outcome = 'uncertain' AND (p_error IS NULL OR p_error = '')) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_finish_fulfillment_outward_intent: exact outcome identity is required';
+  END IF;
+
+  SELECT paid_order.*
+    INTO v_order
+    FROM public.orders AS paid_order
+   WHERE paid_order.id = p_order_id
+     AND paid_order.guild_id = p_guild_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_finish_fulfillment_outward_intent: order identity mismatch';
+  END IF;
+
+  SELECT intent.*
+    INTO v_intent
+    FROM public.commerce_fulfillment_outward_intents AS intent
+   WHERE intent.order_id = p_order_id
+     AND intent.intent_kind = p_intent_kind
+   FOR UPDATE;
+
+  IF NOT FOUND OR v_intent.guild_id IS DISTINCT FROM p_guild_id THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_finish_fulfillment_outward_intent: intent identity mismatch';
+  END IF;
+
+  IF v_intent.state = 'sent' THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'order_id', v_intent.order_id,
+      'intent_kind', v_intent.intent_kind,
+      'state', v_intent.state,
+      'alert_id', NULL
+    );
+  END IF;
+
+  IF v_intent.state = 'uncertain' THEN
+    SELECT alert.id
+      INTO v_alert_id
+      FROM public.alerts AS alert
+     WHERE alert.guild_id = p_guild_id
+       AND alert.alert_type = 'commerce_fulfillment_outward_uncertain'
+       AND alert.resolved = false
+       AND alert.metadata ->> 'order_id' = p_order_id::TEXT
+       AND alert.metadata ->> 'intent_kind' = p_intent_kind
+     ORDER BY alert.created_at, alert.id
+     LIMIT 1;
+
+    RETURN pg_catalog.jsonb_build_object(
+      'order_id', v_intent.order_id,
+      'intent_kind', v_intent.intent_kind,
+      'state', v_intent.state,
+      'alert_id', v_alert_id
+    );
+  END IF;
+
+  IF v_intent.state IS DISTINCT FROM 'sending'
+     OR v_intent.attempt_token IS DISTINCT FROM p_attempt_token THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_finish_fulfillment_outward_intent: attempt token mismatch';
+  END IF;
+
+  UPDATE public.commerce_fulfillment_outward_intents AS intent
+     SET state = p_outcome,
+         attempt_token = NULL,
+         sent_at = CASE WHEN p_outcome = 'sent'
+           THEN pg_catalog.clock_timestamp()
+           ELSE NULL
+         END,
+         uncertain_at = CASE WHEN p_outcome = 'uncertain'
+           THEN pg_catalog.clock_timestamp()
+           ELSE NULL
+         END,
+         last_error = CASE WHEN p_outcome = 'uncertain'
+           THEN pg_catalog.left(p_error, 1000)
+           ELSE NULL
+         END,
+         updated_at = pg_catalog.clock_timestamp()
+   WHERE intent.order_id = p_order_id
+     AND intent.intent_kind = p_intent_kind
+     AND intent.state = 'sending'
+     AND intent.attempt_token = p_attempt_token
+  RETURNING intent.* INTO v_intent;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '40001',
+      MESSAGE = 'commerce_finish_fulfillment_outward_intent: outcome transition raced';
+  END IF;
+
+  IF p_outcome = 'sent' THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'order_id', v_intent.order_id,
+      'intent_kind', v_intent.intent_kind,
+      'state', v_intent.state,
+      'alert_id', NULL
+    );
+  END IF;
+
+  v_message := 'Paid order ' || v_order.order_number || ' has an uncertain '
+    || p_intent_kind || ' delivery. The external call did not provide a durable '
+    || 'acceptance result, so automatic resend is blocked. Inspect the exact '
+    || 'order and manually reconcile before retrying or refunding.';
+  v_metadata := pg_catalog.jsonb_build_object(
+    'source', 'commerce_fulfillment_worker',
+    'order_id', v_order.id,
+    'order_number', v_order.order_number,
+    'intent_kind', p_intent_kind,
+    'required_action', 'manual_reconcile_before_resend_or_refund'
+  );
+
+  UPDATE public.alerts AS alert
+     SET severity = 'critical',
+         title = 'Paid fulfillment delivery may already have been accepted',
+         message = v_message,
+         metadata = v_metadata,
+         updated_at = pg_catalog.clock_timestamp()
+   WHERE alert.guild_id = v_order.guild_id
+     AND alert.alert_type = 'commerce_fulfillment_outward_uncertain'
+     AND alert.resolved = false
+     AND alert.metadata ->> 'order_id' = v_order.id::TEXT
+     AND alert.metadata ->> 'intent_kind' = p_intent_kind
+  RETURNING alert.id INTO v_alert_id;
+
+  IF v_alert_id IS NULL THEN
+    INSERT INTO public.alerts (
+      guild_id, alert_type, severity, title, message, metadata
+    ) VALUES (
+      v_order.guild_id,
+      'commerce_fulfillment_outward_uncertain',
+      'critical',
+      'Paid fulfillment delivery may already have been accepted',
+      v_message,
+      v_metadata
+    )
+    ON CONFLICT DO NOTHING
+    RETURNING id INTO v_alert_id;
+  END IF;
+
+  IF v_alert_id IS NULL THEN
+    SELECT alert.id
+      INTO v_alert_id
+      FROM public.alerts AS alert
+     WHERE alert.guild_id = v_order.guild_id
+       AND alert.alert_type = 'commerce_fulfillment_outward_uncertain'
+       AND alert.resolved = false
+       AND alert.metadata ->> 'order_id' = v_order.id::TEXT
+       AND alert.metadata ->> 'intent_kind' = p_intent_kind
+     ORDER BY alert.created_at, alert.id
+     LIMIT 1;
+  END IF;
+
+  IF v_alert_id IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '40001',
+      MESSAGE = 'commerce_finish_fulfillment_outward_intent: uncertain alert was not persisted';
+  END IF;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'order_id', v_intent.order_id,
+    'intent_kind', v_intent.intent_kind,
+    'state', v_intent.state,
+    'alert_id', v_alert_id
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.commerce_finish_fulfillment_outward_intent(
+  UUID, TEXT, TEXT, UUID, TEXT, TEXT
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.commerce_finish_fulfillment_outward_intent(
+  UUID, TEXT, TEXT, UUID, TEXT, TEXT
+) TO service_role;
+
 -- Atomically select the one paid order allowed to fulfill. The unique claim row
 -- is the concurrency primitive: a competing INSERT waits for the winner's
 -- transaction and then observes that exact winner. A losing order and its
@@ -797,6 +1540,7 @@ BEGIN
       v_hold.conflicting_entitlement_id := v_conflicting_entitlement.id;
       v_hold.provider_kind := p_provider_kind;
       v_hold.provider_id := p_provider_id;
+      v_hold.hold_reason := 'duplicate_paid_fulfillment';
     ELSIF v_claim.order_id IS NULL THEN
       INSERT INTO public.commerce_fulfillment_claims (
         guild_id,
@@ -906,6 +1650,7 @@ BEGIN
       v_hold.conflicting_entitlement_id := NULL;
       v_hold.provider_kind := p_provider_kind;
       v_hold.provider_id := p_provider_id;
+      v_hold.hold_reason := 'duplicate_paid_fulfillment';
     END IF;
 
     IF v_hold.order_id IS NULL THEN
@@ -922,7 +1667,8 @@ BEGIN
       winning_order_id,
       conflicting_entitlement_id,
       provider_kind,
-      provider_id
+      provider_id,
+      hold_reason
     ) VALUES (
       v_hold.order_id,
       v_hold.guild_id,
@@ -931,7 +1677,8 @@ BEGIN
       v_hold.winning_order_id,
       v_hold.conflicting_entitlement_id,
       v_hold.provider_kind,
-      v_hold.provider_id
+      v_hold.provider_id,
+      v_hold.hold_reason
     )
     RETURNING * INTO v_hold;
 
@@ -951,20 +1698,36 @@ BEGIN
     END IF;
   END IF;
 
-  v_alert_type := CASE p_provider_kind
-    WHEN 'capture' THEN 'commerce_duplicate_purchase_capture'
+  v_alert_type := CASE
+    WHEN v_hold.hold_reason = 'unknown_delivery_contract'
+      THEN 'commerce_unknown_delivery_contract'
+    WHEN p_provider_kind = 'capture'
+      THEN 'commerce_duplicate_purchase_capture'
     ELSE 'commerce_duplicate_subscription_activation'
   END;
-  v_alert_title := CASE p_provider_kind
-    WHEN 'capture' THEN 'Customer charged twice for the same product'
+  v_alert_title := CASE
+    WHEN v_hold.hold_reason = 'unknown_delivery_contract'
+      THEN 'Paid order requires manual delivery review'
+    WHEN p_provider_kind = 'capture'
+      THEN 'Customer charged twice for the same product'
     ELSE 'Customer activated a duplicate paid subscription'
   END;
-  v_message := 'Paid order ' || v_order.order_number
-    || ' lost the atomic fulfillment claim for this customer and product. '
-    || 'The provider ' || p_provider_kind || ' ' || p_provider_id
-    || ' for ' || p_amount_cents || ' cents ' || p_currency
-    || ' remains financially visible, but no second entitlement, role set, '
-    || 'or licence key was released. Review and refund/cancel this exact order.';
+  v_message := CASE
+    WHEN v_hold.hold_reason = 'unknown_delivery_contract' THEN
+      'Paid order ' || v_order.order_number
+      || ' reached PayPal without an immutable delivery type snapshot. '
+      || 'The provider ' || p_provider_kind || ' ' || p_provider_id
+      || ' for ' || p_amount_cents || ' cents ' || p_currency
+      || ' remains financially visible, but automatic access and licence-key '
+      || 'delivery are permanently held. Manually fulfil the exact order or refund it.'
+    ELSE
+      'Paid order ' || v_order.order_number
+      || ' lost the atomic fulfillment claim for this customer and product. '
+      || 'The provider ' || p_provider_kind || ' ' || p_provider_id
+      || ' for ' || p_amount_cents || ' cents ' || p_currency
+      || ' remains financially visible, but no second entitlement, role set, '
+      || 'or licence key was released. Review and refund/cancel this exact order.'
+  END;
   v_metadata := pg_catalog.jsonb_build_object(
     'source', 'paypal_webhook',
     'order_id', v_order.id,
@@ -977,7 +1740,11 @@ BEGIN
     'currency', p_currency,
     'winning_order_id', v_hold.winning_order_id,
     'existing_entitlement_id', v_hold.conflicting_entitlement_id,
-    'required_action', 'refund_or_cancel_duplicate'
+    'hold_reason', v_hold.hold_reason,
+    'required_action', CASE v_hold.hold_reason
+      WHEN 'unknown_delivery_contract' THEN 'manual_fulfillment_or_refund'
+      ELSE 'refund_or_cancel_duplicate'
+    END
   ) || CASE p_provider_kind
     WHEN 'capture' THEN pg_catalog.jsonb_build_object(
       'paypal_capture_id', p_provider_id
@@ -988,7 +1755,9 @@ BEGIN
   END;
 
   UPDATE public.alerts AS alert
-     SET message = v_message,
+     SET severity = 'critical',
+         title = v_alert_title,
+         message = v_message,
          metadata = v_metadata,
          updated_at = pg_catalog.clock_timestamp()
    WHERE alert.guild_id = v_order.guild_id
@@ -1051,5 +1820,637 @@ REVOKE ALL ON FUNCTION public.commerce_claim_paid_fulfillment(
 GRANT EXECUTE ON FUNCTION public.commerce_claim_paid_fulfillment(
   UUID, TEXT, UUID, UUID, TEXT, TEXT, INTEGER, TEXT
 ) TO service_role;
+
+-- Legacy paid rows with no immutable delivery snapshot still enter the same
+-- arbitration lock as every other paid order. If they win, the claim is kept
+-- reserved but the order itself receives a permanent unknown-contract hold and
+-- critical alert in this same transaction. If they lose, the duplicate hold
+-- returned by the base claim remains authoritative.
+CREATE OR REPLACE FUNCTION public.commerce_hold_unknown_delivery_contract(
+  p_order_id UUID,
+  p_guild_id TEXT,
+  p_customer_id UUID,
+  p_product_id UUID,
+  p_provider_kind TEXT,
+  p_provider_id TEXT,
+  p_amount_cents INTEGER,
+  p_currency TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_claim JSONB;
+  v_order public.orders%ROWTYPE;
+  v_hold public.commerce_fulfillment_holds%ROWTYPE;
+  v_alert_id UUID;
+  v_message TEXT;
+  v_metadata JSONB;
+BEGIN
+  v_claim := public.commerce_claim_paid_fulfillment(
+    p_order_id,
+    p_guild_id,
+    p_customer_id,
+    p_product_id,
+    p_provider_kind,
+    p_provider_id,
+    p_amount_cents,
+    p_currency
+  );
+
+  IF v_claim ->> 'disposition' = 'held' THEN
+    RETURN v_claim;
+  END IF;
+  IF v_claim ->> 'disposition' IS DISTINCT FROM 'winner'
+     OR v_claim ->> 'order_id' IS DISTINCT FROM p_order_id::TEXT
+     OR v_claim ->> 'winning_order_id' IS DISTINCT FROM p_order_id::TEXT THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '40001',
+      MESSAGE = 'commerce_hold_unknown_delivery_contract: claim returned malformed winner';
+  END IF;
+
+  SELECT paid_order.*
+    INTO v_order
+    FROM public.orders AS paid_order
+   WHERE paid_order.id = p_order_id
+   FOR UPDATE;
+
+  IF NOT FOUND
+     OR v_order.guild_id IS DISTINCT FROM p_guild_id
+     OR v_order.customer_id IS DISTINCT FROM p_customer_id
+     OR v_order.product_id IS DISTINCT FROM p_product_id THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'commerce_hold_unknown_delivery_contract: order identity mismatch';
+  END IF;
+
+  INSERT INTO public.commerce_fulfillment_holds (
+    order_id,
+    guild_id,
+    customer_id,
+    product_id,
+    winning_order_id,
+    conflicting_entitlement_id,
+    provider_kind,
+    provider_id,
+    hold_reason
+  ) VALUES (
+    v_order.id,
+    v_order.guild_id,
+    v_order.customer_id,
+    v_order.product_id,
+    v_order.id,
+    NULL,
+    p_provider_kind,
+    p_provider_id,
+    'unknown_delivery_contract'
+  )
+  RETURNING * INTO v_hold;
+
+  v_message := 'Paid order ' || v_order.order_number
+    || ' reached PayPal without an immutable delivery type snapshot. The '
+    || p_provider_kind || ' is recorded, but automatic access and licence-key '
+    || 'delivery were withheld so mutable product settings cannot rewrite what '
+    || 'was sold. Manually fulfil the exact order or refund the customer.';
+  v_metadata := pg_catalog.jsonb_build_object(
+    'source', 'paypal_webhook',
+    'order_id', v_order.id,
+    'order_number', v_order.order_number,
+    'customer_id', v_order.customer_id,
+    'product_id', v_order.product_id,
+    'provider_kind', p_provider_kind,
+    'provider_id', p_provider_id,
+    'amount_cents', p_amount_cents,
+    'currency', p_currency,
+    'winning_order_id', v_order.id,
+    'existing_entitlement_id', NULL,
+    'hold_reason', 'unknown_delivery_contract',
+    'required_action', 'manual_fulfillment_or_refund'
+  ) || CASE p_provider_kind
+    WHEN 'capture' THEN pg_catalog.jsonb_build_object(
+      'paypal_capture_id', p_provider_id
+    )
+    ELSE pg_catalog.jsonb_build_object(
+      'paypal_subscription_id', p_provider_id
+    )
+  END;
+
+  UPDATE public.alerts AS alert
+     SET severity = 'critical',
+         title = 'Paid order requires manual delivery review',
+         message = v_message,
+         metadata = v_metadata,
+         updated_at = pg_catalog.clock_timestamp()
+   WHERE alert.guild_id = v_order.guild_id
+     AND alert.alert_type = 'commerce_unknown_delivery_contract'
+     AND alert.resolved = false
+     AND alert.metadata ->> 'order_id' = v_order.id::TEXT
+  RETURNING alert.id INTO v_alert_id;
+
+  IF v_alert_id IS NULL THEN
+    INSERT INTO public.alerts (
+      guild_id,
+      alert_type,
+      severity,
+      title,
+      message,
+      metadata
+    ) VALUES (
+      v_order.guild_id,
+      'commerce_unknown_delivery_contract',
+      'critical',
+      'Paid order requires manual delivery review',
+      v_message,
+      v_metadata
+    )
+    ON CONFLICT DO NOTHING
+    RETURNING id INTO v_alert_id;
+  END IF;
+
+  IF v_alert_id IS NULL THEN
+    SELECT alert.id
+      INTO v_alert_id
+      FROM public.alerts AS alert
+     WHERE alert.guild_id = v_order.guild_id
+       AND alert.alert_type = 'commerce_unknown_delivery_contract'
+       AND alert.resolved = false
+       AND alert.metadata ->> 'order_id' = v_order.id::TEXT
+     ORDER BY alert.created_at, alert.id
+     LIMIT 1;
+  END IF;
+
+  IF v_alert_id IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '40001',
+      MESSAGE = 'commerce_hold_unknown_delivery_contract: critical alert was not persisted';
+  END IF;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'order_id', v_order.id,
+    'disposition', 'held',
+    'winning_order_id', v_hold.winning_order_id,
+    'conflicting_entitlement_id', NULL,
+    'alert_id', v_alert_id
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.commerce_hold_unknown_delivery_contract(
+  UUID, TEXT, UUID, UUID, TEXT, TEXT, INTEGER, TEXT
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.commerce_hold_unknown_delivery_contract(
+  UUID, TEXT, UUID, UUID, TEXT, TEXT, INTEGER, TEXT
+) TO service_role;
+
+-- Keep the privacy RPC current with every new RESTRICT-backed commerce rail.
+CREATE OR REPLACE FUNCTION public.purge_guild_data(p_guild_id TEXT)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_controller_ids UUID[] := '{}'::UUID[];
+  v_unresolved_intents INTEGER := 0;
+  v_active_temp_grants INTEGER := 0;
+  v_active_queue_actions INTEGER := 0;
+  v_active_dlq_actions INTEGER := 0;
+  v_pending INTEGER := 0;
+BEGIN
+  IF p_guild_id IS NULL
+     OR p_guild_id <> pg_catalog.btrim(p_guild_id)
+     OR p_guild_id = '' THEN
+    RAISE EXCEPTION USING ERRCODE = '23514',
+      MESSAGE = 'purge_guild_data: canonical p_guild_id is required';
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(
+      'commerce-guild-purge:' || p_guild_id,
+      0
+    )
+  );
+  PERFORM guild.id
+    FROM public.guild AS guild
+   WHERE guild.id = p_guild_id
+   FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'purge_status', 'completed',
+      'pending_role_cleanup_count', 0,
+      'guild_deleted', 0
+    );
+  END IF;
+
+  -- Preserve the global parent -> entitlement lock order before cancellation
+  -- triggers acquire their per-customer advisory locks. A completed capture
+  -- payment has a deferred FK to orders(id, status), so a completed parent
+  -- cannot be changed on the pending-return path. Lock the parents now, retire
+  -- still-payable pending checkouts immediately, then transition completed
+  -- parents only after exact role cleanup has converged and this same
+  -- transaction will delete the payment children.
+  PERFORM paid_order.id
+    FROM public.orders AS paid_order
+   WHERE paid_order.guild_id = p_guild_id
+     AND paid_order.status IN ('pending', 'completed')
+   ORDER BY paid_order.id
+   FOR UPDATE;
+  UPDATE public.orders AS paid_order
+     SET status = 'cancelled',
+         updated_at = pg_catalog.clock_timestamp()
+   WHERE paid_order.guild_id = p_guild_id
+     AND paid_order.status = 'pending';
+  -- Make every entitlement delivery classifier terminal before touching
+  -- retained protocol evidence. Its status trigger signals the exact cleanup
+  -- intents idempotently. The deletion phase later removes entitlements before
+  -- customers, consistent with the canonical entitlement -> advisory ->
+  -- customer order used by every per-customer acquirer (revoke, relink worker,
+  -- enqueue triggers, member purge).
+  UPDATE public.entitlements AS entitlement
+     SET status = 'cancelled',
+         cancelled_at = COALESCE(
+           entitlement.cancelled_at,
+           pg_catalog.clock_timestamp()
+         ),
+         updated_at = pg_catalog.clock_timestamp()
+   WHERE entitlement.guild_id = p_guild_id
+     AND entitlement.status IN (
+       'active', 'pending', 'grace_period', 'suspended'
+     );
+  UPDATE public.license_sessions AS session
+     SET active = false,
+         deactivated_at = COALESCE(
+           session.deactivated_at,
+           pg_catalog.clock_timestamp()
+         ),
+         deactivation_reason = 'entitlement_revoked'
+   WHERE session.active = true
+     AND EXISTS (
+       SELECT 1
+         FROM public.license_keys AS license_key
+        WHERE license_key.id = session.license_key_id
+          AND license_key.guild_id = p_guild_id
+     );
+  UPDATE public.license_keys AS license_key
+     SET status = 'revoked',
+         revoked_at = COALESCE(
+           license_key.revoked_at,
+           pg_catalog.clock_timestamp()
+         ),
+         revocation_reason = 'guild_data_purge',
+         updated_at = pg_catalog.clock_timestamp()
+   WHERE license_key.guild_id = p_guild_id
+     AND license_key.status <> 'revoked';
+
+  SELECT COALESCE(
+           pg_catalog.array_agg(
+             controller.action_id ORDER BY controller.action_id
+           ),
+           '{}'::UUID[]
+         )
+    INTO v_controller_ids
+    FROM (
+      SELECT intent.action_id
+        FROM public.commerce_role_delivery_intents AS intent
+       WHERE intent.guild_id = p_guild_id
+      UNION
+      SELECT intent.cleanup_action_id
+        FROM public.commerce_role_delivery_intents AS intent
+       WHERE intent.guild_id = p_guild_id
+         AND intent.cleanup_action_id IS NOT NULL
+    ) AS controller(action_id);
+
+  UPDATE public.action_queue_dlq AS dlq
+     SET retried = true,
+         retried_at = COALESCE(
+           dlq.retried_at,
+           pg_catalog.clock_timestamp()
+         ),
+         error_message = COALESCE(dlq.error_message || ' | ', '')
+           || 'Retired after exact role-delivery controller settled'
+   WHERE dlq.guild_id = p_guild_id
+     AND (
+       dlq.original_id = ANY(v_controller_ids::TEXT[])
+       OR EXISTS (
+         SELECT 1
+           FROM public.bot_action_queue AS queue
+          WHERE queue.id::TEXT = dlq.original_id
+            AND queue.guild_id = dlq.guild_id
+            AND queue.action = dlq.action
+            AND queue.lane = dlq.lane
+            AND queue.payload = dlq.payload
+            AND queue.status = 'completed'
+            AND public.commerce_noncommerce_cleanup_carrier_kind(
+              queue.guild_id,
+              queue.action,
+              queue.lane,
+              queue.idempotency_key,
+              queue.payload
+            ) IS NOT NULL
+       )
+     )
+     AND COALESCE(dlq.retried, false) = false
+     AND EXISTS (
+       SELECT 1
+         FROM public.bot_action_queue AS queue
+        WHERE queue.id::TEXT = dlq.original_id
+          AND queue.status = 'completed'
+     )
+     AND NOT EXISTS (
+       SELECT 1
+         FROM public.commerce_role_delivery_intents AS intent
+        WHERE intent.guild_id = p_guild_id
+          AND intent.state <> 'settled'
+          AND (
+            intent.action_id::TEXT = dlq.original_id
+            OR intent.cleanup_action_id::TEXT = dlq.original_id
+          )
+     );
+
+  SELECT pg_catalog.count(*)::INTEGER
+    INTO v_unresolved_intents
+    FROM public.commerce_role_delivery_intents AS intent
+   WHERE intent.guild_id = p_guild_id
+     AND intent.state <> 'settled';
+  SELECT pg_catalog.count(*)::INTEGER
+    INTO v_active_temp_grants
+    FROM public.temp_role_grants AS grant_row
+   WHERE grant_row.guild_id = p_guild_id
+     AND grant_row.remove_on_expiry = true
+     AND grant_row.grant_status IN ('pending', 'applied');
+  SELECT pg_catalog.count(*)::INTEGER
+    INTO v_active_queue_actions
+    FROM public.bot_action_queue AS queue
+   WHERE queue.guild_id = p_guild_id
+     AND (
+       queue.status IN ('staged', 'pending', 'processing')
+       OR (
+         queue.status = 'failed'
+         AND public.commerce_noncommerce_cleanup_carrier_kind(
+           queue.guild_id,
+           queue.action,
+           queue.lane,
+           queue.idempotency_key,
+           queue.payload
+         ) IS NOT NULL
+       )
+     );
+  SELECT pg_catalog.count(*)::INTEGER
+    INTO v_active_dlq_actions
+    FROM public.action_queue_dlq AS dlq
+   WHERE dlq.guild_id = p_guild_id
+     AND COALESCE(dlq.retried, false) = false
+     AND (
+       dlq.original_id = ANY(v_controller_ids::TEXT[])
+       OR EXISTS (
+         SELECT 1
+           FROM public.bot_action_queue AS queue
+          WHERE queue.id::TEXT = dlq.original_id
+            AND queue.guild_id = dlq.guild_id
+            AND queue.action = dlq.action
+            AND queue.lane = dlq.lane
+            AND queue.payload = dlq.payload
+            AND public.commerce_noncommerce_cleanup_carrier_kind(
+              queue.guild_id,
+              queue.action,
+              queue.lane,
+              queue.idempotency_key,
+              queue.payload
+            ) IS NOT NULL
+       )
+     );
+
+  v_pending := v_unresolved_intents
+    + v_active_temp_grants
+    + v_active_queue_actions
+    + v_active_dlq_actions;
+  IF v_pending > 0 THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'purge_status', 'pending_role_cleanup',
+      'pending_role_cleanup_count', v_pending,
+      'unresolved_role_delivery_intents', v_unresolved_intents,
+      'active_owned_temp_role_grants', v_active_temp_grants,
+      'active_queue_actions', v_active_queue_actions,
+      'active_commerce_dlq_actions', v_active_dlq_actions,
+      'guild_deleted', 0
+    );
+  END IF;
+
+  -- Exact cleanup has converged, so no pending return can leave the deferred
+  -- capture-payment FK inconsistent. The matching child payments are deleted
+  -- below before this transaction commits.
+  UPDATE public.orders AS paid_order
+     SET status = 'cancelled',
+         updated_at = pg_catalog.clock_timestamp()
+   WHERE paid_order.guild_id = p_guild_id
+     AND paid_order.status = 'completed';
+
+  -- Exact cleanup has converged. Remove protocol/controller tombstones before
+  -- parents, then execute the established guild purge in dependency order.
+  DELETE FROM public.action_queue_dlq WHERE guild_id = p_guild_id;
+  DELETE FROM public.commerce_noncommerce_activation_heads
+   WHERE guild_id = p_guild_id;
+  DELETE FROM public.bot_action_queue WHERE guild_id = p_guild_id;
+  DELETE FROM public.dead_letter_queue WHERE guild_id = p_guild_id;
+  DELETE FROM public.commerce_role_delivery_intents WHERE guild_id = p_guild_id;
+  DELETE FROM public.commerce_legacy_subscription_grant_contracts
+   WHERE guild_id = p_guild_id;
+  DELETE FROM public.temp_role_grants WHERE guild_id = p_guild_id;
+
+  DELETE FROM public.workflow_events WHERE guild_id = p_guild_id;
+  DELETE FROM public.automation_executions WHERE guild_id = p_guild_id;
+  DELETE FROM public.sync_actions WHERE guild_id = p_guild_id;
+  DELETE FROM public.sync_reports WHERE guild_id = p_guild_id;
+  DELETE FROM public.reconciliation_runs WHERE guild_id = p_guild_id;
+  DELETE FROM public.webhook_events WHERE guild_id = p_guild_id;
+  DELETE FROM public.bot_diagnostics WHERE guild_id = p_guild_id;
+  DELETE FROM public.health_metrics WHERE guild_id = p_guild_id;
+
+  DELETE FROM public.commerce_admin_refund_operations WHERE guild_id = p_guild_id;
+  DELETE FROM public.payment_refunds WHERE guild_id = p_guild_id;
+  DELETE FROM public.portal_sessions WHERE guild_id = p_guild_id;
+  DELETE FROM public.fraud_signals WHERE guild_id = p_guild_id;
+  DELETE FROM public.license_validations AS validation
+   WHERE EXISTS (
+     SELECT 1 FROM public.license_keys AS license_key
+      WHERE license_key.id = validation.license_key_id
+        AND license_key.guild_id = p_guild_id
+   ) OR EXISTS (
+     SELECT 1 FROM public.products AS product
+      WHERE product.id = validation.product_id
+        AND product.guild_id = p_guild_id
+   );
+  DELETE FROM public.license_sessions AS session
+   WHERE EXISTS (
+     SELECT 1 FROM public.license_keys AS license_key
+      WHERE license_key.id = session.license_key_id
+        AND license_key.guild_id = p_guild_id
+   );
+  -- Checkout/payment rails intentionally use RESTRICT FKs so ordinary parent
+  -- deletion cannot erase money-path evidence. A completed privacy purge is
+  -- the one explicit erasure boundary: lock and delete holds, then claims,
+  -- before their entitlement/order parents.
+  PERFORM held.order_id
+    FROM public.commerce_fulfillment_holds AS held
+   WHERE held.guild_id = p_guild_id
+   ORDER BY held.order_id
+   FOR UPDATE;
+  DELETE FROM public.commerce_fulfillment_holds
+   WHERE guild_id = p_guild_id;
+  PERFORM claim.guild_id, claim.customer_id, claim.product_id
+    FROM public.commerce_fulfillment_claims AS claim
+   WHERE claim.guild_id = p_guild_id
+   ORDER BY claim.guild_id, claim.customer_id, claim.product_id
+   FOR UPDATE;
+  DELETE FROM public.commerce_fulfillment_claims
+   WHERE guild_id = p_guild_id;
+  PERFORM intent.order_id, intent.intent_kind
+    FROM public.commerce_fulfillment_outward_intents AS intent
+   WHERE intent.guild_id = p_guild_id
+   ORDER BY intent.order_id, intent.intent_kind
+   FOR UPDATE;
+  DELETE FROM public.commerce_fulfillment_outward_intents
+   WHERE guild_id = p_guild_id;
+  PERFORM proof.order_id
+    FROM public.commerce_checkout_deactivation_proofs AS proof
+   WHERE proof.guild_id = p_guild_id
+   ORDER BY proof.order_id
+   FOR UPDATE;
+  DELETE FROM public.commerce_checkout_deactivation_proofs
+   WHERE guild_id = p_guild_id;
+
+  DELETE FROM public.entitlements WHERE guild_id = p_guild_id;
+  DELETE FROM public.license_keys WHERE guild_id = p_guild_id;
+  DELETE FROM public.payments WHERE guild_id = p_guild_id;
+  DELETE FROM public.orders WHERE guild_id = p_guild_id;
+  DELETE FROM public.customers WHERE guild_id = p_guild_id;
+  DELETE FROM public.giveaways WHERE guild_id = p_guild_id;
+  DELETE FROM public.promotions WHERE guild_id = p_guild_id;
+  DELETE FROM public.plans WHERE guild_id = p_guild_id;
+  DELETE FROM public.product_files WHERE guild_id = p_guild_id;
+  DELETE FROM public.commerce_product_temp_role_config WHERE guild_id = p_guild_id;
+  DELETE FROM public.commerce_role_metadata_migration_issues WHERE guild_id = p_guild_id;
+  DELETE FROM public.commerce_temp_role_migration_issues WHERE guild_id = p_guild_id;
+  DELETE FROM public.products WHERE guild_id = p_guild_id;
+  DELETE FROM public.fraud_rules WHERE guild_id = p_guild_id;
+
+  DELETE FROM public.economy_role_income_requests WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_role_income_claims WHERE guild_id = p_guild_id;
+  DELETE FROM public.prediction_bets WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_lottery_tickets WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_market_listings WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_adventure_sessions WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_fish_catches WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_quest_progress WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_user_achievements WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_heist_participants WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_pet_battles WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_farm_plots WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_inventory WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_transactions WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_daily_losses WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_wallets WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_profiles WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_streaks WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_pets WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_prestige WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_recipes WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_role_income WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_loot_tables WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_lottery_drawings WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_adventures WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_fish_species WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_trivia_questions WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_crops WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_quest_templates WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_achievement_defs WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_heists WHERE guild_id = p_guild_id;
+  DELETE FROM public.economy_items WHERE guild_id = p_guild_id;
+  DELETE FROM public.predictions WHERE guild_id = p_guild_id;
+
+  DELETE FROM public.poll_votes AS vote
+   WHERE EXISTS (
+     SELECT 1 FROM public.polls AS poll
+      WHERE poll.id = vote.poll_id AND poll.guild_id = p_guild_id
+  );
+  DELETE FROM public.polls WHERE guild_id = p_guild_id;
+  DELETE FROM public.ticket_metrics WHERE guild_id = p_guild_id;
+  DELETE FROM public.ticket_transcripts WHERE guild_id = p_guild_id;
+  DELETE FROM public.tickets WHERE guild_id = p_guild_id;
+  DELETE FROM public.infractions WHERE guild_id = p_guild_id;
+  DELETE FROM public.admin_changes WHERE guild_id = p_guild_id;
+  DELETE FROM public.incidents WHERE guild_id = p_guild_id;
+  DELETE FROM public.alerts WHERE guild_id = p_guild_id;
+  -- Audit rows are never deleted (owner decision, 2026-07-18): tenant
+  -- deletion scrubs identity — actor/target ids, payload snapshots, error
+  -- text, correlation — and detaches the skeleton from the erased guild so
+  -- the guild row below can be removed. What survives carries no link to
+  -- the tenant or its members; what mattered for security forensics
+  -- (action, actor type, time, outcome) survives forever.
+  UPDATE public.audit_logs
+     SET guild_id = NULL,
+         actor_id = 'anonymized',
+         target_id = CASE WHEN target_id IS NULL THEN NULL ELSE 'anonymized' END,
+         details = pg_catalog.jsonb_build_object('anonymized', true),
+         before_state = NULL,
+         after_state = NULL,
+         error_message = NULL,
+         correlation_id = NULL
+   WHERE guild_id = p_guild_id;
+  DELETE FROM public.message_reports WHERE guild_id = p_guild_id;
+  DELETE FROM public.starboard_entries WHERE guild_id = p_guild_id;
+  DELETE FROM public.member_feature_unlocks WHERE guild_id = p_guild_id;
+  DELETE FROM public.member_levels WHERE guild_id = p_guild_id;
+  DELETE FROM public.member_rank_settings WHERE guild_id = p_guild_id;
+  DELETE FROM public.level_unlock_configs WHERE guild_id = p_guild_id;
+  DELETE FROM public.level_rewards WHERE guild_id = p_guild_id;
+  DELETE FROM public.xp_multipliers WHERE guild_id = p_guild_id;
+  DELETE FROM public.members WHERE guild_id = p_guild_id;
+
+  DELETE FROM public.dashboard_user_roles WHERE guild_id = p_guild_id;
+  DELETE FROM public.dashboard_roles WHERE guild_id = p_guild_id;
+  DELETE FROM public.active_temp_channels WHERE guild_id = p_guild_id;
+  DELETE FROM public.temp_channel_hubs WHERE guild_id = p_guild_id;
+  DELETE FROM public.tutorial_progress WHERE guild_id = p_guild_id;
+  DELETE FROM public.tutorial_steps WHERE guild_id = p_guild_id;
+  DELETE FROM public.tutorial_configs WHERE guild_id = p_guild_id;
+  DELETE FROM public.feature_embed_overrides WHERE guild_id = p_guild_id;
+  DELETE FROM public.embed_configs WHERE guild_id = p_guild_id;
+  DELETE FROM public.scheduled_messages WHERE guild_id = p_guild_id;
+  DELETE FROM public.stats_channels WHERE guild_id = p_guild_id;
+  DELETE FROM public.button_roles WHERE guild_id = p_guild_id;
+  DELETE FROM public.discord_id_map WHERE guild_id = p_guild_id;
+  DELETE FROM public.guild_live_state WHERE guild_id = p_guild_id;
+  DELETE FROM public.guild_desired_state WHERE guild_id = p_guild_id;
+  DELETE FROM public.role_templates WHERE guild_id = p_guild_id;
+  DELETE FROM public.channel_templates WHERE guild_id = p_guild_id;
+  -- server_templates was dropped in 20260601000004_v53_dead_table_cleanup;
+  -- deleting from it aborted every guild purge at runtime.
+  DELETE FROM public.automod_rules WHERE guild_id = p_guild_id;
+  DELETE FROM public.reaction_roles WHERE guild_id = p_guild_id;
+  DELETE FROM public.ticket_panels WHERE guild_id = p_guild_id;
+  DELETE FROM public.automations WHERE guild_id = p_guild_id;
+  DELETE FROM public.custom_commands WHERE guild_id = p_guild_id;
+  DELETE FROM public.guild_config WHERE guild_id = p_guild_id;
+
+  DELETE FROM public.guild WHERE id = p_guild_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING ERRCODE = '40001',
+      MESSAGE = 'purge_guild_data: guild deletion race detected';
+  END IF;
+  RETURN pg_catalog.jsonb_build_object(
+    'purge_status', 'completed',
+    'pending_role_cleanup_count', 0,
+    'guild_deleted', 1
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.purge_guild_data(TEXT)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.purge_guild_data(TEXT)
+  TO service_role;
 
 COMMIT;

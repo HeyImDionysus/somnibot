@@ -1514,6 +1514,19 @@ export interface DbCommerceAdminRefundOperations {
   completed_at: string | null;
 }
 
+export interface DbCommerceCheckoutDeactivationProofs {
+  id: string;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  provider_kind: 'capture' | 'subscription';
+  provider_id: string;
+  proof_kind: 'provider_cancelled' | 'provider_expired' | 'approval_link_not_exposed' | 'operator_verified_unpayable';
+  proof_reference: string;
+  proved_at: string;
+}
+
 export interface DbCommerceFulfillmentClaims {
   guild_id: string;
   customer_id: string;
@@ -1531,7 +1544,21 @@ export interface DbCommerceFulfillmentHolds {
   conflicting_entitlement_id: string | null;
   provider_kind: 'capture' | 'subscription';
   provider_id: string;
+  hold_reason: 'duplicate_paid_fulfillment' | 'unknown_delivery_contract';
   held_at: string;
+}
+
+export interface DbCommerceFulfillmentOutwardIntents {
+  order_id: string;
+  guild_id: string;
+  intent_kind: 'purchase_completed_event' | 'subscription_activated_event' | 'receipt_dm';
+  state: 'sending' | 'sent' | 'uncertain';
+  attempt_token: string | null;
+  started_at: string;
+  sent_at: string | null;
+  uncertain_at: string | null;
+  last_error: string | null;
+  updated_at: string;
 }
 
 export interface DbCommerceLegacySubscriptionGrantContracts {

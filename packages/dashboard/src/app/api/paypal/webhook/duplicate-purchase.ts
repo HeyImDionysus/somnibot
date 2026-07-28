@@ -97,3 +97,38 @@ export async function claimPaidFulfillment(
   }
   return parsePaidFulfillmentClaim(data, order.id);
 }
+
+/**
+ * Reserve the paid winner while permanently withholding automatic delivery
+ * because its immutable sold-delivery contract is absent. The claim, hold, and
+ * critical operator alert are one database transaction.
+ */
+export async function holdUnknownDeliveryContract(
+  supabase: AdminSupabase,
+  order: PaidFulfillmentOrder,
+  provider: {
+    kind: 'capture' | 'subscription';
+    id: string;
+    amountCents: number;
+    currency: string;
+  },
+): Promise<PaidFulfillmentClaim> {
+  const { data, error } = await supabase.rpc('commerce_hold_unknown_delivery_contract', {
+    p_order_id: order.id,
+    p_guild_id: order.guild_id,
+    p_customer_id: order.customer_id,
+    p_product_id: order.product_id,
+    p_provider_kind: provider.kind,
+    p_provider_id: provider.id,
+    p_amount_cents: provider.amountCents,
+    p_currency: provider.currency,
+  });
+  if (error) {
+    throw new Error(`Failed to hold unknown delivery contract: ${error.message}`);
+  }
+  const claim = parsePaidFulfillmentClaim(data, order.id);
+  if (claim.disposition !== 'held') {
+    throw new Error('Unknown delivery contract RPC did not persist a durable hold');
+  }
+  return claim;
+}

@@ -177,6 +177,47 @@ function paidClaimWinner(args: Record<string, unknown>) {
   };
 }
 
+function defaultOutwardIntentRpc(name: string, args: Record<string, unknown>) {
+  if (name === 'commerce_resume_fulfillment_outward_intent') {
+    return {
+      data: {
+        order_id: args.p_order_id,
+        intent_kind: args.p_intent_kind,
+        disposition: 'absent',
+        state: null,
+        attempt_token: null,
+        alert_id: null,
+      },
+      error: null,
+    };
+  }
+  if (name === 'commerce_begin_fulfillment_outward_intent') {
+    return {
+      data: {
+        order_id: args.p_order_id,
+        intent_kind: args.p_intent_kind,
+        disposition: 'send',
+        state: 'sending',
+        attempt_token: '55555555-5555-4555-8555-555555555555',
+        alert_id: null,
+      },
+      error: null,
+    };
+  }
+  if (name === 'commerce_finish_fulfillment_outward_intent') {
+    return {
+      data: {
+        order_id: args.p_order_id,
+        intent_kind: args.p_intent_kind,
+        state: args.p_outcome,
+        alert_id: args.p_outcome === 'uncertain' ? 'alert-outward-uncertain' : null,
+      },
+      error: null,
+    };
+  }
+  return { data: null, error: null };
+}
+
 function makeSupa(overrides: Record<string, any> = {}) {
   return {
     from: vi.fn((table: string) => {
@@ -208,8 +249,120 @@ function makeSupa(overrides: Record<string, any> = {}) {
     rpc: vi.fn(async (name: string, args: Record<string, unknown>) =>
       name === 'commerce_claim_paid_fulfillment'
         ? paidClaimWinner(args)
-        : { data: null, error: null }),
+        : defaultOutwardIntentRpc(name, args)),
   };
+}
+
+function makeOutwardIntentSupa(
+  failFinishOnceFor:
+    | 'purchase_completed_event'
+    | 'subscription_activated_event'
+    | 'receipt_dm',
+  overrides: {
+    entitlement?: Record<string, unknown>;
+    order?: Record<string, unknown>;
+  } = {},
+) {
+  const entitlement = {
+    id: 'ent-123',
+    customer_id: 'cust-1',
+    product_id: 'prod-1',
+    plan_id: null,
+    license_key_id: null,
+    type: 'one_time',
+    status: 'active',
+    source: 'purchase',
+    granted_role_ids: ['role-1'],
+    granted_channel_ids: [],
+    ...overrides.entitlement,
+  };
+  const supa: any = makeSupa({
+    entitlements: entitlement,
+    ...(overrides.order === undefined ? {} : { orders: overrides.order }),
+  });
+  const intents = new Map<string, {
+    state: 'sending' | 'sent' | 'uncertain';
+    attemptToken: string;
+  }>();
+  let finishFailurePending = true;
+  supa.rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    if (name === 'commerce_claim_paid_fulfillment') {
+      return paidClaimWinner(args);
+    }
+    if (
+      name === 'commerce_begin_fulfillment_outward_intent'
+      || name === 'commerce_resume_fulfillment_outward_intent'
+    ) {
+      const key = `${String(args.p_order_id)}:${String(args.p_intent_kind)}`;
+      const existing = intents.get(key);
+      if (!existing) {
+        if (name === 'commerce_resume_fulfillment_outward_intent') {
+          return {
+            data: {
+              order_id: args.p_order_id,
+              intent_kind: args.p_intent_kind,
+              disposition: 'absent',
+              state: null,
+              attempt_token: null,
+              alert_id: null,
+            },
+            error: null,
+          };
+        }
+        const attemptToken = '55555555-5555-4555-8555-555555555555';
+        intents.set(key, { state: 'sending', attemptToken });
+        return {
+          data: {
+            order_id: args.p_order_id,
+            intent_kind: args.p_intent_kind,
+            disposition: 'send',
+            state: 'sending',
+            attempt_token: attemptToken,
+            alert_id: null,
+          },
+          error: null,
+        };
+      }
+      if (existing.state === 'sending') {
+        existing.state = 'uncertain';
+      }
+      return {
+        data: {
+          order_id: args.p_order_id,
+          intent_kind: args.p_intent_kind,
+          disposition: existing.state === 'sent' ? 'sent' : 'uncertain',
+          state: existing.state,
+          attempt_token: null,
+          alert_id: existing.state === 'uncertain' ? 'alert-outward-uncertain' : null,
+        },
+        error: null,
+      };
+    }
+    if (name === 'commerce_finish_fulfillment_outward_intent') {
+      if (args.p_intent_kind === failFinishOnceFor && finishFailurePending) {
+        finishFailurePending = false;
+        return { data: null, error: { message: 'commit result unavailable', code: '08006' } };
+      }
+      const key = `${String(args.p_order_id)}:${String(args.p_intent_kind)}`;
+      const existing = intents.get(key);
+      if (!existing || existing.attemptToken !== args.p_attempt_token) {
+        return { data: null, error: { message: 'intent identity mismatch', code: '23514' } };
+      }
+      existing.state = args.p_outcome === 'sent' ? 'sent' : 'uncertain';
+      return {
+        data: {
+          order_id: args.p_order_id,
+          intent_kind: args.p_intent_kind,
+          state: existing.state,
+          alert_id: existing.state === 'uncertain' ? 'alert-outward-uncertain' : null,
+        },
+        error: null,
+      };
+    }
+    return { data: null, error: null };
+  });
+  supa.__intents = intents;
+  return supa;
 }
 
 function makeGuild() {
@@ -286,6 +439,13 @@ function makeTemporaryRoleHarness(opts: {
     rpc: vi.fn(async (name: string, args: Record<string, unknown>) => {
       if (name === 'commerce_claim_paid_fulfillment') {
         return paidClaimWinner(args);
+      }
+      if (
+        name === 'commerce_begin_fulfillment_outward_intent'
+        || name === 'commerce_resume_fulfillment_outward_intent'
+        || name === 'commerce_finish_fulfillment_outward_intent'
+      ) {
+        return defaultOutwardIntentRpc(name, args);
       }
       if (name === 'commerce_attach_temp_role_delivery') {
         const scripted = opts.attachResults?.shift();
@@ -771,7 +931,7 @@ function makeEntitlementLookupResult(result: { data: unknown; error: unknown }) 
     rpc: vi.fn(async (name: string, args: Record<string, unknown>) =>
       name === 'commerce_claim_paid_fulfillment'
         ? paidClaimWinner(args)
-        : { data: null, error: null }),
+        : defaultOutwardIntentRpc(name, args)),
   };
 }
 
@@ -821,6 +981,81 @@ describe('CommerceFulfillmentService', () => {
         roleDeliveryClaim: TEST_ACTION_CLAIM,
       });
       expect(mockEnsurePurchaseGrantedRoles).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      'purchase_completed_event',
+      'receipt_dm',
+    ] as const)(
+      'never repeats an externally accepted effect after the %s sent marker commit is lost',
+      async (failedIntentKind) => {
+        const supabase = makeOutwardIntentSupa(failedIntentKind);
+        const guild = makeGuild();
+        const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+        const second = new CommerceFulfillmentService(guild, supabase, eventBus);
+
+        const firstResult = await fulfillClaimed(first, basePayload);
+        const replayResult = await fulfillClaimed(second, basePayload);
+
+        expect(firstResult.success).toBe(false);
+        expect(replayResult.success).toBe(true);
+        expect(eventBus.emit).toHaveBeenCalledTimes(1);
+        expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+        expect(supabase.__intents.get(`order-1:${failedIntentKind}`)?.state)
+          .toBe('uncertain');
+        expect(supabase.rpc).toHaveBeenCalledWith(
+          'commerce_begin_fulfillment_outward_intent',
+          expect.objectContaining({
+            p_order_id: 'order-1',
+            p_guild_id: 'guild-1',
+            p_intent_kind: failedIntentKind,
+          }),
+        );
+      },
+    );
+
+    it('resumes a lost purchase event marker after role delivery settled without re-emitting', async () => {
+      const supabase = makeOutwardIntentSupa('purchase_completed_event');
+      const guild = makeGuild();
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockBeginRoleDelivery as any)
+        .mockResolvedValueOnce({
+          state: 'live',
+          attempt: {
+            ...TEST_ACTION_CLAIM,
+            intentId: '11111111-1111-4111-8111-111111111111',
+            mutationToken: '22222222-2222-4222-8222-222222222222',
+          },
+        })
+        .mockResolvedValueOnce({
+          state: 'confirmed_live',
+          intentId: '11111111-1111-4111-8111-111111111111',
+        });
+
+      const firstResult = await fulfillClaimed(first, basePayload);
+      const replayResult = await fulfillClaimed(replay, basePayload);
+
+      expect(firstResult.success).toBe(false);
+      expect(replayResult).toMatchObject({
+        success: true,
+        eventEmitted: false,
+        receiptSent: true,
+        errors: [],
+      });
+      expect(eventBus.emit).toHaveBeenCalledTimes(1);
+      expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+      expect(supabase.__intents.get('order-1:purchase_completed_event')?.state)
+        .toBe('uncertain');
+      expect(supabase.__intents.get('order-1:receipt_dm')?.state).toBe('sent');
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'commerce_resume_fulfillment_outward_intent',
+        expect.objectContaining({
+          p_order_id: 'order-1',
+          p_guild_id: 'guild-1',
+          p_intent_kind: 'purchase_completed_event',
+        }),
+      );
     });
 
     it('completes a backfilled losing queue row as held before any entitlement or Discord effect', async () => {
@@ -1947,6 +2182,59 @@ describe('CommerceFulfillmentService', () => {
       expect(eventBus.emit).toHaveBeenCalledWith('subscription.activated', 'guild-1', expect.objectContaining({ status: 'activated' }));
     });
 
+    it('resumes a lost subscription event marker after role delivery settled without re-emitting', async () => {
+      const supabase = makeOutwardIntentSupa(
+        'subscription_activated_event',
+        {
+          entitlement: {
+            plan_id: 'plan-monthly',
+            type: 'subscription',
+          },
+          order: subscriptionOrderSnapshot,
+        },
+      );
+      const guild = makeGuild();
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockBeginRoleDelivery as any)
+        .mockResolvedValueOnce({
+          state: 'live',
+          attempt: {
+            ...TEST_ACTION_CLAIM,
+            intentId: '11111111-1111-4111-8111-111111111111',
+            mutationToken: '22222222-2222-4222-8222-222222222222',
+          },
+        })
+        .mockResolvedValueOnce({
+          state: 'confirmed_live',
+          intentId: '11111111-1111-4111-8111-111111111111',
+        });
+
+      const firstResult = await fulfillClaimed(first, subscriptionActivationPayload);
+      const replayResult = await fulfillClaimed(replay, subscriptionActivationPayload);
+
+      expect(firstResult.success).toBe(false);
+      expect(replayResult).toMatchObject({
+        success: true,
+        eventEmitted: false,
+        receiptSent: true,
+        errors: [],
+      });
+      expect(eventBus.emit).toHaveBeenCalledTimes(1);
+      expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+      expect(supabase.__intents.get('order-1:subscription_activated_event')?.state)
+        .toBe('uncertain');
+      expect(supabase.__intents.get('order-1:receipt_dm')?.state).toBe('sent');
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'commerce_resume_fulfillment_outward_intent',
+        expect.objectContaining({
+          p_order_id: 'order-1',
+          p_guild_id: 'guild-1',
+          p_intent_kind: 'subscription_activated_event',
+        }),
+      );
+    });
+
     it('binds a staged subscription licence key to the granted entitlement', async () => {
       const payload: FulfillmentPayload = {
         ...subscriptionActivationPayload,
@@ -2682,28 +2970,21 @@ describe('CommerceFulfillmentService', () => {
   });
 
   describe('receipt delivery failure handling', () => {
-    // Defect fix: a failed receipt/license-key DM must never be dropped
-    // silently — it is queued for persistent re-delivery via bot_action_queue.
-    // The queue insert itself is retried with backoff (the queue row is the
-    // only at-rest copy of the plaintext key); if it keeps failing, the
-    // payload is preserved in the retryable DLQ and an operator alert
-    // (never containing the key) is written.
+    // A failed receipt/license-key DM has ambiguous external acceptance. Its
+    // outward intent becomes uncertain, so automatic replay is blocked. The
+    // plaintext payload is preserved in the DLQ for deliberate operator
+    // reconciliation and the alert never contains the key.
 
     /**
-     * `queueInsertError` makes bot_action_queue inserts fail; combine with
-     * `queueInsertFailures: n` to fail only the first n attempts.
      * `dlqInsertError` makes action_queue_dlq inserts fail too (the
      * worst-case path where the key cannot be preserved anywhere).
      */
     function makeRecordingSupa(
       opts: {
-        queueInsertError?: { message: string };
-        queueInsertFailures?: number;
         dlqInsertError?: { message: string };
       } = {},
     ) {
       const inserts: Record<string, any[]> = {};
-      let queueInsertAttempts = 0;
       const supa: any = {
         from: vi.fn((table: string) => {
           const chain: any = {};
@@ -2743,13 +3024,6 @@ describe('CommerceFulfillmentService', () => {
           chain.insert = vi.fn((row: any) => {
             (inserts[table] ??= []).push(row);
             let result: any = { data: null, error: null };
-            if (table === 'bot_action_queue' && opts.queueInsertError) {
-              queueInsertAttempts++;
-              const stillFailing =
-                opts.queueInsertFailures === undefined ||
-                queueInsertAttempts <= opts.queueInsertFailures;
-              if (stillFailing) result = { data: null, error: opts.queueInsertError };
-            }
             if (table === 'action_queue_dlq' && opts.dlqInsertError) {
               result = { data: null, error: opts.dlqInsertError };
             }
@@ -2763,7 +3037,7 @@ describe('CommerceFulfillmentService', () => {
         rpc: vi.fn(async (name: string, args: Record<string, unknown>) =>
           name === 'commerce_claim_paid_fulfillment'
             ? paidClaimWinner(args)
-            : { data: null, error: null }),
+            : defaultOutwardIntentRpc(name, args)),
       };
       supa.__inserts = inserts;
       return supa;
@@ -2787,149 +3061,79 @@ describe('CommerceFulfillmentService', () => {
       expect(supa.__inserts['alerts']).toBeUndefined();
     });
 
-    it('queues persistent re-delivery when the receipt DM fails, without failing fulfillment', async () => {
-      mockDeliverReceiptDM.mockRejectedValueOnce(new Error('503 Service Unavailable'));
+    it('blocks automatic replay and preserves an uncertain receipt for manual review', async () => {
+      mockDeliverReceiptDM.mockRejectedValueOnce(
+        Object.assign(new Error('Cannot send messages to this user'), { code: 50007 }),
+      );
       const supa = makeRecordingSupa();
       service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
 
       const result = await fulfillClaimed(service, keyedPayload);
 
-      // Entitlement was granted — the fulfillment itself must NOT be retried
-      // (that would double-grant); only the delivery is re-queued.
       expect(result.success).toBe(true);
       expect(result.receiptSent).toBe(false);
-      expect(result.receiptRetryQueued).toBe(true);
+      expect(result.receiptRetryQueued).toBe(false);
+      expect(supa.__inserts['bot_action_queue']).toBeUndefined();
 
-      const queued = supa.__inserts['bot_action_queue'];
-      expect(queued).toHaveLength(1);
-      expect(queued[0]).toMatchObject({
+      const dlq = supa.__inserts['action_queue_dlq'];
+      expect(dlq).toHaveLength(1);
+      expect(dlq[0]).toMatchObject({
         guild_id: 'guild-1',
         action: 'deliver_receipt',
-        status: 'pending',
+        retry_count: 0,
+        max_retries: 0,
       });
-      expect(queued[0].payload).toMatchObject({
+      expect(dlq[0].payload).toMatchObject({
         discord_id: 'user-1',
         order_number: 'ORD-001',
         product_name: 'VIP Pass',
         license_key_plaintext: 'SMNI-AAAA-BBBB-CCCC-DDDD',
       });
-      // The order date rides along so a delayed redelivery renders the
-      // date of the order, not the date the retry finally succeeded.
-      expect(new Date(queued[0].payload.order_date).getTime()).not.toBeNaN();
-      // Alerting is handled by the queue's final-failure path, not here
-      expect(supa.__inserts['alerts']).toBeUndefined();
-    });
+      expect(new Date(dlq[0].payload.order_date).getTime()).not.toBeNaN();
+      expect(dlq[0].error_message).toContain('automatic retry blocked');
 
-    it('retries the queue insert with backoff and recovers on a later attempt', async () => {
-      vi.useFakeTimers();
-      try {
-        mockDeliverReceiptDM.mockRejectedValueOnce(new Error('503 Service Unavailable'));
-        const supa = makeRecordingSupa({
-          queueInsertError: { message: 'transient db blip' },
-          queueInsertFailures: 1,
-        });
-        service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
-
-        const resultPromise = fulfillClaimed(service, keyedPayload);
-        await vi.advanceTimersByTimeAsync(10_000); // flush insert backoff sleeps
-        const result = await resultPromise;
-
-        expect(result.success).toBe(true);
-        expect(result.receiptRetryQueued).toBe(true);
-        // Failed once, then queued successfully — no DLQ, no alert
-        expect(supa.__inserts['bot_action_queue']).toHaveLength(2);
-        expect(supa.__inserts['action_queue_dlq']).toBeUndefined();
-        expect(supa.__inserts['alerts']).toBeUndefined();
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('preserves the payload in the DLQ and alerts when the queue insert keeps failing', async () => {
-      vi.useFakeTimers();
-      try {
-        mockDeliverReceiptDM.mockRejectedValueOnce(
-          Object.assign(new Error('Cannot send messages to this user'), { code: 50007 }),
-        );
-        const supa = makeRecordingSupa({ queueInsertError: { message: 'db unavailable' } });
-        service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
-
-        const resultPromise = fulfillClaimed(service, keyedPayload);
-        await vi.advanceTimersByTimeAsync(10_000); // flush insert backoff sleeps
-        const result = await resultPromise;
-
-        expect(result.receiptSent).toBe(false);
-        expect(result.receiptRetryQueued).toBe(false);
-
-        // Queue insert retried before giving up
-        expect(supa.__inserts['bot_action_queue']).toHaveLength(3);
-
-        // The delivery payload — the only remaining copy of the plaintext
-        // key — is preserved in the dashboard-retryable DLQ, not dropped
-        const dlq = supa.__inserts['action_queue_dlq'];
-        expect(dlq).toHaveLength(1);
-        expect(dlq[0]).toMatchObject({
-          guild_id: 'guild-1',
-          action: 'deliver_receipt',
-        });
-        expect(dlq[0].payload).toMatchObject({
-          discord_id: 'user-1',
-          order_number: 'ORD-001',
-          license_key_plaintext: 'SMNI-AAAA-BBBB-CCCC-DDDD',
-        });
-        expect(dlq[0].error_message).toContain('db unavailable');
-
-        // Operator alert written — and it never contains the plaintext key.
-        // It directs the operator to the recovery path that actually works
-        // (DLQ retry / manual resend from the preserved payload) — NOT the
-        // customer portal, which only shows a masked prefix…suffix key.
-        const alerts = supa.__inserts['alerts'];
-        expect(alerts).toHaveLength(1);
-        expect(alerts[0]).toMatchObject({
-          guild_id: 'guild-1',
-          alert_type: 'receipt_delivery_failed',
-          severity: 'critical',
-        });
-        expect(alerts[0].message).toContain('dead-letter queue');
-        expect(alerts[0].message).not.toContain('remains available through the customer portal');
-        expect(alerts[0].metadata).toMatchObject({
-          kind: 'permanent',
-          orderNumber: 'ORD-001',
-          payloadPreserved: true,
-        });
-        expect(JSON.stringify(alerts[0])).not.toContain('SMNI-AAAA-BBBB-CCCC-DDDD');
-      } finally {
-        vi.useRealTimers();
-      }
+      const alerts = supa.__inserts['alerts'];
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toMatchObject({
+        guild_id: 'guild-1',
+        alert_type: 'receipt_delivery_failed',
+        severity: 'critical',
+      });
+      expect(alerts[0].message).toContain('Automatic retry is blocked');
+      expect(alerts[0].message).toContain('Reconcile');
+      expect(alerts[0].message).not.toContain('remains available through the customer portal');
+      expect(alerts[0].metadata).toMatchObject({
+        acceptanceUncertain: true,
+        kind: 'permanent',
+        orderNumber: 'ORD-001',
+        payloadPreserved: true,
+      });
+      expect(JSON.stringify(alerts[0])).not.toContain('SMNI-AAAA-BBBB-CCCC-DDDD');
     });
 
     it('tells the operator the key is unrecoverable when even the DLQ write fails', async () => {
-      vi.useFakeTimers();
-      try {
-        mockDeliverReceiptDM.mockRejectedValueOnce(new Error('503 Service Unavailable'));
-        const supa = makeRecordingSupa({
-          queueInsertError: { message: 'db unavailable' },
-          dlqInsertError: { message: 'db unavailable' },
-        });
-        service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
+      mockDeliverReceiptDM.mockRejectedValueOnce(new Error('503 Service Unavailable'));
+      const supa = makeRecordingSupa({
+        dlqInsertError: { message: 'db unavailable' },
+      });
+      service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
 
-        const resultPromise = fulfillClaimed(service, keyedPayload);
-        await vi.advanceTimersByTimeAsync(10_000); // flush insert backoff sleeps
-        const result = await resultPromise;
+      const result = await fulfillClaimed(service, keyedPayload);
 
-        expect(result.receiptRetryQueued).toBe(false);
+      expect(result.receiptRetryQueued).toBe(false);
+      expect(supa.__inserts['bot_action_queue']).toBeUndefined();
 
-        // The alert must NOT claim the payload sits in the DLQ — it never
-        // made it there. The remaining remediation is revoke + reissue.
-        const alerts = supa.__inserts['alerts'];
-        expect(alerts).toHaveLength(1);
-        expect(alerts[0].message).toContain('could NOT be preserved');
-        expect(alerts[0].message).toContain('revoke');
-        expect(alerts[0].metadata).toMatchObject({ payloadPreserved: false });
-        expect(JSON.stringify(alerts[0])).not.toContain('SMNI-AAAA-BBBB-CCCC-DDDD');
-      } finally {
-        vi.useRealTimers();
-      }
+      // The alert must NOT claim the payload sits in the DLQ — it never
+      // made it there. The remaining remediation is revoke + reissue.
+      const alerts = supa.__inserts['alerts'];
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0].message).toContain('could NOT be preserved');
+      expect(alerts[0].message).toContain('revoke');
+      expect(alerts[0].metadata).toMatchObject({
+        acceptanceUncertain: true,
+        payloadPreserved: false,
+      });
+      expect(JSON.stringify(alerts[0])).not.toContain('SMNI-AAAA-BBBB-CCCC-DDDD');
     });
   });
 });

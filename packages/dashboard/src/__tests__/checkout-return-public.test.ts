@@ -89,6 +89,10 @@ describe('post-checkout copy does not overstate provider state', () => {
 
     expect(markup).toContain('Payment confirmation pending');
     expect(markup).toContain('cannot confirm that funds were captured');
+    expect(markup).toContain(
+      'Even after PayPal confirms payment, delivery may be held for manual review',
+    );
+    expect(markup).toContain('refund may be required before access can be delivered');
     expect(markup).toContain('Do not open a second checkout');
     expect(markup).not.toContain('Payment received');
     expect(markup).not.toContain('payment went through');

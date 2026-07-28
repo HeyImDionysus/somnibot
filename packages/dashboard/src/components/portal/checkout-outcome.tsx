@@ -59,6 +59,11 @@ export function CheckoutComplete() {
           You returned from PayPal, but this public page cannot confirm that funds were captured.
           Your order will be delivered only after PayPal confirms the payment.
         </p>
+        <p className="mt-3 text-sm text-discord-text-secondary">
+          Even after PayPal confirms payment, delivery may be held for manual review. If the
+          purchase cannot be safely matched to what was sold, a refund may be required before
+          access can be delivered.
+        </p>
       </div>
 
       <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-6">
