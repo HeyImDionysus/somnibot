@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -11,10 +12,15 @@ const migrationSource = readFileSync(
 );
 const migrationsDir = mkdtempSync(join(process.cwd(), '.tmp-migration-runner-smoke-'));
 writeFileSync(join(migrationsDir, migrationName), migrationSource);
+const migrationChecksum = createHash('sha256')
+  .update(migrationSource.replace(/\r\n/g, '\n'), 'utf8')
+  .digest('hex');
 
 let migrationHistory = [{
   filename: migrationName,
-  checksum: 'failed-attempt',
+  checksum: migrationChecksum,
+  applied_at: '2026-07-28T00:00:00.000Z',
+  duration_ms: 1,
   success: false,
 }];
 const migrationQueries = [];
@@ -41,20 +47,66 @@ globalThis.fetch = async (input, init = {}) => {
   const url = String(input);
   if (url.includes('/rest/v1/schema_migrations?')) {
     if ((init.method ?? 'GET') === 'GET') {
-      return jsonResponse(migrationHistory);
+      const parsed = new URL(url);
+      const filenameFilter = parsed.searchParams.get('filename');
+      const selected = filenameFilter?.startsWith('eq.')
+        ? migrationHistory.filter((row) => row.filename === filenameFilter.slice(3))
+        : migrationHistory;
+      return jsonResponse(selected);
     }
 
-    const record = JSON.parse(String(init.body));
-    migrationHistory = [
-      ...migrationHistory.filter((row) => row.filename !== record.filename),
-      record,
-    ];
     return okResponse();
   }
   if (url.includes('/database/query')) {
     const { query } = JSON.parse(String(init.body));
-    if (!query.includes('CREATE TABLE IF NOT EXISTS schema_migrations')) {
+
+    const claimToken = query.match(/claim:v1:[a-f0-9]{64}:[0-9a-f-]{36}/i)?.[0];
+    if (
+      claimToken
+      && query.includes('UPDATE public.schema_migrations')
+      && !query.includes('$migration_runner_history$')
+    ) {
+      const expected = [...query.matchAll(/checksum\s*=\s*'([^']+)'/gi)].at(-1)?.[1];
+      if (
+        migrationHistory[0]?.checksum === expected
+        && migrationHistory[0]?.success === false
+      ) {
+        migrationHistory[0].checksum = claimToken;
+        migrationHistory[0].applied_at = '2026-07-28T00:00:01.000Z';
+      }
+      return okResponse();
+    }
+
+    if (query.includes('$migration_runner_claim_proof$')) {
+      if (migrationHistory[0]?.checksum !== claimToken) {
+        return {
+          ok: false,
+          status: 400,
+          text: async () => 'claim proof failed',
+        };
+      }
+      return okResponse();
+    }
+
+    if (
+      query.includes('DO $fraud_index_recovery$')
+      || query.trimStart().startsWith('CREATE INDEX CONCURRENTLY')
+      || query.includes('DO $fraud_index_postflight$')
+    ) {
       migrationQueries.push(query);
+    }
+
+    if (query.includes('$migration_runner_history$')) {
+      const checksums = [...query.matchAll(/checksum\s*=\s*'([^']+)'/gi)]
+        .map((match) => match[1]);
+      const expected = checksums.at(-1);
+      if (
+        migrationHistory[0]?.checksum === expected
+        && migrationHistory[0]?.success === false
+      ) {
+        migrationHistory[0].checksum = checksums.at(-2);
+        migrationHistory[0].success = true;
+      }
     }
     return okResponse();
   }
@@ -93,8 +145,11 @@ try {
   if (!migrationQueries[2].includes('DO $fraud_index_postflight$')) {
     throw new Error('Built migration runner did not preserve the postflight DO batch');
   }
+  if (!migrationQueries[2].includes('$migration_runner_history$')) {
+    throw new Error('Built migration runner did not finalize history in the postflight batch');
+  }
   if (migrationHistory[0]?.success !== true) {
-    throw new Error('Built migration runner did not upsert failed history to success');
+    throw new Error('Built migration runner did not atomically finalize failed history');
   }
 
   const migrationQueryCount = migrationQueries.length;

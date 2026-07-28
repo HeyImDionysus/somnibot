@@ -6,11 +6,20 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+  rmSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { planMigrationSql } from '../services/migration-runner.js';
+
+const APPROVED_NONTRANSACTIONAL_MIGRATION =
+  '20260727034400_fraud_signal_observation_index.sql';
 
 // ── Checksum utility (mirrors what the runner uses) ──
 
@@ -140,7 +149,7 @@ describe('Migration Runner — SQL execution planning', () => {
     expect(planMigrationSql(source)).toEqual([source]);
   });
 
-  it('splits only around top-level CREATE INDEX CONCURRENTLY', () => {
+  it('rejects an otherwise well-shaped CIC file that is not the approved artifact', () => {
     const source = `
       -- a comment with a semicolon ;
       DO $pre$
@@ -164,16 +173,8 @@ describe('Migration Runner — SQL execution planning', () => {
       $post$;
     `;
 
-    const batches = planMigrationSql(source);
-
-    expect(batches).toHaveLength(3);
-    expect(batches[0]).toContain('PERFORM E');
-    expect(batches[0]).toContain('second ordinary; statement before');
-    expect(batches[0]).not.toContain('CREATE /* between keywords');
-    expect(batches[1]).toContain('CREATE /* between keywords ; */ UNIQUE INDEX CONCURRENTLY');
-    expect(batches[1]).not.toContain('DO $post$');
-    expect(batches[2]).toContain('DO $post$');
-    expect(batches[2]).toContain('first ordinary; statement after');
+    expect(() => planMigrationSql(source, '001_synthetic.sql'))
+      .toThrow(/approved nontransactional migration profile/i);
   });
 
   it('segments the complete fraud observation index migration as DO / CIC / DO', () => {
@@ -186,12 +187,59 @@ describe('Migration Runner — SQL execution planning', () => {
       'utf8',
     );
 
-    const batches = planMigrationSql(source);
+    const batches = planMigrationSql(
+      source,
+      APPROVED_NONTRANSACTIONAL_MIGRATION,
+    );
 
     expect(batches).toHaveLength(3);
     expect(batches[0]).toContain('DO $fraud_index_recovery$');
     expect(batches[1].trimStart()).toMatch(/^CREATE INDEX CONCURRENTLY/);
     expect(batches[2]).toContain('DO $fraud_index_postflight$');
+  });
+
+  it('accepts the approved artifact with CRLF checkout line endings', () => {
+    const source = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        '../../../supabase/migrations',
+        APPROVED_NONTRANSACTIONAL_MIGRATION,
+      ),
+      'utf8',
+    ).replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+
+    expect(planMigrationSql(source, APPROVED_NONTRANSACTIONAL_MIGRATION))
+      .toHaveLength(3);
+  });
+
+  it('rejects the approved artifact under a different filename', () => {
+    const source = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        '../../../supabase/migrations',
+        APPROVED_NONTRANSACTIONAL_MIGRATION,
+      ),
+      'utf8',
+    );
+
+    expect(() => planMigrationSql(source, '20260727034401_renamed.sql'))
+      .toThrow(/approved nontransactional migration profile/i);
+  });
+
+  it('rejects a one-byte modification to the approved artifact', () => {
+    const source = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        '../../../supabase/migrations',
+        APPROVED_NONTRANSACTIONAL_MIGRATION,
+      ),
+      'utf8',
+    );
+
+    expect(() => planMigrationSql(
+      `${source}\n-- modified`,
+      APPROVED_NONTRANSACTIONAL_MIGRATION,
+    )).toThrow(/approved nontransactional migration profile/i);
   });
 
   it.each([
@@ -202,7 +250,7 @@ describe('Migration Runner — SQL execution planning', () => {
     "ALTER SYSTEM SET work_mem = '64MB';",
   ])('fails closed for unsupported transaction-incompatible SQL: %s', (statement) => {
     expect(() => planMigrationSql(`${statement}\nCREATE INDEX CONCURRENTLY idx ON t (id);`))
-      .toThrow(/unsupported transaction-incompatible statement/i);
+      .toThrow(/approved nontransactional migration profile/i);
   });
 
   it('fails closed on an unterminated dollar-quoted body', () => {
@@ -215,6 +263,59 @@ describe('Migration Runner — SQL execution planning', () => {
       BEGIN;
       CREATE INDEX CONCURRENTLY idx_example ON example (id);
       COMMIT;
-    `)).toThrow(/unsupported explicit transaction control/i);
+    `)).toThrow(/approved nontransactional migration profile/i);
+  });
+
+  it('preserves one sole outer BEGIN/COMMIT envelope for ordinary SQL', () => {
+    const source = `
+      BEGIN;
+      CREATE TABLE example (id BIGINT PRIMARY KEY);
+      COMMIT;
+    `;
+
+    expect(planMigrationSql(source, '001_outer_envelope.sql')).toEqual([source]);
+  });
+
+  it('rejects every other top-level transaction control shape', () => {
+    expect(() => planMigrationSql(`
+      BEGIN;
+      SAVEPOINT before_change;
+      SELECT 1;
+      COMMIT;
+    `, '001_savepoint.sql')).toThrow(/unsupported top-level transaction control shape/i);
+  });
+
+  it('rejects an unapproved transaction-incompatible statement before CIC', () => {
+    expect(() => planMigrationSql(`
+      ALTER DATABASE app SET TABLESPACE fastspace;
+      CREATE INDEX CONCURRENTLY idx_example ON example (id);
+    `)).toThrow(/approved nontransactional migration profile/i);
+  });
+
+  it('rejects cross-request session state before CIC', () => {
+    expect(() => planMigrationSql(`
+      SET search_path = private;
+      CREATE INDEX CONCURRENTLY idx_example ON example (id);
+      RESET search_path;
+    `)).toThrow(/approved nontransactional migration profile/i);
+  });
+
+  it('accepts every checked-in migration under the closed planner profile', () => {
+    const migrationsDir = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../supabase/migrations',
+    );
+    const failures: string[] = [];
+
+    for (const filename of readdirSync(migrationsDir).filter((file) => file.endsWith('.sql'))) {
+      const source = readFileSync(resolve(migrationsDir, filename), 'utf8');
+      try {
+        planMigrationSql(source, filename);
+      } catch (err) {
+        failures.push(`${filename}: ${String(err)}`);
+      }
+    }
+
+    expect(failures).toEqual([]);
   });
 });

@@ -10,7 +10,7 @@
  *  • Stops on first error (ordered migrations)
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,7 +33,51 @@ interface AppliedMigration {
   filename: string;
   checksum: string;
   success: boolean;
+  applied_at?: string | null;
+  duration_ms?: number | null;
 }
+
+interface LexedSqlStatement {
+  sql: string;
+  tokens: string[];
+}
+
+interface MigrationSqlPlan {
+  batches: string[];
+  completion:
+    | { mode: 'append-to-last-batch' }
+    | {
+      mode: 'before-final-commit';
+      statements: LexedSqlStatement[];
+      finalCommitIndex: number;
+    };
+}
+
+interface HistoryReadResult {
+  success: boolean;
+  row?: AppliedMigration;
+  error?: string;
+}
+
+interface ClaimAcquired {
+  status: 'acquired';
+  token: string;
+}
+
+interface ClaimNotAcquired {
+  status: 'success' | 'busy' | 'drift' | 'error';
+  error?: string;
+}
+
+type ClaimResult = ClaimAcquired | ClaimNotAcquired;
+
+const APPROVED_NONTRANSACTIONAL_MIGRATION =
+  '20260727034400_fraud_signal_observation_index.sql';
+const APPROVED_NONTRANSACTIONAL_SHA256 =
+  '37a5e24dd8740bdfc49309bed8082f8f655467ea03b3c03c38583149cfb6e1ae';
+const CLAIM_PREFIX = 'claim:v1:';
+const CLAIM_LEASE_MS = 5 * 60 * 1000;
+const CLAIM_HEARTBEAT_MS = 60 * 1000;
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -153,8 +197,8 @@ function isEscapeStringStart(sql: string, quoteIndex: number): boolean {
  */
 function lexTopLevelSqlStatements(
   sql: string,
-): Array<{ sql: string; tokens: string[] }> {
-  const statements: Array<{ sql: string; tokens: string[] }> = [];
+): LexedSqlStatement[] {
+  const statements: LexedSqlStatement[] = [];
   let statementStart = 0;
   let tokens: string[] = [];
   let index = 0;
@@ -285,37 +329,6 @@ function isCreateIndexConcurrently(tokens: string[]): boolean {
     && tokens[indexKeyword + 1] === 'CONCURRENTLY';
 }
 
-function unsupportedTransactionStatement(tokens: string[]): string | null {
-  const [first, second] = tokens;
-
-  if (first === 'VACUUM' || first === 'CLUSTER' || first === 'REINDEX' || first === 'CHECKPOINT') {
-    return tokens.slice(0, 4).join(' ');
-  }
-  if (first === 'DISCARD' && second === 'ALL') return 'DISCARD ALL';
-  if (first === 'ALTER' && second === 'SYSTEM') return 'ALTER SYSTEM';
-  if (first === 'CREATE' && (second === 'DATABASE' || second === 'TABLESPACE' || second === 'SUBSCRIPTION')) {
-    return `CREATE ${second}`;
-  }
-  if (first === 'DROP' && (second === 'DATABASE' || second === 'TABLESPACE' || second === 'SUBSCRIPTION')) {
-    return `DROP ${second}`;
-  }
-  if (first === 'DROP' && second === 'INDEX' && tokens.includes('CONCURRENTLY')) {
-    return 'DROP INDEX CONCURRENTLY';
-  }
-  if (
-    first === 'CREATE'
-    && (
-      second === 'INDEX'
-      || (second === 'UNIQUE' && tokens[2] === 'INDEX')
-    )
-    && tokens.includes('CONCURRENTLY')
-  ) {
-    return tokens.slice(0, 4).join(' ');
-  }
-
-  return null;
-}
-
 function explicitTransactionControlStatement(tokens: string[]): string | null {
   const [first, second, third, fourth] = tokens;
 
@@ -347,62 +360,130 @@ function explicitTransactionControlStatement(tokens: string[]): string | null {
 }
 
 /**
- * Preserve the existing one-query implicit transaction for ordinary migration
- * files. Only files containing CREATE INDEX CONCURRENTLY are segmented, with
- * each concurrent index build sent alone and surrounding statements kept in
- * the largest possible transaction batches.
+ * The only nontransactional migration this runner accepts is the exact 034400
+ * recovery file reviewed with this release. A keyword blacklist is not a
+ * safety boundary: PostgreSQL has many statements that cannot share a
+ * transaction, and accepting an unrecognised one before a later CIC batch can
+ * commit a side effect before the migration is recorded.
+ *
+ * Ordinary files stay one simple-query message. PostgreSQL executes the
+ * statements in one implicit transaction unless the file contains explicit
+ * transaction control. Existing migrations with one outer BEGIN/COMMIT
+ * envelope are preserved; the history CAS is inserted inside that envelope.
  */
-export function planMigrationSql(sql: string): string[] {
+function createMigrationSqlPlan(
+  sql: string,
+  migrationName: string,
+): MigrationSqlPlan {
   const statements = lexTopLevelSqlStatements(sql);
-  const hasConcurrentIndex = statements.some(({ tokens }) => (
-    isCreateIndexConcurrently(tokens)
+  const executable = statements
+    .map((statement, index) => ({ statement, index }))
+    .filter(({ statement }) => statement.tokens.length > 0);
+  const concurrentIndexes = executable.filter(({ statement }) => (
+    isCreateIndexConcurrently(statement.tokens)
   ));
-  const classified = statements.map((statement) => {
-    const { tokens } = statement;
-    const concurrentIndex = isCreateIndexConcurrently(tokens);
-    const unsupported = concurrentIndex ? null : unsupportedTransactionStatement(tokens);
-    if (unsupported) {
-      throw new Error(`Unsupported transaction-incompatible statement: ${unsupported}`);
-    }
-    const transactionControl = hasConcurrentIndex
-      ? explicitTransactionControlStatement(tokens)
-      : null;
-    if (transactionControl) {
+
+  if (concurrentIndexes.length > 0) {
+    const approvedShape = (
+      migrationName === APPROVED_NONTRANSACTIONAL_MIGRATION
+      && sha256(sql) === APPROVED_NONTRANSACTIONAL_SHA256
+      && executable.length === 3
+      && executable[0]?.statement.tokens[0] === 'DO'
+      && isCreateIndexConcurrently(executable[1]?.statement.tokens ?? [])
+      && executable[2]?.statement.tokens[0] === 'DO'
+    );
+
+    if (!approvedShape) {
       throw new Error(
-        `Unsupported explicit transaction control in concurrent-index migration: ${transactionControl}`,
+        `SQL contains CREATE INDEX CONCURRENTLY outside the approved nontransactional migration profile`,
       );
     }
-    return { ...statement, concurrentIndex, executable: tokens.length > 0 };
-  });
 
-  if (!hasConcurrentIndex) {
-    return [sql];
+    return {
+      batches: executable.map(({ statement }) => statement.sql),
+      completion: { mode: 'append-to-last-batch' },
+    };
   }
 
-  const batches: string[] = [];
-  let transactionalBatch = '';
-  let transactionalBatchExecutable = false;
+  const transactionControls = executable
+    .map(({ statement, index }) => ({
+      index,
+      control: explicitTransactionControlStatement(statement.tokens),
+      tokens: statement.tokens,
+    }))
+    .filter((item): item is typeof item & { control: string } => item.control !== null);
 
-  const flushTransactionalBatch = (): void => {
-    if (transactionalBatchExecutable) {
-      batches.push(transactionalBatch);
-    }
-    transactionalBatch = '';
-    transactionalBatchExecutable = false;
+  if (transactionControls.length === 0) {
+    return {
+      batches: [sql],
+      completion: { mode: 'append-to-last-batch' },
+    };
+  }
+
+  const firstExecutableIndex = executable[0]?.index;
+  const lastExecutableIndex = executable.at(-1)?.index;
+  const [opening, closing] = transactionControls;
+  const hasSoleOuterEnvelope = (
+    transactionControls.length === 2
+    && opening?.index === firstExecutableIndex
+    && opening.tokens.length === 1
+    && opening.tokens[0] === 'BEGIN'
+    && closing?.index === lastExecutableIndex
+    && closing.tokens.length === 1
+    && closing.tokens[0] === 'COMMIT'
+  );
+
+  if (!hasSoleOuterEnvelope || closing === undefined) {
+    const controls = transactionControls.map(({ control }) => control).join(', ');
+    throw new Error(
+      `Unsupported top-level transaction control shape: ${controls}`,
+    );
+  }
+
+  return {
+    batches: [sql],
+    completion: {
+      mode: 'before-final-commit',
+      statements,
+      finalCommitIndex: closing.index,
+    },
   };
+}
 
-  for (const item of classified) {
-    if (item.concurrentIndex) {
-      flushTransactionalBatch();
-      batches.push(item.sql);
-    } else {
-      transactionalBatch += item.sql;
-      transactionalBatchExecutable ||= item.executable;
+function materializeMigrationBatches(
+  plan: MigrationSqlPlan,
+  completionSql?: string,
+): string[] {
+  if (!completionSql) return [...plan.batches];
+
+  if (plan.completion.mode === 'append-to-last-batch') {
+    const batches = [...plan.batches];
+    const finalIndex = batches.length - 1;
+    if (finalIndex < 0) {
+      throw new Error('Migration plan contains no executable SQL');
     }
+    batches[finalIndex] = `${batches[finalIndex]}\n${completionSql}`;
+    return batches;
   }
-  flushTransactionalBatch();
 
-  return batches;
+  const { statements, finalCommitIndex } = plan.completion;
+  const beforeCommit = statements
+    .slice(0, finalCommitIndex)
+    .map((statement) => statement.sql)
+    .join('');
+  const finalCommitAndTrailing = statements
+    .slice(finalCommitIndex)
+    .map((statement) => statement.sql)
+    .join('');
+
+  return [`${beforeCommit}\n${completionSql}\n${finalCommitAndTrailing}`];
+}
+
+export function planMigrationSql(
+  sql: string,
+  migrationName = '',
+): string[] {
+  return createMigrationSqlPlan(sql, migrationName).batches;
 }
 
 // ── SQL Execution ───────────────────────────────────────────
@@ -412,53 +493,33 @@ async function executeSql(
   serviceRoleKey: string,
   sql: string,
   migrationName: string,
+  preparedPlan?: MigrationSqlPlan,
+  completionSql?: string,
+  claimProofSql?: string,
 ): Promise<{ success: boolean; error?: string }> {
   let batches: string[];
   try {
-    batches = planMigrationSql(sql);
+    const plan = preparedPlan ?? createMigrationSqlPlan(sql, migrationName);
+    batches = materializeMigrationBatches(plan, completionSql);
   } catch (err) {
     return { success: false, error: `Migration SQL planning error: ${String(err)}` };
   }
 
-  // Strategy 1: Supabase Management API
-  const accessToken = process.env.SUPABASE_ACCESS_TOKEN;
-  const projectRef = extractProjectRef(supabaseUrl);
-
-  if (accessToken && projectRef) {
-    try {
-      for (let index = 0; index < batches.length; index += 1) {
-        const res = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/database/query`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ query: batches[index] }),
-        });
-
-        if (!res.ok) {
-          const errText = await res.text();
-          return {
-            success: false,
-            error: `Management API error (${res.status}) in ${migrationName} batch ${index + 1}/${batches.length}: ${errText}`,
-          };
-        }
-      }
-      return { success: true };
-    } catch (err) {
-      return { success: false, error: `Management API request failed: ${String(err)}` };
-    }
-  }
-
-  // Strategy 2: Direct connection via postgres package + SUPABASE_DB_URL
+  // Prefer the configured direct connection. `postgres.unsafe` with no
+  // parameters uses the PostgreSQL simple-query protocol, so an ordinary
+  // multi-statement batch and its history CAS share one implicit transaction.
+  // One max:1 client serializes 034400's preflight / CIC / postflight; the
+  // approved profile is self-contained and does not depend on cross-batch
+  // session state (important when the URL points at a transaction pooler).
   const dbUrl = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
   if (dbUrl) {
     try {
       const { default: postgres } = await import('postgres');
-      // One backend for every batch preserves session-scoped settings and
-      // advisory locks across the ordinary / CIC / ordinary sequence.
       const sqlClient = postgres(dbUrl, { max: 1 });
       try {
+        if (claimProofSql) {
+          await sqlClient.unsafe(claimProofSql);
+        }
         for (const batch of batches) {
           await sqlClient.unsafe(batch);
         }
@@ -471,16 +532,124 @@ async function executeSql(
     }
   }
 
+  // Fallback: Supabase's raw Management SQL endpoint. Each plan batch is one
+  // request. Ordinary SQL and its history CAS therefore remain in one request,
+  // while the approved CIC profile intentionally uses three idempotent
+  // requests. The current postgres-meta implementation forwards that SQL once
+  // to node-postgres pool.query without parameters (a PostgreSQL Simple Query,
+  // whose multi-statement implicit transaction is server-defined). Direct DB
+  // remains preferred because this endpoint is Beta and that implementation
+  // detail is not a published Supabase transaction guarantee.
+  const accessToken = process.env.SUPABASE_ACCESS_TOKEN;
+  const projectRef = extractProjectRef(supabaseUrl);
+
+  if (accessToken && projectRef) {
+    try {
+      const requests = claimProofSql
+        ? [{ sql: claimProofSql, label: 'claim proof' }, ...batches.map((sql, index) => ({
+          sql,
+          label: `batch ${index + 1}/${batches.length}`,
+        }))]
+        : batches.map((sql, index) => ({
+          sql,
+          label: `batch ${index + 1}/${batches.length}`,
+        }));
+
+      for (const request of requests) {
+        const res = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/database/query`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ query: request.sql }),
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          return {
+            success: false,
+            error: `Management API error (${res.status}) in ${migrationName} ${request.label}: ${errText}`,
+          };
+        }
+      }
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: `Management API request failed: ${String(err)}` };
+    }
+  }
+
   return {
     success: false,
     error: `No database access method available. Set SUPABASE_ACCESS_TOKEN or SUPABASE_DB_URL / DATABASE_URL.`,
   };
 }
 
+/**
+ * Execute runner-owned control SQL against the same target selection used for
+ * migration source. Direct SQL (preferred) or the Management SQL endpoint owns
+ * the database-time CAS; the REST API is only the independent verification
+ * read because an HTTP or socket outcome can be ambiguous after commit.
+ */
+async function executeControlSql(
+  supabaseUrl: string,
+  sql: string,
+  operation: string,
+): Promise<{ success: boolean; error?: string }> {
+  const dbUrl = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
+  if (dbUrl) {
+    try {
+      const { default: postgres } = await import('postgres');
+      const client = postgres(dbUrl, { max: 1 });
+      try {
+        await client.unsafe(sql);
+      } finally {
+        await client.end();
+      }
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: `${operation} direct DB error: ${String(err)}` };
+    }
+  }
+
+  const accessToken = process.env.SUPABASE_ACCESS_TOKEN;
+  const projectRef = extractProjectRef(supabaseUrl);
+  if (accessToken && projectRef) {
+    try {
+      const res = await fetch(
+        `https://api.supabase.com/v1/projects/${projectRef}/database/query`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ query: sql }),
+        },
+      );
+      if (res.ok) return { success: true };
+      return {
+        success: false,
+        error: `${operation} Management API error (${res.status}): ${await responseDetails(res)}`,
+      };
+    } catch (err) {
+      return {
+        success: false,
+        error: `${operation} Management API request failed: ${String(err)}`,
+      };
+    }
+  }
+
+  return {
+    success: false,
+    error: `${operation} has no SQL target; set SUPABASE_ACCESS_TOKEN or SUPABASE_DB_URL / DATABASE_URL`,
+  };
+}
+
 // ── Tracking Table Bootstrap ────────────────────────────────
 
 const BOOTSTRAP_SQL = `
-CREATE TABLE IF NOT EXISTS schema_migrations (
+CREATE TABLE IF NOT EXISTS public.schema_migrations (
   filename    TEXT PRIMARY KEY,
   checksum    TEXT NOT NULL,
   applied_at  TIMESTAMPTZ DEFAULT now(),
@@ -503,59 +672,543 @@ async function ensureTrackingTable(
 
 // ── Fetch Applied Migrations ────────────────────────────────
 
+function historyHeaders(
+  serviceRoleKey: string,
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  return {
+    apikey: serviceRoleKey,
+    Authorization: `Bearer ${serviceRoleKey}`,
+    ...extra,
+  };
+}
+
+function historyUrl(
+  supabaseUrl: string,
+  params: Record<string, string> = {},
+): string {
+  const query = new URLSearchParams(params);
+  const suffix = query.size > 0 ? `?${query.toString()}` : '';
+  return `${supabaseUrl}/rest/v1/schema_migrations${suffix}`;
+}
+
+async function responseDetails(res: Response): Promise<string> {
+  try {
+    return await res.text();
+  } catch {
+    return '';
+  }
+}
+
 async function getAppliedMigrations(
   supabaseUrl: string,
   serviceRoleKey: string,
-): Promise<AppliedMigration[]> {
-  const res = await fetch(
-    `${supabaseUrl}/rest/v1/schema_migrations?select=filename,checksum,success&order=filename.asc`,
-    {
-      headers: {
-        apikey: serviceRoleKey,
-        Authorization: `Bearer ${serviceRoleKey}`,
-      },
-    },
-  );
+): Promise<{ success: boolean; rows: AppliedMigration[]; error?: string }> {
+  try {
+    const res = await fetch(
+      historyUrl(supabaseUrl, {
+        select: 'filename,checksum,success,applied_at,duration_ms',
+        order: 'filename.asc',
+      }),
+      { headers: historyHeaders(serviceRoleKey) },
+    );
 
-  if (!res.ok) {
-    // Table might not exist yet (pre-bootstrap)
-    return [];
+    if (!res.ok) {
+      return {
+        success: false,
+        rows: [],
+        error: `Migration history read failed (${res.status}): ${await responseDetails(res)}`,
+      };
+    }
+
+    return { success: true, rows: (await res.json()) as AppliedMigration[] };
+  } catch (err) {
+    return {
+      success: false,
+      rows: [],
+      error: `Migration history read failed: ${String(err)}`,
+    };
   }
-
-  return (await res.json()) as AppliedMigration[];
 }
 
-// ── Record Migration ────────────────────────────────────────
-
-async function recordMigration(
+async function readMigrationHistoryRow(
   supabaseUrl: string,
   serviceRoleKey: string,
   filename: string,
-  checksum: string,
-  durationMs: number,
-  success: boolean,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<HistoryReadResult> {
   try {
-    const res = await fetch(`${supabaseUrl}/rest/v1/schema_migrations?on_conflict=filename`, {
-      method: 'POST',
-      headers: {
-        apikey: serviceRoleKey,
-        Authorization: `Bearer ${serviceRoleKey}`,
-        'Content-Type': 'application/json',
-        Prefer: 'resolution=merge-duplicates',
-      },
-      body: JSON.stringify({ filename, checksum, duration_ms: durationMs, success }),
-    });
+    const res = await fetch(
+      historyUrl(supabaseUrl, {
+        select: 'filename,checksum,success,applied_at,duration_ms',
+        filename: `eq.${filename}`,
+        limit: '1',
+      }),
+      { headers: historyHeaders(serviceRoleKey) },
+    );
 
-    if (res.ok) return { success: true };
+    if (!res.ok) {
+      return {
+        success: false,
+        error: `Migration history row read failed (${res.status}): ${await responseDetails(res)}`,
+      };
+    }
 
-    const details = await res.text();
+    const rows = (await res.json()) as AppliedMigration[];
+    if (rows.length > 1) {
+      return {
+        success: false,
+        error: `Migration history row read returned ${rows.length} rows for ${filename}`,
+      };
+    }
+    return { success: true, row: rows[0] };
+  } catch (err) {
     return {
       success: false,
-      error: `Migration history upsert failed (${res.status}): ${details}`,
+      error: `Migration history row read failed: ${String(err)}`,
+    };
+  }
+}
+
+function checksumEncodings(sql: string): {
+  canonical: string;
+  compatible: Set<string>;
+} {
+  const canonical = sha256(sql);
+  const raw = createHash('sha256').update(sql, 'utf-8').digest('hex');
+  const crlf = createHash('sha256')
+    .update(sql.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n'), 'utf-8')
+    .digest('hex');
+  return { canonical, compatible: new Set([canonical, raw, crlf]) };
+}
+
+function parseClaimToken(
+  checksum: string,
+): { canonical: string; owner: string } | null {
+  const match = checksum.match(
+    /^claim:v1:([a-f0-9]{64}):([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i,
+  );
+  return match ? { canonical: match[1].toLowerCase(), owner: match[2] } : null;
+}
+
+async function writeHistoryClaim(
+  supabaseUrl: string,
+  filename: string,
+  claimToken: string,
+  expected?: AppliedMigration,
+): Promise<string | undefined> {
+  const existingClaim = expected ? parseClaimToken(expected.checksum) : null;
+  const statement = expected
+    ? `
+UPDATE public.schema_migrations
+   SET checksum = ${sqlLiteral(claimToken)},
+       applied_at = now(),
+       duration_ms = 0,
+       success = false
+ WHERE filename = ${sqlLiteral(filename)}
+   AND checksum = ${sqlLiteral(expected.checksum)}
+   AND success = false
+   ${existingClaim ? `AND applied_at < now() - interval '${CLAIM_LEASE_MS / 60_000} minutes'` : ''};
+`
+    : `
+INSERT INTO public.schema_migrations (
+  filename,
+  checksum,
+  applied_at,
+  duration_ms,
+  success
+)
+VALUES (
+  ${sqlLiteral(filename)},
+  ${sqlLiteral(claimToken)},
+  now(),
+  0,
+  false
+)
+ON CONFLICT (filename) DO NOTHING;
+`;
+
+  const result = await executeControlSql(
+    supabaseUrl,
+    statement,
+    'Migration claim write',
+  );
+  return result.success ? undefined : result.error;
+}
+
+function classifyClaimVerification(
+  row: AppliedMigration | undefined,
+  canonical: string,
+  compatible: Set<string>,
+  ownedToken: string,
+  writeError?: string,
+): ClaimResult {
+  if (row?.checksum === ownedToken && row.success === false) {
+    return { status: 'acquired', token: ownedToken };
+  }
+  if (row?.success) {
+    if (compatible.has(row.checksum)) return { status: 'success' };
+    return {
+      status: 'drift',
+      error: `Successful migration history checksum does not match current content`,
+    };
+  }
+  if (!row) {
+    return {
+      status: 'error',
+      error: writeError ?? 'Migration claim was not persisted',
+    };
+  }
+
+  const claim = parseClaimToken(row.checksum);
+  if (claim) {
+    if (claim.canonical !== canonical) {
+      return {
+        status: 'drift',
+        error: `Claimed migration history checksum does not match current content`,
+      };
+    }
+    return {
+      status: 'busy',
+      error: `Migration is claimed by another runner`,
+    };
+  }
+
+  if (!compatible.has(row.checksum)) {
+    return {
+      status: 'drift',
+      error: `Failed migration history checksum does not match current content`,
+    };
+  }
+
+  return {
+    status: 'error',
+    error: writeError ?? 'Migration claim compare-and-set did not acquire the row',
+  };
+}
+
+async function acquireMigrationClaim(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  filename: string,
+  canonical: string,
+  compatible: Set<string>,
+): Promise<ClaimResult> {
+  const read = await readMigrationHistoryRow(supabaseUrl, serviceRoleKey, filename);
+  if (!read.success) return { status: 'error', error: read.error };
+
+  const current = read.row;
+  if (current?.success) {
+    return compatible.has(current.checksum)
+      ? { status: 'success' }
+      : {
+        status: 'drift',
+        error: `Successful migration history checksum does not match current content`,
+      };
+  }
+
+  if (current) {
+    const existingClaim = parseClaimToken(current.checksum);
+    if (existingClaim) {
+      if (existingClaim.canonical !== canonical) {
+        return {
+          status: 'drift',
+          error: `Claimed migration history checksum does not match current content`,
+        };
+      }
+    } else if (!compatible.has(current.checksum)) {
+      return {
+        status: 'drift',
+        error: `Failed migration history checksum does not match current content`,
+      };
+    }
+  }
+
+  const ownedToken = `${CLAIM_PREFIX}${canonical}:${randomUUID()}`;
+  const writeError = await writeHistoryClaim(
+    supabaseUrl,
+    filename,
+    ownedToken,
+    current,
+  );
+
+  // SQL-side claim writes are deliberately treated as ambiguous. A timeout can
+  // arrive after the database committed the CAS, while a successful transport
+  // response does not prove the predicate matched. Only an exact owner-token
+  // REST reread authorizes source SQL execution.
+  const verified = await readMigrationHistoryRow(
+    supabaseUrl,
+    serviceRoleKey,
+    filename,
+  );
+  if (!verified.success) {
+    return {
+      status: 'error',
+      error: `${writeError ? `${writeError}; ` : ''}${verified.error}`,
+    };
+  }
+
+  return classifyClaimVerification(
+    verified.row,
+    canonical,
+    compatible,
+    ownedToken,
+    writeError,
+  );
+}
+
+function sqlLiteral(value: string): string {
+  if (value.includes('\0')) {
+    throw new Error('SQL literal cannot contain a NUL byte');
+  }
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function buildMigrationCompletionSql(
+  filename: string,
+  canonical: string,
+  claimToken: string,
+): string {
+  return `
+DO $migration_runner_history$
+BEGIN
+  UPDATE public.schema_migrations
+     SET checksum = ${sqlLiteral(canonical)},
+         applied_at = now(),
+         duration_ms = 0,
+         success = true
+   WHERE filename = ${sqlLiteral(filename)}
+     AND checksum = ${sqlLiteral(claimToken)}
+     AND success = false;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Migration history claim was lost before commit';
+  END IF;
+END
+$migration_runner_history$;
+`.trim();
+}
+
+function buildMigrationClaimProofSql(
+  filename: string,
+  claimToken: string,
+): string {
+  return `
+DO $migration_runner_claim_proof$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM public.schema_migrations
+     WHERE filename = ${sqlLiteral(filename)}
+       AND checksum = ${sqlLiteral(claimToken)}
+       AND success = false
+  ) THEN
+    RAISE EXCEPTION 'Migration claim is not present on the selected SQL target';
+  END IF;
+END
+$migration_runner_claim_proof$;
+`.trim();
+}
+
+async function renewMigrationClaim(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  filename: string,
+  claimToken: string,
+  canonical: string,
+): Promise<{ success: boolean; error?: string }> {
+  const write = await executeControlSql(
+    supabaseUrl,
+    `
+UPDATE public.schema_migrations
+   SET applied_at = now()
+ WHERE filename = ${sqlLiteral(filename)}
+   AND checksum = ${sqlLiteral(claimToken)}
+   AND success = false;
+`,
+    'Migration claim heartbeat',
+  );
+  const writeError = write.success ? undefined : write.error;
+
+  const verified = await readMigrationHistoryRow(
+    supabaseUrl,
+    serviceRoleKey,
+    filename,
+  );
+  if (!verified.success) {
+    return {
+      success: false,
+      error: `${writeError ? `${writeError}; ` : ''}${verified.error}`,
+    };
+  }
+  if (
+    (verified.row?.checksum === claimToken && verified.row.success === false)
+    || (verified.row?.checksum === canonical && verified.row.success === true)
+  ) {
+    return { success: true };
+  }
+  return {
+    success: false,
+    error: writeError ?? 'Migration claim heartbeat lost ownership',
+  };
+}
+
+function startClaimHeartbeat(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  filename: string,
+  claimToken: string,
+  canonical: string,
+): { stop: () => Promise<string | undefined> } {
+  let heartbeatError: string | undefined;
+  let heartbeatInFlight = Promise.resolve();
+  const timer = setInterval(() => {
+    heartbeatInFlight = heartbeatInFlight.then(async () => {
+      if (heartbeatError) return;
+      const renewed = await renewMigrationClaim(
+        supabaseUrl,
+        serviceRoleKey,
+        filename,
+        claimToken,
+        canonical,
+      );
+      if (!renewed.success) heartbeatError = renewed.error;
+    });
+  }, CLAIM_HEARTBEAT_MS);
+  timer.unref?.();
+
+  return {
+    stop: async () => {
+      clearInterval(timer);
+      await heartbeatInFlight;
+      return heartbeatError;
+    },
+  };
+}
+
+async function releaseMigrationClaim(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  filename: string,
+  canonical: string,
+  claimToken: string,
+  durationMs: number,
+): Promise<{ status: 'released' | 'success' | 'lost' | 'error'; error?: string }> {
+  const write = await executeControlSql(
+    supabaseUrl,
+    `
+UPDATE public.schema_migrations
+   SET checksum = ${sqlLiteral(canonical)},
+       applied_at = now(),
+       duration_ms = ${Math.max(0, Math.trunc(durationMs))},
+       success = false
+ WHERE filename = ${sqlLiteral(filename)}
+   AND checksum = ${sqlLiteral(claimToken)}
+   AND success = false;
+`,
+    'Migration claim release',
+  );
+  const writeError = write.success ? undefined : write.error;
+
+  const verified = await readMigrationHistoryRow(
+    supabaseUrl,
+    serviceRoleKey,
+    filename,
+  );
+  if (!verified.success) {
+    return {
+      status: 'error',
+      error: `${writeError ? `${writeError}; ` : ''}${verified.error}`,
+    };
+  }
+  if (verified.row?.success && verified.row.checksum === canonical) {
+    return { status: 'success' };
+  }
+  if (!verified.row?.success && verified.row?.checksum === canonical) {
+    return { status: 'released' };
+  }
+  if (verified.row?.checksum !== claimToken) {
+    return {
+      status: 'lost',
+      error: writeError ?? 'Migration claim was replaced before failure could be recorded',
+    };
+  }
+  return {
+    status: 'error',
+    error: writeError ?? 'Migration claim release compare-and-set affected no row',
+  };
+}
+
+async function canonicalizeSuccessfulChecksum(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  filename: string,
+  storedChecksum: string,
+  canonical: string,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const res = await fetch(
+      historyUrl(supabaseUrl, {
+        filename: `eq.${filename}`,
+        checksum: `eq.${storedChecksum}`,
+        success: 'eq.true',
+      }),
+      {
+        method: 'PATCH',
+        headers: historyHeaders(serviceRoleKey, {
+          'Content-Type': 'application/json',
+          Prefer: 'return=representation',
+        }),
+        body: JSON.stringify({ checksum: canonical }),
+      },
+    );
+    if (res.ok) return { success: true };
+    return {
+      success: false,
+      error: `Checksum canonicalization failed (${res.status}): ${await responseDetails(res)}`,
     };
   } catch (err) {
-    return { success: false, error: `Migration history upsert failed: ${String(err)}` };
+    return {
+      success: false,
+      error: `Checksum canonicalization failed: ${String(err)}`,
+    };
+  }
+}
+
+async function recordSuccessfulDuration(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  filename: string,
+  canonical: string,
+  durationMs: number,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const res = await fetch(
+      historyUrl(supabaseUrl, {
+        filename: `eq.${filename}`,
+        checksum: `eq.${canonical}`,
+        success: 'eq.true',
+      }),
+      {
+        method: 'PATCH',
+        headers: historyHeaders(serviceRoleKey, {
+          'Content-Type': 'application/json',
+          Prefer: 'return=representation',
+        }),
+        body: JSON.stringify({
+          duration_ms: Math.max(0, Math.trunc(durationMs)),
+        }),
+      },
+    );
+    if (res.ok) return { success: true };
+    return {
+      success: false,
+      error: `Migration duration update failed (${res.status}): ${await responseDetails(res)}`,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: `Migration duration update failed: ${String(err)}`,
+    };
   }
 }
 
@@ -582,13 +1235,19 @@ export async function runMigrations(): Promise<MigrationResult> {
   // Bootstrap tracking table
   const bootstrapped = await ensureTrackingTable(supabaseUrl, serviceRoleKey);
   if (!bootstrapped) {
-    log.warn('️  Could not bootstrap tracking table — falling back to legacy check');
-    return await runLegacyMigrations(supabaseUrl, serviceRoleKey);
+    const error = 'Could not bootstrap migration tracking table; refusing to execute untracked SQL';
+    log.error(error);
+    return { ran: false, applied: [], skipped: [], errors: [error], checksumDrift: [] };
   }
 
   // Load already-applied migrations
-  const applied = await getAppliedMigrations(supabaseUrl, serviceRoleKey);
-  const appliedMap = new Map(applied.map((m) => [m.filename, m]));
+  const appliedRead = await getAppliedMigrations(supabaseUrl, serviceRoleKey);
+  if (!appliedRead.success) {
+    const error = `${appliedRead.error}; refusing to execute SQL without durable history`;
+    log.error(error);
+    return { ran: false, applied: [], skipped: [], errors: [error], checksumDrift: [] };
+  }
+  const appliedMap = new Map(appliedRead.rows.map((m) => [m.filename, m]));
 
   // Find migration files
   let migrationsDir: string;
@@ -615,7 +1274,8 @@ export async function runMigrations(): Promise<MigrationResult> {
 
   for (const file of files) {
     const sql = readFileSync(join(migrationsDir, file), 'utf-8');
-    const checksum = sha256(sql);
+    const { canonical: checksum, compatible: compatibleChecksums } =
+      checksumEncodings(sql);
 
     const existing = appliedMap.get(file);
 
@@ -637,18 +1297,13 @@ export async function runMigrations(): Promise<MigrationResult> {
       // itself once per database. Only content that matches no encoding of
       // itself is real drift, which keeps the warning meaning what it says.
       if (existing.checksum !== checksum) {
-        const legacyHashes = [
-          createHash('sha256').update(sql, 'utf-8').digest('hex'),
-          createHash('sha256').update(sql.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n'), 'utf-8').digest('hex'),
-        ];
-        if (legacyHashes.includes(existing.checksum)) {
-          const historyResult = await recordMigration(
+        if (compatibleChecksums.has(existing.checksum)) {
+          const historyResult = await canonicalizeSuccessfulChecksum(
             supabaseUrl,
             serviceRoleKey,
             file,
+            existing.checksum,
             checksum,
-            0,
-            true,
           );
           if (historyResult.success) {
             log.info(`Checksum record upgraded to canonical form: ${file}`);
@@ -664,50 +1319,140 @@ export async function runMigrations(): Promise<MigrationResult> {
       continue;
     }
 
-    if (existing) {
-      log.warn(`Retrying previously failed migration: ${file}`);
+    let plan: MigrationSqlPlan;
+    try {
+      plan = createMigrationSqlPlan(sql, file);
+    } catch (err) {
+      const error = `${file}: Migration SQL planning error: ${String(err)}`;
+      result.errors.push(error);
+      log.error(error);
+      break;
     }
 
-    // Run this migration
+    if (existing && !parseClaimToken(existing.checksum) && !compatibleChecksums.has(existing.checksum)) {
+      const error = `${file}: Failed migration history checksum does not match current content`;
+      result.checksumDrift.push(file);
+      result.errors.push(error);
+      log.error(error);
+      break;
+    }
+
+    const claim = await acquireMigrationClaim(
+      supabaseUrl,
+      serviceRoleKey,
+      file,
+      checksum,
+      compatibleChecksums,
+    );
+    if (claim.status === 'success') {
+      result.skipped.push(file);
+      appliedMap.set(file, { filename: file, checksum, success: true });
+      continue;
+    }
+    if (claim.status === 'drift') {
+      const error = `${file}: ${claim.error ?? 'Migration history checksum drift'}`;
+      result.checksumDrift.push(file);
+      result.errors.push(error);
+      log.error(error);
+      break;
+    }
+    if (claim.status !== 'acquired') {
+      const error = `${file}: ${claim.error ?? 'Could not acquire migration claim'}`;
+      result.errors.push(error);
+      log.error(error);
+      break;
+    }
+
+    if (existing) log.warn(`Retrying previously failed migration: ${file}`);
+
+    // Execute only after the exact owner token is visible. The completion CAS
+    // is part of the final SQL transaction/batch, so ordinary migration
+    // effects cannot commit without durable success history.
     log.info(`Running ${file}...`);
     result.ran = true;
     const startMs = Date.now();
-
-    const execResult = await executeSql(supabaseUrl, serviceRoleKey, sql, file);
+    const heartbeat = startClaimHeartbeat(
+      supabaseUrl,
+      serviceRoleKey,
+      file,
+      claim.token,
+      checksum,
+    );
+    const completionSql = buildMigrationCompletionSql(
+      file,
+      checksum,
+      claim.token,
+    );
+    const claimProofSql = buildMigrationClaimProofSql(file, claim.token);
+    const execResult = await executeSql(
+      supabaseUrl,
+      serviceRoleKey,
+      sql,
+      file,
+      plan,
+      completionSql,
+      claimProofSql,
+    );
     const durationMs = Date.now() - startMs;
+    const heartbeatError = await heartbeat.stop();
 
     if (execResult.success) {
-      const historyResult = await recordMigration(
+      result.applied.push(file);
+      appliedMap.set(file, { filename: file, checksum, success: true });
+      log.info(`${file} (${durationMs}ms)`);
+      const durationResult = await recordSuccessfulDuration(
         supabaseUrl,
         serviceRoleKey,
         file,
         checksum,
         durationMs,
-        true,
       );
-      if (historyResult.success) {
-        result.applied.push(file);
-        log.info(`${file} (${durationMs}ms)`);
-      } else {
-        const error = `${file}: migration applied but ${historyResult.error}`;
-        result.errors.push(error);
-        log.error(error);
-        break;
+      if (!durationResult.success) {
+        log.warn(`${file}: ${durationResult.error}`);
+      }
+      if (heartbeatError) {
+        log.warn(`${file}: heartbeat reported before atomic completion: ${heartbeatError}`);
       }
     } else {
-      result.errors.push(`${file}: ${execResult.error}`);
-      const historyResult = await recordMigration(
+      const released = await releaseMigrationClaim(
         supabaseUrl,
         serviceRoleKey,
         file,
         checksum,
+        claim.token,
         durationMs,
-        false,
       );
-      if (!historyResult.success) {
-        result.errors.push(`${file}: ${historyResult.error}`);
+
+      // A response can be lost after the final transaction commits. The exact
+      // CAS reread distinguishes that from a real execution failure.
+      if (released.status === 'success') {
+        result.applied.push(file);
+        appliedMap.set(file, { filename: file, checksum, success: true });
+        log.info(`${file} (${durationMs}ms; success confirmed after ambiguous response)`);
+        const durationResult = await recordSuccessfulDuration(
+          supabaseUrl,
+          serviceRoleKey,
+          file,
+          checksum,
+          durationMs,
+        );
+        if (!durationResult.success) {
+          log.warn(`${file}: ${durationResult.error}`);
+        }
+        continue;
       }
-      log.error(`${file}: ${execResult.error}`);
+
+      const executionError = `${file}: ${execResult.error}`;
+      result.errors.push(executionError);
+      if (released.status === 'error') {
+        result.errors.push(`${file}: ${released.error}`);
+      } else if (released.status === 'lost') {
+        result.errors.push(`${file}: ${released.error}`);
+      }
+      if (heartbeatError) {
+        result.errors.push(`${file}: ${heartbeatError}`);
+      }
+      log.error(executionError);
       break; // Stop on first error — migrations are ordered
     }
   }
@@ -720,59 +1465,6 @@ export async function runMigrations(): Promise<MigrationResult> {
 
   if (result.checksumDrift.length > 0) {
     log.warn(`️  ${result.checksumDrift.length} file(s) changed after being applied — review manually`);
-  }
-
-  return result;
-}
-
-// ── Legacy Fallback ─────────────────────────────────────────
-
-/**
- * Fallback migration runner for when the tracking table can't be created.
- * Checks for guild table existence (original behavior) but runs ALL migrations
- * if the DB appears uninitialized.
- */
-async function runLegacyMigrations(
-  supabaseUrl: string,
-  serviceRoleKey: string,
-): Promise<MigrationResult> {
-  const res = await fetch(`${supabaseUrl}/rest/v1/guild?select=id&limit=0`, {
-    headers: {
-      apikey: serviceRoleKey,
-      Authorization: `Bearer ${serviceRoleKey}`,
-    },
-  });
-
-  if (res.ok) {
-    log.info('Database already initialized (legacy check) — skipping');
-    return { ran: false, applied: [], skipped: [], errors: [], checksumDrift: [] };
-  }
-
-  let migrationsDir: string;
-  try {
-    migrationsDir = findMigrationsDir();
-  } catch (err) {
-    return { ran: false, applied: [], skipped: [], errors: [(err as Error).message], checksumDrift: [] };
-  }
-
-  const files = readdirSync(migrationsDir)
-    .filter((f) => f.endsWith('.sql'))
-    .sort();
-
-  const result: MigrationResult = { ran: true, applied: [], skipped: [], errors: [], checksumDrift: [] };
-
-  for (const file of files) {
-    const sql = readFileSync(join(migrationsDir, file), 'utf-8');
-    const execResult = await executeSql(supabaseUrl, serviceRoleKey, sql, file);
-
-    if (execResult.success) {
-      result.applied.push(file);
-      log.info(`${file}`);
-    } else {
-      result.errors.push(`${file}: ${execResult.error}`);
-      log.error(`${file}: ${execResult.error}`);
-      break;
-    }
   }
 
   return result;
