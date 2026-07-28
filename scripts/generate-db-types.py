@@ -555,7 +555,100 @@ def parse_drop_table(sql: str):
 
 
 PLPGSQL_WORD_RE = re.compile(r"(?:[^\W\d]|_)(?:\w|\$)*")
-DOLLAR_QUOTE_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+DOLLAR_QUOTE_RE = re.compile(r"\$(?:(?:[^\W\d]|_)\w*)?\$")
+PLPGSQL_LABEL_RE = re.compile(
+    rf"<<\s*{PG_IDENTIFIER_PATTERN}\s*>>"
+)
+
+
+def split_sql_statements(content: str) -> list[str]:
+    """Split migration SQL outside quoted values and comments."""
+    statements = []
+    current = []
+    i = 0
+
+    while i < len(content):
+        ch = content[i]
+        next_ch = content[i + 1] if i + 1 < len(content) else ""
+
+        if ch in ("'", '"'):
+            quote = ch
+            current.append(ch)
+            i += 1
+            while i < len(content):
+                current.append(content[i])
+                if (
+                    content[i] == quote
+                    and i + 1 < len(content)
+                    and content[i + 1] == quote
+                ):
+                    current.append(content[i + 1])
+                    i += 2
+                    continue
+                if content[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            continue
+
+        if ch == "$":
+            delimiter = DOLLAR_QUOTE_RE.match(content, i)
+            if delimiter is not None:
+                delimiter_text = delimiter.group(0)
+                closing = content.find(delimiter_text, delimiter.end())
+                if closing < 0:
+                    current.append(content[i:])
+                    i = len(content)
+                else:
+                    quote_end = closing + len(delimiter_text)
+                    current.append(content[i:quote_end])
+                    i = quote_end
+                continue
+
+        if ch == "-" and next_ch == "-":
+            i += 2
+            while i < len(content) and content[i] not in "\r\n":
+                i += 1
+            current.append("\n")
+            if i < len(content) and content[i] == "\r":
+                i += 1
+            if i < len(content) and content[i] == "\n":
+                i += 1
+            continue
+
+        if ch == "/" and next_ch == "*":
+            depth = 1
+            newline_count = 0
+            i += 2
+            while i < len(content) and depth:
+                if content.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif content.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    if content[i] == "\n":
+                        newline_count += 1
+                    i += 1
+            current.append("\n" * newline_count if newline_count else " ")
+            continue
+
+        if ch == ";":
+            statement = "".join(current).strip()
+            if statement:
+                statements.append(statement)
+            current = []
+            i += 1
+            continue
+
+        current.append(ch)
+        i += 1
+
+    statement = "".join(current).strip()
+    if statement:
+        statements.append(statement)
+    return statements
 
 
 def tokenize_plpgsql(body: str) -> list[tuple[str, str, int, int]]:
@@ -564,6 +657,23 @@ def tokenize_plpgsql(body: str) -> list[tuple[str, str, int, int]]:
     i = 0
     while i < len(body):
         ch = body[i]
+        if body.startswith("--", i):
+            newline = body.find("\n", i + 2)
+            i = len(body) if newline < 0 else newline + 1
+            continue
+        if body.startswith("/*", i):
+            depth = 1
+            i += 2
+            while i < len(body) and depth:
+                if body.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif body.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            continue
         if ch == "'":
             i += 1
             while i < len(body):
@@ -594,6 +704,12 @@ def tokenize_plpgsql(body: str) -> list[tuple[str, str, int, int]]:
                 if closing >= 0:
                     i = closing + len(delimiter_text)
                     continue
+        if ch == "<":
+            label = PLPGSQL_LABEL_RE.match(body, i)
+            if label is not None:
+                tokens.append(("label", label.group(0), i, label.end()))
+                i = label.end()
+                continue
         if ch == ";":
             tokens.append(("semicolon", ch, i, i + 1))
             i += 1
@@ -640,11 +756,13 @@ SCHEMA_COLUMN_PREDICATE_RE = re.compile(
 )
 
 
-def schema_guard_models_column_action(condition: str, alter_sql: str) -> bool:
-    """Recognize the generator's narrow clean-chain ADD/DROP guard model."""
+def parse_schema_column_guard(
+    condition: str,
+) -> tuple[bool, dict[str, str]] | None:
+    """Parse the narrow information_schema column-existence guard model."""
     guard = SCHEMA_COLUMN_GUARD_RE.fullmatch(condition)
     if guard is None:
-        return False
+        return None
 
     predicates = {}
     for raw_predicate in re.split(
@@ -654,59 +772,152 @@ def schema_guard_models_column_action(condition: str, alter_sql: str) -> bool:
     ):
         predicate = SCHEMA_COLUMN_PREDICATE_RE.fullmatch(raw_predicate.strip())
         if predicate is None:
-            return False
+            return None
         field = predicate.group("field").lower()
         if field in predicates:
-            return False
+            return None
         predicates[field] = predicate.group("value").replace("''", "'")
 
     if not {"table_name", "column_name"}.issubset(predicates):
-        return False
+        return None
+    return guard.group("negated") is not None, predicates
+
+
+def match_schema_column_guard_target(
+    condition: str,
+    alter_sql: str,
+) -> tuple[bool, Table, str, str] | None:
+    """Match a schema guard to one supported ALTER COLUMN target."""
+    guard = parse_schema_column_guard(condition)
+    if guard is None:
+        return None
+    negated, predicates = guard
 
     matched = match_alter_table(alter_sql)
     if matched is None:
-        return False
+        return None
     schema_name, table, body = matched
     clauses = split_top_level(body)
     if len(clauses) != 1 or table.name != predicates["table_name"]:
-        return False
+        return None
 
     guard_schema = predicates.get("table_schema")
     if (
         (schema_name is None and guard_schema is not None)
         or (schema_name is not None and schema_name != guard_schema)
     ):
-        return False
+        return None
 
     clause = clauses[0]
-    if guard.group("negated") is not None:
+    column_match = None
+    for prefix in (
+        r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?",
+        r"DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?",
+        r"ALTER\s+COLUMN\s+",
+    ):
         column_match = match_clause_column(
+            clause,
+            prefix,
+        )
+        if column_match is not None:
+            break
+    if (
+        column_match is None
+        or column_match[0] != predicates["column_name"]
+    ):
+        return None
+    return negated, table, predicates["column_name"], clause
+
+
+def schema_guard_models_column_action(condition: str, alter_sql: str) -> bool:
+    """Recognize the generator's narrow clean-chain ADD/DROP guard model."""
+    target = match_schema_column_guard_target(condition, alter_sql)
+    if target is None:
+        return False
+    negated, _, _, clause = target
+    if negated:
+        action = match_clause_column(
             clause,
             r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?",
         )
     else:
-        column_match = match_clause_column(
+        action = match_clause_column(
             clause,
             r"DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?",
         )
-    return (
-        column_match is not None
-        and column_match[0] == predicates["column_name"]
-    )
+    return action is not None
 
 
-def procedural_path_allows_alter(frames: list[dict], alter_sql: str) -> bool:
-    """Require branch proof, except for the narrow clean-chain ADD/DROP model."""
+def schema_guard_condition_truth(
+    condition: str,
+    alter_sql: str,
+) -> bool | None:
+    """Evaluate a matched column-existence guard against the current model."""
+    target = match_schema_column_guard_target(condition, alter_sql)
+    if target is None:
+        return None
+    negated, table, column_name, _ = target
+    exists = table.has_column(column_name)
+    return not exists if negated else exists
+
+
+def capture_procedural_path(
+    frames: list[dict],
+    alter_sql: str,
+) -> list[dict]:
+    """Freeze the candidate's branch while retaining alternate-branch flags."""
+    path = []
     for frame in frames:
         if frame["kind"] == "block":
             continue
+        entry = {"kind": frame["kind"]}
         if frame["kind"] == "if":
-            if frame["active"]:
+            condition_truths = []
+            for condition in frame["conditions"]:
+                truth = literal_plpgsql_condition(condition)
+                if truth is None:
+                    truth = schema_guard_condition_truth(
+                        condition,
+                        alter_sql,
+                    )
+                condition_truths.append(truth)
+            entry.update(
+                {
+                    "frame": frame,
+                    "branch": frame["branch"],
+                    "branch_index": frame["branch_index"],
+                    "condition_truths": condition_truths,
+                }
+            )
+        path.append(entry)
+    return path
+
+
+def procedural_path_allows_alter(path: list[dict], alter_sql: str) -> bool:
+    """Require branch proof, except for the narrow clean-chain ADD/DROP model."""
+    for entry in path:
+        if entry["kind"] == "if":
+            truths = entry["condition_truths"]
+            branch = entry["branch"]
+            branch_index = entry["branch_index"]
+            if branch == "else":
+                branch_selected = all(truth is False for truth in truths)
+            else:
+                branch_selected = (
+                    branch_index is not None
+                    and all(
+                        truth is False
+                        for truth in truths[:branch_index]
+                    )
+                    and truths[branch_index] is True
+                )
+            if branch_selected:
                 continue
             if (
-                frame["branch"] == "then"
+                branch == "then"
+                and not entry["frame"]["has_alternate"]
                 and schema_guard_models_column_action(
-                    frame["condition"],
+                    entry["frame"]["conditions"][0],
                     alter_sql,
                 )
             ):
@@ -723,13 +934,21 @@ def pop_control_frame(frames: list[dict], kind: str):
             return
 
 
+def nearest_conditional_frame(frames: list[dict]) -> dict | None:
+    """Return the innermost IF or CASE that can own ELSE/ELSIF."""
+    for frame in reversed(frames):
+        if frame["kind"] in ("if", "case"):
+            return frame
+    return None
+
+
 def process_do_block(stmt: str):
     """Conservatively apply supported ALTERs inside a procedural DO block.
 
-    ALTER COLUMN nullability is accepted only on direct or literal-selected
-    paths outside loops, CASE statements, and exception-bearing blocks. The
-    existing clean-chain model for canonical ADD/DROP column existence guards
-    remains so the snapshot does not lose long-standing intended columns.
+    ALTER COLUMN nullability is accepted only on direct, literal-selected, or
+    matched schema-guard paths outside loops, CASE statements, and
+    exception-bearing blocks. The existing clean-chain model for canonical
+    ADD/DROP column guards remains only when the IF has no alternate branch.
     """
     delimiter = DOLLAR_QUOTE_RE.search(stmt)
     if delimiter is None:
@@ -750,6 +969,9 @@ def process_do_block(stmt: str):
         token_type, value, start, end = tokens[i]
         if token_type == "semicolon":
             at_statement_start = True
+            i += 1
+            continue
+        if token_type == "label":
             i += 1
             continue
         if not at_statement_start:
@@ -778,14 +1000,13 @@ def process_do_block(stmt: str):
             if then_index >= len(tokens):
                 return
             condition = body[end:tokens[then_index][2]]
-            truth = literal_plpgsql_condition(condition)
             frames.append(
                 {
                     "kind": "if",
-                    "condition": condition,
-                    "truth": truth,
-                    "active": truth is True,
+                    "conditions": [condition],
                     "branch": "then",
+                    "branch_index": 0,
+                    "has_alternate": False,
                 }
             )
             i = then_index + 1
@@ -793,27 +1014,33 @@ def process_do_block(stmt: str):
             continue
 
         if value == "ELSIF":
-            for frame in reversed(frames):
-                if frame["kind"] == "if":
-                    frame["active"] = False
-                    frame["branch"] = "elsif"
-                    break
             then_index = i + 1
             while (
                 then_index < len(tokens)
                 and tokens[then_index][1] != "THEN"
             ):
                 then_index += 1
+            if then_index >= len(tokens):
+                return
+            condition = body[end:tokens[then_index][2]]
+            conditional = nearest_conditional_frame(frames)
+            if conditional is not None and conditional["kind"] == "if":
+                conditional["conditions"].append(condition)
+                conditional["branch"] = "elsif"
+                conditional["branch_index"] = (
+                    len(conditional["conditions"]) - 1
+                )
+                conditional["has_alternate"] = True
             i = then_index + 1
             at_statement_start = True
             continue
 
         if value == "ELSE":
-            for frame in reversed(frames):
-                if frame["kind"] == "if":
-                    frame["active"] = frame["truth"] is False
-                    frame["branch"] = "else"
-                    break
+            conditional = nearest_conditional_frame(frames)
+            if conditional is not None and conditional["kind"] == "if":
+                conditional["branch"] = "else"
+                conditional["branch_index"] = None
+                conditional["has_alternate"] = True
             i += 1
             at_statement_start = True
             continue
@@ -825,19 +1052,19 @@ def process_do_block(stmt: str):
                 and tokens[loop_index][1] != "LOOP"
             ):
                 loop_index += 1
-            frames.append({"kind": "loop", "active": False})
+            frames.append({"kind": "loop"})
             i = loop_index + 1
             at_statement_start = True
             continue
 
         if value == "LOOP":
-            frames.append({"kind": "loop", "active": False})
+            frames.append({"kind": "loop"})
             i += 1
             at_statement_start = True
             continue
 
         if value == "CASE":
-            frames.append({"kind": "case", "active": False})
+            frames.append({"kind": "case"})
             i += 1
             at_statement_start = False
             continue
@@ -881,7 +1108,7 @@ def process_do_block(stmt: str):
             if semicolon_index >= len(tokens):
                 return
             alter_sql = body[start:tokens[semicolon_index][3]]
-            path_allows_alter = procedural_path_allows_alter(
+            control_path = capture_procedural_path(
                 frames,
                 alter_sql,
             )
@@ -894,7 +1121,7 @@ def process_do_block(stmt: str):
             candidates.append(
                 (
                     alter_sql,
-                    path_allows_alter,
+                    control_path,
                     in_exception_handler,
                     block_frames,
                 )
@@ -909,9 +1136,9 @@ def process_do_block(stmt: str):
             i += 1
         at_statement_start = True
 
-    for alter_sql, path_allows_alter, in_exception_handler, block_frames in candidates:
+    for alter_sql, control_path, in_exception_handler, block_frames in candidates:
         if (
-            path_allows_alter
+            procedural_path_allows_alter(control_path, alter_sql)
             and not in_exception_handler
             and not any(frame["has_exception"] for frame in block_frames)
         ):
@@ -921,32 +1148,8 @@ def process_do_block(stmt: str):
 def process_migration(filepath: Path):
     """Process a single migration file."""
     content = filepath.read_text(encoding="utf-8")
-    
-    # Remove comments
-    content = re.sub(r'--[^\n]*', '', content)
-    content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-    
-    # Split into statements by semicolons, respecting $$ blocks
-    statements = []
-    current = ""
-    in_dollar = False
-    i = 0
-    while i < len(content):
-        if content[i:i+2] == '$$':
-            in_dollar = not in_dollar
-            current += '$$'
-            i += 2
-            continue
-        if content[i] == ';' and not in_dollar:
-            statements.append(current.strip())
-            current = ""
-        else:
-            current += content[i]
-        i += 1
-    if current.strip():
-        statements.append(current.strip())
-    
-    for stmt in statements:
+
+    for stmt in split_sql_statements(content):
         if not stmt:
             continue
         upper = stmt.upper().lstrip()
@@ -1140,6 +1343,42 @@ TABLE_TO_DB_NAME = {
     "sync_actions": "DbSyncAction",
     "ticket_metrics": "DbTicketMetric",
 }
+
+
+TS_INTERFACE_IDENTIFIER_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
+
+
+def table_interface_name(table_name: str) -> str:
+    """Return a deterministic valid TypeScript interface name for a table."""
+    interface_name = TABLE_TO_DB_NAME.get(table_name)
+    if interface_name is None:
+        words = re.findall(r"[A-Za-z0-9]+", table_name)
+        suffix = "".join(word[:1].upper() + word[1:] for word in words)
+        interface_name = "Db" + (suffix or "Table")
+    if TS_INTERFACE_IDENTIFIER_RE.fullmatch(interface_name) is None:
+        raise ValueError(
+            f"invalid TypeScript interface name {interface_name!r} "
+            f"for table {table_name!r}"
+        )
+    return interface_name
+
+
+def build_table_interface_names(table_names: list[str]) -> dict[str, str]:
+    """Build a one-to-one table/interface mapping or fail on collisions."""
+    interface_names = {}
+    owners = {}
+    for table_name in sorted(table_names):
+        interface_name = table_interface_name(table_name)
+        previous_table = owners.get(interface_name)
+        if previous_table is not None and previous_table != table_name:
+            raise ValueError(
+                "TypeScript interface name collision: "
+                f"{previous_table!r} and {table_name!r} both map to "
+                f"{interface_name!r}"
+            )
+        owners[interface_name] = table_name
+        interface_names[table_name] = interface_name
+    return interface_names
 
 
 def generate_row_interface(table: Table, name: str) -> str:
@@ -1399,11 +1638,20 @@ def build_types() -> str:
     for tbl_list in CATEGORIES.values():
         categorized.update(tbl_list)
 
-    uncategorized = sorted(t for t in tables if t not in categorized and t not in SKIP_TABLES)
+    included_tables = [
+        table_name for table_name in tables if table_name not in SKIP_TABLES
+    ]
+    interface_names = build_table_interface_names(included_tables)
+    uncategorized = sorted(
+        table_name
+        for table_name in included_tables
+        if table_name not in categorized
+    )
+    categories = list(CATEGORIES.items())
     if uncategorized:
-        CATEGORIES["Other"] = uncategorized
+        categories.append(("Other", uncategorized))
 
-    for cat_name, tbl_names in CATEGORIES.items():
+    for cat_name, tbl_names in categories:
         cat_tables = [(n, tables[n]) for n in tbl_names if n in tables and n not in SKIP_TABLES]
         if not cat_tables:
             continue
@@ -1412,7 +1660,7 @@ def build_types() -> str:
         lines.append("")
 
         for tbl_name, tbl in cat_tables:
-            db_name = TABLE_TO_DB_NAME.get(tbl_name, "Db" + "".join(p.capitalize() for p in tbl_name.split("_")))
+            db_name = interface_names[tbl_name]
             lines.append(generate_row_interface(tbl, db_name))
             lines.append("")
 

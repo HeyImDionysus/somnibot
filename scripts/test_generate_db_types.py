@@ -33,6 +33,24 @@ class TestAlterColumnNullability(unittest.TestCase):
         finally:
             migration.unlink(missing_ok=True)
 
+    def build(self, sql):
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".sql",
+            dir=_HERE,
+            encoding="utf-8",
+            delete=False,
+        ) as fixture:
+            fixture.write(sql)
+            migration = Path(fixture.name)
+        original_migrations_dir = generator.MIGRATIONS_DIR
+        generator.MIGRATIONS_DIR = migration.parent
+        try:
+            return generator.build_types()
+        finally:
+            generator.MIGRATIONS_DIR = original_migrations_dir
+            migration.unlink(missing_ok=True)
+
     def column(self, table, column):
         return generator.tables[table].columns[column]
 
@@ -113,6 +131,63 @@ class TestAlterColumnNullability(unittest.TestCase):
         )
 
         self.assertTrue(self.column("portal_sessions", "token_hash").nullable)
+
+    def test_case_else_does_not_activate_outer_false_if(self):
+        self.process(
+            """
+            CREATE TABLE public.t(c TEXT);
+            DO $$
+            BEGIN
+              IF false THEN
+                CASE 1
+                  WHEN 1 THEN PERFORM 1;
+                  ELSE PERFORM 2;
+                END CASE;
+                ALTER TABLE public.t ALTER COLUMN c SET NOT NULL;
+              END IF;
+            END;
+            $$;
+            """
+        )
+
+        self.assertTrue(self.column("t", "c").nullable)
+
+    def test_tagged_do_block_keeps_alter_inside_false_if(self):
+        self.process(
+            """
+            CREATE TABLE public.t(c TEXT);
+            DO $body$
+            BEGIN
+              IF false THEN
+                PERFORM 1;
+                ALTER TABLE public.t ALTER COLUMN c SET NOT NULL;
+              END IF;
+            END;
+            $body$;
+            """
+        )
+
+        self.assertTrue(self.column("t", "c").nullable)
+
+    def test_literal_elsif_selects_only_the_matching_branch(self):
+        self.process(
+            """
+            CREATE TABLE public.t(c TEXT);
+            DO $$
+            BEGIN
+              IF false THEN
+                PERFORM 1;
+              ELSIF true THEN
+                ALTER TABLE public.t ALTER COLUMN c SET NOT NULL;
+              ELSE
+                ALTER TABLE public.t ALTER COLUMN c DROP NOT NULL;
+              END IF;
+            END;
+            $$;
+            """
+        )
+
+        self.assertFalse(self.column("t", "c").nullable)
 
     def test_data_dependent_do_block_does_not_apply_alter(self):
         self.process(
@@ -225,6 +300,29 @@ class TestAlterColumnNullability(unittest.TestCase):
 
         self.assertNotIn("category", generator.tables["audit_logs"].columns)
 
+    def test_schema_guard_with_else_does_not_claim_clean_then_chain(self):
+        self.process(
+            """
+            CREATE TABLE public.audit_logs(category TEXT);
+            DO $$
+            BEGIN
+              IF NOT EXISTS (
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_name = 'audit_logs'
+                   AND column_name = 'category'
+              ) THEN
+                ALTER TABLE audit_logs ADD COLUMN category TEXT;
+              ELSE
+                ALTER TABLE audit_logs DROP COLUMN category;
+              END IF;
+            END;
+            $$;
+            """
+        )
+
+        self.assertNotIn("category", generator.tables["audit_logs"].columns)
+
     def test_exception_swallowed_do_block_does_not_apply_alter(self):
         self.process(
             """
@@ -243,6 +341,25 @@ class TestAlterColumnNullability(unittest.TestCase):
         )
 
         self.assertTrue(self.column("portal_sessions", "token_hash").nullable)
+
+    def test_labeled_exception_block_does_not_apply_swallowed_alter(self):
+        self.process(
+            """
+            CREATE TABLE public.t(c TEXT);
+            INSERT INTO public.t VALUES(NULL);
+            DO $$
+            <<guarded>>
+            BEGIN
+              PERFORM 1;
+              ALTER TABLE public.t ALTER COLUMN c SET NOT NULL;
+            EXCEPTION WHEN others THEN
+              NULL;
+            END guarded;
+            $$;
+            """
+        )
+
+        self.assertTrue(self.column("t", "c").nullable)
 
     def test_drop_then_readd_column_follows_source_order(self):
         self.process(
@@ -307,6 +424,53 @@ class TestAlterColumnNullability(unittest.TestCase):
         self.assertFalse(table.columns['Value "Label"'].nullable)
         rendered = generator.generate_row_interface(table, "DbQuoteRegistry")
         self.assertIn('  "Value \\"Label\\"": string;', rendered)
+
+    def test_semicolon_inside_quoted_identifier_does_not_split_create(self):
+        self.process(
+            """
+            CREATE TABLE public.events ("Display;Name" TEXT);
+            """
+        )
+
+        self.assertIn("Display;Name", generator.tables["events"].columns)
+
+    def test_comments_are_ignored_only_outside_quoted_content(self):
+        self.process(
+            """
+            -- A statement-looking comment must not split parsing: DROP TABLE public.comments;
+            CREATE TABLE public.comments (
+              "--literal" TEXT DEFAULT '/* still text */',
+              "/*literal*/" TEXT DEFAULT '-- still text'
+            );
+            /* ALTER TABLE public.comments DROP COLUMN "--literal"; */
+            ALTER TABLE public.comments
+              ALTER COLUMN "--literal" SET NOT NULL;
+            """
+        )
+
+        table = generator.tables["comments"]
+        self.assertEqual(list(table.columns), ["--literal", "/*literal*/"])
+        self.assertFalse(table.columns["--literal"].nullable)
+
+    def test_build_types_derives_valid_name_for_quoted_table(self):
+        rendered = self.build(
+            'CREATE TABLE "App Schema"."Order Events" ("Display Name" TEXT);'
+        )
+
+        self.assertIn("export interface DbOrderEvents {", rendered)
+        self.assertNotIn("export interface DbOrder events {", rendered)
+
+    def test_build_types_rejects_colliding_derived_interface_names(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "interface name collision",
+        ):
+            self.build(
+                """
+                CREATE TABLE public.foo_bar (id UUID);
+                CREATE TABLE public."foo bar" (id UUID);
+                """
+            )
 
     def test_unknown_table_and_column_are_no_ops(self):
         self.process(
