@@ -5,7 +5,8 @@ import { isIP } from 'node:net';
  *
  * The shipped Caddy applies an explicit trusted-proxy policy, derives
  * `{client_ip}`, and overwrites `X-Forwarded-For` with that one canonical
- * address. The dashboard therefore uses one trusted hop by default.
+ * address. Production Compose explicitly configures one trusted hop.
+ * Unconfigured deployments trust no forwarding headers.
  *
  * Custom append-only proxy stacks remain supported: with `N` trusted proxies,
  * the client IP is the `N`-th comma-separated value counted from the right.
@@ -17,8 +18,8 @@ import { isIP } from 'node:net';
 /** Env var naming the number of reverse-proxy hops in front of the dashboard. */
 export const TRUSTED_PROXY_HOPS_ENV = 'SOMNIBOT_TRUSTED_PROXY_HOPS';
 
-/** One canonical `X-Forwarded-For` value from the shipped Caddy. */
-export const DEFAULT_TRUSTED_PROXY_HOPS = 1;
+/** Fail closed unless a verified proxy deployment explicitly opts in. */
+export const DEFAULT_TRUSTED_PROXY_HOPS = 0;
 
 /** Bucket used when no trustworthy client address can be derived. */
 export const UNKNOWN_CLIENT_IP = 'unknown';
@@ -39,9 +40,9 @@ export function resetClientIpWarnings(): void {
 /**
  * Number of proxy hops to trust, from `SOMNIBOT_TRUSTED_PROXY_HOPS`.
  *
- * `0` means the app is directly exposed with no reverse proxy — no header can
- * be trusted at all, so every caller shares one bucket. That is not a supported
- * deployment mode for this app and is warned about loudly.
+ * `0` means no forwarding header can be trusted, so every caller shares one
+ * bucket. This is the safe default for direct or unverified deployments and is
+ * warned about loudly when a caller needs an address.
  */
 export function getTrustedProxyHops(): number {
   const raw = process.env[TRUSTED_PROXY_HOPS_ENV];
@@ -80,8 +81,9 @@ export function getClientIp(req: { headers: { get(name: string): string | null }
     warnOnce(
       'no-hops',
       `${TRUSTED_PROXY_HOPS_ENV}=0 — no proxy headers are trusted, so all callers `
-      + 'share a single rate-limit bucket. Set this to the number of reverse proxies '
-      + 'in front of the dashboard (1 for the shipped Caddy / tunnel setups).',
+      + 'share a single rate-limit bucket. Configure a positive value only when '
+      + 'the deployment proves that its proxy sanitizes or appends the header '
+      + '(production Compose explicitly sets 1 for the shipped Caddy).',
     );
     return UNKNOWN_CLIENT_IP;
   }

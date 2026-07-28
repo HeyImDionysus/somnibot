@@ -6,7 +6,7 @@
  * UNIQUE(discord_id, guild_id)) bound their portal session — and every downstream
  * orders/licenses/downloads read — to an arbitrary, possibly wrong, guild.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
 
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
@@ -16,6 +16,7 @@ vi.mock('@/lib/api/rate-limit', () => ({
 
 import { POST } from '@/app/api/portal/auth/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { TRUSTED_PROXY_HOPS_ENV } from '@/lib/api/client-ip';
 
 // The same Discord identity is a customer in BOTH guilds.
 const CUSTOMERS: Record<string, { id: string; guild_id: string; discord_id: string }> = {
@@ -24,6 +25,7 @@ const CUSTOMERS: Record<string, { id: string; guild_id: string; discord_id: stri
 };
 
 let insertedSession: Record<string, unknown> | null = null;
+const originalHops = process.env[TRUSTED_PROXY_HOPS_ENV];
 
 function makeAdmin() {
   return {
@@ -70,6 +72,7 @@ beforeEach(() => {
   (createAdminSupabase as any).mockReturnValue(makeAdmin());
   process.env.DISCORD_APPLICATION_ID = 'app-id';
   process.env.DISCORD_CLIENT_SECRET = 'secret';
+  process.env[TRUSTED_PROXY_HOPS_ENV] = '1';
   // Discord OAuth: token exchange, then /users/@me → the same identity.
   global.fetch = vi.fn(async (url: any) => {
     const u = String(url);
@@ -77,6 +80,11 @@ beforeEach(() => {
     if (u.includes('/users/@me')) return { ok: true, json: async () => ({ id: 'discord-user-1', username: 'buyer' }) } as any;
     return { ok: false, json: async () => ({}) } as any;
   }) as any;
+});
+
+afterEach(() => {
+  if (originalHops === undefined) delete process.env[TRUSTED_PROXY_HOPS_ENV];
+  else process.env[TRUSTED_PROXY_HOPS_ENV] = originalHops;
 });
 
 describe('POST /api/portal/auth guild scoping', () => {

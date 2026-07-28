@@ -227,8 +227,9 @@ PAYPAL_WEBHOOK_URL=https://somnibot.example.com/api/paypal/webhook
 
 # Reverse-proxy hops in front of the dashboard. 1 = Caddy only (the stack in
 # docker-compose.prod.yml). The shipped Caddy emits one canonical address, so
-# this remains 1 even when an approved CDN is placed in front of Caddy.
-SOMNIBOT_TRUSTED_PROXY_HOPS=1
+# production Compose pins the container to 1 even when an approved CDN is
+# placed in front of Caddy. Keep the generic environment default fail-closed.
+SOMNIBOT_TRUSTED_PROXY_HOPS=0
 
 # Exact source networks allowed to supply X-Forwarded-For to Caddy. Keep this
 # non-routable sentinel for direct client -> Caddy deployments. For a CDN, use
@@ -244,6 +245,13 @@ derived from `X-Forwarded-For`. The production Caddy config does not pass an
 inbound header through. It accepts proxy information only from
 `CADDY_TRUSTED_PROXY_CIDRS`, resolves the client from right to left, then
 overwrites the upstream header with one canonical IPv4 or IPv6 address.
+
+**Upgrade note:** older CDN guidance used
+`SOMNIBOT_TRUSTED_PROXY_HOPS=2`. Change or remove that stale value before using
+the dashboard outside production Compose. Production Compose now pins the
+dashboard container to `1`, matching Caddy's canonical one-entry contract, so
+an old `.env` value cannot collapse all callers into the shared `unknown`
+bucket.
 
 | Setup | Value |
 |---|---|

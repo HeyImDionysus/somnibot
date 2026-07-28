@@ -36,8 +36,8 @@ afterEach(() => {
 });
 
 describe('getTrustedProxyHops', () => {
-  it('defaults to 1 — the shipped Caddy sends one canonical client address', () => {
-    expect(getTrustedProxyHops()).toBe(1);
+  it('defaults to 0 so an unconfigured deployment never trusts a client header', () => {
+    expect(getTrustedProxyHops()).toBe(0);
   });
 
   it('honours an explicit stacked-proxy value', () => {
@@ -67,7 +67,11 @@ describe('getTrustedProxyHops', () => {
   );
 });
 
-describe('getClientIp — one trusted hop (the shipped default)', () => {
+describe('getClientIp — one explicitly trusted hop (the shipped Caddy)', () => {
+  beforeEach(() => {
+    process.env[TRUSTED_PROXY_HOPS_ENV] = '1';
+  });
+
   it('accepts the one canonical address emitted by the shipped Caddy', () => {
     expect(getClientIp(req({ 'x-forwarded-for': REAL_CLIENT }))).toBe(REAL_CLIENT);
   });

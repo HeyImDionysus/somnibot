@@ -41,6 +41,10 @@ services:
       # Keep this as an explicit compatibility switch until nonce propagation is
       # browser-proven for the standalone image.
       SOMNIBOT_CSP_INLINE_COMPAT: ${SOMNIBOT_CSP_INLINE_COMPAT:-1}
+      # Caddy overwrites X-Forwarded-For with exactly one policy-derived client
+      # address. Pin this contract here so stale .env hop counts cannot collapse
+      # all production callers into the shared unknown bucket.
+      SOMNIBOT_TRUSTED_PROXY_HOPS: "1"
     # V5 Audit §4.P2 — memory/CPU limits prevent runaway processes
     deploy:
       resources:

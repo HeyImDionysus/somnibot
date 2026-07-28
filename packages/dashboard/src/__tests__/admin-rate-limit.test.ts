@@ -23,7 +23,9 @@ const originalHops = process.env[TRUSTED_PROXY_HOPS_ENV];
 beforeEach(() => {
   vi.clearAllMocks();
   resetClientIpWarnings();
-  delete process.env[TRUSTED_PROXY_HOPS_ENV];
+  // Production Compose explicitly opts into the shipped Caddy's canonical
+  // single-entry X-Forwarded-For contract.
+  process.env[TRUSTED_PROXY_HOPS_ENV] = '1';
 });
 
 afterEach(() => {

@@ -2,7 +2,7 @@
  * Tests for GET /api/guilds — guild list route.
  * V5 Audit §13.P2a: Dashboard API coverage for guilds endpoint.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Mocks ────────────────────────────────────────────────────
 const { mockCookieGet } = vi.hoisted(() => ({
@@ -28,9 +28,11 @@ import { GET } from '@/app/api/guilds/route';
 import { requireAuth } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { checkRateLimit } from '@/lib/api/rate-limit';
+import { TRUSTED_PROXY_HOPS_ENV } from '@/lib/api/client-ip';
 
 const mockFrom = vi.fn();
 const mockAdmin = { from: mockFrom };
+const originalHops = process.env[TRUSTED_PROXY_HOPS_ENV];
 
 function makeRequest(headers?: Record<string, string>) {
   return new Request('http://localhost/api/guilds', {
@@ -43,6 +45,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockCookieGet.mockReturnValue(undefined);
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockAdmin);
+  process.env[TRUSTED_PROXY_HOPS_ENV] = '1';
+});
+
+afterEach(() => {
+  if (originalHops === undefined) delete process.env[TRUSTED_PROXY_HOPS_ENV];
+  else process.env[TRUSTED_PROXY_HOPS_ENV] = originalHops;
 });
 
 describe('GET /api/guilds', () => {
