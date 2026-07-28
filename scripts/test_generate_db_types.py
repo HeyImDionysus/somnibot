@@ -313,6 +313,35 @@ class TestAlterColumnNullability(unittest.TestCase):
 
         self.assertNotIn("category", generator.tables["audit_logs"].columns)
 
+    def test_later_schema_guard_sees_earlier_do_block_alter(self):
+        self.process(
+            """
+            CREATE TABLE public.t (id UUID);
+            DO $$
+            BEGIN
+              IF NOT EXISTS (
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_name = 't'
+                   AND column_name = 'c'
+              ) THEN
+                ALTER TABLE t ADD COLUMN c TEXT;
+              END IF;
+              IF NOT EXISTS (
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_name = 't'
+                   AND column_name = 'c'
+              ) THEN
+                ALTER TABLE t ALTER COLUMN c SET NOT NULL;
+              END IF;
+            END;
+            $$;
+            """
+        )
+
+        self.assertTrue(self.column("t", "c").nullable)
+
     def test_schema_guard_with_else_does_not_claim_clean_then_chain(self):
         self.process(
             """
@@ -462,6 +491,21 @@ class TestAlterColumnNullability(unittest.TestCase):
             ["value", "note"],
         )
 
+    def test_dollar_quoted_default_does_not_close_create_body(self):
+        self.process(
+            """
+            CREATE TABLE public.t (
+              a TEXT DEFAULT $q$) ignored$q$,
+              b TEXT
+            );
+            """
+        )
+
+        self.assertEqual(
+            list(generator.tables["t"].columns),
+            ["a", "b"],
+        )
+
     def test_comments_are_ignored_only_outside_quoted_content(self):
         self.process(
             """
@@ -499,6 +543,19 @@ class TestAlterColumnNullability(unittest.TestCase):
                 CREATE TABLE public."foo bar" (id UUID);
                 """
             )
+
+    def test_build_types_resets_tables_between_migration_sets(self):
+        alpha = self.build(
+            "CREATE TABLE public.alpha (id UUID);"
+        )
+        beta = self.build(
+            "CREATE TABLE public.beta (id UUID);"
+        )
+
+        self.assertIn("export interface DbAlpha {", alpha)
+        self.assertNotIn("export interface DbBeta {", alpha)
+        self.assertIn("export interface DbBeta {", beta)
+        self.assertNotIn("export interface DbAlpha {", beta)
 
     def test_unknown_table_and_column_are_no_ops(self):
         self.process(

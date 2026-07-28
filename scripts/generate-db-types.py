@@ -213,6 +213,12 @@ def split_top_level(text: str) -> list[str]:
             current.append(text[i:quote_end])
             i = quote_end
             continue
+        if ch == "$":
+            quote_end = sql_dollar_quote_end(text, i)
+            if quote_end is not None:
+                current.append(text[i:quote_end])
+                i = quote_end
+                continue
 
         if ch == "(":
             depth += 1
@@ -343,6 +349,11 @@ def parse_create_table(sql: str):
         if ch in ("'", '"'):
             i = sql_quote_end(sql, i)
             continue
+        if ch == "$":
+            quote_end = sql_dollar_quote_end(sql, i)
+            if quote_end is not None:
+                i = quote_end
+                continue
         if ch == "(":
             paren_depth += 1
         elif ch == ")":
@@ -562,6 +573,17 @@ def match_dollar_quote_delimiter(
     return DOLLAR_QUOTE_RE.match(text, start)
 
 
+def sql_dollar_quote_end(text: str, start: int) -> int | None:
+    """Return the index after one dollar-quoted value, if one starts here."""
+    delimiter = match_dollar_quote_delimiter(text, start)
+    if delimiter is None:
+        return None
+    closing = text.find(delimiter.group(0), delimiter.end())
+    if closing < 0:
+        return len(text)
+    return closing + len(delimiter.group(0))
+
+
 def find_dollar_quote_delimiter(
     text: str,
     start: int = 0,
@@ -595,17 +617,10 @@ def split_sql_statements(content: str) -> list[str]:
             continue
 
         if ch == "$":
-            delimiter = match_dollar_quote_delimiter(content, i)
-            if delimiter is not None:
-                delimiter_text = delimiter.group(0)
-                closing = content.find(delimiter_text, delimiter.end())
-                if closing < 0:
-                    current.append(content[i:])
-                    i = len(content)
-                else:
-                    quote_end = closing + len(delimiter_text)
-                    current.append(content[i:quote_end])
-                    i = quote_end
+            quote_end = sql_dollar_quote_end(content, i)
+            if quote_end is not None:
+                current.append(content[i:quote_end])
+                i = quote_end
                 continue
 
         if ch == "-" and next_ch == "-":
@@ -681,13 +696,10 @@ def tokenize_plpgsql(body: str) -> list[tuple[str, str, int, int]]:
             i = sql_quote_end(body, i)
             continue
         if ch == "$":
-            delimiter = match_dollar_quote_delimiter(body, i)
-            if delimiter is not None:
-                delimiter_text = delimiter.group(0)
-                closing = body.find(delimiter_text, delimiter.end())
-                if closing >= 0:
-                    i = closing + len(delimiter_text)
-                    continue
+            quote_end = sql_dollar_quote_end(body, i)
+            if quote_end is not None:
+                i = quote_end
+                continue
         if ch == "<":
             label = PLPGSQL_LABEL_RE.match(body, i)
             if label is not None:
@@ -832,23 +844,20 @@ def schema_guard_models_column_action(condition: str, alter_sql: str) -> bool:
     return action is not None
 
 
-def schema_guard_condition_truth(
-    condition: str,
-    alter_sql: str,
-) -> bool | None:
-    """Evaluate a matched column-existence guard against the current model."""
-    target = match_schema_column_guard_target(condition, alter_sql)
-    if target is None:
+def schema_guard_model_truth(condition: str) -> bool | None:
+    """Evaluate a column-existence guard against the current table model."""
+    guard = parse_schema_column_guard(condition)
+    if guard is None:
         return None
-    negated, table, column_name, _ = target
-    exists = table.has_column(column_name)
+    negated, predicates = guard
+    table = tables.get(predicates["table_name"])
+    if table is None:
+        return None
+    exists = table.has_column(predicates["column_name"])
     return not exists if negated else exists
 
 
-def capture_procedural_path(
-    frames: list[dict],
-    alter_sql: str,
-) -> list[dict]:
+def capture_procedural_path(frames: list[dict]) -> list[dict]:
     """Freeze the candidate's branch while retaining alternate-branch flags."""
     path = []
     for frame in frames:
@@ -856,32 +865,54 @@ def capture_procedural_path(
             continue
         entry = {"kind": frame["kind"]}
         if frame["kind"] == "if":
-            condition_truths = []
-            for condition in frame["conditions"]:
-                truth = literal_plpgsql_condition(condition)
-                if truth is None:
-                    truth = schema_guard_condition_truth(
-                        condition,
-                        alter_sql,
-                    )
-                condition_truths.append(truth)
             entry.update(
                 {
                     "frame": frame,
                     "branch": frame["branch"],
                     "branch_index": frame["branch_index"],
-                    "condition_truths": condition_truths,
                 }
             )
         path.append(entry)
     return path
 
 
+def resolve_condition_truths(frame: dict, alter_sql: str) -> list[bool | None]:
+    """Resolve an IF once at its source-order position for this target."""
+    if frame["condition_truths"] is None:
+        condition_truths = []
+        for condition in frame["conditions"]:
+            truth = literal_plpgsql_condition(condition)
+            if truth is None:
+                truth = schema_guard_model_truth(condition)
+            condition_truths.append(truth)
+        frame["condition_truths"] = condition_truths
+
+    truths = []
+    for condition, truth in zip(
+        frame["conditions"],
+        frame["condition_truths"],
+    ):
+        if (
+            literal_plpgsql_condition(condition) is None
+            and match_schema_column_guard_target(
+                condition,
+                alter_sql,
+            )
+            is None
+        ):
+            truth = None
+        truths.append(truth)
+    return truths
+
+
 def procedural_path_allows_alter(path: list[dict], alter_sql: str) -> bool:
     """Require branch proof, except for the narrow clean-chain ADD/DROP model."""
     for entry in path:
         if entry["kind"] == "if":
-            truths = entry["condition_truths"]
+            truths = resolve_condition_truths(
+                entry["frame"],
+                alter_sql,
+            )
             branch = entry["branch"]
             branch_index = entry["branch_index"]
             if branch == "else":
@@ -988,6 +1019,7 @@ def process_do_block(stmt: str):
                 {
                     "kind": "if",
                     "conditions": [condition],
+                    "condition_truths": None,
                     "branch": "then",
                     "branch_index": 0,
                     "has_alternate": False,
@@ -1092,10 +1124,7 @@ def process_do_block(stmt: str):
             if semicolon_index >= len(tokens):
                 return
             alter_sql = body[start:tokens[semicolon_index][3]]
-            control_path = capture_procedural_path(
-                frames,
-                alter_sql,
-            )
+            control_path = capture_procedural_path(frames)
             block_frames = [
                 frame for frame in frames if frame["kind"] == "block"
             ]
@@ -1585,6 +1614,7 @@ export type BlastRadius = 'low' | 'medium' | 'high' | 'critical';
 
 def build_types() -> str:
     """Parse all migrations and return the generated TypeScript source as a string."""
+    tables.clear()
     migration_files = sorted(MIGRATIONS_DIR.glob("*.sql"))
     print(f"Processing {len(migration_files)} migration files...")
 
