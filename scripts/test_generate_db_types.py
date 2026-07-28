@@ -169,6 +169,19 @@ class TestAlterColumnNullability(unittest.TestCase):
 
         self.assertTrue(self.column("t", "c").nullable)
 
+    def test_dollar_tag_text_inside_identifier_is_not_dollar_quote(self):
+        self.process(
+            """
+            CREATE TABLE public.foo$tag$bar (id UUID);
+            ALTER TABLE public.foo$tag$bar ADD COLUMN note TEXT;
+            """
+        )
+
+        self.assertEqual(
+            list(generator.tables["foo$tag$bar"].columns),
+            ["id", "note"],
+        )
+
     def test_literal_elsif_selects_only_the_matching_branch(self):
         self.process(
             """
@@ -433,6 +446,21 @@ class TestAlterColumnNullability(unittest.TestCase):
         )
 
         self.assertIn("Display;Name", generator.tables["events"].columns)
+
+    def test_semicolon_inside_escape_string_does_not_split_statement(self):
+        self.process(
+            """
+            CREATE TABLE public.escape_values (
+              value TEXT DEFAULT E'it\\'s;still text'
+            );
+            ALTER TABLE public.escape_values ADD COLUMN note TEXT;
+            """
+        )
+
+        self.assertEqual(
+            list(generator.tables["escape_values"].columns),
+            ["value", "note"],
+        )
 
     def test_comments_are_ignored_only_outside_quoted_content(self):
         self.process(

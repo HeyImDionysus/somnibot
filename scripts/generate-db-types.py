@@ -125,6 +125,38 @@ PG_IDENTIFIER_PATTERN = (
     r'(?:"(?:[^"]|"")*"|(?:[^\W\d]|_)(?:\w|\$)*)'
 )
 PG_IDENTIFIER_RE = re.compile(PG_IDENTIFIER_PATTERN)
+PG_IDENTIFIER_CONTINUATION_RE = re.compile(r"(?:\w|\$)")
+
+
+def is_pg_identifier_continuation(ch: str) -> bool:
+    """Return whether one character can continue an unquoted identifier."""
+    return PG_IDENTIFIER_CONTINUATION_RE.fullmatch(ch) is not None
+
+
+def sql_quote_end(text: str, start: int) -> int:
+    """Return the index after one SQL string or quoted identifier."""
+    quote = text[start]
+    backslash_escapes = (
+        quote == "'"
+        and start > 0
+        and text[start - 1] in ("E", "e")
+        and (
+            start == 1
+            or not is_pg_identifier_continuation(text[start - 2])
+        )
+    )
+    i = start + 1
+    while i < len(text):
+        if backslash_escapes and text[i] == "\\":
+            i = min(i + 2, len(text))
+            continue
+        if text[i] == quote:
+            if i + 1 < len(text) and text[i + 1] == quote:
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    return len(text)
 
 
 def parse_pg_identifier(raw: str) -> str:
@@ -172,41 +204,17 @@ def split_top_level(text: str) -> list[str]:
     parts = []
     current = []
     depth = 0
-    in_single_quote = False
-    in_double_quote = False
     i = 0
 
     while i < len(text):
         ch = text[i]
-        next_ch = text[i + 1] if i + 1 < len(text) else ""
-
-        if in_single_quote:
-            current.append(ch)
-            if ch == "'" and next_ch == "'":
-                current.append(next_ch)
-                i += 2
-                continue
-            if ch == "'":
-                in_single_quote = False
-            i += 1
+        if ch in ("'", '"'):
+            quote_end = sql_quote_end(text, i)
+            current.append(text[i:quote_end])
+            i = quote_end
             continue
 
-        if in_double_quote:
-            current.append(ch)
-            if ch == '"' and next_ch == '"':
-                current.append(next_ch)
-                i += 2
-                continue
-            if ch == '"':
-                in_double_quote = False
-            i += 1
-            continue
-
-        if ch == "'":
-            in_single_quote = True
-        elif ch == '"':
-            in_double_quote = True
-        elif ch == "(":
+        if ch == "(":
             depth += 1
         elif ch == ")":
             depth -= 1
@@ -329,33 +337,13 @@ def parse_create_table(sql: str):
     paren_depth = 0
     start = name_end + opening_paren.end()
     end = len(sql)
-    in_single_quote = False
-    in_double_quote = False
     i = start
     while i < len(sql):
         ch = sql[i]
-        next_ch = sql[i + 1] if i + 1 < len(sql) else ""
-        if in_single_quote:
-            if ch == "'" and next_ch == "'":
-                i += 2
-                continue
-            if ch == "'":
-                in_single_quote = False
-            i += 1
+        if ch in ("'", '"'):
+            i = sql_quote_end(sql, i)
             continue
-        if in_double_quote:
-            if ch == '"' and next_ch == '"':
-                i += 2
-                continue
-            if ch == '"':
-                in_double_quote = False
-            i += 1
-            continue
-        if ch == "'":
-            in_single_quote = True
-        elif ch == '"':
-            in_double_quote = True
-        elif ch == "(":
+        if ch == "(":
             paren_depth += 1
         elif ch == ")":
             if paren_depth == 0:
@@ -561,6 +549,35 @@ PLPGSQL_LABEL_RE = re.compile(
 )
 
 
+def match_dollar_quote_delimiter(
+    text: str,
+    start: int,
+) -> re.Match | None:
+    """Match a dollar delimiter only where it can begin a SQL token."""
+    if (
+        start > 0
+        and is_pg_identifier_continuation(text[start - 1])
+    ):
+        return None
+    return DOLLAR_QUOTE_RE.match(text, start)
+
+
+def find_dollar_quote_delimiter(
+    text: str,
+    start: int = 0,
+) -> re.Match | None:
+    """Find the next dollar delimiter that starts at a token boundary."""
+    for delimiter in DOLLAR_QUOTE_RE.finditer(text, start):
+        if (
+            delimiter.start() == 0
+            or not is_pg_identifier_continuation(
+                text[delimiter.start() - 1]
+            )
+        ):
+            return delimiter
+    return None
+
+
 def split_sql_statements(content: str) -> list[str]:
     """Split migration SQL outside quoted values and comments."""
     statements = []
@@ -572,27 +589,13 @@ def split_sql_statements(content: str) -> list[str]:
         next_ch = content[i + 1] if i + 1 < len(content) else ""
 
         if ch in ("'", '"'):
-            quote = ch
-            current.append(ch)
-            i += 1
-            while i < len(content):
-                current.append(content[i])
-                if (
-                    content[i] == quote
-                    and i + 1 < len(content)
-                    and content[i + 1] == quote
-                ):
-                    current.append(content[i + 1])
-                    i += 2
-                    continue
-                if content[i] == quote:
-                    i += 1
-                    break
-                i += 1
+            quote_end = sql_quote_end(content, i)
+            current.append(content[i:quote_end])
+            i = quote_end
             continue
 
         if ch == "$":
-            delimiter = DOLLAR_QUOTE_RE.match(content, i)
+            delimiter = match_dollar_quote_delimiter(content, i)
             if delimiter is not None:
                 delimiter_text = delimiter.group(0)
                 closing = content.find(delimiter_text, delimiter.end())
@@ -674,30 +677,11 @@ def tokenize_plpgsql(body: str) -> list[tuple[str, str, int, int]]:
                 else:
                     i += 1
             continue
-        if ch == "'":
-            i += 1
-            while i < len(body):
-                if body[i] == "'" and i + 1 < len(body) and body[i + 1] == "'":
-                    i += 2
-                    continue
-                if body[i] == "'":
-                    i += 1
-                    break
-                i += 1
-            continue
-        if ch == '"':
-            i += 1
-            while i < len(body):
-                if body[i] == '"' and i + 1 < len(body) and body[i + 1] == '"':
-                    i += 2
-                    continue
-                if body[i] == '"':
-                    i += 1
-                    break
-                i += 1
+        if ch in ("'", '"'):
+            i = sql_quote_end(body, i)
             continue
         if ch == "$":
-            delimiter = DOLLAR_QUOTE_RE.match(body, i)
+            delimiter = match_dollar_quote_delimiter(body, i)
             if delimiter is not None:
                 delimiter_text = delimiter.group(0)
                 closing = body.find(delimiter_text, delimiter.end())
@@ -950,7 +934,7 @@ def process_do_block(stmt: str):
     exception-bearing blocks. The existing clean-chain model for canonical
     ADD/DROP column guards remains only when the IF has no alternate branch.
     """
-    delimiter = DOLLAR_QUOTE_RE.search(stmt)
+    delimiter = find_dollar_quote_delimiter(stmt)
     if delimiter is None:
         return
     delimiter_text = delimiter.group(0)
