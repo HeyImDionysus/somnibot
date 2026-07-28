@@ -46,6 +46,7 @@ interface IndexCatalogRow {
   indisvalid: boolean;
   indisready: boolean;
   indislive: boolean;
+  indisexclusion: boolean;
   indisunique: boolean;
   access_method: string;
   key_columns: string[];
@@ -125,6 +126,7 @@ async function indexCatalog(
            i.indisvalid,
            i.indisready,
            i.indislive,
+           i.indisexclusion,
            i.indisunique,
            am.amname AS access_method,
            ARRAY(
@@ -327,13 +329,14 @@ async function restoreFixtureTargetIndex(): Promise<void> {
 }
 
 async function expectDefinitionMutantRejected(
-  createIndexSql: string,
+  createMutantSql: string,
   assertMutant: (index: IndexCatalogRow) => void,
+  cleanupMutantSql?: string,
 ): Promise<void> {
   const fragments = indexMigrationFragments();
   await dropFixtureTargetIndex();
   try {
-    await sql.unsafe(createIndexSql);
+    await sql.unsafe(createMutantSql);
     const mutantIndex = await indexCatalog(FIXTURE_SCHEMA);
     expect(mutantIndex).toBeDefined();
     assertMutant(mutantIndex!);
@@ -348,6 +351,9 @@ async function expectDefinitionMutantRejected(
     );
     expect((await indexCatalog(FIXTURE_SCHEMA))?.oid).toBe(mutantIndex!.oid);
   } finally {
+    if (cleanupMutantSql) {
+      await sql.unsafe(cleanupMutantSql);
+    }
     await restoreFixtureTargetIndex();
   }
 }
@@ -358,6 +364,7 @@ function expectTargetIndex(index: IndexCatalogRow | undefined): void {
     indisvalid: true,
     indisready: true,
     indislive: true,
+    indisexclusion: false,
     indisunique: false,
     access_method: 'btree',
     key_columns: ['guild_id', 'last_observed_at'],
@@ -795,6 +802,52 @@ describe('phased fraud observation-clock legacy migration', () => {
     );
   });
 
+  it('rejects and preserves a same-name btree exclusion constraint', async () => {
+    await sql.unsafe(`
+      UPDATE ${FIXTURE_SCHEMA}.fraud_signals
+         SET guild_id = 'fixture-guild-unknown'
+       WHERE id = '${UNKNOWN_TIME_ROW_ID}'
+    `);
+    try {
+      await expectDefinitionMutantRejected(
+        `ALTER TABLE ${FIXTURE_SCHEMA}.fraud_signals
+           ADD CONSTRAINT idx_fraud_signals_critical_observation
+           EXCLUDE USING btree
+             (
+               guild_id WITH =,
+               last_observed_at DESC WITH =
+             )
+           WHERE (status = 'open' AND severity = 'critical')`,
+        (mutantIndex) => {
+          expect(mutantIndex).toMatchObject({
+            indisvalid: true,
+            indisready: true,
+            indislive: true,
+            indisexclusion: true,
+            indisunique: false,
+            access_method: 'btree',
+            key_columns: ['guild_id', 'last_observed_at'],
+            key_options: '0 3',
+            opclasses: ['text_ops', 'timestamptz_ops'],
+            predicate:
+              "status = 'open'::text AND severity = 'critical'::text",
+          });
+          expect(mutantIndex.index_collations).toEqual(
+            mutantIndex.table_collations,
+          );
+        },
+        `ALTER TABLE ${FIXTURE_SCHEMA}.fraud_signals
+           DROP CONSTRAINT IF EXISTS idx_fraud_signals_critical_observation`,
+      );
+    } finally {
+      await sql.unsafe(`
+        UPDATE ${FIXTURE_SCHEMA}.fraud_signals
+           SET guild_id = 'fixture-guild'
+         WHERE id = '${UNKNOWN_TIME_ROW_ID}'
+      `);
+    }
+  });
+
   it('keeps both the public and isolated indexes valid with the exact keys and predicate', async () => {
     expectTargetIndex(await indexCatalog('public'));
     expectTargetIndex(await indexCatalog(FIXTURE_SCHEMA));
@@ -820,6 +873,7 @@ describe('phased fraud observation-clock legacy migration', () => {
     )).toHaveLength(2);
     expect(executableSql).toContain('i.indclass');
     expect(executableSql).toContain('i.indcollation');
+    expect(executableSql.match(/NOT i\.indisexclusion/g)).toHaveLength(2);
     expect(executableSql).not.toContain('regexp_replace');
     expect(executableSql).not.toContain('DROP INDEX CONCURRENTLY');
     expect(executableSql.match(/\bCREATE\s+INDEX\b/gi)).toHaveLength(1);

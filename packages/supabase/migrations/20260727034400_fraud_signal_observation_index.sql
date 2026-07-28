@@ -34,6 +34,7 @@ BEGIN
         i.indisready
         AND i.indislive
         AND NOT i.indisunique
+        AND NOT i.indisexclusion
         AND i.indrelid = 'public.fraud_signals'::pg_catalog.regclass
         AND access_method.amname = 'btree'
         AND i.indnkeyatts = 2
@@ -130,6 +131,7 @@ BEGIN
     AND i.indisready
     AND i.indislive
     AND NOT i.indisunique
+    AND NOT i.indisexclusion
     AND i.indrelid = 'public.fraud_signals'::pg_catalog.regclass
     AND access_method.amname = 'btree'
     AND i.indnkeyatts = 2
