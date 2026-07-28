@@ -404,6 +404,55 @@ describe('SomniLicense', () => {
       expect(vi.getTimerCount()).toBe(0);
     });
 
+    it('keeps a terminal validation authoritative when it completes after a newer success', async () => {
+      const terminalResponse = deferred<Response>();
+      const newerValidResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockImplementationOnce(() => terminalResponse.promise)
+        .mockImplementationOnce(() => newerValidResponse.promise);
+      const client = sdk();
+
+      const terminalValidation = client.validate();
+      const newerValidation = client.validate();
+
+      newerValidResponse.resolve(validationOk());
+      expect((await newerValidation).valid).toBe(true);
+      expect(client.isValid()).toBe(true);
+
+      terminalResponse.resolve(validationSessionInvalidated());
+      expect((await terminalValidation).valid).toBe(false);
+      expect(client.isValid()).toBe(false);
+      expect(client.getSessionId()).toBeNull();
+      expect(client.getFeatures()).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('does not let a pending newer validation resurrect after a terminal validation completes first', async () => {
+      const terminalResponse = deferred<Response>();
+      const newerValidResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockImplementationOnce(() => terminalResponse.promise)
+        .mockImplementationOnce(() => newerValidResponse.promise);
+      const client = sdk();
+
+      const terminalValidation = client.validate();
+      const newerValidation = client.validate();
+
+      terminalResponse.resolve(validationSessionInvalidated());
+      expect((await terminalValidation).valid).toBe(false);
+      expect(client.getSessionId()).toBeNull();
+
+      newerValidResponse.resolve(validationOk());
+      expect(await newerValidation).toMatchObject({
+        valid: false,
+        status: 'session_invalidated',
+      });
+      expect(client.isValid()).toBe(false);
+      expect(client.getSessionId()).toBeNull();
+      expect(client.getFeatures()).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
     it('does not let an older validation success overwrite a terminal heartbeat', async () => {
       const delayedValidationResponse = deferred<Response>();
       const terminalHeartbeatResponse = deferred<Response>();
@@ -455,6 +504,64 @@ describe('SomniLicense', () => {
       expect((await terminalHeartbeat).valid).toBe(false);
       expect(client.isValid()).toBe(false);
       expect(client.getSessionId()).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('does not let a delayed terminal heartbeat for session A clear a newer revalidated session B', async () => {
+      const terminalHeartbeatResponse = deferred<Response>();
+      const revalidationResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk({ session_id: 'sess-a' }))
+        .mockImplementationOnce(() => terminalHeartbeatResponse.promise)
+        .mockImplementationOnce(() => revalidationResponse.promise);
+      const client = sdk({ cacheTtlMs: 1_000 });
+      await client.validate();
+      vi.advanceTimersByTime(2_000);
+
+      const terminalHeartbeat = client.heartbeat();
+      const revalidation = client.validate();
+
+      revalidationResponse.resolve(
+        validationOk({ session_id: 'sess-b', tier: 'business' }),
+      );
+      expect((await revalidation).valid).toBe(true);
+
+      terminalHeartbeatResponse.resolve(heartbeatRevoked());
+      expect((await terminalHeartbeat).valid).toBe(false);
+      expect(client.getSessionId()).toBe('sess-b');
+      expect(client.getTier()).toBe('business');
+      expect(client.isValid()).toBe(true);
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      client.destroy();
+    });
+
+    it('does not let a pending revalidation resurrect after a terminal heartbeat completes first', async () => {
+      const terminalHeartbeatResponse = deferred<Response>();
+      const revalidationResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk({ session_id: 'sess-a' }))
+        .mockImplementationOnce(() => terminalHeartbeatResponse.promise)
+        .mockImplementationOnce(() => revalidationResponse.promise);
+      const client = sdk({ cacheTtlMs: 1_000 });
+      await client.validate();
+      vi.advanceTimersByTime(2_000);
+
+      const terminalHeartbeat = client.heartbeat();
+      const revalidation = client.validate();
+
+      terminalHeartbeatResponse.resolve(heartbeatRevoked());
+      expect((await terminalHeartbeat).valid).toBe(false);
+      expect(client.getSessionId()).toBeNull();
+
+      revalidationResponse.resolve(
+        validationOk({ session_id: 'sess-b', tier: 'business' }),
+      );
+      expect(await revalidation).toMatchObject({
+        valid: false,
+        status: 'session_invalidated',
+      });
+      expect(client.getSessionId()).toBeNull();
+      expect(client.isValid()).toBe(false);
       expect(vi.getTimerCount()).toBe(0);
     });
 
@@ -1063,6 +1170,62 @@ describe('SomniLicense', () => {
       expect(client.isValid()).toBe(true);
       client.destroy();
     });
+
+    it('keeps a newer grace heartbeat authoritative when a stale active heartbeat completes later', async () => {
+      const T0 = new Date('2026-07-09T12:00:00.000Z');
+      vi.setSystemTime(T0);
+      const staleActiveResponse = deferred<Response>();
+      const newerGraceResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())
+        .mockImplementationOnce(() => staleActiveResponse.promise)
+        .mockImplementationOnce(() => newerGraceResponse.promise);
+      const client = sdk({ cacheTtlMs: 3_600_000 });
+      await client.validate();
+
+      const staleActive = client.heartbeat();
+      const newerGrace = client.heartbeat();
+
+      newerGraceResponse.resolve(heartbeatGrace(60_000));
+      expect((await newerGrace).status).toBe('grace_period');
+
+      staleActiveResponse.resolve(heartbeatOk());
+      await staleActive;
+
+      const cached = await client.validate();
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(cached.status).toBe('grace_period');
+      expect(cached.grace_period_ends_at).toBeTruthy();
+      client.destroy();
+    });
+
+    it('keeps a newer active heartbeat authoritative when a stale grace heartbeat completes later', async () => {
+      const T0 = new Date('2026-07-09T12:00:00.000Z');
+      vi.setSystemTime(T0);
+      const staleGraceResponse = deferred<Response>();
+      const newerActiveResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())
+        .mockImplementationOnce(() => staleGraceResponse.promise)
+        .mockImplementationOnce(() => newerActiveResponse.promise);
+      const client = sdk({ cacheTtlMs: 3_600_000 });
+      await client.validate();
+
+      const staleGrace = client.heartbeat();
+      const newerActive = client.heartbeat();
+
+      newerActiveResponse.resolve(heartbeatOk());
+      expect((await newerActive).status).toBe('active');
+
+      staleGraceResponse.resolve(heartbeatGrace(60_000));
+      await staleGrace;
+
+      const cached = await client.validate();
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(cached.status).toBe('active');
+      expect(cached.grace_period_ends_at).toBeNull();
+      client.destroy();
+    });
   });
 
   // ────────── heartbeat auto-scheduling ──────────
@@ -1189,6 +1352,68 @@ describe('SomniLicense', () => {
       expect(fetch).toHaveBeenCalledTimes(3);
       expect(client.getSessionId()).toBeNull();
     });
+
+    it('does not let a delayed deactivation for session A clear a newer revalidated session B', async () => {
+      const deactivationResponse = deferred<Response>();
+      const revalidationResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk({ session_id: 'sess-a' }))
+        .mockImplementationOnce(() => deactivationResponse.promise)
+        .mockImplementationOnce(() => revalidationResponse.promise);
+      const client = sdk({ cacheTtlMs: 1_000 });
+      await client.validate();
+      vi.advanceTimersByTime(2_000);
+
+      const deactivation = client.deactivate();
+      const revalidation = client.validate();
+
+      revalidationResponse.resolve(
+        validationOk({ session_id: 'sess-b', tier: 'business' }),
+      );
+      expect((await revalidation).valid).toBe(true);
+      expect(client.getSessionId()).toBe('sess-b');
+
+      deactivationResponse.resolve(deactivateOk());
+      expect((await deactivation).success).toBe(true);
+
+      expect(client.getSessionId()).toBe('sess-b');
+      expect(client.getTier()).toBe('business');
+      expect(client.isValid()).toBe(true);
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      client.destroy();
+    });
+
+    it('does not let a pending revalidation resurrect after session A deactivation completes first', async () => {
+      const deactivationResponse = deferred<Response>();
+      const revalidationResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk({ session_id: 'sess-a' }))
+        .mockImplementationOnce(() => deactivationResponse.promise)
+        .mockImplementationOnce(() => revalidationResponse.promise);
+      const client = sdk({ cacheTtlMs: 1_000 });
+      await client.validate();
+      vi.advanceTimersByTime(2_000);
+
+      const deactivation = client.deactivate();
+      const revalidation = client.validate();
+
+      deactivationResponse.resolve(deactivateOk());
+      expect((await deactivation).success).toBe(true);
+      expect(client.getSessionId()).toBeNull();
+
+      revalidationResponse.resolve(
+        validationOk({ session_id: 'sess-b', tier: 'business' }),
+      );
+      expect(await revalidation).toMatchObject({
+        valid: false,
+        status: 'session_invalidated',
+      });
+
+      expect(client.getSessionId()).toBeNull();
+      expect(client.getTier()).toBeNull();
+      expect(client.isValid()).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 
   // ────────── destroy / cleanup ──────────
@@ -1211,6 +1436,47 @@ describe('SomniLicense', () => {
         client.destroy();
         client.destroy();
       }).not.toThrow();
+    });
+
+    it('prevents an in-flight validation from resurrecting state after destroy', async () => {
+      const validationResponse = deferred<Response>();
+      vi.mocked(fetch).mockImplementationOnce(() => validationResponse.promise);
+      const client = sdk();
+
+      const validation = client.validate();
+      client.destroy();
+
+      validationResponse.resolve(validationOk());
+      expect(await validation).toMatchObject({
+        valid: false,
+        status: 'destroyed',
+      });
+      expect(client.getSessionId()).toBeNull();
+      expect(client.isValid()).toBe(false);
+      expect(client.getFeatures()).toEqual([]);
+      expect(client.getTier()).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('permanently blocks future network operations after destroy', async () => {
+      vi.mocked(fetch).mockResolvedValue(validationOk());
+      const client = sdk();
+      client.destroy();
+
+      const validation = await client.validate();
+      const heartbeat = await client.heartbeat();
+      const deactivation = await client.deactivate();
+
+      expect(validation).toMatchObject({ valid: false, status: 'destroyed' });
+      expect(heartbeat).toMatchObject({ valid: false, status: 'destroyed' });
+      expect(deactivation).toMatchObject({
+        success: false,
+        error: 'SomniLicense instance has been destroyed',
+      });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(client.getSessionId()).toBeNull();
+      expect(client.isValid()).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
     });
   });
 

@@ -185,6 +185,11 @@ export interface DeactivateResponse {
   error?: string;
 }
 
+interface OperationToken {
+  revision: number;
+  terminalEpoch: number;
+}
+
 export class SomniLicense {
   private config: Required<
     Pick<SomniLicenseConfig, 'apiBase' | 'licenseKey' | 'productId'>
@@ -196,12 +201,24 @@ export class SomniLicense {
   private sessionId: string | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   /**
-   * Terminal teardown advances this generation. Async validation/heartbeat
-   * responses may update state only while they still belong to the generation
-   * in which they started, so a delayed pre-revocation success cannot restore a
-   * session that a newer terminal response already cleared.
+   * Every async operation receives a monotonically increasing revision when it
+   * starts. A non-terminal completion may mutate state only when no newer
+   * revision has already been applied, so response arrival order cannot roll
+   * cached session/payment state backwards. Earlier operations may still settle
+   * while a newer request is pending; once the newer completion applies, older
+   * completions become stale.
+   *
+   * Terminal licence verdicts remain authoritative. Session-scoped terminal
+   * operations (heartbeat/deactivate) apply only to the session they targeted,
+   * so they cannot tear down a newer revalidated session. When terminal
+   * teardown does apply, it advances a separate epoch that invalidates every
+   * operation already in flight, including operations with higher revisions.
    */
-  private stateGeneration = 0;
+  private nextOperationRevision = 0;
+  private appliedOperationRevision = 0;
+  private terminalEpoch = 0;
+  /** `destroy()` is an irreversible lifecycle boundary for this instance. */
+  private disposed = false;
 
   /**
    * W2 review — hard stop for a cached `grace_period` response, on the local
@@ -331,7 +348,11 @@ export class SomniLicense {
    * stops the heartbeat while still inside the grace window. That is the fix
    * for "a one-second database hiccup permanently stops the client".
    */
-  private validateFallback(terminalStatus: string, error?: string): ValidationResponse {
+  private validateFallback(
+    operation: OperationToken,
+    terminalStatus: string,
+    error?: string,
+  ): ValidationResponse {
     const graceMs = this.config.offlineGraceMs ?? 86_400_000;
     const elapsed = this.elapsedSinceAnchor();
 
@@ -347,7 +368,7 @@ export class SomniLicense {
     // If we had a cached result that's now stale, the grace period expired.
     // Clear the stale cache and stop heartbeats to prevent zombie sessions.
     if (this.cachedResult) {
-      this.clearSessionState();
+      this.applyTerminalOperation(operation);
       return { valid: false, status: 'offline_grace_expired' };
     }
 
@@ -375,6 +396,10 @@ export class SomniLicense {
    *     "keep running on cache" instead of "your licence was revoked".
    */
   async validate(): Promise<ValidationResponse> {
+    if (this.disposed) {
+      return this.blockedValidationResponse();
+    }
+
     // Return cache if valid
     // V5 Audit §3.1: Use monotonic clock for cache TTL (consistent with
     // offline grace period) to prevent clock-manipulation bypass.
@@ -382,7 +407,7 @@ export class SomniLicense {
       return this.cachedResult;
     }
 
-    const operationGeneration = this.stateGeneration;
+    const operation = this.beginOperation();
     try {
       const res = await fetch(`${this.config.apiBase}/license/validate`, {
         method: 'POST',
@@ -398,8 +423,8 @@ export class SomniLicense {
 
       const data = await this.readJson<ValidationResponse>(res);
 
-      if (operationGeneration !== this.stateGeneration) {
-        return { valid: false, status: 'session_invalidated' };
+      if (this.disposed) {
+        return this.blockedValidationResponse();
       }
 
       // ── Indeterminate: the server could not answer ────────────────────
@@ -409,13 +434,21 @@ export class SomniLicense {
       // so a server stuck at 503 would extend the offline grace window forever
       // instead of letting it expire.
       if (data === null || isIndeterminateResponse(res.status, data)) {
+        if (!this.claimOperation(operation)) {
+          return this.blockedValidationResponse();
+        }
         return this.validateFallback(
+          operation,
           indeterminateStatus(data),
           data?.error ?? 'License status could not be determined',
         );
       }
 
       if (data.valid) {
+        if (!this.claimOperation(operation)) {
+          return this.blockedValidationResponse();
+        }
+
         this.cachedResult = data;
         this.sessionId = data.session_id ?? null;
 
@@ -468,18 +501,21 @@ export class SomniLicense {
         // server verdict. It must invalidate the prior successful session
         // before returning; otherwise a later outage can resurrect that old
         // cache through validateFallback() as `offline_grace`.
-        this.clearSessionState();
+        if (!this.applyTerminalOperation(operation)) {
+          return this.blockedValidationResponse();
+        }
       }
 
       return data;
     } catch (err) {
-      if (operationGeneration !== this.stateGeneration) {
-        return { valid: false, status: 'session_invalidated' };
+      if (!this.claimOperation(operation)) {
+        return this.blockedValidationResponse();
       }
       // Offline — check grace period using monotonic elapsed time
       // V7 Audit §3.P3a: Uses server-time-anchored monotonic clock instead of
       // raw Date.now() to prevent clock-manipulation bypass.
       return this.validateFallback(
+        operation,
         'network_error',
         err instanceof Error ? err.message : 'Network error',
       );
@@ -495,7 +531,7 @@ export class SomniLicense {
    * resumes on its own once the fault clears. Only a genuinely elapsed grace
    * window tears the session down.
    */
-  private heartbeatFallback(): HeartbeatResponse {
+  private heartbeatFallback(operation: OperationToken): HeartbeatResponse {
     // V5 Audit §3.2: Check grace period instead of unconditionally returning valid.
     const graceMs = this.config.offlineGraceMs ?? 86_400_000;
     const elapsed = this.elapsedSinceAnchor();
@@ -505,7 +541,7 @@ export class SomniLicense {
     if (this.cachedResult?.valid && !this.cachedGraceLapsed() && elapsed < graceMs) {
       return { valid: true, status: 'offline', next_heartbeat_seconds: 300 };
     }
-    this.clearSessionState();
+    this.applyTerminalOperation(operation);
     return { valid: false, status: 'offline_grace_expired', next_heartbeat_seconds: 0 };
   }
 
@@ -521,11 +557,15 @@ export class SomniLicense {
    * until the app is restarted.
    */
   async heartbeat(): Promise<HeartbeatResponse> {
+    if (this.disposed) {
+      return this.blockedHeartbeatResponse();
+    }
+
     if (!this.sessionId) {
       return { valid: false, status: 'no_session', next_heartbeat_seconds: 0 };
     }
 
-    const operationGeneration = this.stateGeneration;
+    const operation = this.beginOperation();
     const sessionId = this.sessionId;
     try {
       const res = await fetch(`${this.config.apiBase}/license/heartbeat`, {
@@ -539,19 +579,26 @@ export class SomniLicense {
 
       const data = await this.readJson<HeartbeatResponse>(res);
 
-      if (operationGeneration !== this.stateGeneration) {
-        return { valid: false, status: 'session_invalidated', next_heartbeat_seconds: 0 };
+      if (this.disposed) {
+        return this.blockedHeartbeatResponse();
       }
 
       // ── Indeterminate: the server could not answer ────────────────────
       // Same reasoning as validate(): no state is torn down, no server-time
       // re-anchor, and the heartbeat timer keeps ticking.
       if (data === null || isIndeterminateResponse(res.status, data)) {
-        return this.heartbeatFallback();
+        if (!this.claimOperation(operation)) {
+          return this.blockedHeartbeatResponse();
+        }
+        return this.heartbeatFallback(operation);
       }
 
       // V7 Audit §3.P3a — refresh server time anchor on successful heartbeat
       if (data.valid) {
+        if (!this.claimOperation(operation)) {
+          return this.blockedHeartbeatResponse();
+        }
+
         this.anchorServerTime(res);
         // W2: the entitlement may have ENTERED grace after the initial
         // validation (payment failed mid-session). The heartbeat now reports
@@ -615,17 +662,17 @@ export class SomniLicense {
           }
         }
       } else {
-        this.clearSessionState();
+        this.applyTerminalSessionOperation(operation, sessionId);
       }
 
       return data;
     } catch {
-      if (operationGeneration !== this.stateGeneration) {
-        return { valid: false, status: 'session_invalidated', next_heartbeat_seconds: 0 };
+      if (!this.claimOperation(operation)) {
+        return this.blockedHeartbeatResponse();
       }
       // A network error during heartbeat should still respect the offline
       // grace window.
-      return this.heartbeatFallback();
+      return this.heartbeatFallback(operation);
     }
   }
 
@@ -633,30 +680,47 @@ export class SomniLicense {
    * Deactivate this device (e.g., on app uninstall).
    */
   async deactivate(): Promise<DeactivateResponse> {
-    if (!this.sessionId) {
+    if (this.disposed) {
+      return this.blockedDeactivateResponse();
+    }
+
+    const sessionId = this.sessionId;
+    if (!sessionId) {
       return { success: true };
     }
 
+    const operation = this.beginOperation();
     try {
       const res = await fetch(`${this.config.apiBase}/license/deactivate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          session_id: this.sessionId,
+          session_id: sessionId,
           license_key: this.config.licenseKey,
         }),
       });
 
       const data = (await res.json()) as DeactivateResponse;
+      if (this.disposed) {
+        return this.blockedDeactivateResponse();
+      }
+
       if (res.ok && data.success) {
-        this.clearSessionState();
+        this.applyTerminalSessionOperation(operation, sessionId);
         return data;
       }
+
+      this.claimOperation(operation);
       return {
         success: false,
         error: data.error ?? `Deactivation failed with HTTP ${res.status}`,
       };
     } catch (err) {
+      if (this.disposed) {
+        return this.blockedDeactivateResponse();
+      }
+
+      this.claimOperation(operation);
       return {
         success: false,
         error: err instanceof Error ? err.message : 'Network error',
@@ -696,23 +760,125 @@ export class SomniLicense {
   }
 
   /**
-   * Clean up timers.
+   * Permanently dispose this client, clear all local state, and stop timers.
+   *
+   * In-flight completions and future network operations are rejected. Create a
+   * new SomniLicense instance if licensing must be started again.
    */
   destroy(): void {
-    this.stopHeartbeat();
+    if (this.disposed) return;
+
+    this.disposed = true;
+    this.terminalEpoch += 1;
+    this.appliedOperationRevision = ++this.nextOperationRevision;
+    this.clearSessionState();
   }
 
   // ── Private ──────────────────────────────
 
   /**
+   * Allocate a revision and capture the terminal epoch before the operation's
+   * first asynchronous gap.
+   */
+  private beginOperation(): OperationToken {
+    this.nextOperationRevision += 1;
+    return {
+      revision: this.nextOperationRevision,
+      terminalEpoch: this.terminalEpoch,
+    };
+  }
+
+  /**
+   * Claim the right to apply a non-terminal completion.
+   *
+   * Revisions advance only when a completion actually settles, so an earlier
+   * request can still provide state while a newer request is pending. Once the
+   * newer completion applies, any later-arriving older completion is stale.
+   */
+  private claimOperation(operation: OperationToken): boolean {
+    if (
+      this.disposed
+      || operation.terminalEpoch !== this.terminalEpoch
+      || operation.revision < this.appliedOperationRevision
+    ) {
+      return false;
+    }
+    this.appliedOperationRevision = operation.revision;
+    return true;
+  }
+
+  /**
+   * A terminal licence verdict applies regardless of non-terminal response
+   * ordering. Its revision is folded into the monotonic state before teardown
+   * so older successes cannot resurrect the invalidated licence.
+   */
+  private applyTerminalOperation(operation: OperationToken): boolean {
+    if (this.disposed || operation.terminalEpoch !== this.terminalEpoch) {
+      return false;
+    }
+    this.appliedOperationRevision = Math.max(
+      this.appliedOperationRevision,
+      operation.revision,
+    );
+    this.terminalEpoch += 1;
+    this.clearSessionState();
+    return true;
+  }
+
+  /**
+   * Apply terminal teardown only to the session the operation targeted.
+   *
+   * This preserves terminal heartbeat/deactivation semantics for the current
+   * session while preventing a delayed response for session A from clearing a
+   * newer revalidated session B.
+   */
+  private applyTerminalSessionOperation(
+    operation: OperationToken,
+    operationSessionId: string,
+  ): void {
+    if (this.disposed || operation.terminalEpoch !== this.terminalEpoch) return;
+    if (this.sessionId !== operationSessionId) {
+      this.claimOperation(operation);
+      return;
+    }
+    this.applyTerminalOperation(operation);
+  }
+
+  private blockedValidationResponse(): ValidationResponse {
+    if (this.disposed) {
+      return {
+        valid: false,
+        status: 'destroyed',
+        error: 'SomniLicense instance has been destroyed',
+      };
+    }
+    return { valid: false, status: 'session_invalidated' };
+  }
+
+  private blockedHeartbeatResponse(): HeartbeatResponse {
+    return {
+      valid: false,
+      status: this.disposed ? 'destroyed' : 'session_invalidated',
+      next_heartbeat_seconds: 0,
+    };
+  }
+
+  private blockedDeactivateResponse(): DeactivateResponse {
+    return {
+      success: false,
+      error: 'SomniLicense instance has been destroyed',
+    };
+  }
+
+  /**
    * Tear down every piece of state derived from a successful validation.
    *
-   * Terminal validation/heartbeat verdicts and elapsed offline grace all use
-   * this transition so no stale cache, session id, deadline, server-time
-   * anchor, or timer can survive independently and later revive the session.
+   * Terminal validation/heartbeat verdicts, successful deactivation, elapsed
+   * offline grace, and permanent disposal all use this transition so no stale
+   * cache, session id, deadline, server-time anchor, or timer can survive
+   * independently and later revive the session.
    */
   private clearSessionState(): void {
-    this.stateGeneration += 1;
     this.cachedResult = null;
     this.cacheExpiry = 0;
     this.sessionId = null;
@@ -722,6 +888,7 @@ export class SomniLicense {
   }
 
   private startHeartbeat(intervalSeconds: number): void {
+    if (this.disposed) return;
     this.stopHeartbeat();
     // V5 Audit §3.P3a: Clamp to minimum 30s to prevent excessive traffic
     const clamped = Math.max(intervalSeconds, 30);

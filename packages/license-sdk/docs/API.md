@@ -29,7 +29,7 @@ Validates the license key against the API. Returns cached result if within TTL.
 ```typescript
 {
   valid: boolean;
-  status: string;         // 'active', 'expired', 'revoked', 'invalid', 'offline_grace', 'network_error'
+  status: string;         // 'active', 'expired', 'revoked', 'invalid', 'offline_grace', 'network_error', 'destroyed'
   entitlement_id?: string;
   features?: string[];    // Product feature flags
   tier?: string | null;   // License tier
@@ -96,6 +96,9 @@ from the licence's point of view.
 
 Deactivates the current device session, freeing a device slot.
 
+After `destroy()` this returns `{ success: false, error: 'SomniLicense instance has been destroyed' }`
+without making a network request.
+
 **Response:**
 ```typescript
 {
@@ -122,7 +125,10 @@ Get the current session ID.
 
 #### `destroy(): void`
 
-Clean up heartbeat timers. Call before disposing the instance.
+Permanently dispose the instance: clear cached/session state, stop heartbeat
+timers, ignore in-flight completions, and block future network operations.
+Subsequent `validate()`/`heartbeat()` calls return terminal `destroyed`
+responses. Create a new `SomniLicense` instance to start licensing again.
 
 ---
 
