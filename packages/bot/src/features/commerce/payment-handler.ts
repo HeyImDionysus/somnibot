@@ -58,6 +58,7 @@ interface PendingCheckoutOrder {
   amount_cents: number;
   currency: string;
   status: string;
+  checkout_active: boolean;
 }
 
 function isExactPendingCheckoutOrder(
@@ -78,6 +79,7 @@ function isExactPendingCheckoutOrder(
     && (order.paypal_subscription_id ?? null) === expected.paypal_subscription_id
     && order.amount_cents === expected.amount_cents
     && order.currency === expected.currency
+    && order.checkout_active === expected.checkout_active
   );
 }
 
@@ -119,19 +121,6 @@ async function cancelUnexposedCheckoutOrder(
   if (error) log.error('Failed to cancel unexposed checkout order:', error.message);
 }
 
-/**
- * How long an in-flight checkout blocks a fresh one for the same
- * (customer, product).
- *
- * PayPal Checkout v2 orders stop being approvable well before this — six hours
- * is deliberately past that window, so releasing the block cannot free a link
- * the buyer could still pay. The cost of the conservative bound is that an
- * abandoned checkout keeps that one product unbuyable for the buyer for up to
- * six hours; the alternative is releasing it early and re-opening exactly the
- * double-charge this rail exists to prevent.
- */
-const STALE_CHECKOUT_AGE_MS = 6 * 60 * 60 * 1000;
-
 type InFlightCheckout =
   | { state: 'clear' }
   | { state: 'blocked'; orderNumber: string }
@@ -143,14 +132,19 @@ type InFlightCheckout =
  * entitlements, and a refund request.
  *
  * The authoritative rail is the partial unique index
- * `uniq_orders_pending_one_time_checkout`, which makes the second one-time
- * order insert fail atomically. This pre-flight exists to (a) refuse before
- * spending a PayPal round-trip, (b) give the buyer a message that names the
- * order, and (c) cover subscription checkouts, which the index deliberately
- * does not (its recovery insert in the webhook must never be blocked).
+ * `uniq_orders_pending_one_time_checkout`, which covers both one-time and
+ * subscription approval links and makes the second active checkout insert fail
+ * atomically. Recovery rows deliberately set `checkout_active = false`, so a
+ * provider-authoritative webhook can still record a link issued elsewhere.
  *
  * A read ERROR is not "clear": during an outage the live checkout may exist, so
  * refusing to guess is the only safe answer on the money path.
+ *
+ * Age is intentionally irrelevant. PayPal approval windows are provider/account
+ * state, not a locally provable six-hour expiry (Orders may have an extended
+ * redirect window, and Subscriptions exposes no equivalent local age contract).
+ * Until exact provider state or an operator proves the link cannot be paid, the
+ * active row keeps blocking a second real-money checkout.
  */
 async function inspectInFlightCheckout(
   supabase: SupabaseClient,
@@ -159,10 +153,11 @@ async function inspectInFlightCheckout(
 ): Promise<InFlightCheckout> {
   const { data, error } = await supabase
     .from('orders')
-    .select('id, order_number, created_at')
+    .select('id, order_number')
     .eq('customer_id', customerId)
     .eq('product_id', productId)
     .eq('status', 'pending')
+    .eq('checkout_active', true)
     .order('created_at', { ascending: false })
     .limit(5);
 
@@ -171,25 +166,10 @@ async function inspectInFlightCheckout(
     return { state: 'unavailable' };
   }
 
-  const rows = (data ?? []) as { id: string; order_number: string; created_at: string }[];
-  const cutoff = Date.now() - STALE_CHECKOUT_AGE_MS;
-  const live = rows.filter((row) => {
-    const createdAt = Date.parse(row.created_at);
-    // An unparseable timestamp is treated as live: never release a block we
-    // cannot prove is safe to release.
-    return !Number.isFinite(createdAt) || createdAt > cutoff;
-  });
-
-  if (live.length > 0) {
-    return { state: 'blocked', orderNumber: live[0].order_number };
-  }
-
-  // Everything outstanding is past the point PayPal would still take it — clear
-  // it so an abandoned checkout does not lock the buyer out permanently.
-  for (const row of rows) {
-    await cancelUnexposedCheckoutOrder(supabase, row.id);
-  }
-  return { state: 'clear' };
+  const rows = (data ?? []) as { id: string; order_number: string }[];
+  return rows.length > 0
+    ? { state: 'blocked', orderNumber: rows[0].order_number }
+    : { state: 'clear' };
 }
 
 /** Does this write error mean the pending-checkout unique index rejected it? */
@@ -507,6 +487,7 @@ export async function handleBuyButton(
       paypal_subscription_id: null,
       amount_cents: product.price_cents,
       currency: product.currency,
+      checkout_active: true,
     };
     const { data: pendingOrder, error: pendingOrderError } = await supabase.from('orders').insert({
       order_number: orderNumber,
@@ -514,7 +495,7 @@ export async function handleBuyButton(
       status: 'pending',
       source: 'purchase',
     })
-      .select('id,customer_id,guild_id,product_id,plan_id,paypal_order_id,paypal_subscription_id,amount_cents,currency,status')
+      .select('id,customer_id,guild_id,product_id,plan_id,paypal_order_id,paypal_subscription_id,amount_cents,currency,status,checkout_active')
       .single();
 
     if (pendingOrderError || !isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
@@ -664,6 +645,7 @@ export async function handleBuyButton(
       paypal_subscription_id: subData.id,
       amount_cents: plan.price_cents,
       currency: plan.currency,
+      checkout_active: true,
     };
     const { data: pendingOrder, error: pendingOrderError } = await supabase.from('orders').insert({
       order_number: orderNumber,
@@ -671,10 +653,28 @@ export async function handleBuyButton(
       status: 'pending',
       source: 'purchase',
     })
-      .select('id,customer_id,guild_id,product_id,plan_id,paypal_order_id,paypal_subscription_id,amount_cents,currency,status')
+      .select('id,customer_id,guild_id,product_id,plan_id,paypal_order_id,paypal_subscription_id,amount_cents,currency,status,checkout_active')
       .single();
 
     if (pendingOrderError || !isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
+      if (isDuplicateCheckoutViolation(pendingOrderError)) {
+        log.warn('Refused a concurrent second subscription checkout for the same product', {
+          productId,
+        });
+        await interaction.editReply({
+          embeds: [
+            brandedEmbed(brandKit, {
+              intent: 'warning',
+              title: '⏳ Checkout Already In Progress',
+              description:
+                'A subscription checkout for this product was just opened. Use that PayPal link '
+                + 'to finish — a second one could create two paid subscriptions. You have not '
+                + 'been charged for this click.',
+            }),
+          ],
+        });
+        return;
+      }
       log.error('Failed to persist subscription checkout order:', pendingOrderError?.message ?? 'identity mismatch');
       await interaction.editReply({
         content: '❌ Checkout could not be safely recorded. No subscription link was opened; please try again.',

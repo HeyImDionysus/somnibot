@@ -291,6 +291,8 @@ function createCaptureRecoveryHarness(options: {
   failOrderCompleteAttempts?: number;
   failOrderPriceUpdateAttempts?: number;
   failCustomerReadAttempts?: number;
+  failClaimAttempts?: number;
+  failAlertInsertAttempts?: number;
 } = {}) {
   const state: any = {
     order: {
@@ -304,7 +306,9 @@ function createCaptureRecoveryHarness(options: {
       currency: 'USD',
       status: 'pending',
       source: 'purchase',
+      checkout_active: true,
       grant_snapshot_frozen_at: null,
+      delivery_type_snapshot: options.withLicense ? 'license_key' : 'access_pass',
       paypal_order_id: options.subscription ? null : 'PAYPAL-ORDER-RECOVERY-1',
       paypal_subscription_id: options.subscription ? 'SUB-RECOVERY-1' : null,
     },
@@ -335,6 +339,10 @@ function createCaptureRecoveryHarness(options: {
     failOrderCompleteAttempts: options.failOrderCompleteAttempts ?? 0,
     failOrderPriceUpdateAttempts: options.failOrderPriceUpdateAttempts ?? 0,
     failCustomerReadAttempts: options.failCustomerReadAttempts ?? 0,
+    failClaimAttempts: options.failClaimAttempts ?? 0,
+    failAlertInsertAttempts: options.failAlertInsertAttempts ?? 0,
+    fulfillmentClaimOrderId: null,
+    fulfillmentHold: null,
     inserts: [] as Array<{ table: string; payload: any }>,
     updates: [] as Array<{ table: string; payload: any }>,
   };
@@ -416,6 +424,141 @@ function createCaptureRecoveryHarness(options: {
       }
       state.legacySubscriptionContract ??= candidate;
       return { data: structuredClone(state.legacySubscriptionContract), error: null };
+    }
+    if (name === 'commerce_claim_paid_fulfillment') {
+      if (state.failClaimAttempts > 0) {
+        state.failClaimAttempts -= 1;
+        return { data: null, error: { message: 'claim database unavailable', code: '08006' } };
+      }
+      if (state.fulfillmentHold) {
+        const existingAlert = (state.alerts ?? []).find(
+          (alert: any) =>
+            alert.metadata?.order_id === state.order.id
+            && alert.resolved !== true,
+        );
+        if (!existingAlert) {
+          (state.alerts ??= []).push({
+            id: 'alert-claim-hold',
+            guild_id: state.order.guild_id,
+            alert_type: args.p_provider_kind === 'capture'
+              ? 'commerce_duplicate_purchase_capture'
+              : 'commerce_duplicate_subscription_activation',
+            severity: 'critical',
+            message: `Paid order ${state.order.order_number} was held; refund required.`,
+            metadata: {
+              order_id: state.order.id,
+              provider_id: args.p_provider_id,
+              winning_order_id: state.fulfillmentHold.winning_order_id,
+              existing_entitlement_id:
+                state.fulfillmentHold.conflicting_entitlement_id,
+            },
+          });
+        }
+        return {
+          data: {
+            order_id: state.order.id,
+            disposition: 'held',
+            winning_order_id: state.fulfillmentHold.winning_order_id,
+            conflicting_entitlement_id:
+              state.fulfillmentHold.conflicting_entitlement_id,
+            alert_id: 'alert-claim-hold',
+          },
+          error: null,
+        };
+      }
+
+      const liveStatuses = ['active', 'pending', 'grace_period', 'suspended'];
+      const liveEntitlements = (state.entitlements ?? []).filter(
+        (entitlement: any) =>
+          entitlement.guild_id === state.order.guild_id
+          && entitlement.customer_id === state.order.customer_id
+          && entitlement.product_id === state.order.product_id
+          && liveStatuses.includes(entitlement.status),
+      );
+      const sameOrderEntitlement = liveEntitlements.find(
+        (entitlement: any) => entitlement.order_id === state.order.id,
+      );
+      const conflictingEntitlement = liveEntitlements.find(
+        (entitlement: any) => entitlement.order_id !== state.order.id,
+      );
+
+      if (sameOrderEntitlement) {
+        state.fulfillmentClaimOrderId ??= state.order.id;
+        return {
+          data: {
+            order_id: state.order.id,
+            disposition: 'winner',
+            winning_order_id: state.order.id,
+            conflicting_entitlement_id: null,
+            alert_id: null,
+          },
+          error: null,
+        };
+      }
+
+      const winningOrderId = conflictingEntitlement?.order_id
+        ?? (
+          state.fulfillmentClaimOrderId !== state.order.id
+            ? state.fulfillmentClaimOrderId
+            : null
+        );
+      if (conflictingEntitlement || winningOrderId) {
+        state.fulfillmentHold = {
+          winning_order_id: winningOrderId,
+          conflicting_entitlement_id: conflictingEntitlement?.id ?? null,
+        };
+        if (
+          args.p_provider_kind === 'subscription'
+          && ['pending', 'completed'].includes(state.order.status)
+        ) {
+          state.order.status = 'pending_review';
+        }
+        const alert = {
+          id: 'alert-claim-hold',
+          guild_id: state.order.guild_id,
+          alert_type: args.p_provider_kind === 'capture'
+            ? 'commerce_duplicate_purchase_capture'
+            : 'commerce_duplicate_subscription_activation',
+          severity: 'critical',
+          message:
+            `Paid order ${state.order.order_number} lost the atomic fulfillment claim; `
+            + 'review and refund/cancel this exact order.',
+          metadata: {
+            order_id: state.order.id,
+            provider_id: args.p_provider_id,
+            ...(args.p_provider_kind === 'capture'
+              ? { paypal_capture_id: args.p_provider_id }
+              : { paypal_subscription_id: args.p_provider_id }),
+            amount_cents: args.p_amount_cents,
+            currency: args.p_currency,
+            winning_order_id: winningOrderId,
+            existing_entitlement_id: conflictingEntitlement?.id ?? null,
+          },
+        };
+        (state.alerts ??= []).push(alert);
+        return {
+          data: {
+            order_id: state.order.id,
+            disposition: 'held',
+            winning_order_id: winningOrderId,
+            conflicting_entitlement_id: conflictingEntitlement?.id ?? null,
+            alert_id: alert.id,
+          },
+          error: null,
+        };
+      }
+
+      state.fulfillmentClaimOrderId = state.order.id;
+      return {
+        data: {
+          order_id: state.order.id,
+          disposition: 'winner',
+          winning_order_id: state.order.id,
+          conflicting_entitlement_id: null,
+          alert_id: null,
+        },
+        error: null,
+      };
     }
     if (name === 'commerce_finalize_paypal_capture') {
       const completed = args.p_amount_cents === state.order.amount_cents
@@ -529,6 +672,10 @@ function createCaptureRecoveryHarness(options: {
       if (operation === 'insert') {
         state.inserts.push({ table, payload: structuredClone(payload) });
         if (table === 'alerts') {
+          if (state.failAlertInsertAttempts > 0) {
+            state.failAlertInsertAttempts -= 1;
+            return { data: null, error: { message: 'alerts unavailable', code: '08006' } };
+          }
           (state.alerts ??= []).push(structuredClone(payload));
           return { data: payload, error: null };
         }
@@ -2306,7 +2453,7 @@ describe('PayPal webhook — edge cases', () => {
       }
     });
 
-    it('stages the exact frozen snapshot before capture finalization and then releases it', async () => {
+    it('freezes and records the exact capture before claim/staging, then releases it', async () => {
       const { supabase, state, rpc } = createCaptureRecoveryHarness();
 
       await handlePaymentCaptured(supabase, captureResource);
@@ -2329,6 +2476,7 @@ describe('PayPal webhook — edge cases', () => {
       expect(rpc.mock.calls.map(([name]) => name)).toEqual([
         'commerce_freeze_order_grant_snapshot',
         'commerce_finalize_paypal_capture',
+        'commerce_claim_paid_fulfillment',
         'bot_action_queue_release_staged',
       ]);
       expect(rpc).toHaveBeenCalledWith('bot_action_queue_release_staged', {
@@ -2370,8 +2518,8 @@ describe('PayPal webhook — edge cases', () => {
       await expect(handlePaymentCaptured(supabase, captureResource)).rejects.toThrow(
         'Failed to stage fulfillment outbox',
       );
-      expect(state.order.status).toBe('pending');
-      expect(state.totalsApplied).toBe(0);
+      expect(state.order.status).toBe('completed');
+      expect(state.totalsApplied).toBe(1);
       state.currentSnapshot = {
         granted_role_ids_snapshot: ['444444444444444444'],
         granted_channel_ids_snapshot: ['555555555555555555'],
@@ -2391,7 +2539,7 @@ describe('PayPal webhook — edge cases', () => {
       });
       expect(state.queue.status).toBe('pending');
       expect(state.totalsApplied).toBe(1);
-      expect(rpc.mock.calls.filter(([name]) => name === 'commerce_finalize_paypal_capture')).toHaveLength(1);
+      expect(rpc.mock.calls.filter(([name]) => name === 'commerce_finalize_paypal_capture')).toHaveLength(2);
     });
 
     it('reuses the staged plaintext/key id after license persistence fails and applies totals once', async () => {
@@ -3170,6 +3318,30 @@ describe('PayPal webhook — duplicate purchase capture', () => {
     expect(state.inserts.filter((i: any) => i.table === 'bot_action_queue')).toHaveLength(0);
   });
 
+  it('records but withholds a historical capture that loses an atomic claim race', async () => {
+    const { supabase, state } = createCaptureRecoveryHarness({ withLicense: true });
+    state.fulfillmentClaimOrderId = 'order-concurrent-winner';
+
+    await handlePaymentCaptured(supabase, captureResource);
+
+    expect(state.payment).not.toBeNull();
+    expect(state.order.status).toBe('completed');
+    expect(state.fulfillmentHold).toEqual({
+      winning_order_id: 'order-concurrent-winner',
+      conflicting_entitlement_id: null,
+    });
+    expect(state.queue).toBeNull();
+    expect(state.licenseKey).toBeNull();
+    expect(state.alerts).toContainEqual(expect.objectContaining({
+      alert_type: 'commerce_duplicate_purchase_capture',
+      severity: 'critical',
+      metadata: expect.objectContaining({
+        order_id: 'order-1',
+        winning_order_id: 'order-concurrent-winner',
+      }),
+    }));
+  });
+
   it('raises a critical operator alert naming the order and the money at stake', async () => {
     const { supabase, state } = createCaptureRecoveryHarness();
     state.entitlements = [priorEntitlement];
@@ -3218,25 +3390,175 @@ describe('PayPal webhook — duplicate purchase capture', () => {
     },
   );
 
-  it('refuses to fulfil when the ownership check itself cannot be answered', async () => {
-    const { supabase, state } = createCaptureRecoveryHarness();
-    const realFrom = supabase.from;
-    supabase.from = (table: string) => {
-      if (table !== 'entitlements') return realFrom(table);
-      const failing: any = {
-        select: () => failing,
-        eq: () => failing,
-        in: () => failing,
-        order: () => failing,
-        limit: () => Promise.resolve({ data: null, error: { message: 'connection reset' } }),
-      };
-      return failing;
-    };
+  it('refuses to fulfil when the atomic claim cannot be persisted', async () => {
+    const { supabase, state } = createCaptureRecoveryHarness({ failClaimAttempts: 1 });
 
     await expect(handlePaymentCaptured(supabase, captureResource)).rejects.toThrow(
-      /duplicate purchase/i,
+      /claim paid fulfillment/i,
     );
-    // Nothing staged, nothing frozen — the webhook fails loudly and PayPal retries.
+    // Nothing is staged or minted; the webhook fails loudly and retries.
     expect(state.queue).toBeNull();
+    expect(state.licenseKey).toBeNull();
+  });
+});
+
+describe('PayPal webhook — frozen licence delivery contract', () => {
+  const subscriptionResource = {
+    id: 'SUB-RECOVERY-1',
+    custom_id: JSON.stringify({
+      guild_id: 'guild-1',
+      product_id: 'product-1',
+      plan_id: 'plan-1',
+      customer_id: 'customer-1',
+      discord_id: 'discord-1',
+    }),
+  };
+  const captureResource = {
+    id: 'CAPTURE-RECOVERY-1',
+    custom_id: JSON.stringify({
+      guild_id: 'guild-1',
+      product_id: 'product-1',
+      customer_id: 'customer-1',
+      discord_id: 'discord-1',
+    }),
+    amount: { value: '9.99', currency_code: 'USD' },
+    supplementary_data: {
+      related_ids: { order_id: 'PAYPAL-ORDER-RECOVERY-1' },
+    },
+  };
+
+  it('stages, persists and delivers a key for a subscription sold as licence_key', async () => {
+    const { supabase, state } = createCaptureRecoveryHarness({
+      subscription: true,
+      withLicense: true,
+    });
+
+    await handleSubscriptionActivated(supabase, subscriptionResource);
+
+    expect(state.order.status).toBe('completed');
+    expect(state.queue.payload).toMatchObject({
+      fulfillment_type: 'subscription_activated',
+      license_key_id: expect.any(String),
+      license_key_plaintext: expect.stringMatching(/^SMNI(?:-[A-Z0-9]{4}){4}$/),
+    });
+    expect(state.licenseKey).toMatchObject({
+      id: state.queue.payload.license_key_id,
+      order_id: 'order-1',
+      product_id: 'product-1',
+    });
+    expect(state.queue.status).toBe('pending');
+  });
+
+  it('never mints from a stale licence config when the frozen order sold file delivery', async () => {
+    const { supabase, state } = createCaptureRecoveryHarness({ withLicense: true });
+    state.order.delivery_type_snapshot = 'file';
+
+    await handlePaymentCaptured(supabase, captureResource);
+
+    expect(state.order.status).toBe('completed');
+    expect(state.queue.payload).not.toHaveProperty('license_key_id');
+    expect(state.queue.payload).not.toHaveProperty('license_key_plaintext');
+    expect(state.licenseKey).toBeNull();
+  });
+
+  it('records and holds a legacy paid capture instead of guessing a missing delivery contract', async () => {
+    const { supabase, state } = createCaptureRecoveryHarness({ withLicense: true });
+    state.order.delivery_type_snapshot = null;
+
+    await handlePaymentCaptured(supabase, captureResource);
+
+    expect(state.payment).not.toBeNull();
+    expect(state.order.status).toBe('completed');
+    expect(state.queue).toBeNull();
+    expect(state.licenseKey).toBeNull();
+    expect(state.alerts).toContainEqual(expect.objectContaining({
+      alert_type: 'commerce_unknown_delivery_contract',
+      severity: 'critical',
+      metadata: expect.objectContaining({ order_id: 'order-1' }),
+    }));
+  });
+
+  it('repairs a missing unknown-delivery alert from a pending_review subscription replay', async () => {
+    const { supabase, state } = createCaptureRecoveryHarness({
+      subscription: true,
+      withLicense: true,
+      failAlertInsertAttempts: 1,
+    });
+    state.order.delivery_type_snapshot = null;
+
+    await expect(
+      handleSubscriptionActivated(supabase, subscriptionResource),
+    ).rejects.toThrow('Failed to persist delivery-contract alert');
+
+    expect(state.order.status).toBe('pending_review');
+    expect(state.queue).toBeNull();
+    expect(state.alerts ?? []).toHaveLength(0);
+
+    await handleSubscriptionActivated(supabase, subscriptionResource);
+
+    expect(state.order.status).toBe('pending_review');
+    expect(state.queue).toBeNull();
+    expect(state.alerts).toContainEqual(expect.objectContaining({
+      alert_type: 'commerce_unknown_delivery_contract',
+      severity: 'critical',
+      metadata: expect.objectContaining({ order_id: 'order-1' }),
+    }));
+  });
+
+  it('holds an activated duplicate subscription before any second entitlement or key', async () => {
+    const { supabase, state } = createCaptureRecoveryHarness({
+      subscription: true,
+      withLicense: true,
+    });
+    state.entitlements = [{
+      id: 'ent-prior-subscription',
+      guild_id: 'guild-1',
+      customer_id: 'customer-1',
+      product_id: 'product-1',
+      order_id: 'order-prior',
+      status: 'active',
+      created_at: '2026-07-01T00:00:00.000Z',
+    }];
+
+    await handleSubscriptionActivated(supabase, subscriptionResource);
+
+    expect(state.order.status).toBe('pending_review');
+    expect(state.queue).toBeNull();
+    expect(state.licenseKey).toBeNull();
+    expect(state.alerts).toContainEqual(expect.objectContaining({
+      alert_type: 'commerce_duplicate_subscription_activation',
+      severity: 'critical',
+      metadata: expect.objectContaining({
+        order_id: 'order-1',
+        paypal_subscription_id: 'SUB-RECOVERY-1',
+        existing_entitlement_id: 'ent-prior-subscription',
+      }),
+    }));
+  });
+
+  it('holds the subscription that loses a concurrent historical activation claim', async () => {
+    const { supabase, state } = createCaptureRecoveryHarness({
+      subscription: true,
+      withLicense: true,
+    });
+    state.fulfillmentClaimOrderId = 'order-concurrent-subscription-winner';
+
+    await handleSubscriptionActivated(supabase, subscriptionResource);
+
+    expect(state.order.status).toBe('pending_review');
+    expect(state.fulfillmentHold).toEqual({
+      winning_order_id: 'order-concurrent-subscription-winner',
+      conflicting_entitlement_id: null,
+    });
+    expect(state.queue).toBeNull();
+    expect(state.licenseKey).toBeNull();
+    expect(state.alerts).toContainEqual(expect.objectContaining({
+      alert_type: 'commerce_duplicate_subscription_activation',
+      severity: 'critical',
+      metadata: expect.objectContaining({
+        order_id: 'order-1',
+        winning_order_id: 'order-concurrent-subscription-winner',
+      }),
+    }));
   });
 });

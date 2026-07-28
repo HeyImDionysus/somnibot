@@ -16,7 +16,8 @@ import {
   type PayPalSaleResource,
 } from '@/lib/types/paypal';
 import { generateLicenseKey, queueFulfillment } from './fulfillment';
-import { findConflictingEntitlement, raiseDuplicatePurchaseAlert } from './duplicate-purchase';
+import { claimPaidFulfillment } from './duplicate-purchase';
+import { raiseUnknownDeliveryContractAlert } from './license-delivery-review';
 
 function formatSupabaseError(error: unknown): string {
   if (
@@ -38,6 +39,14 @@ function requireSupabaseSuccess(error: unknown, operation: string) {
 
 type AdminSupabase = ReturnType<typeof createAdminSupabase>;
 const LIFECYCLE_SCAN_PAGE_SIZE = 500;
+const DELIVERY_TYPES = [
+  'file',
+  'link',
+  'access_pass',
+  'license_key',
+  'mixed',
+] as const;
+type DeliveryType = (typeof DELIVERY_TYPES)[number];
 
 interface FrozenGrantSnapshot {
   order_id: string;
@@ -45,6 +54,7 @@ interface FrozenGrantSnapshot {
   granted_channel_ids_snapshot: string[];
   temporary_role_grants_snapshot: Array<{ role_id: string; duration_seconds: number }>;
   grant_snapshot_frozen_at: string;
+  delivery_type_snapshot: DeliveryType | null;
 }
 
 interface LegacySubscriptionGrantContract {
@@ -102,6 +112,7 @@ interface CommerceOrderRow {
   grant_snapshot_frozen_at?: string | null;
   paypal_order_id?: string | null;
   paypal_subscription_id?: string | null;
+  delivery_type_snapshot?: DeliveryType | null;
 }
 
 interface EntitlementLifecycleRow {
@@ -143,6 +154,17 @@ interface SubscriptionProductIdentityRow {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
+}
+
+function parseDeliveryTypeSnapshot(value: unknown): DeliveryType | null {
+  if (value === null) return null;
+  if (
+    typeof value === 'string'
+    && (DELIVERY_TYPES as readonly string[]).includes(value)
+  ) {
+    return value as DeliveryType;
+  }
+  throw new Error('Order delivery type snapshot is malformed');
 }
 
 async function fetchAllLifecycleRowsById<T extends { id: string }>(
@@ -379,6 +401,7 @@ function parseFrozenGrantSnapshot(data: unknown): FrozenGrantSnapshot {
       candidate.temporary_role_grants_snapshot,
     ),
     grant_snapshot_frozen_at: candidate.grant_snapshot_frozen_at,
+    delivery_type_snapshot: null,
   };
 }
 
@@ -706,7 +729,52 @@ async function freezeOrderGrantSnapshot(
   if (snapshot.order_id !== order.id) {
     throw new Error('Order grant snapshot RPC returned the wrong order');
   }
-  return snapshot;
+  const { data: deliveryContract, error: deliveryContractError } = await supabase
+    .from('orders')
+    .select('id, delivery_type_snapshot')
+    .eq('id', order.id)
+    .eq('guild_id', order.guild_id)
+    .maybeSingle();
+  requireSupabaseSuccess(
+    deliveryContractError,
+    'Failed to load frozen order delivery contract',
+  );
+  if (!deliveryContract || deliveryContract.id !== order.id) {
+    throw new Error('Frozen order delivery contract returned the wrong order');
+  }
+  return {
+    ...snapshot,
+    delivery_type_snapshot: parseDeliveryTypeSnapshot(
+      deliveryContract.delivery_type_snapshot,
+    ),
+  };
+}
+
+async function holdSubscriptionOrderForReview(
+  supabase: AdminSupabase,
+  order: CommerceOrderRow,
+): Promise<void> {
+  if (order.status === 'pending_review' || order.status === 'completed') return;
+  if (order.status !== 'pending') {
+    throw new Error(`Subscription review hold rejected order status ${order.status}`);
+  }
+
+  const { data, error } = await supabase
+    .from('orders')
+    .update({
+      status: 'pending_review',
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', order.id)
+    .eq('guild_id', order.guild_id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+  requireSupabaseSuccess(error, 'Failed to hold subscription order for review');
+  if (!data || data.id !== order.id) {
+    throw new Error('Subscription review hold lost its state race');
+  }
+  order.status = 'pending_review';
 }
 
 async function adoptLegacySubscriptionGrantContract(
@@ -790,6 +858,33 @@ async function ensureStagedLicenseKey(
     existing.key_hash !== keyHash
   ) {
     throw new Error('Existing staged license key failed identity validation');
+  }
+}
+
+function validateStagedLicenseDelivery(
+  payload: Record<string, unknown>,
+  deliveryType: DeliveryType | null,
+): void {
+  const licenseKeyId = payload.license_key_id;
+  const plaintext = payload.license_key_plaintext;
+  const hasExactLicense =
+    isNonEmptyString(licenseKeyId) && isNonEmptyString(plaintext);
+  const hasAnyLicense = licenseKeyId != null || plaintext != null;
+
+  // A queue row staged before delivery snapshots existed is already the durable
+  // sold contract. Do not re-derive or rewrite it from today's catalog.
+  if (deliveryType === null) {
+    if (hasAnyLicense && !hasExactLicense) {
+      throw new Error('Staged legacy license key payload is malformed');
+    }
+    return;
+  }
+
+  if (deliveryType === 'license_key' && !hasExactLicense) {
+    throw new Error('Licence-key order has no staged licence payload');
+  }
+  if (deliveryType !== 'license_key' && hasAnyLicense) {
+    throw new Error('Non-licence order has an unexpected staged licence payload');
   }
 }
 
@@ -1100,7 +1195,7 @@ export async function handlePaymentCaptured(
   if (existingPayment?.order_id) {
     const { data, error } = await supabase
       .from('orders')
-      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, paypal_order_id')
+      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, delivery_type_snapshot, paypal_order_id')
       .eq('id', existingPayment.order_id)
       .eq('guild_id', meta.guild_id)
       .maybeSingle();
@@ -1114,7 +1209,7 @@ export async function handlePaymentCaptured(
     }
     const { data, error } = await supabase
       .from('orders')
-      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, paypal_order_id')
+      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, delivery_type_snapshot, paypal_order_id')
       .eq('guild_id', meta.guild_id)
       .eq('customer_id', meta.customer_id)
       .eq('product_id', meta.product_id)
@@ -1182,54 +1277,46 @@ export async function handlePaymentCaptured(
     }
   }
 
-  // DOUBLE-CHARGE RAIL (Finding 10). The bot's already-purchased guard runs at
-  // buy-click time only, so a customer who completed two checkouts for one
-  // product used to receive two entitlements — the only entitlement uniqueness
-  // is `idx_entitlements_order_id` on order_id, not (customer_id, product_id).
-  //
-  // If they already own it, the money is real and stays recorded (the payment
-  // is still finalized, so the order and payment exist and are refundable
-  // through the normal admin flow), but nothing is fulfilled a second time and
-  // an operator is alerted to refund. Withheld before ANY fulfillment is
-  // staged, so no second entitlement, role set, or licence key is ever minted.
-  //
-  // The grant snapshot is still frozen first — `commerce_finalize_paypal_capture`
-  // refuses a new capture on an unfrozen order, and freezing only records the
-  // sold contract; it grants nothing. This mirrors the amount-mismatch path,
-  // which also freezes and finalizes before returning without staging.
-  const duplicateEntitlement = amountMatches
-    ? await findConflictingEntitlement(supabase, order)
-    : null;
-  if (duplicateEntitlement) {
-    let duplicateFinalization = replayFinalization;
-    if (!duplicateFinalization) {
-      await freezeOrderGrantSnapshot(supabase, order);
-      duplicateFinalization = await finalizePayPalCapture(supabase, {
-        order,
-        paypalCaptureId,
-        amountCents,
-        currency: captureCurrency,
-      });
-    }
-    console.error(
-      `[Webhook] DUPLICATE PURCHASE: order ${order.order_number} captured `
-        + `${amountCents} ${captureCurrency} for a product customer ${order.customer_id} `
-        + `already owns via entitlement ${duplicateEntitlement.id} `
-        + `(order ${duplicateEntitlement.order_id ?? 'none'}). Payment recorded as `
-        + `${duplicateFinalization.order_status}; fulfillment withheld; refund required.`,
-    );
-    await raiseDuplicatePurchaseAlert(supabase, order, duplicateEntitlement, {
-      paypalCaptureId,
-      amountCents,
-      currency: captureCurrency,
-    });
-    return;
-  }
-
   // The finalizer requires the sold access contract to be frozen for both
   // completed and pending_review outcomes. A financial mismatch still must
   // not stage or release any fulfillment.
   const snapshot = await freezeOrderGrantSnapshot(supabase, order);
+  // Persist and re-validate the exact completed capture before fulfillment
+  // arbitration. The claim RPC independently requires this payment row, so a
+  // forged/malformed historical queue payload cannot seize the winner with a
+  // merely syntactic capture ID. No random key or fulfillment row exists yet.
+  const finalization = replayFinalization ?? await finalizePayPalCapture(supabase, {
+    order,
+    paypalCaptureId,
+    amountCents,
+    currency: captureCurrency,
+  });
+  if (shouldSkipCaptureFulfillment(finalization, {
+    order,
+    amountCents,
+    currency: captureCurrency,
+  })) return;
+
+  if (amountMatches) {
+    // The database claim is the atomic double-fulfillment boundary. It must run
+    // before a random licence key or staged queue payload is created. Historical
+    // PayPal links can arrive concurrently, so a JavaScript entitlement read is
+    // not sufficient serialization.
+    const claim = await claimPaidFulfillment(supabase, order, {
+      kind: 'capture',
+      id: paypalCaptureId,
+      amountCents,
+      currency: captureCurrency,
+    });
+    if (claim.disposition === 'held') {
+      console.error(
+        `[Webhook] DUPLICATE PURCHASE: order ${order.order_number} lost fulfillment `
+          + `claim to ${claim.winning_order_id ?? 'an existing entitlement'}; payment `
+          + `recorded, critical alert ${claim.alert_id} persisted, fulfillment withheld.`,
+      );
+      return;
+    }
+  }
   const expected: FulfillmentExpectation = {
     idempotencyKey: `paypal:capture:${paypalCaptureId}:fulfill_purchase`,
     action: 'fulfill_purchase',
@@ -1261,6 +1348,19 @@ export async function handlePaymentCaptured(
   if (amountMatches) {
     staged = await loadFulfillmentByIdempotencyKey(supabase, expected);
   }
+  if (
+    amountMatches
+    && !staged
+    && snapshot.delivery_type_snapshot === null
+  ) {
+    await raiseUnknownDeliveryContractAlert(supabase, order, {
+      kind: 'capture',
+      id: paypalCaptureId,
+      amountCents,
+      currency: captureCurrency,
+    });
+    return;
+  }
   if (amountMatches && !staged) {
     const productName = await requireProductDisplayName(
       supabase,
@@ -1268,14 +1368,9 @@ export async function handlePaymentCaptured(
       'Failed to load captured product display identity',
     );
 
-    const { data: licenseConfig, error: licenseConfigError } = await supabase
-      .from('product_license_config')
-      .select('product_id')
-      .eq('product_id', order.product_id)
-      .maybeSingle();
-    requireSupabaseSuccess(licenseConfigError, 'Failed to load product license configuration');
-
-    const license = licenseConfig ? generateLicenseKey() : null;
+    const license = snapshot.delivery_type_snapshot === 'license_key'
+      ? generateLicenseKey()
+      : null;
     staged = await stageFulfillment(supabase, expected, {
       fulfillment_type: 'one_time_purchase',
       guild_id: order.guild_id,
@@ -1301,22 +1396,9 @@ export async function handlePaymentCaptured(
     });
   }
 
-  // The sold grant contract is frozen before every first finalization. Exact
-  // payments additionally have an immutable grant/license payload durably
-  // staged; mismatches have no queue row and can only become pending_review.
-  const finalization = replayFinalization ?? await finalizePayPalCapture(supabase, {
-    order,
-    paypalCaptureId,
-    amountCents,
-    currency: captureCurrency,
-  });
-  if (shouldSkipCaptureFulfillment(finalization, {
-    order,
-    amountCents,
-    currency: captureCurrency,
-  })) return;
   if (!staged) throw new Error('Completed capture has no staged grant snapshot');
 
+  validateStagedLicenseDelivery(staged.payload, snapshot.delivery_type_snapshot);
   await ensureStagedLicenseKey(supabase, order, staged.payload);
   await releaseStagedFulfillment(supabase, staged);
 
@@ -1383,7 +1465,7 @@ export async function handleSubscriptionActivated(
 
   const { data: existingOrder, error: existingOrderError } = await supabase
     .from('orders')
-    .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, paypal_subscription_id')
+    .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, delivery_type_snapshot, paypal_subscription_id')
     .eq('paypal_subscription_id', subscriptionId)
     .eq('guild_id', meta.guild_id)
     .maybeSingle();
@@ -1399,7 +1481,7 @@ export async function handleSubscriptionActivated(
       order.product_id !== meta.product_id ||
       order.plan_id !== meta.plan_id ||
       order.paypal_subscription_id !== subscriptionId ||
-      !['pending', 'completed'].includes(order.status)
+      !['pending', 'pending_review', 'completed'].includes(order.status)
     )
   ) {
     throw new Error('Subscription order failed identity validation');
@@ -1430,8 +1512,9 @@ export async function handleSubscriptionActivated(
         currency: firstProviderContract.currency,
         status: 'pending',
         source: 'purchase',
+        checkout_active: false,
       })
-      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, paypal_subscription_id')
+      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, delivery_type_snapshot, paypal_subscription_id')
       .single();
     requireSupabaseSuccess(error, 'Failed to create subscription order');
     order = data as CommerceOrderRow | null;
@@ -1446,7 +1529,7 @@ export async function handleSubscriptionActivated(
     order.product_id !== meta.product_id ||
     order.plan_id !== meta.plan_id ||
     order.paypal_subscription_id !== subscriptionId ||
-    !['pending', 'completed'].includes(order.status)
+    !['pending', 'pending_review', 'completed'].includes(order.status)
   ) {
     throw new Error('Subscription order failed identity validation');
   }
@@ -1516,6 +1599,9 @@ export async function handleSubscriptionActivated(
     providerPlanId = stagedProviderPlanId;
   }
 
+  const deliveryTypeSnapshot = parseDeliveryTypeSnapshot(
+    order.delivery_type_snapshot ?? null,
+  );
   const trustFrozenOrderContract = isNonEmptyString(order.grant_snapshot_frozen_at);
   const hasDurableGrantContract = trustFrozenOrderContract || staged !== null;
   const completedLegacyNoGrantContract =
@@ -1563,12 +1649,51 @@ export async function handleSubscriptionActivated(
   if (completedLegacyNoGrantContract) {
     // Legacy completed orders predate immutable grant snapshots. Their exact
     // PayPal subscription, customer, order, local-plan metadata, and financial
-    // identities have already been validated above, but freezing now would
-    // either fail (the RPC only accepts pending orders) or grant today's
-    // mutable product configuration.
+    // identities have already been validated above, but claiming/freeze now
+    // would reserve today's mutable sale contract for an order that can only
+    // safely no-op.
     console.info(
       `[Webhook] Exact legacy subscription replay has no durable grant contract; ` +
         `skipping fulfillment recovery for ${order.order_number}`,
+    );
+    return;
+  }
+
+  // An older inactive-but-still-payable approval link can activate concurrently
+  // with another historical order. The database chooses one durable winner,
+  // atomically holds every loser in pending_review, and persists its critical
+  // operator alert before this handler can stage any fulfillment.
+  const claim = await claimPaidFulfillment(supabase, order, {
+    kind: 'subscription',
+    id: subscriptionId,
+    amountCents: financial.amountCents,
+    currency: financial.currency,
+  });
+  if (claim.disposition === 'held') {
+    console.error(
+      `[Webhook] DUPLICATE SUBSCRIPTION: order ${order.order_number} lost fulfillment `
+        + `claim to ${claim.winning_order_id ?? 'an existing entitlement'}; critical `
+        + `alert ${claim.alert_id} persisted and fulfillment withheld.`,
+    );
+    return;
+  }
+
+  if (!staged && deliveryTypeSnapshot === null) {
+    await holdSubscriptionOrderForReview(supabase, order);
+    await raiseUnknownDeliveryContractAlert(supabase, order, {
+      kind: 'subscription',
+      id: subscriptionId,
+      amountCents: financial.amountCents,
+      currency: financial.currency,
+    });
+    return;
+  }
+
+  // A replay of a non-delivery review hold can never become fulfillable merely
+  // because mutable catalog or entitlement state changed later.
+  if (order.status === 'pending_review') {
+    console.info(
+      `[Webhook] Subscription order ${order.order_number} remains held for manual review`,
     );
     return;
   }
@@ -1596,8 +1721,6 @@ export async function handleSubscriptionActivated(
       granted_role_ids: snapshot.granted_role_ids_snapshot,
       granted_channel_ids: snapshot.granted_channel_ids_snapshot,
       temporary_role_grants: undefined,
-      license_key_id: undefined,
-      license_key_plaintext: undefined,
       entitlement_type: 'subscription',
     },
   };
@@ -1609,6 +1732,9 @@ export async function handleSubscriptionActivated(
       order.product_id,
       'Failed to load subscription product display identity',
     );
+    const license = deliveryTypeSnapshot === 'license_key'
+      ? generateLicenseKey()
+      : null;
 
     staged = await stageFulfillment(supabase, expected, {
       fulfillment_type: 'subscription_activated',
@@ -1626,6 +1752,12 @@ export async function handleSubscriptionActivated(
       currency: financial.currency,
       granted_role_ids: snapshot.granted_role_ids_snapshot,
       granted_channel_ids: snapshot.granted_channel_ids_snapshot,
+      ...(license
+        ? {
+            license_key_id: crypto.randomUUID(),
+            license_key_plaintext: license.plaintext,
+          }
+        : {}),
       entitlement_type: 'subscription',
     });
   }
@@ -1641,6 +1773,7 @@ export async function handleSubscriptionActivated(
   ) {
     throw new Error('Staged subscription fulfillment changed financial identity');
   }
+  validateStagedLicenseDelivery(staged.payload, deliveryTypeSnapshot);
 
   if (order.status === 'pending') {
     const { data: completedOrder, error: completeError } = await supabase
@@ -1660,6 +1793,7 @@ export async function handleSubscriptionActivated(
     if (!completedOrder) throw new Error('Subscription order completion lost its state race');
   }
 
+  await ensureStagedLicenseKey(supabase, order, staged.payload);
   await releaseStagedFulfillment(supabase, staged);
 
   console.log(

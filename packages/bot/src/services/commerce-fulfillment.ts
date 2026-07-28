@@ -77,6 +77,8 @@ export interface FulfillmentPayload {
   product_name: string;
   order_id: string;
   order_number: string;
+  /** Exact completed PayPal capture carried by one-time purchase actions. */
+  paypal_capture_id?: string;
   plan_id?: string;
   paypal_subscription_id?: string;
   paypal_plan_id?: string;
@@ -241,6 +243,8 @@ export interface FulfillmentResult {
   receiptSent?: boolean;
   /** Set when the receipt DM failed and a persistent re-delivery was queued. */
   receiptRetryQueued?: boolean;
+  /** Durable database arbitration withheld this duplicate paid order. */
+  paidFulfillmentHeld?: boolean;
   eventEmitted: boolean;
   errors: string[];
 }
@@ -583,6 +587,84 @@ export class CommerceFulfillmentService {
     throw new PurchaseRoleDeliveryTerminalNoopError(entitlementId);
   }
 
+  /**
+   * Re-check the database's durable paid-order winner before a queue worker can
+   * create an entitlement or touch Discord. This is intentionally repeated in
+   * the worker even though current webhooks claim before staging: historical
+   * staged/pending rows predate that boundary and are still executable.
+   */
+  private async claimInitialPaidFulfillment(
+    payload: FulfillmentPayload,
+  ): Promise<'winner' | 'held'> {
+    const providerKind = payload.entitlement_type === 'one_time'
+      ? 'capture'
+      : 'subscription';
+    const providerId = providerKind === 'capture'
+      ? payload.paypal_capture_id
+      : payload.paypal_subscription_id;
+    if (
+      typeof providerId !== 'string'
+      || !PAYPAL_SUBSCRIPTION_ID_PATTERN.test(providerId)
+    ) {
+      throw new Error(
+        `${providerKind === 'capture' ? 'One-time' : 'Subscription'} fulfillment `
+          + 'payload has no exact paid provider identity',
+      );
+    }
+
+    const { data, error } = await this.supabase.rpc('commerce_claim_paid_fulfillment', {
+      p_order_id: payload.order_id,
+      p_guild_id: payload.guild_id,
+      p_customer_id: payload.customer_id,
+      p_product_id: payload.product_id,
+      p_provider_kind: providerKind,
+      p_provider_id: providerId,
+      p_amount_cents: payload.amount_cents,
+      p_currency: payload.currency,
+    });
+    if (error) {
+      throw new Error(`Failed to claim paid fulfillment: ${error.message}`);
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error('Paid fulfillment claim RPC returned malformed data');
+    }
+
+    const claim = data as Record<string, unknown>;
+    const nullableIdentity = (value: unknown) =>
+      value === null
+      || (typeof value === 'string' && value.length > 0 && value.trim() === value);
+    if (
+      claim.order_id !== payload.order_id
+      || !['winner', 'held'].includes(String(claim.disposition))
+      || !nullableIdentity(claim.winning_order_id)
+      || !nullableIdentity(claim.conflicting_entitlement_id)
+      || !nullableIdentity(claim.alert_id)
+    ) {
+      throw new Error('Paid fulfillment claim RPC returned malformed identity');
+    }
+    if (
+      claim.disposition === 'winner'
+      && (
+        claim.winning_order_id !== payload.order_id
+        || claim.conflicting_entitlement_id !== null
+        || claim.alert_id !== null
+      )
+    ) {
+      throw new Error('Paid fulfillment winner RPC returned an inconsistent result');
+    }
+    if (
+      claim.disposition === 'held'
+      && (
+        typeof claim.alert_id !== 'string'
+        || claim.alert_id.length === 0
+        || claim.alert_id.trim() !== claim.alert_id
+      )
+    ) {
+      throw new Error('Paid fulfillment hold has no durable critical alert');
+    }
+    return claim.disposition as 'winner' | 'held';
+  }
+
   // ── One-Time Purchase ────────────────────────────────────
 
   private async handleOneTimePurchase(
@@ -594,13 +676,21 @@ export class CommerceFulfillmentService {
     }
     const temporaryRoleGrants = normalizeTemporaryRoleGrants(payload.temporary_role_grants);
     const orderStatus = await this.validatePayloadOrderSnapshot(payload, temporaryRoleGrants);
-    if (orderStatus !== 'completed') {
+    if (orderStatus !== 'completed' && orderStatus !== 'pending_review') {
       requireTerminalOrderStatus(orderStatus);
       const terminalEntitlementId = await this.findOrderEntitlement(payload);
       result.entitlementId = terminalEntitlementId ?? undefined;
       await this.finishTerminalRoleDelivery(payload, terminalEntitlementId);
     }
     await this.validatePayloadCustomerIdentity(payload);
+    const claim = await this.claimInitialPaidFulfillment(payload);
+    if (claim === 'held') {
+      result.paidFulfillmentHeld = true;
+      return;
+    }
+    if (orderStatus !== 'completed') {
+      requireTerminalOrderStatus(orderStatus);
+    }
 
     // 1. Grant the entitlement once, or reuse the durable order-scoped row on
     // a queue retry after a later temporary-role step failed.
@@ -1626,13 +1716,21 @@ export class CommerceFulfillmentService {
     }
     const temporaryRoleGrants = normalizeTemporaryRoleGrants(payload.temporary_role_grants);
     const orderStatus = await this.validatePayloadOrderSnapshot(payload, temporaryRoleGrants);
-    if (orderStatus !== 'completed') {
+    if (orderStatus !== 'completed' && orderStatus !== 'pending_review') {
       requireTerminalOrderStatus(orderStatus);
       const terminalEntitlementId = await this.findOrderEntitlement(payload);
       result.entitlementId = terminalEntitlementId ?? undefined;
       await this.finishTerminalRoleDelivery(payload, terminalEntitlementId);
     }
     await this.validatePayloadCustomerIdentity(payload);
+    const claim = await this.claimInitialPaidFulfillment(payload);
+    if (claim === 'held') {
+      result.paidFulfillmentHeld = true;
+      return;
+    }
+    if (orderStatus !== 'completed') {
+      requireTerminalOrderStatus(orderStatus);
+    }
 
     // 1. Grant once, or resume the exact durable entitlement after a worker
     // crash/Discord failure. Subscription actions use the same unique order_id
@@ -1646,6 +1744,7 @@ export class CommerceFulfillmentService {
         productName: payload.product_name,
         orderId: payload.order_id,
         planId: payload.plan_id,
+        licenseKeyId: payload.license_key_id,
         discordId: payload.discord_id,
         type: 'subscription',
         source: 'purchase',
@@ -2098,6 +2197,7 @@ export class CommerceFulfillmentService {
           entitlementId: result.entitlementId,
           receiptSent: result.receiptSent,
           receiptRetryQueued: result.receiptRetryQueued,
+          paidFulfillmentHeld: result.paidFulfillmentHeld,
           eventEmitted: result.eventEmitted,
           success: result.success,
           errors: result.errors,

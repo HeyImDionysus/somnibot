@@ -164,6 +164,19 @@ function makeChain(result: any = { data: null, error: null }) {
   return chain;
 }
 
+function paidClaimWinner(args: Record<string, unknown>) {
+  return {
+    data: {
+      order_id: args.p_order_id,
+      disposition: 'winner',
+      winning_order_id: args.p_order_id,
+      conflicting_entitlement_id: null,
+      alert_id: null,
+    },
+    error: null,
+  };
+}
+
 function makeSupa(overrides: Record<string, any> = {}) {
   return {
     from: vi.fn((table: string) => {
@@ -192,7 +205,10 @@ function makeSupa(overrides: Record<string, any> = {}) {
           : null;
       return makeChain({ data, error: null });
     }),
-    rpc: vi.fn(async () => ({ data: null, error: null })),
+    rpc: vi.fn(async (name: string, args: Record<string, unknown>) =>
+      name === 'commerce_claim_paid_fulfillment'
+        ? paidClaimWinner(args)
+        : { data: null, error: null }),
   };
 }
 
@@ -268,6 +284,9 @@ function makeTemporaryRoleHarness(opts: {
 
   const supabase: any = {
     rpc: vi.fn(async (name: string, args: Record<string, unknown>) => {
+      if (name === 'commerce_claim_paid_fulfillment') {
+        return paidClaimWinner(args);
+      }
       if (name === 'commerce_attach_temp_role_delivery') {
         const scripted = opts.attachResults?.shift();
         if (scripted) return scripted;
@@ -614,6 +633,7 @@ const basePayload: FulfillmentPayload = {
   product_name: 'VIP Pass',
   order_id: 'order-1',
   order_number: 'ORD-001',
+  paypal_capture_id: 'CAPTURE-001',
   amount_cents: 999,
   currency: 'USD',
   granted_role_ids: ['role-1'],
@@ -642,6 +662,7 @@ const subscriptionOrderSnapshot = {
 const subscriptionActivationPayload: FulfillmentPayload = {
   ...basePayload,
   fulfillment_type: 'subscription_activated',
+  paypal_capture_id: undefined,
   plan_id: 'plan-monthly',
   paypal_subscription_id: 'SUB-001',
   entitlement_type: 'subscription',
@@ -747,7 +768,10 @@ function makeEntitlementLookupResult(result: { data: unknown; error: unknown }) 
     from: vi.fn((table: string) => makeChain(
       table === 'entitlements' ? result : { data: null, error: null },
     )),
-    rpc: vi.fn(async () => ({ data: null, error: null })),
+    rpc: vi.fn(async (name: string, args: Record<string, unknown>) =>
+      name === 'commerce_claim_paid_fulfillment'
+        ? paidClaimWinner(args)
+        : { data: null, error: null }),
   };
 }
 
@@ -797,6 +821,101 @@ describe('CommerceFulfillmentService', () => {
         roleDeliveryClaim: TEST_ACTION_CLAIM,
       });
       expect(mockEnsurePurchaseGrantedRoles).not.toHaveBeenCalled();
+    });
+
+    it('completes a backfilled losing queue row as held before any entitlement or Discord effect', async () => {
+      const supabase: any = makeSupa();
+      supabase.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+        if (name !== 'commerce_claim_paid_fulfillment') {
+          return { data: null, error: null };
+        }
+        expect(args).toEqual({
+          p_order_id: 'order-1',
+          p_guild_id: 'guild-1',
+          p_customer_id: 'cust-1',
+          p_product_id: 'prod-1',
+          p_provider_kind: 'capture',
+          p_provider_id: 'CAPTURE-001',
+          p_amount_cents: 999,
+          p_currency: 'USD',
+        });
+        return {
+          data: {
+            order_id: 'order-1',
+            disposition: 'held',
+            winning_order_id: 'order-winner',
+            conflicting_entitlement_id: null,
+            alert_id: 'alert-duplicate-capture',
+          },
+          error: null,
+        };
+      });
+      const guild = makeGuild();
+      service = new CommerceFulfillmentService(guild, supabase as any, eventBus);
+
+      const result = await fulfillClaimed(service, basePayload);
+
+      expect(result).toMatchObject({
+        success: true,
+        paidFulfillmentHeld: true,
+        eventEmitted: false,
+        errors: [],
+      });
+      expect(mockGrant).not.toHaveBeenCalled();
+      expect(mockBeginRoleDelivery).not.toHaveBeenCalled();
+      expect(mockEnsurePurchaseGrantedRoles).not.toHaveBeenCalled();
+      expect(eventBus.emit).not.toHaveBeenCalled();
+      expect(guild.members.fetch).not.toHaveBeenCalled();
+      expect(guild.client.users.fetch).not.toHaveBeenCalled();
+      expect(supabase.from.mock.calls.some(([table]: [string]) => table === 'entitlements'))
+        .toBe(false);
+    });
+
+    it('fails closed before entitlement mutation when the durable paid claim is unavailable', async () => {
+      const supabase: any = makeSupa();
+      supabase.rpc.mockResolvedValue({
+        data: null,
+        error: { message: 'claim database unavailable' },
+      });
+      const guild = makeGuild();
+      service = new CommerceFulfillmentService(guild, supabase as any, eventBus);
+
+      const result = await fulfillClaimed(service, basePayload);
+
+      expect(result.success).toBe(false);
+      expect(result.errors.join(' ')).toContain('Failed to claim paid fulfillment');
+      expect(mockGrant).not.toHaveBeenCalled();
+      expect(mockBeginRoleDelivery).not.toHaveBeenCalled();
+      expect(eventBus.emit).not.toHaveBeenCalled();
+      expect(guild.members.fetch).not.toHaveBeenCalled();
+      expect(guild.client.users.fetch).not.toHaveBeenCalled();
+    });
+
+    it('does not trust a syntactically valid but wrong capture ID from a queued payload', async () => {
+      const supabase: any = makeSupa();
+      supabase.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+        expect(name).toBe('commerce_claim_paid_fulfillment');
+        expect(args.p_provider_id).toBe('CAPTURE-WRONG-ORDER');
+        return {
+          data: null,
+          error: { message: 'completed capture payment identity mismatch' },
+        };
+      });
+      const guild = makeGuild();
+      service = new CommerceFulfillmentService(guild, supabase, eventBus);
+
+      const result = await fulfillClaimed(service, {
+        ...basePayload,
+        paypal_capture_id: 'CAPTURE-WRONG-ORDER',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors.join(' ')).toContain('completed capture payment identity mismatch');
+      expect(mockGrant).not.toHaveBeenCalled();
+      expect(mockBeginRoleDelivery).not.toHaveBeenCalled();
+      expect(eventBus.emit).not.toHaveBeenCalled();
+      expect(guild.members.fetch).not.toHaveBeenCalled();
+      expect(guild.client.users.fetch).not.toHaveBeenCalled();
     });
 
     it('reports error when entitlement grant fails', async () => {
@@ -860,7 +979,14 @@ describe('CommerceFulfillmentService', () => {
       expect(result.errors.join(' ')).toContain(expectedError);
       expect(mockGrant).not.toHaveBeenCalled();
       expect(mockEnsurePurchaseGrantedRoles).not.toHaveBeenCalled();
-      expect(supabase.rpc).not.toHaveBeenCalled();
+      if (orderPatch.status === 'pending_review') {
+        expect(supabase.rpc).toHaveBeenCalledWith(
+          'commerce_claim_paid_fulfillment',
+          expect.objectContaining({ p_order_id: 'order-1' }),
+        );
+      } else {
+        expect(supabase.rpc).not.toHaveBeenCalled();
+      }
       expect(guild.members.fetch).not.toHaveBeenCalled();
     });
 
@@ -937,7 +1063,10 @@ describe('CommerceFulfillmentService', () => {
       expect(result.success).toBe(false);
       expect(result.errors.join(' ')).toContain('identity validation');
       expect(mockGrant).not.toHaveBeenCalled();
-      expect(supabase.rpc).not.toHaveBeenCalled();
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'commerce_claim_paid_fulfillment',
+        expect.objectContaining({ p_order_id: 'order-1' }),
+      );
     });
 
     it('re-confirms permanent roles before reusing an exact order entitlement', async () => {
@@ -1099,8 +1228,15 @@ describe('CommerceFulfillmentService', () => {
       const result = await fulfillClaimed(service, payload);
 
       expect(result.success).toBe(true);
+      const prepareCallIndex = harness.supabase.rpc.mock.calls.findIndex(
+        ([name]: [string]) => name === 'commerce_prepare_temp_role_grant',
+      );
+      expect(prepareCallIndex).toBeGreaterThan(-1);
+      expect(harness.supabase.rpc.mock.invocationCallOrder[0]).toBeLessThan(
+        mockGrant.mock.invocationCallOrder[0],
+      );
       expect(mockGrant.mock.invocationCallOrder[0]).toBeLessThan(
-        harness.supabase.rpc.mock.invocationCallOrder[0],
+        harness.supabase.rpc.mock.invocationCallOrder[prepareCallIndex],
       );
       expect(harness.supabase.rpc).toHaveBeenCalledWith(
         'commerce_prepare_temp_role_grant',
@@ -1748,6 +1884,41 @@ describe('CommerceFulfillmentService', () => {
   });
 
   describe('subscription_activated', () => {
+    it('replays a pending-review subscription hold as a terminal worker no-op', async () => {
+      const supabase: any = makeSupa({
+        orders: {
+          ...subscriptionOrderSnapshot,
+          status: 'pending_review',
+        },
+      });
+      supabase.rpc.mockResolvedValue({
+        data: {
+          order_id: 'order-1',
+          disposition: 'held',
+          winning_order_id: 'order-winner',
+          conflicting_entitlement_id: null,
+          alert_id: 'alert-duplicate-subscription',
+        },
+        error: null,
+      });
+      const guild = makeGuild();
+      service = new CommerceFulfillmentService(guild, supabase as any, eventBus);
+
+      const result = await fulfillClaimed(service, subscriptionActivationPayload);
+
+      expect(result).toMatchObject({
+        success: true,
+        paidFulfillmentHeld: true,
+        eventEmitted: false,
+        errors: [],
+      });
+      expect(mockGrant).not.toHaveBeenCalled();
+      expect(mockBeginRoleDelivery).not.toHaveBeenCalled();
+      expect(eventBus.emit).not.toHaveBeenCalled();
+      expect(guild.members.fetch).not.toHaveBeenCalled();
+      expect(guild.client.users.fetch).not.toHaveBeenCalled();
+    });
+
     it('grants subscription entitlement', async () => {
       const payload = subscriptionActivationPayload;
       service = new CommerceFulfillmentService(
@@ -1764,6 +1935,7 @@ describe('CommerceFulfillmentService', () => {
         productName: 'VIP Pass',
         orderId: 'order-1',
         planId: 'plan-monthly',
+        licenseKeyId: undefined,
         discordId: 'user-1',
         type: 'subscription',
         source: 'purchase',
@@ -1773,6 +1945,29 @@ describe('CommerceFulfillmentService', () => {
       });
       expect(mockEnsurePurchaseGrantedRoles).not.toHaveBeenCalled();
       expect(eventBus.emit).toHaveBeenCalledWith('subscription.activated', 'guild-1', expect.objectContaining({ status: 'activated' }));
+    });
+
+    it('binds a staged subscription licence key to the granted entitlement', async () => {
+      const payload: FulfillmentPayload = {
+        ...subscriptionActivationPayload,
+        license_key_id: 'license-subscription-1',
+        license_key_plaintext: 'SMNI-AAAA-BBBB-CCCC-DDDD',
+      };
+      service = new CommerceFulfillmentService(
+        makeGuild(),
+        makeSupa({ orders: subscriptionOrderSnapshot }) as any,
+        eventBus,
+      );
+
+      const result = await fulfillClaimed(service, payload);
+
+      expect(result.success).toBe(true);
+      expect(mockGrant).toHaveBeenCalledWith(expect.objectContaining({
+        orderId: 'order-1',
+        planId: 'plan-monthly',
+        type: 'subscription',
+        licenseKeyId: 'license-subscription-1',
+      }));
     });
 
     it('reports error when subscription grant fails', async () => {
@@ -2565,7 +2760,10 @@ describe('CommerceFulfillmentService', () => {
           chain.then = (resolve: Function) => resolve({ data: null, error: null });
           return chain;
         }),
-        rpc: vi.fn(async () => ({ data: null, error: null })),
+        rpc: vi.fn(async (name: string, args: Record<string, unknown>) =>
+          name === 'commerce_claim_paid_fulfillment'
+            ? paidClaimWinner(args)
+            : { data: null, error: null }),
       };
       supa.__inserts = inserts;
       return supa;

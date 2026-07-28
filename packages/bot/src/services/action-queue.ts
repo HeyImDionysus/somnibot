@@ -598,6 +598,7 @@ async function handleFulfillment(
       data: {
         entitlementId: result.entitlementId,
         receiptSent: result.receiptSent,
+        paidFulfillmentHeld: result.paidFulfillmentHeld,
         eventEmitted: result.eventEmitted,
       },
     };

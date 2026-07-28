@@ -10,6 +10,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import {
+  CheckoutCancelled,
+  CheckoutComplete,
+} from '@/components/portal/checkout-outcome';
 
 vi.mock('@supabase/ssr', () => ({
   createServerClient: vi.fn(),
@@ -74,5 +80,28 @@ describe('post-checkout landing pages are public', () => {
     const res = await get(path);
 
     expect(res.headers.get('location')).toContain('/login');
+  });
+});
+
+describe('post-checkout copy does not overstate provider state', () => {
+  it('treats a PayPal return as pending until capture is independently confirmed', () => {
+    const markup = renderToStaticMarkup(createElement(CheckoutComplete));
+
+    expect(markup).toContain('Payment confirmation pending');
+    expect(markup).toContain('cannot confirm that funds were captured');
+    expect(markup).toContain('Do not open a second checkout');
+    expect(markup).not.toContain('Payment received');
+    expect(markup).not.toContain('payment went through');
+  });
+
+  it('keeps the cancelled buyer on the original payable link instead of telling them to rebuy', () => {
+    const markup = renderToStaticMarkup(createElement(CheckoutCancelled));
+
+    expect(markup).toContain('does not cancel or invalidate');
+    expect(markup).toContain('that same PayPal link');
+    expect(markup).toContain('Do not press');
+    expect(markup).toContain('verify it cannot still');
+    expect(markup).not.toContain('old checkout link is no longer valid');
+    expect(markup).not.toContain('wait for it to expire');
   });
 });

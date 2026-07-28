@@ -25,7 +25,7 @@
  */
 'use client';
 
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
 /** Read `?guild=` and keep it only if it looks like a Discord snowflake. */
 function readGuildId(): string {
@@ -53,10 +53,11 @@ export function CheckoutComplete() {
   return (
     <div className="mx-auto max-w-2xl space-y-6 py-8">
       <div className="rounded-card border border-discord-success/40 bg-discord-bg-secondary p-8 text-center">
-        <div className="mb-3 text-5xl" aria-hidden="true">✅</div>
-        <h1 className="text-2xl font-bold text-discord-text-primary">Payment received</h1>
+        <div className="mb-3 text-5xl" aria-hidden="true">⏳</div>
+        <h1 className="text-2xl font-bold text-discord-text-primary">Payment confirmation pending</h1>
         <p className="mt-2 text-sm text-discord-text-secondary">
-          Thanks — your PayPal payment went through and your order is being delivered now.
+          You returned from PayPal, but this public page cannot confirm that funds were captured.
+          Your order will be delivered only after PayPal confirms the payment.
         </p>
       </div>
 
@@ -68,9 +69,9 @@ export function CheckoutComplete() {
           <li className="flex gap-3">
             <span className="font-semibold text-[#FF1493]">1.</span>
             <span>
-              The bot sends you a <strong className="text-discord-text-primary">receipt in Discord DMs</strong>,
-              usually within a minute. It includes your licence key and download links if your
-              purchase came with them.
+              After PayPal confirms capture, the bot sends you a
+              <strong className="text-discord-text-primary"> receipt in Discord DMs</strong>.
+              It includes your licence key and download links if your purchase came with them.
             </span>
           </li>
           <li className="flex gap-3">
@@ -100,10 +101,10 @@ export function CheckoutComplete() {
       </div>
 
       <p className="text-center text-xs text-discord-text-muted">
-        This was a real-money purchase paid through PayPal. It is separate from any in-server
-        coin balance you may have, which is not affected. If your receipt has not arrived and
-        nothing appears in your portal after a few minutes, contact the server owner with the
-        date and amount of your payment.
+          Do not open a second checkout while confirmation is pending. This real-money PayPal
+          flow is separate from any in-server coin balance, which is not affected. If your receipt
+          has not arrived and nothing appears in your portal after a few minutes, contact the
+          server owner with the date and amount shown by PayPal.
       </p>
     </div>
   );
@@ -119,16 +120,18 @@ export function CheckoutCancelled() {
         <div className="mb-3 text-5xl" aria-hidden="true">🛒</div>
         <h1 className="text-2xl font-bold text-discord-text-primary">Checkout cancelled</h1>
         <p className="mt-2 text-sm text-discord-text-secondary">
-          You have <strong className="text-discord-text-primary">not been charged</strong> and nothing
-          was purchased.
+          You left the PayPal approval screen. This page does not cancel or invalidate the
+          checkout link you were already given.
         </p>
       </div>
 
       <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-6">
         <p className="text-sm text-discord-text-secondary">
-          If you cancelled by mistake, go back to the store channel in Discord and press
-          <strong className="text-discord-text-primary"> Buy</strong> again. The old checkout link is
-          no longer valid, so use a fresh one rather than reopening the previous PayPal tab.
+          If you cancelled by mistake, return to the original checkout message in Discord and use
+          <strong className="text-discord-text-primary"> that same PayPal link</strong>. Do not press
+          Buy again: a second live approval link could create a duplicate charge. If the original
+          link is no longer available, contact the server owner so they can verify it cannot still
+          be paid before another link is issued.
         </p>
       </div>
 

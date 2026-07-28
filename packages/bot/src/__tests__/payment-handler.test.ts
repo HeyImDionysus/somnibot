@@ -763,6 +763,7 @@ describe('handleBuyButton — one live checkout per product (Finding 10)', () =>
       customer_id: 'cust-1',
       product_id: 'prod-1',
       status: 'pending',
+      checkout_active: true,
       created_at: new Date().toISOString(),
       ...overrides,
     };
@@ -798,10 +799,10 @@ describe('handleBuyButton — one live checkout per product (Finding 10)', () =>
     expect(lastEmbedText(interaction)).toContain('charged twice');
   });
 
-  it('lets the buyer retry once the outstanding checkout is past PayPal\'s window', async () => {
-    const sevenHoursAgo = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString();
+  it('keeps an extended-window one-time approval link blocked after six hours', async () => {
+    const fortyEightHoursAgo = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
     const { supabase, inserts, fetchMock, interaction } = setup([
-      pendingOrder({ created_at: sevenHoursAgo }),
+      pendingOrder({ created_at: fortyEightHoursAgo, paypal_order_id: 'PAYPAL-EXTENDED' }),
     ]);
 
     await handleBuyButton(
@@ -809,11 +810,40 @@ describe('handleBuyButton — one live checkout per product (Finding 10)', () =>
       'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
     );
 
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/v2/checkout/orders'))).toBe(true);
-    expect(inserts.orders ?? []).toHaveLength(1);
-    expect(interaction.editReply).toHaveBeenLastCalledWith(
-      expect.objectContaining({ components: expect.any(Array) }),
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/v2/checkout/orders'))).toBe(false);
+    expect(inserts.orders ?? []).toHaveLength(0);
+    expect(lastEmbedText(interaction)).toContain('ORD-LIVE-1');
+  });
+
+  it('keeps an old subscription approval link blocked without inventing a local expiry', async () => {
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    const engine = makeQueryEngine({
+      products: [subscriptionProduct],
+      customers: [customer],
+      entitlements: [],
+      plans: [legitPlan],
+      orders: [
+        pendingOrder({
+          created_at: eightDaysAgo,
+          paypal_order_id: null,
+          paypal_subscription_id: 'I-OLD-STILL-PAYABLE',
+        }),
+      ],
+    });
+    const fetchMock = makePayPalFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const interaction = makeInteraction();
+
+    await handleBuyButton(
+      interaction, engine.supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
     );
+
+    expect(
+      fetchMock.mock.calls.some(([url]) => String(url).includes('/v1/billing/subscriptions')),
+    ).toBe(false);
+    expect(engine.inserts.orders ?? []).toHaveLength(0);
+    expect(lastEmbedText(interaction)).toContain('ORD-LIVE-1');
   });
 
   it('treats an unreadable checkout history as blocking, never as clear', async () => {
@@ -857,6 +887,38 @@ describe('handleBuyButton — one live checkout per product (Finding 10)', () =>
       ),
     ).toBe(false);
     expect(lastEmbedText(interaction)).toContain('Checkout Already In Progress');
+  });
+
+  it('serializes a concurrent subscription insert and never exposes the losing approval link', async () => {
+    const engine = makeQueryEngine({
+      products: [subscriptionProduct],
+      customers: [customer],
+      entitlements: [],
+      plans: [legitPlan],
+      orders: [],
+    }, {
+      orderInsertError:
+        'duplicate key value violates unique constraint "uniq_orders_pending_one_time_checkout"',
+    });
+    const fetchMock = makePayPalFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const interaction = makeInteraction();
+
+    await handleBuyButton(
+      interaction, engine.supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(
+      fetchMock.mock.calls.some(([url]) => String(url).includes('/v1/billing/subscriptions')),
+    ).toBe(true);
+    expect(
+      interaction.editReply.mock.calls.some(
+        (call: Array<{ components?: unknown }>) => Array.isArray(call[0]?.components),
+      ),
+    ).toBe(false);
+    expect(lastEmbedText(interaction)).toContain('Checkout Already In Progress');
+    expect(lastEmbedText(interaction)).toContain('two paid subscriptions');
   });
 
   it('does not block a different product', async () => {

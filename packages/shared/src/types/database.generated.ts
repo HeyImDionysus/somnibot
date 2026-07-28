@@ -980,6 +980,8 @@ export interface DbOrder {
   granted_channel_ids_snapshot: string[];
   temporary_role_grants_snapshot: Array<{ role_id: string; duration_seconds: number }>;
   grant_snapshot_frozen_at: string | null;
+  checkout_active: boolean;
+  delivery_type_snapshot: string | null;
 }
 
 // — Commerce — Licensing —
@@ -1510,6 +1512,26 @@ export interface DbCommerceAdminRefundOperations {
   updated_at: string;
   provider_outcome_at: string | null;
   completed_at: string | null;
+}
+
+export interface DbCommerceFulfillmentClaims {
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  order_id: string;
+  claimed_at: string;
+}
+
+export interface DbCommerceFulfillmentHolds {
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  winning_order_id: string | null;
+  conflicting_entitlement_id: string | null;
+  provider_kind: 'capture' | 'subscription';
+  provider_id: string;
+  held_at: string;
 }
 
 export interface DbCommerceLegacySubscriptionGrantContracts {
