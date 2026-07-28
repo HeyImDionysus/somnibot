@@ -195,6 +195,13 @@ export class SomniLicense {
   private cacheExpiry: number = 0;
   private sessionId: string | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Terminal teardown advances this generation. Async validation/heartbeat
+   * responses may update state only while they still belong to the generation
+   * in which they started, so a delayed pre-revocation success cannot restore a
+   * session that a newer terminal response already cleared.
+   */
+  private stateGeneration = 0;
 
   /**
    * W2 review — hard stop for a cached `grace_period` response, on the local
@@ -375,6 +382,7 @@ export class SomniLicense {
       return this.cachedResult;
     }
 
+    const operationGeneration = this.stateGeneration;
     try {
       const res = await fetch(`${this.config.apiBase}/license/validate`, {
         method: 'POST',
@@ -389,6 +397,10 @@ export class SomniLicense {
       });
 
       const data = await this.readJson<ValidationResponse>(res);
+
+      if (operationGeneration !== this.stateGeneration) {
+        return { valid: false, status: 'session_invalidated' };
+      }
 
       // ── Indeterminate: the server could not answer ────────────────────
       // Deliberately BEFORE the `data.valid` branch and before any state
@@ -461,6 +473,9 @@ export class SomniLicense {
 
       return data;
     } catch (err) {
+      if (operationGeneration !== this.stateGeneration) {
+        return { valid: false, status: 'session_invalidated' };
+      }
       // Offline — check grace period using monotonic elapsed time
       // V7 Audit §3.P3a: Uses server-time-anchored monotonic clock instead of
       // raw Date.now() to prevent clock-manipulation bypass.
@@ -480,7 +495,7 @@ export class SomniLicense {
    * resumes on its own once the fault clears. Only a genuinely elapsed grace
    * window tears the session down.
    */
-  private heartbeatFallback(terminalStatus: string): HeartbeatResponse {
+  private heartbeatFallback(): HeartbeatResponse {
     // V5 Audit §3.2: Check grace period instead of unconditionally returning valid.
     const graceMs = this.config.offlineGraceMs ?? 86_400_000;
     const elapsed = this.elapsedSinceAnchor();
@@ -491,7 +506,7 @@ export class SomniLicense {
       return { valid: true, status: 'offline', next_heartbeat_seconds: 300 };
     }
     this.clearSessionState();
-    return { valid: false, status: terminalStatus, next_heartbeat_seconds: 0 };
+    return { valid: false, status: 'offline_grace_expired', next_heartbeat_seconds: 0 };
   }
 
   /**
@@ -510,23 +525,29 @@ export class SomniLicense {
       return { valid: false, status: 'no_session', next_heartbeat_seconds: 0 };
     }
 
+    const operationGeneration = this.stateGeneration;
+    const sessionId = this.sessionId;
     try {
       const res = await fetch(`${this.config.apiBase}/license/heartbeat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          session_id: this.sessionId,
+          session_id: sessionId,
           license_key: this.config.licenseKey,
         }),
       });
 
       const data = await this.readJson<HeartbeatResponse>(res);
 
+      if (operationGeneration !== this.stateGeneration) {
+        return { valid: false, status: 'session_invalidated', next_heartbeat_seconds: 0 };
+      }
+
       // ── Indeterminate: the server could not answer ────────────────────
       // Same reasoning as validate(): no state is torn down, no server-time
       // re-anchor, and the heartbeat timer keeps ticking.
       if (data === null || isIndeterminateResponse(res.status, data)) {
-        return this.heartbeatFallback(indeterminateStatus(data));
+        return this.heartbeatFallback();
       }
 
       // V7 Audit §3.P3a — refresh server time anchor on successful heartbeat
@@ -599,9 +620,12 @@ export class SomniLicense {
 
       return data;
     } catch {
+      if (operationGeneration !== this.stateGeneration) {
+        return { valid: false, status: 'session_invalidated', next_heartbeat_seconds: 0 };
+      }
       // A network error during heartbeat should still respect the offline
       // grace window.
-      return this.heartbeatFallback('offline_grace_expired');
+      return this.heartbeatFallback();
     }
   }
 
@@ -609,8 +633,6 @@ export class SomniLicense {
    * Deactivate this device (e.g., on app uninstall).
    */
   async deactivate(): Promise<DeactivateResponse> {
-    this.stopHeartbeat();
-
     if (!this.sessionId) {
       return { success: true };
     }
@@ -625,9 +647,15 @@ export class SomniLicense {
         }),
       });
 
-      const data: DeactivateResponse = await res.json();
-      this.clearSessionState();
-      return data;
+      const data = (await res.json()) as DeactivateResponse;
+      if (res.ok && data.success) {
+        this.clearSessionState();
+        return data;
+      }
+      return {
+        success: false,
+        error: data.error ?? `Deactivation failed with HTTP ${res.status}`,
+      };
     } catch (err) {
       return {
         success: false,
@@ -684,6 +712,7 @@ export class SomniLicense {
    * anchor, or timer can survive independently and later revive the session.
    */
   private clearSessionState(): void {
+    this.stateGeneration += 1;
     this.cachedResult = null;
     this.cacheExpiry = 0;
     this.sessionId = null;

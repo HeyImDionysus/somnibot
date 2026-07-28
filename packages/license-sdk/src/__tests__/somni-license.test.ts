@@ -110,6 +110,10 @@ function deactivateOk(): Response {
   return jsonResponse({ success: true });
 }
 
+function deactivateUnavailable(): Response {
+  return jsonResponse({ success: false, error: 'temporary deactivation fault' }, 503);
+}
+
 function sdk(overrides: Partial<SomniLicenseConfig> = {}): SomniLicense {
   return new SomniLicense({
     apiBase: 'https://dash.test/api',
@@ -117,6 +121,14 @@ function sdk(overrides: Partial<SomniLicenseConfig> = {}): SomniLicense {
     productId: 'prod-1',
     ...overrides,
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
 }
 
 // ─── Setup ───────────────────────────────────────────
@@ -340,6 +352,110 @@ describe('SomniLicense', () => {
       expect(offline.valid).toBe(false);
       expect(offline.status).toBe('network_error');
       expect(offline.status).not.toBe('offline_grace');
+    });
+
+    it('does not let an older validation success overwrite a terminal validation', async () => {
+      const olderValidResponse = deferred<Response>();
+      const terminalResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockImplementationOnce(() => olderValidResponse.promise)
+        .mockImplementationOnce(() => terminalResponse.promise);
+      const client = sdk();
+
+      const olderValidation = client.validate();
+      const terminalValidation = client.validate();
+
+      terminalResponse.resolve(validationSessionInvalidated());
+      expect(await terminalValidation).toMatchObject({
+        valid: false,
+        status: 'session_invalidated',
+      });
+
+      olderValidResponse.resolve(validationOk());
+      expect(await olderValidation).toMatchObject({
+        valid: false,
+        status: 'session_invalidated',
+      });
+      expect(client.isValid()).toBe(false);
+      expect(client.getSessionId()).toBeNull();
+      expect(client.getFeatures()).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('keeps a later terminal validation authoritative when the valid response arrives first', async () => {
+      const validResponse = deferred<Response>();
+      const terminalResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockImplementationOnce(() => validResponse.promise)
+        .mockImplementationOnce(() => terminalResponse.promise);
+      const client = sdk();
+
+      const validValidation = client.validate();
+      const terminalValidation = client.validate();
+
+      validResponse.resolve(validationOk());
+      expect((await validValidation).valid).toBe(true);
+      expect(client.isValid()).toBe(true);
+
+      terminalResponse.resolve(validationSessionInvalidated());
+      expect((await terminalValidation).valid).toBe(false);
+      expect(client.isValid()).toBe(false);
+      expect(client.getSessionId()).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('does not let an older validation success overwrite a terminal heartbeat', async () => {
+      const delayedValidationResponse = deferred<Response>();
+      const terminalHeartbeatResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())
+        .mockImplementationOnce(() => delayedValidationResponse.promise)
+        .mockImplementationOnce(() => terminalHeartbeatResponse.promise);
+      const client = sdk({ cacheTtlMs: 1_000 });
+
+      await client.validate();
+      vi.advanceTimersByTime(2_000);
+
+      const delayedValidation = client.validate();
+      const terminalHeartbeat = client.heartbeat();
+
+      terminalHeartbeatResponse.resolve(heartbeatRevoked());
+      expect((await terminalHeartbeat).valid).toBe(false);
+
+      delayedValidationResponse.resolve(validationOk());
+      expect(await delayedValidation).toMatchObject({
+        valid: false,
+        status: 'session_invalidated',
+      });
+      expect(client.isValid()).toBe(false);
+      expect(client.getSessionId()).toBeNull();
+      expect(client.getFeatures()).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('keeps a later terminal heartbeat authoritative when validation completes first', async () => {
+      const validResponse = deferred<Response>();
+      const terminalHeartbeatResponse = deferred<Response>();
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())
+        .mockImplementationOnce(() => validResponse.promise)
+        .mockImplementationOnce(() => terminalHeartbeatResponse.promise);
+      const client = sdk({ cacheTtlMs: 1_000 });
+
+      await client.validate();
+      vi.advanceTimersByTime(2_000);
+
+      const validation = client.validate();
+      const terminalHeartbeat = client.heartbeat();
+
+      validResponse.resolve(validationOk());
+      expect((await validation).valid).toBe(true);
+
+      terminalHeartbeatResponse.resolve(heartbeatRevoked());
+      expect((await terminalHeartbeat).valid).toBe(false);
+      expect(client.isValid()).toBe(false);
+      expect(client.getSessionId()).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
     });
 
     it('does not re-anchor server time on a fault (grace still expires)', async () => {
@@ -797,6 +913,33 @@ describe('SomniLicense', () => {
       expect(hb.status).toBe('offline_grace_expired');
     });
 
+    it.each([
+      ['service_unavailable', () => heartbeatUnavailable()],
+      ['rate_limited', () => jsonResponse({
+        valid: false,
+        status: 'rate_limited',
+        next_heartbeat_seconds: 0,
+      }, 429)],
+    ])(
+      'reports offline_grace_expired when an indeterminate %s heartbeat arrives after grace',
+      async (_status, response) => {
+        vi.mocked(fetch)
+          .mockResolvedValueOnce(validationOk())
+          .mockResolvedValueOnce(response());
+        const client = sdk({ offlineGraceMs: 2_000 });
+        await client.validate();
+
+        vi.advanceTimersByTime(3_000);
+        const heartbeat = await client.heartbeat();
+
+        expect(heartbeat.valid).toBe(false);
+        expect(heartbeat.status).toBe('offline_grace_expired');
+        expect(client.getSessionId()).toBeNull();
+        expect(client.isValid()).toBe(false);
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
+
     it('surfaces a grace_period status + deadline reported by the heartbeat (grace entered mid-session)', async () => {
       const T0 = new Date('2026-07-09T12:00:00.000Z');
       vi.setSystemTime(T0);
@@ -1011,13 +1154,40 @@ describe('SomniLicense', () => {
     it('returns error on network failure during deactivation', async () => {
       vi.mocked(fetch)
         .mockResolvedValueOnce(validationOk())
-        .mockRejectedValueOnce(new Error('reset'));
+        .mockRejectedValueOnce(new Error('reset'))
+        .mockResolvedValueOnce(deactivateOk());
       const client = sdk();
       await client.validate();
 
       const res = await client.deactivate();
       expect(res.success).toBe(false);
       expect(res.error).toBe('reset');
+      expect(client.getSessionId()).toBe('sess-aaa');
+      expect(client.isValid()).toBe(true);
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      expect((await client.deactivate()).success).toBe(true);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(client.getSessionId()).toBeNull();
+    });
+
+    it('preserves the session and heartbeat after a parsed deactivation failure so retry can work', async () => {
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())
+        .mockResolvedValueOnce(deactivateUnavailable())
+        .mockResolvedValueOnce(deactivateOk());
+      const client = sdk();
+      await client.validate();
+
+      const failed = await client.deactivate();
+      expect(failed.success).toBe(false);
+      expect(client.getSessionId()).toBe('sess-aaa');
+      expect(client.isValid()).toBe(true);
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      expect((await client.deactivate()).success).toBe(true);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(client.getSessionId()).toBeNull();
     });
   });
 
