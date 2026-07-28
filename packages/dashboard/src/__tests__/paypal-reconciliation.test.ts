@@ -2375,6 +2375,70 @@ describe('acquireReconcileLease', () => {
       rpcOps.find((op) => op.functionName === 'paypal_reconcile_finalize')?.args,
     ).toMatchObject({ p_succeeded: false });
   });
+
+  it('releases the exact owner when scheduled failure visibility rejects', async () => {
+    scriptPayPal([], { tokenStatus: 503 });
+    withLedger({ guildIds: [GUILD_ID, SECOND_GUILD_ID] });
+    let activeOwner: string | null = null;
+    rpcResolvers['paypal_reconcile_acquire'] = (args) => {
+      if (activeOwner !== null) return { data: 'busy', error: null };
+      activeOwner = String(args.p_owner_token);
+      return { data: 'acquired', error: null };
+    };
+    rpcResolvers['paypal_reconcile_finalize'] = (args) => {
+      const ownsLease = activeOwner === args.p_owner_token;
+      if (ownsLease) activeOwner = null;
+      return { data: ownsLease, error: null };
+    };
+    let guildReads = 0;
+    resolvers['guild'] = () => {
+      guildReads += 1;
+      if (guildReads === 1) throw new Error('scheduled visibility transport rejected');
+      return {
+        data: [{ id: GUILD_ID }, { id: SECOND_GUILD_ID }],
+        error: null,
+      };
+    };
+
+    const result = await runPayPalReconciliation(supabase as never, {
+      bypassCooldown: false,
+      scheduledVisibility: true,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      retriable: true,
+      reason: expect.stringMatching(/visibility|transport rejected/i),
+    });
+    const acquisitions = rpcOps.filter(
+      (op) => op.functionName === 'paypal_reconcile_acquire',
+    );
+    const finalizations = rpcOps.filter(
+      (op) => op.functionName === 'paypal_reconcile_finalize',
+    );
+    expect(finalizations).toHaveLength(1);
+    expect(finalizations[0]?.args).toEqual({
+      p_owner_token: acquisitions[0]?.args.p_owner_token,
+      p_succeeded: false,
+    });
+    expect(activeOwner).toBeNull();
+
+    const followerToken = '80000000-0000-4000-8000-000000000099';
+    await expect(acquireReconcileLease(
+      supabase as never,
+      followerToken,
+      120_000,
+      0,
+      false,
+    )).resolves.toEqual({ status: 'acquired' });
+    expect(activeOwner).toBe(followerToken);
+
+    expect(opsFor('instance_settings', 'upsert')).toHaveLength(2);
+    const failureAlerts = opsFor('alerts', 'insert')
+      .filter((op) => op.payload?.alert_type === RECONCILE_FAILURE_ALERT_TYPE);
+    expect(failureAlerts.map((op) => op.payload?.guild_id).sort())
+      .toEqual([GUILD_ID, SECOND_GUILD_ID].sort());
+  });
 });
 
 // ── Route ───────────────────────────────────────────────────────────────────

@@ -1742,6 +1742,42 @@ async function applyScheduledVisibility(
   return result;
 }
 
+/**
+ * Scheduled visibility is part of the acquired pass. A transient rejection
+ * must become a retriable result so the caller can release its exact owner
+ * lease, while a second bounded attempt preserves durable failure visibility.
+ */
+async function applyScheduledVisibilitySafely(
+  supabase: AdminSupabase,
+  result: PayPalReconciliationResult,
+): Promise<PayPalReconciliationResult> {
+  try {
+    return await applyScheduledVisibility(supabase, result);
+  } catch (error) {
+    const priorOutcome = result.status === 'failed'
+      ? result.reason
+      : `reconciliation ${result.status}`;
+    const failure: PayPalReconciliationFailure = {
+      status: 'failed',
+      reason: `scheduler visibility threw after ${priorOutcome}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      retriable: true,
+    };
+    try {
+      return await applyScheduledVisibility(supabase, failure);
+    } catch (retryError) {
+      return {
+        status: 'failed',
+        reason: `${failure.reason}; scheduler failure visibility retry threw: ${
+          retryError instanceof Error ? retryError.message : String(retryError)
+        }`,
+        retriable: true,
+      };
+    }
+  }
+}
+
 // ── Reconciliation pass ────────────────────────────────────────────────────
 
 async function runPass(
@@ -2499,46 +2535,60 @@ export async function runPayPalReconciliation(
     return { status: 'skipped', reason: 'another reconciliation pass completed recently' };
   }
 
-  let result: PayPalReconciliationResult;
+  let result: PayPalReconciliationResult = {
+    status: 'failed',
+    reason: 'reconciliation pass did not complete',
+    retriable: true,
+  };
+  let fullyCompletedAndVisible = false;
+  let finalization: ReconcileLeaseMutationResult = {
+    ok: false,
+    reason: 'reconciliation lease finalization did not run',
+  };
   try {
-    result = await runPass(
+    try {
+      result = await runPass(
+        supabase,
+        nowMs,
+        windowStartMs,
+        windowEndMs,
+        async () => {
+          const heartbeat = await heartbeatReconcileLease(
+            supabase,
+            ownerToken,
+            leaseMs,
+          );
+          return heartbeat.ok
+            ? null
+            : {
+                status: 'failed',
+                reason: heartbeat.reason,
+                retriable: true,
+              };
+        },
+        options.resultGuildId,
+      );
+    } catch (error) {
+      result = {
+        status: 'failed',
+        reason: error instanceof Error ? error.message : 'reconciliation threw',
+        retriable: true,
+      };
+    }
+
+    if (options.scheduledVisibility) {
+      result = await applyScheduledVisibilitySafely(supabase, result);
+    }
+    fullyCompletedAndVisible = result.status === 'completed';
+  } finally {
+    // Once acquisition succeeds, every pass/visibility exit releases or
+    // completes this exact opaque owner exactly once.
+    finalization = await finalizeReconcileLease(
       supabase,
-      nowMs,
-      windowStartMs,
-      windowEndMs,
-      async () => {
-        const heartbeat = await heartbeatReconcileLease(
-          supabase,
-          ownerToken,
-          leaseMs,
-        );
-        return heartbeat.ok
-          ? null
-          : {
-              status: 'failed',
-              reason: heartbeat.reason,
-              retriable: true,
-            };
-      },
-      options.resultGuildId,
+      ownerToken,
+      fullyCompletedAndVisible,
     );
-  } catch (error) {
-    result = {
-      status: 'failed',
-      reason: error instanceof Error ? error.message : 'reconciliation threw',
-      retriable: true,
-    };
   }
-
-  if (options.scheduledVisibility) {
-    result = await applyScheduledVisibility(supabase, result);
-  }
-
-  const finalization = await finalizeReconcileLease(
-    supabase,
-    ownerToken,
-    result.status === 'completed',
-  );
   if (!finalization.ok) {
     const failure: PayPalReconciliationFailure = {
       status: 'failed',
@@ -2546,7 +2596,7 @@ export async function runPayPalReconciliation(
       retriable: true,
     };
     return options.scheduledVisibility
-      ? applyScheduledVisibility(supabase, failure)
+      ? applyScheduledVisibilitySafely(supabase, failure)
       : failure;
   }
   return result;
