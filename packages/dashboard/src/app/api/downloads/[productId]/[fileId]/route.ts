@@ -36,6 +36,24 @@ function serviceUnavailable(context: string, error: { message: string }): NextRe
   );
 }
 
+/**
+ * A dispatched nonce write whose result still cannot be confirmed is not a
+ * retryable outage: the link may already be consumed. Tell the caller to mint
+ * a new link rather than inviting a replay of this one.
+ */
+function deliveryStatusUncertain(): NextResponse {
+  console.error(
+    '[Downloads nonce consumption] write outcome remained uncertain after authoritative confirmation',
+  );
+  return NextResponse.json(
+    {
+      error: 'Could not confirm this download delivery. Do not reuse this link; request a new one.',
+      retryable: false,
+    },
+    { status: 409 },
+  );
+}
+
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ productId: string; fileId: string }> },
@@ -187,6 +205,9 @@ export async function GET(
         'Downloads nonce consumption',
         { message: 'Authoritative nonce store is unavailable' },
       );
+    }
+    if (nonceResult === 'uncertain') {
+      return deliveryStatusUncertain();
     }
     return null;
   }

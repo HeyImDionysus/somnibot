@@ -17,6 +17,10 @@ interface ValkeyFixture {
 
 interface ValkeyFixtureOptions {
   ignorePingAfterReplies?: number;
+  initialValues?: Record<string, string>;
+  dropFirstSetBeforeCommit?: boolean;
+  dropFirstSetReplyAfterCommit?: boolean;
+  rejectConnectionsAfterDroppedSet?: boolean;
 }
 
 function parseRespCommand(buffer: string): ParsedCommand | null {
@@ -67,11 +71,17 @@ async function startValkeyFixture(
 ): Promise<ValkeyFixture> {
   const sockets = new Set<Socket>();
   const commands: string[][] = [];
-  const values = new Map<string, string>();
+  const values = new Map<string, string>(Object.entries(options.initialValues ?? {}));
   let pingReplies = 0;
   let ignoredPing = false;
+  let droppedSetReply = false;
+  let rejectConnections = false;
   const server = createServer((socket) => {
     sockets.add(socket);
+    if (rejectConnections) {
+      socket.destroy();
+      return;
+    }
     let buffer = '';
     let authenticated = false;
 
@@ -117,9 +127,24 @@ async function startValkeyFixture(
             socket.write('-ERR invalid SET\r\n');
           } else if (nx && values.has(key)) {
             socket.write('$-1\r\n');
+          } else if (
+            options.dropFirstSetBeforeCommit
+            && !droppedSetReply
+          ) {
+            droppedSetReply = true;
+            socket.destroy();
           } else {
             values.set(key, value);
-            socket.write('+OK\r\n');
+            if (
+              options.dropFirstSetReplyAfterCommit
+              && !droppedSetReply
+            ) {
+              droppedSetReply = true;
+              rejectConnections = options.rejectConnectionsAfterDroppedSet ?? false;
+              socket.destroy();
+            } else {
+              socket.write('+OK\r\n');
+            }
           }
         } else if (name === 'GET' && args[0] === 'somnibot:heartbeat:bot') {
           socket.write(bulk(heartbeat));
@@ -203,18 +228,117 @@ describe('rate-limit Valkey authentication', () => {
         consumeSingleUseValkeyKey('ratelimit:download:nonce:one', 330),
       ).resolves.toBe('replay');
 
-      expect(fixture.commands).toEqual([
-        ['AUTH', 'nonce value'],
-        ['SET', 'ratelimit:download:nonce:one', '1', 'NX', 'EX', '330'],
-        ['SET', 'ratelimit:download:nonce:one', '1', 'NX', 'EX', '330'],
-        ['GET', 'ratelimit:download:nonce:one'],
+      expect(fixture.commands).toHaveLength(3);
+      expect(fixture.commands[0]).toEqual(['AUTH', 'nonce value']);
+      expect(fixture.commands[1].slice(0, 2)).toEqual([
+        'SET',
+        'ratelimit:download:nonce:one',
       ]);
+      expect(fixture.commands[1].slice(3)).toEqual(['NX', 'EX', '330']);
+      expect(Number(fixture.commands[1][2])).toBeGreaterThanOrEqual(2);
+      expect(fixture.commands[2].slice(0, 2)).toEqual([
+        'SET',
+        'ratelimit:download:nonce:one',
+      ]);
+      expect(fixture.commands[2].slice(3)).toEqual(['NX', 'EX', '330']);
+      expect(fixture.commands[2][2]).not.toBe(fixture.commands[1][2]);
     } finally {
       await fixture.close();
     }
   });
 
-  it('fails closed when shared Valkey disappears after consumption', async () => {
+  it('confirms its own committed claim after the SET reply is lost', async () => {
+    const fixture = await startValkeyFixture('lost reply value', '{}', {
+      dropFirstSetReplyAfterCommit: true,
+    });
+    process.env.VALKEY_URL = fixture.url;
+
+    try {
+      const { consumeSingleUseValkeyKey } = await import('@/lib/api/rate-limit');
+      const key = 'ratelimit:download:nonce:lost-reply';
+
+      await expect(
+        consumeSingleUseValkeyKey(key, 330),
+      ).resolves.toBe('consumed');
+      await expect(
+        consumeSingleUseValkeyKey(key, 330),
+      ).resolves.toBe('replay');
+
+      expect(fixture.commands).toHaveLength(5);
+      expect(fixture.commands[0]).toEqual(['AUTH', 'lost reply value']);
+      expect(fixture.commands[1].slice(0, 2)).toEqual(['SET', key]);
+      const claim = fixture.commands[1][2];
+      expect(Number(claim)).toBeGreaterThanOrEqual(2);
+      expect(fixture.commands[2]).toEqual(['AUTH', 'lost reply value']);
+      expect(fixture.commands[3]).toEqual(['GET', key]);
+      expect(fixture.commands[4].slice(0, 2)).toEqual(['SET', key]);
+      expect(fixture.commands[4][2]).not.toBe(claim);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('keeps a retry safe when fresh confirmation proves the dispatched SET did not commit', async () => {
+    const fixture = await startValkeyFixture('absent claim value', '{}', {
+      dropFirstSetBeforeCommit: true,
+    });
+    process.env.VALKEY_URL = fixture.url;
+
+    try {
+      const { consumeSingleUseValkeyKey } = await import('@/lib/api/rate-limit');
+      const key = 'ratelimit:download:nonce:confirmed-absent';
+
+      await expect(
+        consumeSingleUseValkeyKey(key, 330),
+      ).resolves.toBe('unavailable');
+      await expect(
+        consumeSingleUseValkeyKey(key, 330),
+      ).resolves.toBe('consumed');
+      await expect(
+        consumeSingleUseValkeyKey(key, 330),
+      ).resolves.toBe('replay');
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('treats a legacy numeric claim as replay during a rolling deployment', async () => {
+    const key = 'ratelimit:download:nonce:legacy';
+    const fixture = await startValkeyFixture('legacy value', '{}', {
+      initialValues: { [key]: '1' },
+    });
+    process.env.VALKEY_URL = fixture.url;
+
+    try {
+      const { consumeSingleUseValkeyKey } = await import('@/lib/api/rate-limit');
+
+      await expect(
+        consumeSingleUseValkeyKey(key, 330),
+      ).resolves.toBe('replay');
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('reports an unresolved dispatched write as uncertain, not retryable unavailability', async () => {
+    const fixture = await startValkeyFixture('uncertain value', '{}', {
+      dropFirstSetReplyAfterCommit: true,
+      rejectConnectionsAfterDroppedSet: true,
+    });
+    process.env.VALKEY_URL = fixture.url;
+
+    try {
+      const { consumeSingleUseValkeyKey } = await import('@/lib/api/rate-limit');
+
+      await expect(
+        consumeSingleUseValkeyKey('ratelimit:download:nonce:uncertain', 330),
+      ).resolves.toBe('uncertain');
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('does not call a dispatched write retryable when shared Valkey disappears', async () => {
     const fixture = await startValkeyFixture('outage value', '{}');
     process.env.VALKEY_URL = fixture.url;
     const { consumeSingleUseValkeyKey } = await import('@/lib/api/rate-limit');
@@ -226,7 +350,7 @@ describe('rate-limit Valkey authentication', () => {
 
     await expect(
       consumeSingleUseValkeyKey('download:nonce:outage', 330),
-    ).resolves.toBe('unavailable');
+    ).resolves.toBe('uncertain');
   });
 
   it('recovers from an unavailable store without creating local nonce state', async () => {

@@ -10,8 +10,14 @@
  */
 
 import { createConnection, type Socket } from 'node:net';
+import { randomBytes } from 'node:crypto';
 
 // ── Lightweight Valkey client (raw RESP, zero deps) ─────────
+
+type ValkeyReply = string | number | null;
+type ValkeyCommandResult =
+  | { kind: 'reply'; value: ValkeyReply }
+  | { kind: 'not_sent' | 'server_error' | 'uncertain' };
 
 let valkeySocket: Socket | null = null;
 let valkeyReady = false;
@@ -21,7 +27,7 @@ let lastValkeyFailureAt = 0;
 // not on every request.
 let _degradedWarningLogged = false;
 const VALKEY_RETRY_AFTER_MS = 5_000;
-let pendingCallbacks: Array<(reply: string | number | null) => void> = [];
+let pendingCallbacks: Array<(result: ValkeyCommandResult) => void> = [];
 let connectionWaiters: Array<(ready: boolean) => void> = [];
 
 function markValkeyReady(): void {
@@ -70,8 +76,8 @@ function resolveConnectionWaiters(ready: boolean): void {
   connectionWaiters = [];
 }
 
-function rejectPendingCallbacks(): void {
-  for (const cb of pendingCallbacks) cb(null);
+function failPendingCallbacks(): void {
+  for (const cb of pendingCallbacks) cb({ kind: 'uncertain' });
   pendingCallbacks = [];
 }
 
@@ -82,7 +88,7 @@ function failValkeySocket(sock: Socket | null): void {
   valkeyReady = false;
   valkeySocket = null;
   resolveConnectionWaiters(false);
-  rejectPendingCallbacks();
+  failPendingCallbacks();
   sock?.destroy();
 }
 
@@ -156,8 +162,8 @@ function ensureValkey(): boolean {
         return;
       }
 
-      pendingCallbacks.push((reply) => {
-        if (reply === 'OK') {
+      pendingCallbacks.push((result) => {
+        if (result.kind === 'reply' && result.value === 'OK') {
           sock.setTimeout(0);
           valkeyReady = true;
           markValkeyReady();
@@ -185,21 +191,21 @@ function ensureValkey(): boolean {
         const payload = line.slice(1);
 
         if (prefix === ':') {
-          cb(Number(payload));
+          cb({ kind: 'reply', value: Number(payload) });
         } else if (prefix === '+') {
-          cb(payload);
+          cb({ kind: 'reply', value: payload });
         } else if (prefix === '-') {
-          cb(null);
+          cb({ kind: 'server_error' });
         } else if (prefix === '$') {
           const len = Number(payload);
           if (len === -1) {
-            cb(null);
+            cb({ kind: 'reply', value: null });
           } else {
             // Bulk string: next chunk is the data + \r\n
             if (buffer.length >= len + 2) {
               const val = buffer.slice(0, len);
               buffer = buffer.slice(len + 2);
-              cb(val);
+              cb({ kind: 'reply', value: val });
             } else {
               // Incomplete bulk string — put the $<len> line and callback back
               // so they're re-processed when more TCP data arrives
@@ -209,7 +215,7 @@ function ensureValkey(): boolean {
             }
           }
         } else {
-          cb(null);
+          cb({ kind: 'server_error' });
         }
       }
     });
@@ -223,7 +229,7 @@ function ensureValkey(): boolean {
       valkeyReady = false;
       valkeySocket = null;
       resolveConnectionWaiters(false);
-      rejectPendingCallbacks();
+      failPendingCallbacks();
     });
 
     sock.on('timeout', () => {
@@ -236,20 +242,23 @@ function ensureValkey(): boolean {
   return false;
 }
 
-function sendCommand(...args: (string | number)[]): Promise<string | number | null> {
+function sendCommandResult(...args: (string | number)[]): Promise<ValkeyCommandResult> {
   return new Promise((resolve) => {
     const socket = valkeySocket;
     if (!socket || !valkeyReady) {
-      resolve(null);
+      resolve({ kind: 'not_sent' });
       return;
     }
 
-    const callback = resolve as (reply: string | number | null) => void;
+    const callback = resolve as (result: ValkeyCommandResult) => void;
     pendingCallbacks.push(callback);
 
     try {
       socket.write(encodeCommand(...args));
     } catch {
+      const idx = pendingCallbacks.indexOf(callback);
+      if (idx !== -1) pendingCallbacks.splice(idx, 1);
+      resolve({ kind: 'not_sent' });
       failValkeySocket(socket);
       return;
     }
@@ -262,6 +271,25 @@ function sendCommand(...args: (string | number)[]): Promise<string | number | nu
       }
     }, 1000);
   });
+}
+
+async function sendCommand(...args: (string | number)[]): Promise<ValkeyReply> {
+  const result = await sendCommandResult(...args);
+  return result.kind === 'reply' ? result.value : null;
+}
+
+/**
+ * A dispatched write can outlive its socket response. Bypass the normal
+ * outage backoff once so that the same invocation can confirm its claim on a
+ * fresh connection instead of falsely promising that the nonce is retryable.
+ */
+async function reconnectValkeyForWriteConfirmation(): Promise<boolean> {
+  if (valkeyReady) return true;
+  if (valkeyFailed) {
+    valkeyFailed = false;
+    lastValkeyFailureAt = 0;
+  }
+  return ensureValkeyReady();
 }
 
 // ── In-memory fallback ──────────────────────────────────────
@@ -452,7 +480,24 @@ export async function checkValkeyHealth(): Promise<boolean> {
   }
 }
 
-export type SingleUseValkeyResult = 'consumed' | 'replay' | 'unavailable';
+export type SingleUseValkeyResult =
+  | 'consumed'
+  | 'replay'
+  | 'unavailable'
+  | 'uncertain';
+
+/**
+ * A 48-bit cryptographic value stays inside JavaScript's safe-integer range and
+ * Redis' positive signed-64-bit range. That preserves rolling compatibility
+ * with older replicas that still use INCR: every claim is already greater than
+ * one, so an old consumer rejects it as a replay instead of treating the link
+ * as fresh.
+ */
+function createSingleUseClaim(): string {
+  let claim = randomBytes(6).readUIntBE(0, 6);
+  if (claim < 2) claim += 2;
+  return claim.toString();
+}
 
 /**
  * Atomically consume a security-sensitive single-use key in shared Valkey.
@@ -468,22 +513,41 @@ export async function consumeSingleUseValkeyKey(
   if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0) return 'unavailable';
   if (!await ensureValkeyReady()) return 'unavailable';
 
+  let claim: string;
   try {
-    const ttl = Math.max(1, Math.ceil(ttlSeconds));
-    const reply = await sendCommand('SET', key, '1', 'NX', 'EX', ttl);
-    if (reply === 'OK') return 'consumed';
-
-    if (reply !== null) return 'unavailable';
-
-    // RESP null is the normal SET NX reply for an existing key, but the
-    // lightweight client also resolves transport/server failures as null.
-    // Confirm the authoritative key before calling this a replay; otherwise
-    // fail closed as unavailable.
-    const existing = await sendCommand('GET', key);
-    return typeof existing === 'string' ? 'replay' : 'unavailable';
+    claim = createSingleUseClaim();
   } catch {
+    // Claim generation failed before any write was dispatched.
     return 'unavailable';
   }
+
+  const ttl = Math.max(1, Math.ceil(ttlSeconds));
+  const write = await sendCommandResult('SET', key, claim, 'NX', 'EX', ttl);
+
+  if (write.kind === 'reply') {
+    if (write.value === 'OK') return 'consumed';
+    // RESP null is the definitive SET NX response for an existing key.
+    if (write.value === null) return 'replay';
+    return 'uncertain';
+  }
+
+  // No bytes were dispatched, or Valkey definitively rejected the command:
+  // this invocation cannot have consumed the nonce and a later retry is safe.
+  if (write.kind === 'not_sent' || write.kind === 'server_error') {
+    return 'unavailable';
+  }
+
+  // The command was dispatched but its response was lost. Reconnect once and
+  // read the authoritative value. Only our cryptographically random claim
+  // proves that this invocation won SET NX; a different value (including the
+  // legacy "1") is a replay owned by another invocation.
+  if (!await reconnectValkeyForWriteConfirmation()) return 'uncertain';
+  const confirmation = await sendCommandResult('GET', key);
+  if (confirmation.kind !== 'reply') return 'uncertain';
+  if (confirmation.value === claim) return 'consumed';
+  if (typeof confirmation.value === 'string') return 'replay';
+  if (confirmation.value === null) return 'unavailable';
+  return 'uncertain';
 }
 
 /**

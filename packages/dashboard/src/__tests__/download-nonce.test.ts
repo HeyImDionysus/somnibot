@@ -20,7 +20,7 @@ beforeEach(() => {
 });
 
 describe('consumeDownloadNonce', () => {
-  it.each(['consumed', 'replay', 'unavailable'] as const)(
+  it.each(['consumed', 'replay', 'unavailable', 'uncertain'] as const)(
     'preserves the authoritative %s result',
     async (result) => {
       consumeAuthoritatively.mockResolvedValueOnce(result);

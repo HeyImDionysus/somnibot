@@ -169,6 +169,24 @@ describe('GET /api/downloads — nonce delivery boundary', () => {
     expect((await downloadGet(request() as never, params)).status).toBe(410);
   });
 
+  it('does not advertise a retry when a dispatched nonce write remains uncertain', async () => {
+    vi.mocked(createAdminSupabase).mockReturnValue(mockDownload() as never);
+    vi.mocked(consumeDownloadNonce)
+      .mockResolvedValueOnce('uncertain')
+      .mockResolvedValueOnce('replay');
+
+    const uncertain = await downloadGet(request() as never, params);
+    expect(uncertain.status).toBe(409);
+    expect(await uncertain.json()).toMatchObject({
+      retryable: false,
+    });
+    expect(after).not.toHaveBeenCalled();
+
+    const replay = await downloadGet(request() as never, params);
+    expect(replay.status).toBe(410);
+    expect(after).not.toHaveBeenCalled();
+  });
+
   it('returns the redirect after nonce consumption even when analytics never settles', async () => {
     let signalAnalyticsStarted!: () => void;
     const analyticsStarted = new Promise<void>((resolve) => {
