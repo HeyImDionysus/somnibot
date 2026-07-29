@@ -23,6 +23,24 @@ import {
   DEFAULT_FRAUD_THRESHOLDS,
 } from '../services/fraud-detection.js';
 
+const TEST_SIGNAL_ID = '11111111-1111-4111-8111-111111111111';
+
+function fraudReceipt(
+  args: Record<string, unknown>,
+  created = true,
+): Record<string, unknown> {
+  return {
+    signal_id: TEST_SIGNAL_ID,
+    created,
+    guild_id: args.p_guild_id,
+    signal_type: args.p_signal_type,
+    entity_type: args.p_entity_type,
+    entity_id: args.p_entity_id,
+    status: 'open',
+    severity: args.p_severity,
+  };
+}
+
 function mockSupaChain(data: any = null, error: any = null, count: number | null = null) {
   const chain: any = {};
   const methods = [
@@ -65,7 +83,15 @@ function createCtx(fromOverrides: Record<string, any> = {}) {
       // Default chain that resolves with no data
       return mockSupaChain(null, null, 0);
     }),
-    rpc: vi.fn(async () => ({ data: 1, error: null })),
+    rpc: vi.fn(async (
+      fn: string,
+      args?: Record<string, unknown>,
+    ): Promise<{ data: unknown; error: unknown }> => {
+      if (fn === 'fraud_upsert_open_signal_receipt' && args) {
+        return { data: fraudReceipt(args), error: null };
+      }
+      return { data: 1, error: null };
+    }),
   };
 
   // Allow test to configure specific table responses
@@ -119,24 +145,33 @@ describe('checkPurchaseVelocity', () => {
 
     await checkPurchaseVelocity(ctx, 'cust1', 'discord1');
 
-    // Should only query orders, not insert fraud_signals
+    // Should only query orders, not persist a fraud signal.
     expect(supabase.from).toHaveBeenCalledWith('orders');
+    expect(supabase.rpc).not.toHaveBeenCalled();
     expect(eventBus.emit).not.toHaveBeenCalled();
   });
 
   it('creates high severity signal when count equals threshold', async () => {
     const { ctx, supabase, eventBus } = createCtx();
     const ordersChain = countChain(5);
-    const fraudChain = insertChain();
     supabase.from.mockImplementation((table: string) => {
       if (table === 'orders') return ordersChain;
-      if (table === 'fraud_signals') return fraudChain;
       return countChain(0);
     });
 
     await checkPurchaseVelocity(ctx, 'cust1', 'discord1');
 
-    expect(supabase.from).toHaveBeenCalledWith('fraud_signals');
+    expect(supabase.rpc).toHaveBeenCalledWith('fraud_upsert_open_signal_receipt', {
+      p_guild_id: 'g1',
+      p_signal_type: 'velocity',
+      p_severity: 'high',
+      p_entity_type: 'customer',
+      p_entity_id: 'cust1',
+      p_discord_id: 'discord1',
+      p_description: '5 orders in the last 60 minutes (threshold: 5)',
+      p_evidence: { order_count: 5, window_minutes: 60, threshold: 5 },
+      p_auto_action: null,
+    });
     expect(eventBus.emit).toHaveBeenCalledWith('fraud.detected', 'g1', expect.objectContaining({
       signal: 'velocity',
       severity: 'high',
@@ -146,10 +181,8 @@ describe('checkPurchaseVelocity', () => {
   it('creates critical severity signal when count >= 2x threshold', async () => {
     const { ctx, supabase, eventBus } = createCtx();
     const ordersChain = countChain(10); // 10 >= 5*2
-    const fraudChain = insertChain();
     supabase.from.mockImplementation((table: string) => {
       if (table === 'orders') return ordersChain;
-      if (table === 'fraud_signals') return fraudChain;
       return countChain(0);
     });
 
@@ -164,7 +197,6 @@ describe('checkPurchaseVelocity', () => {
     const { ctx, supabase, eventBus } = createCtx();
     supabase.from.mockImplementation((table: string) => {
       if (table === 'orders') return countChain(6);
-      if (table === 'fraud_signals') return insertChain();
       return countChain(0);
     });
 
@@ -189,7 +221,6 @@ describe('checkDeviceAbuse', () => {
     const { ctx, supabase, eventBus } = createCtx();
     supabase.from.mockImplementation((table: string) => {
       if (table === 'license_sessions') return countChain(10); // 10 > 3*3
-      if (table === 'fraud_signals') return insertChain();
       return countChain(0);
     });
 
@@ -205,7 +236,6 @@ describe('checkDeviceAbuse', () => {
     const { ctx, supabase, eventBus } = createCtx();
     supabase.from.mockImplementation((table: string) => {
       if (table === 'license_sessions') return countChain(16); // 16 > 3*5
-      if (table === 'fraud_signals') return insertChain();
       return countChain(0);
     });
 
@@ -246,7 +276,6 @@ describe('checkIPMismatch', () => {
     const sessions = Array.from({ length: 6 }, (_, i) => ({ ip_address: `${i}.0.0.1` }));
     supabase.from.mockImplementation((table: string) => {
       if (table === 'license_sessions') return dataChain(sessions);
-      if (table === 'fraud_signals') return insertChain();
       return countChain(0);
     });
 
@@ -263,7 +292,6 @@ describe('checkIPMismatch', () => {
     const sessions = Array.from({ length: 12 }, (_, i) => ({ ip_address: `${i}.0.0.1` }));
     supabase.from.mockImplementation((table: string) => {
       if (table === 'license_sessions') return dataChain(sessions);
-      if (table === 'fraud_signals') return insertChain();
       return countChain(0);
     });
 
@@ -310,7 +338,6 @@ describe('checkPaymentPattern', () => {
     const { ctx, supabase, eventBus } = createCtx();
     supabase.from.mockImplementation((table: string) => {
       if (table === 'payments') return countChain(3);
-      if (table === 'fraud_signals') return insertChain();
       return countChain(0);
     });
 
@@ -326,7 +353,6 @@ describe('checkPaymentPattern', () => {
     const { ctx, supabase, eventBus } = createCtx();
     supabase.from.mockImplementation((table: string) => {
       if (table === 'payments') return countChain(7);
-      if (table === 'fraud_signals') return insertChain();
       return countChain(0);
     });
 
@@ -338,13 +364,144 @@ describe('checkPaymentPattern', () => {
   });
 });
 
+describe('fraud signal receipt contract', () => {
+  it('does not re-alert when the atomic receipt proves an existing signal was refreshed', async () => {
+    const { ctx, supabase, eventBus } = createCtx();
+    supabase.from.mockReturnValue(countChain(5));
+    supabase.rpc.mockImplementation(async (fn: string, args?: Record<string, unknown>) => {
+      if (fn === 'fraud_upsert_open_signal_receipt' && args) {
+        return { data: fraudReceipt(args, false), error: null };
+      }
+      return { data: 1, error: null };
+    });
+
+    await checkPurchaseVelocity(ctx, 'cust1', 'discord1');
+
+    expect(supabase.rpc).toHaveBeenCalledWith(
+      'fraud_upsert_open_signal_receipt',
+      expect.objectContaining({
+        p_guild_id: 'g1',
+        p_signal_type: 'velocity',
+        p_entity_type: 'customer',
+        p_entity_id: 'cust1',
+      }),
+    );
+    expect(eventBus.emit).not.toHaveBeenCalledWith(
+      'fraud.detected',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('fails closed when the receipt RPC returns an error', async () => {
+    const { ctx, supabase, eventBus } = createCtx();
+    supabase.from.mockReturnValue(countChain(5));
+    supabase.rpc.mockResolvedValue({
+      data: null,
+      error: { code: '42501', message: 'permission denied' },
+    });
+
+    await expect(checkPurchaseVelocity(ctx, 'cust1', 'discord1')).resolves.toBeUndefined();
+
+    expect(eventBus.emit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['null', null],
+    ['scalar', TEST_SIGNAL_ID],
+    ['array', [{ signal_id: TEST_SIGNAL_ID }]],
+    ['invalid signal id', { signal_id: 'not-a-uuid' }],
+    ['non-boolean created flag', { created: 'true' }],
+    ['wrong guild', { guild_id: 'g2' }],
+    ['wrong signal type', { signal_type: 'payment_pattern' }],
+    ['wrong entity type', { entity_type: 'license_key' }],
+    ['wrong entity id', { entity_id: 'cust2' }],
+    ['wrong status', { status: 'confirmed' }],
+    ['wrong created severity', { severity: 'critical' }],
+    ['prototype-name severity', { severity: 'toString' }],
+    ['weaker refresh severity', { created: false, severity: 'medium' }],
+  ])('fails closed for a malformed or identity-mismatched %s receipt', async (_name, patch) => {
+    const { ctx, supabase, eventBus } = createCtx();
+    supabase.from.mockReturnValue(countChain(5));
+    supabase.rpc.mockImplementation(async (fn: string, args?: Record<string, unknown>) => {
+      if (fn !== 'fraud_upsert_open_signal_receipt' || !args) {
+        return { data: 1, error: null };
+      }
+      const data = patch !== null && typeof patch === 'object' && !Array.isArray(patch)
+        ? { ...fraudReceipt(args), ...patch }
+        : patch;
+      return { data, error: null };
+    });
+
+    await expect(checkPurchaseVelocity(ctx, 'cust1', 'discord1')).resolves.toBeUndefined();
+
+    expect(eventBus.emit).not.toHaveBeenCalled();
+  });
+
+  it('reobserves an old critical row before the critical-burst count', async () => {
+    const { ctx, supabase, eventBus } = createCtx();
+    let observationRefreshed = false;
+
+    const orders = countChain(10);
+    const criticalSignals = countChain(0);
+    criticalSignals.then = (resolve: any) => resolve({
+      count: observationRefreshed ? 1 : 0,
+      data: null,
+      error: null,
+    });
+    const incidentData = { id: 'incident-refresh', title: 'test', incident_number: 1 };
+    const incidents: any = dataChain([]);
+    incidents.insert = vi.fn(() => {
+      const inserted: any = {};
+      inserted.select = vi.fn(() => inserted);
+      inserted.single = vi.fn(async () => ({ data: incidentData, error: null }));
+      return inserted;
+    });
+
+    supabase.from.mockImplementation((table: string) => {
+      if (table === 'orders') return orders;
+      if (table === 'fraud_signals') return criticalSignals;
+      if (table === 'incidents') return incidents;
+      if (table === 'incident_events') return insertChain();
+      return countChain(0);
+    });
+    supabase.rpc.mockImplementation(async (fn: string, args?: Record<string, unknown>) => {
+      if (fn === 'fraud_upsert_open_signal_receipt' && args) {
+        observationRefreshed = true;
+        return { data: fraudReceipt(args, false), error: null };
+      }
+      if (fn === 'nextval_incident') return { data: 99, error: null };
+      return { data: null, error: { message: 'unexpected RPC' } };
+    });
+
+    await checkPurchaseVelocity(ctx, 'cust1', 'discord1');
+    await checkCriticalThreshold(ctx, { threshold: 1 });
+
+    expect(observationRefreshed).toBe(true);
+    expect(eventBus.emit).not.toHaveBeenCalledWith(
+      'fraud.detected',
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'incident.created',
+      'g1',
+      expect.objectContaining({ incidentId: 'incident-refresh' }),
+    );
+  });
+});
+
 describe('checkCriticalThreshold', () => {
   it('does nothing when fewer than 3 critical signals', async () => {
     const { ctx, supabase, eventBus } = createCtx();
-    supabase.from.mockReturnValue(countChain(2));
+    const fraudSignals = countChain(2);
+    supabase.from.mockReturnValue(fraudSignals);
 
     await checkCriticalThreshold(ctx);
     expect(eventBus.emit).not.toHaveBeenCalled();
+    expect(fraudSignals.gte).toHaveBeenCalledWith('last_observed_at', expect.any(String));
+    expect(fraudSignals.gte).not.toHaveBeenCalledWith('created_at', expect.any(String));
+    expect(fraudSignals.gte).not.toHaveBeenCalledWith('updated_at', expect.any(String));
   });
 
   it('does nothing when incident already exists for this burst', async () => {
@@ -497,7 +654,6 @@ describe('checkPurchaseVelocity honors a configured threshold', () => {
     const { ctx, supabase, eventBus } = createCtx();
     supabase.from.mockImplementation((table: string) => {
       if (table === 'orders') return countChain(2);
-      if (table === 'fraud_signals') return insertChain();
       return countChain(0);
     });
     await checkPurchaseVelocity(ctx, 'cust1', 'discord1', { threshold: 2, windowMs: 3_600_000 });

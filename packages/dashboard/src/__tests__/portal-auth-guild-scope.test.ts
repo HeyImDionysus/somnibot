@@ -6,7 +6,7 @@
  * UNIQUE(discord_id, guild_id)) bound their portal session — and every downstream
  * orders/licenses/downloads read — to an arbitrary, possibly wrong, guild.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
 
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
@@ -16,6 +16,7 @@ vi.mock('@/lib/api/rate-limit', () => ({
 
 import { POST } from '@/app/api/portal/auth/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { TRUSTED_PROXY_HOPS_ENV } from '@/lib/api/client-ip';
 
 // The same Discord identity is a customer in BOTH guilds.
 const CUSTOMERS: Record<string, { id: string; guild_id: string; discord_id: string }> = {
@@ -24,6 +25,7 @@ const CUSTOMERS: Record<string, { id: string; guild_id: string; discord_id: stri
 };
 
 let insertedSession: Record<string, unknown> | null = null;
+const originalHops = process.env[TRUSTED_PROXY_HOPS_ENV];
 
 function makeAdmin() {
   return {
@@ -70,6 +72,7 @@ beforeEach(() => {
   (createAdminSupabase as any).mockReturnValue(makeAdmin());
   process.env.DISCORD_APPLICATION_ID = 'app-id';
   process.env.DISCORD_CLIENT_SECRET = 'secret';
+  process.env[TRUSTED_PROXY_HOPS_ENV] = '1';
   // Discord OAuth: token exchange, then /users/@me → the same identity.
   global.fetch = vi.fn(async (url: any) => {
     const u = String(url);
@@ -77,6 +80,11 @@ beforeEach(() => {
     if (u.includes('/users/@me')) return { ok: true, json: async () => ({ id: 'discord-user-1', username: 'buyer' }) } as any;
     return { ok: false, json: async () => ({}) } as any;
   }) as any;
+});
+
+afterEach(() => {
+  if (originalHops === undefined) delete process.env[TRUSTED_PROXY_HOPS_ENV];
+  else process.env[TRUSTED_PROXY_HOPS_ENV] = originalHops;
 });
 
 describe('POST /api/portal/auth guild scoping', () => {
@@ -99,5 +107,50 @@ describe('POST /api/portal/auth guild scoping', () => {
     const res = await POST(makeRequest({ action: 'login', code: 'oauth-code' }));
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(insertedSession).toBeNull();
+  });
+});
+
+/**
+ * The address recorded on a portal login is not just a rate-limit bucket — it is
+ * persisted as `portal_sessions.ip_address` and written into the commerce audit
+ * trail, which is the record you reach for when investigating account takeover.
+ *
+ * The route previously read index 0 of X-Forwarded-For, i.e. whatever the caller
+ * put there. That meant an attacker could BOTH rotate the header for a fresh
+ * bucket against the 10-per-5-minutes brute-force limit, AND write an address of
+ * their choosing into the evidence. These pin both halves shut.
+ */
+describe('POST /api/portal/auth — recorded client IP cannot be forged', () => {
+  function loginWith(forwardedFor: string) {
+    return POST(new NextRequest('https://dash.example/api/portal/auth', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://dash.example',
+        'x-forwarded-for': forwardedFor,
+      },
+      body: JSON.stringify({ action: 'login', code: 'oauth-code', guild_id: 'guild-B' }),
+    }));
+  }
+
+  it('persists the proxy-observed address, not the caller-supplied prefix', async () => {
+    const res = await loginWith('9.9.9.9, 198.51.100.2');
+
+    expect(res.status).toBe(200);
+    expect(insertedSession).toMatchObject({ ip_address: '198.51.100.2' });
+    // The forged value must not reach the stored record at all.
+    expect(insertedSession?.ip_address).not.toBe('9.9.9.9');
+  });
+
+  it('records the same address however the caller rewrites the prefix', async () => {
+    const recorded = new Set<unknown>();
+    for (const forged of ['1.1.1.1', '2.2.2.2', '3.3.3.3']) {
+      insertedSession = null;
+      await loginWith(`${forged}, 198.51.100.2`);
+      recorded.add(insertedSession?.ip_address);
+    }
+
+    expect(recorded.size, 'forged prefixes must not produce distinct audit addresses').toBe(1);
+    expect([...recorded][0]).toBe('198.51.100.2');
   });
 });

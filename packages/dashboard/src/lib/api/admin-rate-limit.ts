@@ -9,6 +9,7 @@
 
 import { NextResponse } from 'next/server';
 import { checkRateLimit } from './rate-limit';
+import { getClientIp } from './client-ip';
 
 /**
  * Pre-configured admin rate limit presets.
@@ -25,14 +26,6 @@ const PRESETS: Record<RateLimitPreset, { maxHits: number; windowMs: number }> = 
   bulk: { maxHits: 10, windowMs: 60_000 },
 };
 
-function getClientIp(request: Request): string {
-  const forwarded = request.headers.get('x-forwarded-for');
-  if (forwarded) {
-    return forwarded.split(',')[0]?.trim() ?? 'unknown';
-  }
-  return request.headers.get('x-real-ip') ?? 'unknown';
-}
-
 /**
  * Check admin rate limit for an API route.
  * Returns null if allowed, or a NextResponse if rate-limited.
@@ -46,6 +39,12 @@ export async function checkAdminRateLimit(
   preset: RateLimitPreset = 'standard',
   routeKey?: string,
 ): Promise<NextResponse | null> {
+  // This module used to carry its own copy of the derivation, reading index 0
+  // of X-Forwarded-For — the value the CLIENT supplied — and falling back to a
+  // client-suppliable `x-real-ip`. Because this function guards EVERY admin
+  // route, that one duplicate made the entire admin surface's rate limiting
+  // bypassable by rotating a single header. There is now exactly one definition
+  // of "the client's address" in the dashboard.
   const ip = getClientIp(request);
   const route = routeKey ?? new URL(request.url).pathname;
   const key = `admin:${route}:${ip}`;

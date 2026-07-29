@@ -224,7 +224,56 @@ LAVALINK_PORT=2333
 LAVALINK_PASSWORD=<node scripts/gen-secret.mjs 16>
 
 PAYPAL_WEBHOOK_URL=https://somnibot.example.com/api/paypal/webhook
+
+# Reverse-proxy hops in front of the dashboard. 1 = Caddy only (the stack in
+# docker-compose.prod.yml). The shipped Caddy emits one canonical address, so
+# production Compose pins the container to 1 even when an approved CDN is
+# placed in front of Caddy. Keep the generic environment default fail-closed.
+SOMNIBOT_TRUSTED_PROXY_HOPS=0
+
+# Exact source networks allowed to supply X-Forwarded-For to Caddy. Keep this
+# non-routable sentinel for direct client -> Caddy deployments. For a CDN, use
+# only that provider's current published egress CIDRs (space-separated).
+CADDY_TRUSTED_PROXY_CIDRS=192.0.2.0/24
 ```
+
+### Client IP and rate limiting
+
+Per-IP rate limits on the public licence endpoints (`/api/license/validate`,
+`/api/license/heartbeat`, `/api/license/deactivate`) key off the client address
+derived from `X-Forwarded-For`. The production Caddy config does not pass an
+inbound header through. It accepts proxy information only from
+`CADDY_TRUSTED_PROXY_CIDRS`, resolves the client from right to left, then
+overwrites the upstream header with one canonical IPv4 or IPv6 address.
+
+**Upgrade note:** older CDN guidance used
+`SOMNIBOT_TRUSTED_PROXY_HOPS=2`. Change or remove that stale value before using
+the dashboard outside production Compose. Production Compose now pins the
+dashboard container to `1`, matching Caddy's canonical one-entry contract, so
+an old `.env` value cannot collapse all callers into the shared `unknown`
+bucket.
+
+| Setup | Value |
+|---|---|
+| VPS: client → Caddy → dashboard | `SOMNIBOT_TRUSTED_PROXY_HOPS=1`; leave the CIDR sentinel |
+| VPS: approved CDN → Caddy → dashboard | Hops stays `1`; replace the sentinel with the CDN's exact current egress CIDRs |
+| Different proxy/tunnel that emits one validated canonical address | `1` |
+| Different append-only proxy stack | Its exact trustworthy chain depth |
+| No trustworthy proxy header | `0` (all callers share `unknown`) |
+
+Do not configure `CADDY_TRUSTED_PROXY_CIDRS` as `0.0.0.0/0`, `::/0`, or a
+convenient broad private range. That turns a client-controlled forwarding header
+into trusted input. If Caddy does not recognize the connecting CDN as trusted,
+it uses the CDN peer address instead: rate limiting becomes coarser, but the
+client cannot choose a fresh bucket.
+
+For non-Caddy deployments, a hop count below the real append-only depth selects
+an inner/shared proxy and collapses clients together. A value above the real
+depth can reach a client-supplied prefix when the chain is long enough. The
+dashboard therefore rejects invalid configuration, short chains, and malformed
+addresses to the shared `unknown` bucket and emits one `[client-ip]` warning per
+reason. A 429 remains non-terminal in the SDK, but repeated warnings still mean
+the proxy boundary must be corrected.
 
 Manual fallback: start the production stack on the VPS:
 

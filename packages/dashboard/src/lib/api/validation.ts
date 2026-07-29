@@ -783,7 +783,7 @@ const licenseKeyUpdate = z.object({
 const licenseValidate = z.object({
   license_key: z.string().min(1).max(512),
   product_id: uuid,
-  device_fingerprint: z.string().max(256).optional(),
+  device_fingerprint: z.string().trim().min(1).max(256).optional(),
   device_name: z.string().max(128).optional(),
   app_version: z.string().max(32).optional(),
 });

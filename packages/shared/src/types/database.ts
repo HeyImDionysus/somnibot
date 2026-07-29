@@ -1121,7 +1121,21 @@ export interface DbLicenseValidation {
   license_key_id: string | null;
   product_id: string | null;
   device_fingerprint: string | null;
-  result: 'valid' | 'invalid_key' | 'expired' | 'suspended' | 'revoked' | 'over_device_limit' | 'product_mismatch';
+  result:
+    | 'valid'
+    | 'invalid_key'
+    | 'expired'
+    | 'suspended'
+    | 'revoked'
+    | 'over_device_limit'
+    | 'product_mismatch'
+    | 'cancelled'
+    | 'pending'
+    | 'grace_period'
+    | 'unavailable'
+    | 'rate_limited'
+    | 'session_invalidated'
+    | 'device_fingerprint_required';
   ip_address: string | null;
   app_version: string | null;
   created_at: string;
@@ -1351,6 +1365,7 @@ export interface DbFraudSignal {
   resolved_by: string | null;
   resolution_note: string | null;
   updated_at: string;
+  last_observed_at: string;
   // V19 Audit: added missing schema fields
   action: string | null;
   details: Record<string, unknown> | null;

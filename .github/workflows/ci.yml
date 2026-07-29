@@ -38,7 +38,9 @@ permissions:
 env:
   NODE_VERSION: "22"
   PNPM_VERSION: "9.15.4"
-  SUPABASE_CLI_VERSION: "2.101.0"
+  # 2.110+ executes CREATE INDEX CONCURRENTLY outside the per-migration
+  # transaction, which the online fraud-observation index migration requires.
+  SUPABASE_CLI_VERSION: "2.110.0"
 
 # =============================================================================
 # Reusable setup anchor — keeps checkout+pnpm+node+cache consistent
@@ -881,6 +883,7 @@ jobs:
       - name: Fail on DB type drift
         run: |
           set -euo pipefail
+          python3 scripts/test_generate_db_types.py
           # --check regenerates in memory and exits non-zero if the committed
           # snapshot differs from a fresh generation. The generator resolves the
           # migrations dir relative to itself, so no path patching is required.

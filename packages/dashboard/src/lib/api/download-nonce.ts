@@ -5,70 +5,35 @@
  * nonce that is consumed on first download. Subsequent attempts with the
  * same nonce are rejected.
  *
- * Uses Valkey (via the rate-limit module's raw RESP client) when available.
- * Falls back to an in-memory Set with automatic expiry cleanup.
+ * Uses one authoritative Valkey SET-NX key shared across every dashboard
+ * replica. If Valkey is unavailable, consumption is unavailable too: silently
+ * switching to process-local memory would make an already-consumed nonce fresh
+ * again during an outage or recovery.
  */
 
-import { checkRateLimit } from './rate-limit';
-
-// ── In-memory fallback (single-instance only) ──
-
-const usedNonces = new Map<string, number>(); // nonce → expiresAtMs
-let lastNonceCleanup = Date.now();
-
-/**
- * V7 Audit §2.P3a — Maximum entries in the nonce fallback store.
- * Prevents unbounded memory growth during Valkey outage + high download volume.
- */
-const MAX_NONCE_ENTRIES = 10_000;
-
-function cleanupNonces(): void {
-  const now = Date.now();
-  if (now - lastNonceCleanup < 60_000) return; // clean every ~60s
-  lastNonceCleanup = now;
-  for (const [nonce, expiry] of usedNonces) {
-    if (now > expiry) usedNonces.delete(nonce);
-  }
-
-  // V7 Audit §2.P3a — hard cap eviction (oldest first via Map insertion order)
-  if (usedNonces.size > MAX_NONCE_ENTRIES) {
-    const excess = usedNonces.size - MAX_NONCE_ENTRIES;
-    const iter = usedNonces.keys();
-    for (let i = 0; i < excess; i++) {
-      const { value } = iter.next();
-      if (value) usedNonces.delete(value);
-    }
-  }
-}
+import {
+  consumeSingleUseValkeyKey,
+  type SingleUseValkeyResult,
+} from './rate-limit';
 
 /**
  * Attempt to consume a download nonce.
  *
  * @param nonce  - The UUID nonce from the signed URL
  * @param expUnix - URL expiry as Unix timestamp (seconds)
- * @returns true if this is the first use (consumed), false if already used
+ * @returns consumed, replay, or unavailable (never a process-local fallback)
  */
-export async function consumeDownloadNonce(nonce: string, expUnix: number): Promise<boolean> {
+export async function consumeDownloadNonce(
+  nonce: string,
+  expUnix: number,
+): Promise<SingleUseValkeyResult> {
   // Calculate remaining TTL for the nonce (matches the URL expiry).
   // Add a 30s grace period so the nonce outlives the URL.
   const now = Math.floor(Date.now() / 1000);
   const ttlSeconds = Math.max(expUnix - now + 30, 60);
-
-  // Try Valkey: use the rate-limit module's INCR as a SET-NX equivalent.
-  // A nonce that increments to 1 is fresh; anything higher is a replay.
-  try {
-    const key = `download:nonce:${nonce}`;
-    const result = await checkRateLimit(key, 1, ttlSeconds * 1000);
-    // If not limited → first use (remaining >= 0 means hit count was 1)
-    // If limited → replay (hit count exceeded 1)
-    return !result.limited;
-  } catch {
-    // Valkey unavailable — fall through to memory
-  }
-
-  // In-memory fallback
-  cleanupNonces();
-  if (usedNonces.has(nonce)) return false;
-  usedNonces.set(nonce, (expUnix + 30) * 1000);
-  return true;
+  // Preserve the legacy checkRateLimit key shape so a rolling deployment
+  // shares nonce state with an older dashboard replica. The old path applied
+  // this prefix internally before INCR; SET NX on the same key treats an old
+  // value as consumed, and an old INCR treats the new "1" value as a replay.
+  return consumeSingleUseValkeyKey(`ratelimit:download:nonce:${nonce}`, ttlSeconds);
 }
