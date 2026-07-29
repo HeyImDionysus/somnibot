@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { recordAdminChange } from '@/lib/admin-changes';
 
 const incidentEventCreate = z.object({
   event_type: z.string().max(64).default('note'),
@@ -67,10 +68,14 @@ export async function POST(
     const body = parsed.data;
     const admin = createAdminSupabase();
 
-    // V51: verify incident belongs to this guild before adding events
+    // V51: verify incident belongs to this guild before adding events.
+    // `incident_events` has no guild column of its own, so this check is what
+    // makes the guild id on the recorded admin change correct rather than
+    // assumed. The number/title come from the same read so the recorded
+    // sentence names the incident instead of printing a UUID.
     const { data: incident } = await admin
       .from('incidents')
-      .select('id')
+      .select('id, incident_number, title')
       .eq('id', id)
       .eq('guild_id', ctx.guildId)
       .maybeSingle();
@@ -92,6 +97,29 @@ export async function POST(
       .single();
 
     if (error) return dbError(error, 'incidents/events');
+
+    const incidentRow = incident as { incident_number?: number; title?: string };
+    const label = incidentRow.incident_number
+      ? `#${incidentRow.incident_number} "${incidentRow.title ?? ''}"`.trim()
+      : 'an incident';
+    await recordAdminChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      action: 'incident.event_added',
+      targetType: 'incident update',
+      // The incident, not the event row: this is what the owner navigates to.
+      targetId: id,
+      description: `Added a ${body.event_type} to incident ${label}`,
+      after: {
+        event_id: (data as { id?: string } | null)?.id ?? null,
+        event_type: body.event_type,
+        message: body.message,
+      },
+      blastRadius: 'low',
+      undoReason:
+        'an incident timeline is append-only, so a posted update cannot be taken back',
+    }, admin);
+
     return NextResponse.json({ success: true, data });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';

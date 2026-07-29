@@ -10,7 +10,17 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { recordAdminChange, readRowBefore } from '@/lib/admin-changes';
 import type { SupabaseClient } from '@supabase/supabase-js';
+
+/**
+ * Columns of an incident copied into an admin-changes before/after payload.
+ * Explicit rather than `*`: the change log is rendered verbatim, and an
+ * incident row can accumulate free-text operator fields we would rather name
+ * than inherit.
+ */
+const INCIDENT_RECORD_COLUMNS =
+  'id, incident_number, title, status, severity, assigned_to, started_at';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 
@@ -216,6 +226,29 @@ export async function POST(request: NextRequest) {
       // owner-alert mirror is best-effort
     }
 
+    await recordAdminChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      action: 'incident.created',
+      targetType: 'incident',
+      targetId: incident.id,
+      description:
+        `Opened incident #${nextNumber} "${body.title}" at ${body.severity || 'warning'} severity`,
+      after: {
+        incident_number: nextNumber,
+        title: body.title,
+        severity: body.severity || 'warning',
+        status: 'open',
+        source: body.source || 'manual',
+        assigned_to: body.assigned_to || null,
+      },
+      // An incident record documents the server; it does not change how the
+      // server behaves.
+      blastRadius: 'low',
+      undoReason:
+        'an incident is a permanent operational record — close or resolve it instead of removing it',
+    }, admin);
+
     return NextResponse.json({ success: true, data: incident });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
@@ -234,6 +267,18 @@ export async function PATCH(request: NextRequest) {
     const body = parsed.data;
     const admin = createAdminSupabase();
 
+    // Read the incident's prior state BEFORE the update. This is what makes
+    // the recorded change show what actually changed rather than echoing the
+    // new values back, and it doubles as the source of `started_at` for the
+    // resolution duration below — one guild-scoped read instead of the
+    // previous unscoped, resolve-only one.
+    const before = await readRowBefore(
+      admin,
+      'incidents',
+      { id: body.id, guild_id: ctx.guildId },
+      INCIDENT_RECORD_COLUMNS,
+    );
+
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
     const eventMeta: Record<string, unknown> = {};
 
@@ -244,14 +289,10 @@ export async function PATCH(request: NextRequest) {
       if (body.status === 'resolved') {
         updates.resolved_at = new Date().toISOString();
         // Calculate duration
-        const { data: inc } = await admin
-          .from('incidents')
-          .select('started_at')
-          .eq('id', body.id)
-          .single();
-        if (inc) {
+        const startedAt = before?.started_at;
+        if (startedAt) {
           updates.duration_seconds = Math.round(
-            (Date.now() - new Date(inc.started_at).getTime()) / 1000,
+            (Date.now() - new Date(String(startedAt)).getTime()) / 1000,
           );
         }
       }
@@ -305,6 +346,36 @@ export async function PATCH(request: NextRequest) {
         // best-effort alert resolution
       }
     }
+
+    const label = before?.incident_number
+      ? `#${String(before.incident_number)} "${String(before.title ?? '')}"`.trim()
+      : 'this incident';
+    const changed = Object.keys(updates).filter(
+      (k) => k !== 'updated_at' && k !== 'duration_seconds',
+    );
+    await recordAdminChange({
+      guildId: ctx.guildId,
+      actorId: ctx.discordId,
+      action: resolved ? 'incident.resolved' : 'incident.updated',
+      targetType: 'incident',
+      targetId: body.id,
+      description: resolved
+        ? `Marked incident ${label} resolved`
+        : body.status
+          ? `Moved incident ${label} to ${body.status}`
+          : `Updated the details of incident ${label}`,
+      before: before
+        ? {
+            status: before.status ?? null,
+            severity: before.severity ?? null,
+            assigned_to: before.assigned_to ?? null,
+          }
+        : undefined,
+      after: Object.fromEntries(changed.map((k) => [k, updates[k]])),
+      blastRadius: 'low',
+      undoReason:
+        'an incident timeline is an append-only record — file a further update instead of rewinding one',
+    }, admin);
 
     return NextResponse.json({ success: true, data });
   } catch (e) {

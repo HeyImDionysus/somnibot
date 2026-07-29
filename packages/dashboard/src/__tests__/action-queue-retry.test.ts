@@ -26,7 +26,7 @@ type QueryChain = Record<string, ReturnType<typeof vi.fn>> & PromiseLike<DbResul
 
 function thenableQuery(result: DbResult): QueryChain {
   const chain = {} as QueryChain;
-  for (const method of ['select', 'eq', 'in', 'or', 'limit']) {
+  for (const method of ['select', 'eq', 'in', 'or', 'limit', 'insert']) {
     chain[method] = vi.fn().mockReturnValue(chain);
   }
   chain.then = (onfulfilled, onrejected) => Promise.resolve(result).then(onfulfilled, onrejected);
@@ -62,8 +62,16 @@ function makeSupabase(input: {
   genericRecovery?: DbResult;
 } = {}) {
   const fetch = thenableQuery({ data: input.rows ?? [exactDlq()], error: null });
+  // A successful retry also writes one `admin_changes` row so the owner can see
+  // that failed bot work was sent back to the bot. That bookkeeping write is
+  // NOT the route cloning queue work — the `tables` log below is what the
+  // no-cloning assertions read, so the two can never be confused.
+  const adminChanges = thenableQuery({ data: null, error: null });
+  const tables: string[] = [];
   const from = vi.fn().mockImplementation((table: string) => {
+    tables.push(table);
     if (table === 'action_queue_dlq') return fetch;
+    if (table === 'admin_changes') return adminChanges;
     throw new Error(`Unexpected table ${table}`);
   });
   const rpc = vi.fn().mockImplementation(async (name: string) => {
@@ -89,7 +97,18 @@ function makeSupabase(input: {
     }
     throw new Error(`Unexpected RPC ${name}`);
   });
-  return { from, rpc, fetch };
+  return { from, rpc, fetch, tables };
+}
+
+/**
+ * The original contract: the route reads the DLQ exactly once and NEVER writes
+ * a replacement itself — only the atomic RPC may create queue work. Asserted on
+ * the table log rather than a raw `from` call count so an unrelated bookkeeping
+ * write cannot silently satisfy or break it.
+ */
+function expectNoCloning(mock: { tables: string[] }) {
+  expect(mock.tables.filter((t) => t === 'action_queue_dlq')).toHaveLength(1);
+  expect(mock.tables).not.toContain('bot_action_queue');
 }
 
 function request(ids = [DLQ_ID]) {
@@ -128,7 +147,7 @@ describe('POST /api/action-queue exact carrier retry', () => {
       p_dlq_id: DLQ_ID,
       p_guild_id: GUILD_ID,
     });
-    expect(mock.from).toHaveBeenCalledTimes(1);
+    expectNoCloning(mock);
   });
 
   it.each([
@@ -148,7 +167,7 @@ describe('POST /api/action-queue exact carrier retry', () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ success: true, retried: 1 });
-    expect(mock.from).toHaveBeenCalledTimes(1);
+    expectNoCloning(mock);
   });
 
   it('reports operator-held evidence as a failed retry outcome without cloning', async () => {
@@ -173,7 +192,7 @@ describe('POST /api/action-queue exact carrier retry', () => {
       operatorHeld: 1,
       failed: 0,
     });
-    expect(mock.from).toHaveBeenCalledTimes(1);
+    expectNoCloning(mock);
   });
 
   it.each([
@@ -212,7 +231,7 @@ describe('POST /api/action-queue exact carrier retry', () => {
       operatorHeld: 0,
       failed: 1,
     });
-    expect(mock.from).toHaveBeenCalledTimes(1);
+    expectNoCloning(mock);
   });
 
   it('fails closed when the exact-carrier recovery RPC errors', async () => {
@@ -309,7 +328,7 @@ describe('POST /api/action-queue generic atomic retry', () => {
     expect(mock.fetch.eq).toHaveBeenCalledWith('guild_id', GUILD_ID);
     expect(mock.fetch.in).toHaveBeenCalledWith('id', [DLQ_ID]);
     expect(mock.fetch.or).toHaveBeenCalledWith('retried.eq.false,retried.is.null');
-    expect(mock.from).toHaveBeenCalledTimes(1);
+    expectNoCloning(mock);
   });
 
   it.each([
@@ -398,7 +417,7 @@ describe('POST /api/action-queue generic atomic retry', () => {
         operatorHeld: 0,
         failed: 1,
       });
-      expect(mock.from).toHaveBeenCalledTimes(1);
+      expectNoCloning(mock);
     },
   );
 

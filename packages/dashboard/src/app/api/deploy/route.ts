@@ -11,6 +11,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { recordAdminChange, readRowBefore } from '@/lib/admin-changes';
 
 
 export async function POST(request: NextRequest) {
@@ -19,7 +20,7 @@ export async function POST(request: NextRequest) {
 
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
+  const { guildId, discordId } = auth.ctx;
 
   const parsed = await parseBody(request, schemas.deploy.action);
   if (!parsed.ok) return parsed.response;
@@ -33,6 +34,19 @@ export async function POST(request: NextRequest) {
       { status: 400 },
     );
   }
+
+  // What the guild was set to deploy BEFORE this request replaced it. Only
+  // the shape is kept (how many roles/channels, and whether the previous plan
+  // had finished applying) — the full role/channel plan can be thousands of
+  // lines of JSON and the change log is not a backup of it.
+  const priorState = await readRowBefore(
+    admin,
+    'guild_desired_state',
+    { guild_id: guildId },
+    'guild_id, roles, channels, applied_at',
+  );
+  const priorRoles = Array.isArray(priorState?.roles) ? priorState.roles.length : null;
+  const priorChannels = Array.isArray(priorState?.channels) ? priorState.channels.length : null;
 
   // Store desired state — setting applied_at = null triggers the bot
   const { error } = await admin.from('guild_desired_state').upsert(
@@ -65,6 +79,42 @@ export async function POST(request: NextRequest) {
     },
     success: true,
   });
+
+  // A deploy is the single most far-reaching thing this dashboard can do: the
+  // bot's deploy listener watches guild_desired_state for `applied_at = null`
+  // and then creates, edits and (with cleanExisting) DELETES real Discord roles
+  // and channels. There is deliberately no `undo` — no db row update and no
+  // allowlisted queue action can put a deleted channel and its message history
+  // back, and offering a button that pretends otherwise would be the worst
+  // possible lie on this page.
+  await recordAdminChange({
+    guildId,
+    actorId: discordId,
+    action: 'deploy.requested',
+    targetType: 'server deployment',
+    targetId: guildId,
+    description:
+      `Started a server deployment of ${body.roles.length} roles and `
+      + `${body.channels.length} channels`
+      + ((body.cleanExisting ?? true)
+        ? ', replacing anything already there'
+        : ', keeping what is already there'),
+    before: priorRoles === null && priorChannels === null
+      ? undefined
+      : {
+          role_count: priorRoles,
+          channel_count: priorChannels,
+          previous_deploy_applied_at: priorState?.applied_at ?? null,
+        },
+    after: {
+      role_count: body.roles.length,
+      channel_count: body.channels.length,
+      clean_existing: body.cleanExisting ?? true,
+    },
+    blastRadius: 'critical',
+    undoReason:
+      'the bot applies deployments directly to Discord — roles and channels it creates or deletes cannot be restored from here',
+  }, admin);
 
   return NextResponse.json({
     success: true,
