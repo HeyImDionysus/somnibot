@@ -922,13 +922,23 @@ export interface DbCommerceCheckoutDeactivationProof {
 }
 
 export interface DbCommerceFulfillmentOutwardIntent {
+  id: string;
   order_id: string;
   guild_id: string;
+  outward_generation_id: string | null;
   intent_kind:
     | 'purchase_completed_event'
     | 'subscription_activated_event'
-    | 'receipt_dm';
-  state: 'sending' | 'sent' | 'uncertain';
+    | 'receipt_dm'
+    | 'subscription_renewed_event'
+    | 'subscription_cancelled_event'
+    | 'subscription_cancelled_dm'
+    | 'subscription_payment_failed_lapsed_event'
+    | 'subscription_payment_failed_event'
+    | 'subscription_payment_failed_dm'
+    | 'subscription_suspended_event'
+    | 'subscription_suspended_dm';
+  state: 'sending' | 'sent' | 'uncertain' | 'superseded';
   attempt_token: string | null;
   started_at: string;
   sent_at: string | null;

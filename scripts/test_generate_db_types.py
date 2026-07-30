@@ -70,6 +70,21 @@ class TestAlterColumnNullability(unittest.TestCase):
         self.assertFalse(column.nullable)
         self.assertEqual(column.to_ts_type(), "string")
 
+    def test_outward_intent_state_override_includes_superseded(self):
+        generated = self.build(
+            """
+            CREATE TABLE public.commerce_fulfillment_outward_intents (
+              state TEXT NOT NULL
+                CHECK (state IN ('sending', 'sent', 'uncertain'))
+            );
+            """
+        )
+
+        self.assertIn(
+            "state: 'sending' | 'sent' | 'uncertain' | 'superseded';",
+            generated,
+        )
+
     def test_drop_not_null_restores_nullable_type(self):
         self.process(
             """
