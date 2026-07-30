@@ -94,15 +94,23 @@ export default function BrandingPage() {
         brandingRes.json(),
         embedsRes.json(),
       ]);
-      if (brandingRes.ok && brandingJson.success && embedsRes.ok && embedsJson.success) {
+      if (brandingRes.ok && brandingJson.success) {
         setConfig({ ...DEFAULT_CONFIG, ...brandingJson.data });
+      } else {
+        const message = brandingJson.error || 'Failed to load branding';
+        setError(message);
+        toast({ title: message, variant: 'error' });
+        return;
+      }
+      if (embedsRes.ok && embedsJson.success) {
         const embeds = Array.isArray(embedsJson.data) ? embedsJson.data as SavedEmbed[] : [];
         setSavedEmbeds(embeds);
         setSelectedEmbedId((current) => current || embeds[0]?.id || '');
       } else {
-        const message = brandingJson.error || embedsJson.error || 'Failed to load branding preview';
-        setError(message);
-        toast({ title: message, variant: 'error' });
+        // Saved embeds are optional preview material. Branding remains safely
+        // editable when that independent request is unavailable.
+        setSavedEmbeds([]);
+        setSelectedEmbedId('');
       }
     } catch {
       setError('Failed to load branding');

@@ -22,9 +22,9 @@ export async function GET(req: NextRequest) {
   const { guildId } = auth.ctx;
   const supabase = createAdminSupabase();
 
-  const { data: keys, error: keyError } = await supabase
+  const { data: keys, error: keyError, count: keyTotal } = await supabase
     .from('license_keys')
-    .select('id, product_id, status, activated_at, created_at')
+    .select('id, product_id, status, activated_at, created_at', { count: 'exact' })
     .eq('guild_id', guildId)
     .order('created_at', { ascending: false })
     .limit(5_000);
@@ -127,12 +127,22 @@ export async function GET(req: NextRequest) {
     + unavailable24h
     + deviceLimit24h
     + alertsResult.data.length;
+  const totalKeys = keyTotal ?? keys.length;
+  const keySampleTruncated = totalKeys > keys.length;
 
   return NextResponse.json({
     success: true,
     data: {
-      state: keys.length === 0 ? 'empty' : issueCount > 0 ? 'needs_attention' : 'healthy',
+      // A partial key sample can never establish whole-guild health.
+      state:
+        totalKeys === 0
+          ? 'empty'
+          : issueCount > 0 || keySampleTruncated
+            ? 'needs_attention'
+            : 'healthy',
       keyCounts,
+      sampledKeys: keys.length,
+      totalKeys,
       activeSessions,
       totalSessions: sessionsResult.count ?? sessionsResult.data.length,
       validationWindowHours: 24,
@@ -143,7 +153,8 @@ export async function GET(req: NextRequest) {
       pendingOlderThanDay,
       unresolvedAlerts: alertsResult.data,
       truncated:
-        (sessionsResult.count ?? 0) > sessionsResult.data.length
+        keySampleTruncated
+        || (sessionsResult.count ?? 0) > sessionsResult.data.length
         || (validationsResult.count ?? 0) > validationsResult.data.length,
       checkedAt: new Date().toISOString(),
     },

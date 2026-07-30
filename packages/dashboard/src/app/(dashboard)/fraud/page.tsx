@@ -10,6 +10,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import {
   FraudRuleForm,
+  isSupportedFraudRuleType,
   type EditableFraudRule,
 } from '@/components/fraud-rule-form';
 import { fetchFraudJson, invalidateFraudCache } from '@/lib/fraud-data-cache';
@@ -441,7 +442,9 @@ export default function FraudPage() {
                         {rule.rule_type}
                       </span>
                       <span className="rounded-full bg-discord-bg-tertiary px-2 py-0.5 text-[10px] text-discord-text-muted">
-                        Action: {rule.auto_action}
+                        {isSupportedFraudRuleType(rule.rule_type)
+                          ? 'Action: flag for review'
+                          : 'Legacy rule: no active detector'}
                       </span>
                     </div>
                     {rule.description && (
@@ -456,6 +459,7 @@ export default function FraudPage() {
                     <button
                       type="button"
                       onClick={() => setRuleForm(rule)}
+                      disabled={!isSupportedFraudRuleType(rule.rule_type)}
                       className="rounded-md bg-discord-bg-tertiary px-3 py-1.5 text-xs text-discord-text-secondary hover:text-white"
                     >
                       Edit
@@ -465,6 +469,7 @@ export default function FraudPage() {
                       aria-label={`${rule.enabled ? 'Disable' : 'Enable'} ${rule.name}`}
                       aria-pressed={rule.enabled}
                       onClick={() => toggleRule(rule.id, !rule.enabled)}
+                      disabled={!isSupportedFraudRuleType(rule.rule_type)}
                       className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
                         rule.enabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'
                       }`}

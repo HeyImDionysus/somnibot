@@ -11,7 +11,7 @@ describe('Discord configuration values', () => {
     (value) => expect(discordEmojiSchema.safeParse(value).success).toBe(true),
   );
 
-  it.each(['star', ':star:', '<:x:not-a-snowflake>', ''])(
+  it.each(['star', ':star:', '<:x:not-a-snowflake>', '', 'stars 😀 please', '😀😀'])(
     'rejects non-emoji value %s',
     (value) => expect(discordEmojiSchema.safeParse(value).success).toBe(false),
   );

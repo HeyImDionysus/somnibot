@@ -13,13 +13,10 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
-const fraudRuleType = z.enum([
-  'velocity_limit',
-  'device_limit',
-  'ip_block',
-  'amount_threshold',
-  'pattern_match',
-]);
+// Only expose detectors that production actually evaluates. Historical rows
+// of other constrained types remain readable but cannot be presented as live
+// controls until their runtime detector exists.
+const fraudRuleType = z.literal('velocity_limit');
 
 const fraudRuleCreate = z.object({
   name: z.string().min(1).max(100).trim(),
@@ -29,7 +26,7 @@ const fraudRuleCreate = z.object({
   rule_type: fraudRuleType,
   enabled: z.boolean().default(true),
   config: z.record(z.unknown()).default({}),
-  auto_action: z.string().max(32).default('flag'),
+  auto_action: z.literal('flag').default('flag'),
 });
 
 const fraudRuleUpdate = z.object({
@@ -39,7 +36,7 @@ const fraudRuleUpdate = z.object({
   rule_type: fraudRuleType.optional(),
   enabled: z.boolean().optional(),
   config: z.record(z.unknown()).optional(),
-  auto_action: z.string().max(32).optional(),
+  auto_action: z.literal('flag').optional(),
 });
 
 export async function GET() {

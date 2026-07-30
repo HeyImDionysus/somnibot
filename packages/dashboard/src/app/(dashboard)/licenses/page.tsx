@@ -48,6 +48,8 @@ interface Session {
 interface LicenseHealth {
   state: 'empty' | 'healthy' | 'needs_attention';
   keyCounts: Record<'pending_activation' | 'active' | 'expired' | 'revoked' | 'suspended', number>;
+  sampledKeys: number;
+  totalKeys: number;
   activeSessions: number;
   totalSessions: number;
   validationWindowHours: number;
@@ -293,7 +295,9 @@ export default function LicensesPage() {
             )}
             {health.truncated && (
               <p className="text-xs text-discord-warning">
-                This server exceeded the live panel row limit; counts are exact but the issue sample is partial.
+                This server exceeded a live-panel row limit. The visible counts
+                cover {health.sampledKeys} of {health.totalKeys} keys and must not
+                be treated as whole-server health.
               </p>
             )}
           </div>

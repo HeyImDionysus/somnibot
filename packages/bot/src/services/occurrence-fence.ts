@@ -92,3 +92,20 @@ export async function failDiscordOccurrence(
     .eq('status', 'claimed');
   if (updateError) throw new Error(`Unable to fail Discord occurrence: ${updateError.message}`);
 }
+
+/**
+ * Release a claim only when its caller has proved that no Discord resource
+ * survived. This permits a later legitimate gateway occurrence to retry while
+ * preserving fail-closed behavior across ambiguous external commit windows.
+ */
+export async function releaseDiscordOccurrence(
+  supabase: SupabaseClient,
+  occurrenceId: string,
+): Promise<void> {
+  const { error } = await supabase
+    .from('discord_operation_occurrences')
+    .delete()
+    .eq('id', occurrenceId)
+    .eq('status', 'claimed');
+  if (error) throw new Error(`Unable to release Discord occurrence: ${error.message}`);
+}

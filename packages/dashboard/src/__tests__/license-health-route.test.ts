@@ -79,6 +79,8 @@ describe('GET /api/license/health', () => {
     expect(response.status).toBe(200);
     expect(body.data).toMatchObject({
       state: 'healthy',
+      sampledKeys: 1,
+      totalKeys: 1,
       keyCounts: {
         active: 1,
         pending_activation: 0,
@@ -127,5 +129,28 @@ describe('GET /api/license/health', () => {
     const response = await GET(buildRequest('/api/license/health') as never);
     expect(response.status).toBe(500);
     expect((await response.json()).success).toBe(false);
+  });
+
+  it('never declares whole-guild health from a truncated key sample', async () => {
+    setup({
+      license_keys: {
+        data: [{
+          id: '00000000-0000-0000-0000-000000000001',
+          product_id: '00000000-0000-0000-0000-000000000002',
+          status: 'active',
+          activated_at: '2026-07-30T00:00:00.000Z',
+          created_at: '2026-07-29T00:00:00.000Z',
+        }],
+        error: null,
+        count: 5_001,
+      },
+    });
+    const body = await (await GET(buildRequest('/api/license/health') as never)).json();
+    expect(body.data).toMatchObject({
+      state: 'needs_attention',
+      truncated: true,
+      sampledKeys: 1,
+      totalKeys: 5_001,
+    });
   });
 });

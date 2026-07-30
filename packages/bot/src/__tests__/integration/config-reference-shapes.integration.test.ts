@@ -68,6 +68,11 @@ describe('guild configuration reference shapes', () => {
       starboard_emoji: 'star',
     }).eq('guild_id', guildId);
     expect(rejected.error?.code).toBe('23514');
+
+    const embedded = await supa.from('guild_config').update({
+      starboard_emoji: 'stars 😀 please',
+    }).eq('guild_id', guildId);
+    expect(embedded.error?.code).toBe('23514');
   });
 
   it('accepts web card backgrounds and rejects non-web schemes', async () => {

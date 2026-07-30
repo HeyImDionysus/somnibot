@@ -3,19 +3,17 @@
 import { useMemo, useState } from 'react';
 import { invalidateFraudCache } from '@/lib/fraud-data-cache';
 
-export const FRAUD_RULE_TYPES = [
-  'velocity_limit',
-  'device_limit',
-  'ip_block',
-  'amount_threshold',
-  'pattern_match',
-] as const;
+export const FRAUD_RULE_TYPES = ['velocity_limit'] as const;
+
+export function isSupportedFraudRuleType(value: string): value is 'velocity_limit' {
+  return value === 'velocity_limit';
+}
 
 export interface EditableFraudRule {
   id: string;
   name: string;
   description: string | null;
-  rule_type: (typeof FRAUD_RULE_TYPES)[number];
+  rule_type: string;
   enabled: boolean;
   config: Record<string, unknown>;
   auto_action: string;
@@ -29,21 +27,14 @@ interface Props {
 
 const DEFAULT_CONFIG: Record<(typeof FRAUD_RULE_TYPES)[number], Record<string, unknown>> = {
   velocity_limit: { threshold: 5, window_minutes: 60 },
-  device_limit: { threshold: 3 },
-  ip_block: { blocked_ips: [] },
-  amount_threshold: { threshold_cents: 10_000 },
-  pattern_match: { pattern: '' },
 };
 
 export function FraudRuleForm({ rule, onCancel, onSaved }: Props) {
   const editing = Boolean(rule);
   const [name, setName] = useState(rule?.name ?? '');
   const [description, setDescription] = useState(rule?.description ?? '');
-  const [ruleType, setRuleType] = useState<(typeof FRAUD_RULE_TYPES)[number]>(
-    rule?.rule_type ?? 'velocity_limit',
-  );
+  const [ruleType, setRuleType] = useState<'velocity_limit'>('velocity_limit');
   const [enabled, setEnabled] = useState(rule?.enabled ?? true);
-  const [autoAction, setAutoAction] = useState(rule?.auto_action ?? 'flag');
   const [configText, setConfigText] = useState(
     JSON.stringify(rule?.config ?? DEFAULT_CONFIG.velocity_limit, null, 2),
   );
@@ -80,7 +71,7 @@ export function FraudRuleForm({ rule, onCancel, onSaved }: Props) {
         description: description.trim() || null,
         rule_type: ruleType,
         enabled,
-        auto_action: autoAction.trim() || 'flag',
+        auto_action: 'flag',
         config: JSON.parse(configText) as Record<string, unknown>,
       };
       const response = await fetch('/api/fraud/rules', {
@@ -110,7 +101,8 @@ export function FraudRuleForm({ rule, onCancel, onSaved }: Props) {
             {editing ? 'Edit detection rule' : 'Create detection rule'}
           </h3>
           <p className="mt-1 text-xs text-discord-text-muted">
-            Configuration is stored as JSON so every detector-specific threshold remains configurable.
+            Purchase velocity is the detector currently evaluated at runtime.
+            Matching signals are flagged for operator review.
           </p>
         </div>
         <button type="button" onClick={onCancel} className="text-sm text-discord-text-muted hover:text-white">
@@ -148,15 +140,6 @@ export function FraudRuleForm({ rule, onCancel, onSaved }: Props) {
             value={description}
             onChange={(event) => setDescription(event.target.value)}
             maxLength={500}
-            className="mt-1 w-full rounded-md border border-discord-border-subtle bg-discord-bg-primary px-3 py-2 text-discord-text-primary"
-          />
-        </label>
-        <label className="text-sm text-discord-text-secondary">
-          Automatic action
-          <input
-            value={autoAction}
-            onChange={(event) => setAutoAction(event.target.value)}
-            maxLength={32}
             className="mt-1 w-full rounded-md border border-discord-border-subtle bg-discord-bg-primary px-3 py-2 text-discord-text-primary"
           />
         </label>

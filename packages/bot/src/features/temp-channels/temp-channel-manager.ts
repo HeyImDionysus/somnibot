@@ -6,6 +6,7 @@ import {
   PermissionFlagsBits,
   type Guild,
   type VoiceChannel,
+  type TextChannel,
   type CategoryChannel,
   type GuildMember,
 } from 'discord.js';
@@ -19,6 +20,7 @@ import {
   claimDiscordOccurrence,
   completeDiscordOccurrence,
   failDiscordOccurrence,
+  releaseDiscordOccurrence,
 } from '../../services/occurrence-fence.js';
 
 const log = createLogger('TempChannels');
@@ -150,6 +152,8 @@ export class TempChannelManager {
     if (this.inFlightJoins.has(joinKey)) return;
     this.inFlightJoins.add(joinKey);
     let occurrenceId: string | null = null;
+    let externalRoomExists = false;
+    let activeRecordCommitted = false;
 
     // Format channel name. The catalog's single documented variable is
     // {owner-name}; {username}/{user}/{tag}/{count} are supported aliases.
@@ -214,13 +218,15 @@ export class TempChannelManager {
           }),
         'temp channel create',
       );
+      externalRoomExists = true;
 
       let textChannelId: string | null = null;
+      let textChannel: TextChannel | null = null;
 
       // Optionally create a paired text channel
       if (hub.allow_text_channel) {
         try {
-          const tc = await this.guild.channels.create({
+          textChannel = await this.guild.channels.create({
             name: `${channelName}-chat`,
             type: ChannelType.GuildText,
             parent: category ?? undefined,
@@ -239,7 +245,7 @@ export class TempChannelManager {
               },
             ],
           });
-          textChannelId = tc.id;
+          textChannelId = textChannel.id;
         } catch (err) {
           log.error('Failed to create text channel:', { error: String(err) });
         }
@@ -257,13 +263,20 @@ export class TempChannelManager {
 
       const { error: recordError } = await this.supabase.from('active_temp_channels').insert(record);
       if (recordError) {
-        await vc.delete('Temp channel database record failed').catch(() => {});
-        if (textChannelId) {
-          await this.guild.channels.cache.get(textChannelId)?.delete('Temp channel database record failed').catch(() => {});
+        const cleanup: Promise<unknown>[] = [
+          vc.delete('Temp channel database record failed'),
+        ];
+        if (textChannel) {
+          cleanup.push(textChannel.delete('Temp channel database record failed'));
+        }
+        const cleanupResults = await Promise.allSettled(cleanup);
+        if (cleanupResults.every((result) => result.status === 'fulfilled')) {
+          externalRoomExists = false;
         }
         throw new Error(`Failed to record temp channel: ${recordError.message}`);
       }
       this.activeChannels.set(vc.id, record);
+      activeRecordCommitted = true;
       if (occurrenceId) {
         await completeDiscordOccurrence(
           this.supabase,
@@ -305,7 +318,13 @@ export class TempChannelManager {
       });
       await this.notifyCreationFailure(member, hub, err);
       if (occurrenceId) {
-        await failDiscordOccurrence(this.supabase, occurrenceId, String(err)).catch(() => {});
+        if (!externalRoomExists && !activeRecordCommitted) {
+          await releaseDiscordOccurrence(this.supabase, occurrenceId).catch(() => {});
+        } else {
+          // A room or durable active row may exist. Preserve the fence so a
+          // retry cannot create a duplicate across an ambiguous commit window.
+          await failDiscordOccurrence(this.supabase, occurrenceId, String(err)).catch(() => {});
+        }
       }
     } finally {
       this.inFlightJoins.delete(joinKey);

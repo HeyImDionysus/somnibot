@@ -133,6 +133,19 @@ describe('message-log resilient send', () => {
     );
     expect(client.supabase.from).toHaveBeenCalledWith('alerts');
   });
+
+  it('raises one outage transition instead of amplifying every failed message', async () => {
+    const send = vi.fn().mockRejectedValue(
+      Object.assign(new Error('forbidden'), { status: 403 }),
+    );
+    const client = makeClient(FULL);
+    await logMessageDelete(client as any, makeMessage(send, { id: 'outage-1' }) as any);
+    await logMessageDelete(client as any, makeMessage(send, { id: 'outage-2' }) as any);
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(client.eventBus.emit).toHaveBeenCalledTimes(1);
+    expect(client.supabase.from).toHaveBeenCalledWith('alerts');
+  });
 });
 
 describe('message-log per-event dedupe', () => {

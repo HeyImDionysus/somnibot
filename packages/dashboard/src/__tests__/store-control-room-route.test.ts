@@ -128,8 +128,21 @@ describe('GET /api/store/control-room', () => {
 
   it('marks missing fulfillment evidence as stuck without using aggregate file counts', async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-07-30T12:00:00.000Z'));
+    vi.setSystemTime(new Date('2026-08-01T12:00:00.000Z'));
     setup({
+      orders: {
+        data: [{
+          id: ORDER,
+          order_number: 'ORD-NEW',
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'completed',
+          delivery_type_snapshot: 'mixed',
+          created_at: '2026-07-30T04:00:00.000Z',
+        }],
+        error: null,
+        count: 1,
+      },
       license_keys: { data: [], error: null },
       entitlements: { data: [], error: null },
       commerce_download_deliveries: { data: [], error: null },
@@ -142,6 +155,21 @@ describe('GET /api/store/control-room', () => {
       'No license key was issued within 15 minutes of payment.',
       'No completed download was recorded within 24 hours.',
     ]));
+  });
+
+  it('reports pre-ledger download history as unknown instead of falsely stuck', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-01T12:00:00.000Z'));
+    setup({
+      commerce_download_deliveries: { data: [], error: null },
+    });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+    expect(body.data.customers[0].stages.downloaded).toBe('unknown');
+    expect(body.data.customers[0].reasons).not.toContain(
+      'No completed download was recorded within 24 hours.',
+    );
+    expect(body.data.customers[0].stuck).toBe(false);
   });
 
   it('fails closed when any required pipeline source errors', async () => {

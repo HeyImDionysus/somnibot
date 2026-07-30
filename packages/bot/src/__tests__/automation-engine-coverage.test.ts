@@ -79,12 +79,14 @@ const mockMassThreshold = vi.fn().mockResolvedValue(25);
 const mockMassClaimApproved = vi.fn().mockResolvedValue(null);
 const mockMassComplete = vi.fn().mockResolvedValue(undefined);
 const mockMassFail = vi.fn().mockResolvedValue(undefined);
+const mockMassListHeld = vi.fn().mockResolvedValue([]);
+const mockMassListApproved = vi.fn().mockResolvedValue([]);
 vi.mock('../features/automations/mass-action-hold.js', () => ({
   MassActionHoldService: class {
     subscribe = vi.fn();
     unsubscribe = vi.fn();
-    listHeld = vi.fn().mockResolvedValue([]);
-    listApproved = vi.fn().mockResolvedValue([]);
+    listHeld = mockMassListHeld;
+    listApproved = mockMassListApproved;
     threshold = mockMassThreshold;
     create = mockMassHoldCreate;
     ensureOwnerNotice = mockMassHoldNotice;
@@ -186,6 +188,8 @@ describe('AutomationEngine', () => {
     mockMassClaimApproved.mockResolvedValue(null);
     mockMassComplete.mockResolvedValue(undefined);
     mockMassFail.mockResolvedValue(undefined);
+    mockMassListHeld.mockResolvedValue([]);
+    mockMassListApproved.mockResolvedValue([]);
     guild = makeGuild();
     eventBus = makeEventBus();
     engine = new AutomationEngine(
@@ -219,6 +223,17 @@ describe('AutomationEngine', () => {
       eventBus.fire({ type: 'member.joined', guildId: 'g1', data: {} });
       expect(mockGetForTrigger).toHaveBeenCalledWith('member.joined');
     });
+
+    it('keeps ordinary automations online when one held notice cannot recover', async () => {
+      mockMassListHeld.mockResolvedValue([{
+        id: 'hold-broken-notice',
+        automation_id: 'auto1',
+      }]);
+      mockMassHoldNotice.mockRejectedValueOnce(new Error('Missing Permissions'));
+
+      await expect(engine.start()).resolves.toBeUndefined();
+      expect(eventBus.onAny).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('setAlertService', () => {
@@ -238,13 +253,15 @@ describe('AutomationEngine', () => {
       ]);
       await engine.start();
       eventBus.fire({
-        type: 'member.verified',
+        type: 'giveaway.ended',
         guildId: 'g1',
-        data: { discordId: '10000000000000000', memberNumber: 1 },
-        affectedMemberIds: Array.from(
-          { length: 26 },
-          (_, index) => String(10000000000000000n + BigInt(index)),
-        ),
+        data: {
+          title: 'Bulk winners',
+          winnerIds: Array.from(
+            { length: 26 },
+            (_, index) => String(10000000000000000n + BigInt(index)),
+          ),
+        },
       });
       await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -590,9 +607,13 @@ describe('AutomationEngine', () => {
     });
 
     it('resolves giveaway.ended variables', async () => {
-      const ctx = await fireAndCapture('giveaway.ended', { discordId: 'u1', title: 'Epic Giveaway', winnerIds: ['u1', 'u2'] });
+      const ctx = await fireAndCapture('giveaway.ended', {
+        discordId: '10000000000000000',
+        title: 'Epic Giveaway',
+        winnerIds: ['10000000000000000', '10000000000000001'],
+      });
       expect(ctx?.variables.giveaway).toBe('Epic Giveaway');
-      expect(ctx?.variables.winners).toContain('<@u1>');
+      expect(ctx?.variables.winners).toContain('<@10000000000000000>');
     });
 
     it('resolves button.clicked variables', async () => {

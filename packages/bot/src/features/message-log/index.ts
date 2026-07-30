@@ -239,6 +239,7 @@ async function notifyDeliveryFailure(
   channelId: string,
   error: string,
 ): Promise<void> {
+  if (_deliveryDegraded.has(guildId)) return;
   _deliveryDegraded.add(guildId);
   client.eventBus.emit('message_log.delivery_failed', guildId, { channelId, error });
   await raiseOwnerAlert(client.supabase, guildId, {

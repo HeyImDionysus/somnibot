@@ -4,7 +4,8 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 
-type StageState = 'complete' | 'pending' | 'not_applicable';
+type StageState = 'complete' | 'pending' | 'unknown' | 'not_applicable';
+const DOWNLOAD_LEDGER_AVAILABLE_AT_MS = Date.parse('2026-07-30T03:10:00.000Z');
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -172,6 +173,11 @@ export async function GET(req: NextRequest) {
     const licenseRequired = requiresLicense(order.delivery_type_snapshot);
     const downloadRequired = requiresDownload(order.delivery_type_snapshot);
     const age = elapsedMs(order.created_at, now);
+    const orderCreatedAtMs =
+      typeof order.created_at === 'string' ? Date.parse(order.created_at) : Number.NaN;
+    const downloadEvidenceAvailable =
+      Number.isFinite(orderCreatedAtMs)
+      && orderCreatedAtMs >= DOWNLOAD_LEDGER_AVAILABLE_AT_MS;
     const reasons: string[] = [];
 
     if (order.status === 'pending_review') reasons.push('Payment is held for operator review.');
@@ -182,7 +188,12 @@ export async function GET(req: NextRequest) {
     if (licenseRequired && !key && age > 15 * 60 * 1_000) {
       reasons.push('No license key was issued within 15 minutes of payment.');
     }
-    if (downloadRequired && !download && age > 24 * 60 * 60 * 1_000) {
+    if (
+      downloadRequired
+      && downloadEvidenceAvailable
+      && !download
+      && age > 24 * 60 * 60 * 1_000
+    ) {
       reasons.push('No completed download was recorded within 24 hours.');
     }
     if (
@@ -208,7 +219,13 @@ export async function GET(req: NextRequest) {
       stages: {
         paid: order.status === 'completed' ? 'complete' : 'pending',
         licensed: licenseRequired ? (key ? 'complete' : 'pending') : 'not_applicable',
-        downloaded: downloadRequired ? (download ? 'complete' : 'pending') : 'not_applicable',
+        downloaded: downloadRequired
+          ? download
+            ? 'complete'
+            : downloadEvidenceAvailable
+              ? 'pending'
+              : 'unknown'
+          : 'not_applicable',
         activated: licenseRequired
           ? (key?.activated_at ? 'complete' : 'pending')
           : 'not_applicable',

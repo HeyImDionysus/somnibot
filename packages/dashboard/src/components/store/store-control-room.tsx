@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 
-type StageState = 'complete' | 'pending' | 'not_applicable';
+type StageState = 'complete' | 'pending' | 'unknown' | 'not_applicable';
 
 interface ControlRoomRow {
   orderId: string;
@@ -79,6 +79,7 @@ export default function StoreControlRoom() {
           </h2>
           <p className="text-xs text-discord-text-muted">
             Paid → licensed → downloaded → activated, using durable order and delivery records.
+            Pre-ledger download history is shown as unknown, never as a failure.
           </p>
         </div>
         {!loading && (

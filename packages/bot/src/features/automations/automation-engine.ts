@@ -140,13 +140,26 @@ export class AutomationEngine {
       this.massActionHolds.listHeld(),
       this.massActionHolds.listApproved(),
     ]);
-    for (const hold of held) {
-      const name = await this.automationName(hold.automation_id);
-      await this.massActionHolds.ensureOwnerNotice(hold, name);
-    }
-    for (const hold of approved) {
-      await this.runApprovedHold(hold.id);
-    }
+    await Promise.all(held.map(async (hold) => {
+      try {
+        const name = await this.automationName(hold.automation_id);
+        await this.massActionHolds.ensureOwnerNotice(hold, name);
+      } catch (err) {
+        // A stale/misconfigured alert channel must not take the entire
+        // automation engine offline. The durable held row remains available
+        // for the next recovery attempt and on the dashboard.
+        log.error(`Failed to recover mass-action notice ${hold.id}:`, err);
+      }
+    }));
+    await Promise.all(approved.map(async (hold) => {
+      try {
+        await this.runApprovedHold(hold.id);
+      } catch (err) {
+        // An approved occurrence is independently claimed and marked failed;
+        // ordinary automations must still register below.
+        log.error(`Failed to recover approved mass-action hold ${hold.id}:`, err);
+      }
+    }));
 
     // Listen to ALL platform events and check for matching automations.
     // V10 Audit §2: If an event arrives without _chainDepth but there are
@@ -629,11 +642,19 @@ export class AutomationEngine {
       message: null, // Message object needs to be attached separately for message-based triggers
       variables,
       occurrenceId: this.occurrenceIdFor(event, data),
-      affectedMemberIds: Array.isArray(event.affectedMemberIds)
-        ? event.affectedMemberIds.filter(
-          (id): id is string => typeof id === 'string' && /^\d{17,20}$/.test(id),
-        )
-        : [],
+      affectedMemberIds: (
+        Array.isArray(event.affectedMemberIds)
+          ? event.affectedMemberIds
+          : Array.isArray(data.affectedMemberIds)
+            ? data.affectedMemberIds
+            : Array.isArray(data.winnerIds)
+              ? data.winnerIds
+              : Array.isArray(data.memberIds)
+                ? data.memberIds
+                : []
+      ).filter(
+        (id): id is string => typeof id === 'string' && /^\d{17,20}$/.test(id),
+      ),
       // One budget per event: buildEventContext is called exactly once per
       // event (handleEvent / processMessageEvent / processReactionEvent), so
       // every automation processed for this event draws from the same budget.

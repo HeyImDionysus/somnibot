@@ -7,12 +7,19 @@ export const discordSnowflakeSchema = z.string().regex(
 
 const CUSTOM_EMOJI = /^<a?:[A-Za-z0-9_]{2,32}:\d{17,20}>$/;
 const UNICODE_EMOJI = /(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3)/u;
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 export function isDiscordEmoji(value: string): boolean {
   const normalized = value.trim();
   return normalized.length > 0
     && normalized.length <= 64
-    && (CUSTOM_EMOJI.test(normalized) || UNICODE_EMOJI.test(normalized));
+    && (
+      CUSTOM_EMOJI.test(normalized)
+      || (
+        UNICODE_EMOJI.test(normalized)
+        && [...graphemeSegmenter.segment(normalized)].length === 1
+      )
+    );
 }
 
 export const discordEmojiSchema = z.string()

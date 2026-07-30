@@ -4,6 +4,7 @@ import { requireSupabase } from './helpers.js';
 import {
   claimDiscordOccurrence,
   completeDiscordOccurrence,
+  releaseDiscordOccurrence,
   type DiscordOperationKind,
 } from '../../services/occurrence-fence.js';
 
@@ -63,5 +64,16 @@ describe('durable Discord occurrence fences', () => {
       occurrence_key: key,
     });
     expect(duplicate.error?.code).toBe('23505');
+  });
+
+  it('permits retry only after a no-resource claim is explicitly released', async () => {
+    const key = `${guildId}:temp-channel:retriable-create-failure`;
+    const first = await claimDiscordOccurrence(supa, guildId, 'temp_channel', key);
+    expect(first.won).toBe(true);
+
+    await releaseDiscordOccurrence(supa, first.occurrence.id);
+    const retry = await claimDiscordOccurrence(supa, guildId, 'temp_channel', key);
+    expect(retry.won).toBe(true);
+    expect(retry.occurrence.id).not.toBe(first.occurrence.id);
   });
 });
