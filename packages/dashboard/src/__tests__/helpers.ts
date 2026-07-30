@@ -2,7 +2,7 @@
  * Shared test utilities for dashboard API tests.
  */
 import { vi } from 'vitest';
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
 function createQueryChain() {
   const chain: Record<string, ReturnType<typeof vi.fn>> = {
@@ -63,13 +63,13 @@ export function buildRequest(
     headers?: Record<string, string>;
     searchParams?: Record<string, string>;
   } = {},
-) {
+): NextRequest {
   let url = `http://localhost${path}`;
   if (opts.searchParams) {
     const sp = new URLSearchParams(opts.searchParams);
     url += `?${sp.toString()}`;
   }
-  return new Request(url, {
+  return new NextRequest(url, {
     method: opts.method ?? 'GET',
     headers: {
       'Content-Type': 'application/json',

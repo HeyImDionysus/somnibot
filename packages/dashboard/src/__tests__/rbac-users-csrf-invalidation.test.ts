@@ -80,7 +80,7 @@ function buildRequest(path: string, method: string): NextRequest {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mockRateLimit.mockResolvedValue(null); // not rate limited
   mockWriteTeamAudit.mockResolvedValue(undefined);
 });

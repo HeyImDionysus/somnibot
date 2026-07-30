@@ -12,7 +12,9 @@
  *      must fail (500) so PayPal retries it, instead of being silently
  *      dropped while the customer keeps access.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 
 const { replaySecret } = vi.hoisted(() => {
   const secret = 'test-refund-webhook-replay-secret';
@@ -48,7 +50,13 @@ vi.mock('@/lib/api/rate-limit', () => ({
 import { POST } from '@/app/api/paypal/webhook/route';
 import { resolveRefundPaymentId } from '@/app/api/paypal/webhook/handlers';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { getPayPalTokenResult } from '@/lib/paypal';
+import {
+  getPayPalRuntimeConfig,
+  getPayPalToken,
+  getPayPalTokenResult,
+  getSubscriptionAmount,
+} from '@/lib/paypal';
+import { rateLimits } from '@/lib/api/rate-limit';
 
 const REPLAY_CLAIM_TOKEN = '11111111-1111-4111-8111-111111111111';
 
@@ -210,7 +218,9 @@ describe('PayPal refund parent identity', () => {
 
 function makeMockSupabase() {
   const fromFn = vi.fn();
-  const rpc = vi.fn(async (name: string) => ({
+  const rpc = vi.fn<
+    (name: string, args: Record<string, unknown>) => Promise<MockRowResult>
+  >(async (name: string, _args: Record<string, unknown>) => ({
     data: name === 'webhooks_replay_claim_is_current'
       || name === 'webhooks_finish_replay_claim'
       ? true
@@ -569,7 +579,27 @@ function useWebhookRows(
 let mockSb: ReturnType<typeof makeMockSupabase>;
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  vi.mocked(getPayPalRuntimeConfig).mockResolvedValue({
+    apiBase: 'https://api-m.sandbox.paypal.com',
+    webhookId: 'test-webhook-id',
+  } as never);
+  vi.mocked(getPayPalToken).mockResolvedValue('test-token');
+  vi.mocked(getPayPalTokenResult).mockResolvedValue({
+    ok: true,
+    token: 'test-token',
+  });
+  vi.mocked(getSubscriptionAmount).mockResolvedValue({
+    amountCents: 999,
+    currency: 'USD',
+    planId: 'PAYPAL-PLAN-1',
+    nextBillingTime: '2026-08-29T00:00:00.000Z',
+  });
+  vi.mocked(rateLimits.paypalWebhook).mockResolvedValue({
+    limited: false,
+    remaining: 1,
+    retryAfterMs: 0,
+  });
   mockSb = makeMockSupabase();
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockSb);
 });

@@ -5,7 +5,9 @@
  * bot_action_queue, and that failures are swallowed to avoid breaking
  * dashboard API responses.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 
 // ── Supabase mock (vi.hoisted so it's available when vi.mock runs) ──
 

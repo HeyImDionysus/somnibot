@@ -123,7 +123,7 @@ function makeSupabase(
 
 describe('POST /api/webhooks/[id]/replay', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     process.env.WEBHOOK_REPLAY_SECRET = replaySecret;
     process.env.NEXT_PUBLIC_APP_URL = 'http://localhost';
     (requireGuildOwner as ReturnType<typeof vi.fn>).mockResolvedValue({

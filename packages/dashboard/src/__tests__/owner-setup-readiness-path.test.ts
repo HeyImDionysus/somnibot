@@ -183,7 +183,7 @@ describe('owner setup readiness path', () => {
   let mock: ReturnType<typeof createMockSupabase>;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     process.env = {
       ...originalEnv,
       DASHBOARD_URL: 'http://localhost:3456',

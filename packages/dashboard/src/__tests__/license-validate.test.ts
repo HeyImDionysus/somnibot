@@ -60,8 +60,8 @@ function makeReq(body: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
-  // `vi.clearAllMocks()` clears CALLS but keeps implementations, so a
+    vi.resetAllMocks();
+    // `vi.resetAllMocks()` clears calls and implementations, so every
   // `mockResolvedValue` set inside one test leaks into every later test in the
   // file. That is how the two key-status cases below used to pass without ever
   // reaching the route's key logic: the rate-limit test left `limited: true`

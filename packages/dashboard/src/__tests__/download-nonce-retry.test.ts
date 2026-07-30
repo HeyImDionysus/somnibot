@@ -36,6 +36,8 @@ vi.mock('@/lib/api/download-nonce', () => ({
 import { after, NextRequest } from 'next/server';
 import { GET as downloadGet } from '@/app/api/downloads/[productId]/[fileId]/route';
 import { consumeDownloadNonce } from '@/lib/api/download-nonce';
+import { rateLimits } from '@/lib/api/rate-limit';
+import { verifySignedDownloadUrl } from '@/lib/api/signed-url';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createMockSupabase, registerTable } from './helpers';
 
@@ -96,7 +98,21 @@ function mockDownload(overrides: {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  vi.mocked(after).mockImplementation((task) => {
+    if (typeof task === 'function') void task();
+    else void task;
+  });
+  vi.mocked(rateLimits.portalDownload).mockResolvedValue({
+    limited: false,
+    remaining: 19,
+    retryAfterMs: 0,
+  });
+  vi.mocked(verifySignedDownloadUrl).mockReturnValue({
+    customerId: 'cust-1',
+    guildId: 'guild-1',
+    nonce: 'nonce-1',
+  });
   let consumed = false;
   vi.mocked(consumeDownloadNonce).mockImplementation(async () => {
     if (consumed) return 'replay';

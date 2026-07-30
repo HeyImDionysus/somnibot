@@ -280,7 +280,7 @@ function planBody(overrides: Row = {}) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
   mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
   mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>, { guildId: GUILD });
   (requirePermission as ReturnType<typeof vi.fn>).mockResolvedValue({ guildId: GUILD });

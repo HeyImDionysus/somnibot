@@ -271,7 +271,7 @@ describe('POST /api/orders/[id]/refund — attempt state machine', () => {
     });
   });
 
-  it.each([
+  it.each<[string, unknown]>([
     ['missing row', null],
     ['wrong order', attempt({ order_id: 'other' })],
     ['blank actor', attempt({ actor_id: '' })],
@@ -293,8 +293,8 @@ describe('POST /api/orders/[id]/refund — attempt state machine', () => {
     ['lowercase currency', attempt({ currency: 'usd' })],
     ['untrimmed reason', attempt({ reason: ' reason ' })],
     ...INVALID_PROVIDER_IDS.flatMap(([label, id]) => [
-      [`${label} capture id`, attempt({ paypal_payment_id: id })],
-      [`${label} refund id`, stateAttempt('pending', 'poll', { paypal_refund_id: id })],
+      [`${label} capture id`, attempt({ paypal_payment_id: id })] as [string, unknown],
+      [`${label} refund id`, stateAttempt('pending', 'poll', { paypal_refund_id: id })] as [string, unknown],
     ]),
   ])('fails closed on malformed preparation: %s', async (_label, data) => {
     configureRpc({ prepare: { data, error: null } });
@@ -574,7 +574,7 @@ describe('POST /api/orders/[id]/refund — attempt state machine', () => {
     expect(mock.rpc).toHaveBeenCalledTimes(1);
   });
 
-  it.each([
+  it.each<[string, unknown]>([
     ['unknown status', providerPayload('REFUNDED')],
     ['pending without id', providerPayload('PENDING', { id: undefined })],
     ['completed without amount', providerPayload('COMPLETED', { amount: undefined })],
@@ -587,7 +587,7 @@ describe('POST /api/orders/[id]/refund — attempt state machine', () => {
     ...INVALID_PROVIDER_IDS.map(([label, id]) => [
       `non-canonical provider id: ${label}`,
       providerPayload('COMPLETED', { id }),
-    ]),
+    ] as [string, unknown]),
   ])('does not record malformed provider outcome: %s', async (_label, payload) => {
     mockProvider(payload);
     const response = await post();

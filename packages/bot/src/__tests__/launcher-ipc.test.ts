@@ -1,5 +1,7 @@
 import { Collection } from 'discord.js';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 import { buildLauncherIpcMessage, sendLauncherIpcMessage } from '../services/launcher-ipc.js';
 
 function clientWithGuilds(count: number) {

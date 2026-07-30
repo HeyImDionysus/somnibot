@@ -26,7 +26,7 @@ function mockSavedPayPalSettings(settings: { key: string; value: string }[]) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   process.env = { ...originalEnv };
   vi.stubGlobal('fetch', mockFetch);
   process.env.PAYPAL_API_BASE = 'https://api-m.sandbox.paypal.com';

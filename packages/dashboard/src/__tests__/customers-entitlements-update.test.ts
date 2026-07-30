@@ -74,7 +74,7 @@ function setup() {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
   mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);

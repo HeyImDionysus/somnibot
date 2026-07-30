@@ -4,7 +4,9 @@
  * Tests that destroy() properly iterates managers and calls destroy()
  * on any that implement the Destroyable interface.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 
 // ── Minimal Destroyable implementation ──────────────────────
 

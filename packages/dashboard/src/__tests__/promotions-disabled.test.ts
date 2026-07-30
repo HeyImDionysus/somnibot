@@ -75,7 +75,7 @@ function installSupabase() {
 
 describe('/api/store/promotions while redemption does not exist', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mockRateLimitPass(vi.mocked(checkAdminRateLimit));
     mockAuthSuccess(vi.mocked(requireGuildOwner), { guildId: GUILD });
     installSupabase();

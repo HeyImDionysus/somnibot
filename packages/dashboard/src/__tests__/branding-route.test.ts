@@ -81,7 +81,7 @@ function makePutRequest(body: unknown) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockSupabase);
   (checkAdminRateLimit as ReturnType<typeof vi.fn>).mockResolvedValue(null);
   mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>, { guildId: 'guild-123' });

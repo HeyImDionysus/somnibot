@@ -94,7 +94,16 @@ const defaultModConfig = {
 
 describe('executeAutoModAction', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
+    mockCreateInfraction.mockResolvedValue({
+      infraction: { id: 'inf1' },
+      replayed: false,
+    });
+    mockGetActiveWarningCount.mockResolvedValue(2);
+    mockCalculateExpiryDate.mockReturnValue('2026-12-31');
+    mockExecuteEscalation.mockResolvedValue(undefined);
+    mockPostModLogEntry.mockResolvedValue(undefined);
+    mockWriteAuditLog.mockResolvedValue(undefined);
   });
 
   it('returns early when no member', async () => {

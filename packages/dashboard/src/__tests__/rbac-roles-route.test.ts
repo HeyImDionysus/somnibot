@@ -69,7 +69,7 @@ function mockQueryChain(overrides: Record<string, unknown> = {}) {
 // ── Tests ───────────────────────────────────────────────────
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mockRateLimit.mockResolvedValue(null); // not rate limited
 });
 

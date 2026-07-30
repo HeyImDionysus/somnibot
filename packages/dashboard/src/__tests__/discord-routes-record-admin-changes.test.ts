@@ -149,7 +149,7 @@ function expectRealDiscordUndo(change: RecordAdminChangeInput) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
   calls = [];
   vi.mocked(requireGuildOwner).mockResolvedValue({
     ok: true,

@@ -24,6 +24,13 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
 }));
 
 import { loadConfigFromDatabase, syncConfigToDatabase } from '../services/config-loader.js';
+import { createClient } from '@supabase/supabase-js';
+
+function rearmCreateClient(): void {
+  vi.mocked(createClient).mockReturnValue({
+    from: (...args: any[]) => mockFrom(...args),
+  } as never);
+}
 
 function chainBuilder(resolveValue: any = { data: null, error: null }) {
   const chain: any = {};
@@ -38,7 +45,8 @@ describe('loadConfigFromDatabase', () => {
   const origEnv = { ...process.env };
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
+    rearmCreateClient();
     // Set up required env vars
     process.env.SUPABASE_URL = 'https://test.supabase.co';
     process.env.SUPABASE_SECRET_KEY = 'test-key';
@@ -176,7 +184,8 @@ describe('syncConfigToDatabase', () => {
   const origEnv = { ...process.env };
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
+    rearmCreateClient();
     process.env.SUPABASE_URL = 'https://test.supabase.co';
     process.env.SUPABASE_SECRET_KEY = 'test-key';
   });

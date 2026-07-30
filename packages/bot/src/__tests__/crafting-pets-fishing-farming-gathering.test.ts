@@ -2,7 +2,9 @@
  * Wave 2 deep coverage tests: CraftingManager, PetsManager, FishingManager,
  * FarmingManager deeper, GatheringManager, StatsChannelManager, TicketService
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),

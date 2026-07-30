@@ -8,7 +8,9 @@
  * diff on update/delete — including a dashboard cancel (status change),
  * which the PUT diff captures.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 import { NextRequest } from 'next/server';
 
 vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
@@ -83,7 +85,7 @@ function makeRequest(method: string, opts: { query?: Record<string, string>; bod
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);
 });
 

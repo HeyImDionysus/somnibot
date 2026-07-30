@@ -9,6 +9,8 @@
     "start": "node ../../scripts/prepare-dashboard-standalone.mjs && node .next/standalone/packages/dashboard/server.js",
     "lint": "eslint src/",
     "type-check": "tsc --noEmit",
+    "type-check:test": "tsc --noEmit -p tsconfig.test.json",
+    "test:integrity": "node scripts/check-test-integrity.mjs",
     "test": "vitest run",
     "test:live": "vitest run --config vitest.live.config.ts",
     "test:watch": "vitest",

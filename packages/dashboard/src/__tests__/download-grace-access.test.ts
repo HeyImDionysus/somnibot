@@ -34,6 +34,9 @@ import { NextRequest } from 'next/server';
 import { POST as downloadLinkPost } from '@/app/api/portal/download-link/route';
 import { GET as fileDownloadGet } from '@/app/api/downloads/[productId]/[fileId]/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { rateLimits } from '@/lib/api/rate-limit';
+import { generateSignedDownloadUrl, verifySignedDownloadUrl } from '@/lib/api/signed-url';
+import { consumeDownloadNonce } from '@/lib/api/download-nonce';
 import { createMockSupabase, registerTable, buildRequest } from './helpers';
 
 const PRODUCT_ID = '00000000-0000-4000-a000-000000000001';
@@ -109,7 +112,16 @@ function fileReq() {
 const fileParams = { params: Promise.resolve({ productId: PRODUCT_ID, fileId: FILE_ID }) };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
+  vi.mocked(rateLimits.portalData).mockResolvedValue({ limited: false, remaining: 99, retryAfterMs: 0 });
+  vi.mocked(rateLimits.portalDownload).mockResolvedValue({ limited: false, remaining: 99, retryAfterMs: 0 });
+  vi.mocked(generateSignedDownloadUrl).mockReturnValue('https://signed.example/download');
+  vi.mocked(verifySignedDownloadUrl).mockReturnValue({
+    customerId: 'cust-1',
+    guildId: 'guild-1',
+    nonce: null,
+  });
+  vi.mocked(consumeDownloadNonce).mockResolvedValue('consumed');
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
 });

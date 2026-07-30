@@ -128,7 +128,7 @@ function makeConfig(overrides: Partial<SyncConfig> = {}): SyncConfig {
 const bus = { emit: vi.fn() } as any;
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mockComputeStateDiff.mockReturnValue({ everyoneDrift: false, diffs: [] });
 });
 

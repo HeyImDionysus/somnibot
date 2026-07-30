@@ -31,6 +31,7 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
 
 import { handleLevelUp } from '../features/levels/level-announcer.js';
 import { loadLevelConfig, loadRewards } from '../features/levels/xp-tracker.js';
+import { totalXpForLevel } from '@somnibot/shared';
 
 function makeGuild(options: any = {}) {
   return {
@@ -55,7 +56,13 @@ function makeEventBus() {
 
 describe('handleLevelUp', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
+    vi.mocked(loadLevelConfig).mockResolvedValue({
+      level_up_channel_id: null,
+      level_up_message: null,
+    } as never);
+    vi.mocked(loadRewards).mockResolvedValue([]);
+    vi.mocked(totalXpForLevel).mockReturnValue(100);
   });
 
   it('returns early when member not found', async () => {

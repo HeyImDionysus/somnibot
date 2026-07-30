@@ -185,7 +185,7 @@ let middleware: typeof import('../middleware').middleware;
 
 beforeEach(async () => {
   vi.resetModules();
-  vi.clearAllMocks();
+    vi.resetAllMocks();
   delete process.env.SESSION_TOKEN;
   delete process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE;
   delete process.env.SOMNIBOT_CSP_INLINE_COMPAT;

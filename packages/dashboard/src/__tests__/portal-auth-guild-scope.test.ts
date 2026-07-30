@@ -147,7 +147,9 @@ describe('POST /api/portal/auth — recorded client IP cannot be forged', () => 
     for (const forged of ['1.1.1.1', '2.2.2.2', '3.3.3.3']) {
       insertedSession = null;
       await loginWith(`${forged}, 198.51.100.2`);
-      recorded.add(insertedSession?.ip_address);
+      recorded.add(
+        (insertedSession as Record<string, unknown> | null)?.ip_address,
+      );
     }
 
     expect(recorded.size, 'forged prefixes must not produce distinct audit addresses').toBe(1);

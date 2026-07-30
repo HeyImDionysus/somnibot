@@ -31,10 +31,11 @@ import {
 
 const SESSION_UUID = '11111111-1111-1111-1111-111111111111';
 
-const mock = createMockSupabase();
+let mock: ReturnType<typeof createMockSupabase>;
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  mock = createMockSupabase();
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
   mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
   mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);

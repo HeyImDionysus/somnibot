@@ -139,7 +139,16 @@ describe('AutomationEngine', () => {
   let eventBus: ReturnType<typeof makeEventBus>;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
+    mockLoad.mockResolvedValue(undefined);
+    mockGetForTrigger.mockReturnValue([]);
+    mockEvaluateConditions.mockResolvedValue(true);
+    mockExecuteActions.mockResolvedValue({ executed: 1, failed: 0, errors: [] });
+    mockAllowFire.mockResolvedValue(true);
+    mockAllowCustom.mockResolvedValue(true);
+    mockLogExecution.mockResolvedValue(undefined);
+    mockClaim.mockResolvedValue({ claimed: true, rowId: 'exec-1' });
+    mockFinalize.mockResolvedValue(undefined);
     guild = makeGuild();
     eventBus = makeEventBus();
     engine = new AutomationEngine(

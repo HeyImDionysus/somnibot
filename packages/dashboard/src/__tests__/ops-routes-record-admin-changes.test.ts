@@ -198,7 +198,7 @@ function jsonRequest(url: string, method: string, body?: unknown) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
   seq = 0;
   lastBeforeSeq = 0;
   mutations = [];

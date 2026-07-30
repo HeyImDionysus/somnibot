@@ -4,7 +4,9 @@
  * Security state must stay in one authoritative Valkey keyspace; this layer
  * may never manufacture a fresh process-local fallback.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 
 vi.mock('@/lib/api/rate-limit', () => ({
   consumeSingleUseValkeyKey: vi.fn(),
@@ -16,7 +18,7 @@ import { consumeSingleUseValkeyKey } from '@/lib/api/rate-limit';
 const consumeAuthoritatively = vi.mocked(consumeSingleUseValkeyKey);
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
 });
 
 describe('consumeDownloadNonce', () => {

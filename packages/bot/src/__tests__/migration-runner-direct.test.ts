@@ -366,7 +366,7 @@ describe('migration runner direct-Postgres execution', () => {
   });
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mocks.readdirSync.mockReturnValue([MIGRATION]);
     mocks.readFileSync.mockReturnValue(source);
 

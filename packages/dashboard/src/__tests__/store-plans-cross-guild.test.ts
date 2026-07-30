@@ -83,7 +83,7 @@ describe('/api/store/plans — cross-guild product_id injection', () => {
   let plansTable: ReturnType<typeof registerTable>;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mock = createMockSupabase();
     productsTable = registerTable(mock, 'products');
     plansTable = registerTable(mock, 'plans');

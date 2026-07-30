@@ -82,7 +82,7 @@ function put(url: string, body: unknown) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   vi.mocked(requireGuildOwner).mockResolvedValue({
     ok: true,
     ctx: { userId: 'user-1', discordId: ACTOR, guildId: GUILD },

@@ -31,8 +31,8 @@ Object.assign(process.env, {
 import { createOwnerSession, buildNextHeadersMock, type OwnerSession } from './_session-harness';
 
 // ── next/headers mock: served from a mutable holder set per-scenario ─────────
-const holder = vi.hoisted(() => ({
-  cookies: async () => ({ getAll: () => [] as unknown[], get: () => undefined, set: () => {} }),
+const holder: ReturnType<typeof buildNextHeadersMock> = vi.hoisted(() => ({
+  cookies: async () => ({ getAll: () => [] as import('./_session-harness').CookieRecord[], get: () => undefined, set: () => {} }),
   headers: async () => ({ get: () => null, has: () => false }),
 }));
 vi.mock('next/headers', () => ({

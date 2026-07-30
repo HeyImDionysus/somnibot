@@ -38,7 +38,10 @@ describe('middleware health access', () => {
     });
 
     const { middleware } = await import('../middleware');
-    return middleware(new NextRequest(`http://localhost:3000${path}`, init));
+    return middleware(new NextRequest(
+      `http://localhost:3000${path}`,
+      init as ConstructorParameters<typeof NextRequest>[1],
+    ));
   }
 
   it('allows unauthenticated platform monitors to reach /api/health', async () => {

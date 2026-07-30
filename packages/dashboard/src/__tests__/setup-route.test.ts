@@ -99,7 +99,7 @@ describe('POST /api/setup finalize', () => {
   let mock: ReturnType<typeof createMockSupabase>;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     process.env = {
       ...originalEnv,
       NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
@@ -1410,7 +1410,7 @@ describe('POST /api/setup verify-discord before Supabase is configured', () => {
   let mock: ReturnType<typeof createMockSupabase>;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     process.env = { ...originalEnv };
     delete process.env.NEXT_PUBLIC_SUPABASE_URL;
     delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
@@ -1553,7 +1553,7 @@ describe('GET /api/setup status', () => {
   let mock: ReturnType<typeof createMockSupabase>;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     process.env = {
       ...originalEnv,
       NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
@@ -1917,7 +1917,7 @@ describe('POST /api/setup verify-supabase', () => {
   let mock: ReturnType<typeof createMockSupabase>;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     process.env = { ...originalEnv };
     delete process.env.NEXT_PUBLIC_SUPABASE_URL;
     delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;

@@ -5,7 +5,9 @@
  * state change / denied attempt / failure branch (spying the event bus), so
  * the music.* audit lane is no longer inert.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 
 vi.mock('discord.js', () => ({
   EmbedBuilder: class {

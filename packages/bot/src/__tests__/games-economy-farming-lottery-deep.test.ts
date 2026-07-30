@@ -101,7 +101,7 @@ describe('GamesManager deep games', () => {
   let GamesManager: any;
 
   beforeEach(async () => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     const mod = await import('../features/games/games-manager.js');
     GamesManager = mod.GamesManager;
   });
@@ -205,7 +205,7 @@ describe('EconomyManager deeper', () => {
   let EconomyManager: any;
 
   beforeEach(async () => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     const mod = await import('../features/economy/economy-manager.js');
     EconomyManager = mod.EconomyManager;
   });

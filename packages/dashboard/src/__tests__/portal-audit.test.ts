@@ -100,7 +100,7 @@ function mockDiscord(ok: boolean) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   auditRows = [];
   process.env.DISCORD_APPLICATION_ID = 'app-id';
   process.env.DISCORD_CLIENT_SECRET = 'secret';

@@ -39,5 +39,8 @@ export function buildRequest(path: string, opts: RequestOptions = {}): NextReque
     init.body = JSON.stringify(opts.body);
   }
 
-  return new NextRequest(url, init);
+  return new NextRequest(
+    url,
+    init as ConstructorParameters<typeof NextRequest>[1],
+  );
 }

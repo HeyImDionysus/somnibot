@@ -43,6 +43,25 @@ vi.mock('../services/guild-snapshot.js', () => ({
 
 import { getDeployStatus, startDeployListener } from '../deploy/deploy-listener.js';
 
+function resetDeployMocks(): void {
+  vi.resetAllMocks();
+  mockDeployServerState.mockResolvedValue({
+    success: true,
+    actions: [
+      { action: 'create', entityType: 'role', entityName: 'Admin', discordId: 'r1', success: true },
+      { action: 'create', entityType: 'channel', entityName: 'general', discordId: 'ch1', success: true },
+      { action: 'create', entityType: 'category', entityName: 'Text', discordId: 'cat1', success: true },
+      { action: 'apply', entityType: 'override', entityName: 'override1', discordId: 'o1', success: true },
+    ],
+    errors: [],
+    idMappings: [{ entityType: 'role', key: 'admin', discordId: 'r1' }],
+    duration: 500,
+  });
+  mockWriteAuditLog.mockResolvedValue(undefined);
+  mockWriteAuditBatch.mockResolvedValue(undefined);
+  mockWriteGuildSnapshot.mockResolvedValue(undefined);
+}
+
 // ── Helpers ───────────────────────────────────────────────
 
 function chainBuilder(resolveValue: Record<string, unknown> = { data: null, error: null }) {
@@ -116,7 +135,7 @@ describe('getDeployStatus', () => {
 
 describe('startDeployListener', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    resetDeployMocks();
   });
 
   it('subscribes to realtime channel', () => {
@@ -249,7 +268,7 @@ describe('startDeployListener', () => {
 
 describe('executeDeployDirect (via realtime trigger)', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    resetDeployMocks();
   });
 
   it('stores ID mappings on success', async () => {

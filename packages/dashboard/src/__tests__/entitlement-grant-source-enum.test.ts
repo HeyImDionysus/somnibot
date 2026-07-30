@@ -124,7 +124,7 @@ describe('POST /api/customers/[id]/entitlements — source handling at the route
   }
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);
     mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
   });

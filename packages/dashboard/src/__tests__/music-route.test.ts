@@ -2,7 +2,9 @@
  * Tests for /api/music — music config GET/PUT routes.
  * V5 Audit §13.P2a: Dashboard API coverage for music settings.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 
 vi.mock('@/lib/api/require-owner', () => ({
   requireGuildOwner: vi.fn(),
@@ -26,6 +28,9 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { parseBody } from '@/lib/api/validation';
 
+const actualValidation =
+  await vi.importActual<typeof import('@/lib/api/validation')>('@/lib/api/validation');
+
 const mockFrom = vi.fn();
 const mockSupabase = { from: mockFrom };
 
@@ -46,7 +51,7 @@ function mockAuthFailure() {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockSupabase);
 });
 
@@ -202,9 +207,11 @@ describe('PUT /api/music', () => {
   // The route used to clamp a submitted 0 to 1 (Math.max(1, ...)); the Zod
   // schema now rejects it with a field-level error so nothing is persisted.
   it('rejects music_auto_leave_minutes=0 with a field-named validation error (real schema)', async () => {
-    const actual = await vi.importActual<typeof import('@/lib/api/validation')>('@/lib/api/validation');
     const req = makePutRequest({ music_auto_leave_minutes: 0 });
-    const result = await actual.parseBody(req as never, actual.schemas.music.config as never);
+    const result = await actualValidation.parseBody(
+      req as never,
+      actualValidation.schemas.music.config as never,
+    );
     expect(result.ok).toBe(false);
     const response = (result as { response: Response }).response;
     expect(response.status).toBe(400);
@@ -215,9 +222,11 @@ describe('PUT /api/music', () => {
   });
 
   it('accepts the minimum valid timers (auto_leave=1, auto_destroy=120) (real schema)', async () => {
-    const actual = await vi.importActual<typeof import('@/lib/api/validation')>('@/lib/api/validation');
     const req = makePutRequest({ music_auto_leave_minutes: 1, music_auto_destroy_minutes: 120 });
-    const result = await actual.parseBody(req as never, actual.schemas.music.config as never);
+    const result = await actualValidation.parseBody(
+      req as never,
+      actualValidation.schemas.music.config as never,
+    );
     expect(result.ok).toBe(true);
   });
 

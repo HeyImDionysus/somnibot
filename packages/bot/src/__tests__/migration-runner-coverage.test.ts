@@ -366,7 +366,7 @@ describe('runMigrations claim and execution safety', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     process.env.SUPABASE_URL = 'https://test.supabase.co';
     process.env.SUPABASE_SECRET_KEY = 'secret-key';
     process.env.SUPABASE_ACCESS_TOKEN = 'access-token';

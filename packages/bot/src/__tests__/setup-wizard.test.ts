@@ -105,7 +105,7 @@ function makeInteraction(overrides: any = {}) {
 
 describe('setup-wizard commands', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   describe('buildSetupCommand', () => {

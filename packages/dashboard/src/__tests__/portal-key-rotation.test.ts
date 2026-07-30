@@ -124,7 +124,7 @@ const req = (token?: string) =>
 const params = (id = KEY_ID) => ({ params: Promise.resolve({ id }) });
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
   vi.mocked(rateLimits.portalRotate).mockResolvedValue({ limited: false } as never);
 });
 

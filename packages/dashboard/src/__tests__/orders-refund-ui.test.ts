@@ -6,9 +6,16 @@ import {
   refundActionLabel,
   refundDialogCopy,
 } from '@/lib/api/order-refund-ui';
+import type { RefundableOrderSummary } from '@/lib/api/order-refund-ui';
 import type { RefundRequestResult } from '@/lib/api/order-refund-client';
 
-function order(overrides: Record<string, unknown> = {}) {
+type TestOrder = RefundableOrderSummary & {
+  paypal_order_id: string | null;
+  source: string;
+  [key: string]: unknown;
+};
+
+function order(overrides: Partial<TestOrder> = {}): TestOrder {
   return {
     status: 'completed',
     plan_id: null,
@@ -65,7 +72,7 @@ describe('owner refund eligibility', () => {
     ['positive local context mismatch', { refund_context: 'local' }],
     ['zero-value purchase', { amount_cents: 0, paypal_order_id: null, refund_context: null }],
     ['zero-value provider order', { amount_cents: 0, paypal_order_id: 'PAYPAL-ORDER-1', source: 'manual' }],
-  ])('does not advertise the action for %s', (_label, overrides) => {
+  ] as const)('does not advertise the action for %s', (_label, overrides) => {
     expect(canOfferOwnerRefund(order(overrides))).toBe(false);
   });
 

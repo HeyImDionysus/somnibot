@@ -26,7 +26,7 @@ import {
 
 describe('PayPal reconciliation scheduler failure visibility', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     resetPayPalReconcileSchedulerForTests();
     mocks.recordFailure.mockResolvedValue(true);
     mocks.resolveFailure.mockResolvedValue(true);

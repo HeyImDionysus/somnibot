@@ -106,7 +106,7 @@ describe('schemas.entitlement.grant — type enum aligned with DB CHECK', () => 
 
 describe("POST /api/customers/[id]/entitlements — type 'free' rejected cleanly", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);
     mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
   });

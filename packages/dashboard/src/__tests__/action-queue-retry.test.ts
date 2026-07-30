@@ -119,7 +119,7 @@ function request(ids = [DLQ_ID]) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
   mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>, { guildId: GUILD_ID });
 });
@@ -211,7 +211,7 @@ describe('POST /api/action-queue exact carrier retry', () => {
     ['coercible disposition', [{
       action_id: ACTION_ID,
       action_status: 'pending',
-      disposition: { toString: () => 'reopened' },
+      disposition: { toString: (): string => 'reopened' },
     }]],
     ['invalid tuple', [{
       action_id: ACTION_ID,
@@ -450,7 +450,7 @@ describe('POST /api/action-queue generic atomic retry', () => {
     ['coercible disposition', [{
       action_id: null,
       action_status: null,
-      disposition: { toString: () => 'already_retried' },
+      disposition: { toString: (): string => 'already_retried' },
     }]],
   ])('fails closed for malformed generic RPC output: %s', async (_label, data) => {
     const mock = makeSupabase({

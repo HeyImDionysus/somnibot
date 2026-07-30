@@ -51,7 +51,7 @@ const APPEAL = {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>, { guildId: 'guild-1', discordId: 'owner-1' });
 });
 

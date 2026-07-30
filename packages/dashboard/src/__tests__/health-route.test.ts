@@ -19,7 +19,7 @@ const probe: HealthProbe = {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   delete process.env.DASHBOARD_ENV_VALID;
 });
 

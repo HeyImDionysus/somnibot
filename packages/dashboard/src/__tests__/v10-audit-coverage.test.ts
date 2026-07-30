@@ -129,7 +129,7 @@ const probe: HealthProbe = {
 
 describe('GET /api/health — bot heartbeat (V10 §7)', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it('reports bot online when heartbeat is fresh', async () => {

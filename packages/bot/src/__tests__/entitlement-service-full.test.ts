@@ -690,7 +690,7 @@ function sharedOwnerRevocationSupabase(input: {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
 });
 
 describe('EntitlementService.grant', () => {
@@ -1124,7 +1124,7 @@ describe('EntitlementService.grant', () => {
       expect([...member.roles.cache.keys()].sort()).toEqual(['r1', 'r2']);
       expect(member.roles.remove).not.toHaveBeenCalled();
       expect(eventBus.emit).not.toHaveBeenCalled();
-      vi.clearAllMocks();
+      vi.resetAllMocks();
     }
   });
 
