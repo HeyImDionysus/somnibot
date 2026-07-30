@@ -59,6 +59,9 @@ function makeSupabase(
   const ltCalls: Array<{ table: string; column: string; value: unknown }> = [];
   const tableCallCounts = new Map<string, number>();
   const rpc = vi.fn(async (name: string) => {
+    if (name === 'webhooks_abandon_stale_replay_claim') {
+      return { data: true, error: null };
+    }
     if (name === 'webhooks_finish_replay_claim') {
       return { data: true, error: null };
     }
@@ -326,6 +329,69 @@ describe('POST /api/webhooks/[id]/replay', () => {
     });
 
     expect(res.status).toBe(409);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the claim fenced when internal dispatch has an ambiguous failure', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connection reset')));
+    const { supabase } = makeSupabase({
+      event_id: 'EVT-AMBIGUOUS-DISPATCH',
+      event_type: 'PAYMENT.CAPTURE.COMPLETED',
+      guild_id: 'guild-1',
+      result: 'error',
+      replay_count: 0,
+      payload: {
+        id: 'EVT-AMBIGUOUS-DISPATCH',
+        event_type: 'PAYMENT.CAPTURE.COMPLETED',
+        resource: { id: 'CAPTURE-1' },
+      },
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await POST(
+      new Request('http://localhost/api/webhooks/EVT-AMBIGUOUS-DISPATCH/replay'),
+      { params: Promise.resolve({ id: 'EVT-AMBIGUOUS-DISPATCH' }) },
+    );
+
+    expect(res.status).toBe(502);
+    expect(supabase.rpc).not.toHaveBeenCalledWith(
+      'webhooks_finish_replay_claim',
+      expect.anything(),
+    );
+  });
+
+  it('explicitly abandons a stale claim without dispatching another replay', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { supabase } = makeSupabase({
+      event_id: 'EVT-STALE-RECOVERY',
+      event_type: 'PAYMENT.CAPTURE.COMPLETED',
+      guild_id: 'guild-1',
+      result: null,
+      replay_count: 1,
+      payload: {},
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await POST(
+      new Request('http://localhost/api/webhooks/EVT-STALE-RECOVERY/replay', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'abandon_stale_claim' }),
+      }),
+      { params: Promise.resolve({ id: 'EVT-STALE-RECOVERY' }) },
+    );
+
+    expect(res.status).toBe(200);
+    expect(supabase.rpc).toHaveBeenCalledWith(
+      'webhooks_abandon_stale_replay_claim',
+      {
+        p_event_id: 'EVT-STALE-RECOVERY',
+        p_guild_id: 'guild-1',
+        p_discord_id: 'discord-1',
+        p_stale_seconds: 900,
+      },
+    );
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

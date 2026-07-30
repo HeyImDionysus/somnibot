@@ -387,9 +387,23 @@ export async function POST(req: NextRequest) {
   const replayClaimToken = replay
     ? req.headers.get('x-replay-claim-token')
     : null;
+  const replayGuildId = replay
+    ? req.headers.get('x-replay-guild-id')
+    : null;
   if (replay) {
     const parsedClaimToken = z.string().uuid().safeParse(replayClaimToken);
-    if (!eventId || !parsedClaimToken.success) {
+    const parsedReplayGuildId = replayGuildId === null
+      ? null
+      : z.string()
+      .min(1)
+      .max(64)
+      .regex(/^[A-Za-z0-9_-]+$/)
+      .safeParse(replayGuildId);
+    if (
+      !eventId
+      || !parsedClaimToken.success
+      || (parsedReplayGuildId !== null && !parsedReplayGuildId.success)
+    ) {
       return NextResponse.json({ error: 'Invalid replay claim' }, { status: 409 });
     }
     const { data: claimIsCurrent, error: claimCheckError } = await supabase.rpc(
@@ -699,7 +713,7 @@ export async function POST(req: NextRequest) {
         await raiseWebhookProcessingErrorAlert(supabase, {
           eventId: resolvedEventId,
           eventType: event.event_type,
-          guildId: webhookGuildId,
+          guildId: replay ? replayGuildId : webhookGuildId,
           reason: String(err),
           requiresManualReplay: !RESUMABLE_FAILED_EVENT_TYPES.has(event.event_type),
         });

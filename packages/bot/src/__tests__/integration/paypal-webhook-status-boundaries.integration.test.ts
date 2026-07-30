@@ -412,12 +412,31 @@ describe('PayPal webhook tenant/status boundary migration', () => {
           'error', 'stale worker'
         ) AS finished
       `);
-      const finish = await transaction.unsafe<Array<{ finished: boolean }>>(`
+      const listedWhileClaimed = await transaction.unsafe<Array<{
+        result: { data: Array<Record<string, unknown>>; total: number };
+      }>>(`
+        SELECT ${FIXTURE_SCHEMA}.webhooks_list_scoped(
+          '${GUILD_A}', '${GUILD_A}', NULL, NULL, 0, 50
+        ) AS result
+      `);
+      const abandoned = await transaction.unsafe<Array<{ abandoned: boolean }>>(`
+        SELECT ${FIXTURE_SCHEMA}.webhooks_abandon_stale_replay_claim(
+          'EVT-ORPHAN', '${GUILD_A}', '${GUILD_A}', 900
+        ) AS abandoned
+      `);
+      const oldFinish = await transaction.unsafe<Array<{ finished: boolean }>>(`
         SELECT ${FIXTURE_SCHEMA}.webhooks_finish_replay_claim(
           'EVT-ORPHAN', '${claimToken}', 'success', NULL
         ) AS finished
       `);
-      return { secondClaim, current, staleFinish, finish };
+      return {
+        secondClaim,
+        current,
+        staleFinish,
+        listedWhileClaimed,
+        abandoned,
+        oldFinish,
+      };
     });
     expect(fenced.secondClaim).toEqual([{
       outcome: 'processing',
@@ -426,7 +445,34 @@ describe('PayPal webhook tenant/status boundary migration', () => {
     }]);
     expect(fenced.current).toEqual([{ current: true }]);
     expect(fenced.staleFinish).toEqual([{ finished: false }]);
-    expect(fenced.finish).toEqual([{ finished: true }]);
+    const listedClaimedEvent = fenced.listedWhileClaimed[0]!.result.data
+      .find((row) => row.event_id === 'EVT-ORPHAN');
+    expect(listedClaimedEvent).toBeDefined();
+    expect(listedClaimedEvent).not.toHaveProperty('replay_claim_token');
+    expect(fenced.abandoned).toEqual([{ abandoned: true }]);
+    expect(fenced.oldFinish).toEqual([{ finished: false }]);
+
+    const reclaimed = await sql.begin(async (transaction) => {
+      await transaction.unsafe('SET LOCAL ROLE service_role');
+      const rows = await transaction.unsafe<Array<{
+        outcome: string;
+        claim_token: string;
+      }>>(`
+        SELECT *
+          FROM ${FIXTURE_SCHEMA}.webhooks_claim_scoped_replay(
+            'EVT-ORPHAN', '${GUILD_A}', '${GUILD_A}', 300
+          )
+      `);
+      const finish = await transaction.unsafe<Array<{ finished: boolean }>>(`
+        SELECT ${FIXTURE_SCHEMA}.webhooks_finish_replay_claim(
+          'EVT-ORPHAN', '${rows[0]!.claim_token}', 'success', NULL
+        ) AS finished
+      `);
+      return { rows, finish };
+    });
+    expect(reclaimed.rows[0]!.outcome).toBe('claimed');
+    expect(reclaimed.rows[0]!.claim_token).not.toBe(claimToken);
+    expect(reclaimed.finish).toEqual([{ finished: true }]);
 
     await sql.unsafe(`
       INSERT INTO ${FIXTURE_SCHEMA}.guild (id, owner_discord_id)
@@ -504,6 +550,8 @@ describe('PayPal webhook tenant/status boundary migration', () => {
       anon_claim_check: boolean;
       service_claim_finish: boolean;
       anon_claim_finish: boolean;
+      service_claim_abandon: boolean;
+      anon_claim_abandon: boolean;
     }>>(`
       SELECT
         has_function_privilege(
@@ -583,6 +631,16 @@ describe('PayPal webhook tenant/status boundary migration', () => {
         ) AS anon_claim_check,
         has_function_privilege(
           'service_role',
+          '${FIXTURE_SCHEMA}.webhooks_abandon_stale_replay_claim(text,text,text,integer)',
+          'EXECUTE'
+        ) AS service_claim_abandon,
+        has_function_privilege(
+          'anon',
+          '${FIXTURE_SCHEMA}.webhooks_abandon_stale_replay_claim(text,text,text,integer)',
+          'EXECUTE'
+        ) AS anon_claim_abandon,
+        has_function_privilege(
+          'service_role',
           '${FIXTURE_SCHEMA}.webhooks_finish_replay_claim(text,text,text,text)',
           'EXECUTE'
         ) AS service_claim_finish,
@@ -609,6 +667,8 @@ describe('PayPal webhook tenant/status boundary migration', () => {
       anon_claim: false,
       service_claim_check: true,
       anon_claim_check: false,
+      service_claim_abandon: true,
+      anon_claim_abandon: false,
       service_claim_finish: true,
       anon_claim_finish: false,
     });

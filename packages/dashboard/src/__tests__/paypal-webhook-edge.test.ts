@@ -1632,6 +1632,35 @@ describe('PayPal webhook — edge cases', () => {
     }
   });
 
+  it('routes an internal replay failure alert to the claimed event guild', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { inserts } = useWebhookRows({
+        orders: { data: null, error: { message: 'order lookup unavailable' } },
+      });
+      const req = makeReplay({
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        resource: { id: 'SUB-EXPIRED' },
+        id: 'EVT-SUB-EXPIRED-ALERT-GUILD',
+      }, {
+        'x-replay-guild-id': 'guild-1',
+      });
+
+      const res = await POST(req as never);
+
+      expect(res.status).toBe(500);
+      expect(inserts).toContainEqual({
+        table: 'alerts',
+        payload: expect.objectContaining({
+          guild_id: 'guild-1',
+          alert_type: 'paypal_webhook_processing_error',
+        }),
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
 
   it('records guild_id on persisted capture refund webhook events', async () => {
     const originalFetch = global.fetch;

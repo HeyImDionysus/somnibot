@@ -207,7 +207,22 @@ BEGIN
   SELECT pg_catalog.jsonb_build_object(
            'data',
            COALESCE(
-             (SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(page)) FROM page),
+             (
+               SELECT pg_catalog.jsonb_agg(
+                 pg_catalog.jsonb_build_object(
+                   'event_id', page.event_id,
+                   'event_type', page.event_type,
+                   'processed_at', page.processed_at,
+                   'payload', page.payload,
+                   'result', page.result,
+                   'error_details', page.error_details,
+                   'replayed_at', page.replayed_at,
+                   'replay_count', page.replay_count,
+                   'guild_id', page.guild_id
+                 )
+               )
+                 FROM page
+             ),
              '[]'::JSONB
            ),
            'total',
@@ -340,6 +355,83 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.webhooks_abandon_stale_replay_claim(
+  p_event_id TEXT,
+  p_guild_id TEXT,
+  p_discord_id TEXT,
+  p_stale_seconds INTEGER
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_event public.webhook_events%ROWTYPE;
+  v_is_current_owner BOOLEAN;
+  v_is_sole_operator BOOLEAN;
+BEGIN
+  IF p_event_id IS NULL
+     OR p_event_id !~ '^[A-Za-z0-9_-]{1,128}$'
+     OR p_guild_id IS NULL
+     OR p_guild_id !~ '^[0-9]{1,32}$'
+     OR p_discord_id IS NULL
+     OR p_discord_id = ''
+     OR p_stale_seconds IS NULL
+     OR p_stale_seconds < 300
+     OR p_stale_seconds > 86400 THEN
+    RAISE EXCEPTION 'invalid stale webhook replay abandonment'
+      USING ERRCODE = '22023';
+  END IF;
+
+  LOCK TABLE public.guild IN SHARE MODE;
+  SELECT EXISTS (
+    SELECT 1
+      FROM public.guild
+     WHERE id = p_guild_id
+       AND owner_discord_id = p_discord_id
+  ) INTO v_is_current_owner;
+  IF NOT v_is_current_owner THEN
+    RETURN false;
+  END IF;
+
+  SELECT event.*
+    INTO v_event
+    FROM public.webhook_events AS event
+   WHERE event.event_id = p_event_id
+   FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+
+  v_is_sole_operator := public.webhooks_is_sole_instance_operator(p_discord_id);
+  IF v_event.guild_id IS DISTINCT FROM p_guild_id
+     AND NOT (v_event.guild_id IS NULL AND v_is_sole_operator) THEN
+    RETURN false;
+  END IF;
+
+  IF v_event.result IS NOT NULL
+     OR v_event.replay_claim_token IS NULL
+     OR v_event.processed_at IS NULL
+     OR v_event.processed_at >=
+        pg_catalog.clock_timestamp()
+        - pg_catalog.make_interval(secs => p_stale_seconds) THEN
+    RETURN false;
+  END IF;
+
+  UPDATE public.webhook_events
+     SET result = 'error',
+         error_details =
+           'Stale replay claim abandoned by operator after confirming the worker stopped',
+         replay_claim_token = NULL,
+         processed_at = pg_catalog.clock_timestamp()
+   WHERE event_id = p_event_id
+     AND replay_claim_token = v_event.replay_claim_token
+     AND result IS NULL;
+  RETURN FOUND;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.webhooks_finish_replay_claim(
   p_event_id TEXT,
   p_claim_token TEXT,
@@ -453,6 +545,9 @@ REVOKE ALL ON FUNCTION public.webhooks_claim_scoped_replay(
 ) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.webhooks_replay_claim_is_current(TEXT, TEXT)
   FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.webhooks_abandon_stale_replay_claim(
+  TEXT, TEXT, TEXT, INTEGER
+) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.webhooks_finish_replay_claim(TEXT, TEXT, TEXT, TEXT)
   FROM PUBLIC, anon, authenticated, service_role;
 
@@ -470,6 +565,9 @@ GRANT EXECUTE ON FUNCTION public.webhooks_claim_scoped_replay(
 ) TO service_role;
 GRANT EXECUTE ON FUNCTION public.webhooks_replay_claim_is_current(TEXT, TEXT)
   TO service_role;
+GRANT EXECUTE ON FUNCTION public.webhooks_abandon_stale_replay_claim(
+  TEXT, TEXT, TEXT, INTEGER
+) TO service_role;
 GRANT EXECUTE ON FUNCTION public.webhooks_finish_replay_claim(TEXT, TEXT, TEXT, TEXT)
   TO service_role;
 
@@ -487,6 +585,9 @@ COMMENT ON FUNCTION public.webhooks_claim_scoped_replay(
 ) IS 'Atomic tenant authorization plus non-stealable webhook replay claim.';
 COMMENT ON FUNCTION public.webhooks_replay_claim_is_current(TEXT, TEXT) IS
   'Checks that an internal replay request still owns its exact event claim.';
+COMMENT ON FUNCTION public.webhooks_abandon_stale_replay_claim(
+  TEXT, TEXT, TEXT, INTEGER
+) IS 'Explicit owner-authorized recovery for a confirmed-dead stale replay worker.';
 COMMENT ON FUNCTION public.webhooks_finish_replay_claim(TEXT, TEXT, TEXT, TEXT) IS
   'Fenced completion of an exact webhook replay claim.';
 

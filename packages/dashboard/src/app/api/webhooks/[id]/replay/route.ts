@@ -19,6 +19,10 @@ import { recordAdminChange } from '@/lib/admin-changes';
 const eventIdSchema = z.string().min(1).max(128).regex(/^[\w-]+$/, 'Invalid event ID format');
 const replayClaimTokenSchema = z.string().uuid();
 const WEBHOOK_REPLAY_PROCESSING_STALE_MS = 5 * 60 * 1000;
+const WEBHOOK_REPLAY_ABANDON_STALE_MS = 15 * 60 * 1000;
+const replayActionSchema = z.object({
+  action: z.literal('abandon_stale_claim'),
+}).strict();
 
 // V7 Audit §2.P2a: Prefer dedicated WEBHOOK_REPLAY_SECRET env var.
 // Falls back to HMAC derivation from NEXTAUTH_SECRET for backwards compat.
@@ -49,9 +53,12 @@ function getReplaySecret(): string {
 }
 
 export async function POST(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const rateLimited = await checkAdminRateLimit(req, 'write');
+  if (rateLimited) return rateLimited;
+
   // ── Require guild owner ──
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -70,6 +77,64 @@ export async function POST(
   const id = parsed.data;
 
   const supabase = createAdminSupabase();
+  const contentType = req.headers.get('content-type') ?? '';
+  if (contentType.includes('application/json')) {
+    let rawAction: unknown;
+    try {
+      rawAction = await req.json();
+    } catch {
+      return NextResponse.json(
+        { success: false, error: 'Invalid replay action' },
+        { status: 400 },
+      );
+    }
+    const action = replayActionSchema.safeParse(rawAction);
+    if (!action.success) {
+      return NextResponse.json(
+        { success: false, error: 'Invalid replay action' },
+        { status: 400 },
+      );
+    }
+
+    const { data: abandoned, error: abandonError } = await supabase.rpc(
+      'webhooks_abandon_stale_replay_claim',
+      {
+        p_event_id: id,
+        p_guild_id: guildId,
+        p_discord_id: discordId,
+        p_stale_seconds: WEBHOOK_REPLAY_ABANDON_STALE_MS / 1000,
+      },
+    );
+    if (abandonError) {
+      return NextResponse.json(
+        { success: false, error: 'Failed to recover stale webhook replay' },
+        { status: 500 },
+      );
+    }
+    if (abandoned !== true) {
+      return NextResponse.json(
+        { success: false, error: 'Webhook replay is not stale or is no longer recoverable' },
+        { status: 409 },
+      );
+    }
+
+    await recordAdminChange({
+      guildId,
+      actorId: discordId,
+      action: 'webhook.replay_claim_abandoned',
+      targetType: 'payment webhook',
+      targetId: id,
+      description:
+        'Abandoned a stale replay claim after confirming its original worker stopped',
+      before: { result: null, claim: 'stale_processing' },
+      after: { result: 'error', claim: 'released_for_manual_replay' },
+      blastRadius: 'medium',
+      undoReason:
+        'recovery only releases the stale claim; replaying the payment event remains a separate explicit action',
+    }, supabase);
+
+    return NextResponse.json({ success: true, recovered: true });
+  }
 
   // The database holds guild ownership stable while it authorizes and claims
   // the row, so a newly-added operator cannot race an unattributed replay.
@@ -143,6 +208,7 @@ export async function POST(
     }
     headers['PayPal-Transmission-Id'] = id;
     headers['X-Replay-Claim-Token'] = claimToken;
+    headers['X-Replay-Guild-Id'] = eventGuildId ?? guildId;
     const payloadEventType = (
       event.payload &&
       typeof event.payload === 'object' &&
@@ -157,36 +223,43 @@ export async function POST(
       headers['X-Webhook-Retrying-Failed-Event'] = '1';
     }
 
-    const replayRes = await fetch(`${baseUrl}/api/paypal/webhook`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(event.payload),
-    });
+    let replayRes: Response;
+    try {
+      replayRes = await fetch(`${baseUrl}/api/paypal/webhook`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(event.payload),
+      });
+    } catch (dispatchError) {
+      // A transport exception is ambiguous: the internal handler may already
+      // be executing. Keep the token fenced and require explicit stale-claim
+      // recovery after the operator confirms that worker is gone.
+      await raiseWebhookProcessingErrorAlert(supabase, {
+        eventId: id,
+        eventType,
+        guildId: eventGuildId ?? guildId,
+        reason: `Replay dispatch outcome unknown: ${String(dispatchError)}`,
+        requiresManualReplay: true,
+      });
+      return NextResponse.json(
+        { success: false, error: 'Replay outcome unknown; claim retained for safety' },
+        { status: 502 },
+      );
+    }
 
     const success = replayRes.ok;
 
     if (!success) {
-      const { data: finished, error: finishError } = await supabase.rpc(
-        'webhooks_finish_replay_claim',
-        {
-          p_event_id: id,
-          p_claim_token: claimToken,
-          p_result: 'error',
-          p_error_details: `Replay failed: HTTP ${replayRes.status}`,
-        },
-      );
-
-      // Finding 2: any row landing on result = 'error' raises an alert, so a
-      // replay that silently fails is not another dead end.
-      if (!finishError && finished === true) {
-        await raiseWebhookProcessingErrorAlert(supabase, {
-          eventId: id,
-          eventType,
-          guildId: eventGuildId,
-          reason: `Replay failed: HTTP ${replayRes.status}`,
-          requiresManualReplay: true,
-        });
-      }
+      // Only the internal worker owns claim completion. A gateway-generated
+      // non-2xx response can be ambiguous, so the initiator never clears the
+      // fence and never authorizes an overlapping replay.
+      await raiseWebhookProcessingErrorAlert(supabase, {
+        eventId: id,
+        eventType,
+        guildId: eventGuildId ?? guildId,
+        reason: `Replay returned HTTP ${replayRes.status}; claim retained unless the worker finalized it`,
+        requiresManualReplay: true,
+      });
     }
     // Note: the webhook handler itself updates result on success
 
@@ -240,24 +313,16 @@ export async function POST(
 
     return NextResponse.json({ success, replayed: true });
   } catch (err) {
-    const { data: finished, error: finishError } = await supabase.rpc(
-      'webhooks_finish_replay_claim',
-      {
-        p_event_id: id,
-        p_claim_token: claimToken,
-        p_result: 'error',
-        p_error_details: `Replay exception: ${String(err)}`,
-      },
-    );
-    if (!finishError && finished === true) {
-      await raiseWebhookProcessingErrorAlert(supabase, {
-        eventId: id,
-        eventType,
-        guildId: eventGuildId,
-        reason: `Replay exception: ${String(err)}`,
-        requiresManualReplay: true,
-      });
-    }
+    // The initiator cannot prove the internal worker stopped, so it must never
+    // clear the claim here. The explicit stale-recovery action is the only
+    // safe release path after an ambiguous failure.
+    await raiseWebhookProcessingErrorAlert(supabase, {
+      eventId: id,
+      eventType,
+      guildId: eventGuildId ?? guildId,
+      reason: `Replay outcome unknown: ${String(err)}`,
+      requiresManualReplay: true,
+    });
 
     return NextResponse.json(
       { success: false, error: 'Replay failed' },
