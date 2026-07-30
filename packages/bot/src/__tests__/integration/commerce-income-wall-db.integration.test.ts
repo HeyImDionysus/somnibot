@@ -113,9 +113,63 @@ async function updateOrderAsDatabaseOwner(
   try {
     await sqlA`
       UPDATE public.orders
-         SET ${sqlA(patch)}
+         SET ${sqlA(patch, ...Object.keys(patch))}
        WHERE id = ${orderId}
     `;
+    return null;
+  } catch (error) {
+    return error as DbError;
+  }
+}
+
+async function probeCanonicalFirstFreeze(
+  orderId: string,
+  patch: Record<string, unknown>,
+): Promise<DbError | null> {
+  try {
+    await sqlA.begin(async (tx) => {
+      await tx`
+        CREATE TEMP TABLE commerce_first_freeze_probe
+          (LIKE public.orders INCLUDING ALL)
+          ON COMMIT DROP
+      `;
+      await tx`
+        CREATE TRIGGER commerce_first_freeze_probe_guard
+          BEFORE INSERT OR UPDATE ON commerce_first_freeze_probe
+          FOR EACH ROW
+          EXECUTE FUNCTION public.commerce_protect_order_grant_snapshot()
+      `;
+      await tx`
+        INSERT INTO commerce_first_freeze_probe
+        SELECT *
+          FROM public.orders
+         WHERE id = ${orderId}
+      `;
+      const [before] = await tx<{ frozen_at: string | null }[]>`
+        SELECT grant_snapshot_frozen_at::TEXT AS frozen_at
+          FROM commerce_first_freeze_probe
+         WHERE id = ${orderId}
+      `;
+      if (before?.frozen_at !== null) {
+        throw new Error(`canonical first-freeze probe started frozen: ${before?.frozen_at}`);
+      }
+      if (patch.grant_snapshot_frozen_at === 'infinity') {
+        // Keep PostgreSQL's special timestamp literal server-side; postgres.js
+        // intentionally cannot deserialize an infinite timestamp value.
+        await tx`
+          UPDATE commerce_first_freeze_probe
+             SET grant_snapshot_frozen_at = 'infinity'::TIMESTAMPTZ
+           WHERE id = ${orderId}
+        `;
+      } else {
+        await tx`
+          UPDATE commerce_first_freeze_probe
+             SET ${tx(patch, ...Object.keys(patch))}
+           WHERE id = ${orderId}
+        `;
+      }
+      throw new Error('canonical first-freeze probe unexpectedly succeeded');
+    });
     return null;
   } catch (error) {
     return error as DbError;
@@ -1932,16 +1986,22 @@ describe('commerce income wall database invariant', () => {
       ],
     ];
 
+    const serviceRoleFence = await supa
+      .from('orders')
+      .update(canonicalFreeze)
+      .eq('id', order.id);
+    expect(serviceRoleFence.error).toMatchObject({
+      code: '42501',
+      message: 'API callers must mutate paid orders through a sanctioned commerce RPC',
+    });
+
     for (const [kind, patch] of firstFreezeForgeries) {
-      const rejected = await supa.from('orders').update(patch).eq('id', order.id);
-      if (rejected.error?.code !== '42501') {
+      const rejected = await probeCanonicalFirstFreeze(order.id, patch);
+      if (rejected?.code !== '23514') {
         throw new Error(
-          `expected ${kind} first-freeze forgery to reject with 42501, got ${rejected.error?.code ?? 'success'}`,
+          `expected ${kind} first-freeze forgery to reject with 23514, got ${rejected?.code ?? 'success'}: ${rejected?.message ?? ''}`,
         );
       }
-      expect(rejected.error.message).toContain(
-        'API callers must mutate paid orders through a sanctioned commerce RPC',
-      );
     }
 
     const { data: unchangedOrder, error: unchangedOrderError } = await supa
@@ -2812,27 +2872,27 @@ describe('commerce income wall database invariant', () => {
       .single();
     expect(customerError).toBeNull();
     const paypalOrderId = nextName('overflow-paypal-order');
-    const order = await seedOrderAsDatabaseOwner({
-      orderNumber: nextName('overflow-order'),
-      customerId: customer!.id,
-      guildId: GUILD_A,
-      productId,
-      paypalOrderId,
-      amountCents: 1,
-      currency: 'USD',
-      status: 'pending',
-    });
-    const freeze = await supa.rpc('commerce_freeze_order_grant_snapshot', {
-      p_order_id: order!.id,
-      p_guild_id: GUILD_A,
-      p_customer_id: customer!.id,
-      p_product_id: productId,
-    });
-    expect(freeze.error).toBeNull();
+    const { data: order, error: orderError } = await supa.rpc(
+      'commerce_create_active_paid_checkout',
+      {
+        p_order_number: nextName('overflow-order'),
+        p_guild_id: GUILD_A,
+        p_customer_id: customer!.id,
+        p_product_id: productId,
+        p_plan_id: null,
+        p_provider_kind: 'capture',
+        p_provider_id: paypalOrderId,
+        p_approval_url: `https://paypal.test/approve/${paypalOrderId}`,
+        p_amount_cents: 1,
+        p_currency: 'USD',
+      },
+    );
+    expect(orderError).toBeNull();
+    const orderId = (order as OrderFixture).id;
 
     const captureId = nextName('overflow-capture');
     const failed = await supa.rpc('commerce_finalize_paypal_capture', {
-      p_order_id: order!.id,
+      p_order_id: orderId,
       p_guild_id: GUILD_A,
       p_customer_id: customer!.id,
       p_product_id: productId,
@@ -2846,7 +2906,7 @@ describe('commerce income wall database invariant', () => {
     const { data: rolledBackOrder } = await supa
       .from('orders')
       .select('status')
-      .eq('id', order!.id)
+      .eq('id', orderId)
       .single();
     expect(rolledBackOrder?.status).toBe('pending');
     const { count: rolledBackPayments } = await supa
