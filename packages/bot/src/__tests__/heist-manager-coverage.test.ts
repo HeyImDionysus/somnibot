@@ -145,7 +145,12 @@ describe('HeistManager', () => {
   let valkey: ReturnType<typeof makeValkey>;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
+    mockTrackProgress.mockResolvedValue(undefined);
+    vi.mocked(raiseOwnerAlert).mockResolvedValue({
+      inserted: true,
+      delivered: false,
+    });
     supabase = makeSupabase();
     client = makeClient();
     valkey = makeValkey();
