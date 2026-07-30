@@ -2,7 +2,7 @@
 -- PayPal webhook tenant and paid-order status boundaries.
 --
 -- Paid orders are intentionally protected from direct service_role writes by
--- commerce_normalize_checkout_active(). These exact-identity SECURITY DEFINER
+-- commerce_normalize_checkout_active(). These exact-identity privileged
 -- functions are the only sanctioned transitions for dispute and denied-capture
 -- webhooks. Mixed-tenant disputes fail before any order is changed.
 -- =============================================================================
