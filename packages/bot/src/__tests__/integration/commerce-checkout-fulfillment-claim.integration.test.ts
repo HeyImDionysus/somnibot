@@ -272,12 +272,22 @@ function checkoutClaimMigrationBody(url: URL): string {
     '-- A PayPal subscription sale is authoritative money-path evidence',
     currentUnknownHoldStart,
   );
+  const lifecycleClassifierStart = migration.indexOf(
+    'CREATE OR REPLACE FUNCTION public.commerce_classify_lifecycle_outward_authority(',
+    generationBoundary,
+  );
+  const lifecycleClassifierEnd = migration.indexOf(
+    'REVOKE ALL ON FUNCTION public.commerce_classify_lifecycle_outward_authority(',
+    lifecycleClassifierStart,
+  );
   if (
     generationBoundary < 0
     || currentClaimStart < 0
     || currentClaimEnd < 0
     || currentUnknownHoldStart < 0
     || currentUnknownHoldEnd < 0
+    || lifecycleClassifierStart < 0
+    || lifecycleClassifierEnd < 0
   ) {
     throw new Error('checkout migration extraction boundaries were not found');
   }
@@ -289,7 +299,10 @@ function checkoutClaimMigrationBody(url: URL): string {
   const currentUnknownHold = migration
     .slice(currentUnknownHoldStart, currentUnknownHoldEnd)
     .trim();
-  return `${checkoutAndLegacyOutward}\n\n${currentPaidClaim}\n\n${currentUnknownHold}`;
+  const lifecycleClassifier = migration
+    .slice(lifecycleClassifierStart, lifecycleClassifierEnd)
+    .trim();
+  return `${checkoutAndLegacyOutward}\n\n${currentPaidClaim}\n\n${currentUnknownHold}\n\n${lifecycleClassifier}`;
 }
 
 function nextValue(prefix: string): string {
@@ -338,6 +351,14 @@ async function cleanFixtures(): Promise<void> {
     `;
     await tx`
       DELETE FROM public.commerce_checkout_deactivation_proofs
+      WHERE guild_id = ${GUILD_ID}
+    `;
+    await tx`
+      DELETE FROM public.commerce_subscription_lifecycle_events
+      WHERE guild_id = ${GUILD_ID}
+    `;
+    await tx`
+      DELETE FROM public.commerce_subscription_lifecycle_heads
       WHERE guild_id = ${GUILD_ID}
     `;
     await tx`
@@ -1651,6 +1672,170 @@ describe('checkout migration and atomic fulfillment winner', () => {
         AND intent.intent_kind = 'receipt_dm'
     `;
     expect(row).toEqual({ state: 'uncertain', alert_count: 1 });
+  }, 45_000);
+
+  it('supersedes lifecycle outward effects when a newer accepted generation becomes head', async () => {
+    const fixture = await createFixture('subscription');
+    const [identity] = await sqlObserver<{
+      plan_id: string;
+      discord_id: string;
+    }[]>`
+      SELECT paid_order.plan_id, customer.discord_id
+      FROM public.orders AS paid_order
+      JOIN public.customers AS customer
+        ON customer.id = paid_order.customer_id
+      WHERE paid_order.id = ${fixture.orderA}::UUID
+    `;
+    const oldEventId = nextValue('WH-SUSPENDED');
+    const newEventId = nextValue('WH-RENEWED');
+    const occurredAt = '2026-07-29T12:00:00.000Z';
+    const paidThroughAt = '2026-08-29T12:00:00.000Z';
+    const [entitlement] = await sqlObserver<{ id: string }[]>`
+      INSERT INTO public.entitlements (
+        customer_id, guild_id, product_id, plan_id, order_id,
+        type, status, source, granted_role_ids, granted_channel_ids
+      ) VALUES (
+        ${fixture.customerId}::UUID,
+        ${GUILD_ID},
+        ${fixture.productId}::UUID,
+        ${identity.plan_id}::UUID,
+        ${fixture.orderA}::UUID,
+        'subscription',
+        'suspended',
+        'purchase',
+        ARRAY[]::TEXT[],
+        ARRAY[]::TEXT[]
+      )
+      RETURNING id
+    `;
+    expect(entitlement.id).toEqual(expect.any(String));
+
+    await sqlObserver`
+      INSERT INTO public.commerce_subscription_lifecycle_events (
+        webhook_event_id, paypal_subscription_id, provider_event_type,
+        provider_occurred_at, provider_paid_through_at, order_id, guild_id,
+        customer_id, product_id, plan_id, disposition, event_priority, generation
+      ) VALUES (
+        ${oldEventId},
+        ${fixture.providerA},
+        'BILLING.SUBSCRIPTION.SUSPENDED',
+        ${occurredAt}::TIMESTAMPTZ,
+        NULL,
+        ${fixture.orderA}::UUID,
+        ${GUILD_ID},
+        ${fixture.customerId}::UUID,
+        ${fixture.productId}::UUID,
+        ${identity.plan_id}::UUID,
+        'accepted',
+        40,
+        1
+      )
+    `;
+    await sqlObserver`
+      INSERT INTO public.commerce_subscription_lifecycle_heads (
+        paypal_subscription_id, order_id, guild_id, customer_id, product_id,
+        plan_id, last_webhook_event_id, last_provider_event_type,
+        last_provider_occurred_at, last_event_priority, generation
+      ) VALUES (
+        ${fixture.providerA},
+        ${fixture.orderA}::UUID,
+        ${GUILD_ID},
+        ${fixture.customerId}::UUID,
+        ${fixture.productId}::UUID,
+        ${identity.plan_id}::UUID,
+        ${oldEventId},
+        'BILLING.SUBSCRIPTION.SUSPENDED',
+        ${occurredAt}::TIMESTAMPTZ,
+        40,
+        1
+      )
+    `;
+    const [action] = await sqlObserver<{
+      id: string;
+      outward_generation_id: string;
+    }[]>`
+      INSERT INTO public.bot_action_queue (
+        guild_id, action, lane, status, outward_generation_id, payload
+      ) VALUES (
+        ${GUILD_ID},
+        'fulfill_suspension',
+        'commerce',
+        'processing',
+        pg_catalog.gen_random_uuid(),
+        pg_catalog.jsonb_build_object(
+          'fulfillment_type', 'subscription_suspended',
+          'guild_id', ${GUILD_ID}::TEXT,
+          'customer_id', ${fixture.customerId}::TEXT,
+          'discord_id', ${identity.discord_id}::TEXT,
+          'product_id', ${fixture.productId}::TEXT,
+          'order_id', ${fixture.orderA}::TEXT,
+          'plan_id', ${identity.plan_id}::TEXT,
+          'paypal_subscription_id', ${fixture.providerA}::TEXT,
+          'webhook_event_id', ${oldEventId}::TEXT,
+          'provider_event_type', 'BILLING.SUBSCRIPTION.SUSPENDED',
+          'provider_occurred_at', ${occurredAt}::TEXT,
+          'provider_paid_through_at', NULL::TEXT,
+          'lifecycle_generation', 1
+        )
+      )
+      RETURNING id, outward_generation_id
+    `;
+
+    const [authorized] = await sqlObserver<{ disposition: string }[]>`
+      SELECT public.commerce_classify_lifecycle_outward_authority(
+        ${fixture.orderA}::UUID,
+        ${GUILD_ID},
+        'subscription_suspended_dm',
+        ${action.outward_generation_id}::UUID,
+        ${action.id}::UUID
+      ) AS disposition
+    `;
+    expect(authorized.disposition).toBe('send');
+
+    await sqlObserver`
+      INSERT INTO public.commerce_subscription_lifecycle_events (
+        webhook_event_id, paypal_subscription_id, provider_event_type,
+        provider_occurred_at, provider_paid_through_at, order_id, guild_id,
+        customer_id, product_id, plan_id, disposition, event_priority, generation
+      ) VALUES (
+        ${newEventId},
+        ${fixture.providerA},
+        'PAYMENT.SALE.COMPLETED',
+        (${occurredAt}::TIMESTAMPTZ + INTERVAL '1 hour'),
+        ${paidThroughAt}::TIMESTAMPTZ,
+        ${fixture.orderA}::UUID,
+        ${GUILD_ID},
+        ${fixture.customerId}::UUID,
+        ${fixture.productId}::UUID,
+        ${identity.plan_id}::UUID,
+        'accepted',
+        60,
+        2
+      )
+    `;
+    await sqlObserver`
+      UPDATE public.commerce_subscription_lifecycle_heads
+         SET last_webhook_event_id = ${newEventId},
+             last_provider_event_type = 'PAYMENT.SALE.COMPLETED',
+             last_provider_occurred_at =
+               (${occurredAt}::TIMESTAMPTZ + INTERVAL '1 hour'),
+             last_event_priority = 60,
+             generation = 2,
+             paid_through_at = ${paidThroughAt}::TIMESTAMPTZ,
+             updated_at = pg_catalog.clock_timestamp()
+       WHERE paypal_subscription_id = ${fixture.providerA}
+    `;
+
+    const [superseded] = await sqlObserver<{ disposition: string }[]>`
+      SELECT public.commerce_classify_lifecycle_outward_authority(
+        ${fixture.orderA}::UUID,
+        ${GUILD_ID},
+        'subscription_suspended_dm',
+        ${action.outward_generation_id}::UUID,
+        ${action.id}::UUID
+      ) AS disposition
+    `;
+    expect(superseded.disposition).toBe('superseded');
   }, 45_000);
 
   it('resumes only an existing outward intent and never creates a legacy replay marker', async () => {

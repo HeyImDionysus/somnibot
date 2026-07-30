@@ -5319,10 +5319,10 @@ REVOKE ALL ON FUNCTION public.commerce_assert_outward_action_authority(
   UUID, TEXT, TEXT, UUID, UUID
 ) FROM PUBLIC, anon, authenticated, service_role;
 
--- Terminal subscription cancellation supersedes only outward effects that
--- have not begun. Taking a share lock on the exact entitlement serializes this
--- decision with cancellation's entitlement transition: a begin that saw the
--- pre-cancel state remains authorized, while every later begin sees cancelled.
+-- Every lifecycle event/DM is bound to its immutable accepted provider event
+-- and may begin only while that event is still the serialized lifecycle head.
+-- The entitlement check then handles non-provider terminal transitions that
+-- occur without advancing the provider lifecycle ledger.
 CREATE OR REPLACE FUNCTION public.commerce_classify_lifecycle_outward_authority(
   p_order_id UUID,
   p_guild_id TEXT,
@@ -5339,9 +5339,13 @@ DECLARE
   v_entitlement public.entitlements%ROWTYPE;
   v_role_intent public.commerce_role_delivery_intents%ROWTYPE;
   v_action public.bot_action_queue%ROWTYPE;
+  v_event public.commerce_subscription_lifecycle_events%ROWTYPE;
+  v_head public.commerce_subscription_lifecycle_heads%ROWTYPE;
 BEGIN
   IF p_intent_kind NOT IN (
     'subscription_renewed_event',
+    'subscription_cancelled_event',
+    'subscription_cancelled_dm',
     'subscription_payment_failed_lapsed_event',
     'subscription_payment_failed_event',
     'subscription_payment_failed_dm',
@@ -5369,6 +5373,131 @@ BEGIN
         MESSAGE = 'renewal outward authority lost its exact role-delivery carrier';
     END IF;
 
+    SELECT queue.*
+      INTO v_action
+      FROM public.bot_action_queue AS queue
+     WHERE queue.id = p_action_id
+       AND queue.outward_generation_id = p_outward_generation_id
+       AND queue.guild_id = p_guild_id
+       AND queue.action = 'fulfill_subscription'
+       AND queue.lane = 'commerce'
+       AND queue.payload ->> 'fulfillment_type' = 'subscription_renewed'
+       AND queue.payload ->> 'order_id' = p_order_id::TEXT
+     FOR SHARE;
+  ELSE
+    SELECT queue.*
+      INTO v_action
+      FROM public.bot_action_queue AS queue
+     WHERE queue.id = p_action_id
+       AND queue.outward_generation_id = p_outward_generation_id
+       AND queue.guild_id = p_guild_id
+       AND queue.lane = 'commerce'
+       AND (
+         (
+           queue.action = 'fulfill_cancellation'
+           AND queue.payload ->> 'fulfillment_type' = 'subscription_cancelled'
+           AND p_intent_kind IN (
+             'subscription_cancelled_event',
+             'subscription_cancelled_dm'
+           )
+         )
+         OR (
+           queue.action = 'fulfill_suspension'
+           AND (
+             (
+               queue.payload ->> 'fulfillment_type' = 'subscription_suspended'
+               AND p_intent_kind IN (
+                 'subscription_suspended_event',
+                 'subscription_suspended_dm'
+               )
+             )
+             OR (
+               queue.payload ->> 'fulfillment_type' = 'subscription_payment_failed'
+               AND p_intent_kind IN (
+                 'subscription_payment_failed_lapsed_event',
+                 'subscription_payment_failed_event',
+                 'subscription_payment_failed_dm'
+               )
+             )
+           )
+         )
+       )
+       AND queue.payload ->> 'order_id' = p_order_id::TEXT
+     FOR SHARE;
+  END IF;
+
+  IF v_action.id IS NULL
+     OR pg_catalog.jsonb_typeof(v_action.payload) IS DISTINCT FROM 'object'
+     OR v_action.payload ->> 'webhook_event_id' IS NULL
+     OR v_action.payload ->> 'paypal_subscription_id'
+          !~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$'
+     OR v_action.payload ->> 'provider_event_type' IS NULL
+     OR v_action.payload ->> 'provider_occurred_at' IS NULL
+     OR pg_catalog.jsonb_typeof(
+          v_action.payload -> 'lifecycle_generation'
+        ) IS DISTINCT FROM 'number'
+     OR v_action.payload ->> 'lifecycle_generation' !~ '^[1-9][0-9]*$' THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'lifecycle outward authority lost its exact action carrier';
+  END IF;
+
+  SELECT event_row.*
+    INTO v_event
+    FROM public.commerce_subscription_lifecycle_events AS event_row
+   WHERE event_row.webhook_event_id =
+           v_action.payload ->> 'webhook_event_id'
+     AND event_row.paypal_subscription_id =
+           v_action.payload ->> 'paypal_subscription_id'
+     AND event_row.order_id = p_order_id
+     AND event_row.guild_id = p_guild_id
+     AND event_row.customer_id =
+           (v_action.payload ->> 'customer_id')::UUID
+     AND event_row.product_id =
+           (v_action.payload ->> 'product_id')::UUID
+     AND event_row.plan_id =
+           (v_action.payload ->> 'plan_id')::UUID
+     AND event_row.provider_event_type =
+           v_action.payload ->> 'provider_event_type'
+     AND event_row.provider_occurred_at =
+           (v_action.payload ->> 'provider_occurred_at')::TIMESTAMPTZ
+     AND event_row.provider_paid_through_at IS NOT DISTINCT FROM
+           CASE
+             WHEN v_action.payload ->> 'provider_paid_through_at' IS NULL
+               THEN NULL
+             ELSE (v_action.payload ->> 'provider_paid_through_at')::TIMESTAMPTZ
+           END
+     AND event_row.generation =
+           (v_action.payload ->> 'lifecycle_generation')::BIGINT
+     AND event_row.disposition = 'accepted'
+   FOR SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'lifecycle outward authority lost its accepted event';
+  END IF;
+
+  SELECT head.*
+    INTO v_head
+    FROM public.commerce_subscription_lifecycle_heads AS head
+   WHERE head.paypal_subscription_id = v_event.paypal_subscription_id
+     AND head.order_id = v_event.order_id
+     AND head.guild_id = v_event.guild_id
+     AND head.customer_id = v_event.customer_id
+     AND head.product_id = v_event.product_id
+     AND head.plan_id = v_event.plan_id
+   FOR SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'lifecycle outward authority lost its lifecycle head';
+  END IF;
+  IF v_head.last_webhook_event_id IS DISTINCT FROM v_event.webhook_event_id
+     OR v_head.generation IS DISTINCT FROM v_event.generation THEN
+    RETURN 'superseded';
+  END IF;
+
+  IF p_intent_kind = 'subscription_renewed_event' THEN
     SELECT entitlement.*
       INTO v_entitlement
       FROM public.entitlements AS entitlement
@@ -5385,26 +5514,6 @@ BEGIN
        )
      FOR SHARE;
   ELSE
-    SELECT queue.*
-      INTO v_action
-      FROM public.bot_action_queue AS queue
-     WHERE queue.id = p_action_id
-       AND queue.outward_generation_id = p_outward_generation_id
-       AND queue.guild_id = p_guild_id
-       AND queue.action = 'fulfill_suspension'
-       AND queue.lane = 'commerce'
-       AND queue.payload ->> 'fulfillment_type' IN (
-         'subscription_suspended',
-         'subscription_payment_failed'
-       )
-       AND queue.payload ->> 'order_id' = p_order_id::TEXT
-     FOR SHARE;
-    IF NOT FOUND THEN
-      RAISE EXCEPTION USING
-        ERRCODE = '42501',
-        MESSAGE = 'suspension outward authority lost its exact action carrier';
-    END IF;
-
     SELECT entitlement.*
       INTO v_entitlement
       FROM public.entitlements AS entitlement
@@ -5428,7 +5537,11 @@ BEGIN
       ERRCODE = '23514',
       MESSAGE = 'lifecycle outward authority lost its exact entitlement';
   END IF;
-  IF v_entitlement.status = 'cancelled'
+  IF (
+       v_action.payload ->> 'fulfillment_type'
+         IS DISTINCT FROM 'subscription_cancelled'
+       AND v_entitlement.status = 'cancelled'
+     )
      OR (
        v_action.payload ->> 'fulfillment_type' = 'subscription_payment_failed'
        AND v_entitlement.status = 'suspended'
@@ -5490,10 +5603,10 @@ BEGIN
       MESSAGE = 'commerce_begin_fulfillment_outward_intent: exact intent identity is required';
   END IF;
 
-  -- Canonical outward lock order is action -> role-delivery intent ->
-  -- entitlement -> outward intent. The lifecycle classifier locks the latter
-  -- two, so hold the exact current action claim before invoking either
-  -- authority helper. Queue finalization takes the same action row first.
+  -- Canonical outward lock order starts with the action, followed by the
+  -- immutable lifecycle/role carrier, lifecycle head, entitlement, and outward
+  -- intent. Hold the exact current claim before invoking either authority
+  -- helper. Queue finalization takes the same action row first.
   PERFORM 1
     FROM public.bot_action_queue AS queue
    WHERE queue.id = p_action_id

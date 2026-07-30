@@ -3758,11 +3758,22 @@ export async function startActionQueueListener(
   let reconnectDelay = 1_000;
   const MAX_RECONNECT_DELAY = 30_000;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let activeChannel: ReturnType<typeof supabase.channel> | undefined;
   let stopped = false;
 
-  function scheduleReconnect(): void {
-    if (stopped) return;
+  function removeChannel(channel: ReturnType<typeof supabase.channel> | undefined): void {
+    if (!channel) return;
+    if (activeChannel === channel) activeChannel = undefined;
+    void supabase.removeChannel(channel).catch((err) => {
+      log.warn('Realtime channel cleanup failed', { error: String(err) });
+    });
+  }
+
+  function scheduleReconnect(channel?: ReturnType<typeof supabase.channel>): void {
+    removeChannel(channel);
+    if (stopped || reconnectTimer) return;
     reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
       subscribeToQueue();
     }, reconnectDelay);
     reconnectTimer.unref?.();
@@ -3771,7 +3782,9 @@ export async function startActionQueueListener(
 
   function subscribeToQueue(): void {
     if (stopped) return;
+    let channel: ReturnType<typeof supabase.channel>;
     const dispatchPendingAction = async (payload: { new: Record<string, unknown> }) => {
+      if (stopped || activeChannel !== channel) return;
       const action = payload.new as unknown as ActionRow;
       if (action.status !== 'pending') return;
 
@@ -3785,7 +3798,9 @@ export async function startActionQueueListener(
       // shared per-lane scheduler. The atomic claim deduplicates INSERT/UPDATE
       // deliveries against startup, reconnect, and periodic sweeps.
       await scheduler.run(laneOf(action), () =>
-        processAction(guild, supabase, action, scheduler),
+        stopped
+          ? Promise.resolve()
+          : processAction(guild, supabase, action, scheduler),
       );
     };
 
@@ -3794,7 +3809,6 @@ export async function startActionQueueListener(
     // (e.g. a reused channel, or a client mid-teardown). Without this guard
     // the throw escapes the reconnect setTimeout as an uncaught exception.
     // On failure, fall back to the backoff-scheduled reconnect instead.
-    let channel: ReturnType<typeof supabase.channel>;
     try {
       channel = supabase
         .channel(`bot-action-queue-${Date.now()}`)
@@ -3825,8 +3839,10 @@ export async function startActionQueueListener(
       scheduleReconnect();
       return;
     }
+    activeChannel = channel;
 
     channel.subscribe((status, err) => {
+        if (activeChannel !== channel) return;
         if (status === 'SUBSCRIBED') {
           log.info('Realtime subscription: SUBSCRIBED');
           reconnectDelay = 1_000; // reset backoff on success
@@ -3847,7 +3863,7 @@ export async function startActionQueueListener(
           log.warn(`Realtime subscription ${status}, reconnecting in ${reconnectDelay}ms`, {
             error: err ? String(err) : undefined,
           });
-          scheduleReconnect();
+          scheduleReconnect(channel);
         } else {
           log.info(`Realtime subscription: ${status}`);
         }
@@ -3862,7 +3878,11 @@ export async function startActionQueueListener(
     staleRecoveryTimer,
     stop: () => {
       stopped = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+      removeChannel(activeChannel);
     },
   };
 }

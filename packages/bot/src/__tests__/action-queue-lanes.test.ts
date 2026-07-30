@@ -467,6 +467,7 @@ function makeLaneSupa(seedRows: any[] = [], opts: {
       };
       return chan;
     }),
+    removeChannel: vi.fn(async () => 'ok'),
   };
   supa.__claimOrder = claimOrder;
   supa.__inserts = inserts;
@@ -668,6 +669,36 @@ describe('stale recovery lane priority', () => {
 // ── Realtime flood: per-lane concurrency budgets ───────────
 
 describe('Realtime lane budgets', () => {
+  it('removes the active channel and ignores post-stop Realtime deliveries', async () => {
+    const supa = makeLaneSupa([]);
+    const listener = await startActionQueueListener(makeGuild(), supa);
+    const insertHandler = supa.__realtime.handlers.INSERT;
+    expect(insertHandler).toBeTypeOf('function');
+
+    listener.stop();
+    await insertHandler!({
+      new: {
+        id: 'post-stop-commerce',
+        guild_id: 'guild-1',
+        action: 'deliver_receipt',
+        lane: 'commerce',
+        status: 'pending',
+        payload: {
+          guild_id: 'guild-1', customer_id: 'customer-1',
+          discord_id: 'user-1', product_id: 'product-1', order_id: 'order-1',
+          order_number: 'ORD-STOP', product_name: 'VIP Pass',
+          amount_cents: 999, currency: 'USD',
+        },
+        created_at: new Date().toISOString(),
+        retry_count: 0,
+      },
+    });
+
+    expect(supa.removeChannel).toHaveBeenCalledTimes(1);
+    expect(supa.__claimOrder).toEqual([]);
+    expect(mockDeliverReceiptDM).not.toHaveBeenCalled();
+  });
+
   it('dispatches staged-to-pending UPDATE releases while ignoring staged and future-backoff rows', async () => {
     const supa = makeLaneSupa([]);
     await startActionQueueListener(makeGuild(), supa);

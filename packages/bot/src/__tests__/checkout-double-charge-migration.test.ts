@@ -193,6 +193,58 @@ describe('checkout double-charge migration safety contracts', () => {
     expect(migration).toContain('commerce_prepare_action_outward_generation');
   });
 
+  it('fences every lifecycle outward effect to the current accepted generation', () => {
+    const classifier = migration.slice(
+      migration.indexOf(
+        'CREATE OR REPLACE FUNCTION public.commerce_classify_lifecycle_outward_authority',
+      ),
+      migration.indexOf(
+        'REVOKE ALL ON FUNCTION public.commerce_classify_lifecycle_outward_authority',
+      ),
+    );
+
+    for (const intentKind of [
+      'subscription_renewed_event',
+      'subscription_cancelled_event',
+      'subscription_cancelled_dm',
+      'subscription_payment_failed_lapsed_event',
+      'subscription_payment_failed_event',
+      'subscription_payment_failed_dm',
+      'subscription_suspended_event',
+      'subscription_suspended_dm',
+    ]) {
+      expect(classifier).toContain(`'${intentKind}'`);
+    }
+    expect(classifier).toContain('commerce_subscription_lifecycle_events');
+    expect(classifier).toContain("event_row.disposition = 'accepted'");
+    expect(classifier).toContain('commerce_subscription_lifecycle_heads');
+    expect(classifier).toContain(
+      'v_head.last_webhook_event_id IS DISTINCT FROM v_event.webhook_event_id',
+    );
+    expect(classifier).toContain(
+      'v_head.generation IS DISTINCT FROM v_event.generation',
+    );
+    expect(classifier).toContain("RETURN 'superseded'");
+  });
+
+  it('defers provider cancellation fulfillment until the paid-through boundary', () => {
+    const lifecycleAction = migration.slice(
+      migration.indexOf(
+        'CREATE OR REPLACE FUNCTION public.commerce_create_or_recover_subscription_lifecycle_action',
+      ),
+      migration.indexOf(
+        'REVOKE ALL ON FUNCTION public.commerce_create_or_recover_subscription_lifecycle_action',
+      ),
+    );
+
+    expect(lifecycleAction).toMatch(
+      /v_next_retry_at := CASE[\s\S]+BILLING\.SUBSCRIPTION\.CANCELLED[\s\S]+provider_paid_through_at > pg_catalog\.clock_timestamp\(\)[\s\S]+THEN v_event\.provider_paid_through_at/i,
+    );
+    expect(lifecycleAction).toMatch(
+      /INSERT INTO public\.bot_action_queue[\s\S]+next_retry_at[\s\S]+v_next_retry_at/i,
+    );
+  });
+
   it('persists a critical operator alert when a rotated key loses its receipt carrier', () => {
     expect(migration).toContain('commerce_license_rotation_delivery_held');
     expect(migration).toContain('uniq_alerts_unresolved_license_rotation_delivery');
