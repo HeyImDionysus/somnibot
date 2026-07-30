@@ -42,6 +42,9 @@ const INVALID_PROVIDER_IDS: Array<[string, string]> = [
   ['overlong', 'R'.repeat(256)],
 ];
 
+/** The only tables the refund route may reach for change-history bookkeeping. */
+const BOOKKEEPING_TABLES = ['orders', 'admin_changes'];
+
 type RpcResult = { data: unknown; error: null | { code?: string; message: string } };
 type RefundSupabaseMock = {
   rpc: ReturnType<typeof vi.fn>;
@@ -181,7 +184,21 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  expect(mock.from).not.toHaveBeenCalled();
+  // The refund STATE MACHINE still touches no table directly — every step goes
+  // through the attempt-keyed RPCs, so no direct write can desynchronise the
+  // order, its entitlements, its license keys or its device sessions from the
+  // attempt record.
+  //
+  // The only `.from()` calls this route may make are the bookkeeping ones that
+  // feed the Admin Changes page: a best-effort READ of the order before
+  // finalization flips it (so the recorded before-state is the pre-refund one)
+  // and the `admin_changes` row itself. Both swallow their own failures, which
+  // is why a `from` that returns undefined here still lets the refund complete.
+  // Anything else appearing in this list is a direct table write sneaking back
+  // into the state machine.
+  for (const [table] of mock.from.mock.calls) {
+    expect(BOOKKEEPING_TABLES).toContain(table);
+  }
   vi.unstubAllGlobals();
   consoleErrorSpy.mockRestore();
 });

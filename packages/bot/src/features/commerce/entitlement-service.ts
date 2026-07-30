@@ -53,6 +53,8 @@ export interface NonCommerceRoleDeliveryContract {
 export interface SubscriptionReactivationContract extends PurchaseRoleDeliveryContract {
   planId: string;
   entitlementType: 'subscription';
+  expiresAt: string;
+  grantedChannelIds: string[];
 }
 
 export type PurchaseRoleReconciliationOutcome = 'live' | 'terminal';
@@ -61,6 +63,38 @@ export interface RoleDeliveryActionClaim {
   actionId: string;
   claimToken: string;
 }
+
+export interface SubscriptionFulfillmentClaim extends RoleDeliveryActionClaim {
+  orderId: string;
+  orderNumber: string;
+  customerId: string;
+  discordId: string;
+  productId: string;
+  productName: string;
+  planId: string;
+  paypalSubscriptionId: string;
+  amountCents: number;
+  currency: string;
+  expectedStatus: EntitlementLifecycleStatus;
+  expectedUpdatedAt: string | null;
+}
+
+export type SubscriptionPaymentFailureFulfillmentResult =
+  | {
+    disposition: 'applied' | 'replay';
+    outwardGenerationId: string;
+    gracePeriodEndsAt: string;
+  }
+  | {
+    disposition: 'noop';
+    outwardGenerationId: null;
+    gracePeriodEndsAt: string | null;
+  }
+  | {
+    disposition: 'stale' | 'not_found' | 'failed';
+    outwardGenerationId: null;
+    gracePeriodEndsAt: null;
+  };
 
 export type EntitlementLifecycleStatus =
   | 'active'
@@ -71,18 +105,36 @@ export type EntitlementLifecycleStatus =
   | 'cancelled';
 
 export type EntitlementRevokeResult =
-  | { disposition: 'applied'; transitionId: string; status: 'expired' | 'cancelled' }
-  | { disposition: 'noop'; transitionId: null; status: 'expired' | 'cancelled' }
+  | {
+    disposition: 'applied';
+    transitionId: string;
+    status: 'expired' | 'cancelled' | 'suspended';
+    outwardGenerationId?: string | null;
+  }
+  | {
+    disposition: 'noop';
+    transitionId: null;
+    status: 'expired' | 'cancelled' | 'suspended';
+    outwardGenerationId?: string | null;
+  }
   | {
     disposition: 'stale';
     transitionId: null;
     status: 'active' | 'pending' | 'grace_period' | 'suspended';
+    outwardGenerationId?: null;
   }
-  | { disposition: 'not_found' | 'failed'; transitionId: null; status: null };
+  | {
+    disposition: 'not_found' | 'failed';
+    transitionId: null;
+    status: null;
+    outwardGenerationId?: null;
+  };
 
 export interface PurchaseRoleDeliveryAttempt extends RoleDeliveryActionClaim {
   intentId: string;
   mutationToken: string;
+  /** Present for paid delivery intents; omitted by non-commerce role carriers. */
+  outwardGenerationId?: string;
 }
 
 type RoleDeliveryAttachmentDisposition =
@@ -147,7 +199,7 @@ export type PurchaseRoleDeliveryDisposition =
 
 export type PurchaseRoleDeliveryBeginResult =
   | { state: 'live'; attempt: PurchaseRoleDeliveryAttempt }
-  | { state: 'confirmed_live'; intentId: string }
+  | { state: 'confirmed_live'; intentId: string; outwardGenerationId: string | null }
   | { state: 'terminal'; intentId: string; cleanupNeeded: boolean };
 
 export type NonCommerceRoleDeliveryBeginResult =
@@ -222,6 +274,7 @@ function firstRpcRow(value: unknown): Record<string, unknown> | null {
 export class EntitlementService {
   private activePurchaseRoleDeliveryAttempt: PurchaseRoleDeliveryAttempt | null = null;
   private confirmedPurchaseRoleDeliveryReplay = false;
+  private purchaseRoleDeliveryOutwardGeneration: string | null = null;
 
   constructor(
     private guild: Guild,
@@ -245,30 +298,93 @@ export class EntitlementService {
       throw new Error('Paid entitlement grant requires an exact action claim');
     }
 
-    // Create entitlement record
-    const { data: entitlement, error } = await this.supabase
-      .from('entitlements')
-      .insert({
-        customer_id: opts.customerId,
-        guild_id: guildId,
-        product_id: opts.productId,
-        plan_id: opts.planId ?? null,
-        license_key_id: opts.licenseKeyId ?? null,
-        order_id: opts.orderId,
-        type: opts.type,
-        status: 'active',
-        source: opts.source,
-        granted_role_ids: opts.grantedRoleIds,
-        granted_channel_ids: opts.grantedChannelIds,
-        starts_at: new Date().toISOString(),
-        expires_at: opts.expiresAt ?? null,
-      })
-      .select('id')
-      .single();
-
-    if (error || !entitlement) {
-      log.error('Failed to create entitlement:', error?.message);
-      return null;
+    let entitlement: { id: string } | null = null;
+    if (opts.type === 'subscription') {
+      if (
+        typeof opts.planId !== 'string'
+        || !Number.isFinite(Date.parse(opts.expiresAt ?? ''))
+      ) {
+        throw new Error('Subscription entitlement requires exact lifecycle expiry');
+      }
+      const { data, error } = await (
+        this.supabase.rpc as (
+          fn: string,
+          params: Record<string, unknown>,
+        ) => ReturnType<typeof this.supabase.rpc>
+      )('commerce_apply_subscription_entitlement_lifecycle', {
+        p_action_id: opts.roleDeliveryClaim.actionId,
+        p_claim_token: opts.roleDeliveryClaim.claimToken,
+        p_entitlement_id: null,
+        p_guild_id: guildId,
+        p_customer_id: opts.customerId,
+        p_discord_id: opts.discordId,
+        p_product_id: opts.productId,
+        p_order_id: opts.orderId,
+        p_plan_id: opts.planId,
+        p_license_key_id: opts.licenseKeyId ?? null,
+        p_granted_role_ids: opts.grantedRoleIds,
+        p_granted_channel_ids: opts.grantedChannelIds,
+        p_expires_at: opts.expiresAt,
+      });
+      if (error) {
+        throw new Error(
+          `Failed to bind subscription entitlement lifecycle: ${error.message}`,
+        );
+      }
+      const row = firstRpcRow(data);
+      if (
+        !row
+        || !['created', 'replay', 'superseded'].includes(
+          String(row.disposition),
+        )
+        || (
+          row.entitlement_id !== null
+          && (
+            typeof row.entitlement_id !== 'string'
+            || row.entitlement_id.length === 0
+          )
+        )
+      ) {
+        throw new Error('Subscription entitlement lifecycle returned malformed evidence');
+      }
+      if (row.disposition === 'superseded') {
+        throw new PurchaseRoleDeliveryTerminalNoopError(
+          row.entitlement_id as string | null,
+        );
+      }
+      if (
+        typeof row.entitlement_id !== 'string'
+        || row.status !== 'active'
+        || Date.parse(String(row.expires_at)) !== Date.parse(opts.expiresAt as string)
+      ) {
+        throw new Error('Subscription entitlement lifecycle returned mismatched access');
+      }
+      entitlement = { id: row.entitlement_id };
+    } else {
+      const { data, error } = await this.supabase
+        .from('entitlements')
+        .insert({
+          customer_id: opts.customerId,
+          guild_id: guildId,
+          product_id: opts.productId,
+          plan_id: opts.planId ?? null,
+          license_key_id: opts.licenseKeyId ?? null,
+          order_id: opts.orderId,
+          type: opts.type,
+          status: 'active',
+          source: opts.source,
+          granted_role_ids: opts.grantedRoleIds,
+          granted_channel_ids: opts.grantedChannelIds,
+          starts_at: new Date().toISOString(),
+          expires_at: opts.expiresAt ?? null,
+        })
+        .select('id')
+        .single();
+      if (error || !data) {
+        log.error('Failed to create entitlement:', error?.message);
+        return null;
+      }
+      entitlement = data;
     }
 
     const contract: PurchaseRoleDeliveryContract = {
@@ -347,7 +463,8 @@ export class EntitlementService {
    */
   async revoke(
     entitlementId: string,
-    reason: 'expired' | 'cancelled' | 'revoked' | 'refund',
+    reason: 'expired' | 'cancelled' | 'refund' | 'suspended',
+    fulfillmentClaim?: SubscriptionFulfillmentClaim,
   ): Promise<EntitlementRevokeResult> {
     const guildId = this.guild.id;
 
@@ -384,18 +501,66 @@ export class EntitlementService {
       return { disposition: 'failed', transitionId: null, status: null };
     }
 
+    if (
+      fulfillmentClaim
+      && (
+        !['cancelled', 'suspended'].includes(reason)
+        || fulfillmentClaim.orderId.length === 0
+        || fulfillmentClaim.orderNumber.length === 0
+        || fulfillmentClaim.customerId.length === 0
+        || fulfillmentClaim.discordId.length === 0
+        || fulfillmentClaim.productId.length === 0
+        || fulfillmentClaim.productName.length === 0
+        || fulfillmentClaim.planId.length === 0
+        || fulfillmentClaim.paypalSubscriptionId.length === 0
+        || !Number.isSafeInteger(fulfillmentClaim.amountCents)
+        || fulfillmentClaim.amountCents < 0
+        || fulfillmentClaim.currency.length === 0
+        || fulfillmentClaim.actionId.length === 0
+        || fulfillmentClaim.claimToken.length === 0
+        || fulfillmentClaim.expectedStatus !== ent.status
+        || fulfillmentClaim.expectedUpdatedAt !== (ent.updated_at ?? null)
+      )
+    ) {
+      log.error('Subscription lifecycle claim does not match the observed entitlement');
+      return { disposition: 'failed', transitionId: null, status: null };
+    }
+
     const { data, error } = await (
       this.supabase.rpc as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
-    )('commerce_revoke_entitlement_exact', {
-      p_entitlement_id: entitlementId,
-      p_guild_id: guildId,
-      p_expected_status: ent.status,
-      p_expected_updated_at: ent.updated_at,
-      p_reason: reason,
-    });
+    )(
+      fulfillmentClaim
+        ? 'commerce_revoke_subscription_fulfillment'
+        : 'commerce_revoke_entitlement_exact',
+      fulfillmentClaim
+        ? {
+          p_action_id: fulfillmentClaim.actionId,
+          p_claim_token: fulfillmentClaim.claimToken,
+          p_entitlement_id: entitlementId,
+          p_guild_id: guildId,
+          p_order_id: fulfillmentClaim.orderId,
+          p_customer_id: fulfillmentClaim.customerId,
+          p_discord_id: fulfillmentClaim.discordId,
+          p_product_id: fulfillmentClaim.productId,
+          p_plan_id: fulfillmentClaim.planId,
+          p_paypal_subscription_id: fulfillmentClaim.paypalSubscriptionId,
+          p_fulfillment_type: reason === 'cancelled'
+            ? 'subscription_cancelled'
+            : 'subscription_suspended',
+          p_expected_status: ent.status,
+          p_expected_updated_at: ent.updated_at,
+        }
+        : {
+          p_entitlement_id: entitlementId,
+          p_guild_id: guildId,
+          p_expected_status: ent.status,
+          p_expected_updated_at: ent.updated_at,
+          p_reason: reason,
+        },
+    );
 
     if (error) {
       log.error('Failed to revoke entitlement:', error.message);
@@ -405,6 +570,40 @@ export class EntitlementService {
     const row = firstRpcRow(data);
     if (!row || typeof row.disposition !== 'string') {
       log.error('Entitlement revocation returned malformed transition evidence');
+      return { disposition: 'failed', transitionId: null, status: null };
+    }
+
+    const outwardGenerationId = row.outward_generation_id;
+    if (
+      fulfillmentClaim
+      && outwardGenerationId !== null
+      && (
+        typeof outwardGenerationId !== 'string'
+        || outwardGenerationId.length === 0
+        || outwardGenerationId.trim() !== outwardGenerationId
+      )
+    ) {
+      log.error('Subscription lifecycle transition returned malformed outward generation');
+      return { disposition: 'failed', transitionId: null, status: null };
+    }
+    const fulfillmentIdentityMatches = !fulfillmentClaim
+      || (
+        row.action_id === fulfillmentClaim.actionId
+        && row.claim_token === fulfillmentClaim.claimToken
+        && row.order_id === fulfillmentClaim.orderId
+        && row.order_number === fulfillmentClaim.orderNumber
+        && row.guild_id === guildId
+        && row.customer_id === fulfillmentClaim.customerId
+        && row.discord_id === fulfillmentClaim.discordId
+        && row.product_id === fulfillmentClaim.productId
+        && row.product_name === fulfillmentClaim.productName
+        && row.plan_id === fulfillmentClaim.planId
+        && row.paypal_subscription_id === fulfillmentClaim.paypalSubscriptionId
+        && row.amount_cents === fulfillmentClaim.amountCents
+        && row.currency === fulfillmentClaim.currency
+      );
+    if (!fulfillmentIdentityMatches) {
+      log.error('Subscription lifecycle transition returned mismatched action evidence');
       return { disposition: 'failed', transitionId: null, status: null };
     }
 
@@ -421,12 +620,19 @@ export class EntitlementService {
       if (
         !exactIdentity
         || row.transition_id !== null
-        || (row.status !== 'expired' && row.status !== 'cancelled')
+        || !['expired', 'cancelled', 'suspended'].includes(String(row.status))
       ) {
         log.error('Entitlement revocation returned mismatched no-op evidence');
         return { disposition: 'failed', transitionId: null, status: null };
       }
-      return { disposition: 'noop', transitionId: null, status: row.status };
+      return {
+        disposition: 'noop',
+        transitionId: null,
+        status: row.status as 'expired' | 'cancelled' | 'suspended',
+        ...(fulfillmentClaim
+          ? { outwardGenerationId: outwardGenerationId as string | null }
+          : {}),
+      };
     }
 
     if (row.disposition === 'stale') {
@@ -442,24 +648,37 @@ export class EntitlementService {
         disposition: 'stale',
         transitionId: null,
         status: row.status as 'active' | 'pending' | 'grace_period' | 'suspended',
+        ...(fulfillmentClaim ? { outwardGenerationId: null } : {}),
       };
     }
 
-    const expectedStatus = reason === 'cancelled' ? 'cancelled' : 'expired';
+    const expectedStatus = reason === 'cancelled'
+      ? 'cancelled'
+      : reason === 'suspended'
+        ? 'suspended'
+        : 'expired';
+    const appliedContractMatches = fulfillmentClaim
+      ? fulfillmentIdentityMatches
+      : (
+        typeof row.discord_id === 'string'
+        && row.discord_id.length > 0
+        && typeof row.product_id === 'string'
+        && row.product_id.length > 0
+        && typeof row.product_name === 'string'
+        && Array.isArray(row.role_ids)
+        && row.role_ids.every(
+          (roleId) => typeof roleId === 'string' && roleId.length > 0,
+        )
+      );
     if (
       row.disposition !== 'applied'
       || !exactIdentity
       || typeof row.transition_id !== 'string'
       || row.transition_id.length === 0
       || row.status !== expectedStatus
-      || typeof row.discord_id !== 'string'
-      || row.discord_id.length === 0
-      || typeof row.product_id !== 'string'
-      || row.product_id.length === 0
-      || typeof row.product_name !== 'string'
-      || !Array.isArray(row.role_ids)
-      || row.role_ids.some((roleId) => typeof roleId !== 'string' || roleId.length === 0)
+      || !appliedContractMatches
       || typeof row.updated_at !== 'string'
+      || (fulfillmentClaim && typeof outwardGenerationId !== 'string')
     ) {
       log.error('Entitlement revocation returned mismatched applied evidence');
       return { disposition: 'failed', transitionId: null, status: null };
@@ -476,6 +695,9 @@ export class EntitlementService {
       disposition: 'applied',
       transitionId: row.transition_id,
       status: expectedStatus,
+      ...(fulfillmentClaim
+        ? { outwardGenerationId: outwardGenerationId as string }
+        : {}),
     };
   }
 
@@ -591,6 +813,178 @@ export class EntitlementService {
   }
 
   /**
+   * Atomically win or recover one queued subscription-suspension episode.
+   *
+   * The database binds the outward generation only to the exact current action
+   * claim that won the active -> grace transition. A different action seeing
+   * the target state receives no generation and therefore emits nothing.
+   */
+  async startPaymentFailureGraceForFulfillment(
+    entitlementId: string,
+    gracePeriodDays: number,
+    claim: SubscriptionFulfillmentClaim,
+  ): Promise<SubscriptionPaymentFailureFulfillmentResult> {
+    if (
+      !Number.isSafeInteger(gracePeriodDays)
+      || gracePeriodDays < 0
+      || [
+        entitlementId,
+        claim.actionId,
+        claim.claimToken,
+        claim.orderId,
+        claim.orderNumber,
+        claim.customerId,
+        claim.discordId,
+        claim.productId,
+        claim.productName,
+        claim.planId,
+        claim.paypalSubscriptionId,
+        claim.currency,
+      ].some((value) => value.length === 0 || value.trim() !== value)
+      || !Number.isSafeInteger(claim.amountCents)
+      || claim.amountCents < 0
+    ) {
+      return {
+        disposition: 'failed',
+        outwardGenerationId: null,
+        gracePeriodEndsAt: null,
+      };
+    }
+
+    const { data, error } = await (
+      this.supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof this.supabase.rpc>
+    )('commerce_start_payment_failure_grace_fulfillment', {
+      p_action_id: claim.actionId,
+      p_claim_token: claim.claimToken,
+      p_entitlement_id: entitlementId,
+      p_guild_id: this.guild.id,
+      p_order_id: claim.orderId,
+      p_customer_id: claim.customerId,
+      p_discord_id: claim.discordId,
+      p_product_id: claim.productId,
+      p_plan_id: claim.planId,
+      p_paypal_subscription_id: claim.paypalSubscriptionId,
+      p_expected_status: claim.expectedStatus,
+      p_expected_updated_at: claim.expectedUpdatedAt,
+      p_grace_period_days: gracePeriodDays,
+    });
+    if (error) {
+      log.error('Failed to start payment-failure grace for fulfillment:', error.message);
+      return {
+        disposition: 'failed',
+        outwardGenerationId: null,
+        gracePeriodEndsAt: null,
+      };
+    }
+    const row = firstRpcRow(data);
+    const validDisposition =
+      row
+      && typeof row.disposition === 'string'
+      && ['applied', 'replay', 'noop', 'stale', 'not_found'].includes(row.disposition);
+    const exactContract =
+      row
+      && row.action_id === claim.actionId
+      && row.claim_token === claim.claimToken
+      && row.guild_id === this.guild.id
+      && row.order_id === claim.orderId
+      && row.order_number === claim.orderNumber
+      && row.customer_id === claim.customerId
+      && row.discord_id === claim.discordId
+      && row.product_id === claim.productId
+      && row.product_name === claim.productName
+      && row.plan_id === claim.planId
+      && row.paypal_subscription_id === claim.paypalSubscriptionId
+      && row.amount_cents === claim.amountCents
+      && row.currency === claim.currency;
+    if (
+      !validDisposition
+      || !exactContract
+      || (
+        row.disposition === 'not_found'
+          ? row.entitlement_id !== null
+          : row.entitlement_id !== entitlementId
+      )
+    ) {
+      log.error('Subscription payment failure returned malformed action evidence');
+      return {
+        disposition: 'failed',
+        outwardGenerationId: null,
+        gracePeriodEndsAt: null,
+      };
+    }
+
+    if (row.disposition === 'applied' || row.disposition === 'replay') {
+      if (
+        row.status !== 'grace_period'
+        || typeof row.updated_at !== 'string'
+        || typeof row.outward_generation_id !== 'string'
+        || row.outward_generation_id.length === 0
+        || typeof row.grace_period_ends_at !== 'string'
+        || !Number.isFinite(Date.parse(row.grace_period_ends_at))
+      ) {
+        log.error('Subscription payment failure winner returned malformed durable evidence');
+        return {
+          disposition: 'failed',
+          outwardGenerationId: null,
+          gracePeriodEndsAt: null,
+        };
+      }
+      return {
+        disposition: row.disposition,
+        outwardGenerationId: row.outward_generation_id,
+        gracePeriodEndsAt: row.grace_period_ends_at,
+      };
+    }
+
+    const validOptionalGraceDeadline =
+      row.grace_period_ends_at === null
+      || (
+        typeof row.grace_period_ends_at === 'string'
+        && Number.isFinite(Date.parse(row.grace_period_ends_at))
+      );
+    const validLoserEnvelope =
+      row.outward_generation_id === null
+      && validOptionalGraceDeadline
+      && (
+        row.disposition === 'not_found'
+          ? row.status === null
+            && row.updated_at === null
+            && row.grace_period_ends_at === null
+          : typeof row.updated_at === 'string'
+            && (
+              row.disposition === 'noop'
+                ? ['cancelled', 'expired', 'grace_period', 'suspended'].includes(
+                  row.status as string,
+                )
+                : ['active', 'pending'].includes(row.status as string)
+            )
+      );
+    if (!validLoserEnvelope) {
+      log.error('Subscription payment failure loser returned malformed evidence');
+      return {
+        disposition: 'failed',
+        outwardGenerationId: null,
+        gracePeriodEndsAt: null,
+      };
+    }
+    if (row.disposition === 'noop') {
+      return {
+        disposition: 'noop',
+        outwardGenerationId: null,
+        gracePeriodEndsAt: row.grace_period_ends_at as string | null,
+      };
+    }
+    return {
+      disposition: row.disposition as 'stale' | 'not_found',
+      outwardGenerationId: null,
+      gracePeriodEndsAt: null,
+    };
+  }
+
+  /**
    * Recover a paid subscription from grace/suspension, or repair an exact
    * already-active replay. Every identity field is re-proved from storage;
    * terminal or unsupported states are never reactivated.
@@ -606,12 +1000,17 @@ export class EntitlementService {
       contract.grantedRoleIds,
       'Subscription reactivation role vector',
     );
+    const expectedChannelIds = normalizeExactRoleVector(
+      contract.grantedChannelIds,
+      'Subscription reactivation channel vector',
+    );
     if (
       !roleDeliveryClaim
       ||
       entitlementId.length === 0
       || entitlementId.trim() !== entitlementId
       || contract.entitlementType !== 'subscription'
+      || !Number.isFinite(Date.parse(contract.expiresAt))
       || ![
         contract.customerId,
         contract.productId,
@@ -626,7 +1025,7 @@ export class EntitlementService {
     const loadExactEntitlement = async () => {
       const { data, error } = await this.supabase
         .from('entitlements')
-        .select('id, guild_id, customer_id, product_id, plan_id, order_id, type, status, source, granted_role_ids, grace_period_ends_at')
+        .select('id, guild_id, customer_id, product_id, plan_id, order_id, type, status, source, granted_role_ids, granted_channel_ids, grace_period_ends_at, expires_at')
         .eq('id', entitlementId)
         .eq('guild_id', guildId)
         .eq('customer_id', contract.customerId)
@@ -655,10 +1054,10 @@ export class EntitlementService {
           'suspended',
           'expired',
           'cancelled',
-          'revoked',
         ].includes(data.status)
         || (data.source !== 'purchase' && data.source !== null)
         || !exactRoleVectorsMatch(data.granted_role_ids, expectedRoleIds)
+        || !exactRoleVectorsMatch(data.granted_channel_ids, expectedChannelIds)
       ) {
         throw new Error('Subscription reactivation entitlement identity mismatch');
       }
@@ -667,22 +1066,6 @@ export class EntitlementService {
 
     let entitlement = await loadExactEntitlement();
     if (!entitlement) return false;
-
-    const begun = await this.beginPurchaseRoleDeliveryAttempt(
-      entitlementId,
-      {
-        ...contract,
-        grantedRoleIds: expectedRoleIds,
-      },
-      roleDeliveryClaim,
-    );
-    if (begun.state === 'terminal') {
-      if (begun.cleanupNeeded) {
-        await this.executeOwnedPurchaseRoleCleanup(begun.intentId, roleDeliveryClaim);
-      }
-      throw new PurchaseRoleDeliveryTerminalNoopError(entitlementId);
-    }
-    const deliveryAttempt = begun.state === 'live' ? begun.attempt : undefined;
 
     const { data: customer, error: customerError } = await this.supabase
       .from('customers')
@@ -702,56 +1085,74 @@ export class EntitlementService {
       );
     }
 
-    if (entitlement.status !== 'active') {
-      if (!['grace_period', 'suspended'].includes(entitlement.status)) return false;
-
-      const updatedAt = new Date().toISOString();
-      const { data: updated, error: updateError } = await this.supabase
-        .from('entitlements')
-        .update({
-          status: 'active',
-          grace_period_ends_at: null,
-          updated_at: updatedAt,
-        })
-        .eq('id', entitlementId)
-        .eq('guild_id', guildId)
-        .eq('customer_id', contract.customerId)
-        .eq('product_id', contract.productId)
-        .eq('plan_id', contract.planId)
-        .eq('order_id', contract.orderId)
-        .eq('type', 'subscription')
-        .in('status', ['grace_period', 'suspended'])
-        .select('id, guild_id, customer_id, product_id, plan_id, order_id, type, status, source, granted_role_ids, grace_period_ends_at')
-        .maybeSingle();
-      if (updateError) {
-        log.error('Failed to reactivate entitlement:', updateError.message);
-        return false;
-      }
-
-      // A competing worker may have won the transition. Re-read the exact row
-      // and accept only an active replay; a terminal race remains rejected.
-      if (!updated) {
-        entitlement = await loadExactEntitlement();
-        if (!entitlement || entitlement.status !== 'active') return false;
-      } else {
-        if (
-          updated.id !== entitlementId
-          || updated.guild_id !== guildId
-          || updated.customer_id !== contract.customerId
-          || updated.product_id !== contract.productId
-          || updated.plan_id !== contract.planId
-          || updated.order_id !== contract.orderId
-          || updated.type !== 'subscription'
-          || updated.status !== 'active'
-          || updated.grace_period_ends_at !== null
-          || (updated.source !== 'purchase' && updated.source !== null)
-          || !exactRoleVectorsMatch(updated.granted_role_ids, expectedRoleIds)
-        ) {
-          throw new Error('Subscription reactivation update returned mismatched proof');
-        }
-        entitlement = updated;
-      }
+    const { data: lifecycleData, error: lifecycleError } = await (
+      this.supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof this.supabase.rpc>
+    )('commerce_apply_subscription_entitlement_lifecycle', {
+      p_action_id: roleDeliveryClaim.actionId,
+      p_claim_token: roleDeliveryClaim.claimToken,
+      p_entitlement_id: entitlementId,
+      p_guild_id: guildId,
+      p_customer_id: contract.customerId,
+      p_discord_id: contract.discordId,
+      p_product_id: contract.productId,
+      p_order_id: contract.orderId,
+      p_plan_id: contract.planId,
+      p_license_key_id: null,
+      p_granted_role_ids: expectedRoleIds,
+      p_granted_channel_ids: expectedChannelIds,
+      p_expires_at: contract.expiresAt,
+    });
+    if (lifecycleError) {
+      throw new Error(
+        `Failed to advance subscription entitlement lifecycle: ${lifecycleError.message}`,
+      );
     }
+    const lifecycleRow = firstRpcRow(lifecycleData);
+    if (
+      !lifecycleRow
+      || !['advanced', 'superseded'].includes(String(lifecycleRow.disposition))
+      || lifecycleRow.entitlement_id !== entitlementId
+    ) {
+      throw new Error('Subscription reactivation lifecycle returned malformed evidence');
+    }
+    if (lifecycleRow.disposition === 'superseded') {
+      throw new PurchaseRoleDeliveryTerminalNoopError(entitlementId);
+    }
+    if (
+      lifecycleRow.status !== 'active'
+      || Date.parse(String(lifecycleRow.expires_at))
+        !== Date.parse(contract.expiresAt)
+    ) {
+      throw new Error('Subscription reactivation lifecycle returned mismatched access');
+    }
+    entitlement = await loadExactEntitlement();
+    if (
+      !entitlement
+      || entitlement.status !== 'active'
+      || Date.parse(String(entitlement.expires_at))
+        !== Date.parse(contract.expiresAt)
+    ) {
+      throw new Error('Subscription reactivation durable access disappeared');
+    }
+
+    const begun = await this.beginPurchaseRoleDeliveryAttempt(
+      entitlementId,
+      {
+        ...contract,
+        grantedRoleIds: expectedRoleIds,
+      },
+      roleDeliveryClaim,
+    );
+    if (begun.state === 'terminal') {
+      if (begun.cleanupNeeded) {
+        await this.executeOwnedPurchaseRoleCleanup(begun.intentId, roleDeliveryClaim);
+      }
+      throw new PurchaseRoleDeliveryTerminalNoopError(entitlementId);
+    }
+    const deliveryAttempt = begun.state === 'live' ? begun.attempt : undefined;
 
     if (deliveryAttempt) {
       await this.ensurePurchaseGrantedRoles(
@@ -790,6 +1191,7 @@ export class EntitlementService {
     claim: RoleDeliveryActionClaim,
   ): Promise<PurchaseRoleDeliveryBeginResult> {
     this.confirmedPurchaseRoleDeliveryReplay = false;
+    this.purchaseRoleDeliveryOutwardGeneration = null;
     const normalizedRoleIds = normalizeExactRoleVector(
       contract.grantedRoleIds,
       'Purchase granted role vector',
@@ -819,7 +1221,15 @@ export class EntitlementService {
       p_entitlement_type: contract.entitlementType,
       p_permanent_role_ids: normalizedRoleIds,
     });
-    if (error) throw new Error(`Failed to begin paid role delivery intent: ${error.message}`);
+    if (error) {
+      if (
+        contract.entitlementType === 'subscription'
+        && error.message.includes('subscription lifecycle authority was superseded')
+      ) {
+        throw new PurchaseRoleDeliveryTerminalNoopError(entitlementId);
+      }
+      throw new Error(`Failed to begin paid role delivery intent: ${error.message}`);
+    }
 
     const row = firstRpcRow(data);
     if (
@@ -834,6 +1244,14 @@ export class EntitlementService {
       || typeof row.contract_live !== 'boolean'
       || typeof row.delivery_confirmed !== 'boolean'
       || typeof row.cleanup_needed !== 'boolean'
+      || (
+        row.outward_generation_id !== null
+        && (
+          typeof row.outward_generation_id !== 'string'
+          || row.outward_generation_id.length === 0
+          || row.outward_generation_id.trim() !== row.outward_generation_id
+        )
+      )
     ) {
       throw new Error('Paid role delivery intent returned malformed evidence');
     }
@@ -843,7 +1261,13 @@ export class EntitlementService {
         throw new Error('Confirmed paid role replay returned an active mutation token');
       }
       this.confirmedPurchaseRoleDeliveryReplay = true;
-      return { state: 'confirmed_live', intentId: row.intent_id };
+      this.purchaseRoleDeliveryOutwardGeneration =
+        row.outward_generation_id as string | null;
+      return {
+        state: 'confirmed_live',
+        intentId: row.intent_id,
+        outwardGenerationId: row.outward_generation_id as string | null,
+      };
     }
     if (!row.contract_live) {
       if (row.may_mutate) {
@@ -862,6 +1286,8 @@ export class EntitlementService {
       row.intent_state !== 'open'
       || typeof row.mutation_token !== 'string'
       || row.mutation_token.length === 0
+      || typeof row.outward_generation_id !== 'string'
+      || row.outward_generation_id.length === 0
     ) {
       throw new Error('Live paid role delivery intent returned mismatched evidence');
     }
@@ -869,8 +1295,10 @@ export class EntitlementService {
       ...claim,
       intentId: row.intent_id,
       mutationToken: row.mutation_token,
+      outwardGenerationId: row.outward_generation_id,
     };
     this.activePurchaseRoleDeliveryAttempt = attempt;
+    this.purchaseRoleDeliveryOutwardGeneration = row.outward_generation_id;
     return {
       state: 'live',
       attempt,
@@ -1060,6 +1488,11 @@ export class EntitlementService {
 
   wasPurchaseRoleDeliveryConfirmedReplay(): boolean {
     return this.confirmedPurchaseRoleDeliveryReplay;
+  }
+
+  getPurchaseRoleDeliveryOutwardGeneration(): string | null {
+    return this.activePurchaseRoleDeliveryAttempt?.outwardGenerationId
+      ?? this.purchaseRoleDeliveryOutwardGeneration;
   }
 
   private async assertRoleDeliveryAttemptLive(
@@ -1591,7 +2024,6 @@ export class EntitlementService {
       'suspended',
       'expired',
       'cancelled',
-      'revoked',
     ];
     const orderStatuses = [
       'pending',

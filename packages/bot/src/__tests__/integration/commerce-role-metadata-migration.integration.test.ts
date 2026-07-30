@@ -63,7 +63,10 @@ function migrationSource(filename: string): string {
     filename,
   );
 
-  return readFileSync(path, 'utf8');
+  // Git may materialize SQL fixtures with CRLF on Windows. Normalize source
+  // text so ordering assertions exercise the migration rather than the host's
+  // checkout line-ending policy.
+  return readFileSync(path, 'utf8').replace(/\r\n?/g, '\n');
 }
 
 function migrationSql(): string {

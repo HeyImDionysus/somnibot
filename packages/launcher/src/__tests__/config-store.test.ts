@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { buildDbUrlEnv } from '../main/supabase-db-url.js';
 
 // The config shape from config-store.ts (replicated here since the
 // module imports electron-store which isn't available outside Electron).
@@ -106,6 +107,24 @@ describe('Launcher Config', () => {
     tailscaleAuthKey: 'tskey-auth-secret',
     lavalinkEnabled: true,
   };
+
+  it('builds a direct session-capable Supabase database URL for migration locks', () => {
+    expect(buildDbUrlEnv(
+      'https://runnerproof.supabase.co',
+      'p@ss word',
+    )).toEqual({
+      SUPABASE_DB_URL:
+        'postgresql://postgres:p%40ss%20word@db.runnerproof.supabase.co:5432/postgres',
+    });
+  });
+
+  it('does not synthesize a database URL without both a project ref and password', () => {
+    expect(buildDbUrlEnv('https://example.com', 'secret')).toEqual({});
+    expect(buildDbUrlEnv('https://runnerproof.supabase.co.evil.example', 'secret'))
+      .toEqual({});
+    expect(buildDbUrlEnv('http://runnerproof.supabase.co', 'secret')).toEqual({});
+    expect(buildDbUrlEnv('https://runnerproof.supabase.co', '')).toEqual({});
+  });
 
   it('detects ready-to-launch config', () => {
     expect(isReadyToLaunch(validConfig)).toBe(true);

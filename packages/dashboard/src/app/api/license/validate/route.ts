@@ -13,15 +13,11 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { parseBody, schemas } from '@/lib/api/validation';
+import { licenseUnavailable } from '@/lib/api/license-status';
+import { getClientIp } from '@/lib/api/client-ip';
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
-}
-
-function getClientIp(req: NextRequest): string {
-  return req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
-    ?? req.headers.get('x-real-ip')
-    ?? 'unknown';
 }
 
 // ── Composite lookup result shape ────────────────────────────
@@ -95,11 +91,13 @@ export async function POST(req: NextRequest) {
   });
 
   if (lookupError) {
-    console.error('[License] license_validate_lookup RPC error:', lookupError.message);
-    return NextResponse.json(
-      { valid: false, status: 'revoked', error: 'Internal validation error' },
-      { status: 500 },
-    );
+    // The lookup FAILED — we learned nothing about this key. Reporting
+    // 'revoked' here (the old behaviour) told a paying customer their licence
+    // was cancelled because our database blinked, and the SDK treated that as
+    // terminal. Report it as undetermined instead: HTTP 503 +
+    // status 'service_unavailable', which the SDK handles non-terminally.
+    await logValidation(supabase, null, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+    return licenseUnavailable('License/validate license_validate_lookup', lookupError);
   }
 
   const result = lookup as LookupResult;
@@ -210,9 +208,55 @@ export async function POST(req: NextRequest) {
   }
 
   // 6. Multi-device tracking (atomic RPC stays separate — needs FOR UPDATE)
+  //
+  // On the `evict_oldest` default (product_license_config.device_policy, set in
+  // 20260518000101): it does not REFUSE anyone, so a share group is never told
+  // "no" — each validation evicts the least-recently-seen session and takes its
+  // place. It is kept as the default deliberately:
+  //
+  //   * `reject` hard-blocks a customer who reimaged their machine or replaced
+  //     a laptop until they find the portal and free a seat by hand. Breaking a
+  //     paying customer's working install is worse than the leak.
+  //   * Since the seat layer actually works again (Finding 3), eviction is real
+  //     friction on sharers rather than a no-op: every extra person kicks
+  //     someone else off mid-session, and it is self-limiting in a way that
+  //     costs an honest customer nothing.
+  //   * The leak is no longer invisible — the device-abuse signal below now
+  //     fires under this policy — so the owner can flip individual products to
+  //     `reject` from the licence config with evidence in hand.
+  //
+  // Changing the column default would apply to new products only, but the
+  // recommendation is to keep it: switch specific products to `reject` when a
+  // signal says so.
   let sessionId: string | undefined;
+  const seatTrackingEnabled =
+    typeof result.config_max_devices === 'number' && result.config_max_devices > 0;
 
-  if (device_fingerprint && result.config_max_devices) {
+  // Seat enforcement cannot be optional at the caller's discretion. Products
+  // with tracking disabled remain compatible with fingerprint-less clients,
+  // but a tracked product must fail closed instead of granting a seatless,
+  // heartbeat-less validation.
+  if (seatTrackingEnabled && !device_fingerprint) {
+    await logValidation(
+      supabase,
+      result.key_id!,
+      product_id,
+      device_fingerprint,
+      'device_fingerprint_required',
+      clientIp,
+      app_version,
+    );
+    return NextResponse.json(
+      {
+        valid: false,
+        status: 'device_fingerprint_required',
+        error: 'A non-empty device fingerprint is required for this product.',
+      },
+      { status: 400 },
+    );
+  }
+
+  if (device_fingerprint && seatTrackingEnabled) {
     const { data: deviceResult, error: deviceError } = await supabase
       .rpc('license_validate_device', {
         p_license_key_id: result.key_id,
@@ -224,9 +268,54 @@ export async function POST(req: NextRequest) {
         p_device_policy: result.config_device_policy || 'evict_oldest',
       });
 
+    // A device fingerprint was supplied and the product is seat-limited, so a
+    // session is REQUIRED for this validation to mean anything. Failing to
+    // establish one used to be logged and swallowed, and execution fell
+    // through to `valid: true, session_id: null` — a machine that validated as
+    // healthy while consuming zero seats and never heartbeating again.
+    //
+    // We cannot answer `valid: true` (we did not grant a seat) and we must not
+    // answer with a verdict (the licence itself is fine). Report it as
+    // undetermined, which the SDK handles non-terminally: an install with a
+    // cached validation keeps working on offline grace while we recover.
     if (deviceError) {
-      console.error('[License] Device validation RPC error:', deviceError.message);
-    } else if (deviceResult?.status === 'over_device_limit') {
+      await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+      return licenseUnavailable('License/validate license_validate_device', deviceError);
+    }
+
+    // A remotely revoked fingerprint is a real terminal device verdict, not a
+    // service fault and not a revocation of the licence key itself. Handle it
+    // before the generic no-session guard so the SDK stops this device instead
+    // of retrying a 503 forever.
+    if (deviceResult?.status === 'session_invalidated') {
+      await logValidation(
+        supabase,
+        result.key_id!,
+        product_id,
+        device_fingerprint,
+        'session_invalidated',
+        clientIp,
+        app_version,
+      );
+      return NextResponse.json({
+        valid: false,
+        status: 'session_invalidated',
+        error: 'This device was revoked by an administrator. Contact the server owner if you need it restored.',
+      });
+    }
+
+    // Defence in depth against the same class of bug: the RPC answered, but
+    // with no session id and no recognised status. Treat "no seat granted" as
+    // a failure to validate rather than silently issuing a seatless success.
+    if (!deviceResult?.session_id && deviceResult?.status !== 'over_device_limit') {
+      await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+      return licenseUnavailable(
+        'License/validate license_validate_device',
+        { message: `RPC returned no session (status=${String(deviceResult?.status ?? 'null')})` },
+      );
+    }
+
+    if (deviceResult?.status === 'over_device_limit') {
       await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'over_device_limit', clientIp, app_version);
       return NextResponse.json({
         valid: false,
@@ -235,15 +324,16 @@ export async function POST(req: NextRequest) {
         active_devices: deviceResult.active_devices,
         max_devices: deviceResult.max_devices,
       });
-    } else if (deviceResult?.session_id) {
-      sessionId = deviceResult.session_id;
     }
+
+    // Guaranteed non-null by the guard above.
+    sessionId = deviceResult.session_id;
   }
 
   // Fraud checks (non-blocking — fire-and-forget)
   // V11 Audit M-8: Also check critical fraud signal threshold after device/IP checks
   // so accumulated signals auto-create incidents.
-  if (device_fingerprint && result.config_max_devices && result.product_guild_id) {
+  if (device_fingerprint && seatTrackingEnabled && result.product_guild_id) {
     const guildId = result.product_guild_id;
     const maxDevices = result.config_max_devices || 3;
     runFraudChecks(supabase, guildId, result.key_id!, maxDevices, result.customer_discord_id ?? null)
@@ -483,6 +573,99 @@ async function raiseFraudCheckAlert(
   }
 }
 
+/**
+ * Rolling window for the device-abuse signal.
+ *
+ * A week, not a day: a sharing group does not have to be online on the same
+ * day for the key to be serving all of them, and "how many distinct machines
+ * does this key serve" is naturally a weekly question. The IP check below uses
+ * 24h because a burst of IPs in one day is itself the anomaly there.
+ */
+const DEVICE_ABUSE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Distinct devices in the window, as a multiple of max_devices, that trips the signal. */
+const DEVICE_ABUSE_HIGH_RATIO = 3;
+const DEVICE_ABUSE_CRITICAL_RATIO = 5;
+
+/** Bound on rows read per check. A key over this is far past any threshold. */
+const DEVICE_ABUSE_ROW_CAP = 1000;
+
+interface OpenFraudSignal {
+  guildId: string;
+  signalType: 'device_abuse' | 'ip_mismatch';
+  severity: 'medium' | 'high' | 'critical';
+  entityType: 'license_key';
+  entityId: string;
+  discordId: string | null;
+  description: string;
+  evidence: Record<string, unknown>;
+}
+
+/**
+ * Persist one open signal per entity through the partial-index-aware RPC.
+ *
+ * PostgREST's column-only `upsert` cannot express
+ * `ON CONFLICT (...) WHERE status = 'open'`; the database function is the
+ * atomic boundary that refreshes evidence and preserves monotonic severity.
+ */
+async function upsertOpenFraudSignal(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  signal: OpenFraudSignal,
+): Promise<void> {
+  const { error } = await supabase.rpc('fraud_upsert_open_signal', {
+    p_guild_id: signal.guildId,
+    p_signal_type: signal.signalType,
+    p_severity: signal.severity,
+    p_entity_type: signal.entityType,
+    p_entity_id: signal.entityId,
+    p_discord_id: signal.discordId,
+    p_description: signal.description,
+    p_evidence: signal.evidence,
+    p_auto_action: null,
+  });
+
+  if (error) {
+    throw new Error(`fraud signal upsert failed: ${error.message}`);
+  }
+}
+
+/**
+ * Device-sharing signal.
+ *
+ * ## Why this does not count active sessions
+ *
+ * It used to fire on `activeDevices > maxDevices * 3` — which is mathematically
+ * unreachable in the default configuration. Under `evict_oldest` (the schema
+ * default) every new device evicts the least-recently-seen one, so the active
+ * count is *pinned at* `max_devices` by construction; it can never reach three
+ * times it. Under `reject` the RPC refuses past the limit, so it is pinned
+ * there too. The signal could only ever have fired on legacy or
+ * hand-inserted rows. Ten people sharing one 3-seat key produced exactly the
+ * same active count as one honest customer with three machines.
+ *
+ * ## What it counts instead
+ *
+ * Distinct DEVICES that used the key inside the window, whether or not they
+ * currently hold a seat. Eviction pins the seat count; it does not pin the
+ * number of machines, which is the thing we actually care about. A row in
+ * `license_sessions` is one device — `UNIQUE(license_key_id,
+ * device_fingerprint)` guarantees it — so the row count in the window *is* the
+ * distinct-device count, with no DISTINCT and no aggregation.
+ *
+ * (Eviction *rate* was the other candidate. It is worse here: a device's
+ * `deactivation_reason` is cleared when it reclaims its row, so churn
+ * systematically undercounts exactly the keys that churn hardest. It is
+ * reported as supporting evidence, not used as the trigger.)
+ *
+ * ## Thresholds
+ *
+ * `> max_devices * 3` distinct machines in seven days. Honest churn — a
+ * reinstall, a new laptop, a re-imaged machine — moves this by one or two, so
+ * a 3-seat licence has to reach ten distinct machines before it trips. The
+ * cost of a false positive is low by design: fraud signals are advisory, they
+ * open an operator alert and never refuse a validation, so a customer with an
+ * unstable fingerprint is reviewed, not locked out.
+ */
 async function checkDeviceAbuse(
   supabase: ReturnType<typeof createAdminSupabase>,
   guildId: string,
@@ -490,35 +673,51 @@ async function checkDeviceAbuse(
   maxDevices: number,
   discordId: string | null,
 ): Promise<void> {
-  const { count, error: countError } = await supabase
+  const since = new Date(Date.now() - DEVICE_ABUSE_WINDOW_MS).toISOString();
+
+  // One read serves every number below — cheaper than the head-count it
+  // replaces plus the counts the evidence needs.
+  const { data: sessions, error: sessionsError } = await supabase
     .from('license_sessions')
-    .select('*', { count: 'exact', head: true })
+    .select('active, last_seen_at, deactivation_reason')
     .eq('license_key_id', licenseKeyId)
-    .eq('active', true);
+    .gte('last_seen_at', since)
+    .limit(DEVICE_ABUSE_ROW_CAP);
 
-  if (countError) {
-    throw new Error(`session count query failed: ${countError.message}`);
+  if (sessionsError) {
+    throw new Error(`session window query failed: ${sessionsError.message}`);
   }
 
-  const activeDevices = count || 0;
+  const rows = sessions ?? [];
+  const devicesInWindow = rows.length;
+  const activeDevices = rows.filter((s) => s.active).length;
+  const evictedInWindow = rows.filter((s) => s.deactivation_reason === 'device_limit').length;
 
-  if (activeDevices > maxDevices * 3) {
-    const { error: insertError } = await supabase.from('fraud_signals').insert({
-      guild_id: guildId,
-      signal_type: 'device_abuse',
-      severity: activeDevices > maxDevices * 5 ? 'critical' : 'high',
-      entity_type: 'license_key',
-      entity_id: licenseKeyId,
-      discord_id: discordId,
-      description: `${activeDevices} active device sessions on a ${maxDevices}-device license`,
-      evidence: { active_sessions: activeDevices, max_devices: maxDevices, ratio: activeDevices / maxDevices },
-      status: 'open',
-    });
+  if (devicesInWindow <= maxDevices * DEVICE_ABUSE_HIGH_RATIO) return;
 
-    if (insertError) {
-      throw new Error(`fraud signal insert failed: ${insertError.message}`);
-    }
-  }
+  const windowDays = Math.round(DEVICE_ABUSE_WINDOW_MS / (24 * 60 * 60 * 1000));
+  await upsertOpenFraudSignal(supabase, {
+    guildId,
+    signalType: 'device_abuse',
+    severity: devicesInWindow > maxDevices * DEVICE_ABUSE_CRITICAL_RATIO ? 'critical' : 'high',
+    entityType: 'license_key',
+    entityId: licenseKeyId,
+    discordId,
+    description:
+      `${devicesInWindow} distinct devices used a ${maxDevices}-device license in the last ${windowDays} days`,
+    evidence: {
+      devices_in_window: devicesInWindow,
+      window_days: windowDays,
+      max_devices: maxDevices,
+      ratio: devicesInWindow / maxDevices,
+      // Context for the operator: under evict_oldest `active_sessions` is
+      // pinned at max_devices, so a high device count with a pinned seat count
+      // and a non-zero eviction count is the signature of seat thrashing.
+      active_sessions: activeDevices,
+      evicted_for_device_limit: evictedInWindow,
+      truncated: devicesInWindow >= DEVICE_ABUSE_ROW_CAP,
+    },
+  });
 }
 
 async function checkIPMismatch(
@@ -543,27 +742,22 @@ async function checkIPMismatch(
   const uniqueIPs = new Set((sessions || []).map(s => s.ip_address).filter(Boolean));
 
   if (uniqueIPs.size >= 5) {
-    const { error: insertError } = await supabase.from('fraud_signals').insert({
-      guild_id: guildId,
-      signal_type: 'ip_mismatch',
+    await upsertOpenFraudSignal(supabase, {
+      guildId,
+      signalType: 'ip_mismatch',
       severity: uniqueIPs.size >= 10 ? 'critical' : 'medium',
-      entity_type: 'license_key',
-      entity_id: licenseKeyId,
-      discord_id: discordId,
+      entityType: 'license_key',
+      entityId: licenseKeyId,
+      discordId,
       description: `${uniqueIPs.size} unique IPs in the last 24 hours`,
       evidence: { unique_ips: uniqueIPs.size, window_hours: 24 },
-      status: 'open',
     });
-
-    if (insertError) {
-      throw new Error(`fraud signal insert failed: ${insertError.message}`);
-    }
   }
 }
 
 /**
- * V11 Audit M-8: Auto-create an incident when ≥ 3 critical fraud signals
- * accumulate within the last hour for a guild.
+ * V11 Audit M-8: Auto-create an incident when ≥ 3 critical fraud signals were
+ * observed or refreshed within the last hour for a guild.
  *
  * Mirror of the bot's `checkCriticalThreshold` — runs in the dashboard
  * context (no event bus) after license validation fraud checks.
@@ -582,7 +776,7 @@ async function checkCriticalFraudThreshold(
     .eq('guild_id', guildId)
     .eq('status', 'open')
     .eq('severity', 'critical')
-    .gte('created_at', since);
+    .gte('last_observed_at', since);
 
   if (countError) {
     throw new Error(`fraud signal count query failed: ${countError.message}`);

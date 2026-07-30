@@ -368,7 +368,14 @@ export default function AnalyticsPage() {
       {/* Promotion Performance */}
       {data.promotions.length > 0 && (
         <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4">
-          <h2 className="text-sm font-semibold text-discord-text-secondary mb-4">Promotion Performance</h2>
+          <h2 className="text-sm font-semibold text-discord-text-secondary">Promotion Performance</h2>
+          {/* Finding 8: nothing in checkout redeems a promotion, so these rows
+              have never discounted an order. Say so rather than implying they
+              are live. */}
+          <p className="mb-4 mt-1 text-xs text-yellow-400">
+            Coupons are disabled — none of these were applied at checkout, and every order was
+            charged full price.
+          </p>
           <div className="space-y-2">
             {data.promotions.map((p) => (
               <div key={p.id} className="flex items-center justify-between rounded-md bg-discord-bg-tertiary p-3">

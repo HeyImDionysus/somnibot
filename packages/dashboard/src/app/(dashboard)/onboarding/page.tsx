@@ -171,13 +171,13 @@ export default function OnboardingPage() {
       </div>
 
       {/* @everyone Lockdown */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
         <div className="flex items-start gap-4">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-red-500/10 text-red-400">
             🔒
           </div>
           <div className="flex-1">
-            <h2 className="text-lg font-semibold text-discord-text-primary">
+            <h2 className="text-lg font-medium text-discord-text-primary">
               @everyone Permissions
             </h2>
             <p className="mt-1 text-sm text-discord-text-muted">
@@ -185,7 +185,7 @@ export default function OnboardingPage() {
               and cannot be changed. New members see only the Discord onboarding screen until they
               complete it and receive the Member role.
             </p>
-            <div className="mt-3 rounded border border-discord-border bg-discord-bg-tertiary px-4 py-2 text-xs text-discord-text-muted">
+            <div className="mt-3 rounded border border-discord-border-subtle bg-discord-bg-tertiary px-4 py-2 text-xs text-discord-text-muted">
               All permissions come from the Member role and above. @everyone = 0 ensures
               unverified members cannot access any channels.
             </div>
@@ -194,10 +194,10 @@ export default function OnboardingPage() {
       </section>
 
       {/* Discord Onboarding Toggle */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-discord-text-primary">
+            <h2 className="text-lg font-medium text-discord-text-primary">
               Discord Onboarding
             </h2>
             <p className="mt-1 text-sm text-discord-text-muted">
@@ -220,15 +220,15 @@ export default function OnboardingPage() {
       </section>
 
       {/* Member Role Selection */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
-        <h2 className="text-lg font-semibold text-discord-text-primary">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
+        <h2 className="text-lg font-medium text-discord-text-primary">
           Member Role
         </h2>
         <p className="mt-1 text-sm text-discord-text-muted">
           The role granted when a member completes onboarding. This unlocks channel access.
         </p>
         <select
-          className="mt-3 w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+          className="mt-3 w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
           value={config.member_role_id ?? ''}
           onChange={(e) =>
             setConfig((prev) => ({
@@ -250,8 +250,8 @@ export default function OnboardingPage() {
       </section>
 
       {/* Interest Role Mapping */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
-        <h2 className="text-lg font-semibold text-discord-text-primary">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
+        <h2 className="text-lg font-medium text-discord-text-primary">
           Interest Roles
         </h2>
         <p className="mt-1 text-sm text-discord-text-muted">
@@ -266,10 +266,10 @@ export default function OnboardingPage() {
               return (
                 <div
                   key={name}
-                  className="flex items-center justify-between rounded border border-discord-border bg-discord-bg-tertiary px-3 py-2"
+                  className="flex items-center justify-between rounded border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2"
                 >
                   <span className="text-sm text-discord-text-primary">
-                    &quot;{name}&quot; → <span className="text-somni-cyan">{role?.name ?? roleId}</span>
+                    &quot;{name}&quot; → <span className="text-discord-accent">{role?.name ?? roleId}</span>
                   </span>
                   <button
                     onClick={() => removeInterestMapping(name)}
@@ -289,12 +289,12 @@ export default function OnboardingPage() {
             placeholder="Interest name..."
             value={newInterestName}
             onChange={(e) => setNewInterestName(e.target.value)}
-            className="flex-1 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-somni-pink focus:outline-none"
+            className="flex-1 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-discord-accent focus:outline-none"
           />
           <select
             value={newInterestRole}
             onChange={(e) => setNewInterestRole(e.target.value)}
-            className="flex-1 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+            className="flex-1 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
           >
             <option value="">Select role...</option>
             {roles
@@ -309,7 +309,7 @@ export default function OnboardingPage() {
           <button
             onClick={addInterestMapping}
             disabled={!newInterestName.trim() || !newInterestRole}
-            className="rounded-md bg-somni-pink px-4 py-2 text-sm font-medium text-white hover:bg-somni-pink/80 disabled:opacity-50"
+            className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent-hover disabled:opacity-50"
           >
             Add
           </button>
@@ -318,8 +318,8 @@ export default function OnboardingPage() {
 
       {/* Native Onboarding Prompts (synced to Discord) */}
       {config.onboarding_enabled && (
-        <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
-          <h2 className="text-lg font-semibold text-discord-text-primary">
+        <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
+          <h2 className="text-lg font-medium text-discord-text-primary">
             Onboarding Prompts
           </h2>
           <p className="mt-1 text-sm text-discord-text-muted">
@@ -331,7 +331,7 @@ export default function OnboardingPage() {
             {(config.onboarding_config?.prompts ?? []).map((prompt, pIdx) => (
               <div
                 key={pIdx}
-                className="rounded border border-discord-border bg-discord-bg-tertiary p-4 space-y-3"
+                className="rounded border border-discord-border-subtle bg-discord-bg-tertiary p-4 space-y-3"
               >
                 <div className="flex items-center justify-between">
                   <input
@@ -346,7 +346,7 @@ export default function OnboardingPage() {
                       }));
                     }}
                     placeholder="Prompt title..."
-                    className="flex-1 rounded-md border border-discord-border bg-discord-bg-primary px-3 py-1.5 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-somni-pink focus:outline-none"
+                    className="flex-1 rounded-md border border-discord-border-subtle bg-discord-bg-primary px-3 py-1.5 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-discord-accent focus:outline-none"
                   />
                   <button
                     onClick={() => {
@@ -375,7 +375,7 @@ export default function OnboardingPage() {
                           onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
                         }));
                       }}
-                      className="h-3.5 w-3.5 rounded accent-somni-pink"
+                      className="h-3.5 w-3.5 rounded accent-discord-accent"
                     />
                     Required
                   </label>
@@ -391,7 +391,7 @@ export default function OnboardingPage() {
                           onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
                         }));
                       }}
-                      className="h-3.5 w-3.5 rounded accent-somni-pink"
+                      className="h-3.5 w-3.5 rounded accent-discord-accent"
                     />
                     Single select
                   </label>
@@ -405,7 +405,7 @@ export default function OnboardingPage() {
                         onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
                       }));
                     }}
-                    className="rounded border border-discord-border bg-discord-bg-primary px-2 py-0.5 text-xs text-discord-text-primary"
+                    className="rounded border border-discord-border-subtle bg-discord-bg-primary px-2 py-0.5 text-xs text-discord-text-primary"
                   >
                     <option value="multiple_choice">Multiple Choice</option>
                     <option value="dropdown">Dropdown</option>
@@ -430,7 +430,7 @@ export default function OnboardingPage() {
                           }));
                         }}
                         placeholder="Option title..."
-                        className="flex-1 rounded border border-discord-border bg-discord-bg-primary px-2 py-1 text-xs text-discord-text-primary placeholder:text-discord-text-muted focus:border-somni-pink focus:outline-none"
+                        className="flex-1 rounded border border-discord-border-subtle bg-discord-bg-primary px-2 py-1 text-xs text-discord-text-primary placeholder:text-discord-text-muted focus:border-discord-accent focus:outline-none"
                       />
                       <button
                         onClick={() => {
@@ -462,7 +462,7 @@ export default function OnboardingPage() {
                         onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
                       }));
                     }}
-                    className="text-xs text-somni-cyan hover:text-somni-cyan/80"
+                    className="text-xs text-discord-accent hover:text-discord-accent/80"
                   >
                     + Add Option
                   </button>
@@ -484,7 +484,7 @@ export default function OnboardingPage() {
                   onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
                 }));
               }}
-              className="rounded-md bg-somni-pink/10 px-4 py-2 text-sm font-medium text-somni-pink hover:bg-somni-pink/20"
+              className="rounded-md bg-discord-accent/10 px-4 py-2 text-sm font-medium text-discord-accent hover:bg-discord-accent/20"
             >
               + Add Prompt
             </button>
@@ -493,8 +493,8 @@ export default function OnboardingPage() {
       )}
 
       {/* Returning Members */}
-      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
-        <h2 className="text-lg font-semibold text-discord-text-primary">
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
+        <h2 className="text-lg font-medium text-discord-text-primary">
           Returning Members
         </h2>
         <p className="mt-1 text-sm text-discord-text-muted">
@@ -513,7 +513,7 @@ export default function OnboardingPage() {
                   returning_member_skip_welcome_dm: e.target.checked,
                 }))
               }
-              className="h-4 w-4 rounded border-discord-border bg-discord-bg-tertiary accent-somni-pink"
+              className="h-4 w-4 rounded border-discord-border-subtle bg-discord-bg-tertiary accent-discord-accent"
             />
             <span className="text-sm text-discord-text-primary">
               Skip welcome DM for returning members
@@ -530,7 +530,7 @@ export default function OnboardingPage() {
                   returning_member_restore_entitlements: e.target.checked,
                 }))
               }
-              className="h-4 w-4 rounded border-discord-border bg-discord-bg-tertiary accent-somni-pink"
+              className="h-4 w-4 rounded border-discord-border-subtle bg-discord-bg-tertiary accent-discord-accent"
             />
             <span className="text-sm text-discord-text-primary">
               Auto-restore entitlement roles (purchases, subscriptions)
@@ -547,7 +547,7 @@ export default function OnboardingPage() {
                   returning_member_restore_levels: e.target.checked,
                 }))
               }
-              className="h-4 w-4 rounded border-discord-border bg-discord-bg-tertiary accent-somni-pink"
+              className="h-4 w-4 rounded border-discord-border-subtle bg-discord-bg-tertiary accent-discord-accent"
             />
             <span className="text-sm text-discord-text-primary">
               Auto-restore level reward roles
@@ -561,7 +561,7 @@ export default function OnboardingPage() {
         <button
           onClick={handleSave}
           disabled={saving}
-          className="rounded-md bg-somni-pink px-6 py-2.5 text-sm font-semibold text-white hover:bg-somni-pink/80 disabled:opacity-50"
+          className="rounded-md bg-discord-accent px-6 py-2.5 text-sm font-medium text-white hover:bg-discord-accent-hover disabled:opacity-50"
         >
           {saving ? 'Saving...' : 'Save Changes'}
         </button>

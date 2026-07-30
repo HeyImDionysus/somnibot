@@ -14,6 +14,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { recordAdminChange } from '@/lib/admin-changes';
 
 const VALID_STATUSES = ['pending', 'approved', 'denied', 'expired'] as const;
 type AppealStatus = (typeof VALID_STATUSES)[number];
@@ -129,6 +130,28 @@ export async function PATCH(req: NextRequest) {
 
   // TODO(audit): appeal.approved / appeal.denied — emit an audit event once the
   // audit wave wires appeal.* into events.ts / audit-service.ts.
+
+  // The decided row is what the atomic update returned, so no second read can
+  // disagree with it. The prior status is known exactly: only a 'pending' row
+  // could have matched.
+  const decided = data as { appellant_discord_id?: string; infraction_id?: string };
+  await recordAdminChange({
+    guildId,
+    actorId: discordId,
+    action: `moderation.appeal_${nextStatus}`,
+    targetType: 'infraction appeal',
+    targetId: id,
+    description:
+      `${nextStatus === 'approved' ? 'Approved' : 'Denied'} the appeal from `
+      + `${decided.appellant_discord_id ?? 'a member'} against their infraction`,
+    before: { status: 'pending' },
+    after: { status: nextStatus, reviewer_id: discordId },
+    blastRadius: 'medium',
+    // The bot's appeals sweep DMs the member the moment decision_notified is
+    // false, so by the time anyone clicks undo the member has been told.
+    undoReason:
+      'the decision is delivered to the member by the bot, so it cannot be silently reversed — decide the next appeal differently instead',
+  }, supabase);
 
   return NextResponse.json({ success: true, data });
 }

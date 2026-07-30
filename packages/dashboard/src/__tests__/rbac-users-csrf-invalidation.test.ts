@@ -95,7 +95,6 @@ function tableMock(config: Record<string, Array<Record<string, unknown>>>) {
   for (const [t, arr] of Object.entries(config)) queues[t] = [...arr];
   mockSupabase.from.mockImplementation((table: string) => {
     const result = queues[table]?.length ? queues[table].shift()! : { data: null, error: null };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const chain: any = {};
     for (const m of ['select', 'eq', 'lt', 'order', 'limit', 'in']) chain[m] = vi.fn(() => chain);
     chain.insert = vi.fn(() => chain);

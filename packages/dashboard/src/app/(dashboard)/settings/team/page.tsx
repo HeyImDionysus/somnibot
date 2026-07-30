@@ -330,7 +330,7 @@ export default function TeamSettingsPage() {
                 disabled={ctrlSaving}
                 onChange={(e) => setMaxPending(Number(e.target.value))}
                 onBlur={(e) => void saveTeamControls({ team_max_pending_invitations: Number(e.target.value) })}
-                className="mt-1 w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+                className="mt-1 w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
               />
             </label>
             <label className="block text-sm">
@@ -342,7 +342,7 @@ export default function TeamSettingsPage() {
                   setExpiryMs(Number(e.target.value));
                   void saveTeamControls({ team_invitation_expiry_ms: Number(e.target.value) });
                 }}
-                className="mt-1 w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+                className="mt-1 w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
               >
                 <option value="86400000">24 hours</option>
                 <option value="259200000">3 days</option>

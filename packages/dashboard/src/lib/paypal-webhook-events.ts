@@ -47,6 +47,22 @@ export const PAYPAL_HANDLED_WEBHOOK_EVENTS = [
     eventType: 'PAYMENT.CAPTURE.REVERSED',
     purpose: 'Revokes access after capture reversals or chargebacks.',
   },
+  {
+    eventType: 'PAYMENT.CAPTURE.DENIED',
+    purpose: 'Cancels the pending order and alerts when PayPal refuses a capture.',
+  },
+  {
+    eventType: 'CUSTOMER.DISPUTE.CREATED',
+    purpose: 'Marks the order disputed and alerts the operator about a chargeback.',
+  },
+  {
+    eventType: 'CUSTOMER.DISPUTE.UPDATED',
+    purpose: 'Keeps the open dispute alert current as the case progresses.',
+  },
+  {
+    eventType: 'CUSTOMER.DISPUTE.RESOLVED',
+    purpose: 'Records the dispute outcome for the operator.',
+  },
 ] as const;
 
 export const PAYPAL_HANDLED_WEBHOOK_EVENT_TYPES = PAYPAL_HANDLED_WEBHOOK_EVENTS.map(

@@ -60,7 +60,7 @@ export function GuildSelector() {
       <select
         value={activeGuildId}
         onChange={(e) => switchGuild(e.target.value)}
-        className="w-full rounded border border-discord-border bg-discord-bg-tertiary px-2.5 py-1.5 text-sm text-discord-text-primary focus:border-somni-pink/50 focus:outline-none"
+        className="w-full rounded border border-discord-border-subtle bg-discord-bg-tertiary px-2.5 py-1.5 text-sm text-discord-text-primary focus:border-somni-pink/50 focus:outline-none"
         title={activeGuild?.name ?? 'Select server'}
       >
         {guilds.map((g) => (

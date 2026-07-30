@@ -1,14 +1,14 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 201 migration files in packages/supabase/migrations/
+ * Source: 222 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
  * database.ts. CI regenerates this file and fails if it differs from the
  * committed copy, forcing a review whenever a migration changes the schema.
  * The generator is a best-effort SQL parser; see the RUNBOOK for its known
- * limitations (no ALTER COLUMN type/nullability tracking, no constraint
+ * limitations (no ALTER COLUMN type tracking, no constraint
  * re-derivation), which is why it is a tripwire rather than the source type.
  */
 
@@ -496,7 +496,7 @@ export interface DbGuildDesiredState {
 }
 
 export interface DbDiscordIdMap {
-  guild_id: string | null;
+  guild_id: string;
   entity_type: 'role' | 'channel' | 'category';
   template_key: string;
   discord_id: string;
@@ -520,7 +520,7 @@ export interface DbGuildLiveState {
 
 export interface DbReactionRole {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   channel_id: string;
   message_id: string;
   emoji: string;
@@ -539,7 +539,7 @@ export interface DbReactionRole {
 
 export interface DbAutomodRule {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   type: 'word_filter' | 'link_filter' | 'invite_filter' | 'spam_filter' | 'duplicate_filter' | 'caps_filter' | 'mention_spam' | 'newline_spam';
   enabled: boolean;
@@ -557,7 +557,7 @@ export interface DbAutomodRule {
 
 export interface DbInfraction {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   member_id: string;
   moderator_id: string;
   type: 'warn' | 'mute' | 'kick' | 'ban';
@@ -592,7 +592,7 @@ export interface DbMessageReport {
 
 export interface DbTicketPanel {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   channel_id: string;
   message_id: string | null;
@@ -619,7 +619,7 @@ export interface DbTicketPanel {
 
 export interface DbTicket {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   panel_id: string | null;
   channel_id: string | null;
   ticket_number: number;
@@ -668,7 +668,7 @@ export interface DbTicketMetric {
 
 export interface DbAutomation {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   description: string | null;
   trigger_type: string;
@@ -691,7 +691,7 @@ export interface DbAutomation {
 export interface DbAutomationExecution {
   id: string;
   automation_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   triggered_by: string;
   trigger_event: string;
   conditions_passed: boolean;
@@ -705,7 +705,7 @@ export interface DbAutomationExecution {
 
 export interface DbCustomCommand {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   description: string;
   actions: Record<string, unknown>[];
@@ -725,7 +725,7 @@ export interface DbCustomCommand {
 
 export interface DbEmbedConfig {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   title: string | null;
   description: string | null;
@@ -748,7 +748,7 @@ export interface DbEmbedConfig {
 // — Levels & XP —
 
 export interface DbMemberLevel {
-  guild_id: string | null;
+  guild_id: string;
   member_id: string;
   xp: number;
   level: number;
@@ -761,7 +761,7 @@ export interface DbMemberLevel {
 
 export interface DbLevelReward {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   level: number;
   role_id: string;
   remove_at_level: number | null;
@@ -771,14 +771,14 @@ export interface DbLevelReward {
 
 export interface DbXpMultiplier {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   role_id: string;
   multiplier: number;
   created_at: string;
 }
 
 export interface DbMemberRankSettings {
-  guild_id: string | null;
+  guild_id: string;
   member_id: string;
   background_url: string | null;
   background_storage_path: string | null;
@@ -794,7 +794,7 @@ export interface DbMemberRankSettings {
 
 export interface DbTempChannelHub {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   hub_channel_id: string;
   category_id: string;
   naming_format: string;
@@ -807,7 +807,7 @@ export interface DbTempChannelHub {
   created_at: string;
   updated_at: string;
   allow_claim: boolean;
-  empty_grace_seconds: number | null;
+  empty_grace_seconds: number;
   room_created_template: string | null;
   control_applied_template: string | null;
   control_denied_template: string | null;
@@ -816,7 +816,7 @@ export interface DbTempChannelHub {
 export interface DbActiveTempChannel {
   channel_id: string;
   text_channel_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   hub_id: string | null;
   owner_id: string;
   created_at: string;
@@ -824,7 +824,7 @@ export interface DbActiveTempChannel {
 
 export interface DbStatsChannel {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   channel_id: string | null;
   stat_type: 'total_members' | 'online_members' | 'bot_count' | 'role_count' | 'channel_count' | 'premium_members' | 'active_tickets' | 'total_xp_earned' | 'highest_level' | 'custom_counter';
   stat_config: Record<string, unknown>;
@@ -840,7 +840,7 @@ export interface DbStatsChannel {
 
 export interface DbScheduledMessage {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   channel_id: string;
   message: string | null;
@@ -865,7 +865,7 @@ export interface DbScheduledMessage {
 
 export interface DbProduct {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   description: string | null;
   type: 'one_time' | 'subscription';
@@ -906,7 +906,7 @@ export interface DbProductFile {
 export interface DbPlan {
   id: string;
   product_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   paypal_plan_id: string | null;
   interval_unit: 'DAY' | 'WEEK' | 'MONTH' | 'YEAR';
@@ -924,7 +924,7 @@ export interface DbPlan {
 export interface DbCustomer {
   id: string;
   user_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   discord_id: string;
   discord_username: string;
   paypal_customer_id: string | null;
@@ -939,7 +939,7 @@ export interface DbCustomer {
 
 export interface DbPromotion {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   name: string;
   type: 'percentage' | 'fixed_amount';
   value: number;
@@ -963,7 +963,7 @@ export interface DbOrder {
   id: string;
   order_number: string;
   customer_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   product_id: string | null;
   plan_id: string | null;
   paypal_order_id: string | null;
@@ -980,6 +980,10 @@ export interface DbOrder {
   granted_channel_ids_snapshot: string[];
   temporary_role_grants_snapshot: Array<{ role_id: string; duration_seconds: number }>;
   grant_snapshot_frozen_at: string | null;
+  checkout_active: boolean;
+  delivery_type_snapshot: string | null;
+  checkout_approval_url: string | null;
+  commerce_compatible_child_status: string | null;
 }
 
 // — Commerce — Licensing —
@@ -989,7 +993,7 @@ export interface DbLicenseKey {
   order_id: string | null;
   customer_id: string | null;
   product_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   key_hash: string;
   key_prefix: string;
   key_suffix: string;
@@ -1010,7 +1014,7 @@ export interface DbLicenseKey {
 export interface DbEntitlement {
   id: string;
   customer_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   product_id: string | null;
   plan_id: string | null;
   license_key_id: string | null;
@@ -1064,7 +1068,7 @@ export interface DbLicenseValidation {
   license_key_id: string | null;
   product_id: string | null;
   device_fingerprint: string | null;
-  result: 'valid' | 'invalid_key' | 'expired' | 'suspended' | 'revoked' | 'over_device_limit' | 'product_mismatch';
+  result: 'valid' | 'invalid_key' | 'expired' | 'suspended' | 'revoked' | 'over_device_limit' | 'product_mismatch' | 'cancelled' | 'pending' | 'grace_period' | 'unavailable' | 'rate_limited' | 'session_invalidated' | 'device_fingerprint_required';
   ip_address: string | null;
   app_version: string | null;
   created_at: string;
@@ -1076,7 +1080,7 @@ export interface DbPayment {
   id: string;
   order_id: string | null;
   customer_id: string | null;
-  guild_id: string | null;
+  guild_id: string;
   paypal_payment_id: string | null;
   paypal_event_id: string | null;
   amount_cents: number;
@@ -1087,13 +1091,14 @@ export interface DbPayment {
   paypal_resource_type: string | null;
   commerce_required_order_status: string | null;
   commerce_settled_capture_order_id: string | null;
+  commerce_customer_totals_recorded_at: string | null;
 }
 
 // — Commerce — Giveaways —
 
 export interface DbGiveaway {
   id: string;
-  guild_id: string | null;
+  guild_id: string;
   channel_id: string;
   message_id: string | null;
   prize: string;
@@ -1143,6 +1148,7 @@ export interface DbWebhookEvent {
   replayed_at: string | null;
   replay_count: number;
   guild_id: string | null;
+  replay_claim_token: string | null;
 }
 
 export interface DbBotDiagnostics {
@@ -1184,6 +1190,7 @@ export interface DbBotActionQueue {
   lane: 'commerce' | 'game';
   claim_token: string | null;
   idempotency_key: string | null;
+  outward_generation_id: string | null;
 }
 
 export interface DbAlert {
@@ -1222,13 +1229,13 @@ export interface DbDashboardRole {
 export interface DbDashboardUserRole {
   id: string;
   guild_id: string;
-  user_id: string;
+  user_id: string | null;
   role_id: string;
   granted_by: string | null;
   created_at: string;
   assigned_at: string;
   assigned_by: string | null;
-  discord_id: string | null;
+  discord_id: string;
 }
 
 // — Customer Portal —
@@ -1238,7 +1245,7 @@ export interface DbPortalSession {
   guild_id: string;
   customer_id: string | null;
   discord_id: string;
-  session_token: string;
+  session_token: string | null;
   ip_address: string | null;
   user_agent: string | null;
   expires_at: string;
@@ -1272,6 +1279,7 @@ export interface DbFraudSignal {
   resolution_note: string | null;
   status: string;
   updated_at: string;
+  last_observed_at: string;
 }
 
 export interface DbFraudRule {
@@ -1310,7 +1318,7 @@ export interface DbIncident {
   duration_seconds: number | null;
   identified_at: string | null;
   impact_summary: string | null;
-  incident_number: number | null;
+  incident_number: number;
   root_cause: string | null;
   source: string | null;
   source_ref_id: string | null;
@@ -1383,9 +1391,9 @@ export interface DbAdminChange {
   id: string;
   guild_id: string;
   actor_id: string;
-  change_type: string;
-  target_table: string;
-  target_id: string;
+  change_type: string | null;
+  target_table: string | null;
+  target_id: string | null;
   before_state: Record<string, unknown> | null;
   after_state: Record<string, unknown> | null;
   description: string | null;
@@ -1512,6 +1520,55 @@ export interface DbCommerceAdminRefundOperations {
   completed_at: string | null;
 }
 
+export interface DbCommerceCheckoutDeactivationProofs {
+  id: string;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  provider_kind: 'capture' | 'subscription';
+  provider_id: string;
+  proof_kind: 'provider_cancelled' | 'provider_expired' | 'approval_link_not_exposed' | 'operator_verified_unpayable';
+  proof_reference: string;
+  proved_at: string;
+}
+
+export interface DbCommerceFulfillmentClaims {
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  order_id: string;
+  claimed_at: string;
+}
+
+export interface DbCommerceFulfillmentHolds {
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  winning_order_id: string | null;
+  conflicting_entitlement_id: string | null;
+  provider_kind: 'capture' | 'subscription';
+  provider_id: string;
+  hold_reason: 'duplicate_paid_fulfillment' | 'unknown_delivery_contract';
+  held_at: string;
+}
+
+export interface DbCommerceFulfillmentOutwardIntents {
+  id: string;
+  order_id: string;
+  guild_id: string;
+  outward_generation_id: string | null;
+  intent_kind: 'purchase_completed_event' | 'subscription_activated_event' | 'receipt_dm' | 'subscription_renewed_event' | 'subscription_cancelled_event' | 'subscription_cancelled_dm' | 'subscription_payment_failed_lapsed_event' | 'subscription_payment_failed_event' | 'subscription_payment_failed_dm' | 'subscription_suspended_event' | 'subscription_suspended_dm';
+  state: 'sending' | 'sent' | 'uncertain' | 'superseded';
+  attempt_token: string | null;
+  started_at: string;
+  sent_at: string | null;
+  uncertain_at: string | null;
+  last_error: string | null;
+  updated_at: string;
+}
+
 export interface DbCommerceLegacySubscriptionGrantContracts {
   order_id: string;
   source_queue_id: string;
@@ -1581,6 +1638,20 @@ export interface DbCommerceProductTempRoleConfig {
   updated_at: string;
 }
 
+export interface DbCommerceProviderIncidents {
+  id: string;
+  webhook_event_id: string;
+  provider_event_type: 'PAYMENT.CAPTURE.COMPLETED' | 'BILLING.SUBSCRIPTION.ACTIVATED' | 'PAYMENT.SALE.COMPLETED';
+  provider_resource_id: string | null;
+  provider_parent_id: string | null;
+  observed_guild_id: string | null;
+  routable_guild_id: string | null;
+  incident_reason: 'provider_identity_malformed' | 'custom_identity_missing_or_malformed' | 'customer_identity_missing_or_mismatched' | 'order_identity_missing_or_ambiguous' | 'product_identity_missing_or_mismatched' | 'plan_identity_missing_or_mismatched' | 'financial_identity_malformed' | 'subscription_sale_router_failed';
+  evidence: Json;
+  alert_id: string | null;
+  created_at: string;
+}
+
 export interface DbCommerceRoleDeliveryIntents {
   id: string;
   contract_kind: 'paid' | 'noncommerce';
@@ -1620,6 +1691,7 @@ export interface DbCommerceRoleDeliveryIntents {
   mutation_started_at: string | null;
   cleanup_mutation_started_at: string | null;
   last_error: string | null;
+  outward_generation_id: string | null;
 }
 
 export interface DbCommerceRoleMetadataMigrationIssues {
@@ -1631,6 +1703,61 @@ export interface DbCommerceRoleMetadataMigrationIssues {
   details: Json;
   resolved_at: string | null;
   created_at: string;
+}
+
+export interface DbCommerceSubscriptionLifecycleEvents {
+  webhook_event_id: string;
+  paypal_subscription_id: string;
+  provider_event_type: string;
+  provider_occurred_at: string;
+  provider_paid_through_at: string | null;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  plan_id: string;
+  disposition: 'accepted' | 'stale';
+  event_priority: number;
+  generation: number;
+  recorded_at: string;
+}
+
+export interface DbCommerceSubscriptionLifecycleHeads {
+  paypal_subscription_id: string;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  plan_id: string;
+  last_webhook_event_id: string;
+  last_provider_event_type: string;
+  last_provider_occurred_at: string;
+  last_event_priority: number;
+  generation: number;
+  paid_through_at: string | null;
+  cancellation_effective_at: string | null;
+  updated_at: string;
+}
+
+export interface DbCommerceSubscriptionSaleHolds {
+  payment_id: string;
+  paypal_payment_id: string;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  plan_id: string;
+  paypal_subscription_id: string;
+  hold_reason: 'financial_mismatch' | 'terminal_or_held_order' | 'renewal_contract_invalid' | 'renewal_action_failed';
+  contract_detail: string;
+  observed_order_status: 'pending' | 'completed' | 'refunded' | 'disputed' | 'cancelled' | 'pending_review';
+  provider_amount_cents: number;
+  provider_currency: string;
+  stored_order_amount_cents: number;
+  stored_order_currency: string;
+  alert_id: string;
+  action_id: string | null;
+  held_at: string;
 }
 
 export interface DbCommerceTempRoleMigrationIssues {
@@ -2142,6 +2269,15 @@ export interface DbPaymentRefunds {
   created_at: string;
   is_terminal_event_witness: boolean;
   paypal_resource_type: string | null;
+}
+
+export interface DbPaypalReconciliationState {
+  singleton: boolean;
+  state: 'running' | 'completed';
+  owner_token: string | null;
+  lease_expires_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
 }
 
 export interface DbPollOptions {

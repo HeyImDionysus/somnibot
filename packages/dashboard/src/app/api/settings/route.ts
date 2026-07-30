@@ -7,6 +7,7 @@ import { parseBody } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { apiServerError } from '@/lib/api/response';
+import { recordAdminChange, humanizeColumn } from '@/lib/admin-changes';
 
 const settingsUpdate = z.object({
   section: z.string().min(1).max(64),
@@ -196,13 +197,51 @@ export async function PUT(request: NextRequest) {
       .filter(([, value]) => !value.includes('••••') && value.trim() !== '')
       .map(([key, value]) => ({ key, value, section, updated_at: now }));
 
+    // NOTE: the upsert's error is still swallowed (pre-existing — this route
+    // reports ok as long as the call does not throw). It is captured here only
+    // so a change that did not land is never recorded as if it had.
+    let upsertError: unknown = null;
     if (upsertRows.length > 0) {
-      await admin
+      const { error } = await admin
         .from('instance_settings')
         .upsert(upsertRows, { onConflict: 'key' });
+      upsertError = error ?? null;
     }
 
     await notifyBot('settings', { section });
+
+    if (upsertRows.length > 0 && !upsertError) {
+      const changedKeys = upsertRows.map((r) => r.key);
+      await recordAdminChange({
+        // `instance_settings` is keyed by `key` alone — it has NO guild column
+        // and every row applies to the whole installation. `admin_changes` is
+        // per-guild and `guild_id` is NOT NULL, so this is filed under the
+        // acting owner's active guild (a real guild from the session, never a
+        // placeholder) and the sentence says out loud that the change is
+        // installation-wide, so nobody reads it as a per-server setting.
+        guildId: auth.ctx.guildId,
+        actorId: auth.ctx.discordId,
+        action: 'instance.settings_updated',
+        targetType: 'installation settings',
+        targetId: section,
+        description:
+          `Changed ${changedKeys.length} ${section} connection setting`
+          + `${changedKeys.length === 1 ? '' : 's'} `
+          + `(${changedKeys.map(humanizeColumn).join(', ')}) for the whole bot installation`,
+        // [security] KEY NAMES ONLY — never values, and no before-read.
+        // instance_settings is where the Discord bot token, the Supabase
+        // service-role key, the PayPal client secret and the Lavalink password
+        // live (SECRET_FIELDS above). Copying either the old or the new value
+        // into before_state/after_state would replicate every credential of
+        // this installation into a table the Admin Changes page renders in
+        // full. The names alone are what an owner needs to see.
+        after: { section, changed_keys: changedKeys },
+        // A wrong bot token or Supabase key takes the entire installation down.
+        blastRadius: 'critical',
+        undoReason:
+          'the previous values are credentials that are deliberately never copied into this log, so there is nothing here to restore them from',
+      }, admin);
+    }
 
     return NextResponse.json({ ok: true });
   } catch (err) {

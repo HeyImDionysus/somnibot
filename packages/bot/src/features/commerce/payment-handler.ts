@@ -48,7 +48,9 @@ interface PayPalTokenResponse {
 }
 
 interface PendingCheckoutOrder {
+  disposition: 'created' | 'replay';
   id: string;
+  order_number: string;
   customer_id: string;
   guild_id: string;
   product_id: string;
@@ -58,17 +60,85 @@ interface PendingCheckoutOrder {
   amount_cents: number;
   currency: string;
   status: string;
+  checkout_active: boolean;
+  checkout_approval_url: string;
+  delivery_type_snapshot: string;
+  granted_role_ids_snapshot: string[];
+  granted_channel_ids_snapshot: string[];
+  temporary_role_grants_snapshot: unknown[];
+  grant_snapshot_frozen_at: string;
+}
+
+const CHECKOUT_DELIVERY_TYPES = new Set([
+  'file',
+  'link',
+  'access_pass',
+  'license_key',
+  'mixed',
+]);
+const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const TIMESTAMPTZ_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+const MAX_TEMP_ROLE_DURATION_SECONDS = 315_360_000;
+
+function isExactSnowflakeVector(value: unknown): value is string[] {
+  return (
+    Array.isArray(value)
+    && value.every((entry) =>
+      typeof entry === 'string'
+      && DISCORD_SNOWFLAKE.test(entry))
+    && new Set(value).size === value.length
+  );
+}
+
+function isExactTemporaryGrantSnapshot(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  const roleIds = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+    const grant = entry as Record<string, unknown>;
+    if (
+      Object.keys(grant).sort().join(',') !== 'duration_seconds,role_id'
+      || typeof grant.role_id !== 'string'
+      || !DISCORD_SNOWFLAKE.test(grant.role_id)
+      || roleIds.has(grant.role_id)
+      || !Number.isSafeInteger(grant.duration_seconds)
+      || (grant.duration_seconds as number) <= 0
+      || (grant.duration_seconds as number) > MAX_TEMP_ROLE_DURATION_SECONDS
+    ) {
+      return false;
+    }
+    roleIds.add(grant.role_id);
+  }
+  return true;
 }
 
 function isExactPendingCheckoutOrder(
   value: unknown,
-  expected: Omit<PendingCheckoutOrder, 'id' | 'status'>,
+  expected: Pick<
+    PendingCheckoutOrder,
+    | 'order_number'
+    | 'customer_id'
+    | 'guild_id'
+    | 'product_id'
+    | 'plan_id'
+    | 'paypal_order_id'
+    | 'paypal_subscription_id'
+    | 'amount_cents'
+    | 'currency'
+    | 'checkout_active'
+    | 'checkout_approval_url'
+  >,
 ): value is PendingCheckoutOrder {
   if (!value || typeof value !== 'object') return false;
   const order = value as Partial<PendingCheckoutOrder>;
   return (
     typeof order.id === 'string'
-    && order.id.length > 0
+    && UUID_PATTERN.test(order.id)
+    && (order.disposition === 'created' || order.disposition === 'replay')
+    && order.order_number === expected.order_number
     && order.status === 'pending'
     && order.customer_id === expected.customer_id
     && order.guild_id === expected.guild_id
@@ -78,45 +148,199 @@ function isExactPendingCheckoutOrder(
     && (order.paypal_subscription_id ?? null) === expected.paypal_subscription_id
     && order.amount_cents === expected.amount_cents
     && order.currency === expected.currency
+    && order.checkout_active === expected.checkout_active
+    && order.checkout_approval_url === expected.checkout_approval_url
+    && typeof order.delivery_type_snapshot === 'string'
+    && CHECKOUT_DELIVERY_TYPES.has(order.delivery_type_snapshot)
+    && isExactSnowflakeVector(order.granted_role_ids_snapshot)
+    && isExactSnowflakeVector(order.granted_channel_ids_snapshot)
+    && isExactTemporaryGrantSnapshot(order.temporary_role_grants_snapshot)
+    && typeof order.grant_snapshot_frozen_at === 'string'
+    && TIMESTAMPTZ_PATTERN.test(order.grant_snapshot_frozen_at)
+    && Number.isFinite(Date.parse(order.grant_snapshot_frozen_at))
   );
 }
 
-async function freezeCheckoutGrantSnapshot(
+type CheckoutBlockReason =
+  | 'provider_checkout'
+  | 'paid_hold'
+  | 'paid_fulfillment'
+  | 'active_entitlement';
+
+type InFlightCheckout =
+  | { state: 'clear' }
+  | {
+      state: 'blocked';
+      orderNumber: string | null;
+      reason: CheckoutBlockReason;
+      approvalUrl: string | null;
+    }
+  | { state: 'unavailable' };
+
+/**
+ * Finding 10: refuse to open a SECOND payment link for a product this customer
+ * already has a live checkout for. Two approval links meant two captures, two
+ * entitlements, and a refund request.
+ *
+ * The service-only inspection RPC can see private paid holds/claims as well as
+ * every still-payable provider row. Its matching INSERT trigger repeats the
+ * decision under the same identity advisory lock used by fulfillment claims,
+ * while the partial unique index serializes ordinary concurrent double-clicks.
+ *
+ * A read ERROR is not "clear": during an outage the live checkout may exist, so
+ * refusing to guess is the only safe answer on the money path.
+ *
+ * Age is intentionally irrelevant. PayPal approval windows are provider/account
+ * state, not a locally provable six-hour expiry (Orders may have an extended
+ * redirect window, and Subscriptions exposes no equivalent local age contract).
+ * Until exact provider state or an operator proves the link cannot be paid, the
+ * active row keeps blocking a second real-money checkout.
+ */
+async function inspectInFlightCheckout(
   supabase: SupabaseClient,
-  order: PendingCheckoutOrder,
-): Promise<boolean> {
-  const { data, error } = await supabase.rpc('commerce_freeze_order_grant_snapshot', {
-    p_order_id: order.id,
-    p_guild_id: order.guild_id,
-    p_customer_id: order.customer_id,
-    p_product_id: order.product_id,
+  guildId: string,
+  customerId: string,
+  productId: string,
+): Promise<InFlightCheckout> {
+  const { data, error } = await supabase.rpc('commerce_inspect_checkout_blocker', {
+    p_guild_id: guildId,
+    p_customer_id: customerId,
+    p_product_id: productId,
   });
+
   if (error) {
-    log.error('Failed to freeze checkout grant snapshot:', error.message);
-    return false;
+    log.error('Failed to inspect in-flight checkout:', error.message);
+    return { state: 'unavailable' };
+  }
+
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    log.error('Checkout blocker inspection returned malformed data');
+    return { state: 'unavailable' };
+  }
+  const result = data as Record<string, unknown>;
+  if (
+    result.disposition === 'clear'
+    && result.reason === null
+    && result.order_id === null
+    && result.order_number === null
+    && result.approval_url === null
+  ) {
+    return { state: 'clear' };
   }
   if (
-    !data
-    || typeof data !== 'object'
-    || (data as Record<string, unknown>).order_id !== order.id
-    || typeof (data as Record<string, unknown>).grant_snapshot_frozen_at !== 'string'
+    result.disposition === 'blocked'
+    && ['provider_checkout', 'paid_hold', 'paid_fulfillment', 'active_entitlement']
+      .includes(String(result.reason))
+    && (result.order_number === null || typeof result.order_number === 'string')
+    && (
+      result.approval_url === null
+      || isPayPalApprovalUrl(result.approval_url)
+    )
+    && (
+      result.reason === 'provider_checkout'
+      || result.approval_url === null
+    )
   ) {
-    log.error('Checkout grant snapshot returned malformed identity');
-    return false;
+    return {
+      state: 'blocked',
+      orderNumber: result.order_number as string | null,
+      reason: result.reason as CheckoutBlockReason,
+      approvalUrl: result.approval_url as string | null,
+    };
   }
-  return true;
+  log.error('Checkout blocker inspection returned malformed identity');
+  return { state: 'unavailable' };
 }
 
-async function cancelUnexposedCheckoutOrder(
-  supabase: SupabaseClient,
-  orderId: string,
-): Promise<void> {
-  const { error } = await supabase
-    .from('orders')
-    .update({ status: 'cancelled', updated_at: new Date().toISOString() })
-    .eq('id', orderId)
-    .eq('status', 'pending');
-  if (error) log.error('Failed to cancel unexposed checkout order:', error.message);
+function isPayPalApprovalUrl(value: unknown): value is string {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.length > 2048
+    || value.trim() !== value
+  ) {
+    return false;
+  }
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return url.protocol === 'https:'
+      && (host === 'paypal.com' || host.endsWith('.paypal.com'));
+  } catch {
+    return false;
+  }
+}
+
+type CheckoutReservationBlock = {
+  orderNumber: string | null;
+  reason: CheckoutBlockReason;
+};
+
+/**
+ * Classify only the two authoritative checkout-reservation failures. Other
+ * unique violations are persistence failures, not proof that another usable
+ * PayPal link exists.
+ */
+function parseCheckoutReservationBlock(
+  error: { code?: string; message?: string } | null,
+): CheckoutReservationBlock | null {
+  if (!error) return null;
+  const message = error.message ?? '';
+  const triggerBlock = message.match(
+    /commerce_checkout_blocked:\s*(provider_checkout|paid_hold|paid_fulfillment|active_entitlement)\s+order\s+(\S+)/,
+  );
+  if (triggerBlock) {
+    return {
+      reason: triggerBlock[1] as CheckoutBlockReason,
+      orderNumber: triggerBlock[2] === 'unknown' ? null : triggerBlock[2],
+    };
+  }
+  if (message.includes('uniq_orders_pending_one_time_checkout')) {
+    return { reason: 'provider_checkout', orderNumber: null };
+  }
+  return null;
+}
+
+function checkoutBlockCopy(
+  block: CheckoutReservationBlock,
+  subscription: boolean,
+): { title: string; description: string } {
+  const previousOrder = block.orderNumber ? ` (**${block.orderNumber}**)` : '';
+  if (block.reason === 'paid_hold' || block.reason === 'paid_fulfillment') {
+    return {
+      title: '⚠️ Previous Payment Needs Review',
+      description:
+        `A previous payment for this product${previousOrder} still requires delivery `
+        + 'or refund review. A second PayPal link is blocked so you cannot be charged '
+        + 'again while that is unresolved. Contact the server owner; you have not been '
+        + 'charged for this click.',
+    };
+  }
+  if (block.reason === 'active_entitlement') {
+    return {
+      title: '⚠️ Already Purchased',
+      description:
+        'You already have an active entitlement for this product. You have not been '
+        + 'charged for this click.',
+    };
+  }
+  return subscription
+    ? {
+        title: '⏳ Checkout Already In Progress',
+        description:
+          `A subscription checkout for this product is already open${previousOrder}. `
+          + 'Use that PayPal link to finish — a second one could create two paid '
+          + 'subscriptions. You have not been charged for this click.',
+      }
+    : {
+        title: '⏳ Checkout Already In Progress',
+        description:
+          `You already have a checkout open for this product${previousOrder}. `
+          + 'Finish paying with the PayPal link you were given, and your purchase will '
+          + 'be delivered automatically.\n\n'
+          + 'A second link would let you be charged twice for the same thing, so it is '
+          + 'not offered. You have not been charged for this click.',
+      };
 }
 
 /**
@@ -207,6 +431,43 @@ export async function handleBuyButton(
     return;
   }
 
+  // DELIVERABILITY guard — a licence-key product whose product_license_config
+  // row is missing takes the money, grants the entitlement and roles, and
+  // delivers NO key (the capture webhook mints a key only when that row
+  // exists). The database now auto-provisions the config, but this is the
+  // last-mile fence: never open a payment link for a product that provably
+  // cannot deliver what it sells. A read ERROR is not "no config" — during an
+  // outage the config may exist, so degrade honestly instead of refusing a
+  // valid sale.
+  if (product.delivery_type === 'license_key') {
+    const { data: licenseConfig, error: licenseConfigError } = await supabase
+      .from('product_license_config')
+      .select('product_id')
+      .eq('product_id', productId)
+      .maybeSingle();
+
+    if (licenseConfigError) {
+      await replyCheckoutUnavailable(interaction, supabase, guildId);
+      return;
+    }
+
+    if (!licenseConfig) {
+      log.error('Refusing checkout for licence product without licence config:', { productId });
+      await interaction.editReply({
+        embeds: [
+          brandedEmbed(brandKit, {
+            intent: 'warning',
+            title: '⚠️ Temporarily Unavailable',
+            description:
+              'This product is not ready to be delivered yet, so it cannot be purchased right now. '
+              + 'You have not been charged — please contact the server owner.',
+          }),
+        ],
+      });
+      return;
+    }
+  }
+
   // Check if user already has an active entitlement for this product. These
   // reads GUARD real money: proceeding when they error (rather than when they
   // genuinely return nothing) would let an outage bypass the already-purchased
@@ -250,6 +511,54 @@ export async function handleBuyButton(
       });
       return;
     }
+
+    // DOUBLE-CHARGE guard — one live checkout per customer per product.
+    const inFlight = await inspectInFlightCheckout(
+      supabase,
+      guildId,
+      existingCustomer.id,
+      productId,
+    );
+    if (inFlight.state === 'unavailable') {
+      await replyCheckoutUnavailable(interaction, supabase, guildId);
+      return;
+    }
+    if (inFlight.state === 'blocked') {
+      if (inFlight.reason === 'provider_checkout' && inFlight.approvalUrl) {
+        await interaction.editReply({
+          embeds: [
+            brandedEmbed(brandKit, {
+              intent: 'primary',
+              title: product.type === 'subscription'
+                ? `🔄 Resume Subscription: ${product.name}`
+                : `🛒 Resume Purchase: ${product.name}`,
+              description:
+                'Your existing PayPal checkout is still available. Continue it below; no second checkout was created.',
+            }),
+          ],
+          components: [
+            new ActionRowBuilder<ButtonBuilder>().addComponents(
+              new ButtonBuilder()
+                .setLabel(product.type === 'subscription' ? 'Continue Subscription' : 'Continue Purchase')
+                .setStyle(ButtonStyle.Link)
+                .setURL(inFlight.approvalUrl)
+                .setEmoji('💳'),
+            ),
+          ],
+        });
+        return;
+      }
+      const copy = checkoutBlockCopy(inFlight, product.type === 'subscription');
+      await interaction.editReply({
+        embeds: [
+          brandedEmbed(brandKit, {
+            intent: 'warning',
+            ...copy,
+          }),
+        ],
+      });
+      return;
+    }
   }
 
   // Get or create customer
@@ -283,19 +592,40 @@ export async function handleBuyButton(
   }
 
   const price = (product.price_cents / 100).toFixed(2);
-  const returnUrl = `${dashboardUrl}/store?order_complete=true`;
-  const cancelUrl = `${dashboardUrl}/store?order_cancelled=true`;
+  // Post-checkout destinations MUST be publicly reachable: the buyer is a
+  // Discord customer, not a dashboard admin. `/store` lives under
+  // app/(dashboard) and is not in the middleware's public-route list, so the
+  // old return_url dumped every paying customer on the admin /login page — and
+  // nothing ever read the `order_complete` / `order_cancelled` params anyway.
+  // `/portal/*` is already sessionless-public, so these pages need no
+  // middleware change and expose no admin surface. The guild id rides along so
+  // the page can link to the right per-guild portal; it is a public server id,
+  // and the pages deliberately show NOTHING customer-specific because these
+  // URLs are guessable.
+  const portalQuery = `?guild=${encodeURIComponent(guildId)}`;
+  const returnUrl = `${dashboardUrl}/portal/order-complete${portalQuery}`;
+  const cancelUrl = `${dashboardUrl}/portal/order-cancelled${portalQuery}`;
   // White-label: the PayPal checkout brand must be the owner's store brand.
   const brandName = brandKit.brandName;
 
   if (product.type === 'one_time') {
+    const productCurrency =
+      typeof product.currency === 'string' && /^[A-Za-z]{3}$/.test(product.currency)
+        ? product.currency.toUpperCase()
+        : null;
+    if (!productCurrency) {
+      await interaction.editReply({
+        content: '❌ This product has an invalid billing currency and cannot be purchased.',
+      });
+      return;
+    }
     // Create PayPal order
     const orderPayload = {
       intent: 'CAPTURE',
       purchase_units: [
         {
           amount: {
-            currency_code: product.currency,
+            currency_code: productCurrency,
             value: price,
           },
           description: product.name,
@@ -337,7 +667,7 @@ export async function handleBuyButton(
     const orderData = await orderRes.json() as { id: string; links?: Array<{ rel: string; href: string }> };
     const approvalLink = orderData.links?.find((l) => l.rel === 'approve');
 
-    if (!approvalLink?.href) {
+    if (!isPayPalApprovalUrl(approvalLink?.href)) {
       await interaction.editReply({ content: '❌ Failed to get checkout URL.' });
       return;
     }
@@ -347,6 +677,7 @@ export async function handleBuyButton(
     const orderNumber = seqResult || `ORD-${Date.now().toString(36).toUpperCase()}`;
 
     const expectedOrder = {
+      order_number: orderNumber,
       customer_id: customerId,
       guild_id: guildId,
       product_id: productId,
@@ -354,28 +685,57 @@ export async function handleBuyButton(
       paypal_order_id: orderData.id,
       paypal_subscription_id: null,
       amount_cents: product.price_cents,
-      currency: product.currency,
+      currency: productCurrency,
+      checkout_active: true,
+      checkout_approval_url: approvalLink.href,
     };
-    const { data: pendingOrder, error: pendingOrderError } = await supabase.from('orders').insert({
-      order_number: orderNumber,
-      ...expectedOrder,
-      status: 'pending',
-      source: 'purchase',
-    })
-      .select('id,customer_id,guild_id,product_id,plan_id,paypal_order_id,paypal_subscription_id,amount_cents,currency,status')
-      .single();
+    let pendingOrder: unknown = null;
+    let pendingOrderError: { code?: string; message?: string } | null = null;
+    // An RPC response can be lost after commit. Replay the exact provider and
+    // order-number contract once; SQL returns the already-frozen row only when
+    // every immutable field still matches.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await supabase.rpc('commerce_create_active_paid_checkout', {
+        p_order_number: orderNumber,
+        p_guild_id: guildId,
+        p_customer_id: customerId,
+        p_product_id: productId,
+        p_plan_id: null,
+        p_provider_kind: 'capture',
+        p_provider_id: orderData.id,
+        p_approval_url: approvalLink.href,
+        p_amount_cents: product.price_cents,
+        p_currency: productCurrency,
+      });
+      pendingOrder = response.data;
+      pendingOrderError = response.error;
+      if (!pendingOrderError && isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
+        break;
+      }
+      if (parseCheckoutReservationBlock(pendingOrderError)) break;
+    }
 
     if (pendingOrderError || !isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
+      // The pending-checkout unique index is the atomic version of the
+      // pre-flight guard above: it is what actually stops a genuine
+      // double-click, where both clicks read "clear" before either inserted.
+      // The link is never exposed, so the losing PayPal order cannot be paid.
+      const reservationBlock = parseCheckoutReservationBlock(pendingOrderError);
+      if (reservationBlock) {
+        log.warn('Refused a concurrent second checkout for the same product', { productId });
+        await interaction.editReply({
+          embeds: [
+            brandedEmbed(brandKit, {
+              intent: 'warning',
+              ...checkoutBlockCopy(reservationBlock, false),
+            }),
+          ],
+        });
+        return;
+      }
       log.error('Failed to persist one-time checkout order:', pendingOrderError?.message ?? 'identity mismatch');
       await interaction.editReply({
         content: '❌ Checkout could not be safely recorded. No payment link was opened; please try again.',
-      });
-      return;
-    }
-    if (!(await freezeCheckoutGrantSnapshot(supabase, pendingOrder))) {
-      await cancelUnexposedCheckoutOrder(supabase, pendingOrder.id);
-      await interaction.editReply({
-        content: '❌ Checkout configuration changed before it could be secured. No payment link was opened; please try again.',
       });
       return;
     }
@@ -386,7 +746,7 @@ export async function handleBuyButton(
           intent: 'primary',
           title: `🛒 Purchase: ${product.name}`,
           description:
-            `**Price:** $${price} ${product.currency}\n\nClick the button below to complete your purchase via PayPal.`,
+            `**Price:** $${price} ${productCurrency}\n\nClick the button below to complete your purchase via PayPal.`,
         }),
       ],
       components: [
@@ -432,6 +792,16 @@ export async function handleBuyButton(
       await interaction.editReply({ content: '❌ No active subscription plan found for this product.' });
       return;
     }
+    const planCurrency =
+      typeof plan.currency === 'string' && /^[A-Za-z]{3}$/.test(plan.currency)
+        ? plan.currency.toUpperCase()
+        : null;
+    if (!planCurrency) {
+      await interaction.editReply({
+        content: '❌ This subscription has an invalid billing currency and cannot be purchased.',
+      });
+      return;
+    }
 
     // Create PayPal subscription
     const subPayload = {
@@ -471,7 +841,7 @@ export async function handleBuyButton(
     const subData = await subRes.json() as { id: string; links?: Array<{ rel: string; href: string }> };
     const approvalLink = subData.links?.find((l) => l.rel === 'approve');
 
-    if (!approvalLink?.href) {
+    if (!isPayPalApprovalUrl(approvalLink?.href)) {
       await interaction.editReply({ content: '❌ Failed to get checkout URL.' });
       return;
     }
@@ -484,6 +854,7 @@ export async function handleBuyButton(
     const orderNumber = seqResult || `ORD-${Date.now().toString(36).toUpperCase()}`;
 
     const expectedOrder = {
+      order_number: orderNumber,
       customer_id: customerId,
       guild_id: guildId,
       product_id: productId,
@@ -491,28 +862,52 @@ export async function handleBuyButton(
       paypal_order_id: null,
       paypal_subscription_id: subData.id,
       amount_cents: plan.price_cents,
-      currency: plan.currency,
+      currency: planCurrency,
+      checkout_active: true,
+      checkout_approval_url: approvalLink.href,
     };
-    const { data: pendingOrder, error: pendingOrderError } = await supabase.from('orders').insert({
-      order_number: orderNumber,
-      ...expectedOrder,
-      status: 'pending',
-      source: 'purchase',
-    })
-      .select('id,customer_id,guild_id,product_id,plan_id,paypal_order_id,paypal_subscription_id,amount_cents,currency,status')
-      .single();
+    let pendingOrder: unknown = null;
+    let pendingOrderError: { code?: string; message?: string } | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await supabase.rpc('commerce_create_active_paid_checkout', {
+        p_order_number: orderNumber,
+        p_guild_id: guildId,
+        p_customer_id: customerId,
+        p_product_id: productId,
+        p_plan_id: plan.id,
+        p_provider_kind: 'subscription',
+        p_provider_id: subData.id,
+        p_approval_url: approvalLink.href,
+        p_amount_cents: plan.price_cents,
+        p_currency: planCurrency,
+      });
+      pendingOrder = response.data;
+      pendingOrderError = response.error;
+      if (!pendingOrderError && isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
+        break;
+      }
+      if (parseCheckoutReservationBlock(pendingOrderError)) break;
+    }
 
     if (pendingOrderError || !isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
+      const reservationBlock = parseCheckoutReservationBlock(pendingOrderError);
+      if (reservationBlock) {
+        log.warn('Refused a concurrent second subscription checkout for the same product', {
+          productId,
+        });
+        await interaction.editReply({
+          embeds: [
+            brandedEmbed(brandKit, {
+              intent: 'warning',
+              ...checkoutBlockCopy(reservationBlock, true),
+            }),
+          ],
+        });
+        return;
+      }
       log.error('Failed to persist subscription checkout order:', pendingOrderError?.message ?? 'identity mismatch');
       await interaction.editReply({
         content: '❌ Checkout could not be safely recorded. No subscription link was opened; please try again.',
-      });
-      return;
-    }
-    if (!(await freezeCheckoutGrantSnapshot(supabase, pendingOrder))) {
-      await cancelUnexposedCheckoutOrder(supabase, pendingOrder.id);
-      await interaction.editReply({
-        content: '❌ Checkout configuration changed before it could be secured. No subscription link was opened; please try again.',
       });
       return;
     }
@@ -523,7 +918,7 @@ export async function handleBuyButton(
           intent: 'primary',
           title: `🔄 Subscribe: ${product.name}`,
           description:
-            `**Plan:** ${plan.name}\n**Price:** $${(plan.price_cents / 100).toFixed(2)} ${plan.currency}/${plan.interval_unit.toLowerCase()}\n\nClick the button below to start your subscription via PayPal.`,
+            `**Plan:** ${plan.name}\n**Price:** $${(plan.price_cents / 100).toFixed(2)} ${planCurrency}/${plan.interval_unit.toLowerCase()}\n\nClick the button below to start your subscription via PayPal.`,
         }),
       ],
       components: [

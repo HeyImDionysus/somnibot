@@ -30,6 +30,12 @@ vi.mock('@/lib/paypal', () => ({
   }),
   getPayPalToken: vi.fn().mockResolvedValue('test-token'),
   getPayPalTokenResult: vi.fn().mockResolvedValue({ ok: true, token: 'test-token' }),
+  getSubscriptionAmount: vi.fn().mockResolvedValue({
+    amountCents: 999,
+    currency: 'EUR',
+    planId: 'PAYPAL-PLAN-1',
+    nextBillingTime: '2026-08-29T00:00:00.000Z',
+  }),
   isRetriablePayPalStatus: (status: number) => status >= 500 || status === 429 || status === 408,
   PAYPAL_API_BASE: 'https://api-m.sandbox.paypal.com',
 }));
@@ -44,15 +50,24 @@ import { resolveRefundPaymentId } from '@/app/api/paypal/webhook/handlers';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { getPayPalTokenResult } from '@/lib/paypal';
 
+const REPLAY_CLAIM_TOKEN = '11111111-1111-4111-8111-111111111111';
+
+function withProviderTime(body: unknown): unknown {
+  return body !== null && typeof body === 'object' && !Array.isArray(body)
+    ? { create_time: '2026-07-29T00:00:00.000Z', ...body }
+    : body;
+}
+
 function makeReplay(body: unknown, headers: Record<string, string> = {}) {
   return new Request('http://localhost/api/paypal/webhook', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-replay-secret': replaySecret,
+      'x-replay-claim-token': REPLAY_CLAIM_TOKEN,
       ...headers,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(withProviderTime(body)),
   });
 }
 
@@ -67,7 +82,7 @@ function makeSignedWebhook(body: unknown) {
       'paypal-transmission-sig': 'sig-1',
       'paypal-transmission-time': new Date().toISOString(),
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(withProviderTime(body)),
   });
 }
 
@@ -195,7 +210,13 @@ describe('PayPal refund parent identity', () => {
 
 function makeMockSupabase() {
   const fromFn = vi.fn();
-  const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
+  const rpc = vi.fn(async (name: string) => ({
+    data: name === 'webhooks_replay_claim_is_current'
+      || name === 'webhooks_finish_replay_claim'
+      ? true
+      : null,
+    error: null,
+  }));
 
   function makeChain(resolvedValue?: { data: unknown; error: unknown }) {
     const defaultResolved = resolvedValue ?? { data: null, error: null };
@@ -294,8 +315,142 @@ function useWebhookRows(
   const rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
   const tableCallCounts = new Map<string, number>();
   let recordCallCount = 0;
+  const tableData = (table: string): Record<string, unknown>[] => {
+    const configured = rows[table];
+    const results = Array.isArray(configured) ? configured : configured ? [configured] : [];
+    return results.flatMap((result) => {
+      if (Array.isArray(result.data)) {
+        return result.data.filter(
+          (value): value is Record<string, unknown> =>
+            value !== null && typeof value === 'object' && !Array.isArray(value),
+        );
+      }
+      return result.data !== null
+        && typeof result.data === 'object'
+        && !Array.isArray(result.data)
+        ? [result.data as Record<string, unknown>]
+        : [];
+    });
+  };
   mockSb.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+    if (
+      name === 'webhooks_replay_claim_is_current'
+      || name === 'webhooks_finish_replay_claim'
+    ) {
+      return { data: true, error: null };
+    }
     rpcCalls.push({ name, args });
+    if (name === 'commerce_record_subscription_lifecycle_observation') {
+      return {
+        data: {
+          disposition: 'accepted',
+          accepted: true,
+          generation: 1,
+          webhook_event_id: args.p_webhook_event_id,
+          provider_event_type: args.p_provider_event_type,
+          provider_occurred_at: args.p_provider_occurred_at,
+          provider_paid_through_at: args.p_provider_paid_through_at,
+          paypal_subscription_id: args.p_paypal_subscription_id,
+          order_id: args.p_order_id,
+          guild_id: args.p_guild_id,
+          customer_id: args.p_customer_id,
+          product_id: args.p_product_id,
+          plan_id: args.p_plan_id,
+        },
+        error: null,
+      };
+    }
+    if (name === 'commerce_record_subscription_sale_or_hold') {
+      const order = tableData('orders').find((row) => row.id === args.p_order_id);
+      const payment = tableData('payments').find(
+        (row) => row.paypal_payment_id === args.p_paypal_payment_id,
+      );
+      const terminalPaymentStatus =
+        payment?.status === 'refunded' || payment?.status === 'reversed'
+          ? payment.status
+          : 'completed';
+      const successorReplay = terminalPaymentStatus !== 'completed';
+      const financialMismatch =
+        order?.amount_cents !== args.p_amount_cents
+        || order?.currency !== args.p_currency;
+      const disposition = financialMismatch
+        ? 'held_financial_mismatch'
+        : successorReplay
+          ? 'successor_replay'
+          : 'staged';
+      return {
+        data: {
+          disposition,
+          fulfillment_allowed: disposition === 'staged',
+          paypal_payment_id: args.p_paypal_payment_id,
+          paypal_subscription_id: args.p_paypal_subscription_id,
+          order_id: args.p_order_id,
+          order_number: order?.order_number,
+          guild_id: args.p_guild_id,
+          customer_id: args.p_customer_id,
+          product_id: args.p_product_id,
+          plan_id: args.p_plan_id,
+          stored_order_amount_cents: order?.amount_cents,
+          stored_order_currency: order?.currency,
+          provider_payment_amount_cents: args.p_amount_cents,
+          provider_payment_currency: args.p_currency,
+          payment_id: payment?.id ?? 'payment-router-created',
+          payment_created: payment === undefined,
+          terminal_payment_status: terminalPaymentStatus,
+          action_id: disposition === 'staged' ? 'action-router-created' : null,
+          action: disposition === 'staged' ? 'fulfill_subscription' : null,
+          action_status: disposition === 'staged' ? 'pending' : null,
+          idempotency_key: disposition !== 'staged'
+            ? null
+            : `paypal:sale:${String(args.p_paypal_payment_id)}:fulfill_subscription_renewal`,
+          payload: disposition === 'staged'
+            ? { fulfillment_type: 'subscription_renewed' }
+            : null,
+          hold_reason: financialMismatch ? 'financial_mismatch' : null,
+          contract_detail: financialMismatch ? 'provider amount differs from order' : null,
+          alert_id: financialMismatch ? 'alert-financial-mismatch' : null,
+          alert_type: financialMismatch ? 'commerce_financial_mismatch' : null,
+        },
+        error: null,
+      };
+    }
+    if (name === 'commerce_create_or_recover_subscription_lifecycle_action') {
+      const order = tableData('orders').find((row) => row.id === args.p_order_id);
+      const carrier = tableData('bot_action_queue').find(
+        (row) => row.idempotency_key
+          === `paypal:subscription:${String(args.p_paypal_subscription_id)}:fulfill_subscription`,
+      );
+      const carrierPayload = carrier?.payload as Record<string, unknown> | undefined;
+      const replay = tableData('bot_action_queue').some(
+        (row) => row !== carrier && typeof row.id === 'string' && row.id.length > 0,
+      );
+      return {
+        data: {
+          disposition: replay ? 'replay' : 'created',
+          action_id: 'action-lifecycle-created',
+          action_status: 'pending',
+          action: args.p_fulfillment_type === 'subscription_cancelled'
+            ? 'fulfill_cancellation'
+            : 'fulfill_suspension',
+          idempotency_key:
+            `paypal:lifecycle:${String(args.p_webhook_event_id)}:${String(args.p_fulfillment_type)}`,
+          webhook_event_id: args.p_webhook_event_id,
+          fulfillment_type: args.p_fulfillment_type,
+          guild_id: args.p_guild_id,
+          customer_id: args.p_customer_id,
+          discord_id: args.p_discord_id,
+          product_id: args.p_product_id,
+          product_name: carrierPayload?.product_name,
+          order_id: args.p_order_id,
+          order_number: order?.order_number,
+          plan_id: args.p_plan_id,
+          paypal_subscription_id: args.p_paypal_subscription_id,
+          amount_cents: order?.amount_cents,
+          currency: order?.currency,
+        },
+        error: null,
+      };
+    }
     if (name === 'bot_action_queue_release_staged') {
       if (rpcOptions.releaseError) return { data: null, error: rpcOptions.releaseError };
       return {
@@ -2189,7 +2344,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
     ['underpayment', '9.98', 'EUR'],
     ['overpayment', '10.00', 'EUR'],
     ['currency mismatch', '9.99', 'USD'],
-  ])('PAYMENT.SALE.COMPLETED rejects renewal %s before payment or fulfillment', async (
+  ])('PAYMENT.SALE.COMPLETED atomically holds renewal %s without legacy writes', async (
     _label,
     total,
     currency,
@@ -2201,7 +2356,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
         subscriptionId: `SUB-RENEWAL-${_label.replaceAll(' ', '-').toUpperCase()}`,
         saleId: `SALE-RENEWAL-${_label.replaceAll(' ', '-').toUpperCase()}`,
       });
-      const { inserts } = useWebhookRows(context.rows);
+      const { inserts, rpcCalls } = useWebhookRows(context.rows);
       const req = makeReplay({
         event_type: 'PAYMENT.SALE.COMPLETED',
         resource: {
@@ -2213,7 +2368,13 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
       });
 
       const res = await POST(req as never);
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(200);
+      expect(rpcCalls).toContainEqual({
+        name: 'commerce_record_subscription_sale_or_hold',
+        args: expect.objectContaining({
+          p_paypal_subscription_id: context.order.paypal_subscription_id,
+        }),
+      });
       expect(inserts).not.toContainEqual(expect.objectContaining({ table: 'payments' }));
       expect(inserts).not.toContainEqual(expect.objectContaining({ table: 'bot_action_queue' }));
     } finally {
@@ -2258,7 +2419,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
       subscriptionId: 'SUB-EUR-1',
       saleId: 'SALE-EUR-1',
     });
-    const { inserts } = useWebhookRows({
+    const { rpcCalls } = useWebhookRows({
       ...context.rows,
       payments: {
         data: {
@@ -2288,27 +2449,15 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
 
     const res = await POST(req as never);
     expect(res.status).toBe(200);
-    expect(inserts).toContainEqual({
-      table: 'payments',
-      payload: expect.objectContaining({
-        paypal_payment_id: 'SALE-EUR-1',
-        amount_cents: 999,
-        currency: 'EUR',
-        status: 'completed',
-        paypal_resource_type: 'sale',
-      }),
-    });
-    expect(inserts).toContainEqual({
-      table: 'bot_action_queue',
-      payload: expect.objectContaining({
-        idempotency_key: 'paypal:sale:SALE-EUR-1:fulfill_subscription_renewal',
-        action: 'fulfill_subscription',
-        payload: expect.objectContaining({
-          fulfillment_type: 'subscription_renewed',
-          existing_entitlement_id: 'entitlement-order-sub-eur',
-          plan_id: 'plan-order-sub-eur',
-          discord_id: 'discord-1',
-        }),
+    expect(rpcCalls).toContainEqual({
+      name: 'commerce_record_subscription_sale_or_hold',
+      args: expect.objectContaining({
+        p_paypal_payment_id: 'SALE-EUR-1',
+        p_paypal_subscription_id: 'SUB-EUR-1',
+        p_order_id: 'order-sub-eur',
+        p_plan_id: 'plan-order-sub-eur',
+        p_amount_cents: 999,
+        p_currency: 'EUR',
       }),
     });
   });
@@ -2375,7 +2524,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
       subscriptionId: 'SUB-EXACT-REPLAY',
       saleId: 'SALE-EXACT-REPLAY',
     });
-    const { inserts } = useWebhookRows({
+    const { rpcCalls } = useWebhookRows({
       ...context.rows,
       payments: [
         { data: null, error: { code: '23505', message: 'duplicate payment' } },
@@ -2407,7 +2556,8 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
 
     const res = await POST(req as never);
     expect(res.status).toBe(200);
-    expect(inserts.filter(({ table }) => table === 'payments')).toHaveLength(1);
+    expect(rpcCalls.filter(({ name }) =>
+      name === 'commerce_record_subscription_sale_or_hold')).toHaveLength(1);
   });
 
   it.each([
@@ -2417,12 +2567,15 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
   ] as const)(
     'PAYMENT.SALE.COMPLETED treats an exact %s sale replay with a %s order as a successor-state no-op',
     async (successorStatus, successorOrderStatus) => {
-      const { inserts, updates } = useWebhookRows({
+      const { rpcCalls, updates } = useWebhookRows({
         orders: {
           data: {
             id: 'order-successor-replay',
+            order_number: 'ORD-SUCCESSOR-REPLAY',
             customer_id: 'customer-1',
             guild_id: 'guild-1',
+            product_id: 'product-successor-replay',
+            plan_id: 'plan-successor-replay',
             paypal_subscription_id: 'SUB-SUCCESSOR-REPLAY',
             amount_cents: 999,
             currency: 'EUR',
@@ -2460,7 +2613,8 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
 
       const res = await POST(req as never);
       expect(res.status).toBe(200);
-      expect(inserts.filter(({ table }) => table === 'payments')).toHaveLength(1);
+      expect(rpcCalls.filter(({ name }) =>
+        name === 'commerce_record_subscription_sale_or_hold')).toHaveLength(1);
       expect(updates.filter(({ table }) => table === 'payments')).toEqual([]);
     },
   );
@@ -2594,7 +2748,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
         subscriptionId: 'SUB-RESUMED-SALE',
         saleId: 'SALE-RESUMED',
       });
-      const { inserts, updates } = useWebhookRows({
+      const { rpcCalls, updates } = useWebhookRows({
         ...context.rows,
         orders: [
           {
@@ -2648,7 +2802,8 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
 
       const res = await POST(req as never);
       expect(res.status).toBe(200);
-      expect(inserts.filter(({ table }) => table === 'payments')).toHaveLength(1);
+      expect(rpcCalls.filter(({ name }) =>
+        name === 'commerce_record_subscription_sale_or_hold')).toHaveLength(1);
       expect(updates).toContainEqual({
         table: 'webhook_events',
         payload: expect.objectContaining({ result: null, error_details: null }),
@@ -3168,7 +3323,11 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
             guild_id: 'guild-1',
             customer_id: 'customer-1',
             product_id: 'product-1',
+            plan_id: 'plan-1',
             paypal_subscription_id: input.eventId.replace(/^EVT-/, ''),
+            amount_cents: 999,
+            currency: 'USD',
+            status: 'completed',
           },
           error: null,
         },
@@ -3182,8 +3341,33 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
         error: null,
       },
       bot_action_queue: [
-        input.queueProbe, // retry dedupe probe
-        { data: null, error: null }, // fulfillment insert
+        {
+          data: {
+            id: 'activation-carrier-1',
+            guild_id: 'guild-1',
+            action: 'fulfill_subscription',
+            lane: 'commerce',
+            status: 'completed',
+            idempotency_key:
+              `paypal:subscription:${input.eventId.replace(/^EVT-/, '')}:fulfill_subscription`,
+            payload: {
+              fulfillment_type: 'subscription_activated',
+              guild_id: 'guild-1',
+              customer_id: 'customer-1',
+              discord_id: 'discord-1',
+              product_id: 'product-1',
+              product_name: 'Subscription',
+              order_id: input.orderId,
+              order_number: `ORD-${input.orderId}`,
+              plan_id: 'plan-1',
+              paypal_plan_id: 'PAYPAL-PLAN-1',
+              paypal_subscription_id: input.eventId.replace(/^EVT-/, ''),
+              entitlement_type: 'subscription',
+            },
+          },
+          error: null,
+        },
+        input.queueProbe,
       ],
     });
   }
@@ -3194,7 +3378,7 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
       new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
     );
     try {
-      const { inserts, updates } = useResumedSubscriptionRows({
+      const { rpcCalls, updates } = useResumedSubscriptionRows({
         eventId: 'EVT-SUB-CANCEL-RETRY',
         orderId: 'order-cancel-retry',
         queueProbe: { data: [], error: null }, // failed attempt queued nothing
@@ -3208,25 +3392,15 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
 
       const res = await POST(req as never);
       expect(res.status).toBe(200);
-      const fulfillmentInserts = inserts.filter(
-        (i) =>
-          i.table === 'bot_action_queue' &&
-          (i.payload as { action?: string }).action === 'fulfill_cancellation',
-      );
-      expect(fulfillmentInserts).toHaveLength(1);
-      expect(fulfillmentInserts[0]!.payload).toEqual(
-        expect.objectContaining({
-          guild_id: 'guild-1',
-          action: 'fulfill_cancellation',
-          payload: expect.objectContaining({
-            fulfillment_type: 'subscription_cancelled',
-            order_id: 'order-cancel-retry',
-            discord_id: 'discord-1',
-            webhook_event_id: 'EVT-SUB-CANCEL-RETRY',
-          }),
-          status: 'pending',
+      expect(rpcCalls).toContainEqual({
+        name: 'commerce_create_or_recover_subscription_lifecycle_action',
+        args: expect.objectContaining({
+          p_webhook_event_id: 'EVT-SUB-CANCEL-RETRY',
+          p_fulfillment_type: 'subscription_cancelled',
+          p_order_id: 'order-cancel-retry',
+          p_discord_id: 'discord-1',
         }),
-      );
+      });
       expect(updates).toContainEqual({
         table: 'webhook_events',
         payload: expect.objectContaining({ result: 'success' }),
@@ -3242,7 +3416,7 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
       new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
     );
     try {
-      const { inserts, updates } = useResumedSubscriptionRows({
+      const { rpcCalls, updates } = useResumedSubscriptionRows({
         eventId: 'EVT-SUB-CANCEL-RETRY-DUP',
         orderId: 'order-cancel-retry-dup',
         queueProbe: { data: [{ id: 'queued-cancel-1' }], error: null },
@@ -3256,12 +3430,8 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
 
       const res = await POST(req as never);
       expect(res.status).toBe(200);
-      expect(inserts).not.toContainEqual(
-        expect.objectContaining({
-          table: 'bot_action_queue',
-          payload: expect.objectContaining({ action: 'fulfill_cancellation' }),
-        }),
-      );
+      expect(rpcCalls.filter(({ name }) =>
+        name === 'commerce_create_or_recover_subscription_lifecycle_action')).toHaveLength(1);
       expect(updates).toContainEqual({
         table: 'webhook_events',
         payload: expect.objectContaining({ result: 'success' }),
@@ -3277,7 +3447,7 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
       new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
     );
     try {
-      const { inserts } = useResumedSubscriptionRows({
+      const { rpcCalls } = useResumedSubscriptionRows({
         eventId: 'EVT-SUB-SUSPEND-RETRY',
         orderId: 'order-suspend-retry',
         queueProbe: { data: [], error: null },
@@ -3291,15 +3461,12 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
 
       const res = await POST(req as never);
       expect(res.status).toBe(200);
-      expect(inserts).toContainEqual({
-        table: 'bot_action_queue',
-        payload: expect.objectContaining({
-          action: 'fulfill_suspension',
-          payload: expect.objectContaining({
-            fulfillment_type: 'subscription_suspended',
-            order_id: 'order-suspend-retry',
-            webhook_event_id: 'EVT-SUB-SUSPEND-RETRY',
-          }),
+      expect(rpcCalls).toContainEqual({
+        name: 'commerce_create_or_recover_subscription_lifecycle_action',
+        args: expect.objectContaining({
+          p_webhook_event_id: 'EVT-SUB-SUSPEND-RETRY',
+          p_fulfillment_type: 'subscription_suspended',
+          p_order_id: 'order-suspend-retry',
         }),
       });
     } finally {
@@ -3307,13 +3474,13 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
     }
   });
 
-  it('errored BILLING.SUBSCRIPTION.PAYMENT.FAILED is resumable — redelivery queues the suspension fulfillment', async () => {
+  it('errored BILLING.SUBSCRIPTION.PAYMENT.FAILED resumes through its distinct lifecycle action', async () => {
     const originalFetch = global.fetch;
     global.fetch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
     );
     try {
-      const { inserts } = useResumedSubscriptionRows({
+      const { rpcCalls } = useResumedSubscriptionRows({
         eventId: 'EVT-SUB-PAYFAIL-RETRY',
         orderId: 'order-payfail-retry',
         queueProbe: { data: [], error: null },
@@ -3327,15 +3494,12 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
 
       const res = await POST(req as never);
       expect(res.status).toBe(200);
-      expect(inserts).toContainEqual({
-        table: 'bot_action_queue',
-        payload: expect.objectContaining({
-          action: 'fulfill_suspension',
-          payload: expect.objectContaining({
-            fulfillment_type: 'subscription_suspended',
-            order_id: 'order-payfail-retry',
-            webhook_event_id: 'EVT-SUB-PAYFAIL-RETRY',
-          }),
+      expect(rpcCalls).toContainEqual({
+        name: 'commerce_create_or_recover_subscription_lifecycle_action',
+        args: expect.objectContaining({
+          p_webhook_event_id: 'EVT-SUB-PAYFAIL-RETRY',
+          p_fulfillment_type: 'subscription_payment_failed',
+          p_order_id: 'order-payfail-retry',
         }),
       });
     } finally {
@@ -3358,7 +3522,7 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
     );
     const tokenResultMock = getPayPalTokenResult as ReturnType<typeof vi.fn>;
     try {
-      const { inserts, updates, upserts } = useResumedSubscriptionRows({
+      const { inserts, updates, upserts, rpcCalls } = useResumedSubscriptionRows({
         eventId: 'EVT-SUB-CANCEL-OUTAGE',
         orderId: 'order-cancel-outage',
         queueProbe: { data: [], error: null }, // failed attempt queued nothing
@@ -3394,23 +3558,14 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
 
       const resumedRes = await POST(makeRedelivery() as never);
       expect(resumedRes.status).toBe(200);
-      const fulfillmentInserts = inserts.filter(
-        (i) =>
-          i.table === 'bot_action_queue' &&
-          (i.payload as { action?: string }).action === 'fulfill_cancellation',
-      );
-      expect(fulfillmentInserts).toHaveLength(1);
-      expect(fulfillmentInserts[0]!.payload).toEqual(
-        expect.objectContaining({
-          guild_id: 'guild-1',
-          action: 'fulfill_cancellation',
-          payload: expect.objectContaining({
-            order_id: 'order-cancel-outage',
-            webhook_event_id: 'EVT-SUB-CANCEL-OUTAGE',
-          }),
-          status: 'pending',
+      expect(rpcCalls).toContainEqual({
+        name: 'commerce_create_or_recover_subscription_lifecycle_action',
+        args: expect.objectContaining({
+          p_webhook_event_id: 'EVT-SUB-CANCEL-OUTAGE',
+          p_fulfillment_type: 'subscription_cancelled',
+          p_order_id: 'order-cancel-outage',
         }),
-      );
+      });
       expect(updates).toContainEqual({
         table: 'webhook_events',
         payload: expect.objectContaining({ result: 'success' }),

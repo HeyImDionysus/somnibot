@@ -138,7 +138,7 @@ export default function AppealsPage() {
             }}
             className={`rounded-md px-3 py-1.5 text-sm font-medium capitalize transition-colors ${
               statusFilter === f
-                ? 'bg-somni-pink text-white'
+                ? 'bg-discord-accent text-white'
                 : 'bg-discord-bg-secondary text-discord-text-muted hover:text-discord-text-primary'
             }`}
           >
@@ -151,9 +151,9 @@ export default function AppealsPage() {
       {loading ? (
         <TableSkeleton rows={8} />
       ) : appeals.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-lg border border-discord-border bg-discord-bg-secondary py-16">
+        <div className="flex flex-col items-center justify-center rounded-lg border border-discord-border-subtle bg-discord-bg-secondary py-16">
           <span className="text-4xl">⚖️</span>
-          <h3 className="mt-4 text-lg font-semibold text-discord-text-primary">No Appeals</h3>
+          <h3 className="mt-4 text-lg font-medium text-discord-text-primary">No Appeals</h3>
           <p className="mt-1 text-sm text-discord-text-muted">
             {statusFilter === 'all'
               ? 'No appeals have been filed yet.'
@@ -161,10 +161,10 @@ export default function AppealsPage() {
           </p>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-lg border border-discord-border">
+        <div className="overflow-hidden rounded-lg border border-discord-border-subtle">
           <table className="w-full">
             <thead>
-              <tr className="border-b border-discord-border bg-discord-bg-tertiary">
+              <tr className="border-b border-discord-border-subtle bg-discord-bg-tertiary">
                 <th className="px-4 py-3 text-left text-xs font-medium text-discord-text-muted uppercase">Status</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-discord-text-muted uppercase">Appellant</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-discord-text-muted uppercase">Reason</th>

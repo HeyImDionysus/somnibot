@@ -175,17 +175,17 @@ export default function MembersPage() {
           value={search}
           onChange={(e) => { setSearch(e.target.value); setPage(1); }}
           placeholder="Search by username or Discord ID..."
-          className="flex-1 min-w-[200px] rounded border border-discord-border bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink/50 focus:outline-none"
+          className="flex-1 min-w-[200px] rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent/50 focus:outline-none"
         />
 
-        <div className="flex overflow-hidden rounded border border-discord-border">
+        <div className="flex overflow-hidden rounded border border-discord-border-subtle">
           {STATUS_FILTERS.map((f) => (
             <button
               key={f.value}
               onClick={() => { setStatus(f.value); setPage(1); setSelected(new Set()); }}
               className={`px-3 py-2 text-sm transition-colors ${
                 status === f.value
-                  ? 'bg-somni-pink text-white'
+                  ? 'bg-discord-accent text-white'
                   : 'bg-discord-bg-secondary text-discord-text-secondary hover:text-discord-text-primary'
               }`}
             >
@@ -199,7 +199,7 @@ export default function MembersPage() {
             <select
               value={bulkAction}
               onChange={(e) => { setBulkAction(e.target.value as BulkAction | ''); setActionParam(''); }}
-              className="rounded border border-discord-border bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary"
+              className="rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary"
             >
               <option value="">Bulk Action...</option>
               <option value="assign_role">Assign Role</option>
@@ -215,7 +215,7 @@ export default function MembersPage() {
                 value={actionParam}
                 onChange={(e) => setActionParam(e.target.value)}
                 placeholder="Role ID..."
-                className="w-48 rounded border border-discord-border bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:outline-none"
+                className="w-48 rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:outline-none"
               />
             )}
 
@@ -225,7 +225,7 @@ export default function MembersPage() {
                 value={actionParam}
                 onChange={(e) => setActionParam(e.target.value)}
                 placeholder="DM message..."
-                className="flex-1 min-w-[200px] rounded border border-discord-border bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:outline-none"
+                className="flex-1 min-w-[200px] rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:outline-none"
               />
             )}
 
@@ -233,7 +233,7 @@ export default function MembersPage() {
               <button
                 onClick={executeBulk}
                 disabled={actionLoading || (bulkAction !== 'export' && bulkAction !== 'reset_economy' && !actionParam)}
-                className="rounded-md bg-somni-pink px-4 py-2 text-sm font-medium text-white hover:bg-somni-pink/80 disabled:opacity-50"
+                className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent-hover disabled:opacity-50"
               >
                 {actionLoading ? 'Processing...' : `Execute (${selected.size})`}
               </button>
@@ -243,16 +243,16 @@ export default function MembersPage() {
       </div>
 
       {/* Members Table */}
-      <div className="overflow-x-auto rounded-lg border border-discord-border bg-discord-bg-secondary">
+      <div className="overflow-x-auto rounded-lg border border-discord-border-subtle bg-discord-bg-secondary">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-discord-border text-left text-discord-text-muted">
+            <tr className="border-b border-discord-border-subtle text-left text-discord-text-muted">
               <th className="px-3 py-3 w-10">
                 <input
                   type="checkbox"
                   checked={members.length > 0 && selected.size === members.length}
                   onChange={toggleAll}
-                  className="h-4 w-4 rounded border-discord-border"
+                  className="h-4 w-4 rounded border-discord-border-subtle"
                 />
               </th>
               <th className="px-3 py-3">Member</th>
@@ -268,7 +268,7 @@ export default function MembersPage() {
             {members.map((m) => (
               <tr
                 key={m.discord_id}
-                className={`border-b border-discord-border/50 transition-colors ${
+                className={`border-b border-discord-border-subtle/50 transition-colors ${
                   selected.has(m.discord_id) ? 'bg-discord-blurple/10' : 'hover:bg-discord-bg-tertiary/50'
                 }`}
               >
@@ -277,7 +277,7 @@ export default function MembersPage() {
                     type="checkbox"
                     checked={selected.has(m.discord_id)}
                     onChange={() => toggleSelect(m.discord_id)}
-                    className="h-4 w-4 rounded border-discord-border"
+                    className="h-4 w-4 rounded border-discord-border-subtle"
                   />
                 </td>
                 <td className="px-3 py-2.5">
@@ -355,14 +355,14 @@ export default function MembersPage() {
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={page === 1}
-              className="rounded-md border border-discord-border px-3 py-1.5 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary disabled:opacity-30"
+              className="rounded-md border border-discord-border-subtle px-3 py-1.5 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary disabled:opacity-30"
             >
               Previous
             </button>
             <button
               onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
               disabled={page === totalPages}
-              className="rounded-md border border-discord-border px-3 py-1.5 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary disabled:opacity-30"
+              className="rounded-md border border-discord-border-subtle px-3 py-1.5 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary disabled:opacity-30"
             >
               Next
             </button>

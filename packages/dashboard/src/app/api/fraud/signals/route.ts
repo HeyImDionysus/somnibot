@@ -1,6 +1,16 @@
 /**
  * GET /api/fraud/signals — List fraud signals with filtering.
  * PATCH /api/fraud/signals — Update signal status (investigate, confirm, dismiss).
+ *
+ * ── Deciding a signal enforces nothing ────────────────────────────────────
+ * Confirming or dismissing a signal writes status/resolution fields and
+ * nothing else. Nothing reads that decision to block a customer, cancel an
+ * order or move money; the only downstream consumer is the critical-burst
+ * counter (bot `services/fraud-detection.ts` and `api/license/validate`),
+ * which counts `status = 'open'` critical signals in the last hour to decide
+ * whether to auto-raise an incident. Dismissing therefore quiets an alarm — it
+ * does not punish anyone — and the recorded description says exactly that, so
+ * an owner never assumes "confirmed" already dealt with the fraudster.
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -9,6 +19,7 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { readRowBefore, recordAdminChange } from '@/lib/admin-changes';
 
 const fraudSignalUpdate = z.object({
   id: z.string().uuid(),
@@ -89,6 +100,15 @@ export async function PATCH(request: NextRequest) {
       updates.resolved_at = new Date().toISOString();
     }
 
+    // Prior status and the signal's identity, read before the update replaces
+    // them.
+    const before = await readRowBefore(
+      admin,
+      'fraud_signals',
+      { id: body.id, guild_id: ctx.guildId },
+      'id, status, signal_type, severity, resolution_note',
+    );
+
     const { data, error } = await admin
       .from('fraud_signals')
       .update(updates)
@@ -98,6 +118,36 @@ export async function PATCH(request: NextRequest) {
       .single();
 
     if (error) return dbError(error, 'fraud/signals');
+
+    const signalName = typeof before?.signal_type === 'string'
+      ? `"${before.signal_type}"`
+      : '';
+    const severity = typeof before?.severity === 'string' ? `${before.severity} ` : '';
+    const subject = `the ${severity}${signalName ? `${signalName} ` : ''}fraud signal`;
+
+    await recordAdminChange(
+      {
+        guildId: ctx.guildId,
+        actorId: ctx.discordId,
+        action: body.status ? `fraud.signal_${body.status}` : 'fraud.signal_annotated',
+        targetType: 'fraud signal',
+        targetId: body.id,
+        description: body.status
+          ? `Marked ${subject} as ${body.status} — this is a review decision only: it `
+            + 'does not block the customer, cancel their order or move any money'
+          : `Added a resolution note to ${subject}`,
+        before: before
+          ? { status: before.status, resolution_note: before.resolution_note }
+          : undefined,
+        after: updates,
+        blastRadius: 'medium',
+        undoReason:
+          'fraud signal decisions are outside the dashboard undo system — set the '
+          + 'status back by hand if this was a mistake',
+      },
+      admin,
+    );
+
     return NextResponse.json({ success: true, data });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';

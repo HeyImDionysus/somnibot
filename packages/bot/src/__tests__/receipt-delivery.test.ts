@@ -48,13 +48,39 @@ const { mockDeliverReceiptDM } = vi.hoisted(() => ({
 vi.mock('../features/commerce/receipt-builder.js', () => ({
   sendReceiptDM: vi.fn(async () => true),
   deliverReceiptDM: mockDeliverReceiptDM,
+  prepareReceiptDM: vi.fn(async (...args: unknown[]) => async () => {
+    await (mockDeliverReceiptDM as (...values: unknown[]) => Promise<void>)(...args);
+  }),
 }));
 
-import { startActionQueueListener } from '../services/action-queue.js';
+import { ACTION_HANDLERS, startActionQueueListener } from '../services/action-queue.js';
 import { laneForAction } from '../services/action-queue-lanes.js';
 import { writeAuditLog } from '../services/audit.js';
 
 // ── Mocks ──────────────────────────────────────────────────
+
+function receiptGenerationEvidence(
+  args: Record<string, unknown>,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    action_id: args.p_action_id,
+    claim_token: args.p_claim_token,
+    order_id: args.p_order_id,
+    guild_id: args.p_guild_id,
+    customer_id: args.p_customer_id,
+    discord_id: args.p_discord_id,
+    product_id: args.p_product_id,
+    order_number: args.p_order_number,
+    product_name: args.p_product_name,
+    amount_cents: args.p_amount_cents,
+    currency: args.p_currency,
+    license_key_id: args.p_license_key_id,
+    outward_generation_id: '77777777-7777-4777-8777-777777777777',
+    disposition: 'prepared',
+    ...overrides,
+  };
+}
 
 /**
  * Recording Supabase mock: captures inserts per table and status updates on
@@ -95,6 +121,8 @@ function makeSupa(
   );
   let sweepCalls = 0;
   let retryCall = 0;
+  let outwardState: 'absent' | 'sending' | 'sent' | 'uncertain' = 'absent';
+  let outwardToken: string | null = null;
 
   const makeChain = () => {
     const chain: any = {};
@@ -158,6 +186,66 @@ function makeSupa(
       return chain;
     }),
     rpc: vi.fn(async (name: string, args: Record<string, unknown> = {}) => {
+      if (name === 'commerce_prepare_action_outward_generation') {
+        return {
+          data: receiptGenerationEvidence(args),
+          error: null,
+        };
+      }
+      if (name === 'commerce_begin_fulfillment_outward_intent') {
+        if (outwardState === 'absent') {
+          outwardState = 'sending';
+          outwardToken = '88888888-8888-4888-8888-888888888888';
+          return {
+            data: {
+              order_id: args.p_order_id,
+              guild_id: args.p_guild_id,
+              intent_kind: args.p_intent_kind,
+              outward_generation_id: args.p_outward_generation_id,
+              disposition: 'send',
+              state: 'sending',
+              attempt_token: outwardToken,
+              alert_id: null,
+            },
+            error: null,
+          };
+        }
+        if (outwardState === 'sending') {
+          outwardState = 'uncertain';
+          outwardToken = null;
+        }
+        return {
+          data: {
+            order_id: args.p_order_id,
+            guild_id: args.p_guild_id,
+            intent_kind: args.p_intent_kind,
+            outward_generation_id: args.p_outward_generation_id,
+            disposition: outwardState === 'sent' ? 'sent' : 'uncertain',
+            state: outwardState,
+            attempt_token: null,
+            alert_id: outwardState === 'uncertain' ? 'alert-outward-uncertain' : null,
+          },
+          error: null,
+        };
+      }
+      if (name === 'commerce_finish_fulfillment_outward_intent') {
+        if (outwardToken !== args.p_attempt_token) {
+          return { data: null, error: { message: 'outward attempt mismatch' } };
+        }
+        outwardState = args.p_outcome === 'sent' ? 'sent' : 'uncertain';
+        outwardToken = null;
+        return {
+          data: {
+            order_id: args.p_order_id,
+            guild_id: args.p_guild_id,
+            intent_kind: args.p_intent_kind,
+            outward_generation_id: args.p_outward_generation_id,
+            state: outwardState,
+            alert_id: outwardState === 'uncertain' ? 'alert-outward-uncertain' : null,
+          },
+          error: null,
+        };
+      }
       if (name === 'bot_action_queue_recover_stale') {
         return { data: opts.staleFailed ?? [], error: null };
       }
@@ -273,12 +361,15 @@ function deliveryAction(overrides: Record<string, unknown> = {}) {
     status: 'pending',
     payload: {
       guild_id: 'guild-1',
+      customer_id: 'customer-1',
       discord_id: 'user-1',
+      product_id: 'product-1',
       order_id: 'order-1',
       order_number: 'ORD-001',
       product_name: 'VIP Pass',
       amount_cents: 999,
       currency: 'USD',
+      license_key_id: 'license-1',
       license_key_plaintext: 'SMNI-AAAA-BBBB-CCCC-DDDD',
     },
     created_at: new Date().toISOString(),
@@ -326,12 +417,247 @@ describe('deliver_receipt action', () => {
     expect(supa.__inserts['alerts']).toBeUndefined();
   });
 
-  it('retries transient delivery failures with exponential backoff', async () => {
+  it('does not resend an accepted receipt when action finalization is lost and the exact claim is recovered', async () => {
+    const guild = makeGuild();
+    const supa = makeSupa();
+    const originalRpc = supa.rpc.getMockImplementation();
+    let outwardState: 'absent' | 'sending' | 'sent' = 'absent';
+    supa.rpc.mockImplementation(async (name: string, args: Record<string, unknown> = {}) => {
+      if (name === 'commerce_prepare_action_outward_generation') {
+        return {
+          data: receiptGenerationEvidence(args),
+          error: null,
+        };
+      }
+      if (name === 'commerce_begin_fulfillment_outward_intent') {
+        if (outwardState === 'sent') {
+          return {
+            data: {
+              order_id: args.p_order_id,
+              guild_id: args.p_guild_id,
+              intent_kind: 'receipt_dm',
+              outward_generation_id: args.p_outward_generation_id,
+              disposition: 'sent',
+              state: 'sent',
+              attempt_token: null,
+              alert_id: null,
+            },
+            error: null,
+          };
+        }
+        outwardState = 'sending';
+        return {
+          data: {
+            order_id: args.p_order_id,
+            guild_id: args.p_guild_id,
+            intent_kind: 'receipt_dm',
+            outward_generation_id: args.p_outward_generation_id,
+            disposition: 'send',
+            state: 'sending',
+            attempt_token: '88888888-8888-4888-8888-888888888888',
+            alert_id: null,
+          },
+          error: null,
+        };
+      }
+      if (name === 'commerce_finish_fulfillment_outward_intent') {
+        outwardState = 'sent';
+        return {
+          data: {
+            order_id: args.p_order_id,
+            guild_id: args.p_guild_id,
+            intent_kind: 'receipt_dm',
+            outward_generation_id: args.p_outward_generation_id,
+            state: 'sent',
+            alert_id: null,
+          },
+          error: null,
+        };
+      }
+      return originalRpc!(name, args);
+    });
+    const payload = deliveryAction().payload;
+    const handler = ACTION_HANDLERS.deliver_receipt!;
+    const context = {
+      actionId: 'act-deliver-1',
+      claimToken: '44444444-4444-4444-8444-444444444444',
+    };
+
+    const acceptedBeforeLostFinalization = await handler(guild, supa, payload, context);
+    const recoveredClaim = await handler(guild, supa, payload, context);
+
+    expect(acceptedBeforeLostFinalization.success).toBe(true);
+    expect(recoveredClaim.success).toBe(true);
+    expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+    expect(outwardState).toBe('sent');
+  });
+
+  it('holds an accepted DM when outward finish has no committed response and never sends it again', async () => {
+    const guild = makeGuild();
+    const supa = makeSupa();
+    const originalRpc = supa.rpc.getMockImplementation();
+    let outwardState: 'absent' | 'sending' | 'uncertain' = 'absent';
+    supa.rpc.mockImplementation(async (name: string, args: Record<string, unknown> = {}) => {
+      if (name === 'commerce_prepare_action_outward_generation') {
+        return {
+          data: receiptGenerationEvidence(args),
+          error: null,
+        };
+      }
+      if (name === 'commerce_begin_fulfillment_outward_intent') {
+        if (outwardState === 'absent') {
+          outwardState = 'sending';
+          return {
+            data: {
+              order_id: args.p_order_id,
+              guild_id: args.p_guild_id,
+              intent_kind: 'receipt_dm',
+              outward_generation_id: args.p_outward_generation_id,
+              disposition: 'send',
+              state: 'sending',
+              attempt_token: '88888888-8888-4888-8888-888888888888',
+              alert_id: null,
+            },
+            error: null,
+          };
+        }
+        outwardState = 'uncertain';
+        return {
+        data: {
+          order_id: args.p_order_id,
+          guild_id: args.p_guild_id,
+          intent_kind: 'receipt_dm',
+            outward_generation_id: args.p_outward_generation_id,
+            disposition: 'uncertain',
+            state: 'uncertain',
+            attempt_token: null,
+            alert_id: 'alert-outward-uncertain',
+          },
+          error: null,
+        };
+      }
+      if (name === 'commerce_finish_fulfillment_outward_intent') {
+        return { data: null, error: { message: 'commit response unavailable' } };
+      }
+      return originalRpc!(name, args);
+    });
+    const handler = ACTION_HANDLERS.deliver_receipt!;
+    const payload = deliveryAction().payload;
+    const context = {
+      actionId: 'act-deliver-1',
+      claimToken: '44444444-4444-4444-8444-444444444444',
+    };
+
+    const first = await handler(guild, supa, payload, context);
+    const recovered = await handler(guild, supa, payload, context);
+
+    expect(first.success).toBe(false);
+    expect(recovered).toMatchObject({ success: false, retryable: false });
+    expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+    expect(outwardState).toBe('uncertain');
+  });
+
+  it('keeps pre-send user preparation safely retryable with no outward row, then sends once', async () => {
+    const guild = makeGuild();
+    guild.client.users.fetch
+      .mockRejectedValueOnce(new Error('user preparation unavailable'))
+      .mockResolvedValue({ id: 'user-1' });
+    const supa = makeSupa();
+    const handler = ACTION_HANDLERS.deliver_receipt!;
+    const payload = deliveryAction().payload;
+    const context = {
+      actionId: 'act-deliver-1',
+      claimToken: '44444444-4444-4444-8444-444444444444',
+    };
+
+    const first = await handler(guild, supa, payload, context);
+    const beginCallsBeforeRetry = supa.rpc.mock.calls.filter(
+      ([name]: [string]) => name === 'commerce_begin_fulfillment_outward_intent',
+    );
+    const retry = await handler(guild, supa, payload, context);
+
+    expect(first).toMatchObject({ success: false, retryable: true });
+    expect(beginCallsBeforeRetry).toEqual([]);
+    expect(retry.success).toBe(true);
+    expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails a retried legacy receipt with no generation closed and sends no DM', async () => {
+    const guild = makeGuild();
+    const supa = makeSupa();
+    const originalRpc = supa.rpc.getMockImplementation();
+    supa.rpc.mockImplementation(async (name: string, args: Record<string, unknown> = {}) => {
+      if (name === 'commerce_prepare_action_outward_generation') {
+        return {
+          data: null,
+          error: {
+            message: 'legacy receipt retry has no durable generation',
+            code: '23514',
+          },
+        };
+      }
+      return originalRpc!(name, args);
+    });
+
+    const result = await ACTION_HANDLERS.deliver_receipt!(
+      guild,
+      supa,
+      deliveryAction({ retry_count: 1 }).payload,
+      {
+        actionId: 'act-deliver-1',
+        claimToken: '44444444-4444-4444-8444-444444444444',
+      },
+    );
+
+    expect(result).toMatchObject({ success: false, retryable: false });
+    expect(mockDeliverReceiptDM).not.toHaveBeenCalled();
+    expect(supa.rpc).not.toHaveBeenCalledWith(
+      'commerce_begin_fulfillment_outward_intent',
+      expect.anything(),
+    );
+  });
+
+  it('retries a lost generation-bind response with the same carrier and sends once', async () => {
+    const guild = makeGuild();
+    const supa = makeSupa();
+    const originalRpc = supa.rpc.getMockImplementation();
+    let bindCalls = 0;
+    supa.rpc.mockImplementation(async (name: string, args: Record<string, unknown> = {}) => {
+      if (name === 'commerce_prepare_action_outward_generation') {
+        bindCalls += 1;
+        if (bindCalls === 1) {
+          // The SQL transaction may have committed even though the transport
+          // did not return its evidence.
+          return { data: null, error: { message: 'connection closed after commit' } };
+        }
+        return {
+          data: receiptGenerationEvidence(args, { disposition: 'replay' }),
+          error: null,
+        };
+      }
+      return originalRpc!(name, args);
+    });
+    const handler = ACTION_HANDLERS.deliver_receipt!;
+    const payload = deliveryAction().payload;
+    const context = {
+      actionId: 'act-deliver-1',
+      claimToken: '44444444-4444-4444-8444-444444444444',
+    };
+
+    const lost = await handler(guild, supa, payload, context);
+    const recovered = await handler(guild, supa, payload, context);
+
+    expect(lost).toMatchObject({ success: false, retryable: true });
+    expect(recovered.success).toBe(true);
+    expect(bindCalls).toBe(2);
+    expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries provably pre-send preparation failures with exponential backoff', async () => {
     vi.useFakeTimers();
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
-    mockDeliverReceiptDM.mockRejectedValue(new Error('503 Service Unavailable'));
-
     const guild = makeGuild();
+    guild.client.users.fetch.mockRejectedValue(new Error('503 Service Unavailable'));
     const supa = makeSupa([deliveryAction()]);
 
     await startActionQueueListener(guild, supa);
@@ -358,8 +684,8 @@ describe('deliver_receipt action', () => {
     vi.useFakeTimers();
     try {
       const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
-      mockDeliverReceiptDM.mockRejectedValue(new Error('503 Service Unavailable'));
       const guild = makeGuild();
+      guild.client.users.fetch.mockRejectedValue(new Error('503 Service Unavailable'));
       const supa = makeSupa([deliveryAction()], {
         retryResults: [{
           data: [{ applied: false, disposition: 'completed' }],
@@ -390,8 +716,8 @@ describe('deliver_receipt action', () => {
     vi.useFakeTimers();
     try {
       const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
-      mockDeliverReceiptDM.mockRejectedValue(new Error('503 Service Unavailable'));
       const guild = makeGuild();
+      guild.client.users.fetch.mockRejectedValue(new Error('503 Service Unavailable'));
       const supa = makeSupa([deliveryAction()], {
         retryResults: [{
           data: [{ applied: false, disposition: 'stale_claim' }],
@@ -418,8 +744,8 @@ describe('deliver_receipt action', () => {
     vi.useFakeTimers();
     try {
       const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
-      mockDeliverReceiptDM.mockRejectedValue(new Error('503 Service Unavailable'));
       const guild = makeGuild();
+      guild.client.users.fetch.mockRejectedValue(new Error('503 Service Unavailable'));
       const supa = makeSupa([deliveryAction()], {
         retryResults: [{
           data: [{
@@ -446,8 +772,8 @@ describe('deliver_receipt action', () => {
     vi.useFakeTimers();
     try {
       const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
-      mockDeliverReceiptDM.mockRejectedValue(new Error('503 Service Unavailable'));
       const guild = makeGuild();
+      guild.client.users.fetch.mockRejectedValue(new Error('503 Service Unavailable'));
       const supa = makeSupa([deliveryAction()], {
         retryResults: [{
           data: [{ applied: false, disposition: 'operator_held' }],
@@ -478,8 +804,8 @@ describe('deliver_receipt action', () => {
     vi.useFakeTimers();
     try {
       const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
-      mockDeliverReceiptDM.mockRejectedValue(new Error('503 Service Unavailable'));
       const guild = makeGuild();
+      guild.client.users.fetch.mockRejectedValue(new Error('503 Service Unavailable'));
       const supa = makeSupa([deliveryAction()], {
         retryResults: [
           { data: [{ applied: false, disposition: 'intent_raced' }], error: null },

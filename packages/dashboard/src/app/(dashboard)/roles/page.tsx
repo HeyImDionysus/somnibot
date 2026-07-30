@@ -218,7 +218,7 @@ function PermissionEditor({
   const enabledCount = PERMISSION_DEFS.filter((p) => permHas(permissions, p.bit)).length;
 
   return (
-    <div className="rounded-lg border border-discord-border bg-discord-bg-tertiary/30">
+    <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary/30">
       <button
         onClick={() => setExpanded(!expanded)}
         className="flex w-full items-center justify-between px-4 py-3 text-left"
@@ -236,7 +236,7 @@ function PermissionEditor({
       </button>
 
       {expanded && (
-        <div className="border-t border-discord-border px-4 pb-4 pt-2 space-y-2">
+        <div className="border-t border-discord-border-subtle px-4 pb-4 pt-2 space-y-2">
           <p className="text-[10px] text-discord-text-muted">
             Toggle individual permissions. Changes are based on the tier default — toggling resets to your custom set.
           </p>

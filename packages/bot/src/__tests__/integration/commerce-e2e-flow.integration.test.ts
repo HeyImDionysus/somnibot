@@ -115,31 +115,30 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
   // ────────────────────────────────────────────────────────────
 
   it('Step 1: creates a pending order (checkout initiated)', async () => {
-    const { data, error } = await supa.from('orders').insert({
-      order_number: orderNumber,
-      customer_id: customerId,
-      guild_id: GUILD_ID,
-      product_id: productId,
-      paypal_order_id: paypalOrderId,
-      amount_cents: 1499,
-      currency: 'USD',
-      status: 'pending',
-      source: 'purchase',
-    }).select().single();
-
-    expect(error).toBeNull();
-    expect(data!.status).toBe('pending');
-    orderId = data!.id;
-  });
-
-  it('Step 2: records the PayPal payment capture', async () => {
-    const freeze = await supa.rpc('commerce_freeze_order_grant_snapshot', {
-      p_order_id: orderId,
+    const { data, error } = await supa.rpc('commerce_create_active_paid_checkout', {
+      p_order_number: orderNumber,
       p_guild_id: GUILD_ID,
       p_customer_id: customerId,
       p_product_id: productId,
+      p_plan_id: null,
+      p_provider_kind: 'capture',
+      p_provider_id: paypalOrderId,
+      p_approval_url: `https://paypal.test/approve/${paypalOrderId}`,
+      p_amount_cents: 1499,
+      p_currency: 'USD',
     });
-    expect(freeze.error).toBeNull();
+
+    expect(error).toBeNull();
+    expect(data).toMatchObject({
+      disposition: 'created',
+      status: 'pending',
+      checkout_active: true,
+      grant_snapshot_frozen_at: expect.any(String),
+    });
+    orderId = (data as { id: string }).id;
+  });
+
+  it('Step 2: records the PayPal payment capture', async () => {
     const capture = await supa.rpc('commerce_finalize_paypal_capture', {
       p_order_id: orderId,
       p_guild_id: GUILD_ID,

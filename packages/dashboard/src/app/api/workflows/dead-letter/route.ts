@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { recordAdminChange, readRowBefore } from '@/lib/admin-changes';
 
 const deadLetterAction = z.object({
   action: z.enum(['retry', 'discard']),
@@ -79,6 +80,18 @@ export async function POST(request: NextRequest) {
     const body = parsed.data;
     const admin = createAdminSupabase();
 
+    // Prior state, read BEFORE either write — after the update every row says
+    // 'retrying' or 'discarded' and the original failure is gone from view.
+    const before = await readRowBefore(
+      admin,
+      'dead_letter_queue',
+      { id: body.id, guild_id: ctx.guildId },
+      'id, event_type, source, status, retry_count',
+    );
+    const jobLabel = before?.event_type
+      ? `${String(before.source ?? 'background')} job "${String(before.event_type)}"`
+      : 'failed background job';
+
     if (body.action === 'retry') {
       const { data, error } = await admin
         .from('dead_letter_queue')
@@ -93,6 +106,25 @@ export async function POST(request: NextRequest) {
         .single();
 
       if (error) return dbError(error, 'workflows/dead-letter');
+
+      // A retry re-runs the original job, whatever it did the first time —
+      // this is not a bookkeeping status flip.
+      await recordAdminChange({
+        guildId: ctx.guildId,
+        actorId: ctx.discordId,
+        action: 'workflows.dead_letter_retried',
+        targetType: 'failed background job',
+        targetId: body.id,
+        description: `Queued the failed ${jobLabel} to run again`,
+        before: before
+          ? { status: before.status ?? null, retry_count: before.retry_count ?? null }
+          : undefined,
+        after: { status: 'retrying', retry_count: 0 },
+        blastRadius: 'high',
+        undoReason:
+          'the job is queued to run again and may already have done so, so the retry cannot be called back',
+      }, admin);
+
       return NextResponse.json({ success: true, data });
     }
 
@@ -111,6 +143,27 @@ export async function POST(request: NextRequest) {
         .single();
 
       if (error) return dbError(error, 'workflows/dead-letter');
+
+      // Discarding only closes the item out — nothing re-runs, and whatever
+      // the job was going to do stays undone.
+      await recordAdminChange({
+        guildId: ctx.guildId,
+        actorId: ctx.discordId,
+        action: 'workflows.dead_letter_discarded',
+        targetType: 'failed background job',
+        targetId: body.id,
+        description:
+          `Gave up on the failed ${jobLabel} and closed it without running it again`,
+        before: before ? { status: before.status ?? null } : undefined,
+        after: {
+          status: 'discarded',
+          resolution_note: body.note || 'Manually discarded',
+        },
+        blastRadius: 'medium',
+        undoReason:
+          'a discarded job is closed out for good — there is no supported way to put it back in the queue',
+      }, admin);
+
       return NextResponse.json({ success: true, data });
     }
 

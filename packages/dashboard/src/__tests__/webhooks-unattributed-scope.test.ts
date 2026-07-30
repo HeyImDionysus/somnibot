@@ -1,0 +1,430 @@
+/**
+ * Finding 2 — unattributed (guild_id IS NULL) webhook events must be visible
+ * and replayable, WITHOUT weakening guild scoping.
+ *
+ * `.eq('guild_id', guildId)` never matches NULL in SQL, so the rows that most
+ * need an operator — a failed `CHECKOUT.ORDER.APPROVED` capture, and the case
+ * the code itself calls catastrophic ("Customer was charged but no
+ * order/entitlement was created") — were the exact rows the dashboard could
+ * neither list nor replay (404).
+ *
+ * The authorization rule under test (see app/api/webhooks/scope.ts): an
+ * unattributed row belongs to nobody, so it is exposed ONLY to a caller who is
+ * the sole operator of the whole instance. Anything less certain fails closed.
+ * An attributed row still belongs strictly to its own guild.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.hoisted(() => {
+  process.env.NEXTAUTH_SECRET = 'test-secret-webhook-scope';
+  process.env.WEBHOOK_REPLAY_SECRET = 'test-webhook-scope-replay-secret';
+});
+
+vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
+vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
+vi.mock('@/lib/api/admin-rate-limit', () => ({
+  checkAdminRateLimit: vi.fn().mockResolvedValue(null),
+}));
+
+import { GET } from '@/app/api/webhooks/route';
+import { POST as REPLAY } from '@/app/api/webhooks/[id]/replay/route';
+import { isSoleInstanceOperator, mayAccessWebhookRow } from '@/app/api/webhooks/scope';
+import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
+
+const OWNER_DISCORD_ID = '123456789012345678';
+const OTHER_DISCORD_ID = '876543210987654321';
+const GUILD_ID = '111111111111111111';
+const OTHER_GUILD_ID = '999999999999999999';
+
+// ── Recording Supabase double ───────────────────────────────────────────────
+
+interface RecordedOp {
+  table: string;
+  op: 'select' | 'insert' | 'update' | 'upsert' | 'delete';
+  payload?: Record<string, unknown>;
+  filters: Array<{ method: string; args: unknown[] }>;
+}
+
+type Resolver = (op: RecordedOp) => { data: unknown; error: unknown; count?: number };
+
+let ops: RecordedOp[] = [];
+let resolvers: Record<string, Resolver> = {};
+let soleOperatorRpcResult: { data: unknown; error: unknown };
+let rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+let replayClaimResult: { data: unknown; error: unknown };
+
+const CHAIN_METHODS = [
+  'select', 'eq', 'is', 'in', 'neq', 'gt', 'lt', 'gte', 'lte',
+  'or', 'not', 'order', 'limit', 'range', 'match', 'filter',
+];
+
+function makeSupabase() {
+  const from = (table: string) => {
+    const op: RecordedOp = { table, op: 'select', filters: [] };
+
+    const resolve = () => {
+      const resolver = resolvers[`${table}.${op.op}`] ?? resolvers[table];
+      return resolver ? resolver(op) : { data: null, error: null };
+    };
+
+    const chain: Record<string, unknown> = {};
+    for (const method of CHAIN_METHODS) {
+      chain[method] = (...args: unknown[]) => {
+        if (method !== 'select') op.filters.push({ method, args });
+        return chain;
+      };
+    }
+    for (const method of ['insert', 'update', 'upsert'] as const) {
+      chain[method] = (payload: Record<string, unknown>) => {
+        op.op = method;
+        op.payload = payload;
+        return chain;
+      };
+    }
+    chain.delete = () => { op.op = 'delete'; return chain; };
+
+    const settle = () => { ops.push(op); return resolve(); };
+
+    chain.maybeSingle = () => {
+      const result = settle();
+      const data = Array.isArray(result.data) ? result.data[0] ?? null : result.data;
+      return Promise.resolve({ data, error: result.error });
+    };
+    chain.single = chain.maybeSingle;
+    chain.then = (
+      onFulfilled?: (v: unknown) => unknown,
+      onRejected?: (e: unknown) => unknown,
+    ) => Promise.resolve(settle()).then(onFulfilled ?? undefined, onRejected ?? undefined);
+
+    return chain;
+  };
+
+  return {
+    from: vi.fn(from),
+    rpc: vi.fn().mockImplementation(
+      async (name: string, args: Record<string, unknown>) => {
+        rpcCalls.push({ name, args });
+        if (name === 'webhooks_is_sole_instance_operator') {
+          return soleOperatorRpcResult;
+        }
+        if (name === 'webhooks_list_scoped') {
+          return { data: { data: [], total: 0 }, error: null };
+        }
+        if (name === 'webhooks_claim_scoped_replay') {
+          return replayClaimResult;
+        }
+        if (name === 'webhooks_finish_replay_claim') {
+          return { data: true, error: null };
+        }
+        return { data: null, error: null };
+      },
+    ),
+  };
+}
+
+function opsFor(table: string, op?: RecordedOp['op']) {
+  return ops.filter((o) => o.table === table && (op ? o.op === op : true));
+}
+
+function filterMethods(op: RecordedOp) {
+  return op.filters.map((f) => `${f.method}(${JSON.stringify(f.args)})`);
+}
+
+/** Guild table contents => whether the caller is the sole instance operator. */
+function withGuilds(owners: Array<string | null>) {
+  soleOperatorRpcResult = {
+    data: owners.length > 0
+      && owners.every((owner) => owner === OWNER_DISCORD_ID),
+    error: null,
+  };
+}
+
+const mockFetch = vi.fn();
+let errorSpy: ReturnType<typeof vi.spyOn>;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  ops = [];
+  resolvers = {};
+  rpcCalls = [];
+  soleOperatorRpcResult = { data: null, error: null };
+  replayClaimResult = { data: [{ outcome: 'not_found', event_data: null }], error: null };
+  (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(makeSupabase());
+  (requireGuildOwner as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ok: true,
+    ctx: { userId: 'user-1', discordId: OWNER_DISCORD_ID, guildId: GUILD_ID },
+  });
+  mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+  vi.stubGlobal('fetch', mockFetch);
+  errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  errorSpy.mockRestore();
+  vi.unstubAllGlobals();
+});
+
+// ── The rule itself ─────────────────────────────────────────────────────────
+
+describe('isSoleInstanceOperator', () => {
+  it('is true when every guild in the instance has the caller as owner', async () => {
+    withGuilds([OWNER_DISCORD_ID, OWNER_DISCORD_ID]);
+    await expect(isSoleInstanceOperator(makeSupabase() as never, OWNER_DISCORD_ID))
+      .resolves.toBe(true);
+  });
+
+  it('is false as soon as another operator exists', async () => {
+    withGuilds([OWNER_DISCORD_ID, OTHER_DISCORD_ID]);
+    await expect(isSoleInstanceOperator(makeSupabase() as never, OWNER_DISCORD_ID))
+      .resolves.toBe(false);
+  });
+
+  it('is false when a guild has no recorded owner (cannot prove sole ownership)', async () => {
+    withGuilds([OWNER_DISCORD_ID, null]);
+    await expect(isSoleInstanceOperator(makeSupabase() as never, OWNER_DISCORD_ID))
+      .resolves.toBe(false);
+  });
+
+  it('fails closed on a query error', async () => {
+    soleOperatorRpcResult = { data: null, error: { message: 'boom' } };
+    await expect(isSoleInstanceOperator(makeSupabase() as never, OWNER_DISCORD_ID))
+      .resolves.toBe(false);
+  });
+
+  it('fails closed when there are no guilds at all', async () => {
+    withGuilds([]);
+    await expect(isSoleInstanceOperator(makeSupabase() as never, OWNER_DISCORD_ID))
+      .resolves.toBe(false);
+  });
+
+  it('proves sole ownership beyond PostgREST max_rows using exact counts', async () => {
+    withGuilds(Array.from({ length: 1001 }, () => OWNER_DISCORD_ID));
+    await expect(isSoleInstanceOperator(makeSupabase() as never, OWNER_DISCORD_ID))
+      .resolves.toBe(true);
+  });
+
+  it('detects a different owner beyond the first 1000 guilds', async () => {
+    withGuilds([
+      ...Array.from({ length: 1000 }, () => OWNER_DISCORD_ID),
+      OTHER_DISCORD_ID,
+    ]);
+    await expect(isSoleInstanceOperator(makeSupabase() as never, OWNER_DISCORD_ID))
+      .resolves.toBe(false);
+  });
+});
+
+describe('mayAccessWebhookRow', () => {
+  it('never lets one guild reach another guild row, sole operator or not', () => {
+    expect(mayAccessWebhookRow(OTHER_GUILD_ID, GUILD_ID, true)).toBe(false);
+    expect(mayAccessWebhookRow(OTHER_GUILD_ID, GUILD_ID, false)).toBe(false);
+  });
+
+  it('allows a row that belongs to the caller guild', () => {
+    expect(mayAccessWebhookRow(GUILD_ID, GUILD_ID, false)).toBe(true);
+  });
+
+  it('gates unattributed rows on sole-operator status', () => {
+    expect(mayAccessWebhookRow(null, GUILD_ID, true)).toBe(true);
+    expect(mayAccessWebhookRow(null, GUILD_ID, false)).toBe(false);
+  });
+});
+
+// ── GET /api/webhooks ───────────────────────────────────────────────────────
+
+describe('GET /api/webhooks scoping', () => {
+  function listRequest() {
+    return new Request('http://localhost/api/webhooks') as never;
+  }
+
+  it('includes unattributed rows for the sole instance operator', async () => {
+    withGuilds([OWNER_DISCORD_ID]);
+    resolvers['webhook_events'] = () => ({ data: [], error: null, count: 0 });
+
+    const res = await GET(listRequest());
+    expect(res.status).toBe(200);
+
+    expect(rpcCalls).toContainEqual({
+      name: 'webhooks_list_scoped',
+      args: expect.objectContaining({
+        p_guild_id: GUILD_ID,
+        p_discord_id: OWNER_DISCORD_ID,
+      }),
+    });
+  });
+
+  it('falls back to strict guild scoping when another operator exists', async () => {
+    withGuilds([OWNER_DISCORD_ID, OTHER_DISCORD_ID]);
+    resolvers['webhook_events'] = () => ({ data: [], error: null, count: 0 });
+
+    await GET(listRequest());
+
+    expect(rpcCalls.filter((call) => call.name === 'webhooks_list_scoped'))
+      .toHaveLength(1);
+  });
+
+  it('never widens scope to another guild', async () => {
+    withGuilds([OWNER_DISCORD_ID]);
+    resolvers['webhook_events'] = () => ({ data: [], error: null, count: 0 });
+
+    await GET(listRequest());
+
+    const call = rpcCalls.find(({ name }) => name === 'webhooks_list_scoped');
+    expect(JSON.stringify(call?.args)).not.toContain(OTHER_GUILD_ID);
+  });
+});
+
+// ── POST /api/webhooks/[id]/replay ──────────────────────────────────────────
+
+describe('POST /api/webhooks/[id]/replay scoping', () => {
+  const params = (id: string) => ({ params: Promise.resolve({ id }) });
+
+  function withEvent(row: Record<string, unknown> | null) {
+    const rowGuildId = row?.guild_id ?? null;
+    const allowed = row != null && (
+      rowGuildId === GUILD_ID
+      || (rowGuildId === null && soleOperatorRpcResult.data === true)
+    );
+    replayClaimResult = {
+      data: [{
+        outcome: allowed ? 'claimed' : 'not_found',
+        event_data: allowed ? row : null,
+        claim_token: allowed ? '11111111-1111-4111-8111-111111111111' : null,
+      }],
+      error: null,
+    };
+  }
+
+  it('replays an unattributed event for the sole instance operator', async () => {
+    withGuilds([OWNER_DISCORD_ID]);
+    withEvent({
+      event_id: 'EVT-ORPHAN',
+      guild_id: null,
+      result: 'error',
+      event_type: 'CHECKOUT.ORDER.APPROVED',
+      payload: { event_type: 'CHECKOUT.ORDER.APPROVED', resource: { id: 'ORDER-1' } },
+      replay_count: 0,
+    });
+
+    const res = await REPLAY(new Request('http://localhost') as never, params('EVT-ORPHAN'));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ replayed: true });
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/paypal/webhook'),
+      expect.anything(),
+    );
+  });
+
+  it('claims the unattributed row through the atomic scoped RPC', async () => {
+    withGuilds([OWNER_DISCORD_ID]);
+    withEvent({
+      event_id: 'EVT-ORPHAN-2',
+      guild_id: null,
+      result: 'error',
+      event_type: 'CHECKOUT.ORDER.APPROVED',
+      payload: {},
+      replay_count: 0,
+    });
+
+    await REPLAY(new Request('http://localhost') as never, params('EVT-ORPHAN-2'));
+
+    expect(rpcCalls).toContainEqual({
+      name: 'webhooks_claim_scoped_replay',
+      args: {
+        p_event_id: 'EVT-ORPHAN-2',
+        p_guild_id: GUILD_ID,
+        p_discord_id: OWNER_DISCORD_ID,
+        p_stale_seconds: 300,
+      },
+    });
+    expect(opsFor('webhook_events', 'update')).toHaveLength(0);
+  });
+
+  it('404s an unattributed event when the instance has another operator', async () => {
+    withGuilds([OWNER_DISCORD_ID, OTHER_DISCORD_ID]);
+    withEvent({
+      event_id: 'EVT-ORPHAN-3',
+      guild_id: null,
+      result: 'error',
+      event_type: 'CHECKOUT.ORDER.APPROVED',
+      payload: {},
+      replay_count: 0,
+    });
+
+    const res = await REPLAY(new Request('http://localhost') as never, params('EVT-ORPHAN-3'));
+
+    expect(res.status).toBe(404);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(opsFor('webhook_events', 'update')).toHaveLength(0);
+  });
+
+  it('404s another guild event even for the sole instance operator', async () => {
+    withGuilds([OWNER_DISCORD_ID]);
+    withEvent({
+      event_id: 'EVT-OTHER-GUILD',
+      guild_id: OTHER_GUILD_ID,
+      result: 'error',
+      event_type: 'PAYMENT.CAPTURE.COMPLETED',
+      payload: {},
+      replay_count: 0,
+    });
+
+    const res = await REPLAY(new Request('http://localhost') as never, params('EVT-OTHER-GUILD'));
+
+    expect(res.status).toBe(404);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('still replays a normally-attributed event for its own guild', async () => {
+    withGuilds([OWNER_DISCORD_ID, OTHER_DISCORD_ID]);
+    withEvent({
+      event_id: 'EVT-MINE',
+      guild_id: GUILD_ID,
+      result: 'error',
+      event_type: 'PAYMENT.CAPTURE.COMPLETED',
+      payload: {},
+      replay_count: 0,
+    });
+
+    const res = await REPLAY(new Request('http://localhost') as never, params('EVT-MINE'));
+
+    expect(res.status).toBe(200);
+    expect(rpcCalls.some(({ name }) => name === 'webhooks_claim_scoped_replay'))
+      .toBe(true);
+  });
+
+  it('404s a genuinely missing event without probing guild scope', async () => {
+    withGuilds([OWNER_DISCORD_ID]);
+    withEvent(null);
+
+    const res = await REPLAY(new Request('http://localhost') as never, params('EVT-NOPE'));
+
+    expect(res.status).toBe(404);
+    expect(rpcCalls.some(({ name }) => name === 'webhooks_is_sole_instance_operator'))
+      .toBe(false);
+  });
+
+  it('raises an operator alert when the replay itself fails', async () => {
+    withGuilds([OWNER_DISCORD_ID]);
+    withEvent({
+      event_id: 'EVT-REPLAY-FAIL',
+      guild_id: GUILD_ID,
+      result: 'error',
+      event_type: 'CHECKOUT.ORDER.APPROVED',
+      payload: {},
+      replay_count: 0,
+    });
+    resolvers['alerts.update'] = () => ({ data: [], error: null });
+    mockFetch.mockResolvedValue(new Response('{}', { status: 500 }));
+
+    await REPLAY(new Request('http://localhost') as never, params('EVT-REPLAY-FAIL'));
+
+    const alertInsert = opsFor('alerts', 'insert')[0];
+    expect(alertInsert).toBeDefined();
+    expect(alertInsert!.payload).toMatchObject({
+      guild_id: GUILD_ID,
+      alert_type: 'paypal_webhook_processing_error',
+    });
+  });
+});

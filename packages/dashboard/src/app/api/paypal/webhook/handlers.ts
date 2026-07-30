@@ -16,6 +16,11 @@ import {
   type PayPalSaleResource,
 } from '@/lib/types/paypal';
 import { generateLicenseKey, queueFulfillment } from './fulfillment';
+import { raiseCaptureDeniedAlert, raiseDisputeAlert } from './alerts';
+import {
+  claimPaidFulfillment,
+  holdUnknownDeliveryContract,
+} from './duplicate-purchase';
 
 function formatSupabaseError(error: unknown): string {
   if (
@@ -37,6 +42,14 @@ function requireSupabaseSuccess(error: unknown, operation: string) {
 
 type AdminSupabase = ReturnType<typeof createAdminSupabase>;
 const LIFECYCLE_SCAN_PAGE_SIZE = 500;
+const DELIVERY_TYPES = [
+  'file',
+  'link',
+  'access_pass',
+  'license_key',
+  'mixed',
+] as const;
+type DeliveryType = (typeof DELIVERY_TYPES)[number];
 
 interface FrozenGrantSnapshot {
   order_id: string;
@@ -44,6 +57,7 @@ interface FrozenGrantSnapshot {
   granted_channel_ids_snapshot: string[];
   temporary_role_grants_snapshot: Array<{ role_id: string; duration_seconds: number }>;
   grant_snapshot_frozen_at: string;
+  delivery_type_snapshot: DeliveryType | null;
 }
 
 interface LegacySubscriptionGrantContract {
@@ -68,6 +82,7 @@ interface FinancialAmount {
 
 interface AuthoritativeSubscriptionContract extends FinancialAmount {
   providerPlanId: string;
+  paidThroughAt: string;
 }
 
 interface FulfillmentQueueRow {
@@ -101,6 +116,7 @@ interface CommerceOrderRow {
   grant_snapshot_frozen_at?: string | null;
   paypal_order_id?: string | null;
   paypal_subscription_id?: string | null;
+  delivery_type_snapshot?: DeliveryType | null;
 }
 
 interface EntitlementLifecycleRow {
@@ -131,17 +147,151 @@ interface SubscriptionLifecycleOrderRow {
   guild_id: string;
   customer_id: string;
   product_id: string;
+  plan_id: string;
   paypal_subscription_id: string;
+  amount_cents: number;
+  currency: string;
+  status: 'completed' | 'pending_review';
 }
 
-interface SubscriptionProductIdentityRow {
-  id: string;
-  guild_id: string;
-  name: string;
+interface SubscriptionLifecycleCarrier {
+  discordId: string;
+  productName: string;
+  providerPlanId: string;
 }
+
+type SubscriptionLifecycleEventType =
+  | 'BILLING.SUBSCRIPTION.ACTIVATED'
+  | 'PAYMENT.SALE.COMPLETED'
+  | 'BILLING.SUBSCRIPTION.PAYMENT.FAILED'
+  | 'BILLING.SUBSCRIPTION.SUSPENDED'
+  | 'BILLING.SUBSCRIPTION.CANCELLED'
+  | 'BILLING.SUBSCRIPTION.EXPIRED';
+
+export interface ProviderMoneyHandlerOptions {
+  webhookEventId: string;
+  providerOccurredAt?: string;
+}
+
+type ProviderMoneyEventType =
+  | 'PAYMENT.CAPTURE.COMPLETED'
+  | 'BILLING.SUBSCRIPTION.ACTIVATED'
+  | 'PAYMENT.SALE.COMPLETED';
+
+type ProviderIncidentReason =
+  | 'provider_identity_malformed'
+  | 'custom_identity_missing_or_malformed'
+  | 'customer_identity_missing_or_mismatched'
+  | 'order_identity_missing_or_ambiguous'
+  | 'product_identity_missing_or_mismatched'
+  | 'plan_identity_missing_or_mismatched'
+  | 'financial_identity_malformed'
+  | 'subscription_sale_router_failed';
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
+}
+
+function boundedProviderIdentity(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 && value.length <= 512
+    ? value
+    : null;
+}
+
+function boundedObservedGuildId(value: unknown): string | null {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 512
+    && value.trim() === value
+    ? value
+    : null;
+}
+
+function requireProviderMoneyEventId(
+  options: ProviderMoneyHandlerOptions,
+  operation: string,
+): string {
+  if (
+    !isNonEmptyString(options.webhookEventId)
+    || options.webhookEventId.trim() !== options.webhookEventId
+    || options.webhookEventId.length > 160
+  ) {
+    throw new Error(`${operation} requires an exact webhook event id`);
+  }
+  return options.webhookEventId;
+}
+
+async function recordProviderMoneyIncident(
+  supabase: AdminSupabase,
+  input: {
+    webhookEventId: string;
+    eventType: ProviderMoneyEventType;
+    resourceId: unknown;
+    parentId?: unknown;
+    observedGuildId?: unknown;
+    reason: ProviderIncidentReason;
+    evidence: Record<string, unknown>;
+  },
+): Promise<void> {
+  if (
+    !isNonEmptyString(input.webhookEventId)
+    || input.webhookEventId.trim() !== input.webhookEventId
+    || input.webhookEventId.length > 160
+  ) {
+    throw new Error('Provider money incident requires an exact webhook event id');
+  }
+  const providerResourceId = boundedProviderIdentity(input.resourceId);
+  const providerParentId = boundedProviderIdentity(input.parentId);
+  const observedGuildId = boundedObservedGuildId(input.observedGuildId);
+  const { data, error } = await supabase.rpc(
+    'commerce_record_provider_incident',
+    {
+      p_webhook_event_id: input.webhookEventId,
+      p_provider_event_type: input.eventType,
+      p_provider_resource_id: providerResourceId,
+      p_provider_parent_id: providerParentId,
+      p_observed_guild_id: observedGuildId,
+      p_incident_reason: input.reason,
+      p_evidence: input.evidence,
+    },
+  );
+  requireSupabaseSuccess(error, 'Failed to persist provider money incident');
+  const row = data as Record<string, unknown> | null;
+  const routableGuildId = row?.routable_guild_id;
+  if (
+    !row
+    || !['created', 'replay'].includes(String(row.disposition))
+    || !isNonEmptyString(row.incident_id)
+    || row.webhook_event_id !== input.webhookEventId
+    || row.provider_event_type !== input.eventType
+    || row.provider_resource_id !== providerResourceId
+    || row.provider_parent_id !== providerParentId
+    || row.observed_guild_id !== observedGuildId
+    || row.incident_reason !== input.reason
+    || row.fulfillment_allowed !== false
+    || (
+      routableGuildId !== null
+      && routableGuildId !== observedGuildId
+    )
+    || (
+      routableGuildId === null
+        ? row.alert_id !== null
+        : !isNonEmptyString(row.alert_id)
+    )
+  ) {
+    throw new Error('Provider money incident returned malformed durable identity');
+  }
+}
+
+function parseDeliveryTypeSnapshot(value: unknown): DeliveryType | null {
+  if (value === null) return null;
+  if (
+    typeof value === 'string'
+    && (DELIVERY_TYPES as readonly string[]).includes(value)
+  ) {
+    return value as DeliveryType;
+  }
+  throw new Error('Order delivery type snapshot is malformed');
 }
 
 async function fetchAllLifecycleRowsById<T extends { id: string }>(
@@ -255,12 +405,11 @@ async function loadSubscriptionLifecycleContext(
   operation: string,
 ): Promise<{
   order: SubscriptionLifecycleOrderRow;
-  product: SubscriptionProductIdentityRow;
-  customer: CustomerIdentityRow;
+  carrier: SubscriptionLifecycleCarrier;
 }> {
   const { data: orderData, error: orderError } = await supabase
     .from('orders')
-    .select('id, order_number, guild_id, customer_id, product_id, paypal_subscription_id')
+    .select('id, order_number, guild_id, customer_id, product_id, plan_id, paypal_subscription_id, amount_cents, currency, status')
     .eq('paypal_subscription_id', subscriptionId)
     .maybeSingle();
   requireSupabaseSuccess(orderError, `${operation}: failed to load order`);
@@ -271,38 +420,249 @@ async function loadSubscriptionLifecycleContext(
     !isNonEmptyString(orderData.guild_id) ||
     !isNonEmptyString(orderData.customer_id) ||
     !isNonEmptyString(orderData.product_id) ||
+    !isNonEmptyString(orderData.plan_id) ||
     orderData.paypal_subscription_id !== subscriptionId
+    || !Number.isSafeInteger(orderData.amount_cents)
+    || orderData.amount_cents < 0
+    || !isNonEmptyString(orderData.currency)
+    || !['completed', 'pending_review'].includes(String(orderData.status))
   ) {
     throw new Error(`${operation}: order identity mismatch`);
   }
   const order = orderData as SubscriptionLifecycleOrderRow;
 
-  const { data: productData, error: productError } = await supabase
-    .from('products')
-    .select('id, guild_id, name')
-    .eq('id', order.product_id)
-    .eq('guild_id', order.guild_id)
+  const { data: carrierData, error: carrierError } = await supabase
+    .from('bot_action_queue')
+    .select('id, guild_id, action, lane, status, idempotency_key, payload')
+    .eq(
+      'idempotency_key',
+      `paypal:subscription:${subscriptionId}:fulfill_subscription`,
+    )
     .maybeSingle();
-  requireSupabaseSuccess(productError, `${operation}: failed to load product`);
+  requireSupabaseSuccess(
+    carrierError,
+    `${operation}: failed to load historical activation carrier`,
+  );
+  const carrierPayload =
+    carrierData?.payload
+    && typeof carrierData.payload === 'object'
+    && !Array.isArray(carrierData.payload)
+      ? carrierData.payload as Record<string, unknown>
+      : null;
   if (
-    !productData ||
-    productData.id !== order.product_id ||
-    productData.guild_id !== order.guild_id ||
-    !isNonEmptyString(productData.name)
+    !carrierData
+    || carrierData.guild_id !== order.guild_id
+    || carrierData.action !== 'fulfill_subscription'
+    || carrierData.lane !== 'commerce'
+    || !['staged', 'pending', 'processing', 'completed', 'failed'].includes(
+      String(carrierData.status),
+    )
+    || carrierData.idempotency_key
+      !== `paypal:subscription:${subscriptionId}:fulfill_subscription`
+    || !carrierPayload
+    || carrierPayload.fulfillment_type !== 'subscription_activated'
+    || carrierPayload.guild_id !== order.guild_id
+    || carrierPayload.customer_id !== order.customer_id
+    || carrierPayload.product_id !== order.product_id
+    || carrierPayload.order_id !== order.id
+    || carrierPayload.order_number !== order.order_number
+    || carrierPayload.plan_id !== order.plan_id
+    || carrierPayload.paypal_subscription_id !== subscriptionId
+    || carrierPayload.entitlement_type !== 'subscription'
+    || !isNonEmptyString(carrierPayload.discord_id)
+    || !isNonEmptyString(carrierPayload.product_name)
+    || !isNonEmptyString(carrierPayload.paypal_plan_id)
   ) {
-    throw new Error(`${operation}: product identity mismatch`);
+    throw new Error(`${operation}: historical activation carrier mismatch`);
   }
 
-  const customer = await requireExactCustomerIdentity(supabase, {
-    customerId: order.customer_id,
-    guildId: order.guild_id,
-    operation: `${operation}: failed to load customer`,
-  });
   return {
     order,
-    product: productData as SubscriptionProductIdentityRow,
-    customer,
+    carrier: {
+      discordId: carrierPayload.discord_id,
+      productName: carrierPayload.product_name,
+      providerPlanId: carrierPayload.paypal_plan_id,
+    },
   };
+}
+
+async function createOrRecoverSubscriptionLifecycleAction(
+  supabase: AdminSupabase,
+  input: {
+    webhookEventId: string;
+    fulfillmentType:
+      | 'subscription_cancelled'
+      | 'subscription_suspended'
+      | 'subscription_payment_failed';
+    order: SubscriptionLifecycleOrderRow;
+    carrier: SubscriptionLifecycleCarrier;
+  },
+): Promise<void> {
+  if (
+    !isNonEmptyString(input.webhookEventId)
+    || input.webhookEventId.trim() !== input.webhookEventId
+  ) {
+    throw new Error('Subscription lifecycle fulfillment requires an exact webhook event id');
+  }
+  const expectedAction = input.fulfillmentType === 'subscription_cancelled'
+    ? 'fulfill_cancellation'
+    : 'fulfill_suspension';
+  const expectedIdempotencyKey =
+    `paypal:lifecycle:${input.webhookEventId}:${input.fulfillmentType}`;
+  const { data, error } = await supabase.rpc(
+    'commerce_create_or_recover_subscription_lifecycle_action',
+    {
+      p_webhook_event_id: input.webhookEventId,
+      p_fulfillment_type: input.fulfillmentType,
+      p_guild_id: input.order.guild_id,
+      p_customer_id: input.order.customer_id,
+      p_discord_id: input.carrier.discordId,
+      p_product_id: input.order.product_id,
+      p_order_id: input.order.id,
+      p_plan_id: input.order.plan_id,
+      p_paypal_subscription_id: input.order.paypal_subscription_id,
+    },
+  );
+  requireSupabaseSuccess(error, 'Failed to create subscription lifecycle fulfillment');
+  const row = data as Record<string, unknown> | null;
+  const disposition = row?.disposition;
+  const actionStatus = row?.action_status;
+  const validDispositionState =
+    (disposition === 'created' && actionStatus === 'pending')
+    || (
+      disposition === 'replay'
+      && ['pending', 'processing', 'completed'].includes(String(actionStatus))
+    )
+    || (
+      disposition === 'operator_held'
+      && ['staged', 'failed'].includes(String(actionStatus))
+    );
+  const validHistoricalCarrierIdentity =
+    disposition === 'created'
+      ? row?.discord_id === input.carrier.discordId
+        && row?.product_name === input.carrier.productName
+      : isNonEmptyString(row?.discord_id)
+        && isNonEmptyString(row?.product_name);
+  if (
+    !row
+    || !isNonEmptyString(row.action_id)
+    || !validDispositionState
+    || row.action !== expectedAction
+    || row.idempotency_key !== expectedIdempotencyKey
+    || row.webhook_event_id !== input.webhookEventId
+    || row.fulfillment_type !== input.fulfillmentType
+    || row.guild_id !== input.order.guild_id
+    || row.customer_id !== input.order.customer_id
+    || !validHistoricalCarrierIdentity
+    || row.product_id !== input.order.product_id
+    || row.order_id !== input.order.id
+    || row.order_number !== input.order.order_number
+    || row.plan_id !== input.order.plan_id
+    || row.paypal_subscription_id !== input.order.paypal_subscription_id
+    || row.amount_cents !== input.order.amount_cents
+    || row.currency !== input.order.currency
+  ) {
+    throw new Error('Subscription lifecycle fulfillment returned malformed identity');
+  }
+  if (disposition === 'operator_held') {
+    throw new Error(
+      'Subscription lifecycle fulfillment is operator-held and was not replaced',
+    );
+  }
+}
+
+function requireProviderOccurredAt(
+  value: unknown,
+  operation: string,
+): string {
+  if (!isNonEmptyString(value) || value.trim() !== value) {
+    throw new Error(`${operation} requires provider create_time`);
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    throw new Error(`${operation} has invalid provider create_time`);
+  }
+  return new Date(timestamp).toISOString();
+}
+
+async function recordSubscriptionLifecycleObservation(
+  supabase: AdminSupabase,
+  input: {
+    webhookEventId: string;
+    eventType: SubscriptionLifecycleEventType;
+    providerOccurredAt: unknown;
+    providerPaidThroughAt?: string | null;
+    order: SubscriptionLifecycleOrderRow | CommerceOrderRow;
+  },
+): Promise<{
+  accepted: boolean;
+  generation: number;
+  occurredAt: string;
+  paidThroughAt: string | null;
+}> {
+  const occurredAt = requireProviderOccurredAt(
+    input.providerOccurredAt,
+    input.eventType,
+  );
+  const paidThroughAt = input.providerPaidThroughAt ?? null;
+  if (paidThroughAt !== null) {
+    const paidThroughTimestamp = Date.parse(paidThroughAt);
+    if (
+      !Number.isFinite(paidThroughTimestamp)
+      || paidThroughTimestamp <= Date.parse(occurredAt)
+    ) {
+      throw new Error(`${input.eventType} requires a finite future paid-through boundary`);
+    }
+  }
+  if (!isNonEmptyString(input.order.plan_id)) {
+    throw new Error(`${input.eventType} requires an exact local plan identity`);
+  }
+
+  const { data, error } = await supabase.rpc(
+    'commerce_record_subscription_lifecycle_observation',
+    {
+      p_webhook_event_id: input.webhookEventId,
+      p_provider_event_type: input.eventType,
+      p_provider_occurred_at: occurredAt,
+      p_provider_paid_through_at: paidThroughAt,
+      p_paypal_subscription_id: input.order.paypal_subscription_id,
+      p_order_id: input.order.id,
+      p_guild_id: input.order.guild_id,
+      p_customer_id: input.order.customer_id,
+      p_product_id: input.order.product_id,
+      p_plan_id: input.order.plan_id,
+    },
+  );
+  requireSupabaseSuccess(error, 'Failed to record subscription lifecycle chronology');
+  const row = data as Record<string, unknown> | null;
+  const disposition = String(row?.disposition ?? '');
+  const accepted = row?.accepted === true;
+  const generation = Number(row?.generation);
+  if (
+    !row
+    || !['accepted', 'replay', 'stale', 'stale_replay'].includes(disposition)
+    || accepted !== ['accepted', 'replay'].includes(disposition)
+    || !Number.isSafeInteger(generation)
+    || generation < 1
+    || row.webhook_event_id !== input.webhookEventId
+    || row.provider_event_type !== input.eventType
+    || Date.parse(String(row.provider_occurred_at)) !== Date.parse(occurredAt)
+    || (
+      paidThroughAt === null
+        ? row.provider_paid_through_at !== null
+        : Date.parse(String(row.provider_paid_through_at))
+          !== Date.parse(paidThroughAt)
+    )
+    || row.paypal_subscription_id !== input.order.paypal_subscription_id
+    || row.order_id !== input.order.id
+    || row.guild_id !== input.order.guild_id
+    || row.customer_id !== input.order.customer_id
+    || row.product_id !== input.order.product_id
+    || row.plan_id !== input.order.plan_id
+  ) {
+    throw new Error('Subscription lifecycle chronology returned malformed identity');
+  }
+  return { accepted, generation, occurredAt, paidThroughAt };
 }
 
 function parseStringArray(value: unknown, label: string): string[] {
@@ -378,6 +738,7 @@ function parseFrozenGrantSnapshot(data: unknown): FrozenGrantSnapshot {
       candidate.temporary_role_grants_snapshot,
     ),
     grant_snapshot_frozen_at: candidate.grant_snapshot_frozen_at,
+    delivery_type_snapshot: null,
   };
 }
 
@@ -551,7 +912,11 @@ async function requireAuthoritativeSubscriptionAmount(
       subAmount.currency.toUpperCase(),
       `Subscription ${subscriptionId} authoritative billing amount`,
     );
-    return { ...financial, providerPlanId: subAmount.planId };
+    return {
+      ...financial,
+      providerPlanId: subAmount.planId,
+      paidThroughAt: subAmount.nextBillingTime,
+    };
   } catch {
     throw new Error(
       `Subscription ${subscriptionId} authoritative billing amount is unavailable`,
@@ -705,7 +1070,25 @@ async function freezeOrderGrantSnapshot(
   if (snapshot.order_id !== order.id) {
     throw new Error('Order grant snapshot RPC returned the wrong order');
   }
-  return snapshot;
+  const { data: deliveryContract, error: deliveryContractError } = await supabase
+    .from('orders')
+    .select('id, delivery_type_snapshot')
+    .eq('id', order.id)
+    .eq('guild_id', order.guild_id)
+    .maybeSingle();
+  requireSupabaseSuccess(
+    deliveryContractError,
+    'Failed to load frozen order delivery contract',
+  );
+  if (!deliveryContract || deliveryContract.id !== order.id) {
+    throw new Error('Frozen order delivery contract returned the wrong order');
+  }
+  return {
+    ...snapshot,
+    delivery_type_snapshot: parseDeliveryTypeSnapshot(
+      deliveryContract.delivery_type_snapshot,
+    ),
+  };
 }
 
 async function adoptLegacySubscriptionGrantContract(
@@ -792,56 +1175,38 @@ async function ensureStagedLicenseKey(
   }
 }
 
+function validateStagedLicenseDelivery(
+  payload: Record<string, unknown>,
+  deliveryType: DeliveryType | null,
+): void {
+  const licenseKeyId = payload.license_key_id;
+  const plaintext = payload.license_key_plaintext;
+  const hasExactLicense =
+    isNonEmptyString(licenseKeyId) && isNonEmptyString(plaintext);
+  const hasAnyLicense = licenseKeyId != null || plaintext != null;
+
+  // A queue row staged before delivery snapshots existed is already the durable
+  // sold contract. Do not re-derive or rewrite it from today's catalog.
+  if (deliveryType === null) {
+    if (hasAnyLicense && !hasExactLicense) {
+      throw new Error('Staged legacy license key payload is malformed');
+    }
+    return;
+  }
+
+  if (deliveryType === 'license_key' && !hasExactLicense) {
+    throw new Error('Licence-key order has no staged licence payload');
+  }
+  if (deliveryType !== 'license_key' && hasAnyLicense) {
+    throw new Error('Non-licence order has an unexpected staged licence payload');
+  }
+}
+
 const EXPIRABLE_ENTITLEMENT_STATUSES = ['active', 'pending', 'grace_period', 'suspended'];
 const EXPIRY_RETRY_ENTITLEMENT_STATUSES = [
   ...EXPIRABLE_ENTITLEMENT_STATUSES,
   'expired',
 ];
-
-/**
- * W2 codex round 2: retry-dedupe probe for cancellation/suspension
- * fulfillments. A failed BILLING.SUBSCRIPTION.CANCELLED / .SUSPENDED /
- * .PAYMENT.FAILED event is resumable (RESUMABLE_FAILED_EVENT_TYPES), and the
- * failed attempt may already have queued the fulfillment (insert committed
- * but the response was lost, or the process died before recording success).
- * The bot-side entitlement effects are idempotent, but the user DM / event
- * emission are not — so a resumed retry must not queue a second action.
- * The probe is scoped by the triggering webhook event id (stamped into the
- * payload) so a fulfillment queued by an EARLIER suspension episode of the
- * same order never suppresses a genuinely new one.
- */
-async function hasQueuedOrderFulfillment(
-  supabase: ReturnType<typeof createAdminSupabase>,
-  input: {
-    guildId: string;
-    action: string;
-    orderId: string;
-    fulfillmentType: string;
-    webhookEventId?: string;
-  },
-): Promise<boolean> {
-  const payloadFilter: Record<string, string> = {
-    order_id: input.orderId,
-    fulfillment_type: input.fulfillmentType,
-  };
-  if (input.webhookEventId) {
-    payloadFilter.webhook_event_id = input.webhookEventId;
-  }
-
-  const { data, error } = await supabase
-    .from('bot_action_queue')
-    .select('id')
-    .eq('guild_id', input.guildId)
-    .eq('action', input.action)
-    .in('status', ['pending', 'processing', 'completed'])
-    .contains('payload', payloadFilter)
-    .limit(1);
-  requireSupabaseSuccess(error, `Failed to inspect queued ${input.action}`);
-  if (!Array.isArray(data) || data.some((row) => !row || !isNonEmptyString(row.id))) {
-    throw new Error(`Failed to inspect queued ${input.action}: query returned malformed data`);
-  }
-  return data.length > 0;
-}
 
 async function hasQueuedSubscriptionExpiredAuditEvent(
   supabase: ReturnType<typeof createAdminSupabase>,
@@ -984,12 +1349,52 @@ export function resolveRefundPaymentId(
 
 // ── Order Approved ──────────────────────────────────
 
+/**
+ * Finding 2: PayPal reports an already-captured order as HTTP 422 with
+ * `details[0].issue === 'ORDER_ALREADY_CAPTURED'`. That is not a failure — it
+ * is proof the capture we are retrying already happened, and the resulting
+ * `PAYMENT.CAPTURE.COMPLETED` event is what actually creates the order rows.
+ *
+ * This matters because `CHECKOUT.ORDER.APPROVED` is now resumable: without it,
+ * a capture that timed out client-side but succeeded at PayPal would fail
+ * forever on every retry.
+ */
+function isAlreadyCapturedResponse(status: number, body: string): boolean {
+  if (status !== 422) return false;
+  try {
+    const parsed = JSON.parse(body) as { details?: Array<{ issue?: unknown }> };
+    return Array.isArray(parsed.details)
+      && parsed.details.some((detail) => detail?.issue === 'ORDER_ALREADY_CAPTURED');
+  } catch {
+    return false;
+  }
+}
+
 export async function handleOrderApproved(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
+  options: ProviderMoneyHandlerOptions,
 ) {
-  const paypalOrderId = resource.id as string;
-  if (!paypalOrderId) return;
+  requireProviderMoneyEventId(options, 'Order approval');
+  const paypalOrderId = resource.id;
+  if (!isCanonicalPayPalResourceId(paypalOrderId)) {
+    throw new Error('Approved PayPal order identity is malformed');
+  }
+  const { data: order, error: orderError } = await supabase
+    .from('orders')
+    .select('id, guild_id, paypal_order_id, status')
+    .eq('paypal_order_id', paypalOrderId)
+    .maybeSingle();
+  requireSupabaseSuccess(orderError, 'Failed to load approved PayPal order');
+  if (
+    !order
+    || !isNonEmptyString(order.id)
+    || !isNonEmptyString(order.guild_id)
+    || order.paypal_order_id !== paypalOrderId
+    || !['pending', 'completed', 'pending_review'].includes(String(order.status))
+  ) {
+    throw new Error('Approved PayPal order has no exact resumable local carrier');
+  }
 
   const paypalConfig = await getPayPalRuntimeConfig();
   const token = await getPayPalToken(paypalConfig);
@@ -997,21 +1402,58 @@ export async function handleOrderApproved(
     throw new Error('Could not get PayPal token to capture order');
   }
 
-  const captureRes = await fetch(
-    `${paypalConfig.apiBase}/v2/checkout/orders/${paypalOrderId}/capture`,
-    {
+  const providerOrderUrl =
+    `${paypalConfig.apiBase}/v2/checkout/orders/${paypalOrderId}`;
+  let captureRes: Response | null = null;
+  try {
+    captureRes = await fetch(`${providerOrderUrl}/capture`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
+        // Keep this stable across provider redelivery and manual replay.
+        'PayPal-Request-Id': `capture-${paypalOrderId}`,
       },
       signal: AbortSignal.timeout(10_000),
-    },
-  );
+    });
+  } catch {
+    // A timed-out POST may have committed at PayPal. Reconcile below instead
+    // of issuing a second capture under a new identity.
+  }
 
-  if (!captureRes.ok) {
+  let captured = false;
+  if (captureRes?.ok) {
+    const captureBody = await captureRes.json().catch(() => null) as
+      | { id?: unknown; status?: unknown }
+      | null;
+    captured =
+      captureBody?.id === paypalOrderId
+      && captureBody.status === 'COMPLETED';
+  } else if (captureRes) {
     const errorText = await captureRes.text();
-    throw new Error(`Failed to capture PayPal order: ${errorText}`);
+    if (isAlreadyCapturedResponse(captureRes.status, errorText)) {
+      captured = true;
+    }
+  }
+  if (!captured) {
+    const reconcileRes = await fetch(providerOrderUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (reconcileRes.ok) {
+      const reconcileBody = await reconcileRes.json().catch(() => null) as
+        | { id?: unknown; status?: unknown }
+        | null;
+      captured =
+        reconcileBody?.id === paypalOrderId
+        && reconcileBody.status === 'COMPLETED';
+    }
+  }
+  if (!captured) {
+    const providerStatus = captureRes?.status ?? 'ambiguous';
+    throw new Error(
+      `Failed to capture PayPal order and exact reconciliation did not prove completion (${providerStatus})`,
+    );
   }
 
   console.log(`[Webhook] Captured PayPal order: ${paypalOrderId}`);
@@ -1022,36 +1464,93 @@ export async function handleOrderApproved(
 export async function handlePaymentCaptured(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
+  options: ProviderMoneyHandlerOptions,
 ) {
+  const webhookEventId = requireProviderMoneyEventId(
+    options,
+    'Payment capture',
+  );
   const parsed = paypalCaptureResourceSchema.safeParse(resource);
   const capture: PayPalCaptureResource = parsed.success
     ? parsed.data
     : { id: String(resource.id ?? '') };
 
-  const customId = capture.custom_id;
+  const customId = capture.custom_id
+    ?? (typeof resource.custom_id === 'string' ? resource.custom_id : undefined);
   let meta: {
     guild_id: string;
     product_id: string;
     customer_id: string;
     discord_id: string;
   } | null = null;
+  let observedGuildId: string | null = null;
 
   if (customId) {
     try {
-      const raw = JSON.parse(customId);
-      if (raw.g && raw.p && raw.c && raw.d) {
-        meta = {
-          guild_id: raw.g,
-          product_id: raw.p,
-          customer_id: raw.c,
-          discord_id: raw.d,
-        };
-      } else {
-        meta = raw;
+      const raw = JSON.parse(customId) as unknown;
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        const custom = raw as Record<string, unknown>;
+        observedGuildId = boundedObservedGuildId(
+          custom.g ?? custom.guild_id,
+        );
+        if (custom.g && custom.p && custom.c && custom.d) {
+          meta = {
+            guild_id: String(custom.g),
+            product_id: String(custom.p),
+            customer_id: String(custom.c),
+            discord_id: String(custom.d),
+          };
+        } else {
+          meta = {
+            guild_id: String(custom.guild_id ?? ''),
+            product_id: String(custom.product_id ?? ''),
+            customer_id: String(custom.customer_id ?? ''),
+            discord_id: String(custom.discord_id ?? ''),
+          };
+        }
       }
     } catch {
       /* ignore */
     }
+  }
+
+  const paypalCaptureId = resource.id;
+  const rawRelatedIds = resource.supplementary_data;
+  let fallbackPayPalOrderId: unknown;
+  if (
+    rawRelatedIds
+    && typeof rawRelatedIds === 'object'
+    && !Array.isArray(rawRelatedIds)
+  ) {
+    const relatedIds =
+      (rawRelatedIds as Record<string, unknown>).related_ids;
+    if (
+      relatedIds
+      && typeof relatedIds === 'object'
+      && !Array.isArray(relatedIds)
+    ) {
+      fallbackPayPalOrderId =
+        (relatedIds as Record<string, unknown>).order_id;
+    }
+  }
+  const paypalOrderId = capture.supplementary_data?.related_ids?.order_id
+    ?? fallbackPayPalOrderId;
+  if (
+    !isNonEmptyString(paypalCaptureId)
+    || !isCanonicalPayPalResourceId(paypalCaptureId)
+  ) {
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'PAYMENT.CAPTURE.COMPLETED',
+      resourceId: paypalCaptureId,
+      parentId: paypalOrderId,
+      observedGuildId,
+      reason: 'provider_identity_malformed',
+      evidence: {
+        resource_id_present: isNonEmptyString(paypalCaptureId),
+      },
+    });
+    return;
   }
 
   if (
@@ -1061,28 +1560,50 @@ export async function handlePaymentCaptured(
     !isNonEmptyString(meta.customer_id) ||
     !isNonEmptyString(meta.discord_id)
   ) {
-    const captureId = resource.id as string | undefined;
-    console.error(
-      `[Webhook] Payment captured but custom_id is missing or malformed — ` +
-        `captureId=${captureId ?? 'unknown'}, raw custom_id=${JSON.stringify(customId)}. ` +
-        `Customer was charged but no order/entitlement was created. Manual reconciliation required.`,
-    );
-    throw new Error(
-      `Payment captured without valid custom_id metadata (capture ${captureId})`,
-    );
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'PAYMENT.CAPTURE.COMPLETED',
+      resourceId: paypalCaptureId,
+      parentId: paypalOrderId,
+      observedGuildId,
+      reason: 'custom_identity_missing_or_malformed',
+      evidence: {
+        custom_id_present: isNonEmptyString(customId),
+      },
+    });
+    return;
   }
 
-  const paypalCaptureId = resource.id as string;
-  if (!isNonEmptyString(paypalCaptureId)) {
-    throw new Error('Payment capture is missing its provider id');
+  const { data: customer, error: customerError } = await supabase
+    .from('customers')
+    .select('id, guild_id, discord_id')
+    .eq('id', meta.customer_id)
+    .eq('guild_id', meta.guild_id)
+    .maybeSingle();
+  requireSupabaseSuccess(
+    customerError,
+    'Failed to validate captured payment customer',
+  );
+  if (
+    !customer
+    || customer.id !== meta.customer_id
+    || customer.guild_id !== meta.guild_id
+    || customer.discord_id !== meta.discord_id
+  ) {
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'PAYMENT.CAPTURE.COMPLETED',
+      resourceId: paypalCaptureId,
+      parentId: paypalOrderId,
+      observedGuildId: meta.guild_id,
+      reason: 'customer_identity_missing_or_mismatched',
+      evidence: {
+        customer_id: meta.customer_id,
+        product_id: meta.product_id,
+      },
+    });
+    return;
   }
-  const paypalOrderId = capture.supplementary_data?.related_ids?.order_id;
-  await requireExactCustomerIdentity(supabase, {
-    customerId: meta.customer_id,
-    guildId: meta.guild_id,
-    expectedDiscordId: meta.discord_id,
-    operation: 'Failed to validate captured payment customer',
-  });
 
   // A resumed event first follows the capture's unique payment row back to
   // the exact order. Before the first successful payment insert, the order is
@@ -1099,21 +1620,35 @@ export async function handlePaymentCaptured(
   if (existingPayment?.order_id) {
     const { data, error } = await supabase
       .from('orders')
-      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, paypal_order_id')
+      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, delivery_type_snapshot, paypal_order_id')
       .eq('id', existingPayment.order_id)
       .eq('guild_id', meta.guild_id)
       .maybeSingle();
     requireSupabaseSuccess(error, 'Failed to load captured order');
     order = data as CommerceOrderRow | null;
   } else {
-    if (!isNonEmptyString(paypalOrderId)) {
-      throw new Error(
-        `Payment capture ${paypalCaptureId} is missing its PayPal order identity`,
-      );
+    if (
+      !isNonEmptyString(paypalOrderId)
+      || !isCanonicalPayPalResourceId(paypalOrderId)
+    ) {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId,
+        eventType: 'PAYMENT.CAPTURE.COMPLETED',
+        resourceId: paypalCaptureId,
+        parentId: paypalOrderId,
+        observedGuildId: meta.guild_id,
+        reason: 'provider_identity_malformed',
+        evidence: {
+          customer_id: meta.customer_id,
+          product_id: meta.product_id,
+          paypal_order_id_present: isNonEmptyString(paypalOrderId),
+        },
+      });
+      return;
     }
     const { data, error } = await supabase
       .from('orders')
-      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, paypal_order_id')
+      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, delivery_type_snapshot, paypal_order_id')
       .eq('guild_id', meta.guild_id)
       .eq('customer_id', meta.customer_id)
       .eq('product_id', meta.product_id)
@@ -1136,16 +1671,54 @@ export async function handlePaymentCaptured(
     !Number.isSafeInteger(order.amount_cents) ||
     !isNonEmptyString(order.currency)
   ) {
-    throw new Error(`Captured payment ${paypalCaptureId} has no matching order identity`);
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'PAYMENT.CAPTURE.COMPLETED',
+      resourceId: paypalCaptureId,
+      parentId: paypalOrderId,
+      observedGuildId: meta.guild_id,
+      reason: 'order_identity_missing_or_ambiguous',
+      evidence: {
+        local_order_found: order !== null,
+        local_order_id: boundedProviderIdentity(order?.id),
+        customer_id: meta.customer_id,
+        product_id: meta.product_id,
+      },
+    });
+    return;
   }
 
   const amountCents = parsePayPalAmountToCents(capture.amount?.value);
   if (amountCents == null) {
-    throw new Error(`Payment capture ${paypalCaptureId} has an invalid amount`);
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'PAYMENT.CAPTURE.COMPLETED',
+      resourceId: paypalCaptureId,
+      parentId: paypalOrderId,
+      observedGuildId: order.guild_id,
+      reason: 'financial_identity_malformed',
+      evidence: {
+        order_id: order.id,
+        amount_present: capture.amount?.value !== undefined,
+      },
+    });
+    return;
   }
   const rawCaptureCurrency = capture.amount?.currency_code;
   if (!isNonEmptyString(rawCaptureCurrency) || !/^[A-Za-z]{3}$/.test(rawCaptureCurrency)) {
-    throw new Error(`Payment capture ${paypalCaptureId} has an invalid currency`);
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'PAYMENT.CAPTURE.COMPLETED',
+      resourceId: paypalCaptureId,
+      parentId: paypalOrderId,
+      observedGuildId: order.guild_id,
+      reason: 'financial_identity_malformed',
+      evidence: {
+        order_id: order.id,
+        currency: boundedProviderIdentity(rawCaptureCurrency),
+      },
+    });
+    return;
   }
   const captureCurrency = rawCaptureCurrency.toUpperCase();
   const amountMatches = amountCents === order.amount_cents
@@ -1177,6 +1750,12 @@ export async function handlePaymentCaptured(
         `[Webhook] Exact legacy capture replay has no frozen grant snapshot; ` +
           `skipping fulfillment recovery for ${order.order_number}`,
       );
+      await holdUnknownDeliveryContract(supabase, order, {
+        kind: 'capture',
+        id: paypalCaptureId,
+        amountCents,
+        currency: captureCurrency,
+      });
       return;
     }
   }
@@ -1185,6 +1764,22 @@ export async function handlePaymentCaptured(
   // completed and pending_review outcomes. A financial mismatch still must
   // not stage or release any fulfillment.
   const snapshot = await freezeOrderGrantSnapshot(supabase, order);
+  // Persist and re-validate the exact completed capture before fulfillment
+  // arbitration. The claim RPC independently requires this payment row, so a
+  // forged/malformed historical queue payload cannot seize the winner with a
+  // merely syntactic capture ID. No random key or fulfillment row exists yet.
+  const finalization = replayFinalization ?? await finalizePayPalCapture(supabase, {
+    order,
+    paypalCaptureId,
+    amountCents,
+    currency: captureCurrency,
+  });
+  if (shouldSkipCaptureFulfillment(finalization, {
+    order,
+    amountCents,
+    currency: captureCurrency,
+  })) return;
+
   const expected: FulfillmentExpectation = {
     idempotencyKey: `paypal:capture:${paypalCaptureId}:fulfill_purchase`,
     action: 'fulfill_purchase',
@@ -1216,6 +1811,40 @@ export async function handlePaymentCaptured(
   if (amountMatches) {
     staged = await loadFulfillmentByIdempotencyKey(supabase, expected);
   }
+  if (
+    amountMatches
+    && !staged
+    && snapshot.delivery_type_snapshot === null
+  ) {
+    await holdUnknownDeliveryContract(supabase, order, {
+      kind: 'capture',
+      id: paypalCaptureId,
+      amountCents,
+      currency: captureCurrency,
+    });
+    return;
+  }
+  if (amountMatches) {
+    // The database claim is the atomic double-fulfillment boundary. It must run
+    // before a random licence key or staged queue payload is created. Historical
+    // PayPal links can arrive concurrently, so a JavaScript entitlement read is
+    // not sufficient serialization. Unknown delivery contracts use the wrapper
+    // above instead so claim + permanent hold + alert are one transaction.
+    const claim = await claimPaidFulfillment(supabase, order, {
+      kind: 'capture',
+      id: paypalCaptureId,
+      amountCents,
+      currency: captureCurrency,
+    });
+    if (claim.disposition === 'held') {
+      console.error(
+        `[Webhook] DUPLICATE PURCHASE: order ${order.order_number} lost fulfillment `
+          + `claim to ${claim.winning_order_id ?? 'an existing entitlement'}; payment `
+          + `recorded, critical alert ${claim.alert_id} persisted, fulfillment withheld.`,
+      );
+      return;
+    }
+  }
   if (amountMatches && !staged) {
     const productName = await requireProductDisplayName(
       supabase,
@@ -1223,14 +1852,9 @@ export async function handlePaymentCaptured(
       'Failed to load captured product display identity',
     );
 
-    const { data: licenseConfig, error: licenseConfigError } = await supabase
-      .from('product_license_config')
-      .select('product_id')
-      .eq('product_id', order.product_id)
-      .maybeSingle();
-    requireSupabaseSuccess(licenseConfigError, 'Failed to load product license configuration');
-
-    const license = licenseConfig ? generateLicenseKey() : null;
+    const license = snapshot.delivery_type_snapshot === 'license_key'
+      ? generateLicenseKey()
+      : null;
     staged = await stageFulfillment(supabase, expected, {
       fulfillment_type: 'one_time_purchase',
       guild_id: order.guild_id,
@@ -1256,22 +1880,9 @@ export async function handlePaymentCaptured(
     });
   }
 
-  // The sold grant contract is frozen before every first finalization. Exact
-  // payments additionally have an immutable grant/license payload durably
-  // staged; mismatches have no queue row and can only become pending_review.
-  const finalization = replayFinalization ?? await finalizePayPalCapture(supabase, {
-    order,
-    paypalCaptureId,
-    amountCents,
-    currency: captureCurrency,
-  });
-  if (shouldSkipCaptureFulfillment(finalization, {
-    order,
-    amountCents,
-    currency: captureCurrency,
-  })) return;
   if (!staged) throw new Error('Completed capture has no staged grant snapshot');
 
+  validateStagedLicenseDelivery(staged.payload, snapshot.delivery_type_snapshot);
   await ensureStagedLicenseKey(supabase, order, staged.payload);
   await releaseStagedFulfillment(supabase, staged);
 
@@ -1285,13 +1896,18 @@ export async function handlePaymentCaptured(
 export async function handleSubscriptionActivated(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
+  options: ProviderMoneyHandlerOptions,
 ) {
+  const webhookEventId = requireProviderMoneyEventId(
+    options,
+    'Subscription activation',
+  );
   const parsed = paypalCaptureResourceSchema.safeParse(resource);
   const capture: PayPalCaptureResource = parsed.success
     ? parsed.data
     : { id: String(resource.id ?? '') };
-  const customId = capture.custom_id;
-  if (!customId) throw new Error('Subscription activation is missing custom_id');
+  const customId = capture.custom_id
+    ?? (typeof resource.custom_id === 'string' ? resource.custom_id : undefined);
 
   let meta: {
     guild_id: string;
@@ -1299,46 +1915,77 @@ export async function handleSubscriptionActivated(
     plan_id: string;
     customer_id: string;
     discord_id: string;
-  };
+  } | null = null;
+  let observedGuildId: string | null = null;
   try {
-    const raw = JSON.parse(customId);
-    if (raw.g && raw.p && raw.c && raw.d) {
-      meta = {
-        guild_id: raw.g,
-        product_id: raw.p,
-        plan_id: raw.pl ?? raw.plan_id ?? '',
-        customer_id: raw.c,
-        discord_id: raw.d,
-      };
-    } else {
-      meta = raw;
+    const raw = JSON.parse(customId ?? '') as unknown;
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const custom = raw as Record<string, unknown>;
+      observedGuildId = boundedObservedGuildId(
+        custom.g ?? custom.guild_id,
+      );
+      meta = custom.g && custom.p && custom.c && custom.d
+        ? {
+            guild_id: String(custom.g),
+            product_id: String(custom.p),
+            plan_id: String(custom.pl ?? custom.plan_id ?? ''),
+            customer_id: String(custom.c),
+            discord_id: String(custom.d),
+          }
+        : {
+            guild_id: String(custom.guild_id ?? ''),
+            product_id: String(custom.product_id ?? ''),
+            plan_id: String(custom.plan_id ?? ''),
+            customer_id: String(custom.customer_id ?? ''),
+            discord_id: String(custom.discord_id ?? ''),
+          };
     }
   } catch {
-    throw new Error('Subscription activation has malformed custom_id');
+    /* Durable incident below. */
+  }
+
+  const subscriptionId = resource.id;
+  if (
+    !isNonEmptyString(subscriptionId)
+    || !isCanonicalPayPalResourceId(subscriptionId)
+  ) {
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'BILLING.SUBSCRIPTION.ACTIVATED',
+      resourceId: subscriptionId,
+      observedGuildId,
+      reason: 'provider_identity_malformed',
+      evidence: {
+        resource_id_present: isNonEmptyString(subscriptionId),
+      },
+    });
+    return;
   }
 
   if (
+    !meta ||
     !isNonEmptyString(meta.guild_id) ||
     !isNonEmptyString(meta.product_id) ||
     !isNonEmptyString(meta.plan_id) ||
     !isNonEmptyString(meta.customer_id) ||
     !isNonEmptyString(meta.discord_id)
   ) {
-    throw new Error('Subscription activation has malformed custom_id');
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'BILLING.SUBSCRIPTION.ACTIVATED',
+      resourceId: subscriptionId,
+      observedGuildId,
+      reason: 'custom_identity_missing_or_malformed',
+      evidence: {
+        custom_id_present: isNonEmptyString(customId),
+      },
+    });
+    return;
   }
-
-  const subscriptionId = resource.id as string;
-  if (!isNonEmptyString(subscriptionId)) throw new Error('Subscription activation has no provider id');
-  await requireExactCustomerIdentity(supabase, {
-    customerId: meta.customer_id,
-    guildId: meta.guild_id,
-    expectedDiscordId: meta.discord_id,
-    operation: 'Failed to validate subscription customer',
-  });
 
   const { data: existingOrder, error: existingOrderError } = await supabase
     .from('orders')
-    .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, paypal_subscription_id')
+    .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, delivery_type_snapshot, paypal_subscription_id')
     .eq('paypal_subscription_id', subscriptionId)
     .eq('guild_id', meta.guild_id)
     .maybeSingle();
@@ -1354,42 +2001,174 @@ export async function handleSubscriptionActivated(
       order.product_id !== meta.product_id ||
       order.plan_id !== meta.plan_id ||
       order.paypal_subscription_id !== subscriptionId ||
-      !['pending', 'completed'].includes(order.status)
+      !['pending', 'pending_review', 'completed'].includes(order.status)
     )
   ) {
-    throw new Error('Subscription order failed identity validation');
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'BILLING.SUBSCRIPTION.ACTIVATED',
+      resourceId: subscriptionId,
+      observedGuildId: meta.guild_id,
+      reason: 'order_identity_missing_or_ambiguous',
+      evidence: {
+        local_order_id: boundedProviderIdentity(order.id),
+        customer_id: meta.customer_id,
+        product_id: meta.product_id,
+        plan_id: meta.plan_id,
+      },
+    });
+    return;
   }
 
   let firstProviderContract: AuthoritativeSubscriptionContract | null = null;
   let prevalidatedProviderPlanId: string | null = null;
 
-  if (!order) {
-    firstProviderContract = await requireAuthoritativeSubscriptionAmount(subscriptionId);
-    await requireExactSubscriptionPlan(supabase, {
-      planId: meta.plan_id,
-      guildId: meta.guild_id,
-      productId: meta.product_id,
-      providerPlanId: firstProviderContract.providerPlanId,
-    });
-    prevalidatedProviderPlanId = firstProviderContract.providerPlanId;
-    const { data, error } = await supabase
-      .from('orders')
-      .insert({
-        order_number: `ORD-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`,
+  const { data: customer, error: customerError } = await supabase
+    .from('customers')
+    .select('id, guild_id, discord_id')
+    .eq('id', meta.customer_id)
+    .eq('guild_id', meta.guild_id)
+    .maybeSingle();
+  requireSupabaseSuccess(
+    customerError,
+    'Failed to validate subscription customer',
+  );
+  if (
+    !customer
+    || customer.id !== meta.customer_id
+    || customer.guild_id !== meta.guild_id
+    || customer.discord_id !== meta.discord_id
+  ) {
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'BILLING.SUBSCRIPTION.ACTIVATED',
+      resourceId: subscriptionId,
+      observedGuildId: meta.guild_id,
+      reason: 'customer_identity_missing_or_mismatched',
+      evidence: {
         customer_id: meta.customer_id,
-        guild_id: meta.guild_id,
         product_id: meta.product_id,
         plan_id: meta.plan_id,
-        paypal_subscription_id: subscriptionId,
-        amount_cents: firstProviderContract.amountCents,
-        currency: firstProviderContract.currency,
-        status: 'pending',
-        source: 'purchase',
-      })
-      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, paypal_subscription_id')
-      .single();
-    requireSupabaseSuccess(error, 'Failed to create subscription order');
-    order = data as CommerceOrderRow | null;
+      },
+    });
+    return;
+  }
+
+  if (!order) {
+    firstProviderContract = await requireAuthoritativeSubscriptionAmount(subscriptionId);
+    const { data: plan, error: planError } = await supabase
+      .from('plans')
+      .select('id, guild_id, product_id, paypal_plan_id')
+      .eq('id', meta.plan_id)
+      .eq('guild_id', meta.guild_id)
+      .eq('product_id', meta.product_id)
+      .maybeSingle();
+    requireSupabaseSuccess(
+      planError,
+      'Failed to load subscription plan identity',
+    );
+    if (
+      !plan
+      || plan.id !== meta.plan_id
+      || plan.guild_id !== meta.guild_id
+      || plan.product_id !== meta.product_id
+      || plan.paypal_plan_id !== firstProviderContract.providerPlanId
+    ) {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId,
+        eventType: 'BILLING.SUBSCRIPTION.ACTIVATED',
+        resourceId: subscriptionId,
+        observedGuildId: meta.guild_id,
+        reason: 'plan_identity_missing_or_mismatched',
+        evidence: {
+          customer_id: meta.customer_id,
+          product_id: meta.product_id,
+          plan_id: meta.plan_id,
+          provider_plan_id:
+            boundedProviderIdentity(firstProviderContract.providerPlanId),
+        },
+      });
+      return;
+    }
+    prevalidatedProviderPlanId = firstProviderContract.providerPlanId;
+    const recoveryOrderNumber =
+      `ORD-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`;
+    let recoveryData: unknown = null;
+    let recoveryError: unknown = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await supabase.rpc(
+        'commerce_create_subscription_activation_recovery_order',
+        {
+          p_order_number: recoveryOrderNumber,
+          p_guild_id: meta.guild_id,
+          p_customer_id: meta.customer_id,
+          p_product_id: meta.product_id,
+          p_plan_id: meta.plan_id,
+          p_paypal_subscription_id: subscriptionId,
+          p_amount_cents: firstProviderContract.amountCents,
+          p_currency: firstProviderContract.currency,
+        },
+      );
+      recoveryData = response.data;
+      recoveryError = response.error;
+      if (!recoveryError) {
+        const candidate = recoveryData as Record<string, unknown> | null;
+        const holdReason = candidate?.hold_reason;
+        const expectedAlertType = holdReason === 'unknown_delivery_contract'
+          ? 'commerce_unknown_delivery_contract'
+          : holdReason === 'duplicate_paid_fulfillment'
+            ? 'commerce_duplicate_subscription_activation'
+            : null;
+        const validWinner =
+          isNonEmptyString(candidate?.winning_order_id)
+          && (
+            holdReason === 'unknown_delivery_contract'
+              ? candidate?.winning_order_id === candidate?.id
+                && candidate?.conflicting_entitlement_id === null
+              : candidate?.winning_order_id !== candidate?.id
+          );
+        if (
+          candidate
+          && ['created', 'replay'].includes(String(candidate.disposition))
+          && isNonEmptyString(candidate.id)
+          && isNonEmptyString(candidate.order_number)
+          && candidate.guild_id === meta.guild_id
+          && candidate.customer_id === meta.customer_id
+          && candidate.product_id === meta.product_id
+          && candidate.plan_id === meta.plan_id
+          && candidate.paypal_order_id === null
+          && candidate.paypal_subscription_id === subscriptionId
+          && candidate.amount_cents === firstProviderContract.amountCents
+          && candidate.currency === firstProviderContract.currency
+          && candidate.status === 'pending_review'
+          && candidate.checkout_active === false
+          && expectedAlertType !== null
+          && validWinner
+          && isNonEmptyString(candidate.alert_id)
+          && candidate.alert_type === expectedAlertType
+          && candidate.delivery_type_snapshot === null
+          && candidate.grant_snapshot_frozen_at === null
+          && Array.isArray(candidate.granted_role_ids_snapshot)
+          && candidate.granted_role_ids_snapshot.length === 0
+          && Array.isArray(candidate.granted_channel_ids_snapshot)
+          && candidate.granted_channel_ids_snapshot.length === 0
+          && Array.isArray(candidate.temporary_role_grants_snapshot)
+          && candidate.temporary_role_grants_snapshot.length === 0
+        ) {
+          recoveryError = null;
+          break;
+        }
+        recoveryError = new Error(
+          'Subscription recovery order returned malformed hold identity',
+        );
+      }
+    }
+    requireSupabaseSuccess(recoveryError, 'Failed to create subscription order');
+    console.warn(
+      `[Webhook] Subscription activation ${subscriptionId} has no frozen sold contract; ` +
+        'the payment identity is held for manual fulfillment or refund',
+    );
+    return;
   }
 
   if (
@@ -1401,9 +2180,22 @@ export async function handleSubscriptionActivated(
     order.product_id !== meta.product_id ||
     order.plan_id !== meta.plan_id ||
     order.paypal_subscription_id !== subscriptionId ||
-    !['pending', 'completed'].includes(order.status)
+    !['pending', 'pending_review', 'completed'].includes(order.status)
   ) {
-    throw new Error('Subscription order failed identity validation');
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'BILLING.SUBSCRIPTION.ACTIVATED',
+      resourceId: subscriptionId,
+      observedGuildId: meta.guild_id,
+      reason: 'order_identity_missing_or_ambiguous',
+      evidence: {
+        local_order_id: boundedProviderIdentity(order?.id),
+        customer_id: meta.customer_id,
+        product_id: meta.product_id,
+        plan_id: meta.plan_id,
+      },
+    });
+    return;
   }
 
   const baseExpectation: FulfillmentExpectation = {
@@ -1416,6 +2208,7 @@ export async function handleSubscriptionActivated(
   let staged = await loadFulfillmentByIdempotencyKey(supabase, baseExpectation);
   let financial: FinancialAmount;
   let providerPlanId: string;
+  let providerPaidThroughAt: string;
   let pendingFinancialUpdate: FinancialAmount | null = null;
   if (!staged && order.status === 'completed') {
     financial = parseFinancialAmount(
@@ -1432,6 +2225,7 @@ export async function handleSubscriptionActivated(
       throw new Error('Completed subscription order disagrees with PayPal financial state');
     }
     providerPlanId = providerContract.providerPlanId;
+    providerPaidThroughAt = providerContract.paidThroughAt;
   } else if (!staged) {
     // Every first/pending activation is checked against PayPal. A provider
     // outage is retryable; silently trusting a local plan price can grant a
@@ -1440,6 +2234,7 @@ export async function handleSubscriptionActivated(
       await requireAuthoritativeSubscriptionAmount(subscriptionId);
     financial = providerContract;
     providerPlanId = providerContract.providerPlanId;
+    providerPaidThroughAt = providerContract.paidThroughAt;
     if (
       order.amount_cents !== financial.amountCents ||
       order.currency !== financial.currency
@@ -1469,8 +2264,19 @@ export async function handleSubscriptionActivated(
       throw new Error('Staged subscription fulfillment has malformed provider plan identity');
     }
     providerPlanId = stagedProviderPlanId;
+    const stagedPaidThroughAt = staged.payload.provider_paid_through_at;
+    if (
+      !isNonEmptyString(stagedPaidThroughAt)
+      || !Number.isFinite(Date.parse(stagedPaidThroughAt))
+    ) {
+      throw new Error('Staged subscription fulfillment has malformed paid-through identity');
+    }
+    providerPaidThroughAt = stagedPaidThroughAt;
   }
 
+  const deliveryTypeSnapshot = parseDeliveryTypeSnapshot(
+    order.delivery_type_snapshot ?? null,
+  );
   const trustFrozenOrderContract = isNonEmptyString(order.grant_snapshot_frozen_at);
   const hasDurableGrantContract = trustFrozenOrderContract || staged !== null;
   const completedLegacyNoGrantContract =
@@ -1495,35 +2301,110 @@ export async function handleSubscriptionActivated(
   }
 
   if (pendingFinancialUpdate) {
-    const { data: pricedOrder, error: priceError } = await supabase
-      .from('orders')
-      .update({
-        amount_cents: pendingFinancialUpdate.amountCents,
-        currency: pendingFinancialUpdate.currency,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', order.id)
-      .eq('guild_id', order.guild_id)
-      .eq('status', 'pending')
-      .eq('amount_cents', order.amount_cents)
-      .eq('currency', order.currency)
-      .select('id')
-      .maybeSingle();
+    const { data: pricedOrder, error: priceError } = await supabase.rpc(
+      'commerce_reprice_pending_subscription_order',
+      {
+        p_order_id: order.id,
+        p_guild_id: order.guild_id,
+        p_customer_id: order.customer_id,
+        p_product_id: order.product_id,
+        p_plan_id: meta.plan_id,
+        p_paypal_subscription_id: subscriptionId,
+        p_amount_cents: pendingFinancialUpdate.amountCents,
+        p_currency: pendingFinancialUpdate.currency,
+      },
+    );
     requireSupabaseSuccess(priceError, 'Failed to persist subscription billing amount');
-    if (!pricedOrder) throw new Error('Subscription billing amount update lost its state race');
-    order.amount_cents = pendingFinancialUpdate.amountCents;
-    order.currency = pendingFinancialUpdate.currency;
+    if (
+      !pricedOrder
+      || typeof pricedOrder !== 'object'
+      || Array.isArray(pricedOrder)
+      || pricedOrder.order_id !== order.id
+      || pricedOrder.guild_id !== order.guild_id
+      || pricedOrder.status !== 'pending_review'
+      || pricedOrder.disposition !== 'held_financial_mismatch'
+      || pricedOrder.amount_cents !== order.amount_cents
+      || pricedOrder.currency !== order.currency
+      || !isNonEmptyString(pricedOrder.alert_id)
+    ) {
+      throw new Error('Subscription billing amount update lost its state race');
+    }
+    console.error(
+      `[Webhook] Subscription ${subscriptionId} financials differ from the pending order; `
+        + `order ${order.order_number} is held in pending_review and no fulfillment was staged.`,
+    );
+    return;
   }
 
   if (completedLegacyNoGrantContract) {
     // Legacy completed orders predate immutable grant snapshots. Their exact
     // PayPal subscription, customer, order, local-plan metadata, and financial
-    // identities have already been validated above, but freezing now would
-    // either fail (the RPC only accepts pending orders) or grant today's
-    // mutable product configuration.
+    // identities have already been validated above, but claiming/freeze now
+    // would reserve today's mutable sale contract for an order that can only
+    // safely no-op.
     console.info(
       `[Webhook] Exact legacy subscription replay has no durable grant contract; ` +
         `skipping fulfillment recovery for ${order.order_number}`,
+    );
+    await holdUnknownDeliveryContract(supabase, order, {
+      kind: 'subscription',
+      id: subscriptionId,
+      amountCents: financial.amountCents,
+      currency: financial.currency,
+    });
+    return;
+  }
+
+  if (!staged && deliveryTypeSnapshot === null) {
+    await holdUnknownDeliveryContract(supabase, order, {
+      kind: 'subscription',
+      id: subscriptionId,
+      amountCents: financial.amountCents,
+      currency: financial.currency,
+    });
+    return;
+  }
+
+  const chronology = await recordSubscriptionLifecycleObservation(supabase, {
+    webhookEventId,
+    eventType: 'BILLING.SUBSCRIPTION.ACTIVATED',
+    providerOccurredAt: options.providerOccurredAt,
+    providerPaidThroughAt,
+    order,
+  });
+  if (!chronology.accepted) {
+    console.log(
+      `[Webhook] Ignored stale subscription activation: ${subscriptionId}`,
+    );
+    return;
+  }
+
+  // An older inactive-but-still-payable approval link can activate concurrently
+  // with another historical order. The database chooses one durable winner,
+  // atomically holds every loser in pending_review, and persists its critical
+  // operator alert before this handler can stage any fulfillment. Unknown
+  // delivery contracts use the wrapper above instead so no claim-only crash
+  // window can exist.
+  const claim = await claimPaidFulfillment(supabase, order, {
+    kind: 'subscription',
+    id: subscriptionId,
+    amountCents: financial.amountCents,
+    currency: financial.currency,
+  });
+  if (claim.disposition === 'held') {
+    console.error(
+      `[Webhook] DUPLICATE SUBSCRIPTION: order ${order.order_number} lost fulfillment `
+        + `claim to ${claim.winning_order_id ?? 'an existing entitlement'}; critical `
+        + `alert ${claim.alert_id} persisted and fulfillment withheld.`,
+    );
+    return;
+  }
+
+  // A replay of a non-delivery review hold can never become fulfillable merely
+  // because mutable catalog or entitlement state changed later.
+  if (order.status === 'pending_review') {
+    console.info(
+      `[Webhook] Subscription order ${order.order_number} remains held for manual review`,
     );
     return;
   }
@@ -1548,22 +2429,53 @@ export async function handleSubscriptionActivated(
       paypal_subscription_id: subscriptionId,
       plan_id: meta.plan_id,
       paypal_plan_id: providerPlanId,
+      provider_paid_through_at: providerPaidThroughAt,
+      webhook_event_id: options.webhookEventId,
+      provider_event_type: 'BILLING.SUBSCRIPTION.ACTIVATED',
+      provider_occurred_at: chronology.occurredAt,
+      lifecycle_generation: chronology.generation,
       granted_role_ids: snapshot.granted_role_ids_snapshot,
       granted_channel_ids: snapshot.granted_channel_ids_snapshot,
       temporary_role_grants: undefined,
-      license_key_id: undefined,
-      license_key_plaintext: undefined,
       entitlement_type: 'subscription',
     },
   };
   if (staged) staged = validateQueueRow(staged, expected);
 
   if (!staged) {
-    const productName = await requireProductDisplayName(
-      supabase,
-      order.product_id,
+    const { data: product, error: productError } = await supabase
+      .from('products')
+      .select('id, name')
+      .eq('id', order.product_id)
+      .maybeSingle();
+    requireSupabaseSuccess(
+      productError,
       'Failed to load subscription product display identity',
     );
+    if (
+      !product
+      || product.id !== order.product_id
+      || !isNonEmptyString(product.name)
+    ) {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId,
+        eventType: 'BILLING.SUBSCRIPTION.ACTIVATED',
+        resourceId: subscriptionId,
+        observedGuildId: order.guild_id,
+        reason: 'product_identity_missing_or_mismatched',
+        evidence: {
+          order_id: order.id,
+          customer_id: order.customer_id,
+          product_id: order.product_id,
+          plan_id: order.plan_id,
+        },
+      });
+      return;
+    }
+    const productName = product.name;
+    const license = deliveryTypeSnapshot === 'license_key'
+      ? generateLicenseKey()
+      : null;
 
     staged = await stageFulfillment(supabase, expected, {
       fulfillment_type: 'subscription_activated',
@@ -1577,10 +2489,21 @@ export async function handleSubscriptionActivated(
       paypal_subscription_id: subscriptionId,
       plan_id: meta.plan_id,
       paypal_plan_id: providerPlanId,
+      provider_paid_through_at: providerPaidThroughAt,
+      webhook_event_id: options.webhookEventId,
+      provider_event_type: 'BILLING.SUBSCRIPTION.ACTIVATED',
+      provider_occurred_at: chronology.occurredAt,
+      lifecycle_generation: chronology.generation,
       amount_cents: financial.amountCents,
       currency: financial.currency,
       granted_role_ids: snapshot.granted_role_ids_snapshot,
       granted_channel_ids: snapshot.granted_channel_ids_snapshot,
+      ...(license
+        ? {
+            license_key_id: crypto.randomUUID(),
+            license_key_plaintext: license.plaintext,
+          }
+        : {}),
       entitlement_type: 'subscription',
     });
   }
@@ -1596,25 +2519,38 @@ export async function handleSubscriptionActivated(
   ) {
     throw new Error('Staged subscription fulfillment changed financial identity');
   }
+  validateStagedLicenseDelivery(staged.payload, deliveryTypeSnapshot);
 
   if (order.status === 'pending') {
-    const { data: completedOrder, error: completeError } = await supabase
-      .from('orders')
-      .update({
-        status: 'completed',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', order.id)
-      .eq('guild_id', order.guild_id)
-      .eq('status', 'pending')
-      .eq('amount_cents', financial.amountCents)
-      .eq('currency', financial.currency)
-      .select('id')
-      .maybeSingle();
+    const { data: completedOrder, error: completeError } = await supabase.rpc(
+      'commerce_complete_pending_subscription_order',
+      {
+        p_order_id: order.id,
+        p_guild_id: order.guild_id,
+        p_customer_id: order.customer_id,
+        p_product_id: order.product_id,
+        p_plan_id: meta.plan_id,
+        p_paypal_subscription_id: subscriptionId,
+        p_amount_cents: financial.amountCents,
+        p_currency: financial.currency,
+      },
+    );
     requireSupabaseSuccess(completeError, 'Failed to complete subscription order');
-    if (!completedOrder) throw new Error('Subscription order completion lost its state race');
+    if (
+      !completedOrder
+      || typeof completedOrder !== 'object'
+      || Array.isArray(completedOrder)
+      || completedOrder.order_id !== order.id
+      || completedOrder.guild_id !== order.guild_id
+      || completedOrder.status !== 'completed'
+      || completedOrder.amount_cents !== financial.amountCents
+      || completedOrder.currency !== financial.currency
+    ) {
+      throw new Error('Subscription order completion lost its state race');
+    }
   }
 
+  await ensureStagedLicenseKey(supabase, order, staged.payload);
   await releaseStagedFulfillment(supabase, staged);
 
   console.log(
@@ -1626,68 +2562,51 @@ export async function handleSubscriptionActivated(
 
 export interface SubscriptionQueueOptions {
   retryingFailedEvent?: boolean;
-  /** Webhook event id — stamped into the fulfillment payload for retry dedupe. */
-  webhookEventId?: string;
+  /** Canonical webhook event id — the durable lifecycle carrier identity. */
+  webhookEventId: string;
+  providerOccurredAt?: string;
 }
 
 export async function handleSubscriptionCancelled(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
-  options: SubscriptionQueueOptions = {},
+  options: SubscriptionQueueOptions,
 ) {
   const subscriptionId = resource.id;
   if (!isNonEmptyString(subscriptionId)) {
     throw new Error('Subscription cancellation has no provider id');
   }
-  const { order, product, customer } = await loadSubscriptionLifecycleContext(
+  const { order, carrier } = await loadSubscriptionLifecycleContext(
     supabase,
     subscriptionId,
     'Subscription cancellation',
   );
-
-  // W2 codex round 2: on a resumed retry the failed attempt may already have
-  // queued this fulfillment — don't queue a duplicate (double DM / event).
-  if (options.retryingFailedEvent) {
-    const alreadyQueued = await hasQueuedOrderFulfillment(supabase, {
-      guildId: order.guild_id,
-      action: 'fulfill_cancellation',
-      orderId: order.id,
-      fulfillmentType: 'subscription_cancelled',
-      webhookEventId: options.webhookEventId,
-    });
-    if (alreadyQueued) {
-      console.info(
-        `[Webhook] Subscription cancellation fulfillment already queued for ${subscriptionId}, skipping duplicate`,
-      );
-      return;
-    }
+  const providerContract = await requireAuthoritativeSubscriptionAmount(
+    subscriptionId,
+  );
+  if (providerContract.providerPlanId !== carrier.providerPlanId) {
+    throw new Error('Subscription cancellation provider plan identity mismatch');
   }
-
-  const queued = await queueFulfillment(supabase, 'fulfill_cancellation', order.guild_id, {
-    fulfillment_type: 'subscription_cancelled',
-    guild_id: order.guild_id,
-    customer_id: order.customer_id,
-    discord_id: customer.discord_id,
-    product_id: order.product_id,
-    product_name: product.name,
-    order_id: order.id,
-    order_number: order.order_number,
-    amount_cents: 0,
-    currency: 'USD',
-    granted_role_ids: [],
-    granted_channel_ids: [],
-    entitlement_type: 'subscription',
-    ...(options.webhookEventId ? { webhook_event_id: options.webhookEventId } : {}),
+  const chronology = await recordSubscriptionLifecycleObservation(supabase, {
+    webhookEventId: options.webhookEventId,
+    eventType: 'BILLING.SUBSCRIPTION.CANCELLED',
+    providerOccurredAt: options.providerOccurredAt,
+    providerPaidThroughAt: providerContract.paidThroughAt,
+    order,
   });
-  // W2: a failed queue insert used to be logged and swallowed — the
-  // cancellation (and the bot-side entitlement revocation it drives) was
-  // silently lost. Throw so the webhook records an error and PayPal's
-  // redelivery re-processes it (BILLING.SUBSCRIPTION.CANCELLED is in
-  // RESUMABLE_FAILED_EVENT_TYPES); the bot-side revoke is a no-op for
-  // already-revoked entitlements, so a retry cannot double-revoke.
-  if (!queued) {
-    throw new Error('Failed to queue subscription cancellation fulfillment');
+  if (!chronology.accepted) {
+    console.log(
+      `[Webhook] Ignored stale subscription cancellation: ${subscriptionId}`,
+    );
+    return;
   }
+
+  await createOrRecoverSubscriptionLifecycleAction(supabase, {
+    webhookEventId: options.webhookEventId,
+    fulfillmentType: 'subscription_cancelled',
+    order,
+    carrier,
+  });
 
   console.log(
     `[Webhook] Subscription cancelled + fulfillment queued: ${subscriptionId}`,
@@ -1699,236 +2618,38 @@ export async function handleSubscriptionCancelled(
 export async function handleSubscriptionExpired(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
-  options: { retryingFailedEvent?: boolean } = {},
+  options: SubscriptionQueueOptions,
 ) {
   const subscriptionId = resource.id;
   if (!isNonEmptyString(subscriptionId)) {
     throw new Error('Subscription expiry has no provider id');
   }
 
-  const { data: order, error: orderError } = await supabase
-    .from('orders')
-    .select('id, order_number, guild_id, customer_id, product_id, plan_id, status, paypal_subscription_id')
-    .eq('paypal_subscription_id', subscriptionId)
-    .maybeSingle();
-
-  requireSupabaseSuccess(orderError, 'Failed to load expired subscription order');
-  if (
-    !order ||
-    !isNonEmptyString(order.id) ||
-    !isNonEmptyString(order.order_number) ||
-    !isNonEmptyString(order.guild_id) ||
-    !isNonEmptyString(order.customer_id) ||
-    !isNonEmptyString(order.product_id) ||
-    !isNonEmptyString(order.status) ||
-    order.paypal_subscription_id !== subscriptionId
-  ) {
-    throw new Error('Expired subscription order identity mismatch');
+  const { order, carrier } = await loadSubscriptionLifecycleContext(
+    supabase,
+    subscriptionId,
+    'Subscription expiry',
+  );
+  const chronology = await recordSubscriptionLifecycleObservation(supabase, {
+    webhookEventId: options.webhookEventId,
+    eventType: 'BILLING.SUBSCRIPTION.EXPIRED',
+    providerOccurredAt: options.providerOccurredAt,
+    order,
+  });
+  if (!chronology.accepted) {
+    console.log(`[Webhook] Ignored stale subscription expiry: ${subscriptionId}`);
+    return;
   }
 
-  const now = new Date().toISOString();
-  const entitlementLookupStatuses = options.retryingFailedEvent
-    ? EXPIRY_RETRY_ENTITLEMENT_STATUSES
-    : EXPIRABLE_ENTITLEMENT_STATUSES;
-  const licenseKeyLookupStatuses = options.retryingFailedEvent
-    ? ['pending_activation', 'active', 'suspended', 'expired']
-    : ['pending_activation', 'active', 'suspended'];
-
-  const activeEntitlements = await fetchAllLifecycleRowsById<EntitlementLifecycleRow>(
-    async (afterId) => {
-      let query = supabase
-        .from('entitlements')
-        .select('id, license_key_id')
-        .eq('order_id', order.id)
-        .eq('guild_id', order.guild_id)
-        .eq('product_id', order.product_id)
-        .in('status', entitlementLookupStatuses)
-        .order('id', { ascending: true })
-        .limit(LIFECYCLE_SCAN_PAGE_SIZE);
-      if (afterId !== null) query = query.gt('id', afterId);
-      return await query as {
-        data: EntitlementLifecycleRow[] | null;
-        error: unknown;
-      };
-    },
-    'Failed to load active entitlements for subscription expiry',
-  );
-
-  const activeLicenseKeys = await fetchAllLifecycleRowsById<LicenseKeyLifecycleRow>(
-    async (afterId) => {
-      let query = supabase
-        .from('license_keys')
-        .select('id')
-        .eq('order_id', order.id)
-        .eq('guild_id', order.guild_id)
-        .eq('product_id', order.product_id)
-        .in('status', licenseKeyLookupStatuses)
-        .order('id', { ascending: true })
-        .limit(LIFECYCLE_SCAN_PAGE_SIZE);
-      if (afterId !== null) query = query.gt('id', afterId);
-      return await query as {
-        data: LicenseKeyLifecycleRow[] | null;
-        error: unknown;
-      };
-    },
-    'Failed to load active license keys for subscription expiry',
-  );
-
-  const licenseKeyIds = [
-    ...new Set([
-      ...(activeEntitlements ?? [])
-        .map((ent) => ent.license_key_id)
-        .filter((id): id is string => Boolean(id)),
-      ...(activeLicenseKeys ?? [])
-        .map((key) => key.id)
-        .filter((id): id is string => Boolean(id)),
-    ]),
-  ];
-
-  // This terminal status transition atomically enqueues identity-rich
-  // revoke_roles rows through commerce_entitlements_enqueue_role_revocation.
-  // Do not add a second payload-only queue row here: it would bypass the
-  // trigger's shared-owner/re-activation safety.
-  const { error: expireEntitlementsError } = await supabase
-    .from('entitlements')
-    .update({
-      status: 'expired',
-      expires_at: now,
-      grace_period_ends_at: null,
-      updated_at: now,
-    })
-    .eq('order_id', order.id)
-    .eq('guild_id', order.guild_id)
-    .eq('product_id', order.product_id)
-    .in('status', EXPIRABLE_ENTITLEMENT_STATUSES);
-  requireSupabaseSuccess(
-    expireEntitlementsError,
-    'Failed to expire entitlements for subscription expiry',
-  );
-
-  // W2 codex round 2: EXPIRABLE_ENTITLEMENT_STATUSES includes 'grace_period',
-  // so this expiry is a terminal transition for a row that suspend() may have
-  // left an 'entitlement_grace_period' operator alert open on. revoke() and
-  // the reconciliation sweep resolve that alert on their terminal writes; this
-  // direct webhook expiry bypassed both. Resolve it with the same
-  // entitlement-scoped, entitlement_grace_period filter (no-op when none open).
-  // Non-fatal: the entitlement expiry above has already committed.
-  const expiryGraceAlertEntitlementIds = (activeEntitlements ?? []).map((ent) => ent.id);
-  if (expiryGraceAlertEntitlementIds.length > 0) {
-    const { error: expireGraceAlertError } = await supabase
-      .from('alerts')
-      .update({ resolved: true, resolved_at: now, updated_at: now })
-      .eq('guild_id', order.guild_id)
-      .eq('alert_type', 'entitlement_grace_period')
-      .in('metadata->>entitlement_id', expiryGraceAlertEntitlementIds)
-      .eq('resolved', false);
-    if (expireGraceAlertError) {
-      console.error(
-        '[Webhook] Failed to resolve grace-period alerts for subscription expiry:',
-        formatSupabaseError(expireGraceAlertError),
-      );
-    }
-  }
-
-  const { error: expireLicenseKeysError } = await supabase
-    .from('license_keys')
-    .update({
-      status: 'expired',
-      expires_at: now,
-      updated_at: now,
-    })
-    .eq('order_id', order.id)
-    .eq('guild_id', order.guild_id)
-    .eq('product_id', order.product_id)
-    .in('status', ['pending_activation', 'active', 'suspended']);
-  requireSupabaseSuccess(
-    expireLicenseKeysError,
-    'Failed to expire license keys for subscription expiry',
-  );
-
-  if (licenseKeyIds.length > 0) {
-    const { error: deactivateSessionsError } = await supabase
-      .from('license_sessions')
-      .update({
-        active: false,
-        deactivated_at: now,
-        deactivation_reason: 'entitlement_revoked',
-      })
-      .in('license_key_id', licenseKeyIds)
-      .eq('active', true);
-    requireSupabaseSuccess(
-      deactivateSessionsError,
-      'Failed to deactivate license sessions for subscription expiry',
-    );
-  }
-
-  const hadActiveAccess =
-    (activeEntitlements?.length ?? 0) > 0 || licenseKeyIds.length > 0;
-
-  if (hadActiveAccess) {
-    const customer = await requireExactCustomerIdentity(supabase, {
-      customerId: order.customer_id,
-      guildId: order.guild_id,
-      operation: 'Failed to load customer for subscription expiry fulfillment',
-    });
-    let shouldQueueAuditEvent = true;
-    if (options.retryingFailedEvent) {
-      shouldQueueAuditEvent = !(await hasQueuedSubscriptionExpiredAuditEvent(
-        supabase,
-        {
-          guildId: order.guild_id,
-          discordId: customer.discord_id,
-          orderId: order.id,
-          productId: order.product_id,
-        },
-      ));
-    }
-
-    if (shouldQueueAuditEvent) {
-      const queued = await queueFulfillment(supabase, 'emit_audit_event', order.guild_id, {
-        event_type: 'subscription.expired',
-        event_data: {
-          lifecycleId: order.id,
-          discordId: customer.discord_id,
-          orderId: order.id,
-          productId: order.product_id,
-          planId: order.plan_id ?? '',
-          status: 'expired',
-        },
-      });
-      if (!queued) {
-        throw new Error('Failed to queue subscription expired audit event');
-      }
-    }
-  }
-
-  await supabase
-    .from('audit_logs')
-    .insert({
-      guild_id: order.guild_id,
-      actor_type: 'system',
-      actor_id: 'paypal_webhook',
-      action: 'subscription.expired',
-      target_type: 'order',
-      target_id: order.id,
-      details: {
-        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
-        paypal_subscription_id: subscriptionId,
-        product_id: order.product_id,
-        entitlement_ids: (activeEntitlements ?? []).map((ent) => ent.id),
-        license_key_ids: licenseKeyIds,
-        role_revocation_source: 'entitlement_status_trigger',
-      },
-    })
-    .then(
-      () => {},
-      () => {
-        /* ignore */
-      },
-    );
+  await createOrRecoverSubscriptionLifecycleAction(supabase, {
+    webhookEventId: options.webhookEventId,
+    fulfillmentType: 'subscription_cancelled',
+    order,
+    carrier,
+  });
 
   console.log(
-    `[Webhook] Subscription expired + product access expired: ${subscriptionId}`,
+    `[Webhook] Subscription expired + fulfillment queued: ${subscriptionId}`,
   );
 }
 
@@ -1937,62 +2658,78 @@ export async function handleSubscriptionExpired(
 export async function handleSubscriptionSuspended(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
-  options: SubscriptionQueueOptions = {},
+  options: SubscriptionQueueOptions,
 ) {
   const subscriptionId = resource.id;
   if (!isNonEmptyString(subscriptionId)) {
     throw new Error('Subscription suspension has no provider id');
   }
-  const { order, product, customer } = await loadSubscriptionLifecycleContext(
+  const { order, carrier } = await loadSubscriptionLifecycleContext(
     supabase,
     subscriptionId,
     'Subscription suspension',
   );
-
-  // W2 codex round 2: same retry dedupe as handleSubscriptionCancelled.
-  if (options.retryingFailedEvent) {
-    const alreadyQueued = await hasQueuedOrderFulfillment(supabase, {
-      guildId: order.guild_id,
-      action: 'fulfill_suspension',
-      orderId: order.id,
-      fulfillmentType: 'subscription_suspended',
-      webhookEventId: options.webhookEventId,
-    });
-    if (alreadyQueued) {
-      console.info(
-        `[Webhook] Subscription suspension fulfillment already queued for ${subscriptionId}, skipping duplicate`,
-      );
-      return;
-    }
-  }
-
-  const queued = await queueFulfillment(supabase, 'fulfill_suspension', order.guild_id, {
-    fulfillment_type: 'subscription_suspended',
-    guild_id: order.guild_id,
-    customer_id: order.customer_id,
-    discord_id: customer.discord_id,
-    product_id: order.product_id,
-    product_name: product.name,
-    order_id: order.id,
-    order_number: order.order_number,
-    amount_cents: 0,
-    currency: 'USD',
-    granted_role_ids: [],
-    granted_channel_ids: [],
-    entitlement_type: 'subscription',
-    ...(options.webhookEventId ? { webhook_event_id: options.webhookEventId } : {}),
+  const chronology = await recordSubscriptionLifecycleObservation(supabase, {
+    webhookEventId: options.webhookEventId,
+    eventType: 'BILLING.SUBSCRIPTION.SUSPENDED',
+    providerOccurredAt: options.providerOccurredAt,
+    order,
   });
-  // W2: same reasoning as handleSubscriptionCancelled — losing this insert
-  // silently means the entitlement never enters its grace period. The
-  // bot-side suspend targets 'active' entitlements only, so retries are safe
-  // (BILLING.SUBSCRIPTION.SUSPENDED / .PAYMENT.FAILED are in
-  // RESUMABLE_FAILED_EVENT_TYPES).
-  if (!queued) {
-    throw new Error('Failed to queue subscription suspension fulfillment');
+  if (!chronology.accepted) {
+    console.log(
+      `[Webhook] Ignored stale subscription suspension: ${subscriptionId}`,
+    );
+    return;
   }
+
+  await createOrRecoverSubscriptionLifecycleAction(supabase, {
+    webhookEventId: options.webhookEventId,
+    fulfillmentType: 'subscription_suspended',
+    order,
+    carrier,
+  });
 
   console.log(
     `[Webhook] Subscription suspended + fulfillment queued: ${subscriptionId}`,
+  );
+}
+
+export async function handleSubscriptionPaymentFailed(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  resource: Record<string, unknown>,
+  options: SubscriptionQueueOptions,
+) {
+  const subscriptionId = resource.id;
+  if (!isNonEmptyString(subscriptionId)) {
+    throw new Error('Subscription payment failure has no provider id');
+  }
+  const { order, carrier } = await loadSubscriptionLifecycleContext(
+    supabase,
+    subscriptionId,
+    'Subscription payment failure',
+  );
+  const chronology = await recordSubscriptionLifecycleObservation(supabase, {
+    webhookEventId: options.webhookEventId,
+    eventType: 'BILLING.SUBSCRIPTION.PAYMENT.FAILED',
+    providerOccurredAt: options.providerOccurredAt,
+    order,
+  });
+  if (!chronology.accepted) {
+    console.log(
+      `[Webhook] Ignored stale subscription payment failure: ${subscriptionId}`,
+    );
+    return;
+  }
+
+  await createOrRecoverSubscriptionLifecycleAction(supabase, {
+    webhookEventId: options.webhookEventId,
+    fulfillmentType: 'subscription_payment_failed',
+    order,
+    carrier,
+  });
+
+  console.log(
+    `[Webhook] Subscription payment failure + grace fulfillment queued: ${subscriptionId}`,
   );
 }
 
@@ -2001,284 +2738,265 @@ export async function handleSubscriptionSuspended(
 export async function handleSubscriptionPayment(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
+  options: ProviderMoneyHandlerOptions,
 ) {
+  const webhookEventId = requireProviderMoneyEventId(
+    options,
+    'Subscription payment',
+  );
   const parsed = paypalSaleResourceSchema.safeParse(resource);
-  if (!parsed.success) throw new Error('Subscription payment payload is malformed');
-  const sale: PayPalSaleResource = parsed.data;
-  const providerPaymentId = sale.id;
-  const billingAgreementId = sale.billing_agreement_id;
-  const amountCents = parsePayPalAmountToCents(sale.amount?.total);
-  const rawCurrency = sale.amount?.currency;
+  const sale: PayPalSaleResource | null = parsed.success ? parsed.data : null;
+  const providerPaymentId = sale?.id ?? resource.id;
+  const billingAgreementId =
+    sale?.billing_agreement_id ?? resource.billing_agreement_id;
   if (
-    !isNonEmptyString(providerPaymentId) ||
-    !isNonEmptyString(billingAgreementId) ||
-    amountCents == null ||
-    !isNonEmptyString(rawCurrency) ||
-    !/^[A-Za-z]{3}$/.test(rawCurrency)
+    !isNonEmptyString(providerPaymentId)
+    || !isCanonicalPayPalResourceId(providerPaymentId)
+    || !isNonEmptyString(billingAgreementId)
+    || !isCanonicalPayPalResourceId(billingAgreementId)
   ) {
-    throw new Error('Subscription payment provider identity or amount is malformed');
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'PAYMENT.SALE.COMPLETED',
+      resourceId: providerPaymentId,
+      parentId: billingAgreementId,
+      reason: 'provider_identity_malformed',
+      evidence: {
+        resource_id_present: isNonEmptyString(providerPaymentId),
+        billing_agreement_id_present: isNonEmptyString(billingAgreementId),
+      },
+    });
+    return;
   }
-  const currency = rawCurrency.toUpperCase();
 
-  const { data: order, error: orderError } = await supabase
+  const { data: orderData, error: orderError } = await supabase
     .from('orders')
-    .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, source, paypal_subscription_id, granted_role_ids_snapshot, granted_channel_ids_snapshot, temporary_role_grants_snapshot, grant_snapshot_frozen_at')
+    .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, paypal_subscription_id')
     .eq('paypal_subscription_id', billingAgreementId)
     .maybeSingle();
   requireSupabaseSuccess(orderError, 'Failed to load subscription payment order');
+  const order = orderData as CommerceOrderRow | null;
   if (
     !order ||
     !isNonEmptyString(order.id) ||
+    !isNonEmptyString(order.order_number) ||
     !isNonEmptyString(order.customer_id) ||
     !isNonEmptyString(order.guild_id) ||
-    order.paypal_subscription_id !== billingAgreementId ||
-    !['pending', 'completed', 'refunded', 'disputed', 'cancelled', 'pending_review'].includes(order.status)
+    !isNonEmptyString(order.product_id) ||
+    !isNonEmptyString(order.plan_id) ||
+    order.paypal_subscription_id !== billingAgreementId
   ) {
-    throw new Error('Subscription payment order identity mismatch');
-  }
-  const orderFinancial = parseFinancialAmount(
-    order.amount_cents,
-    order.currency,
-    'Subscription renewal order financial identity',
-  );
-  if (
-    amountCents !== orderFinancial.amountCents
-    || currency !== orderFinancial.currency
-  ) {
-    throw new Error('Subscription payment amount or currency does not match the renewal contract');
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'PAYMENT.SALE.COMPLETED',
+      resourceId: providerPaymentId,
+      parentId: billingAgreementId,
+      observedGuildId: order?.guild_id,
+      reason: 'order_identity_missing_or_ambiguous',
+      evidence: {
+        local_order_found: order !== null,
+        local_order_id: boundedProviderIdentity(order?.id),
+      },
+    });
+    return;
   }
 
-  const expectedPayment = {
-    order_id: order.id,
-    customer_id: order.customer_id,
-    guild_id: order.guild_id,
+  const amountCents = parsePayPalAmountToCents(sale?.amount?.total);
+  const rawCurrency = sale?.amount?.currency;
+  if (
+    amountCents == null
+    || !isNonEmptyString(rawCurrency)
+    || !/^[A-Za-z]{3}$/.test(rawCurrency)
+  ) {
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'PAYMENT.SALE.COMPLETED',
+      resourceId: providerPaymentId,
+      parentId: billingAgreementId,
+      observedGuildId: order.guild_id,
+      reason: 'financial_identity_malformed',
+      evidence: {
+        order_id: order.id,
+        amount_present: sale?.amount?.total !== undefined,
+        currency: boundedProviderIdentity(rawCurrency),
+      },
+    });
+    return;
+  }
+  const currency = rawCurrency.toUpperCase();
+  const routerIncidentEvidence = {
     paypal_payment_id: providerPaymentId,
-    amount_cents: amountCents,
-    currency,
-    status: 'completed',
-    paypal_resource_type: 'sale',
-  };
-  const validatePayment = (
-    data: unknown,
-    allowSuccessorState = false,
-  ): 'completed' | 'refunded' | 'reversed' => {
-    if (!data || typeof data !== 'object') {
-      throw new Error('Subscription payment persistence returned no row');
-    }
-    const row = data as Record<string, unknown>;
-    const validStatus = row.status === expectedPayment.status
-      || (allowSuccessorState && (row.status === 'refunded' || row.status === 'reversed'));
-    if (
-      !isNonEmptyString(row.id) ||
-      row.order_id !== expectedPayment.order_id ||
-      row.customer_id !== expectedPayment.customer_id ||
-      row.guild_id !== expectedPayment.guild_id ||
-      row.paypal_payment_id !== expectedPayment.paypal_payment_id ||
-      row.amount_cents !== expectedPayment.amount_cents ||
-      row.currency !== expectedPayment.currency ||
-      row.paypal_resource_type !== expectedPayment.paypal_resource_type ||
-      !validStatus
-    ) {
-      throw new Error('Subscription payment persistence identity mismatch');
-    }
-    return row.status as 'completed' | 'refunded' | 'reversed';
-  };
-
-  const { data: insertedPayment, error: insertError } = await supabase
-    .from('payments')
-    .insert(expectedPayment)
-    .select('id, order_id, customer_id, guild_id, paypal_payment_id, paypal_resource_type, amount_cents, currency, status')
-    .single();
-  if (insertError) {
-    if (!isUniqueViolation(insertError)) {
-      throw new Error(`Failed to persist subscription payment: ${formatSupabaseError(insertError)}`);
-    }
-    const { data: existingPayment, error: existingError } = await supabase
-      .from('payments')
-      .select('id, order_id, customer_id, guild_id, paypal_payment_id, paypal_resource_type, amount_cents, currency, status')
-      .eq('paypal_payment_id', providerPaymentId)
-      .maybeSingle();
-    requireSupabaseSuccess(existingError, 'Failed to inspect replayed subscription payment');
-    const replayStatus = validatePayment(existingPayment, true);
-    if (replayStatus !== 'completed') {
-      const validSuccessorOrderState = replayStatus === 'refunded'
-        ? order.status === 'refunded'
-        : order.status === 'refunded' || order.status === 'disputed';
-      if (!validSuccessorOrderState) {
-        throw new Error('Subscription payment successor state mismatch');
-      }
-      console.info(
-        `[Webhook] Subscription payment replay preserved successor state ${replayStatus}; ` +
-          `skipping persistence for ${providerPaymentId}`,
-      );
-      return;
-    }
-  } else {
-    validatePayment(insertedPayment);
-  }
-
-  if (
-    order.status !== 'completed'
-    || !isNonEmptyString(order.order_number)
-    || !isNonEmptyString(order.product_id)
-    || !isNonEmptyString(order.plan_id)
-    || (order.source !== 'purchase' && order.source !== null)
-  ) {
-    throw new Error('Subscription renewal order is not an exact completed purchase');
-  }
-  const customer = await requireExactCustomerIdentity(supabase, {
-    customerId: order.customer_id,
-    guildId: order.guild_id,
-    operation: 'Failed to load subscription renewal customer identity',
-  });
-
-  let grantedRoleIds: string[];
-  let grantedChannelIds: string[];
-  let productName: string;
-  let paypalPlanId: string | undefined;
-  if (isNonEmptyString(order.grant_snapshot_frozen_at)) {
-    if (!Number.isFinite(Date.parse(order.grant_snapshot_frozen_at))) {
-      throw new Error('Subscription renewal order has malformed frozen grant identity');
-    }
-    grantedRoleIds = parseExactStringVector(
-      order.granted_role_ids_snapshot,
-      'Subscription renewal permanent role snapshot',
-    );
-    grantedChannelIds = parseExactStringVector(
-      order.granted_channel_ids_snapshot,
-      'Subscription renewal channel snapshot',
-    );
-    if (
-      !Array.isArray(order.temporary_role_grants_snapshot)
-      || order.temporary_role_grants_snapshot.length !== 0
-    ) {
-      throw new Error('Subscription renewal order has unexpected temporary-role grants');
-    }
-    productName = await requireProductDisplayName(
-      supabase,
-      order.product_id,
-      'Failed to load subscription renewal product identity',
-    );
-  } else if (order.grant_snapshot_frozen_at === null) {
-    const { data: legacy, error: legacyError } = await supabase
-      .from('commerce_legacy_subscription_grant_contracts')
-      .select('order_id, source_queue_id, guild_id, customer_id, discord_id, product_id, product_name, order_number, plan_id, paypal_subscription_id, paypal_plan_id, amount_cents, currency, granted_role_ids_snapshot, granted_channel_ids_snapshot, persisted_at')
-      .eq('order_id', order.id)
-      .maybeSingle();
-    requireSupabaseSuccess(legacyError, 'Failed to load subscription renewal legacy contract');
-    if (
-      !legacy
-      || legacy.order_id !== order.id
-      || !isNonEmptyString(legacy.source_queue_id)
-      || legacy.guild_id !== order.guild_id
-      || legacy.customer_id !== order.customer_id
-      || legacy.discord_id !== customer.discord_id
-      || legacy.product_id !== order.product_id
-      || !isNonEmptyString(legacy.product_name)
-      || legacy.order_number !== order.order_number
-      || legacy.plan_id !== order.plan_id
-      || legacy.paypal_subscription_id !== billingAgreementId
-      || !isNonEmptyString(legacy.paypal_plan_id)
-      || legacy.amount_cents !== orderFinancial.amountCents
-      || legacy.currency !== orderFinancial.currency
-      || !isNonEmptyString(legacy.persisted_at)
-      || !Number.isFinite(Date.parse(legacy.persisted_at))
-    ) {
-      throw new Error('Subscription renewal legacy contract identity mismatch');
-    }
-    grantedRoleIds = parseExactStringVector(
-      legacy.granted_role_ids_snapshot,
-      'Subscription renewal legacy role snapshot',
-    );
-    grantedChannelIds = parseExactStringVector(
-      legacy.granted_channel_ids_snapshot,
-      'Subscription renewal legacy channel snapshot',
-    );
-    productName = legacy.product_name;
-    paypalPlanId = legacy.paypal_plan_id;
-  } else {
-    throw new Error('Subscription renewal order has no durable grant contract');
-  }
-
-  const { data: entitlement, error: entitlementError } = await supabase
-    .from('entitlements')
-    .select('id, guild_id, customer_id, order_id, product_id, plan_id, type, status, source, granted_role_ids, granted_channel_ids')
-    .eq('guild_id', order.guild_id)
-    .eq('customer_id', order.customer_id)
-    .eq('order_id', order.id)
-    .eq('product_id', order.product_id)
-    .eq('plan_id', order.plan_id)
-    .maybeSingle();
-  requireSupabaseSuccess(entitlementError, 'Failed to load subscription renewal entitlement');
-  const knownEntitlementStatuses = [
-    'active',
-    'pending',
-    'grace_period',
-    'suspended',
-    'cancelled',
-    'expired',
-    'revoked',
-  ];
-  if (
-    !entitlement
-    || !isNonEmptyString(entitlement.id)
-    || entitlement.guild_id !== order.guild_id
-    || entitlement.customer_id !== order.customer_id
-    || entitlement.order_id !== order.id
-    || entitlement.product_id !== order.product_id
-    || entitlement.plan_id !== order.plan_id
-    || entitlement.type !== 'subscription'
-    || !knownEntitlementStatuses.includes(entitlement.status)
-    || (entitlement.source !== 'purchase' && entitlement.source !== null)
-    || !payloadValuesEqual(
-      parseExactStringVector(
-        entitlement.granted_role_ids,
-        'Subscription renewal entitlement role vector',
-      ),
-      grantedRoleIds,
-    )
-    || !payloadValuesEqual(
-      parseExactStringVector(
-        entitlement.granted_channel_ids,
-        'Subscription renewal entitlement channel vector',
-      ),
-      grantedChannelIds,
-    )
-  ) {
-    throw new Error('Subscription renewal entitlement identity mismatch');
-  }
-
-  const fulfillmentPayload: Record<string, unknown> = {
-    fulfillment_type: 'subscription_renewed',
-    guild_id: order.guild_id,
-    customer_id: order.customer_id,
-    discord_id: customer.discord_id,
-    product_id: order.product_id,
-    product_name: productName,
+    paypal_subscription_id: billingAgreementId,
     order_id: order.id,
     order_number: order.order_number,
+    guild_id: order.guild_id,
+    customer_id: order.customer_id,
+    product_id: order.product_id,
     plan_id: order.plan_id,
-    paypal_subscription_id: billingAgreementId,
-    amount_cents: orderFinancial.amountCents,
-    currency: orderFinancial.currency,
-    granted_role_ids: grantedRoleIds,
-    granted_channel_ids: grantedChannelIds,
-    entitlement_type: 'subscription',
-    existing_entitlement_id: entitlement.id,
-    ...(paypalPlanId ? { paypal_plan_id: paypalPlanId } : {}),
+    provider_amount_cents: amountCents,
+    provider_currency: currency,
   };
-  const expectation: FulfillmentExpectation = {
-    idempotencyKey: `paypal:sale:${providerPaymentId}:fulfill_subscription_renewal`,
-    action: 'fulfill_subscription',
-    guildId: order.guild_id,
-    orderId: order.id,
-    fulfillmentType: 'subscription_renewed',
-    payload: fulfillmentPayload,
-  };
-  const staged = await stageFulfillment(supabase, expectation, fulfillmentPayload);
-  await releaseStagedFulfillment(supabase, staged);
+  let providerContract: AuthoritativeSubscriptionContract;
+  let chronology: Awaited<
+    ReturnType<typeof recordSubscriptionLifecycleObservation>
+  >;
+  try {
+    providerContract = await requireAuthoritativeSubscriptionAmount(
+      billingAgreementId,
+    );
+    chronology = await recordSubscriptionLifecycleObservation(supabase, {
+      webhookEventId,
+      eventType: 'PAYMENT.SALE.COMPLETED',
+      providerOccurredAt: options.providerOccurredAt,
+      providerPaidThroughAt: providerContract.paidThroughAt,
+      order,
+    });
+    if (!chronology.accepted) {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId,
+        eventType: 'PAYMENT.SALE.COMPLETED',
+        resourceId: providerPaymentId,
+        parentId: billingAgreementId,
+        observedGuildId: order.guild_id,
+        reason: 'subscription_sale_router_failed',
+        evidence: routerIncidentEvidence,
+      });
+      return;
+    }
+  } catch {
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'PAYMENT.SALE.COMPLETED',
+      resourceId: providerPaymentId,
+      parentId: billingAgreementId,
+      observedGuildId: order.guild_id,
+      reason: 'subscription_sale_router_failed',
+      evidence: routerIncidentEvidence,
+    });
+    return;
+  }
 
-  console.log(`[Webhook] Subscription payment recorded + renewal queued: ${providerPaymentId}`);
+  const { data, error } = await supabase.rpc(
+    'commerce_record_subscription_sale_or_hold',
+    {
+      p_paypal_payment_id: providerPaymentId,
+      p_paypal_subscription_id: billingAgreementId,
+      p_order_id: order.id,
+      p_guild_id: order.guild_id,
+      p_customer_id: order.customer_id,
+      p_product_id: order.product_id,
+      p_plan_id: order.plan_id,
+      p_webhook_event_id: webhookEventId,
+      p_lifecycle_generation: chronology.generation,
+      p_amount_cents: amountCents,
+      p_currency: currency,
+    },
+  );
+  if (error) {
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'PAYMENT.SALE.COMPLETED',
+      resourceId: providerPaymentId,
+      parentId: billingAgreementId,
+      observedGuildId: order.guild_id,
+      reason: 'subscription_sale_router_failed',
+      evidence: routerIncidentEvidence,
+    });
+    return;
+  }
+  const row = data as Record<string, unknown> | null;
+  const disposition = String(row?.disposition ?? '');
+  const fulfillmentAllowed = row?.fulfillment_allowed === true;
+  const heldDisposition = [
+    'held_financial_mismatch',
+    'held_terminal_order',
+    'held_contract_invalid',
+  ].includes(disposition);
+  const successfulDisposition = ['staged', 'replay'].includes(disposition);
+  const successorReplay = disposition === 'successor_replay';
+  const supersededReplay = disposition === 'superseded_replay';
+  const actionStatus = row?.action_status;
+  if (
+    !row
+    || (
+      !heldDisposition
+      && !successfulDisposition
+      && !successorReplay
+      && !supersededReplay
+    )
+    || row.paypal_payment_id !== providerPaymentId
+    || row.paypal_subscription_id !== billingAgreementId
+    || row.order_id !== order.id
+    || row.order_number !== order.order_number
+    || row.guild_id !== order.guild_id
+    || row.customer_id !== order.customer_id
+    || row.product_id !== order.product_id
+    || row.plan_id !== order.plan_id
+    || row.stored_order_amount_cents !== order.amount_cents
+    || row.stored_order_currency !== order.currency
+    || row.provider_payment_amount_cents !== amountCents
+    || row.provider_payment_currency !== currency
+    || !isNonEmptyString(row.payment_id)
+    || typeof row.payment_created !== 'boolean'
+    || !['completed', 'refunded', 'reversed'].includes(
+      String(row.terminal_payment_status),
+    )
+    || (fulfillmentAllowed !== successfulDisposition)
+    || (
+      successfulDisposition
+      && (
+        !isNonEmptyString(row.action_id)
+        || row.action !== 'fulfill_subscription'
+        || !['pending', 'processing', 'completed'].includes(String(actionStatus))
+        || row.idempotency_key
+          !== `paypal:sale:${providerPaymentId}:fulfill_subscription_renewal`
+        || !row.payload
+        || typeof row.payload !== 'object'
+      )
+    )
+    || (
+      heldDisposition
+      && (
+        !isNonEmptyString(row.hold_reason)
+        || !isNonEmptyString(row.contract_detail)
+        || !isNonEmptyString(row.alert_id)
+        || !isNonEmptyString(row.alert_type)
+      )
+    )
+    || (
+      successorReplay
+      && (
+        row.terminal_payment_status === 'completed'
+        || row.alert_id !== null
+        || row.hold_reason !== null
+      )
+    )
+    || (
+      supersededReplay
+      && (
+        fulfillmentAllowed
+        || !isNonEmptyString(row.action_id)
+        || row.action !== 'fulfill_subscription'
+        || !isNonEmptyString(row.contract_detail)
+        || row.alert_id !== null
+      )
+    )
+  ) {
+    await recordProviderMoneyIncident(supabase, {
+      webhookEventId,
+      eventType: 'PAYMENT.SALE.COMPLETED',
+      resourceId: providerPaymentId,
+      parentId: billingAgreementId,
+      observedGuildId: order.guild_id,
+      reason: 'subscription_sale_router_failed',
+      evidence: routerIncidentEvidence,
+    });
+    return;
+  }
+
+  console.log(
+    `[Webhook] Subscription payment ${providerPaymentId} persisted with ${disposition}`,
+  );
 }
 
 // ── Capture Refunded / Reversed ─────────────────────
@@ -2983,5 +3701,257 @@ async function handleExternalPaymentRefunded(
   console.log(
     `[Webhook] ${eventType} processed for order ${orderId} (${identifierName} ${paymentId}) — ` +
       `full refund, access revoked, payment ${finalized.payment_status}`,
+  );
+}
+
+// ── Disputes / chargebacks (Finding 9) ──────────────────────────────────────
+
+/**
+ * The transaction ids a dispute names. PayPal puts the capture (or sale) id
+ * this integration stores in `payments.paypal_payment_id` on
+ * `disputed_transactions[].seller_transaction_id`.
+ */
+export function resolveDisputedTransactionIds(
+  resource: Record<string, unknown>,
+): string[] {
+  const transactions = resource.disputed_transactions;
+  if (!Array.isArray(transactions)) return [];
+
+  const ids = new Set<string>();
+  for (const txn of transactions) {
+    if (!txn || typeof txn !== 'object') continue;
+    const sellerTxnId = (txn as { seller_transaction_id?: unknown }).seller_transaction_id;
+    // Only canonical provider ids reach a database lookup, matching the guard
+    // the refund path already applies.
+    if (isNonEmptyString(sellerTxnId) && isCanonicalPayPalResourceId(sellerTxnId)) {
+      ids.add(sellerTxnId);
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * Lossless identity set used at authorization/mutation boundaries. Unlike the
+ * display-oriented helper above, one malformed array entry invalidates the
+ * whole set so a full PayPal payload can never be scoped or partly applied
+ * from a silently filtered subset.
+ */
+export function resolveStrictDisputedTransactionIds(
+  resource: Record<string, unknown>,
+): { ids: string[]; valid: boolean } {
+  const transactions = resource.disputed_transactions;
+  if (!Array.isArray(transactions)) return { ids: [], valid: true };
+
+  const ids: string[] = [];
+  for (const txn of transactions) {
+    if (!txn || typeof txn !== 'object') return { ids: [], valid: false };
+    const sellerTxnId = (txn as { seller_transaction_id?: unknown }).seller_transaction_id;
+    if (
+      !isNonEmptyString(sellerTxnId)
+      || !isCanonicalPayPalResourceId(sellerTxnId)
+    ) {
+      return { ids: [], valid: false };
+    }
+    ids.push(sellerTxnId);
+  }
+  return { ids, valid: true };
+}
+
+/** The dispute's own identifier. PayPal uses `dispute_id`, not `id`. */
+export function resolveDisputeId(resource: Record<string, unknown>): string | null {
+  const disputeId = resource.dispute_id ?? resource.id;
+  return isNonEmptyString(disputeId) && isCanonicalPayPalResourceId(disputeId)
+    ? disputeId
+    : null;
+}
+
+function readDisputeString(value: unknown): string | null {
+  return isNonEmptyString(value) && value.length <= 128 ? value : null;
+}
+
+/**
+ * Handle `CUSTOMER.DISPUTE.CREATED` / `.UPDATED` / `.RESOLVED`.
+ *
+ * Previously these fell through to the route's `default:` branch and were then
+ * written as `result: 'success'` — a chargeback recorded as a success, with
+ * `orders.status = 'disputed'` present in the CHECK constraint but never set
+ * by anything.
+ *
+ * What this does: resolve the disputed transaction(s) back to local orders,
+ * flip `orders.status` to `'disputed'`, and alert the operator.
+ *
+ * What this deliberately does NOT do: revoke access or move money. Settlement
+ * already works — `PAYMENT.CAPTURE.REVERSED` / `.REFUNDED` revoke access when
+ * funds actually move — and a dispute is not yet a loss. Re-doing settlement
+ * here would revoke access from a customer whose dispute the seller may win.
+ *
+ * Idempotent: the status flip is conditional on the current status, so a
+ * redelivery or replay is a no-op, and the alert is DB-deduped on dispute id.
+ */
+export async function handleDisputeEvent(
+  supabase: AdminSupabase,
+  resource: Record<string, unknown>,
+  eventType: string,
+) {
+  const disputeId = resolveDisputeId(resource);
+  if (!disputeId) {
+    throw new Error('Dispute event is missing a usable dispute id');
+  }
+
+  const transactionSet = resolveStrictDisputedTransactionIds(resource);
+  if (!transactionSet.valid) {
+    throw new Error('Dispute event contains a malformed transaction identity set');
+  }
+  const transactionIds = transactionSet.ids;
+
+  const amount = resource.dispute_amount as
+    { value?: unknown; currency_code?: unknown } | undefined;
+  const amountCents = parsePayPalAmountToCents(amount?.value);
+  const currency = typeof amount?.currency_code === 'string'
+    && /^[A-Z]{3}$/.test(amount.currency_code)
+    ? amount.currency_code
+    : null;
+
+  // Resolve and mutate through one exact-identity database boundary. The RPC
+  // rejects mixed-guild matches before touching any order.
+  let guildId: string | null = null;
+  const orderIds: string[] = [];
+  let markedDisputed = 0;
+  if (transactionIds.length > 0) {
+    const { data: matches, error } = await supabase.rpc(
+      'commerce_apply_paypal_dispute',
+      {
+        p_paypal_payment_ids: transactionIds,
+        p_mark_disputed: eventType !== 'CUSTOMER.DISPUTE.RESOLVED',
+      },
+    );
+    requireSupabaseSuccess(error, 'Failed to apply PayPal dispute');
+
+    const rows = Array.isArray(matches) ? matches : matches ? [matches] : [];
+    const guildIds = new Set<string>();
+    for (const match of rows) {
+      if (isNonEmptyString(match.guild_id)) guildIds.add(match.guild_id);
+      if (isNonEmptyString(match.order_id) && !orderIds.includes(match.order_id)) {
+        orderIds.push(match.order_id);
+      }
+      if (match.marked_disputed === true) markedDisputed += 1;
+    }
+    if (guildIds.size > 1) {
+      throw new Error('PayPal dispute RPC returned mixed-guild evidence');
+    }
+    guildId = guildIds.size === 1 ? [...guildIds][0]! : null;
+  }
+
+  await raiseDisputeAlert(supabase, {
+    disputeId,
+    eventType,
+    guildId,
+    status: readDisputeString(resource.status),
+    reason: readDisputeString(resource.reason),
+    amountCents,
+    currency,
+    orderIds,
+    unmatched: orderIds.length === 0,
+  });
+
+  console.log(
+    `[Webhook] ${eventType} recorded for dispute ${disputeId} — ` +
+      `${orderIds.length} order(s) matched, ${markedDisputed} marked disputed`,
+  );
+}
+
+// ── Denied capture (Finding 9) ──────────────────────────────────────────────
+
+/**
+ * Handle `PAYMENT.CAPTURE.DENIED` — PayPal refused to settle a capture.
+ *
+ * This event type was not in `PAYPAL_HANDLED_WEBHOOK_EVENTS` at all, so the
+ * webhook was never even subscribed to it; had it arrived it would have been
+ * recorded as a success. The order sat `pending` forever with no alert.
+ *
+ * Idempotent: the cancel is conditional on `status = 'pending'`, so a replay
+ * is a no-op, and the alert is DB-deduped on capture id.
+ */
+export async function handleCaptureDenied(
+  supabase: AdminSupabase,
+  resource: Record<string, unknown>,
+) {
+  const captureId = resource.id;
+  if (!isNonEmptyString(captureId) || !isCanonicalPayPalResourceId(captureId)) {
+    throw new Error('Denied capture is missing its provider id');
+  }
+
+  const parsed = paypalCaptureResourceSchema.safeParse(resource);
+  const capture: PayPalCaptureResource = parsed.success
+    ? parsed.data
+    : { id: captureId };
+
+  const amountCents = parsePayPalAmountToCents(capture.amount?.value);
+  const currency = typeof capture.amount?.currency_code === 'string'
+    && /^[A-Z]{3}$/.test(capture.amount.currency_code)
+    ? capture.amount.currency_code
+    : null;
+
+  // custom_id carries the signed checkout identities; a capture resource keeps
+  // it at the root (unlike an Order, which keeps it on the purchase units).
+  let claimedGuildId: string | null = null;
+  if (isNonEmptyString(capture.custom_id)) {
+    try {
+      const raw = JSON.parse(capture.custom_id);
+      const candidate = raw?.g ?? raw?.guild_id;
+      if (isNonEmptyString(candidate)) claimedGuildId = candidate;
+    } catch {
+      /* malformed custom_id — only an exact local order can authorize effects */
+    }
+  }
+
+  const paypalOrderId = capture.supplementary_data?.related_ids?.order_id ?? null;
+
+  // paypal_order_id is globally unique (partial unique index). Resolve it even
+  // when custom_id is absent/malformed, then derive the tenant from the local
+  // order. custom_id is only a consistency hint; it never grants cross-guild
+  // authority.
+  let guildId: string | null = null;
+  let orderId: string | null = null;
+  let orderCancelled = false;
+  if (isNonEmptyString(paypalOrderId)) {
+    const { data: applied, error } = await supabase.rpc(
+      'commerce_apply_capture_denied',
+      {
+        p_paypal_order_id: paypalOrderId,
+        p_claimed_guild_id: claimedGuildId,
+      },
+    );
+    requireSupabaseSuccess(error, 'Failed to apply denied capture');
+    const rows = Array.isArray(applied) ? applied : applied ? [applied] : [];
+    if (rows.length > 1) {
+      throw new Error('Denied capture RPC returned multiple orders');
+    }
+    const order = rows[0];
+    if (order) {
+      if (!isNonEmptyString(order.guild_id) || !isNonEmptyString(order.order_id)) {
+        throw new Error('Denied capture order has no usable guild identity');
+      }
+      orderId = order.order_id;
+      guildId = order.guild_id;
+      orderCancelled = order.order_cancelled === true;
+    }
+  }
+
+  if (orderId && guildId) {
+    await raiseCaptureDeniedAlert(supabase, {
+      captureId,
+      guildId,
+      orderId,
+      paypalOrderId: paypalOrderId ?? null,
+      amountCents,
+      currency,
+      orderCancelled,
+    });
+  }
+
+  console.log(
+    `[Webhook] PAYMENT.CAPTURE.DENIED recorded for capture ${captureId} — ` +
+      `order ${orderId ?? 'unmatched'}${orderCancelled ? ' cancelled' : ''}`,
   );
 }

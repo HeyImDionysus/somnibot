@@ -1,19 +1,9 @@
 /**
- * POST /api/portal/licenses/[id]/rotate — customer-initiated key rotation.
- *
- * The `license_rotate_key` RPC has existed and worked for a while; nothing
- * reachable called it, so a customer whose key leaked had to contact the
- * seller and wait.
- *
- * The properties worth pinning are about the SECRET, not the happy path:
- *   - the new plaintext key never appears in the HTTP response;
- *   - only its hash is handed to the database;
- *   - it is delivered down the existing audited DM path, not a new one;
- *   - a replayed rotation does not mint a second key;
- *   - a failed delivery is reported precisely, because the old key is already
- *     dead and a blanket "success" would be a lie.
+ * Customer key rotation is one atomic database operation: revoke the old
+ * hash, persist the successor hash, and stage the only plaintext copy in the
+ * protected receipt carrier. HTTP responses and logs never expose that key.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/api/rate-limit', () => ({
@@ -26,34 +16,79 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { rateLimits } from '@/lib/api/rate-limit';
 
 const KEY_ID = '11111111-1111-4111-8111-111111111111';
-const CUSTOMER = 'cust-1';
-const GUILD = '222222222222222222';
+const CUSTOMER_ID = '22222222-2222-4222-8222-222222222222';
+const PRODUCT_ID = '33333333-3333-4333-8333-333333333333';
+const ORDER_ID = '44444444-4444-4444-8444-444444444444';
+const SUCCESSOR_ID = '55555555-5555-4555-8555-555555555555';
+const ACTION_ID = '66666666-6666-4666-8666-666666666666';
+const GUILD_ID = '222222222222222222';
+const DISCORD_ID = '333333333333333333';
 
 const LICENCE = {
   id: KEY_ID,
   status: 'active',
-  bound_discord_id: '333333333333333333',
-  order_id: 'order-1',
-  orders: { order_number: 'ORD-001' },
+  customer_id: CUSTOMER_ID,
+  guild_id: GUILD_ID,
+  product_id: PRODUCT_ID,
+  bound_discord_id: DISCORD_ID,
+  order_id: ORDER_ID,
+  orders: { order_number: 'ORD-001', amount_cents: 999, currency: 'USD' },
   products: { name: 'VIP Pass' },
 };
+
+type RpcResponse = {
+  data: Record<string, unknown> | null;
+  error: { message: string } | null;
+};
+
+function exactRotationResult(
+  args: Record<string, unknown>,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    status: 'rotated',
+    old_key_id: KEY_ID,
+    new_key_id: SUCCESSOR_ID,
+    action_id: ACTION_ID,
+    action_status: 'pending',
+    guild_id: GUILD_ID,
+    customer_id: CUSTOMER_ID,
+    product_id: PRODUCT_ID,
+    order_id: ORDER_ID,
+    discord_id: DISCORD_ID,
+    new_key_suffix: args.p_new_key_suffix,
+    license_key_id: SUCCESSOR_ID,
+    order_number: LICENCE.orders.order_number,
+    product_name: LICENCE.products.name,
+    amount_cents: LICENCE.orders.amount_cents,
+    currency: LICENCE.orders.currency,
+    delivery: 'queued',
+    ...overrides,
+  };
+}
 
 function mockDb(opts: {
   portal?: { customer_id: string; guild_id: string } | null;
   licence?: Record<string, unknown> | null;
-  rpcResult?: Record<string, unknown> | null;
-  rpcError?: { message: string } | null;
-  queueError?: { message: string } | null;
+  rpcImpl?: (
+    name: string,
+    args: Record<string, unknown>,
+    call: number,
+  ) => RpcResponse | Promise<RpcResponse>;
 } = {}) {
-  const queued: Record<string, unknown>[] = [];
   const rpcCalls: Array<[string, Record<string, unknown>]> = [];
+  const inserts: Array<{ table: string; row: Record<string, unknown> }> = [];
 
   const from = vi.fn((table: string) => {
-    const chain: Record<string, unknown> = {};
-    for (const m of ['select', 'eq', 'gt']) chain[m] = vi.fn(() => chain);
+    const chain: Record<string, any> = {};
+    for (const method of ['select', 'eq', 'gt']) {
+      chain[method] = vi.fn(() => chain);
+    }
     chain.single = vi.fn(async () => ({
       data: table === 'portal_sessions'
-        ? (opts.portal === undefined ? { customer_id: CUSTOMER, guild_id: GUILD } : opts.portal)
+        ? (opts.portal === undefined
+            ? { customer_id: CUSTOMER_ID, guild_id: GUILD_ID }
+            : opts.portal)
         : null,
       error: null,
     }));
@@ -64,22 +99,21 @@ function mockDb(opts: {
       error: null,
     }));
     chain.insert = vi.fn(async (row: Record<string, unknown>) => {
-      if (table === 'bot_action_queue') queued.push(row);
-      return { error: opts.queueError ?? null };
+      inserts.push({ table, row });
+      return { error: null };
     });
     return chain;
   });
 
-  const rpc = vi.fn(async (fn: string, args: Record<string, unknown>) => {
-    rpcCalls.push([fn, args]);
-    return {
-      data: opts.rpcResult === undefined ? { status: 'rotated' } : opts.rpcResult,
-      error: opts.rpcError ?? null,
-    };
+  const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    rpcCalls.push([name, args]);
+    return opts.rpcImpl
+      ? opts.rpcImpl(name, args, rpcCalls.length)
+      : { data: exactRotationResult(args), error: null };
   });
 
   vi.mocked(createAdminSupabase).mockReturnValue({ from, rpc } as never);
-  return { queued, rpcCalls };
+  return { inserts, rpcCalls };
 }
 
 const req = (token?: string) =>
@@ -87,7 +121,6 @@ const req = (token?: string) =>
     method: 'POST',
     ...(token ? { headers: { 'x-portal-token': token } } : {}),
   });
-
 const params = (id = KEY_ID) => ({ params: Promise.resolve({ id }) });
 
 beforeEach(() => {
@@ -95,135 +128,151 @@ beforeEach(() => {
   vi.mocked(rateLimits.portalRotate).mockResolvedValue({ limited: false } as never);
 });
 
-describe('access control', () => {
-  it('refuses without a portal token', async () => {
+describe('access control and recovery routing', () => {
+  it('refuses missing auth, expired sessions, rate limits, and foreign licences', async () => {
     mockDb();
     expect((await POST(req(), params())).status).toBe(401);
-  });
 
-  it('refuses an expired session', async () => {
     mockDb({ portal: null });
-    expect((await POST(req('tok'), params())).status).toBe(401);
-  });
+    expect((await POST(req('token'), params())).status).toBe(401);
 
-  it('refuses once the daily rotation limit is hit', async () => {
     mockDb();
-    vi.mocked(rateLimits.portalRotate).mockResolvedValue({ limited: true } as never);
-    const res = await POST(req('tok'), params());
-    expect(res.status).toBe(429);
+    vi.mocked(rateLimits.portalRotate).mockResolvedValueOnce({ limited: true } as never);
+    expect((await POST(req('token'), params())).status).toBe(429);
+
+    const foreign = mockDb({ licence: null });
+    expect((await POST(req('token'), params())).status).toBe(404);
+    expect(foreign.rpcCalls).toHaveLength(0);
   });
 
-  it('404s a licence belonging to someone else', async () => {
-    const { rpcCalls } = mockDb({ licence: null });
-    const res = await POST(req('tok'), params());
-    expect(res.status).toBe(404);
-    // Nothing was rotated on the refused path.
-    expect(rpcCalls).toHaveLength(0);
-  });
-
-  it('refuses to rotate a revoked licence', async () => {
-    const { rpcCalls } = mockDb({ licence: { ...LICENCE, status: 'revoked' } });
-    const res = await POST(req('tok'), params());
-    expect(res.status).toBe(409);
-    expect(rpcCalls).toHaveLength(0);
-  });
-});
-
-describe('the new secret', () => {
-  it('never returns the plaintext key', async () => {
-    const { rpcCalls } = mockDb();
-    const res = await POST(req('tok'), params());
-    const body = await res.json();
-
-    expect(res.status).toBe(200);
-    // Only the last four characters, so the customer can tell the keys apart.
-    expect(body.newKeySuffix).toMatch(/^[A-Z0-9]{4}$/);
-    const serialized = JSON.stringify(body);
-    expect(serialized).not.toMatch(/SMNI-/);
-    // And whatever hash went to the database must not be in the response.
-    const [, args] = rpcCalls[0]!;
-    expect(serialized).not.toContain(args.p_new_key_hash as string);
-  });
-
-  it('hands the database a hash, never the key itself', async () => {
-    const { rpcCalls } = mockDb();
-    await POST(req('tok'), params());
-
-    const [fn, args] = rpcCalls[0]!;
-    expect(fn).toBe('license_rotate_key');
-    // sha256 hex.
-    expect(args.p_new_key_hash).toMatch(/^[a-f0-9]{64}$/);
-    expect(args.p_new_key_prefix).toBe('SMNI');
-    expect(String(args.p_new_key_suffix)).toHaveLength(4);
-  });
-
-  it('delivers the new key down the existing receipt-DM path', async () => {
-    const { queued } = mockDb();
-    await POST(req('tok'), params());
-
-    expect(queued).toHaveLength(1);
-    expect(queued[0]).toMatchObject({
-      guild_id: GUILD,
-      action: 'deliver_receipt',
-      status: 'pending',
+  it('routes a revoked predecessor through the atomic RPC for response-loss recovery', async () => {
+    const db = mockDb({
+      licence: { ...LICENCE, status: 'revoked' },
+      rpcImpl: async () => ({
+        data: { status: 'not_rotatable' },
+        error: null,
+      }),
     });
-    const payload = queued[0]!.payload as Record<string, unknown>;
-    expect(payload.discord_id).toBe(LICENCE.bound_discord_id);
-    // This is the ONE place the plaintext legitimately travels.
-    expect(String(payload.license_key_plaintext)).toMatch(/^SMNI-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/);
-  });
 
-  it('generates a different key each time', async () => {
-    const a = mockDb();
-    await POST(req('tok'), params());
-    const b = mockDb();
-    await POST(req('tok'), params());
-
-    const keyA = (a.queued[0]!.payload as Record<string, unknown>).license_key_plaintext;
-    const keyB = (b.queued[0]!.payload as Record<string, unknown>).license_key_plaintext;
-    expect(keyA).not.toBe(keyB);
-  });
-
-  it('avoids characters that are misread when retyped', async () => {
-    const { queued } = mockDb();
-    await POST(req('tok'), params());
-    const key = String((queued[0]!.payload as Record<string, unknown>).license_key_plaintext);
-    // Customers retype these from a DM. Every confusable PAIR must have one
-    // side removed, or the ambiguity survives: O/0, I/1, L/1, S/5, Z/2, B/8.
-    expect(key.slice(5)).not.toMatch(/[O0IL1S5Z2B8U]/);
+    expect((await POST(req('token'), params())).status).toBe(409);
+    expect(db.rpcCalls).toHaveLength(1);
+    expect(db.rpcCalls[0]![0]).toBe('commerce_rotate_license_and_stage_receipt');
   });
 });
 
-describe('replay and failure', () => {
-  it('does not mint a second key when the rotation already happened', async () => {
-    const { queued } = mockDb({ rpcResult: { status: 'already_rotated' } });
-    const res = await POST(req('tok'), params());
-    const body = await res.json();
+describe('atomic secret carrier', () => {
+  it('uses one atomic RPC and never returns the plaintext', async () => {
+    const db = mockDb();
+    const response = await POST(req('token'), params());
+    const body = await response.json();
 
-    expect(res.status).toBe(200);
+    expect(response.status).toBe(200);
+    expect(db.rpcCalls).toHaveLength(1);
+    const [name, args] = db.rpcCalls[0]!;
+    expect(name).toBe('commerce_rotate_license_and_stage_receipt');
+    expect(args).toMatchObject({
+      p_license_key_id: KEY_ID,
+      p_guild_id: GUILD_ID,
+      p_customer_id: CUSTOMER_ID,
+      p_product_id: PRODUCT_ID,
+      p_order_id: ORDER_ID,
+      p_discord_id: DISCORD_ID,
+      p_new_key_prefix: 'SMNI',
+      p_actor_discord_id: DISCORD_ID,
+    });
+    expect(String(args.p_new_key_plaintext)).toMatch(
+      /^SMNI-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/,
+    );
+    expect(args.p_new_key_suffix).toBe(
+      String(args.p_new_key_plaintext).slice(-4),
+    );
+    expect(body.newKeySuffix).toBe(args.p_new_key_suffix);
+    expect(JSON.stringify(body)).not.toContain(String(args.p_new_key_plaintext));
+    expect(db.inserts).toEqual([]);
+  });
+
+  it('generates distinct, transcription-safe plaintext carriers', async () => {
+    const first = mockDb();
+    await POST(req('token'), params());
+    const second = mockDb();
+    await POST(req('token'), params());
+
+    const firstKey = String(first.rpcCalls[0]![1].p_new_key_plaintext);
+    const secondKey = String(second.rpcCalls[0]![1].p_new_key_plaintext);
+    expect(firstKey).not.toBe(secondKey);
+    expect(firstKey.slice(5)).not.toMatch(/[O0IL1S5Z2B8U]/);
+    expect(secondKey.slice(5)).not.toMatch(/[O0IL1S5Z2B8U]/);
+  });
+
+  it('rejects a fresh response whose suffix is not the submitted successor', async () => {
+    mockDb({
+      rpcImpl: async (_name, args) => ({
+        data: exactRotationResult(args, { new_key_suffix: 'ACDE' }),
+        error: null,
+      }),
+    });
+
+    expect((await POST(req('token'), params())).status).toBe(500);
+  });
+});
+
+describe('response loss and replay', () => {
+  it('retries the exact atomic call once after a lost commit response', async () => {
+    const db = mockDb({
+      rpcImpl: async (_name, args, call) => call === 1
+        ? { data: null, error: { message: 'connection closed after commit' } }
+        : {
+            data: exactRotationResult(args, {
+              status: 'already_rotated',
+              action_status: 'pending',
+            }),
+            error: null,
+          },
+    });
+
+    const response = await POST(req('token'), params());
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
     expect(body.alreadyRotated).toBe(true);
-    // Critically: no second delivery, so the customer is not sent a key that
-    // does not work.
-    expect(queued).toHaveLength(0);
+    expect(db.rpcCalls).toHaveLength(2);
+    expect(db.rpcCalls[1]).toEqual(db.rpcCalls[0]);
+    expect(db.inserts).toEqual([]);
   });
 
-  it('says the old key is dead even when delivery could not be queued', async () => {
-    mockDb({ queueError: { message: 'queue unavailable' } });
-    const res = await POST(req('tok'), params());
-    const body = await res.json();
+  it('reports an exact failed replay as held rather than claiming delivery', async () => {
+    mockDb({
+      rpcImpl: async (_name, args) => ({
+        data: exactRotationResult(args, {
+          status: 'already_rotated',
+          action_status: 'failed',
+        }),
+        error: null,
+      }),
+    });
 
-    // The rotation DID happen — reporting failure would invite a retry that
-    // mints a third key, and reporting plain success would hide that no DM
-    // is coming.
-    expect(res.status).toBe(200);
-    expect(body.delivery).toBe('not_queued');
-    expect(body.message).toContain('stopped working');
-    expect(body.message).toContain('Contact the seller');
+    const response = await POST(req('token'), params());
+    const body = await response.json();
+    expect(response.status).toBe(409);
+    expect(body).toMatchObject({
+      alreadyRotated: true,
+      delivery: 'held',
+    });
   });
 
-  it('surfaces an RPC failure rather than claiming success', async () => {
-    mockDb({ rpcError: { message: 'deadlock detected' } });
-    const res = await POST(req('tok'), params());
-    expect(res.status).toBeGreaterThanOrEqual(400);
+  it('surfaces durable held evidence and repeated RPC errors', async () => {
+    mockDb({
+      rpcImpl: async () => ({ data: { status: 'held' }, error: null }),
+    });
+    expect((await POST(req('token'), params())).status).toBe(409);
+
+    const failed = mockDb({
+      rpcImpl: async () => ({
+        data: null,
+        error: { message: 'deadlock detected' },
+      }),
+    });
+    expect((await POST(req('token'), params())).status).toBeGreaterThanOrEqual(400);
+    expect(failed.rpcCalls).toHaveLength(2);
   });
 });
