@@ -44,7 +44,15 @@ vi.mock('../../utils/random.js', () => ({
   randomFloat: vi.fn(() => 0.5),
 }));
 
+vi.mock('../services/alert-service.js', () => ({
+  raiseOwnerAlert: vi.fn().mockResolvedValue({
+    inserted: true,
+    delivered: false,
+  }),
+}));
+
 import { PetsManager, registerPetsManager, invalidatePetsCache } from '../features/pets/pets-manager.js';
+import { raiseOwnerAlert } from '../services/alert-service.js';
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -327,6 +335,56 @@ describe('PetsManager', () => {
       );
     });
 
+    it('refunds a paid feed when the atomic pet mutation fails', async () => {
+      supabase = makeSupabase({
+        guild_config: { economy_pets_enabled: true, economy_pet_feed_cost: 50 },
+        economy_pets: { id: 'p1', hunger: 50, status: 'normal' },
+        economy_wallets: { wallet: 500 },
+      });
+      supabase.rpc
+        .mockResolvedValueOnce({ data: null, error: null })
+        .mockResolvedValueOnce({ data: null, error: { message: 'feed failed' } })
+        .mockResolvedValueOnce({ data: 550, error: null });
+      mgr = new PetsManager(supabase as any, null as any, valkey as any);
+      const interaction = makeInteraction();
+
+      await mgr.feedPet(interaction as any);
+
+      expect(supabase.rpc).toHaveBeenNthCalledWith(3, 'economy_add_balance', {
+        p_guild_id: 'g1',
+        p_user_id: 'u1',
+        p_amount: 50,
+      });
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('have been refunded'),
+      }));
+    });
+
+    it('does not claim a paid feed refund when the compensating credit fails', async () => {
+      supabase = makeSupabase({
+        guild_config: { economy_pets_enabled: true, economy_pet_feed_cost: 50 },
+        economy_pets: { id: 'p1', hunger: 50, status: 'normal' },
+        economy_wallets: { wallet: 500 },
+      });
+      supabase.rpc
+        .mockResolvedValueOnce({ data: null, error: null })
+        .mockResolvedValueOnce({ data: null, error: { message: 'feed failed' } })
+        .mockResolvedValueOnce({ data: null, error: { message: 'refund failed' } });
+      mgr = new PetsManager(supabase as any, null as any, valkey as any);
+      const interaction = makeInteraction();
+
+      await mgr.feedPet(interaction as any);
+
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('refund could not be confirmed'),
+      }));
+      expect(raiseOwnerAlert).toHaveBeenCalledWith(
+        supabase,
+        'g1',
+        expect.objectContaining({ alertType: 'pet_economy_refund_failed' }),
+      );
+    });
+
     it('rejects when no pet', async () => {
       supabase = makeSupabase({
         guild_config: { economy_pets_enabled: true },
@@ -385,6 +443,59 @@ describe('PetsManager', () => {
       expect(supabase.rpc).not.toHaveBeenCalledWith(
         'economy_subtract_balance',
         expect.anything(),
+      );
+    });
+
+    it('describes a failed zero-cost training honestly without claiming a refund', async () => {
+      supabase = makeSupabase({
+        guild_config: { economy_pets_enabled: true, economy_pet_train_cost: 0 },
+        economy_pets: {
+          id: 'p1', level: 5, xp: 50, energy: 90,
+          health: 100, attack: 10, defense: 10, speed: 10, status: 'happy',
+        },
+      });
+      supabase.rpc.mockResolvedValueOnce({ data: null, error: { message: 'train failed' } });
+      mgr = new PetsManager(supabase as any, null as any, valkey as any);
+      const interaction = makeInteraction();
+
+      await mgr.trainPet(interaction as any);
+
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('Nothing was charged'),
+      }));
+      expect(interaction.reply).not.toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('have been refunded'),
+      }));
+    });
+
+    it('does not claim a paid training refund when the compensating credit fails', async () => {
+      supabase = makeSupabase({
+        guild_config: { economy_pets_enabled: true, economy_pet_train_cost: 100 },
+        economy_pets: {
+          id: 'p1', level: 5, xp: 50, energy: 90,
+          health: 100, attack: 10, defense: 10, speed: 10, status: 'happy',
+        },
+        economy_wallets: { wallet: 500 },
+      });
+      supabase.rpc
+        .mockResolvedValueOnce({ data: null, error: null })
+        .mockResolvedValueOnce({ data: null, error: { message: 'train failed' } })
+        .mockResolvedValueOnce({ data: null, error: { message: 'refund failed' } });
+      mgr = new PetsManager(supabase as any, null as any, valkey as any);
+      const interaction = makeInteraction();
+
+      await mgr.trainPet(interaction as any);
+
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('refund could not be confirmed'),
+      }));
+      expect(raiseOwnerAlert).toHaveBeenCalledWith(
+        supabase,
+        'g1',
+        expect.objectContaining({
+          alertType: 'pet_economy_refund_failed',
+          metadata: expect.objectContaining({ operation: 'train' }),
+        }),
       );
     });
   });

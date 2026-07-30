@@ -13,6 +13,7 @@ import { POST } from '@/app/api/sync/route';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { notifyBot } from '@/lib/notify-bot';
 
 function makeRequest(body: Record<string, unknown>) {
   return new NextRequest('http://localhost/api/sync', {
@@ -118,6 +119,12 @@ describe('POST /api/sync', () => {
       expect.objectContaining({ sync_interval_minutes: 15 }),
       expect.anything(),
     );
+    expect(notifyBot).toHaveBeenCalledWith('settings', {
+      sync_enabled: true,
+      sync_interval_minutes: 15,
+      sync_auto_repair: false,
+      sync_auto_repair_everyone: false,
+    });
   });
 
   it('keeps legacy non-permission accepts working', async () => {

@@ -52,6 +52,7 @@ import { invalidateHeistCache } from '../features/heist/index.js';
 import { invalidateBrandKitCache } from '../features/branding/index.js';
 import { invalidateAlertChannelCache } from './alert-service.js';
 import { createLogger } from '@somnibot/shared';
+import type { ConfigChangedData, PlatformEvent } from '@somnibot/shared';
 
 const log = createLogger('ConfigWatcher');
 
@@ -64,31 +65,49 @@ interface ConfigCache {
 export class ConfigWatcher {
   private cache: ConfigCache = { guildConfig: null, sectionLastReload: new Map() };
   private reloadCooldownMs = 2000; // Don't reload same section more than once every 2 seconds
+  private configChangedHandler:
+    | ((event: PlatformEvent<'config.changed', ConfigChangedData>) => Promise<void>)
+    | null = null;
 
   constructor(
     private guild: Guild,
     private supabase: SupabaseClient,
     private eventBus: PlatformEventBus,
     private valkey: Valkey,
-    private onSyncIntervalChange?: (intervalMinutes: number) => void,
+    private onSyncConfigChange?: (
+      intervalMinutes?: number,
+      runImmediately?: boolean,
+    ) => void,
   ) {}
 
   /**
    * Start listening for config changes.
    */
   start(): void {
-    this.eventBus.on('config.changed', async (event) => {
+    if (this.configChangedHandler) return;
+
+    this.configChangedHandler = async (event) => {
       if (event.guildId !== this.guild.id) return;
 
       const section = event.data.section;
       const changedInterval = event.data.changes?.sync_interval_minutes;
+      const changedEnabled = event.data.changes?.sync_enabled;
       if (
         (section === 'settings' || section === 'all')
-        && typeof changedInterval === 'number'
-        && Number.isFinite(changedInterval)
-        && changedInterval > 0
+        && (
+          (typeof changedInterval === 'number'
+            && Number.isFinite(changedInterval)
+            && changedInterval > 0)
+          || changedEnabled === true
+        )
       ) {
-        this.onSyncIntervalChange?.(changedInterval);
+        const interval =
+          typeof changedInterval === 'number' ? changedInterval : undefined;
+        if (changedEnabled === true) {
+          this.onSyncConfigChange?.(interval, true);
+        } else {
+          this.onSyncConfigChange?.(interval);
+        }
       }
       const now = Date.now();
 
@@ -191,9 +210,22 @@ export class ConfigWatcher {
       } catch (err) {
         log.error(`Failed to reload ${section}:`, err);
       }
-    });
+    };
+    this.eventBus.on('config.changed', this.configChangedHandler);
 
     log.info('Watching for config changes');
+  }
+
+  /**
+   * Remove the exact listener registered by start(). Idempotent so guild
+   * teardown and partial-init recovery cannot retain a stale scheduler
+   * callback or accumulate duplicate reloads on re-init.
+   */
+  stop(): void {
+    if (!this.configChangedHandler) return;
+    this.eventBus.off('config.changed', this.configChangedHandler);
+    this.configChangedHandler = null;
+    this.cache.sectionLastReload.clear();
   }
 
   // ── Section Reloaders ──────────────────────────────────

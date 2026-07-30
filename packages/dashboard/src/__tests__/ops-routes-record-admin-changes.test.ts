@@ -35,6 +35,9 @@ vi.mock('@/lib/api/admin-rate-limit', () => ({
   checkAdminRateLimit: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('@/lib/notify-bot', () => ({ notifyBot: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('@/app/api/webhooks/scope', () => ({
+  isSoleInstanceOperator: vi.fn().mockResolvedValue(true),
+}));
 vi.mock('@/lib/team-invitations', () => ({
   loadTeamConfig: vi.fn(),
   writeTeamAudit: vi.fn().mockResolvedValue(undefined),
@@ -62,6 +65,7 @@ import {
   type RecordAdminChangeInput,
 } from '@/lib/admin-changes';
 import { validateUndoPayload } from '@/lib/api/undo-allowlist';
+import { isSoleInstanceOperator } from '@/app/api/webhooks/scope';
 
 const GUILD = '111111111111111111';
 const ACTOR = '222222222222222222';
@@ -214,6 +218,7 @@ beforeEach(() => {
     ok: true,
     ctx: { userId: 'user-1', discordId: ACTOR, guildId: GUILD },
   } as never);
+  vi.mocked(isSoleInstanceOperator).mockResolvedValue(true);
   vi.mocked(readRowBefore).mockResolvedValue(undefined);
   createAdminMock();
 });

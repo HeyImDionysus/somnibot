@@ -17,6 +17,7 @@ let supa!: SupabaseClient;
 const GUILD_ID = `test-economy-guild-${Date.now()}`;
 const USER_A = 'econ-user-aaa';
 const USER_B = 'econ-user-bbb';
+const USER_C = 'econ-user-ccc';
 
 beforeAll(async () => {
   supa = await requireSupabase();
@@ -27,11 +28,21 @@ beforeAll(async () => {
     name: 'Economy Test Guild',
     owner_discord_id: '111222333',
   });
+  await supa.from('guild_config').insert({
+    guild_id: GUILD_ID,
+    economy_max_bank: 0,
+  });
+  await supa.rpc('economy_add_balance', {
+    p_guild_id: GUILD_ID,
+    p_user_id: USER_C,
+    p_amount: 1000,
+  });
 });
 
 afterAll(async () => {
   await supa.from('economy_transactions').delete().eq('guild_id', GUILD_ID);
   await supa.from('economy_wallets').delete().eq('guild_id', GUILD_ID);
+  await supa.from('guild_config').delete().eq('guild_id', GUILD_ID);
   await supa.from('guild').delete().eq('id', GUILD_ID);
 });
 
@@ -80,7 +91,7 @@ describe('economy_bank_deposit RPC', () => {
   it('moves funds from wallet to bank', async () => {
     const { data: depositAmt, error } = await supa.rpc('economy_bank_deposit', {
       p_guild_id: GUILD_ID,
-      p_user_id: USER_A,
+      p_user_id: USER_C,
       p_amount: 600,
     });
 
@@ -92,18 +103,70 @@ describe('economy_bank_deposit RPC', () => {
       .from('economy_wallets')
       .select('wallet, bank')
       .eq('guild_id', GUILD_ID)
-      .eq('user_id', USER_A)
+      .eq('user_id', USER_C)
       .single();
 
-    expect(data!.wallet).toBe(900);   // 1500 - 600
+    expect(data!.wallet).toBe(400);   // 1000 - 600
     expect(data!.bank).toBe(600);
+  });
+
+  it('enforces the guild-configured cap atomically across concurrent deposits', async () => {
+    await supa.from('guild_config')
+      .update({ economy_max_bank: 700 })
+      .eq('guild_id', GUILD_ID);
+
+    const results = await Promise.all([
+      supa.rpc('economy_bank_deposit', {
+        p_guild_id: GUILD_ID,
+        p_user_id: USER_C,
+        p_amount: 100,
+      }),
+      supa.rpc('economy_bank_deposit', {
+        p_guild_id: GUILD_ID,
+        p_user_id: USER_C,
+        p_amount: 100,
+      }),
+    ]);
+
+    expect(results.every((result) => result.error === null)).toBe(true);
+    expect(results.map((result) => Number(result.data)).sort((a, b) => a - b))
+      .toEqual([0, 100]);
+
+    const { data } = await supa.from('economy_wallets')
+      .select('wallet, bank')
+      .eq('guild_id', GUILD_ID)
+      .eq('user_id', USER_C)
+      .single();
+    expect(data).toMatchObject({ wallet: 300, bank: 700 });
+  });
+
+  it('treats a configured zero bank cap as unlimited', async () => {
+    await supa.from('guild_config')
+      .update({ economy_max_bank: 0 })
+      .eq('guild_id', GUILD_ID);
+
+    const { data: depositAmt, error } = await supa.rpc('economy_bank_deposit', {
+      p_guild_id: GUILD_ID,
+      p_user_id: USER_C,
+      p_amount: 100,
+    });
+
+    expect(error).toBeNull();
+    expect(depositAmt).toBe(100);
+
+    const { data } = await supa.from('economy_wallets')
+      .select('wallet, bank')
+      .eq('guild_id', GUILD_ID)
+      .eq('user_id', USER_C)
+      .single();
+    expect(data).toMatchObject({ wallet: 200, bank: 800 });
   });
 
   it('returns 0 when wallet has insufficient funds', async () => {
     // Try to deposit more than wallet has — should return 0 and do nothing
     const { data: depositAmt, error } = await supa.rpc('economy_bank_deposit', {
       p_guild_id: GUILD_ID,
-      p_user_id: USER_A,
+      p_user_id: USER_C,
       p_amount: 99999,
     });
 
@@ -115,11 +178,11 @@ describe('economy_bank_deposit RPC', () => {
       .from('economy_wallets')
       .select('wallet, bank')
       .eq('guild_id', GUILD_ID)
-      .eq('user_id', USER_A)
+      .eq('user_id', USER_C)
       .single();
 
-    expect(data!.wallet).toBe(900);
-    expect(data!.bank).toBe(600);
+    expect(data!.wallet).toBe(200);
+    expect(data!.bank).toBe(800);
   });
 });
 
@@ -127,7 +190,7 @@ describe('economy_bank_withdraw RPC', () => {
   it('moves funds from bank to wallet', async () => {
     const { data: withdrawAmt, error } = await supa.rpc('economy_bank_withdraw', {
       p_guild_id: GUILD_ID,
-      p_user_id: USER_A,
+      p_user_id: USER_C,
       p_amount: 300,
     });
 
@@ -138,17 +201,17 @@ describe('economy_bank_withdraw RPC', () => {
       .from('economy_wallets')
       .select('wallet, bank')
       .eq('guild_id', GUILD_ID)
-      .eq('user_id', USER_A)
+      .eq('user_id', USER_C)
       .single();
 
-    expect(data!.wallet).toBe(1200); // 900 + 300
-    expect(data!.bank).toBe(300);    // 600 - 300
+    expect(data!.wallet).toBe(500); // 200 + 300
+    expect(data!.bank).toBe(500);   // 800 - 300
   });
 
   it('returns 0 when bank has insufficient funds', async () => {
     const { data: withdrawAmt, error } = await supa.rpc('economy_bank_withdraw', {
       p_guild_id: GUILD_ID,
-      p_user_id: USER_A,
+      p_user_id: USER_C,
       p_amount: 99999,
     });
 

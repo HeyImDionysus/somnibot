@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { apiServerError, dbError } from '@/lib/api/response';
 import { recordAdminChange, humanizeColumn } from '@/lib/admin-changes';
+import { isSoleInstanceOperator } from '@/app/api/webhooks/scope';
 
 const settingsUpdate = z.object({
   section: z.string().min(1).max(64),
@@ -83,6 +84,13 @@ export async function GET() {
   try {
     const auth = await requireGuildOwner();
     if (!auth.ok) return auth.response;
+    const admin = createAdminSupabase();
+    if (!(await isSoleInstanceOperator(admin, auth.ctx.discordId))) {
+      return NextResponse.json(
+        { error: 'Forbidden — installation operator access required' },
+        { status: 403 },
+      );
+    }
 
     // Step 1: Read env vars as base values
     const values: Record<string, string> = {};
@@ -97,7 +105,6 @@ export async function GET() {
     }
 
     // Step 2: Read DB overrides (instance_settings)
-    const admin = createAdminSupabase();
     const { data: settings } = await admin
       .from('instance_settings')
       .select('key, value, section')
@@ -183,12 +190,17 @@ export async function PUT(request: NextRequest) {
   try {
     const auth = await requireGuildOwner();
     if (!auth.ok) return auth.response;
+    const admin = createAdminSupabase();
+    if (!(await isSoleInstanceOperator(admin, auth.ctx.discordId))) {
+      return NextResponse.json(
+        { error: 'Forbidden — installation operator access required' },
+        { status: 403 },
+      );
+    }
 
     const parsed = await parseBody(request, settingsUpdate);
     if (!parsed.ok) return parsed.response;
     const { section, values } = parsed.data;
-
-    const admin = createAdminSupabase();
 
     // V10 Audit §6: Batch all upserts into a single operation to avoid
     // sequential timing that leaks info about which keys were skipped.

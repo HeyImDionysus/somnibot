@@ -13,12 +13,16 @@ vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
 vi.mock('@/lib/api/admin-rate-limit', () => ({ checkAdminRateLimit: vi.fn() }));
 vi.mock('@/lib/notify-bot', () => ({ notifyBot: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('@/app/api/webhooks/scope', () => ({
+  isSoleInstanceOperator: vi.fn(),
+}));
 
 import { PUT } from '@/app/api/settings/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { notifyBot } from '@/lib/notify-bot';
+import { isSoleInstanceOperator } from '@/app/api/webhooks/scope';
 
 import {
   createMockSupabase,
@@ -37,6 +41,7 @@ beforeEach(() => {
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
   mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
   mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);
+  vi.mocked(isSoleInstanceOperator).mockResolvedValue(true);
 });
 
 function putSettings(body: unknown) {
@@ -56,6 +61,18 @@ describe('PUT /api/settings', () => {
 
     const res = await putSettings({ section: 'discord', values: { guild_id: '123' } });
     expect(res.status).toBe(401);
+  });
+
+  it('returns 403 when a guild owner is not the sole installation operator', async () => {
+    vi.mocked(isSoleInstanceOperator).mockResolvedValue(false);
+
+    const res = await putSettings({
+      section: 'discord',
+      values: { discord_bot_token: 'replacement-token' },
+    });
+
+    expect(res.status).toBe(403);
+    expect(mock._query.upsert).not.toHaveBeenCalled();
   });
 
   it('returns 400 for missing section', async () => {

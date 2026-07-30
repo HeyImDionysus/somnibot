@@ -317,9 +317,11 @@ export class HeistManager {
 
     // Check balance for entry fee
     const entryFee = config.economy_heist_entry_fee ?? 100;
-    const { data: wallet, error: walletErr } = await this.supabase
-      .from('economy_wallets').select('wallet')
-      .eq('guild_id', guildId).eq('user_id', userId).single();
+    const { data: wallet, error: walletErr } = entryFee > 0
+      ? await this.supabase
+          .from('economy_wallets').select('wallet')
+          .eq('guild_id', guildId).eq('user_id', userId).single()
+      : { data: { wallet: 0 }, error: null };
 
     // A FAILED wallet read is not an empty wallet: telling the member they "need
     // N coins" off a read the bot could not perform is a fabricated balance.
@@ -596,6 +598,15 @@ export class HeistManager {
         content: `❌ You need ${cEmoji} **${entryFee.toLocaleString()}** ${cName} to join.`,
         ephemeral: true,
       });
+      return;
+    }
+    if (joinStatus !== 'joined') {
+      log.error(`heist_join returned unexpected status "${joinStatus}"`, {
+        guildId,
+        heistId: heist.id,
+        userId,
+      });
+      await this.replyHeistUnavailable(interaction, ` No ${cName} were charged.`);
       return;
     }
 

@@ -224,6 +224,45 @@ describe('ConfigWatcher', () => {
     expect(reconfigure).toHaveBeenCalledWith(5);
   });
 
+  it('runs sync immediately when the dashboard enables an initially disabled scheduler', async () => {
+    const reconfigure = vi.fn();
+    const localBus: any = { on: vi.fn(), off: vi.fn(), emit: vi.fn() };
+    const localWatcher = new ConfigWatcher(
+      makeGuild(),
+      makeSupa() as any,
+      localBus,
+      makeValkey(),
+      reconfigure,
+    );
+    localWatcher.start();
+    const handler = localBus.on.mock.calls[0][1];
+
+    await handler({
+      guildId: 'guild-1',
+      data: {
+        section: 'settings',
+        changedBy: 'owner',
+        changes: { sync_enabled: true },
+      },
+    });
+
+    expect(reconfigure).toHaveBeenCalledWith(undefined, true);
+  });
+
+  it('removes its exact listener on stop and can be started again without duplicates', () => {
+    const handler = eventBus.on.mock.calls[0][1];
+
+    watcher.stop();
+    watcher.stop();
+
+    expect(eventBus.off).toHaveBeenCalledTimes(1);
+    expect(eventBus.off).toHaveBeenCalledWith('config.changed', handler);
+
+    watcher.start();
+    expect(eventBus.on).toHaveBeenCalledTimes(2);
+    expect(eventBus.on.mock.calls[1][1]).not.toBe(handler);
+  });
+
   it('drops the alert-channel cache on section=all (full reload path)', async () => {
     await configHandler({ guildId: 'guild-1', data: { section: 'all', changedBy: 'user1' } });
     expect(mocks.invalidateAlertChannelCache).toHaveBeenCalledWith('guild-1');

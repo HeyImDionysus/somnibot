@@ -215,7 +215,10 @@ export function startSyncScheduler(
   supabase: SupabaseClient,
   eventBus: PlatformEventBus,
   initialConfig: SyncConfig,
-): { stop: () => void; reconfigure: (intervalMinutes: number) => void } {
+): {
+  stop: () => void;
+  reconfigure: (intervalMinutes?: number, runImmediately?: boolean) => void;
+} {
   let timer: ReturnType<typeof setInterval> | null = null;
   let initialTimer: ReturnType<typeof setTimeout> | null = null;
   let running = false;
@@ -227,6 +230,12 @@ export function startSyncScheduler(
     if (timer) clearInterval(timer);
     currentIntervalMinutes = intervalMinutes;
     timer = setInterval(run, intervalMinutes * 60 * 1000);
+  };
+
+  const reconfigure = (intervalMinutes?: number, runImmediately = false) => {
+    if (stopped) return;
+    if (intervalMinutes !== undefined) arm(intervalMinutes);
+    if (runImmediately) void run();
   };
 
   const run = async () => {
@@ -284,7 +293,7 @@ export function startSyncScheduler(
   arm(initialConfig.intervalMinutes);
 
   return {
-    reconfigure: arm,
+    reconfigure,
     stop: () => {
       stopped = true;
       if (initialTimer) clearTimeout(initialTimer);

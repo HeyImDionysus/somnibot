@@ -188,7 +188,7 @@ describe('HeistManager', () => {
           });
         }
         if (table === 'economy_heists') return chainBuilder({ data: null, error: null });
-        if (table === 'economy_wallets') return chainBuilder({ data: { wallet: 0 }, error: null });
+        if (table === 'economy_wallets') return chainBuilder({ data: null, error: { code: 'PGRST116' } });
         return chainBuilder();
       });
       const interaction = makeInteraction();
@@ -196,6 +196,7 @@ describe('HeistManager', () => {
       await mgr.startHeist(interaction as any);
 
       expect(valkey.set).not.toHaveBeenCalledWith('heist:cd:g1', '1', 'EX', 0, 'NX');
+      expect(supabase.from).not.toHaveBeenCalledWith('economy_wallets');
       expect(supabase.rpc).not.toHaveBeenCalledWith('economy_subtract_balance', expect.anything());
     });
 
@@ -475,6 +476,24 @@ describe('HeistManager', () => {
       expect(replyArg.embeds).toBeDefined();
       expect(String(replyArg.embeds[0].data.description)).toContain('3/8');
       expect(String(replyArg.embeds[0].data.description)).toContain('54%');
+    });
+
+    it('passes a configured zero fee to the atomic join without a separate debit', async () => {
+      const rpcCalls = setupJoin(
+        {
+          data: [{ status: 'joined', member_count: 2, success_chance: 47, role: 'Hacker' }],
+          error: null,
+        },
+        { configOverrides: { economy_heist_entry_fee: 0 } },
+      );
+
+      await mgr.joinHeist(makeInteraction() as any);
+
+      expect(rpcCalls).toContainEqual({
+        fn: 'heist_join',
+        args: expect.objectContaining({ p_entry_fee: 0 }),
+      });
+      expect(rpcCalls.some((c) => c.fn === 'economy_subtract_balance')).toBe(false);
     });
 
     it('rejects when already joined (RPC status already_joined)', async () => {

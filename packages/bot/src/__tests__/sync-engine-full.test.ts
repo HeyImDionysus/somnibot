@@ -475,4 +475,23 @@ describe('startSyncScheduler', () => {
     expect(intervalSpy).toHaveBeenLastCalledWith(expect.any(Function), 5 * 60 * 1000);
     scheduler.stop();
   });
+
+  it('can run immediately when an initially disabled scheduler is enabled', async () => {
+    const supabase = { from: vi.fn(() => supaChain({
+      sync_enabled: true,
+      sync_interval_minutes: 60,
+      sync_auto_repair: false,
+      sync_auto_repair_everyone: false,
+    })) } as any;
+    const scheduler = startSyncScheduler(
+      makeGuild() as any,
+      supabase,
+      makeEventBus() as any,
+      makeConfig({ enabled: false, intervalMinutes: 60 }),
+    );
+
+    scheduler.reconfigure(undefined, true);
+    await vi.waitFor(() => expect(supabase.from).toHaveBeenCalledWith('guild_config'));
+    scheduler.stop();
+  });
 });

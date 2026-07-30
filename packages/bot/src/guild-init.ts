@@ -118,7 +118,10 @@ interface GuildServices {
   voiceXpTimer?: ReturnType<typeof setInterval>;
   actionQueueStaleTimer?: ReturnType<typeof setInterval>;
   actionQueueStop?: () => Promise<void>;
-  syncHandle?: { stop: () => void; reconfigure: (intervalMinutes: number) => void };
+  syncHandle?: {
+    stop: () => void;
+    reconfigure: (intervalMinutes?: number, runImmediately?: boolean) => void;
+  };
   reconTimer?: ReturnType<typeof setInterval>;
   automationEngine?: AutomationEngine;
   configWatcher?: ConfigWatcher;
@@ -292,10 +295,14 @@ export async function initGuildFeatures(
     autoRepair: guildCfg?.sync_auto_repair ?? false,
     autoRepairEveryone: guildCfg?.sync_auto_repair_everyone ?? false,
   };
-  if (syncConfig.enabled) {
-    services.syncHandle = startSyncScheduler(guild, supabase, eventBus, syncConfig);
-    guildLog.info('Sync engine started', { interval: syncConfig.intervalMinutes });
-  }
+  // Keep the scheduler alive even while sync is disabled. Its cycles read the
+  // current DB config and no-op while disabled, which lets a dashboard change
+  // enable sync without requiring a process restart.
+  services.syncHandle = startSyncScheduler(guild, supabase, eventBus, syncConfig);
+  guildLog.info('Sync scheduler started', {
+    enabled: syncConfig.enabled,
+    interval: syncConfig.intervalMinutes,
+  });
 
   // ── Ticket command (always registered) ──
   allCommands.push(ticketCommand);
@@ -654,7 +661,8 @@ export async function initGuildFeatures(
       supabase,
       eventBus,
       valkey,
-      (intervalMinutes) => services.syncHandle?.reconfigure(intervalMinutes),
+      (intervalMinutes, runImmediately) =>
+        services.syncHandle?.reconfigure(intervalMinutes, runImmediately),
     );
     services.configWatcher.start();
     ctx.setManager('configWatcher', services.configWatcher);

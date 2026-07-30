@@ -664,12 +664,16 @@ export async function DELETE(req: NextRequest) {
 
   // Read first: after the write the prior `active` value is unrecoverable, and
   // it is the one thing that makes this change genuinely undoable.
-  const before = await readRowBefore(
-    supabase,
-    'products',
-    { id, guild_id: guildId },
-    'id, name, active',
-  );
+  const { data: before, error: readError } = await supabase
+    .from('products')
+    .select('id, name, active')
+    .eq('id', id)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+
+  if (readError) {
+    return commerceWriteError(readError);
+  }
 
   if (!before) {
     return NextResponse.json(

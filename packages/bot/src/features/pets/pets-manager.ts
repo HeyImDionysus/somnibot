@@ -241,6 +241,49 @@ export class PetsManager {
     }
   }
 
+  /**
+   * Compensate a debit after the pet mutation fails. Supabase reports many RPC
+   * failures as a resolved `{ error }`, so checking only thrown rejections can
+   * falsely tell a member their coins were returned. Refund failures are made
+   * operator-visible and the caller receives an honest, actionable message.
+   */
+  private async refundCoins(
+    guildId: string,
+    userId: string,
+    amount: number,
+    operation: 'buy' | 'feed' | 'train',
+  ): Promise<boolean> {
+    if (amount <= 0) return true;
+
+    try {
+      const { error } = await this.supabase.rpc('economy_add_balance', {
+        p_guild_id: guildId,
+        p_user_id: userId,
+        p_amount: amount,
+      });
+      if (!error) return true;
+      log.error(`Pet ${operation} refund failed`, { guildId, userId, amount, error: error.message });
+    } catch (error) {
+      log.error(`Pet ${operation} refund threw`, {
+        guildId,
+        userId,
+        amount,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    await raiseOwnerAlert(this.supabase, guildId, {
+      alertType: 'pet_economy_refund_failed',
+      severity: 'critical',
+      title: 'Pet economy refund needs attention',
+      message:
+        `A ${operation} refund of ${amount} coins could not be confirmed for member ${userId}.`,
+      metadata: { user_id: userId, amount, operation },
+      client: this.client,
+    });
+    return false;
+  }
+
   private async ensureEnabled(interaction: ChatInputCommandInteraction): Promise<boolean> {
     const { config, degraded } = await this.getConfigChecked(interaction.guildId!);
     // A failed config read is an outage, not "pets are off" — degrade honestly.
@@ -356,10 +399,13 @@ export class PetsManager {
 
     if (insertErr) {
       log.error('buyPet insert failed — refunding:', insertErr.message);
-      await Promise.resolve(this.supabase.rpc('economy_add_balance', {
-        p_guild_id: guildId, p_user_id: userId, p_amount: price,
-      })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
-      await interaction.reply({ content: '❌ Failed to create pet — your coins have been refunded.', ephemeral: true });
+      const refunded = await this.refundCoins(guildId, userId, price, 'buy');
+      await interaction.reply({
+        content: refunded
+          ? '❌ Failed to create pet — your coins have been refunded.'
+          : '❌ Failed to create pet, and the refund could not be confirmed. Please contact an administrator.',
+        ephemeral: true,
+      });
       return;
     }
 
@@ -430,12 +476,26 @@ export class PetsManager {
     }
 
     // Atomic feed — prevents TOCTOU race with decay timer
-    const { data: feedResult } = await this.supabase.rpc('economy_pet_feed', {
+    const { data: feedResult, error: feedError } = await this.supabase.rpc('economy_pet_feed', {
       p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: 30,
     });
     const fr = feedResult as { success: boolean; old_hunger: number; new_hunger: number; status: string } | null;
-    if (!fr?.success) {
-      await interaction.reply({ content: '❌ Could not feed your pet — try again.', ephemeral: true });
+    if (feedError || !fr?.success) {
+      const refunded = await this.refundCoins(
+        guildId,
+        interaction.user.id,
+        cost,
+        'feed',
+      );
+      const outcome = cost === 0
+        ? ' Nothing was charged.'
+        : refunded
+          ? ' Your coins have been refunded.'
+          : ' The refund could not be confirmed. Please contact an administrator.';
+      await interaction.reply({
+        content: `❌ Could not feed your pet — try again.${outcome}`,
+        ephemeral: true,
+      });
       return;
     }
 
@@ -546,13 +606,21 @@ export class PetsManager {
     });
     const tr = trainResult as { success: boolean; new_xp: number; new_level: number; leveled_up: boolean; new_energy: number; stat_bonus: string | null } | null;
     if (!tr?.success) {
-      // Refund since training failed
-      if (cost > 0) {
-        await Promise.resolve(this.supabase.rpc('economy_add_balance', {
-          p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-        })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
-      }
-      await interaction.reply({ content: '❌ Training failed — your coins have been refunded.', ephemeral: true });
+      const refunded = await this.refundCoins(
+        guildId,
+        interaction.user.id,
+        cost,
+        'train',
+      );
+      const outcome = cost === 0
+        ? ' Nothing was charged.'
+        : refunded
+          ? ' Your coins have been refunded.'
+          : ' The refund could not be confirmed. Please contact an administrator.';
+      await interaction.reply({
+        content: `❌ Training failed.${outcome}`,
+        ephemeral: true,
+      });
       return;
     }
 
