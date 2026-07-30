@@ -45,7 +45,7 @@ import {
   handleDisputeEvent,
   handleCaptureDenied,
   resolveRefundPaymentId,
-  resolveDisputedTransactionIds,
+  resolveStrictDisputedTransactionIds,
 } from './handlers';
 
 // ── Main handler ────────────────────────────────────
@@ -275,8 +275,10 @@ async function resolveWebhookGuildId(
   // capture/sale id stored in payments.paypal_payment_id. Without this, every
   // chargeback would land as an unattributed row.
   if (event.event_type.startsWith('CUSTOMER.DISPUTE.')) {
+    const transactionSet = resolveStrictDisputedTransactionIds(event.resource);
+    if (!transactionSet.valid) return null;
     const matchedGuildIds = new Set<string>();
-    for (const transactionId of resolveDisputedTransactionIds(event.resource)) {
+    for (const transactionId of transactionSet.ids) {
       const disputeGuildId = await lookupPaymentGuildId(supabase, transactionId);
       // Every transaction in the signed dispute must resolve locally. A
       // partial match stays unattributed rather than filing the full payload
@@ -382,6 +384,25 @@ export async function POST(req: NextRequest) {
   }
   const eventId = event.id ?? req.headers.get('paypal-transmission-id') ?? '';
   const resolvedEventId = eventId || randomBytes(16).toString('hex');
+  const replayClaimToken = replay
+    ? req.headers.get('x-replay-claim-token')
+    : null;
+  if (replay) {
+    const parsedClaimToken = z.string().uuid().safeParse(replayClaimToken);
+    if (!eventId || !parsedClaimToken.success) {
+      return NextResponse.json({ error: 'Invalid replay claim' }, { status: 409 });
+    }
+    const { data: claimIsCurrent, error: claimCheckError } = await supabase.rpc(
+      'webhooks_replay_claim_is_current',
+      {
+        p_event_id: resolvedEventId,
+        p_claim_token: parsedClaimToken.data,
+      },
+    );
+    if (claimCheckError || claimIsCurrent !== true) {
+      return NextResponse.json({ error: 'Replay claim is no longer current' }, { status: 409 });
+    }
+  }
   const shouldRecordEventResult = Boolean(eventId) || !replay;
   let retryingFailedEvent = replay && req.headers.get('x-webhook-retrying-failed-event') === '1';
   let webhookGuildId: string | null = null;
@@ -414,7 +435,7 @@ export async function POST(req: NextRequest) {
     if (!inserted || inserted.length === 0) {
       const { data: existing, error: existingError } = await supabase
         .from('webhook_events')
-        .select('result, processed_at')
+        .select('result, processed_at, replay_claim_token')
         .eq('event_id', resolvedEventId)
         .maybeSingle();
 
@@ -456,6 +477,9 @@ export async function POST(req: NextRequest) {
 
         retryingFailedEvent = true;
       } else if (existing?.result == null) {
+        if (existing?.replay_claim_token) {
+          return NextResponse.json({ status: 'processing' }, { status: 409 });
+        }
         const processedAt = Date.parse(String(existing?.processed_at ?? ''));
         const isStale = Number.isFinite(processedAt) &&
           Date.now() - processedAt >= WEBHOOK_PROCESSING_STALE_MS;
@@ -604,16 +628,27 @@ export async function POST(req: NextRequest) {
     }
 
     if (shouldRecordEventResult) {
-      const { error: completionError } = await supabase
-        .from('webhook_events')
-        .update({
-          result: 'success',
-          error_details: null,
-          ...(webhookGuildId ? { guild_id: webhookGuildId } : {}),
+      const completion = replay
+        ? await supabase.rpc('webhooks_finish_replay_claim', {
+          p_event_id: resolvedEventId,
+          p_claim_token: replayClaimToken,
+          p_result: 'success',
+          p_error_details: null,
         })
-        .eq('event_id', resolvedEventId);
+        : await supabase
+          .from('webhook_events')
+          .update({
+            result: 'success',
+            error_details: null,
+            ...(webhookGuildId ? { guild_id: webhookGuildId } : {}),
+          })
+          .eq('event_id', resolvedEventId);
+      const completionError = completion.error;
       if (completionError) {
         throw new Error(`Failed to persist webhook completion: ${completionError.message}`);
+      }
+      if (replay && completion.data !== true) {
+        throw new Error('Webhook replay claim is no longer current');
       }
     }
 
@@ -640,26 +675,35 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error(`[Webhook] Error processing ${event.event_type}:`, err);
     if (shouldRecordEventResult) {
-      await supabase
-        .from('webhook_events')
-        .update({
-          result: 'error',
-          error_details: String(err),
-          ...(webhookGuildId ? { guild_id: webhookGuildId } : {}),
+      const errorCompletion = replay
+        ? await supabase.rpc('webhooks_finish_replay_claim', {
+          p_event_id: resolvedEventId,
+          p_claim_token: replayClaimToken,
+          p_result: 'error',
+          p_error_details: String(err),
         })
-        .eq('event_id', resolvedEventId);
+        : await supabase
+          .from('webhook_events')
+          .update({
+            result: 'error',
+            error_details: String(err),
+            ...(webhookGuildId ? { guild_id: webhookGuildId } : {}),
+          })
+          .eq('event_id', resolvedEventId);
 
       // Finding 2: a webhook_events row landing on result = 'error' used to be
       // completely silent. Non-resumable types get HTTP 200 on PayPal's next
       // delivery, so PayPal stops retrying and the failure is permanent unless
       // a human notices. Alert on every error, resumable or not.
-      await raiseWebhookProcessingErrorAlert(supabase, {
-        eventId: resolvedEventId,
-        eventType: event.event_type,
-        guildId: webhookGuildId,
-        reason: String(err),
-        requiresManualReplay: !RESUMABLE_FAILED_EVENT_TYPES.has(event.event_type),
-      });
+      if (!replay || (!errorCompletion.error && errorCompletion.data === true)) {
+        await raiseWebhookProcessingErrorAlert(supabase, {
+          eventId: resolvedEventId,
+          eventType: event.event_type,
+          guildId: webhookGuildId,
+          reason: String(err),
+          requiresManualReplay: !RESUMABLE_FAILED_EVENT_TYPES.has(event.event_type),
+        });
+      }
     }
 
     // V11 Re-Audit L-2: Don't leak event_type in error responses.

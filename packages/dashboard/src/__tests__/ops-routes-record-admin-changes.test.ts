@@ -1178,6 +1178,7 @@ describe('/api/webhooks/[id]/replay', () => {
     client.rpc.mockResolvedValue({
       data: [{
         outcome: 'claimed',
+        claim_token: '11111111-1111-4111-8111-111111111111',
         event_data: {
           event_id: 'EVT-1',
           event_type: 'PAYMENT.CAPTURE.COMPLETED',

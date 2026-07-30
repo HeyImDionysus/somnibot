@@ -50,6 +50,7 @@ import {
   handleCaptureDenied,
   resolveDisputeId,
   resolveDisputedTransactionIds,
+  resolveStrictDisputedTransactionIds,
 } from '@/app/api/paypal/webhook/handlers';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import {
@@ -61,6 +62,7 @@ const GUILD_ID = '111111111111111111';
 const SECOND_GUILD_ID = '222222222222222222';
 const CAPTURE_ID = 'CAPTURE-DISPUTED-1';
 const ORDER_UUID = '00000000-0000-4000-8000-000000000001';
+const REPLAY_CLAIM_TOKEN = '11111111-1111-4111-8111-111111111111';
 
 // ── Recording Supabase double ───────────────────────────────────────────────
 
@@ -127,6 +129,12 @@ function makeSupabase() {
   };
 
   const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    if (name === 'webhooks_replay_claim_is_current') {
+      return { data: true, error: null };
+    }
+    if (name === 'webhooks_finish_replay_claim') {
+      return { data: true, error: null };
+    }
     const resolver = rpcResolvers[name];
     return resolver ? resolver(args) : { data: null, error: null };
   });
@@ -182,6 +190,7 @@ function makeReplay(body: unknown) {
     headers: {
       'Content-Type': 'application/json',
       'x-replay-secret': replaySecret,
+      'x-replay-claim-token': REPLAY_CLAIM_TOKEN,
     },
     body: JSON.stringify(body),
   });
@@ -288,6 +297,15 @@ describe('dispute resource parsing', () => {
   it('returns nothing when disputed_transactions is missing', () => {
     expect(resolveDisputedTransactionIds({})).toEqual([]);
   });
+
+  it('invalidates the full strict identity set when any entry is malformed', () => {
+    expect(resolveStrictDisputedTransactionIds({
+      disputed_transactions: [
+        { seller_transaction_id: CAPTURE_ID },
+        { seller_transaction_id: 'has spaces' },
+      ],
+    })).toEqual({ ids: [], valid: false });
+  });
 });
 
 // ── Dispute handling ────────────────────────────────────────────────────────
@@ -386,6 +404,21 @@ describe('handleDisputeEvent', () => {
     await expect(
       handleDisputeEvent(supabase as never, disputeResource(), 'CUSTOMER.DISPUTE.CREATED'),
     ).rejects.toThrow(/apply PayPal dispute/i);
+  });
+
+  it('rejects a malformed transaction set before calling the mutation RPC', async () => {
+    await expect(handleDisputeEvent(
+      supabase as never,
+      disputeResource({
+        disputed_transactions: [
+          { seller_transaction_id: CAPTURE_ID },
+          { seller_transaction_id: 'has spaces' },
+        ],
+      }),
+      'CUSTOMER.DISPUTE.CREATED',
+    )).rejects.toThrow(/malformed transaction identity/i);
+
+    expect(supabase.rpc).not.toHaveBeenCalled();
   });
 });
 
@@ -640,6 +673,50 @@ describe('route dispatch', () => {
     }
 
     expect(res.status).toBe(500);
+    expect(opsFor('webhook_events', 'upsert')[0]!.payload)
+      .not.toHaveProperty('guild_id');
+  });
+
+  it('keeps a malformed full dispute identity set unattributed and rejects it', async () => {
+    const req = new Request('http://localhost/api/paypal/webhook', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'paypal-auth-algo': 'SHA256withRSA',
+        'paypal-cert-url': 'https://example.com/cert',
+        'paypal-transmission-id': 'EVT-DISPUTE-MALFORMED-SET',
+        'paypal-transmission-sig': 'sig-1',
+        'paypal-transmission-time': new Date().toISOString(),
+      },
+      body: JSON.stringify({
+        id: 'EVT-DISPUTE-MALFORMED-SET',
+        event_type: 'CUSTOMER.DISPUTE.CREATED',
+        resource: disputeResource({
+          disputed_transactions: [
+            { seller_transaction_id: CAPTURE_ID },
+            { seller_transaction_id: 'CAPTURE HAS SPACES' },
+          ],
+        }),
+      }),
+    });
+
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    let res: Response;
+    try {
+      res = await POST(req as never);
+    } finally {
+      global.fetch = originalFetch;
+    }
+
+    expect(res.status).toBe(500);
+    expect(opsFor('payments', 'select')).toHaveLength(0);
+    expect(supabase.rpc).not.toHaveBeenCalledWith(
+      'commerce_apply_paypal_dispute',
+      expect.anything(),
+    );
     expect(opsFor('webhook_events', 'upsert')[0]!.payload)
       .not.toHaveProperty('guild_id');
   });

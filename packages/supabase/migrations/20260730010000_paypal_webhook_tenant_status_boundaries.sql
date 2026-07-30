@@ -9,6 +9,9 @@
 
 BEGIN;
 
+ALTER TABLE public.webhook_events
+  ADD COLUMN IF NOT EXISTS replay_claim_token UUID;
+
 CREATE OR REPLACE FUNCTION public.webhooks_is_sole_instance_operator(
   p_discord_id TEXT
 )
@@ -153,6 +156,7 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
+  v_is_current_owner BOOLEAN;
   v_is_sole_operator BOOLEAN;
   v_result JSONB;
 BEGIN
@@ -172,6 +176,15 @@ BEGIN
   -- Serialize the ownership proof with guild inserts/updates/deletes for the
   -- duration of the protected read.
   LOCK TABLE public.guild IN SHARE MODE;
+  SELECT EXISTS (
+    SELECT 1
+      FROM public.guild
+     WHERE id = p_guild_id
+       AND owner_discord_id = p_discord_id
+  ) INTO v_is_current_owner;
+  IF NOT v_is_current_owner THEN
+    RETURN pg_catalog.jsonb_build_object('data', '[]'::JSONB, 'total', 0);
+  END IF;
   v_is_sole_operator := public.webhooks_is_sole_instance_operator(p_discord_id);
 
   WITH scoped AS MATERIALIZED (
@@ -214,7 +227,8 @@ CREATE OR REPLACE FUNCTION public.webhooks_claim_scoped_replay(
 )
 RETURNS TABLE (
   outcome TEXT,
-  event_data JSONB
+  event_data JSONB,
+  claim_token TEXT
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -222,7 +236,9 @@ SET search_path = ''
 AS $$
 DECLARE
   v_event public.webhook_events%ROWTYPE;
+  v_is_current_owner BOOLEAN;
   v_is_sole_operator BOOLEAN;
+  v_claim_token UUID;
 BEGIN
   IF p_event_id IS NULL
      OR p_event_id !~ '^[A-Za-z0-9_-]{1,128}$'
@@ -239,6 +255,16 @@ BEGIN
 
   -- Hold the ownership set stable through authorization and the replay claim.
   LOCK TABLE public.guild IN SHARE MODE;
+  SELECT EXISTS (
+    SELECT 1
+      FROM public.guild
+     WHERE id = p_guild_id
+       AND owner_discord_id = p_discord_id
+  ) INTO v_is_current_owner;
+  IF NOT v_is_current_owner THEN
+    RETURN QUERY SELECT 'not_found'::TEXT, NULL::JSONB, NULL::TEXT;
+    RETURN;
+  END IF;
   SELECT event.*
     INTO v_event
     FROM public.webhook_events AS event
@@ -246,37 +272,109 @@ BEGIN
    FOR UPDATE;
 
   IF NOT FOUND THEN
-    RETURN QUERY SELECT 'not_found'::TEXT, NULL::JSONB;
+    RETURN QUERY SELECT 'not_found'::TEXT, NULL::JSONB, NULL::TEXT;
     RETURN;
   END IF;
 
   v_is_sole_operator := public.webhooks_is_sole_instance_operator(p_discord_id);
   IF v_event.guild_id IS DISTINCT FROM p_guild_id
      AND NOT (v_event.guild_id IS NULL AND v_is_sole_operator) THEN
-    RETURN QUERY SELECT 'not_found'::TEXT, NULL::JSONB;
+    RETURN QUERY SELECT 'not_found'::TEXT, NULL::JSONB, NULL::TEXT;
     RETURN;
   END IF;
 
+  -- A replay claim is never stolen on a timer. A worker that is merely slow
+  -- must not overlap a second worker and duplicate irreversible fulfilment.
+  -- A stale provider delivery (which has no replay token) remains claimable.
   IF v_event.result IS NULL
      AND (
+       v_event.replay_claim_token IS NOT NULL
+       OR
        v_event.processed_at IS NULL
        OR v_event.processed_at >=
           pg_catalog.clock_timestamp()
           - pg_catalog.make_interval(secs => p_stale_seconds)
      ) THEN
-    RETURN QUERY SELECT 'processing'::TEXT, NULL::JSONB;
+    RETURN QUERY SELECT 'processing'::TEXT, NULL::JSONB, NULL::TEXT;
     RETURN;
   END IF;
 
+  v_claim_token := pg_catalog.gen_random_uuid();
   UPDATE public.webhook_events AS event
      SET result = NULL,
          error_details = NULL,
+         replay_claim_token = v_claim_token,
          replayed_at = pg_catalog.clock_timestamp(),
          replay_count = COALESCE(event.replay_count, 0) + 1,
          processed_at = pg_catalog.clock_timestamp()
    WHERE event.event_id = p_event_id;
 
-  RETURN QUERY SELECT 'claimed'::TEXT, pg_catalog.to_jsonb(v_event);
+  RETURN QUERY
+  SELECT 'claimed'::TEXT, pg_catalog.to_jsonb(v_event), v_claim_token::TEXT;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.webhooks_replay_claim_is_current(
+  p_event_id TEXT,
+  p_claim_token TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  IF p_event_id IS NULL
+     OR p_event_id !~ '^[A-Za-z0-9_-]{1,128}$'
+     OR p_claim_token IS NULL
+     OR p_claim_token !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' THEN
+    RETURN false;
+  END IF;
+  RETURN EXISTS (
+    SELECT 1
+      FROM public.webhook_events
+     WHERE event_id = p_event_id
+       AND result IS NULL
+       AND replay_claim_token = p_claim_token::UUID
+  );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.webhooks_finish_replay_claim(
+  p_event_id TEXT,
+  p_claim_token TEXT,
+  p_result TEXT,
+  p_error_details TEXT DEFAULT NULL
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_updated INTEGER;
+BEGIN
+  IF p_event_id IS NULL
+     OR p_event_id !~ '^[A-Za-z0-9_-]{1,128}$'
+     OR p_claim_token IS NULL
+     OR p_claim_token !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+     OR p_result NOT IN ('success', 'error') THEN
+    RAISE EXCEPTION 'invalid webhook replay completion'
+      USING ERRCODE = '22023';
+  END IF;
+
+  UPDATE public.webhook_events
+     SET result = p_result,
+         error_details = CASE
+           WHEN p_result = 'success' THEN NULL
+           ELSE p_error_details
+         END,
+         replay_claim_token = NULL
+   WHERE event_id = p_event_id
+     AND result IS NULL
+     AND replay_claim_token = p_claim_token::UUID;
+  GET DIAGNOSTICS v_updated = ROW_COUNT;
+  RETURN v_updated = 1;
 END;
 $$;
 
@@ -353,6 +451,10 @@ REVOKE ALL ON FUNCTION public.webhooks_list_scoped(
 REVOKE ALL ON FUNCTION public.webhooks_claim_scoped_replay(
   TEXT, TEXT, TEXT, INTEGER
 ) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.webhooks_replay_claim_is_current(TEXT, TEXT)
+  FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.webhooks_finish_replay_claim(TEXT, TEXT, TEXT, TEXT)
+  FROM PUBLIC, anon, authenticated, service_role;
 
 GRANT EXECUTE ON FUNCTION public.webhooks_is_sole_instance_operator(TEXT)
   TO service_role;
@@ -366,6 +468,10 @@ GRANT EXECUTE ON FUNCTION public.webhooks_list_scoped(
 GRANT EXECUTE ON FUNCTION public.webhooks_claim_scoped_replay(
   TEXT, TEXT, TEXT, INTEGER
 ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.webhooks_replay_claim_is_current(TEXT, TEXT)
+  TO service_role;
+GRANT EXECUTE ON FUNCTION public.webhooks_finish_replay_claim(TEXT, TEXT, TEXT, TEXT)
+  TO service_role;
 
 COMMENT ON FUNCTION public.webhooks_is_sole_instance_operator(TEXT) IS
   'Atomic sole-instance ownership proof for access to unattributed webhook rows.';
@@ -378,6 +484,10 @@ COMMENT ON FUNCTION public.webhooks_list_scoped(
 ) IS 'Atomic tenant and sole-operator scoped webhook event listing.';
 COMMENT ON FUNCTION public.webhooks_claim_scoped_replay(
   TEXT, TEXT, TEXT, INTEGER
-) IS 'Atomic tenant and sole-operator authorization plus webhook replay claim.';
+) IS 'Atomic tenant authorization plus non-stealable webhook replay claim.';
+COMMENT ON FUNCTION public.webhooks_replay_claim_is_current(TEXT, TEXT) IS
+  'Checks that an internal replay request still owns its exact event claim.';
+COMMENT ON FUNCTION public.webhooks_finish_replay_claim(TEXT, TEXT, TEXT, TEXT) IS
+  'Fenced completion of an exact webhook replay claim.';
 
 COMMIT;

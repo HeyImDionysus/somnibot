@@ -114,6 +114,9 @@ function makeSupabase() {
         if (name === 'webhooks_claim_scoped_replay') {
           return replayClaimResult;
         }
+        if (name === 'webhooks_finish_replay_claim') {
+          return { data: true, error: null };
+        }
         return { data: null, error: null };
       },
     ),
@@ -286,6 +289,7 @@ describe('POST /api/webhooks/[id]/replay scoping', () => {
       data: [{
         outcome: allowed ? 'claimed' : 'not_found',
         event_data: allowed ? row : null,
+        claim_token: allowed ? '11111111-1111-4111-8111-111111111111' : null,
       }],
       error: null,
     };

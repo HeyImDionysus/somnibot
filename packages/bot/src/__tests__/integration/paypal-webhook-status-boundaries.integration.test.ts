@@ -367,6 +367,7 @@ describe('PayPal webhook tenant/status boundary migration', () => {
       return transaction.unsafe<Array<{
         outcome: string;
         event_data: { event_id: string; replay_count: number };
+        claim_token: string;
       }>>(`
         SELECT *
           FROM ${FIXTURE_SCHEMA}.webhooks_claim_scoped_replay(
@@ -380,7 +381,52 @@ describe('PayPal webhook tenant/status boundary migration', () => {
         event_id: 'EVT-ORPHAN',
         replay_count: 0,
       }),
+      claim_token: expect.any(String),
     }]);
+    const claimToken = claimed[0]!.claim_token;
+    await sql.unsafe(`
+      UPDATE ${FIXTURE_SCHEMA}.webhook_events
+         SET processed_at = now() - interval '1 hour'
+       WHERE event_id = 'EVT-ORPHAN'
+    `);
+    const fenced = await sql.begin(async (transaction) => {
+      await transaction.unsafe('SET LOCAL ROLE service_role');
+      const secondClaim = await transaction.unsafe<Array<{
+        outcome: string;
+        event_data: unknown;
+        claim_token: string | null;
+      }>>(`
+        SELECT *
+          FROM ${FIXTURE_SCHEMA}.webhooks_claim_scoped_replay(
+            'EVT-ORPHAN', '${GUILD_A}', '${GUILD_A}', 1
+          )
+      `);
+      const current = await transaction.unsafe<Array<{ current: boolean }>>(`
+        SELECT ${FIXTURE_SCHEMA}.webhooks_replay_claim_is_current(
+          'EVT-ORPHAN', '${claimToken}'
+        ) AS current
+      `);
+      const staleFinish = await transaction.unsafe<Array<{ finished: boolean }>>(`
+        SELECT ${FIXTURE_SCHEMA}.webhooks_finish_replay_claim(
+          'EVT-ORPHAN', '22222222-2222-4222-8222-222222222222',
+          'error', 'stale worker'
+        ) AS finished
+      `);
+      const finish = await transaction.unsafe<Array<{ finished: boolean }>>(`
+        SELECT ${FIXTURE_SCHEMA}.webhooks_finish_replay_claim(
+          'EVT-ORPHAN', '${claimToken}', 'success', NULL
+        ) AS finished
+      `);
+      return { secondClaim, current, staleFinish, finish };
+    });
+    expect(fenced.secondClaim).toEqual([{
+      outcome: 'processing',
+      event_data: null,
+      claim_token: null,
+    }]);
+    expect(fenced.current).toEqual([{ current: true }]);
+    expect(fenced.staleFinish).toEqual([{ finished: false }]);
+    expect(fenced.finish).toEqual([{ finished: true }]);
 
     await sql.unsafe(`
       INSERT INTO ${FIXTURE_SCHEMA}.guild (id, owner_discord_id)
@@ -400,7 +446,43 @@ describe('PayPal webhook tenant/status boundary migration', () => {
           )
       `);
     });
-    expect(denied).toEqual([{ outcome: 'not_found', event_data: null }]);
+    expect(denied).toEqual([{
+      outcome: 'not_found',
+      event_data: null,
+      claim_token: null,
+    }]);
+
+    await sql.unsafe(`
+      UPDATE ${FIXTURE_SCHEMA}.guild
+         SET owner_discord_id = '${GUILD_B}'
+       WHERE id = '${GUILD_A}'
+    `);
+    const staleOwner = await sql.begin(async (transaction) => {
+      await transaction.unsafe('SET LOCAL ROLE service_role');
+      const list = await transaction.unsafe<Array<{
+        result: { data: unknown[]; total: number };
+      }>>(`
+        SELECT ${FIXTURE_SCHEMA}.webhooks_list_scoped(
+          '${GUILD_A}', '${GUILD_A}', NULL, NULL, 0, 50
+        ) AS result
+      `);
+      const claim = await transaction.unsafe<Array<{
+        outcome: string;
+        event_data: unknown;
+      }>>(`
+        SELECT *
+          FROM ${FIXTURE_SCHEMA}.webhooks_claim_scoped_replay(
+            'EVT-MINE', '${GUILD_A}', '${GUILD_A}', 300
+          )
+      `);
+      return { list, claim };
+    });
+    expect(staleOwner.list[0]!.result).toEqual({ data: [], total: 0 });
+    expect(staleOwner.claim).toEqual([{
+      outcome: 'not_found',
+      event_data: null,
+      claim_token: null,
+    }]);
   });
 
   it('exposes all three boundary functions only to service_role', async () => {
@@ -418,6 +500,10 @@ describe('PayPal webhook tenant/status boundary migration', () => {
       anon_list: boolean;
       service_claim: boolean;
       anon_claim: boolean;
+      service_claim_check: boolean;
+      anon_claim_check: boolean;
+      service_claim_finish: boolean;
+      anon_claim_finish: boolean;
     }>>(`
       SELECT
         has_function_privilege(
@@ -484,7 +570,27 @@ describe('PayPal webhook tenant/status boundary migration', () => {
           'anon',
           '${FIXTURE_SCHEMA}.webhooks_claim_scoped_replay(text,text,text,integer)',
           'EXECUTE'
-        ) AS anon_claim
+        ) AS anon_claim,
+        has_function_privilege(
+          'service_role',
+          '${FIXTURE_SCHEMA}.webhooks_replay_claim_is_current(text,text)',
+          'EXECUTE'
+        ) AS service_claim_check,
+        has_function_privilege(
+          'anon',
+          '${FIXTURE_SCHEMA}.webhooks_replay_claim_is_current(text,text)',
+          'EXECUTE'
+        ) AS anon_claim_check,
+        has_function_privilege(
+          'service_role',
+          '${FIXTURE_SCHEMA}.webhooks_finish_replay_claim(text,text,text,text)',
+          'EXECUTE'
+        ) AS service_claim_finish,
+        has_function_privilege(
+          'anon',
+          '${FIXTURE_SCHEMA}.webhooks_finish_replay_claim(text,text,text,text)',
+          'EXECUTE'
+        ) AS anon_claim_finish
     `);
 
     expect(privileges).toEqual({
@@ -501,6 +607,10 @@ describe('PayPal webhook tenant/status boundary migration', () => {
       anon_list: false,
       service_claim: true,
       anon_claim: false,
+      service_claim_check: true,
+      anon_claim_check: false,
+      service_claim_finish: true,
+      anon_claim_finish: false,
     });
   });
 });

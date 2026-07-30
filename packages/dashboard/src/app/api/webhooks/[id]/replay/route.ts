@@ -17,6 +17,7 @@ import { recordAdminChange } from '@/lib/admin-changes';
 
 /** V7 Audit §7.P2a — Zod schema for replay event ID path param. */
 const eventIdSchema = z.string().min(1).max(128).regex(/^[\w-]+$/, 'Invalid event ID format');
+const replayClaimTokenSchema = z.string().uuid();
 const WEBHOOK_REPLAY_PROCESSING_STALE_MS = 5 * 60 * 1000;
 
 // V7 Audit §2.P2a: Prefer dedicated WEBHOOK_REPLAY_SECRET env var.
@@ -105,6 +106,7 @@ export async function POST(
     || !claim.event_data
     || typeof claim.event_data !== 'object'
     || Array.isArray(claim.event_data)
+    || !replayClaimTokenSchema.safeParse(claim.claim_token).success
   ) {
     return NextResponse.json(
       { success: false, error: 'Failed to claim webhook replay' },
@@ -112,6 +114,7 @@ export async function POST(
     );
   }
   const event = claim.event_data as Record<string, unknown>;
+  const claimToken = claim.claim_token as string;
   const eventGuildId = (event.guild_id ?? null) as string | null;
   const eventType = typeof event.event_type === 'string'
     ? event.event_type
@@ -139,6 +142,7 @@ export async function POST(
       // WEBHOOK_REPLAY_SECRET not configured — replay may fail signature verification
     }
     headers['PayPal-Transmission-Id'] = id;
+    headers['X-Replay-Claim-Token'] = claimToken;
     const payloadEventType = (
       event.payload &&
       typeof event.payload === 'object' &&
@@ -162,23 +166,27 @@ export async function POST(
     const success = replayRes.ok;
 
     if (!success) {
-      await supabase
-        .from('webhook_events')
-        .update({
-          result: 'error',
-          error_details: `Replay failed: HTTP ${replayRes.status}`,
-        })
-        .eq('event_id', id);
+      const { data: finished, error: finishError } = await supabase.rpc(
+        'webhooks_finish_replay_claim',
+        {
+          p_event_id: id,
+          p_claim_token: claimToken,
+          p_result: 'error',
+          p_error_details: `Replay failed: HTTP ${replayRes.status}`,
+        },
+      );
 
       // Finding 2: any row landing on result = 'error' raises an alert, so a
       // replay that silently fails is not another dead end.
-      await raiseWebhookProcessingErrorAlert(supabase, {
-        eventId: id,
-        eventType,
-        guildId: eventGuildId,
-        reason: `Replay failed: HTTP ${replayRes.status}`,
-        requiresManualReplay: true,
-      });
+      if (!finishError && finished === true) {
+        await raiseWebhookProcessingErrorAlert(supabase, {
+          eventId: id,
+          eventType,
+          guildId: eventGuildId,
+          reason: `Replay failed: HTTP ${replayRes.status}`,
+          requiresManualReplay: true,
+        });
+      }
     }
     // Note: the webhook handler itself updates result on success
 
@@ -232,21 +240,24 @@ export async function POST(
 
     return NextResponse.json({ success, replayed: true });
   } catch (err) {
-    await supabase
-      .from('webhook_events')
-      .update({
-        result: 'error',
-        error_details: `Replay exception: ${String(err)}`,
-      })
-      .eq('event_id', id);
-
-    await raiseWebhookProcessingErrorAlert(supabase, {
-      eventId: id,
-      eventType,
-      guildId: eventGuildId,
-      reason: `Replay exception: ${String(err)}`,
-      requiresManualReplay: true,
-    });
+    const { data: finished, error: finishError } = await supabase.rpc(
+      'webhooks_finish_replay_claim',
+      {
+        p_event_id: id,
+        p_claim_token: claimToken,
+        p_result: 'error',
+        p_error_details: `Replay exception: ${String(err)}`,
+      },
+    );
+    if (!finishError && finished === true) {
+      await raiseWebhookProcessingErrorAlert(supabase, {
+        eventId: id,
+        eventType,
+        guildId: eventGuildId,
+        reason: `Replay exception: ${String(err)}`,
+        requiresManualReplay: true,
+      });
+    }
 
     return NextResponse.json(
       { success: false, error: 'Replay failed' },

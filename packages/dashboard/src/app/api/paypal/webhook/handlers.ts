@@ -3730,6 +3730,33 @@ export function resolveDisputedTransactionIds(
   return [...ids];
 }
 
+/**
+ * Lossless identity set used at authorization/mutation boundaries. Unlike the
+ * display-oriented helper above, one malformed array entry invalidates the
+ * whole set so a full PayPal payload can never be scoped or partly applied
+ * from a silently filtered subset.
+ */
+export function resolveStrictDisputedTransactionIds(
+  resource: Record<string, unknown>,
+): { ids: string[]; valid: boolean } {
+  const transactions = resource.disputed_transactions;
+  if (!Array.isArray(transactions)) return { ids: [], valid: true };
+
+  const ids: string[] = [];
+  for (const txn of transactions) {
+    if (!txn || typeof txn !== 'object') return { ids: [], valid: false };
+    const sellerTxnId = (txn as { seller_transaction_id?: unknown }).seller_transaction_id;
+    if (
+      !isNonEmptyString(sellerTxnId)
+      || !isCanonicalPayPalResourceId(sellerTxnId)
+    ) {
+      return { ids: [], valid: false };
+    }
+    ids.push(sellerTxnId);
+  }
+  return { ids, valid: true };
+}
+
 /** The dispute's own identifier. PayPal uses `dispute_id`, not `id`. */
 export function resolveDisputeId(resource: Record<string, unknown>): string | null {
   const disputeId = resource.dispute_id ?? resource.id;
@@ -3771,7 +3798,11 @@ export async function handleDisputeEvent(
     throw new Error('Dispute event is missing a usable dispute id');
   }
 
-  const transactionIds = resolveDisputedTransactionIds(resource);
+  const transactionSet = resolveStrictDisputedTransactionIds(resource);
+  if (!transactionSet.valid) {
+    throw new Error('Dispute event contains a malformed transaction identity set');
+  }
+  const transactionIds = transactionSet.ids;
 
   const amount = resource.dispute_amount as
     { value?: unknown; currency_code?: unknown } | undefined;

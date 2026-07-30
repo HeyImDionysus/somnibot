@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const replaySecret = 'test-webhook-replay-secret';
+const replayClaimToken = '11111111-1111-4111-8111-111111111111';
 
 vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
 vi.mock('@/lib/api/admin-rate-limit', () => ({ checkAdminRateLimit: vi.fn() }));
@@ -58,6 +59,9 @@ function makeSupabase(
   const ltCalls: Array<{ table: string; column: string; value: unknown }> = [];
   const tableCallCounts = new Map<string, number>();
   const rpc = vi.fn(async (name: string) => {
+    if (name === 'webhooks_finish_replay_claim') {
+      return { data: true, error: null };
+    }
     if (name !== 'webhooks_claim_scoped_replay') {
       return { data: null, error: null };
     }
@@ -73,6 +77,7 @@ function makeSupabase(
       data: [{
         outcome: recentProcessing ? 'processing' : 'claimed',
         event_data: recentProcessing ? null : event,
+        claim_token: recentProcessing ? null : replayClaimToken,
       }],
       error: null,
     };
@@ -159,6 +164,7 @@ describe('POST /api/webhooks/[id]/replay', () => {
         headers: expect.objectContaining({
           'PayPal-Transmission-Id': 'EVT-STUCK',
           'X-Replay-Secret': replaySecret,
+          'X-Replay-Claim-Token': replayClaimToken,
           'X-Webhook-Retrying-Failed-Event': '1',
         }),
       }),

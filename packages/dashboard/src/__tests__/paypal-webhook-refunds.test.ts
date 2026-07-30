@@ -50,6 +50,8 @@ import { resolveRefundPaymentId } from '@/app/api/paypal/webhook/handlers';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { getPayPalTokenResult } from '@/lib/paypal';
 
+const REPLAY_CLAIM_TOKEN = '11111111-1111-4111-8111-111111111111';
+
 function withProviderTime(body: unknown): unknown {
   return body !== null && typeof body === 'object' && !Array.isArray(body)
     ? { create_time: '2026-07-29T00:00:00.000Z', ...body }
@@ -62,6 +64,7 @@ function makeReplay(body: unknown, headers: Record<string, string> = {}) {
     headers: {
       'Content-Type': 'application/json',
       'x-replay-secret': replaySecret,
+      'x-replay-claim-token': REPLAY_CLAIM_TOKEN,
       ...headers,
     },
     body: JSON.stringify(withProviderTime(body)),
@@ -207,7 +210,13 @@ describe('PayPal refund parent identity', () => {
 
 function makeMockSupabase() {
   const fromFn = vi.fn();
-  const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
+  const rpc = vi.fn(async (name: string) => ({
+    data: name === 'webhooks_replay_claim_is_current'
+      || name === 'webhooks_finish_replay_claim'
+      ? true
+      : null,
+    error: null,
+  }));
 
   function makeChain(resolvedValue?: { data: unknown; error: unknown }) {
     const defaultResolved = resolvedValue ?? { data: null, error: null };
@@ -324,6 +333,12 @@ function useWebhookRows(
     });
   };
   mockSb.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+    if (
+      name === 'webhooks_replay_claim_is_current'
+      || name === 'webhooks_finish_replay_claim'
+    ) {
+      return { data: true, error: null };
+    }
     rpcCalls.push({ name, args });
     if (name === 'commerce_record_subscription_lifecycle_observation') {
       return {

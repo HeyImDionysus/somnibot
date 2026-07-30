@@ -1148,6 +1148,7 @@ export interface DbWebhookEvent {
   replayed_at: string | null;
   replay_count: number;
   guild_id: string | null;
+  replay_claim_token: string | null;
 }
 
 export interface DbBotDiagnostics {

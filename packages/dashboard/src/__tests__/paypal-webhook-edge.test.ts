@@ -100,6 +100,7 @@ const EXACT_SUBSCRIPTION_CUSTOMER = {
   guild_id: 'guild-1',
   discord_id: 'discord-1',
 };
+const REPLAY_CLAIM_TOKEN = '11111111-1111-4111-8111-111111111111';
 
 function makeReplay(body: unknown, headers: Record<string, string> = {}) {
   const payload = body && typeof body === 'object' && !Array.isArray(body)
@@ -110,6 +111,7 @@ function makeReplay(body: unknown, headers: Record<string, string> = {}) {
     headers: {
       'Content-Type': 'application/json',
       'x-replay-secret': replaySecret,
+      'x-replay-claim-token': REPLAY_CLAIM_TOKEN,
       ...headers,
     },
     body: JSON.stringify(payload),
@@ -167,7 +169,10 @@ function providerIncidentResult(args: Record<string, unknown>) {
 function makeMockSupabase() {
   const fromFn = vi.fn();
   const rpc = vi.fn(async (name: string, args: Record<string, unknown>) =>
-    name === 'commerce_record_provider_incident'
+    name === 'webhooks_replay_claim_is_current'
+      || name === 'webhooks_finish_replay_claim'
+      ? { data: true, error: null }
+      : name === 'commerce_record_provider_incident'
       ? providerIncidentResult(args)
       : { data: null, error: null });
 
@@ -283,6 +288,12 @@ function useWebhookRows(
   const orderCalls: Array<{ table: string; column: string; options: unknown }> = [];
   const tableCallCounts = new Map<string, number>();
   mockSb.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+    if (
+      name === 'webhooks_replay_claim_is_current'
+      || name === 'webhooks_finish_replay_claim'
+    ) {
+      return { data: true, error: null };
+    }
     if (name === 'commerce_record_provider_incident') {
       return providerIncidentResult(args);
     }
@@ -550,6 +561,12 @@ function createCaptureRecoveryHarness(options: {
   state.orders = [state.order];
 
   const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    if (
+      name === 'webhooks_replay_claim_is_current'
+      || name === 'webhooks_finish_replay_claim'
+    ) {
+      return { data: true, error: null };
+    }
     if (name === 'commerce_record_provider_incident') {
       state.providerIncidents.push(structuredClone(args));
       return providerIncidentResult(args);
@@ -1592,7 +1609,7 @@ describe('PayPal webhook — edge cases', () => {
   ])('subscription expiry fails closed on an exact-order %s', async (_caseName, orderResult) => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      const { inserts, updates } = useWebhookRows({ orders: orderResult });
+      const { inserts, updates, rpc } = useWebhookRows({ orders: orderResult });
       const req = makeReplay({
         event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
         resource: { id: 'SUB-EXPIRED' },
@@ -1602,10 +1619,13 @@ describe('PayPal webhook — edge cases', () => {
       const res = await POST(req as never);
       expect(res.status).toBe(500);
       expect(inserts).toEqual([]);
-      expect(updates).toContainEqual({
-        table: 'webhook_events',
-        payload: expect.objectContaining({ result: 'error' }),
-      });
+      expect(rpc).toHaveBeenCalledWith(
+        'webhooks_finish_replay_claim',
+        expect.objectContaining({
+          p_result: 'error',
+          p_claim_token: REPLAY_CLAIM_TOKEN,
+        }),
+      );
       expect(updates.filter(({ table }) => table !== 'webhook_events')).toEqual([]);
     } finally {
       errorSpy.mockRestore();
