@@ -702,6 +702,113 @@ describe('AuditService', () => {
       await restarted.stop();
     });
 
+    it('writes a recoverable bounded gap instead of a self-generated oversized spool', async () => {
+      const stored = new Map<string, string>();
+      const recoveryStore = {
+        get: vi.fn(async (key: string) => stored.get(key) ?? null),
+        set: vi.fn(async (key: string, value: string) => {
+          stored.set(key, value);
+          return 'OK';
+        }),
+        del: vi.fn(async (key: string) => stored.delete(key) ? 1 : 0),
+      };
+      const failedSupabase = makeSupabase();
+      failedSupabase._upsertMock.mockResolvedValue({
+        error: { message: 'audit store remains unavailable' },
+      });
+      const first = new AuditService(
+        'g1',
+        failedSupabase as any,
+        makeEventBus() as any,
+        recoveryStore,
+      );
+      await first.log({
+        action: 'oversized.details',
+        actorType: 'bot',
+        actorId: 'bot1',
+        details: { blob: 'x'.repeat(9 * 1024 * 1024) },
+      });
+      await first.stop();
+
+      const raw = stored.values().next().value as string;
+      expect(Buffer.byteLength(raw, 'utf8')).toBeLessThanOrEqual(8 * 1024 * 1024);
+      const envelope = JSON.parse(raw);
+      const capacityRow = envelope.rows.find(
+        (row: Record<string, unknown>) => row.action === 'audit.capacity_exhausted',
+      );
+      expect(capacityRow).toMatchObject({
+        action: 'audit.capacity_exhausted',
+        details: expect.objectContaining({
+          count: 1,
+          invalidRows: 1,
+          source: 'restart residue handoff',
+        }),
+      });
+
+      const recoveredSupabase = makeSupabase();
+      const restarted = new AuditService(
+        'g1',
+        recoveredSupabase as any,
+        makeEventBus() as any,
+        recoveryStore,
+      );
+      restarted.start();
+      await (restarted as unknown as { flush: () => Promise<void> }).flush();
+      expect(recoveredSupabase._upsertMock.mock.calls[0]?.[0]).toEqual(envelope.rows);
+      expect(recoveryStore.del).toHaveBeenCalledOnce();
+      await restarted.stop();
+    });
+
+    it('keeps the persisted payload authoritative when a same-key log races restore', async () => {
+      const load = deferred<string | null>();
+      const persistedRow = {
+        guild_id: 'g1',
+        actor_type: 'bot',
+        actor_id: 'original-bot',
+        action: 'same.key',
+        category: 'system',
+        target_type: null,
+        target_id: null,
+        details: { authority: 'persisted' },
+        before_state: null,
+        after_state: null,
+        correlation_id: null,
+        occurrence_key: 'same.key:occurrence-1',
+        success: true,
+        error_message: null,
+      };
+      const recoveryStore = {
+        get: vi.fn(() => load.promise),
+        set: vi.fn(async () => 'OK'),
+        del: vi.fn(async () => 1),
+      };
+      const raced = new AuditService(
+        'g1',
+        supabase as any,
+        makeEventBus() as any,
+        recoveryStore,
+      );
+      raced.start();
+      await raced.log({
+        action: 'same.key',
+        actorType: 'bot',
+        actorId: 'racing-bot',
+        details: { authority: 'racing-redelivery' },
+        occurrenceKey: 'same.key:occurrence-1',
+      });
+      load.resolve(JSON.stringify({
+        version: 1,
+        guildId: 'g1',
+        rows: [persistedRow],
+      }));
+      await (raced as unknown as { flush: () => Promise<void> }).flush();
+
+      const written = supabase._upsertMock.mock.calls[0]?.[0] as
+        Array<Record<string, unknown>>;
+      expect(written).toEqual([persistedRow]);
+      await raced.stop();
+    });
+
     it('rejects instead of falsely completing when persistent write failure leaves residue', async () => {
       supabase._upsertMock.mockResolvedValue({
         error: { message: 'audit store remains unavailable' },

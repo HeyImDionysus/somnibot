@@ -1333,6 +1333,7 @@ export class AuditService {
   private static readonly MAPPING_WAIT_TIMEOUT_MS = 10_000;
   private static readonly MAX_RECOVERY_ROWS = AuditService.MAX_BUFFERED_ENTRIES + 1_024;
   private static readonly MAX_RECOVERY_BYTES = 8 * 1024 * 1024;
+  private static readonly MAX_PENDING_FLUSH_RECOVERIES = 1_024;
   private guildId: string;
   private supabase: SupabaseClient;
   private eventBus: PlatformEventBus;
@@ -1525,7 +1526,14 @@ export class AuditService {
       for (const row of validatedRows) {
         const key = row.occurrence_key as string;
         if (this.persistedResidueKeys.has(key)) continue;
-        this.queue.push(row);
+        const racedIndex = this.queue.findIndex((queued) => queued.occurrence_key === key);
+        if (racedIndex >= 0) {
+          // The already-persisted immutable payload is authoritative over an
+          // event/manual redelivery that raced the async restore.
+          this.queue[racedIndex] = row;
+        } else {
+          this.queue.push(row);
+        }
         this.persistedResidueKeys.add(key);
       }
     } catch (err) {
@@ -1606,6 +1614,13 @@ export class AuditService {
     entry: Record<string, unknown>,
     capacityContext: { source: string; eventType?: string; action?: string },
   ): void {
+    const key = entry.occurrence_key;
+    if (
+      typeof key === 'string'
+      && this.queue.some((queued) => queued.occurrence_key === key)
+    ) {
+      return;
+    }
     if (this.queue.length >= AuditService.MAX_BUFFERED_ENTRIES) {
       this.recordCapacityDrop(capacityContext);
       return;
@@ -1865,7 +1880,7 @@ export class AuditService {
 
     if (this.flushOutage) {
       const outage = this.flushOutage;
-      this.pendingFlushRecoveries.push(Object.freeze({
+      this.enqueueFlushRecovery(Object.freeze({
         guild_id: this.guildId,
         actor_type: 'system',
         actor_id: 'audit-service',
@@ -1898,11 +1913,8 @@ export class AuditService {
       await this.maybeDeletePersistedResidue();
       return 0;
     }
-    await this.recoveryStore.set(this.recoveryStoreKey, JSON.stringify({
-      version: AUDIT_RESIDUE_VERSION,
-      guildId: this.guildId,
-      rows,
-    }));
+    const envelope = this.buildRecoveryEnvelope(rows);
+    await this.recoveryStore.set(this.recoveryStoreKey, JSON.stringify(envelope));
 
     this.queue = [];
     this.activeGapWindows.clear();
@@ -1910,7 +1922,108 @@ export class AuditService {
     this.pendingFlushRecoveries = [];
     this.persistedResidueKeys.clear();
     this.persistedResidueCleanupPending = false;
-    return rows.length;
+    return envelope.rows.length;
+  }
+
+  private buildRecoveryEnvelope(rows: ReadonlyArray<Record<string, unknown>>): {
+    version: number;
+    guildId: string;
+    rows: ReadonlyArray<Readonly<Record<string, unknown>>>;
+  } {
+    const selected: Array<Readonly<Record<string, unknown>>> = [];
+    const seenKeys = new Set<string>();
+    let selectedBytes = 0;
+    let dropped = 0;
+    let invalid = 0;
+    let duplicate = 0;
+    // Reserve enough room for the envelope and one bounded capacity-gap row.
+    const rowByteBudget = AuditService.MAX_RECOVERY_BYTES - 32_768;
+    const rowLimit = AuditService.MAX_RECOVERY_ROWS - 1;
+
+    for (const candidate of rows) {
+      let row: Record<string, unknown>;
+      try {
+        row = this.validateRecoveryRow(candidate);
+      } catch {
+        dropped++;
+        invalid++;
+        continue;
+      }
+      const key = row.occurrence_key as string;
+      if (seenKeys.has(key)) {
+        dropped++;
+        duplicate++;
+        continue;
+      }
+      const rowBytes = Buffer.byteLength(JSON.stringify(row), 'utf8') + 1;
+      if (
+        selected.length >= rowLimit
+        || rowBytes > rowByteBudget
+        || selectedBytes + rowBytes > rowByteBudget
+      ) {
+        dropped++;
+        continue;
+      }
+      seenKeys.add(key);
+      selected.push(Object.freeze({ ...row }));
+      selectedBytes += rowBytes;
+    }
+
+    if (dropped > 0) {
+      selected.push(Object.freeze({
+        guild_id: this.guildId,
+        actor_type: 'system',
+        actor_id: 'audit-service',
+        action: 'audit.capacity_exhausted',
+        category: 'system',
+        target_type: 'audit_restart_handoff',
+        target_id: this.guildId,
+        details: Object.freeze({
+          count: dropped,
+          source: 'restart residue handoff',
+          invalidRows: invalid,
+          duplicateRows: duplicate,
+          retainedRows: selected.length,
+          rowLimit: AuditService.MAX_RECOVERY_ROWS,
+          byteLimit: AuditService.MAX_RECOVERY_BYTES,
+          persistedAt: new Date().toISOString(),
+        }),
+        before_state: null,
+        after_state: null,
+        correlation_id: null,
+        occurrence_key: `audit.capacity_exhausted:${randomUUID()}`,
+        success: false,
+        error_message: 'Audit rows exceeded the bounded restart handoff contract',
+      }));
+    }
+
+    const envelope = {
+      version: AUDIT_RESIDUE_VERSION,
+      guildId: this.guildId,
+      rows: selected,
+    };
+    const serializedBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+    if (
+      selected.length > AuditService.MAX_RECOVERY_ROWS
+      || serializedBytes > AuditService.MAX_RECOVERY_BYTES
+    ) {
+      throw new Error('bounded audit restart envelope construction failed');
+    }
+    return envelope;
+  }
+
+  private enqueueFlushRecovery(row: Readonly<Record<string, unknown>>): void {
+    if (
+      this.pendingFlushRecoveries.length
+      >= AuditService.MAX_PENDING_FLUSH_RECOVERIES
+    ) {
+      this.recordCapacityDrop({
+        source: 'pending audit flush recovery markers',
+        action: String(row.action ?? 'audit.flush_failed'),
+      });
+      return;
+    }
+    this.pendingFlushRecoveries.push(row);
   }
 
   /**
@@ -2116,7 +2229,7 @@ export class AuditService {
           | string
           | undefined)
         ?? this.guildId;
-      this.pendingFlushRecoveries.push(Object.freeze({
+      this.enqueueFlushRecovery(Object.freeze({
         guild_id: guildId,
         actor_type: 'system',
         actor_id: 'audit-service',
