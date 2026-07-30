@@ -47,6 +47,16 @@ interface GiveawayConfig {
   winnerAnnouncementStyle: 'embed' | 'plain';
 }
 
+export function buildGiveawayEntryLabel(
+  configuredLabel: string,
+  entryCount: number,
+  paused: boolean,
+): string {
+  const suffix = ` (${entryCount})`;
+  const base = paused ? 'Paused' : configuredLabel;
+  return `${base.slice(0, Math.max(0, 80 - suffix.length))}${suffix}`;
+}
+
 const DEFAULT_GIVEAWAY_CONFIG: GiveawayConfig = {
   defaultWinnerCount: 1,
   dmWinners: true,
@@ -753,7 +763,7 @@ export class GiveawayManager {
     return new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(`giveaway_enter:${giveaway.id}`)
-        .setLabel(isPaused ? `Paused (${giveaway.entries.length})` : `${enterLabel} (${giveaway.entries.length})`)
+        .setLabel(buildGiveawayEntryLabel(enterLabel, giveaway.entries.length, isPaused))
         .setEmoji(isPaused ? '⏸️' : '🎉')
         .setStyle(isPaused ? ButtonStyle.Secondary : ButtonStyle.Success)
         .setDisabled(isPaused),

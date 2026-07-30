@@ -215,15 +215,36 @@ export function startSyncScheduler(
   supabase: SupabaseClient,
   eventBus: PlatformEventBus,
   initialConfig: SyncConfig,
-): { stop: () => void } {
+): {
+  stop: () => Promise<void>;
+  reconfigure: (intervalMinutes?: number, runImmediately?: boolean) => void;
+} {
   let timer: ReturnType<typeof setInterval> | null = null;
+  let initialTimer: ReturnType<typeof setTimeout> | null = null;
   let running = false;
+  let stopped = false;
+  let activeRun: Promise<void> | null = null;
+  let currentIntervalMinutes = initialConfig.intervalMinutes;
 
-  const run = async () => {
-    if (running) return;
+  const arm = (intervalMinutes: number) => {
+    if (stopped || !Number.isFinite(intervalMinutes) || intervalMinutes <= 0) return;
+    if (timer) clearInterval(timer);
+    currentIntervalMinutes = intervalMinutes;
+    timer = setInterval(run, intervalMinutes * 60 * 1000);
+  };
+
+  const reconfigure = (intervalMinutes?: number, runImmediately = false) => {
+    if (stopped) return;
+    if (intervalMinutes !== undefined) arm(intervalMinutes);
+    if (runImmediately) void run();
+  };
+
+  const run = (): Promise<void> => {
+    if (stopped || running) return Promise.resolve();
     running = true;
 
-    try {
+    const cycle = (async () => {
+      try {
       // Reload config from DB each cycle
       const { data: guildConfig } = await supabase
         .from('guild_config')
@@ -231,12 +252,18 @@ export function startSyncScheduler(
         .eq('guild_id', guild.id)
         .single();
 
+      if (stopped) return;
+
       const config: SyncConfig = {
         enabled: guildConfig?.sync_enabled ?? initialConfig.enabled,
         intervalMinutes: guildConfig?.sync_interval_minutes ?? initialConfig.intervalMinutes,
         autoRepair: guildConfig?.sync_auto_repair ?? initialConfig.autoRepair,
         autoRepairEveryone: guildConfig?.sync_auto_repair_everyone ?? initialConfig.autoRepairEveryone,
       };
+
+      if (config.intervalMinutes !== currentIntervalMinutes) {
+        arm(config.intervalMinutes);
+      }
 
       if (!config.enabled) {
         running = false;
@@ -250,7 +277,8 @@ export function startSyncScheduler(
           `[Sync] Drift detected: ${result.driftItems.length} items (${result.repaired} auto-repaired)`,
         );
       }
-    } catch (err) {
+      } catch (err) {
+      if (stopped) return;
       log.error('Cycle error:', { error: String(err) });
       // A failed reconcile cycle must leave a durable audit_logs row, not just a
       // transient log line — mirror it via the sync.failed audit mapping.
@@ -258,20 +286,31 @@ export function startSyncScheduler(
         error: err instanceof Error ? err.message : String(err),
         stage: 'cycle',
       });
-    } finally {
+      } finally {
       running = false;
-    }
+      }
+    })();
+    activeRun = cycle;
+    void cycle.then(
+      () => { if (activeRun === cycle) activeRun = null; },
+      () => { if (activeRun === cycle) activeRun = null; },
+    );
+    return cycle;
   };
 
   // Initial run after 30 seconds
-  setTimeout(run, 30_000);
+  initialTimer = setTimeout(run, 30_000);
 
   // Schedule periodic runs
-  timer = setInterval(run, initialConfig.intervalMinutes * 60 * 1000);
+  arm(initialConfig.intervalMinutes);
 
   return {
-    stop: () => {
+    reconfigure,
+    stop: async () => {
+      stopped = true;
+      if (initialTimer) clearTimeout(initialTimer);
       if (timer) clearInterval(timer);
+      await activeRun;
     },
   };
 }

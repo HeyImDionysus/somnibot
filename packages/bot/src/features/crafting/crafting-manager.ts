@@ -246,9 +246,11 @@ export class CraftingManager {
 
     // V49-M1: Atomic cooldown via SET PX NX — prevents two concurrent
     // craft calls from both bypassing the cooldown check.
-    const cooldownMs = (recipe.cooldown_seconds || config.economy_crafting_cooldown_seconds) * 1000;
+    const cooldownMs = (recipe.cooldown_seconds ?? config.economy_crafting_cooldown_seconds) * 1000;
     const cdKey = `economy:craft:${this.guild.id}:${userId}`;
-    const lockResult = await this.valkey.set(cdKey, '1', 'PX', cooldownMs, 'NX');
+    const lockResult = cooldownMs > 0
+      ? await this.valkey.set(cdKey, '1', 'PX', cooldownMs, 'NX')
+      : 'OK';
     if (lockResult !== 'OK') {
       const ttl = await this.valkey.pttl(cdKey);
       const remaining = Math.ceil(Math.max(ttl, 0) / 1000);

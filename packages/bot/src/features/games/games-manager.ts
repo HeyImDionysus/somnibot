@@ -442,7 +442,7 @@ export class GamesManager {
       return null;
     }
     const maxBet = (config[maxBetKey] as number) ?? 10000;
-    if (amount > maxBet) {
+    if (maxBet > 0 && amount > maxBet) {
       await unlock();
       await interaction.reply({ content: `❌ Max bet is ${config.currency_emoji} **${maxBet.toLocaleString()}** ${config.currency_name}.`, ephemeral: true });
       return null;

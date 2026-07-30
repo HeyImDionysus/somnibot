@@ -6,8 +6,9 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
-import { apiServerError } from '@/lib/api/response';
+import { apiServerError, dbError } from '@/lib/api/response';
 import { recordAdminChange, humanizeColumn } from '@/lib/admin-changes';
+import { isSoleInstanceOperator } from '@/app/api/webhooks/scope';
 
 const settingsUpdate = z.object({
   section: z.string().min(1).max(64),
@@ -83,6 +84,13 @@ export async function GET() {
   try {
     const auth = await requireGuildOwner();
     if (!auth.ok) return auth.response;
+    const admin = createAdminSupabase();
+    if (!(await isSoleInstanceOperator(admin, auth.ctx.discordId))) {
+      return NextResponse.json(
+        { error: 'Forbidden — installation operator access required' },
+        { status: 403 },
+      );
+    }
 
     // Step 1: Read env vars as base values
     const values: Record<string, string> = {};
@@ -97,7 +105,6 @@ export async function GET() {
     }
 
     // Step 2: Read DB overrides (instance_settings)
-    const admin = createAdminSupabase();
     const { data: settings } = await admin
       .from('instance_settings')
       .select('key, value, section')
@@ -183,12 +190,17 @@ export async function PUT(request: NextRequest) {
   try {
     const auth = await requireGuildOwner();
     if (!auth.ok) return auth.response;
+    const admin = createAdminSupabase();
+    if (!(await isSoleInstanceOperator(admin, auth.ctx.discordId))) {
+      return NextResponse.json(
+        { error: 'Forbidden — installation operator access required' },
+        { status: 403 },
+      );
+    }
 
     const parsed = await parseBody(request, settingsUpdate);
     if (!parsed.ok) return parsed.response;
     const { section, values } = parsed.data;
-
-    const admin = createAdminSupabase();
 
     // V10 Audit §6: Batch all upserts into a single operation to avoid
     // sequential timing that leaks info about which keys were skipped.
@@ -197,20 +209,21 @@ export async function PUT(request: NextRequest) {
       .filter(([, value]) => !value.includes('••••') && value.trim() !== '')
       .map(([key, value]) => ({ key, value, section, updated_at: now }));
 
-    // NOTE: the upsert's error is still swallowed (pre-existing — this route
-    // reports ok as long as the call does not throw). It is captured here only
-    // so a change that did not land is never recorded as if it had.
-    let upsertError: unknown = null;
-    if (upsertRows.length > 0) {
-      const { error } = await admin
-        .from('instance_settings')
-        .upsert(upsertRows, { onConflict: 'key' });
-      upsertError = error ?? null;
+    if (upsertRows.length === 0) {
+      return NextResponse.json(
+        { error: 'No writable settings were supplied' },
+        { status: 400 },
+      );
     }
+
+    const { error: upsertError } = await admin
+      .from('instance_settings')
+      .upsert(upsertRows, { onConflict: 'key' });
+    if (upsertError) return dbError(upsertError, 'settings');
 
     await notifyBot('settings', { section });
 
-    if (upsertRows.length > 0 && !upsertError) {
+    {
       const changedKeys = upsertRows.map((r) => r.key);
       await recordAdminChange({
         // `instance_settings` is keyed by `key` alone — it has NO guild column

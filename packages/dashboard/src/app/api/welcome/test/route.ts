@@ -16,6 +16,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 import { recordAdminChange } from '@/lib/admin-changes';
 
 const welcomeTestSchema = z.object({
@@ -53,10 +54,7 @@ export async function POST(req: NextRequest) {
     });
 
   if (queueError) {
-    return NextResponse.json(
-      { success: false, error: queueError.message },
-      { status: 500 },
-    );
+    return dbError(queueError, 'welcome/test');
   }
 
   await recordAdminChange({

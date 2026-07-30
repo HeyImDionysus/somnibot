@@ -270,7 +270,7 @@ jobs:
       - name: Build shared
         run: pnpm --filter @somnibot/shared build
       - name: Run shared tests
-        run: pnpm --filter @somnibot/shared test -- --reporter=verbose
+        run: pnpm --filter @somnibot/shared test --reporter=verbose
 
   # ──────────────────────────────────────────────────────────────────────────
   # 6c. Launcher Tests (V5 Audit §13.7)
@@ -294,7 +294,7 @@ jobs:
             packages/*/node_modules
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Run launcher tests
-        run: pnpm --filter @somnibot/launcher test -- --reporter=verbose
+        run: pnpm --filter @somnibot/launcher test --reporter=verbose
 
   # ──────────────────────────────────────────────────────────────────────────
   # 6d. E2E Contract Tests
@@ -323,7 +323,7 @@ jobs:
       - name: Type-check e2e contract package
         run: pnpm --filter @somnibot/e2e type-check
       - name: Run e2e contract tests
-        run: pnpm --filter @somnibot/e2e test -- --reporter=verbose
+        run: pnpm --filter @somnibot/e2e test --reporter=verbose
 
   # ──────────────────────────────────────────────────────────────────────────
   # 6e. E2E Testkit (loopback harness) — guard + isolation
@@ -364,7 +364,7 @@ jobs:
           pnpm --filter @somnibot/testkit type-check
           pnpm --filter @somnibot/testkit run type-check:test
       - name: Run testkit tests
-        run: pnpm --filter @somnibot/testkit test -- --reporter=verbose
+        run: pnpm --filter @somnibot/testkit test --reporter=verbose
 
   # ──────────────────────────────────────────────────────────────────────────
   # 7. Integration Tests — real Supabase (full migration stack)
@@ -432,7 +432,7 @@ jobs:
       - name: Build shared
         run: pnpm --filter @somnibot/shared build
       - name: Run integration tests
-        run: pnpm --filter @somnibot/bot test:integration -- --reporter=verbose
+        run: pnpm --filter @somnibot/bot test:integration --reporter=verbose
         env:
           SUPABASE_URL: http://127.0.0.1:54321
           SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
@@ -454,6 +454,7 @@ jobs:
   test-live:
     name: 🛰️ Live-Stack E2E (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: install
     # Sharded 4-ways with vitest's native --shard: this was the pipeline's long
     # pole — one runner grinding the whole live suite serially for ~25-35
@@ -542,7 +543,12 @@ jobs:
           pnpm --filter @somnibot/bot build
           pnpm --filter @somnibot/testkit build
       - name: Run live-stack E2E (real initGuildFeatures)
-        run: pnpm --filter @somnibot/testkit test:live -- --reporter=verbose --shard=${{ matrix.shard }}/4
+        # A1-A4 gate: every ordinary live file runs exactly once across the
+        # four shards. The 46-domain A5 fleet has its own post-merge step below.
+        run: >-
+          pnpm --filter @somnibot/testkit test:live --reporter=verbose
+          --exclude=src/__tests__/live/all-domains-scenario.live.test.ts
+          --shard=${{ matrix.shard }}/4
         env:
           # Guard env for the loopback lane. live-setup.ts also force-pins the
           # safety-critical vars, but setting them here documents the contract
@@ -557,12 +563,28 @@ jobs:
           SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: e2e-live-disposable-guild
           SOMNIBOT_LOOPBACK_E2E_CONFIRMATION: I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE
           PAYPAL_ENV: sandbox
+      - name: Run A5 46-domain fleet (post-merge, once)
+        if: github.event_name == 'push' && matrix.shard == 1
+        run: >-
+          pnpm --filter @somnibot/testkit test:live --reporter=verbose
+          src/__tests__/live/all-domains-scenario.live.test.ts
+        env:
+          NODE_ENV: test
+          SUPABASE_URL: http://127.0.0.1:54321
+          SUPABASE_SECRET_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
+          VALKEY_URL: redis://localhost:6379
+          DISCORD_GUILD_ID: e2e-live-disposable-guild
+          SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: e2e-live-disposable-guild
+          SOMNIBOT_LOOPBACK_E2E_CONFIRMATION: I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE
+          PAYPAL_ENV: sandbox
       # Dashboard route-driving lane: drives the REAL Next.js route handlers
       # in-process against the SAME local Supabase, with a REAL owner auth
       # session (zero production auth edits — only next/headers is mocked). See
       # packages/dashboard/src/__tests__/live/_session-harness.ts.
       - name: Run dashboard live-stack E2E (real route handlers + real session)
-        run: pnpm --filter @somnibot/dashboard test:live -- --reporter=verbose
+        run: >-
+          pnpm --filter @somnibot/dashboard test:live --reporter=verbose
+          --shard=${{ matrix.shard }}/4
         env:
           NODE_ENV: test
           SUPABASE_URL: http://127.0.0.1:54321

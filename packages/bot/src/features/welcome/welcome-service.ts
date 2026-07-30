@@ -143,8 +143,17 @@ async function sendWelcomeDM(
     await member.send(messageText);
     log.info(`DM sent to ${member.user.tag}`);
   } catch (err) {
-    // DMs can fail if user has them disabled — not an error
-    log.warn(`Could not DM ${member.user.tag} (DMs may be disabled)`);
+    const code = typeof err === 'object' && err !== null && 'code' in err
+      ? Number((err as { code?: unknown }).code)
+      : undefined;
+    if (code === 50007) {
+      log.warn(`Could not DM ${member.user.tag} because Discord rejected the DM`);
+    } else {
+      log.error(`Failed to send welcome DM to ${member.user.tag}:`, {
+        code,
+        error: String(err),
+      });
+    }
   }
 }
 

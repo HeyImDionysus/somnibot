@@ -401,8 +401,10 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: wallet, message: "You don't have that much in your wallet." };
     }
 
-    const maxDeposit = wallet.bank_max - wallet.bank;
-    if (maxDeposit <= 0) {
+    const maxDeposit = cfg.economy_max_bank > 0
+      ? cfg.economy_max_bank - wallet.bank
+      : wallet.wallet;
+    if (cfg.economy_max_bank > 0 && maxDeposit <= 0) {
       return { success: false, amount: 0, balance: wallet, message: 'Your bank is full!' };
     }
 
@@ -540,7 +542,12 @@ export class EconomyManager {
     const totalAmount = baseAmount + streakBonus;
 
     // Credit wallet — V50-L2: handle null (RPC failure)
-    const updated = await this.creditWallet(userId, totalAmount);
+    // A configured zero reward is a valid no-op, not an RPC outage. The
+    // positive-only balance RPC deliberately rejects zero, so retain the
+    // cooldown/streak claim while reading the unchanged wallet locally.
+    const updated = totalAmount === 0
+      ? await this.getOrCreateWallet(userId)
+      : await this.creditWallet(userId, totalAmount);
     if (!updated) {
       // [game-economy-wallet-rewards DEPFAIL] Outage lane: the reward credit
       // failed (database unreachable / RPC error). RELEASE the just-claimed

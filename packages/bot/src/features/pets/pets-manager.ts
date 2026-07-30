@@ -241,6 +241,51 @@ export class PetsManager {
     }
   }
 
+  /**
+   * Compensate a debit after the pet mutation fails. Supabase reports many RPC
+   * failures as a resolved `{ error }`, so checking only thrown rejections can
+   * falsely tell a member their coins were returned. Refund failures are made
+   * operator-visible and the caller receives an honest, actionable message.
+   */
+  private async refundCoins(
+    guildId: string,
+    userId: string,
+    amount: number,
+    operation: 'buy' | 'feed' | 'train',
+    requestId: string,
+  ): Promise<boolean> {
+    if (amount <= 0) return true;
+
+    try {
+      const { error } = await this.supabase.rpc('economy_refund_balance', {
+        p_guild_id: guildId,
+        p_user_id: userId,
+        p_amount: amount,
+        p_idempotency_key: `pet:${operation}:refund:${requestId}`,
+      });
+      if (!error) return true;
+      log.error(`Pet ${operation} refund failed`, { guildId, userId, amount, error: error.message });
+    } catch (error) {
+      log.error(`Pet ${operation} refund threw`, {
+        guildId,
+        userId,
+        amount,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    await raiseOwnerAlert(this.supabase, guildId, {
+      alertType: 'pet_economy_refund_failed',
+      severity: 'critical',
+      title: 'Pet economy refund needs attention',
+      message:
+        `A ${operation} refund of ${amount} coins could not be confirmed for member ${userId}.`,
+      metadata: { user_id: userId, amount, operation },
+      client: this.client,
+    });
+    return false;
+  }
+
   private async ensureEnabled(interaction: ChatInputCommandInteraction): Promise<boolean> {
     const { config, degraded } = await this.getConfigChecked(interaction.guildId!);
     // A failed config read is an outage, not "pets are off" — degrade honestly.
@@ -356,10 +401,13 @@ export class PetsManager {
 
     if (insertErr) {
       log.error('buyPet insert failed — refunding:', insertErr.message);
-      await Promise.resolve(this.supabase.rpc('economy_add_balance', {
-        p_guild_id: guildId, p_user_id: userId, p_amount: price,
-      })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
-      await interaction.reply({ content: '❌ Failed to create pet — your coins have been refunded.', ephemeral: true });
+      const refunded = await this.refundCoins(guildId, userId, price, 'buy', interaction.id);
+      await interaction.reply({
+        content: refunded
+          ? '❌ Failed to create pet — your coins have been refunded.'
+          : '❌ Failed to create pet, and the refund could not be confirmed. Please contact an administrator.',
+        ephemeral: true,
+      });
       return;
     }
 
@@ -395,9 +443,11 @@ export class PetsManager {
     if (pet.hunger >= 100) { await interaction.reply({ content: '🍖 Your pet is already full!', ephemeral: true }); return; }
 
     // Check balance before deducting
-    const { data: feedWallet, error: feedWalletErr } = await this.supabase
-      .from('economy_wallets').select('wallet')
-      .eq('guild_id', guildId).eq('user_id', interaction.user.id).single();
+    const { data: feedWallet, error: feedWalletErr } = cost > 0
+      ? await this.supabase
+          .from('economy_wallets').select('wallet')
+          .eq('guild_id', guildId).eq('user_id', interaction.user.id).single()
+      : { data: { wallet: 0 }, error: null };
 
     // A FAILED wallet read is not an empty wallet — never fabricate "you need
     // N coins" from a read the bot could not perform.
@@ -411,9 +461,11 @@ export class PetsManager {
       return;
     }
 
-    const { error: feedDebitErr } = await this.supabase.rpc('economy_subtract_balance', {
-      p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-    });
+    const { error: feedDebitErr } = cost > 0
+      ? await this.supabase.rpc('economy_subtract_balance', {
+          p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
+        })
+      : { error: null };
     if (feedDebitErr) {
       // Insufficient balance is the only honest "you need N coins" case; any
       // other failure debited nothing and degrades honestly.
@@ -426,12 +478,27 @@ export class PetsManager {
     }
 
     // Atomic feed — prevents TOCTOU race with decay timer
-    const { data: feedResult } = await this.supabase.rpc('economy_pet_feed', {
+    const { data: feedResult, error: feedError } = await this.supabase.rpc('economy_pet_feed', {
       p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: 30,
     });
     const fr = feedResult as { success: boolean; old_hunger: number; new_hunger: number; status: string } | null;
-    if (!fr?.success) {
-      await interaction.reply({ content: '❌ Could not feed your pet — try again.', ephemeral: true });
+    if (feedError || !fr?.success) {
+      const refunded = await this.refundCoins(
+        guildId,
+        interaction.user.id,
+        cost,
+        'feed',
+        interaction.id,
+      );
+      const outcome = cost === 0
+        ? ' Nothing was charged.'
+        : refunded
+          ? ' Your coins have been refunded.'
+          : ' The refund could not be confirmed. Please contact an administrator.';
+      await interaction.reply({
+        content: `❌ Could not feed your pet — try again.${outcome}`,
+        ephemeral: true,
+      });
       return;
     }
 
@@ -502,9 +569,11 @@ export class PetsManager {
     if (pet.level >= MAX_LEVEL) { await interaction.reply({ content: '🎓 Your pet is at max level! Try `/pet prestige`.', ephemeral: true }); return; }
 
     // Check balance before deducting
-    const { data: trainWallet, error: trainWalletErr } = await this.supabase
-      .from('economy_wallets').select('wallet')
-      .eq('guild_id', guildId).eq('user_id', interaction.user.id).single();
+    const { data: trainWallet, error: trainWalletErr } = cost > 0
+      ? await this.supabase
+          .from('economy_wallets').select('wallet')
+          .eq('guild_id', guildId).eq('user_id', interaction.user.id).single()
+      : { data: { wallet: 0 }, error: null };
 
     // A FAILED wallet read is not an empty wallet — never fabricate a balance verdict.
     if (trainWalletErr && trainWalletErr.code !== 'PGRST116') {
@@ -517,9 +586,11 @@ export class PetsManager {
       return;
     }
 
-    const { error: trainDebitErr } = await this.supabase.rpc('economy_subtract_balance', {
-      p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-    });
+    const { error: trainDebitErr } = cost > 0
+      ? await this.supabase.rpc('economy_subtract_balance', {
+          p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
+        })
+      : { error: null };
     if (trainDebitErr) {
       if (/insufficient/i.test(trainDebitErr.message ?? '')) {
         await interaction.reply({ content: `❌ Payment failed — you need **${cost.toLocaleString()}** coins.`, ephemeral: true });
@@ -538,11 +609,22 @@ export class PetsManager {
     });
     const tr = trainResult as { success: boolean; new_xp: number; new_level: number; leveled_up: boolean; new_energy: number; stat_bonus: string | null } | null;
     if (!tr?.success) {
-      // Refund since training failed
-      await Promise.resolve(this.supabase.rpc('economy_add_balance', {
-        p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-      })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
-      await interaction.reply({ content: '❌ Training failed — your coins have been refunded.', ephemeral: true });
+      const refunded = await this.refundCoins(
+        guildId,
+        interaction.user.id,
+        cost,
+        'train',
+        interaction.id,
+      );
+      const outcome = cost === 0
+        ? ' Nothing was charged.'
+        : refunded
+          ? ' Your coins have been refunded.'
+          : ' The refund could not be confirmed. Please contact an administrator.';
+      await interaction.reply({
+        content: `❌ Training failed.${outcome}`,
+        ephemeral: true,
+      });
       return;
     }
 

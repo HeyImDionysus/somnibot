@@ -35,6 +35,7 @@ const INITIATOR = 'heist-user-init';
 const JOINER_A = 'heist-user-aaa';
 const JOINER_B = 'heist-user-bbb';
 const BANNED = 'heist-user-banned';
+const FREE_JOINER = 'heist-user-free';
 
 const ENTRY_FEE = 100;
 const BASE_CHANCE = 40;
@@ -187,6 +188,49 @@ describe('finding 2 — heist_start inserts the initiator row atomically', () =>
         .eq('heist_id', heistId)
         .eq('user_id', JOINER_A);
       expect(loserRows).toBe(0);
+    } finally {
+      await cleanupHeists();
+    }
+  });
+});
+
+describe('configured zero entry fee', () => {
+  it('admits a wallet-less member without calling the positive-only debit path', async () => {
+    const heistId = await startHeist();
+    try {
+      await supa.from('economy_wallets')
+        .delete()
+        .eq('guild_id', GUILD_ID)
+        .eq('user_id', FREE_JOINER);
+
+      const { data, error } = await supa.rpc('heist_join', {
+        p_heist_id: heistId,
+        p_user_id: FREE_JOINER,
+        p_role: 'Lookout',
+        p_entry_fee: 0,
+        p_max: MAX,
+        p_base_chance: BASE_CHANCE,
+      });
+
+      expect(error).toBeNull();
+      const row = Array.isArray(data) ? data[0] : data;
+      expect(row?.status).toBe('joined');
+
+      const { data: participant } = await supa
+        .from('economy_heist_participants')
+        .select('entry_fee_paid')
+        .eq('heist_id', heistId)
+        .eq('user_id', FREE_JOINER)
+        .single();
+      expect(participant?.entry_fee_paid).toBe(0);
+
+      const { data: wallet } = await supa
+        .from('economy_wallets')
+        .select('wallet')
+        .eq('guild_id', GUILD_ID)
+        .eq('user_id', FREE_JOINER)
+        .maybeSingle();
+      expect(wallet).toBeNull();
     } finally {
       await cleanupHeists();
     }

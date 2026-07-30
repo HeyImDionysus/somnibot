@@ -120,7 +120,10 @@ export default function InfractionsPage() {
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
-      toast({ title: `${manualForm.type.charAt(0).toUpperCase() + manualForm.type.slice(1)} issued`, variant: 'success' });
+      toast({
+        title: `${manualForm.type.charAt(0).toUpperCase() + manualForm.type.slice(1)} recorded in history`,
+        variant: 'success',
+      });
       setShowManualWarn(false);
       setManualForm({ member_id: '', type: 'warn', reason: '' });
       await loadInfractions();
@@ -162,7 +165,11 @@ export default function InfractionsPage() {
       {/* Manual Warn Form */}
       {showManualWarn && (
         <div className="rounded-lg border-2 border-discord-accent/30 bg-discord-bg-secondary p-4 space-y-3">
-          <h3 className="font-medium text-discord-text-primary">Create Manual Infraction</h3>
+          <h3 className="font-medium text-discord-text-primary">Record Historical Infraction</h3>
+          <p className="rounded border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-300">
+            History only: this records the event for staff reference. It does not warn, mute,
+            kick, or ban the member in Discord.
+          </p>
           <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="block text-xs text-discord-text-muted mb-1">Member Discord ID</label>
@@ -204,7 +211,7 @@ export default function InfractionsPage() {
               disabled={saving || !manualForm.member_id || !manualForm.reason}
               className="rounded bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent-hover disabled:opacity-50"
             >
-              {saving ? 'Creating...' : 'Create'}
+              {saving ? 'Recording...' : 'Record in History'}
             </button>
             <button
               onClick={() => setShowManualWarn(false)}

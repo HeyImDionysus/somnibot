@@ -35,6 +35,9 @@ vi.mock('@/lib/api/admin-rate-limit', () => ({
   checkAdminRateLimit: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('@/lib/notify-bot', () => ({ notifyBot: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('@/app/api/webhooks/scope', () => ({
+  isSoleInstanceOperator: vi.fn().mockResolvedValue(true),
+}));
 vi.mock('@/lib/team-invitations', () => ({
   loadTeamConfig: vi.fn(),
   writeTeamAudit: vi.fn().mockResolvedValue(undefined),
@@ -62,6 +65,7 @@ import {
   type RecordAdminChangeInput,
 } from '@/lib/admin-changes';
 import { validateUndoPayload } from '@/lib/api/undo-allowlist';
+import { isSoleInstanceOperator } from '@/app/api/webhooks/scope';
 
 const GUILD = '111111111111111111';
 const ACTOR = '222222222222222222';
@@ -214,6 +218,7 @@ beforeEach(() => {
     ok: true,
     ctx: { userId: 'user-1', discordId: ACTOR, guildId: GUILD },
   } as never);
+  vi.mocked(isSoleInstanceOperator).mockResolvedValue(true);
   vi.mocked(readRowBefore).mockResolvedValue(undefined);
   createAdminMock();
 });
@@ -241,7 +246,6 @@ describe('/api/rbac/roles', () => {
       priority: 5,
     }));
     expect(res.status).toBe(200);
-
     const arg = recorded();
     expectWellFormed(arg);
     expect(arg.action).toBe('rbac.role_created');
@@ -667,6 +671,10 @@ describe('/api/moderation/infractions', () => {
       reason: 'Repeated spam after warnings',
     }));
     expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      execution: 'history_only',
+      message: expect.stringContaining('no Discord action'),
+    });
 
     const arg = recorded();
     expectWellFormed(arg);
@@ -920,6 +928,23 @@ describe('/api/workflows/dead-letter', () => {
     expect(arg.undo).toBeUndefined();
   });
 
+  it('POST resolve records the manual resolution', async () => {
+    createAdminMock({ dead_letter_queue: { data: { id: ROW_UUID }, error: null } });
+    const { POST } = await import('@/app/api/workflows/dead-letter/route');
+
+    const res = await POST(jsonRequest('http://x/api/workflows/dead-letter', 'POST', {
+      action: 'resolve',
+      id: ROW_UUID,
+    }));
+    expect(res.status).toBe(200);
+
+    const arg = recorded();
+    expectWellFormed(arg);
+    expect(arg.action).toBe('workflows.dead_letter_resolved');
+    expect(arg.blastRadius).toBe('medium');
+    expect(arg.undo).toBeUndefined();
+  });
+
   it('records nothing when the dead-letter write fails', async () => {
     createAdminMock({ dead_letter_queue: { data: null, error: { message: 'boom' } } });
     const { POST } = await import('@/app/api/workflows/dead-letter/route');
@@ -958,6 +983,15 @@ describe('/api/deploy', () => {
     // worst possible lie on this page.
     expect(arg.undo).toBeUndefined();
     expect(arg.undoReason).toContain('Discord');
+
+    const auditInsert = mutations.find(
+      (mutation) => mutation.table === 'audit_logs' && mutation.kind === 'insert',
+    );
+    expect(auditInsert?.payload).toMatchObject({
+      guild_id: GUILD,
+      actor_id: ACTOR,
+      action: 'deploy.requested',
+    });
   });
 
   it('records nothing when the desired-state write fails', async () => {
@@ -1043,6 +1077,52 @@ describe('/api/sync/action', () => {
     expect(arg.after).toMatchObject({ drift_count: 1 });
   });
 
+  it('POST ignore rejects a missing drift item instead of reporting a no-op success', async () => {
+    createAdminMock({
+      guild_desired_state: {
+        data: {
+          drift_details: [{ entityType: 'role', entityName: 'Member' }],
+        },
+        error: null,
+      },
+    });
+    const { POST } = await import('@/app/api/sync/action/route');
+
+    const res = await POST(jsonRequest('http://x/api/sync/action', 'POST', {
+      action: 'ignore',
+      driftItem,
+    }));
+
+    expect(res.status).toBe(404);
+    expect(recordAdminChange).not.toHaveBeenCalled();
+  });
+
+  it('POST ignore reports a failed desired-state update', async () => {
+    createAdminMock({
+      guild_desired_state: [
+        {
+          data: {
+            drift_details: [
+              { entityType: 'role', entityName: 'Moderator' },
+              { entityType: 'role', entityName: 'Member' },
+            ],
+          },
+          error: null,
+        },
+        { data: null, error: { message: 'write failed' } },
+      ],
+    });
+    const { POST } = await import('@/app/api/sync/action/route');
+
+    const res = await POST(jsonRequest('http://x/api/sync/action', 'POST', {
+      action: 'ignore',
+      driftItem,
+    }));
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(recordAdminChange).not.toHaveBeenCalled();
+  });
+
   it('POST clear_all records nothing when the write fails', async () => {
     createAdminMock({ guild_desired_state: { data: null, error: { message: 'boom' } } });
     const { POST } = await import('@/app/api/sync/action/route');
@@ -1088,7 +1168,7 @@ describe('/api/settings', () => {
     expect(arg.undo).toBeUndefined();
   });
 
-  it('records nothing when every submitted value was masked or blank', async () => {
+  it('rejects a no-op when every submitted value was masked or blank', async () => {
     createAdminMock({ instance_settings: { data: null, error: null } });
     const { PUT } = await import('@/app/api/settings/route');
 
@@ -1097,7 +1177,7 @@ describe('/api/settings', () => {
       values: { discord_bot_token: '••••••••abcd', discord_client_secret: '  ' },
     }));
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
     expect(recordAdminChange).not.toHaveBeenCalled();
   });
 
@@ -1105,11 +1185,12 @@ describe('/api/settings', () => {
     createAdminMock({ instance_settings: { data: null, error: { message: 'boom' } } });
     const { PUT } = await import('@/app/api/settings/route');
 
-    await PUT(jsonRequest('http://x/api/settings', 'PUT', {
+    const res = await PUT(jsonRequest('http://x/api/settings', 'PUT', {
       section: 'discord',
       values: { discord_guild_id: '111222333' },
     }));
 
+    expect(res.status).toBeGreaterThanOrEqual(500);
     expect(recordAdminChange).not.toHaveBeenCalled();
   });
 });

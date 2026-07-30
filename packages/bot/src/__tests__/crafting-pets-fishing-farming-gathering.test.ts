@@ -228,6 +228,40 @@ describe('CraftingManager deep', () => {
     const result = await mgr.craft('u1', 'Iron Sword');
     expect(result.embed.data.description).toContain('wait');
   });
+
+  it('crafting cooldown 0 bypasses Valkey instead of issuing PX 0', async () => {
+    const { CraftingManager } = await import('../features/crafting/crafting-manager.js');
+    const s = craftSupa([{ item_name: 'Iron', quantity: 5, item_id: 'iron1' }]);
+    s.from = vi.fn((table: string) => {
+      if (table === 'guild_config') {
+        return chain({ economy_crafting_enabled: true, economy_crafting_cooldown_seconds: 0 });
+      }
+      if (table === 'economy_recipes') return chainAsync(recipes);
+      if (table === 'economy_inventory') {
+        return chainAsync([{ item_name: 'Iron', quantity: 5, item_id: 'iron1' }]);
+      }
+      if (table === 'economy_items') return chainAsync([{ id: 'item1', name: 'Iron Sword' }]);
+      return chain(null);
+    });
+    s.rpc = vi.fn(async (name: string) => (
+      name === 'economy_decrement_inventory'
+        ? { data: true, error: null }
+        : { data: null, error: null }
+    ));
+    const vk = valkey();
+    const mgr = new CraftingManager(guild(), s, vk);
+
+    const result = await mgr.craft('u1', 'Iron Sword');
+
+    expect(result.embed).toBeDefined();
+    expect(vk.set).not.toHaveBeenCalledWith(
+      expect.stringContaining('economy:craft:'),
+      '1',
+      'PX',
+      0,
+      'NX',
+    );
+  });
 });
 
 // ═══════════════════════════════════════════════

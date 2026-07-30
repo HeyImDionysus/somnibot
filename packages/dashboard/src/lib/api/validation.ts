@@ -721,8 +721,8 @@ const musicConfig = z.object({
   music_enabled: z.boolean().optional(),
   music_default_volume: z.number().int().min(0).max(150).optional(),
   dj_role_id: snowflake.optional().nullable(),
-  // A timer of 0 is not a valid setting (the bot floors both to >=1); reject it
-  // with a field-level error instead of letting the route silently clamp it to 1.
+  // A timer of 0 is not a valid setting; reject it with a field-level error
+  // instead of letting the dashboard route silently clamp it to 1.
   // auto_destroy caps at 120 to match the route's ceiling (Math.min(120, ...)).
   music_auto_leave_minutes: z.number().int().min(1).max(60).optional(),
   music_auto_destroy_minutes: z.number().int().min(1).max(120).optional(),

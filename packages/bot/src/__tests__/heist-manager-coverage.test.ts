@@ -43,12 +43,17 @@ vi.mock('discord.js', () => ({
   },
 }));
 
+vi.mock('../services/alert-service.js', () => ({
+  raiseOwnerAlert: vi.fn().mockResolvedValue({ inserted: true, delivered: false }),
+}));
+
 import {
   HeistManager,
   registerHeistManager,
   invalidateHeistCache,
   getHeistManager,
 } from '../features/heist/heist-manager.js';
+import { raiseOwnerAlert } from '../services/alert-service.js';
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -113,6 +118,7 @@ function makeClient() {
 
 function makeInteraction(overrides: Record<string, unknown> = {}) {
   return {
+    id: 'interaction-1',
     guildId: 'g1',
     channelId: 'ch1',
     user: { id: 'u1' },
@@ -139,7 +145,12 @@ describe('HeistManager', () => {
   let valkey: ReturnType<typeof makeValkey>;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
+    mockTrackProgress.mockResolvedValue(undefined);
+    vi.mocked(raiseOwnerAlert).mockResolvedValue({
+      inserted: true,
+      delivered: false,
+    });
     supabase = makeSupabase();
     client = makeClient();
     valkey = makeValkey();
@@ -173,6 +184,65 @@ describe('HeistManager', () => {
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('lay low') }),
       );
+    });
+
+    it('zero cooldown and entry fee bypass invalid Valkey and debit calls', async () => {
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({
+            data: {
+              ...defaultConfig,
+              economy_heist_cooldown_seconds: 0,
+              economy_heist_entry_fee: 0,
+            },
+            error: null,
+          });
+        }
+        if (table === 'economy_heists') return chainBuilder({ data: null, error: null });
+        if (table === 'economy_wallets') return chainBuilder({ data: null, error: { code: 'PGRST116' } });
+        return chainBuilder();
+      });
+      const interaction = makeInteraction();
+
+      await mgr.startHeist(interaction as any);
+
+      expect(valkey.set).not.toHaveBeenCalledWith('heist:cd:g1', '1', 'EX', 0, 'NX');
+      expect(supabase.from).not.toHaveBeenCalledWith('economy_wallets');
+      expect(supabase.rpc).not.toHaveBeenCalledWith('economy_subtract_balance', expect.anything());
+    });
+
+    it('describes a failed zero-fee start without claiming a refund', async () => {
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({
+            data: {
+              ...defaultConfig,
+              economy_heist_cooldown_seconds: 0,
+              economy_heist_entry_fee: 0,
+            },
+            error: null,
+          });
+        }
+        if (table === 'economy_heists') return chainBuilder({ data: null, error: null });
+        return chainBuilder();
+      });
+      supabase.rpc.mockImplementation((fn: string) => {
+        if (fn === 'heist_start') {
+          return Promise.resolve({ data: null, error: { message: 'database unavailable' } });
+        }
+        return Promise.resolve({ data: null, error: null });
+      });
+      const interaction = makeInteraction();
+
+      await mgr.startHeist(interaction as any);
+
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('Nothing was charged'),
+      }));
+      expect(interaction.reply).not.toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('refunded'),
+      }));
+      expect(supabase.rpc).not.toHaveBeenCalledWith('economy_refund_balance', expect.anything());
     });
 
     it('rejects on DB cooldown fallback', async () => {
@@ -325,6 +395,77 @@ describe('HeistManager', () => {
       expect(
         supabase.from.mock.calls.some((c: any[]) => c[0] === 'economy_heist_participants'),
       ).toBe(false);
+      expect(supabase.rpc).toHaveBeenCalledWith('economy_refund_balance', {
+        p_guild_id: 'g1',
+        p_user_id: 'u1',
+        p_amount: 100,
+        p_idempotency_key: 'heist:start-refund:interaction-1',
+      });
+    });
+
+    it('raises an owner alert when a positive-fee start refund fails', async () => {
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') return chainBuilder({ data: { ...defaultConfig }, error: null });
+        if (table === 'economy_heists') return chainBuilder({ data: null, error: null });
+        if (table === 'economy_wallets') return chainBuilder({ data: { wallet: 500 }, error: null });
+        return chainBuilder();
+      });
+      supabase.rpc.mockImplementation((fn: string) => {
+        if (fn === 'economy_subtract_balance') {
+          return Promise.resolve({ data: null, error: null });
+        }
+        if (fn === 'heist_start') {
+          return Promise.resolve({ data: null, error: { message: 'create failed' } });
+        }
+        if (fn === 'economy_refund_balance') {
+          return Promise.resolve({ data: null, error: { message: 'refund failed' } });
+        }
+        return Promise.resolve({ data: null, error: null });
+      });
+      const interaction = makeInteraction();
+
+      await mgr.startHeist(interaction as any);
+
+      expect(raiseOwnerAlert).toHaveBeenCalledWith(
+        supabase,
+        'g1',
+        expect.objectContaining({ alertType: 'heist_entry_fee_refund_failed' }),
+      );
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('administrator was notified'),
+      }));
+    });
+
+    it('does not claim an administrator notification when every alert leg fails', async () => {
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') return chainBuilder({ data: { ...defaultConfig }, error: null });
+        if (table === 'economy_heists') return chainBuilder({ data: null, error: null });
+        if (table === 'economy_wallets') return chainBuilder({ data: { wallet: 500 }, error: null });
+        return chainBuilder();
+      });
+      supabase.rpc.mockImplementation((fn: string) => {
+        if (fn === 'economy_subtract_balance') {
+          return Promise.resolve({ data: null, error: null });
+        }
+        if (fn === 'heist_start') {
+          return Promise.resolve({ data: null, error: { message: 'create failed' } });
+        }
+        if (fn === 'economy_refund_balance') {
+          return Promise.resolve({ data: null, error: { message: 'refund failed' } });
+        }
+        return Promise.resolve({ data: null, error: null });
+      });
+      vi.mocked(raiseOwnerAlert).mockResolvedValueOnce({
+        inserted: false,
+        delivered: false,
+      });
+      const interaction = makeInteraction();
+
+      await mgr.startHeist(interaction as any);
+
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('administrator notification could not be confirmed'),
+      }));
     });
 
     it('starts heist successfully via the atomic heist_start RPC', async () => {
@@ -451,6 +592,24 @@ describe('HeistManager', () => {
       expect(replyArg.embeds).toBeDefined();
       expect(String(replyArg.embeds[0].data.description)).toContain('3/8');
       expect(String(replyArg.embeds[0].data.description)).toContain('54%');
+    });
+
+    it('passes a configured zero fee to the atomic join without a separate debit', async () => {
+      const rpcCalls = setupJoin(
+        {
+          data: [{ status: 'joined', member_count: 2, success_chance: 47, role: 'Hacker' }],
+          error: null,
+        },
+        { configOverrides: { economy_heist_entry_fee: 0 } },
+      );
+
+      await mgr.joinHeist(makeInteraction() as any);
+
+      expect(rpcCalls).toContainEqual({
+        fn: 'heist_join',
+        args: expect.objectContaining({ p_entry_fee: 0 }),
+      });
+      expect(rpcCalls.some((c) => c.fn === 'economy_subtract_balance')).toBe(false);
     });
 
     it('rejects when already joined (RPC status already_joined)', async () => {

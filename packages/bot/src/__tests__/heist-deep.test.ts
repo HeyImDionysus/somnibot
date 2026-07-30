@@ -55,6 +55,7 @@ function makeClient() {
 
 function makeInteraction() {
   return {
+    id: 'interaction-deep-1',
     guildId: 'guild-1',
     channelId: 'ch-1',
     user: { id: 'user-1', username: 'Tester', displayAvatarURL: () => 'url' },
@@ -175,9 +176,16 @@ describe('HeistManager deep', () => {
     const interaction = makeInteraction();
     await mgr.startHeist(interaction);
 
-    // The pre-debited entry fee is refunded via economy_add_balance.
-    const refunds = supa.rpc.mock.calls.filter((c: any[]) => c[0] === 'economy_add_balance');
+    // The pre-debited entry fee is restored exactly once without minting
+    // total_earned through the idempotent compensation RPC.
+    const refunds = supa.rpc.mock.calls.filter((c: any[]) => c[0] === 'economy_refund_balance');
     expect(refunds.length).toBe(1);
+    expect(refunds[0][1]).toEqual({
+      p_guild_id: 'guild-1',
+      p_user_id: 'user-1',
+      p_amount: 100,
+      p_idempotency_key: 'heist:start-refund:interaction-deep-1',
+    });
     expect(interaction.reply).toHaveBeenCalled();
   });
 

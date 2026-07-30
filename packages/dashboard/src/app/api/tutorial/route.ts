@@ -169,7 +169,15 @@ export async function PUT(req: NextRequest) {
   }, supabase);
 
   // Replace all steps: delete existing, insert new
-  await supabase.from('tutorial_steps').delete().eq('guild_id', guildId);
+  const { error: deleteStepsError } = await supabase
+    .from('tutorial_steps')
+    .delete()
+    .eq('guild_id', guildId);
+  if (deleteStepsError) {
+    // Never continue into the insert after a failed delete: doing so can
+    // duplicate the old list while still presenting the request as a replace.
+    return dbError(deleteStepsError, 'tutorial');
+  }
 
   const rows = steps.map((s, idx) => ({
     guild_id: guildId,

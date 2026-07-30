@@ -435,7 +435,7 @@ describe('startSyncScheduler', () => {
     vi.useRealTimers();
   });
 
-  it('returns a stop function', () => {
+  it('returns a stop function', async () => {
     const guild = makeGuild();
     const supabase = { from: vi.fn(() => supaChain()) } as any;
     const bus = makeEventBus();
@@ -444,20 +444,99 @@ describe('startSyncScheduler', () => {
     const scheduler = startSyncScheduler(guild as any, supabase, bus as any, config);
 
     expect(typeof scheduler.stop).toBe('function');
-    scheduler.stop(); // Clean up
+    await scheduler.stop(); // Clean up
   });
 
-  it('stop clears the interval', () => {
+  it('stop clears the interval', async () => {
     const guild = makeGuild();
     const supabase = { from: vi.fn(() => supaChain()) } as any;
     const bus = makeEventBus();
     const config = makeConfig({ intervalMinutes: 1 });
 
     const scheduler = startSyncScheduler(guild as any, supabase, bus as any, config);
-    scheduler.stop();
+    await scheduler.stop();
 
     // After stop, advancing time should not trigger runs
     // (If timer was cleared, no more callbacks)
     expect(scheduler).toBeDefined();
+  });
+
+  it('rearms the live interval without a bot restart', async () => {
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const scheduler = startSyncScheduler(
+      makeGuild() as any,
+      { from: vi.fn(() => supaChain()) } as any,
+      makeEventBus() as any,
+      makeConfig({ intervalMinutes: 60 }),
+    );
+
+    scheduler.reconfigure(5);
+
+    expect(intervalSpy).toHaveBeenLastCalledWith(expect.any(Function), 5 * 60 * 1000);
+    await scheduler.stop();
+  });
+
+  it('can run immediately when an initially disabled scheduler is enabled', async () => {
+    const supabase = { from: vi.fn(() => supaChain({
+      sync_enabled: true,
+      sync_interval_minutes: 60,
+      sync_auto_repair: false,
+      sync_auto_repair_everyone: false,
+    })) } as any;
+    const scheduler = startSyncScheduler(
+      makeGuild() as any,
+      supabase,
+      makeEventBus() as any,
+      makeConfig({ enabled: false, intervalMinutes: 60 }),
+    );
+
+    scheduler.reconfigure(undefined, true);
+    await vi.waitFor(() => expect(supabase.from).toHaveBeenCalledWith('guild_config'));
+    await scheduler.stop();
+  });
+
+  it('stop waits for an in-flight config read and prevents the sync cycle', async () => {
+    type ConfigRead = {
+      data: {
+        sync_enabled: boolean;
+        sync_interval_minutes: number;
+        sync_auto_repair: boolean;
+        sync_auto_repair_everyone: boolean;
+      };
+    };
+    let resolveConfig!: (value: ConfigRead) => void;
+    const configRead = new Promise<ConfigRead>((resolve) => { resolveConfig = resolve; });
+    const configChain = {
+      select: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnThis(),
+      single: vi.fn(() => configRead),
+    };
+    const supabase = { from: vi.fn(() => configChain) } as any;
+    const scheduler = startSyncScheduler(
+      makeGuild() as any,
+      supabase,
+      makeEventBus() as any,
+      makeConfig({ enabled: true, intervalMinutes: 60 }),
+    );
+
+    scheduler.reconfigure(undefined, true);
+    await vi.waitFor(() => expect(supabase.from).toHaveBeenCalledWith('guild_config'));
+    const stopped = scheduler.stop();
+    let stopSettled = false;
+    void stopped.then(() => { stopSettled = true; });
+    await Promise.resolve();
+    expect(stopSettled).toBe(false);
+
+    resolveConfig({
+      data: {
+        sync_enabled: true,
+        sync_interval_minutes: 60,
+        sync_auto_repair: true,
+        sync_auto_repair_everyone: true,
+      },
+    });
+    await stopped;
+
+    expect(supabase.from).toHaveBeenCalledTimes(1);
   });
 });

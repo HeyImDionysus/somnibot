@@ -331,12 +331,15 @@ describe('/api/store/products', () => {
   });
 
   it('DELETE is a DEACTIVATION, so it offers a genuine restore of the prior flag', async () => {
-    vi.mocked(readRowBefore).mockResolvedValue({
+    const client = mockClient(['products']);
+    client.chains.products.maybeSingle.mockResolvedValue({
+      data: {
       id: PRODUCT_ID,
       name: 'Pro License',
       active: true,
+      },
+      error: null,
     });
-    mockClient(['products']);
     const { DELETE } = await import('@/app/api/store/products/route');
 
     const res = await DELETE(
@@ -366,12 +369,28 @@ describe('/api/store/products', () => {
   });
 
   it('DELETE records nothing for a product this guild does not have', async () => {
-    vi.mocked(readRowBefore).mockResolvedValue(undefined);
     mockClient(['products']);
     const { DELETE } = await import('@/app/api/store/products/route');
 
-    await DELETE(jsonRequest(`http://x/api/store/products?id=${PRODUCT_ID}`, 'DELETE'));
+    const res = await DELETE(jsonRequest(`http://x/api/store/products?id=${PRODUCT_ID}`, 'DELETE'));
 
+    expect(res.status).toBe(404);
+    expect(recordAdminChange).not.toHaveBeenCalled();
+  });
+
+  it('DELETE reports a redacted server failure when the product lookup fails', async () => {
+    const client = mockClient(['products']);
+    client.chains.products.maybeSingle.mockResolvedValue({
+      data: null,
+      error: { message: 'permission denied for products', code: '42501' },
+    });
+    const { DELETE } = await import('@/app/api/store/products/route');
+
+    const res = await DELETE(jsonRequest(`http://x/api/store/products?id=${PRODUCT_ID}`, 'DELETE'));
+    const body = await res.json();
+
+    expect(res.status).toBe(500);
+    expect(body.error).not.toContain('permission denied');
     expect(recordAdminChange).not.toHaveBeenCalled();
   });
 });
@@ -1100,8 +1119,9 @@ describe('/api/reconciliation', () => {
     client.chains.bot_action_queue.result = { data: null, error: { message: 'boom' } };
     const { POST } = await import('@/app/api/reconciliation/route');
 
-    await POST(jsonRequest('http://x/api/reconciliation', 'POST'));
+    const res = await POST(jsonRequest('http://x/api/reconciliation', 'POST'));
 
+    expect(res.status).toBeGreaterThanOrEqual(500);
     expect(recordAdminChange).not.toHaveBeenCalled();
   });
 });

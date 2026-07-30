@@ -91,4 +91,14 @@ describe('interpolateMessage', () => {
   it('handles multiple occurrences', () => {
     expect(interpolateMessage('{user} {user} {server}', vars)).toBe('<@123> <@123> Test Server');
   });
+
+  it('caps the expanded Discord message at 2,000 characters', () => {
+    const expanded = interpolateMessage('{server}', {
+      ...vars,
+      server: 'x'.repeat(2_500),
+    });
+
+    expect(expanded).toHaveLength(2_000);
+    expect(expanded.endsWith('…')).toBe(true);
+  });
 });

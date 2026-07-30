@@ -16,7 +16,8 @@
  * MEMBER, so there is no single inverse to replay (and `bulk_role_add` /
  * `bulk_role_remove` are deliberately absent from the undo allowlist);
  * `reset_economy` destroys balances with no snapshot kept; a delivered DM
- * cannot be recalled. `export` changes nothing at all and is not recorded.
+ * cannot be recalled. `export` changes no server state, but it reads member
+ * PII and therefore writes a dedicated access audit before releasing data.
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
@@ -166,6 +167,27 @@ export async function POST(req: NextRequest) {
       } catch (err) {
         if (err instanceof MemberEnrichmentError) return dbError(err, 'members/bulk/enrichment');
         throw err;
+      }
+
+      // This is a sensitive read, not an admin-state mutation. Keep it out of
+      // admin_changes, but fail closed unless the PII access itself is durably
+      // attributable in the audit log.
+      const { error: auditError } = await admin.from('audit_logs').insert({
+        guild_id: guildId,
+        actor_type: 'dashboard',
+        actor_id: auth.ctx.discordId,
+        action: 'bulk.export_members',
+        target_type: 'members',
+        target_id: `bulk:${enriched.length}`,
+        success: true,
+        details: {
+          requested_member_count: member_ids.length,
+          exported_member_count: enriched.length,
+          format: 'json',
+        },
+      });
+      if (auditError) {
+        return dbError(auditError, 'members/bulk/audit');
       }
 
       return NextResponse.json({
