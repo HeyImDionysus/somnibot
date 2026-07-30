@@ -247,7 +247,7 @@ export class HeistManager {
 
     // V53-L3: Valkey-based atomic cooldown (defense-in-depth alongside DB check + unique index)
     const cooldownSecs = config.economy_heist_cooldown_seconds ?? 300;
-    if (this.valkey) {
+    if (this.valkey && cooldownSecs > 0) {
       const cooldownKey = `heist:cd:${guildId}`;
       const locked = await this.valkey.set(cooldownKey, '1', 'EX', cooldownSecs, 'NX');
       if (!locked) {
@@ -338,9 +338,11 @@ export class HeistManager {
     }
 
     // Deduct entry fee (atomic — raises on insufficient balance)
-    const { error: feeErr } = await this.supabase.rpc('economy_subtract_balance', {
-      p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
-    });
+    const { error: feeErr } = entryFee > 0
+      ? await this.supabase.rpc('economy_subtract_balance', {
+          p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
+        })
+      : { error: null };
     if (feeErr) {
       // Only a genuine insufficient-balance raise may claim the member lacks
       // coins; a network/transient RPC failure debited nothing and must degrade
@@ -403,10 +405,13 @@ export class HeistManager {
 
     if (startErr || !startResult || startResult.status !== 'started' || !heistId) {
       const duplicate = startResult?.status === 'duplicate_active';
-      // Always refund the entry fee — we charged it before the atomic insert.
-      const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
-        p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
-      });
+      // Refund only when a fee was charged. The positive-only balance RPC
+      // rejects zero; a free heist therefore has nothing to compensate.
+      const { error: refundErr } = entryFee > 0
+        ? await this.supabase.rpc('economy_add_balance', {
+            p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
+          })
+        : { error: null };
       if (refundErr) {
         log.error('CRITICAL: heist_start failed AND refund failed', {
           guildId, userId, entryFee, startErr, refundErr,

@@ -161,6 +161,44 @@ describe('handleRankCommand', () => {
       content: expect.stringContaining('reset'),
     }));
   });
+
+  it('does not claim reset succeeded when the delete fails', async () => {
+    const c = client();
+    c.supabase.from = vi.fn().mockReturnValue(chain({
+      data: null,
+      error: { message: 'database unavailable' },
+    }));
+    const i = interaction({ sub: 'customize', bool: true });
+
+    await handleRankCommand(i as any, c as any);
+
+    expect(i.editReply).toHaveBeenCalledOnce();
+    expect(i.editReply).toHaveBeenCalledWith({
+      content: expect.stringContaining('could not be reset'),
+    });
+    expect(i.editReply).not.toHaveBeenCalledWith({
+      content: expect.stringContaining('reset to server defaults'),
+    });
+  });
+
+  it('does not claim customization saved when the upsert fails', async () => {
+    const c = client();
+    c.supabase.from = vi.fn().mockReturnValue(chain({
+      data: null,
+      error: { message: 'database unavailable' },
+    }));
+    const i = interaction({ sub: 'customize', str: '#00ff00' });
+
+    await handleRankCommand(i as any, c as any);
+
+    expect(i.editReply).toHaveBeenCalledOnce();
+    expect(i.editReply).toHaveBeenCalledWith({
+      content: expect.stringContaining('could not be saved'),
+    });
+    expect(i.editReply).not.toHaveBeenCalledWith({
+      content: expect.stringContaining('customization saved'),
+    });
+  });
 });
 
 describe('handleLeaderboardCommand', () => {

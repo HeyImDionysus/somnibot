@@ -213,6 +213,34 @@ describe('processMessageXp', () => {
     expect(result.granted).toBe(false);
   });
 
+  it('treats a zero cooldown as disabled and never sends EX 0 to Valkey', async () => {
+    const supabase = makeSupabase({
+      guild_config: {
+        data: {
+          levels_enabled: true,
+          xp_channel_list: [],
+          no_xp_role_id: null,
+          xp_cooldown_seconds: 0,
+        },
+        error: null,
+      },
+      xp_multipliers: { data: [], error: null },
+    });
+    supabase.rpc.mockResolvedValue({
+      data: { new_xp: 25, old_level: 0, new_level: 0 },
+      error: null,
+    });
+    const valkey = makeValkey();
+
+    const first = await processMessageXp(makeMessage() as any, supabase as any, valkey as any, 'g1');
+    const second = await processMessageXp(makeMessage() as any, supabase as any, valkey as any, 'g1');
+
+    expect(first.granted).toBe(true);
+    expect(second.granted).toBe(true);
+    expect(valkey.set).not.toHaveBeenCalled();
+    expect(supabase.rpc).toHaveBeenCalledTimes(2);
+  });
+
   it('grants XP successfully via RPC', async () => {
     const supabase = makeSupabase({
       guild_config: { data: { levels_enabled: true, xp_channel_list: [], no_xp_role_id: null }, error: null },

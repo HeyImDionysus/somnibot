@@ -118,7 +118,7 @@ interface GuildServices {
   voiceXpTimer?: ReturnType<typeof setInterval>;
   actionQueueStaleTimer?: ReturnType<typeof setInterval>;
   actionQueueStop?: () => Promise<void>;
-  syncHandle?: { stop: () => void };
+  syncHandle?: { stop: () => void; reconfigure: (intervalMinutes: number) => void };
   reconTimer?: ReturnType<typeof setInterval>;
   automationEngine?: AutomationEngine;
   configWatcher?: ConfigWatcher;
@@ -649,7 +649,13 @@ export async function initGuildFeatures(
     const contextMenuCmds = buildContextMenuCommands();
     for (const cmd of contextMenuCmds) allCommands.push(cmd.toJSON());
 
-    services.configWatcher = new ConfigWatcher(guild, supabase, eventBus, valkey);
+    services.configWatcher = new ConfigWatcher(
+      guild,
+      supabase,
+      eventBus,
+      valkey,
+      (intervalMinutes) => services.syncHandle?.reconfigure(intervalMinutes),
+    );
     services.configWatcher.start();
     ctx.setManager('configWatcher', services.configWatcher);
 

@@ -12,7 +12,7 @@ import { dbError } from '@/lib/api/response';
 import { recordAdminChange, readRowBefore } from '@/lib/admin-changes';
 
 const deadLetterAction = z.object({
-  action: z.enum(['retry', 'discard']),
+  action: z.enum(['retry', 'discard', 'resolve']),
   id: z.string().uuid(),
   note: z.string().max(1000).optional(),
 });
@@ -182,6 +182,24 @@ export async function POST(request: NextRequest) {
         .single();
 
       if (error) return dbError(error, 'workflows/dead-letter');
+
+      await recordAdminChange({
+        guildId: ctx.guildId,
+        actorId: ctx.discordId,
+        action: 'workflows.dead_letter_resolved',
+        targetType: 'failed background job',
+        targetId: body.id,
+        description: `Marked the failed ${jobLabel} as resolved without running it again`,
+        before: before ? { status: before.status ?? null } : undefined,
+        after: {
+          status: 'resolved',
+          resolution_note: body.note || 'Manually resolved',
+        },
+        blastRadius: 'medium',
+        undoReason:
+          'a resolved job is closed out and cannot be put back into the queue from this dashboard',
+      }, admin);
+
       return NextResponse.json({ success: true, data });
     }
 

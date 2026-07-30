@@ -46,6 +46,7 @@ vi.mock('@/lib/admin-changes', async (importOriginal) => ({
 import { NextRequest } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { enrichMembers } from '@/lib/api/member-enrichment';
 import {
   recordAdminChange,
   recordCrudChange,
@@ -151,6 +152,7 @@ function expectRealDiscordUndo(change: RecordAdminChangeInput) {
 beforeEach(() => {
     vi.resetAllMocks();
   calls = [];
+  vi.mocked(enrichMembers).mockResolvedValue([]);
   vi.mocked(requireGuildOwner).mockResolvedValue({
     ok: true,
     ctx: { userId: 'user-1', discordId: ACTOR, guildId: GUILD },
@@ -468,7 +470,7 @@ describe('/api/members/bulk', () => {
     expectNotUndoable(change, /recalled/);
   });
 
-  it('does not record an export — nothing in the server changed', async () => {
+  it('audits the PII export without presenting it as an admin-state change', async () => {
     mockClient({ members: { data: [] } });
     const { POST } = await import('@/app/api/members/bulk/route');
 
@@ -477,6 +479,22 @@ describe('/api/members/bulk', () => {
     );
     expect(res.status).toBe(200);
 
+    expect(calls).toContain('insert:audit_logs');
+    expect(recordAdminChange).not.toHaveBeenCalled();
+  });
+
+  it('does not release exported PII when its audit row cannot be written', async () => {
+    mockClient({
+      members: { data: [] },
+      audit_logs: { error: { message: 'audit unavailable' } },
+    });
+    const { POST } = await import('@/app/api/members/bulk/route');
+
+    const res = await POST(
+      req('http://x/api/members/bulk', 'POST', { member_ids: MEMBERS, action: 'export' }),
+    );
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
     expect(recordAdminChange).not.toHaveBeenCalled();
   });
 
@@ -647,6 +665,8 @@ describe('POST /api/welcome/test', () => {
     );
 
     expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(JSON.stringify(body)).not.toContain('boom');
     expect(recordAdminChange).not.toHaveBeenCalled();
   });
 });

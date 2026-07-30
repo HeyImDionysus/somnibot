@@ -312,6 +312,21 @@ describe('PetsManager', () => {
       expect(interaction.reply).toHaveBeenCalled();
     });
 
+    it('zero feed cost does not call the positive-only balance debit RPC', async () => {
+      supabase = makeSupabase({
+        guild_config: { economy_pets_enabled: true, economy_pet_feed_cost: 0 },
+        economy_pets: { id: 'p1', hunger: 50, status: 'normal' },
+      });
+      mgr = new PetsManager(supabase as any, null as any, valkey as any);
+
+      await mgr.feedPet(makeInteraction() as any);
+
+      expect(supabase.rpc).not.toHaveBeenCalledWith(
+        'economy_subtract_balance',
+        expect.anything(),
+      );
+    });
+
     it('rejects when no pet', async () => {
       supabase = makeSupabase({
         guild_config: { economy_pets_enabled: true },
@@ -353,6 +368,24 @@ describe('PetsManager', () => {
       const interaction = makeInteraction();
       await mgr.trainPet(interaction as any);
       expect(interaction.reply).toHaveBeenCalled();
+    });
+
+    it('zero training cost does not call the positive-only balance debit RPC', async () => {
+      supabase = makeSupabase({
+        guild_config: { economy_pets_enabled: true, economy_pet_train_cost: 0 },
+        economy_pets: {
+          id: 'p1', level: 5, xp: 50, energy: 90,
+          health: 100, attack: 10, defense: 10, speed: 10, status: 'happy',
+        },
+      });
+      mgr = new PetsManager(supabase as any, null as any, valkey as any);
+
+      await mgr.trainPet(makeInteraction() as any);
+
+      expect(supabase.rpc).not.toHaveBeenCalledWith(
+        'economy_subtract_balance',
+        expect.anything(),
+      );
     });
   });
 

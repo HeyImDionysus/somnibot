@@ -31,7 +31,7 @@ const levelsConfigUpdate = z.object({
   xp_channel_list: z.array(snowflake).max(100).optional(),
   level_up_channel_id: snowflake.optional().nullable(),
   level_up_message: z.string().max(2000).optional(),
-  rank_card_accent_color: z.string().max(32).optional().nullable(),
+  rank_card_accent_color: z.number().int().min(0).max(0xFFFFFF).optional().nullable(),
   rank_card_background: z.string().max(512).optional().nullable(),
   no_xp_role_id: snowflake.optional().nullable(),
 });

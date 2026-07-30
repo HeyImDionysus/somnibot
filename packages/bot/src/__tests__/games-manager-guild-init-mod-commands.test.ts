@@ -165,6 +165,27 @@ describe('GamesManager interactions', () => {
     }));
   });
 
+  it('coinflip treats a configured max bet of 0 as unlimited', async () => {
+    const supa = mockSupabase();
+    supa.from
+      .mockReturnValueOnce(mockSupabaseChain({
+        guild_id: 'g1',
+        economy_games_enabled: true,
+        economy_coinflip_max_bet: 0,
+        economy_daily_loss_limit: 0,
+      }))
+      .mockReturnValueOnce(mockSupabaseChain({ wallet: 50_000 }))
+      .mockReturnValueOnce(mockSupabaseChain({ wallet: 50_000 }));
+    const mgr = new GamesManager(supa);
+    const interaction = mockChatInputInteraction();
+
+    await mgr.coinflip(interaction, 20_000);
+
+    expect(interaction.reply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Max bet'),
+    }));
+  });
+
   it('coinflip rejected when insufficient balance', async () => {
     const supa = mockSupabase();
     supa.from

@@ -144,7 +144,7 @@ export async function POST(request: NextRequest) {
     await admin.from('audit_logs').insert({
       guild_id: guildId,
       actor_type: 'dashboard',
-      actor_id: 'setup-wizard',
+      actor_id: auth.ctx.discordId,
       action: 'setup.confirmed',
       target_type: 'guild',
       target_id: guildId,

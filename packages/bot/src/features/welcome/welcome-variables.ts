@@ -82,8 +82,14 @@ export function interpolateMessage(
   template: string,
   variables: WelcomeVariables,
 ): string {
-  return template.replace(/\{([^}]+)\}/g, (match, key: string) => {
+  const interpolated = template.replace(/\{([^}]+)\}/g, (match, key: string) => {
     const value = variables[key.trim() as keyof WelcomeVariables];
     return value !== undefined ? value : match; // Leave unknown vars as-is
   });
+  // Discord message content is capped at 2,000 characters. Templates are
+  // validated before substitution, but variables such as server/user names
+  // can expand the final result beyond that limit.
+  return interpolated.length <= 2_000
+    ? interpolated
+    : `${interpolated.slice(0, 1_999)}…`;
 }

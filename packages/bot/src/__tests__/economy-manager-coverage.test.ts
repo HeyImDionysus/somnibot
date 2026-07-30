@@ -390,6 +390,7 @@ describe('EconomyManager', () => {
     });
 
     it('fails when bank is full', async () => {
+      supabase._configData.economy_max_bank = 10000;
       supabase.from.mockImplementation((table: string) => {
         if (table === 'economy_wallets') return chainBuilder({ data: makeWallet({ bank: 10000, bank_max: 10000 }) });
         return chainBuilder({ data: supabase._configData });
@@ -397,6 +398,24 @@ describe('EconomyManager', () => {
       const result = await em.deposit('u1', 500);
       expect(result.success).toBe(false);
       expect(result.message).toContain('bank is full');
+    });
+
+    it('uses the guild-configured bank cap instead of the legacy wallet column', async () => {
+      supabase._configData.economy_max_bank = 1500;
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'economy_wallets') {
+          return chainBuilder({ data: makeWallet({ wallet: 1000, bank: 1400, bank_max: 999999 }) });
+        }
+        return chainBuilder({ data: supabase._configData });
+      });
+
+      await em.deposit('u1', 500);
+
+      expect(supabase.rpc).toHaveBeenCalledWith('economy_bank_deposit', {
+        p_guild_id: 'g1',
+        p_user_id: 'u1',
+        p_amount: '100',
+      });
     });
 
     it('fails when RPC returns error', async () => {
@@ -461,6 +480,17 @@ describe('EconomyManager', () => {
       const result = await em.claimTimedReward('u1', 'monthly');
       expect(result.success).toBe(true);
       expect(result.amount).toBe(15000);
+    });
+
+    it('accepts a configured zero reward without raising an outage', async () => {
+      supabase._configData.economy_daily_amount = 0;
+
+      const result = await em.claimTimedReward('u1', 'daily');
+
+      expect(result.success).toBe(true);
+      expect(result.amount).toBe(0);
+      expect(supabase.rpc).not.toHaveBeenCalledWith('economy_add_balance', expect.anything());
+      expect(supabase.from).not.toHaveBeenCalledWith('alerts');
     });
 
     it('prevents double-claim via Valkey NX', async () => {

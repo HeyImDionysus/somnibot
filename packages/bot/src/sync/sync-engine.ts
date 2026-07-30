@@ -215,9 +215,19 @@ export function startSyncScheduler(
   supabase: SupabaseClient,
   eventBus: PlatformEventBus,
   initialConfig: SyncConfig,
-): { stop: () => void } {
+): { stop: () => void; reconfigure: (intervalMinutes: number) => void } {
   let timer: ReturnType<typeof setInterval> | null = null;
+  let initialTimer: ReturnType<typeof setTimeout> | null = null;
   let running = false;
+  let stopped = false;
+  let currentIntervalMinutes = initialConfig.intervalMinutes;
+
+  const arm = (intervalMinutes: number) => {
+    if (stopped || !Number.isFinite(intervalMinutes) || intervalMinutes <= 0) return;
+    if (timer) clearInterval(timer);
+    currentIntervalMinutes = intervalMinutes;
+    timer = setInterval(run, intervalMinutes * 60 * 1000);
+  };
 
   const run = async () => {
     if (running) return;
@@ -237,6 +247,10 @@ export function startSyncScheduler(
         autoRepair: guildConfig?.sync_auto_repair ?? initialConfig.autoRepair,
         autoRepairEveryone: guildConfig?.sync_auto_repair_everyone ?? initialConfig.autoRepairEveryone,
       };
+
+      if (config.intervalMinutes !== currentIntervalMinutes) {
+        arm(config.intervalMinutes);
+      }
 
       if (!config.enabled) {
         running = false;
@@ -264,13 +278,16 @@ export function startSyncScheduler(
   };
 
   // Initial run after 30 seconds
-  setTimeout(run, 30_000);
+  initialTimer = setTimeout(run, 30_000);
 
   // Schedule periodic runs
-  timer = setInterval(run, initialConfig.intervalMinutes * 60 * 1000);
+  arm(initialConfig.intervalMinutes);
 
   return {
+    reconfigure: arm,
     stop: () => {
+      stopped = true;
+      if (initialTimer) clearTimeout(initialTimer);
       if (timer) clearInterval(timer);
     },
   };

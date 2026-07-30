@@ -134,7 +134,7 @@ describe('PUT /api/settings', () => {
       },
     });
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
     expect(mock._query.upsert).not.toHaveBeenCalled();
   });
 

@@ -671,6 +671,13 @@ export async function DELETE(req: NextRequest) {
     'id, name, active',
   );
 
+  if (!before) {
+    return NextResponse.json(
+      { success: false, error: 'Product not found' },
+      { status: 404 },
+    );
+  }
+
   // Soft delete — deactivate instead of hard delete to preserve entitlements
   const { error } = await supabase
     .from('products')
@@ -685,35 +692,29 @@ export async function DELETE(req: NextRequest) {
   // Notify bot so deactivated product is no longer purchasable
   await notifyBot('commerce', { product_deactivated: id });
 
-  // Only when the row was actually found in this guild. The update above
-  // matches zero rows for an unknown id and still reports success (see the
-  // route's missing 404), and a change history entry for a product that was
-  // never touched would be worse than none.
-  if (before) {
-    // This is an UPDATE, not a delete — the row still exists with active=false,
-    // so restoring the prior flag is a real reversal, not a resurrection.
-    await recordAdminChange(
-      {
-        guildId,
-        actorId: auth.ctx.discordId,
-        action: 'store.product_deactivated',
-        targetType: 'store product',
-        targetId: id,
-        description:
-          `Deactivated the store product "${(before.name as string | null) ?? id}" — `
-          + 'customers can no longer buy it. Everyone who already bought it keeps their access.',
-        before: { active: before.active },
-        after: { active: false },
-        blastRadius: 'high',
-        undo: undoByRestoring(
-          'products',
-          { id, guild_id: guildId },
-          { active: before.active },
-        ),
-      },
-      supabase,
-    );
-  }
+  // This is an UPDATE, not a delete — the row still exists with active=false,
+  // so restoring the prior flag is a real reversal, not a resurrection.
+  await recordAdminChange(
+    {
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'store.product_deactivated',
+      targetType: 'store product',
+      targetId: id,
+      description:
+        `Deactivated the store product "${(before.name as string | null) ?? id}" — `
+        + 'customers can no longer buy it. Everyone who already bought it keeps their access.',
+      before: { active: before.active },
+      after: { active: false },
+      blastRadius: 'high',
+      undo: undoByRestoring(
+        'products',
+        { id, guild_id: guildId },
+        { active: before.active },
+      ),
+    },
+    supabase,
+  );
 
   return NextResponse.json({ success: true });
 }

@@ -460,4 +460,19 @@ describe('startSyncScheduler', () => {
     // (If timer was cleared, no more callbacks)
     expect(scheduler).toBeDefined();
   });
+
+  it('rearms the live interval without a bot restart', () => {
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const scheduler = startSyncScheduler(
+      makeGuild() as any,
+      { from: vi.fn(() => supaChain()) } as any,
+      makeEventBus() as any,
+      makeConfig({ intervalMinutes: 60 }),
+    );
+
+    scheduler.reconfigure(5);
+
+    expect(intervalSpy).toHaveBeenLastCalledWith(expect.any(Function), 5 * 60 * 1000);
+    scheduler.stop();
+  });
 });

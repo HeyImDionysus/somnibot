@@ -395,9 +395,11 @@ export class PetsManager {
     if (pet.hunger >= 100) { await interaction.reply({ content: '🍖 Your pet is already full!', ephemeral: true }); return; }
 
     // Check balance before deducting
-    const { data: feedWallet, error: feedWalletErr } = await this.supabase
-      .from('economy_wallets').select('wallet')
-      .eq('guild_id', guildId).eq('user_id', interaction.user.id).single();
+    const { data: feedWallet, error: feedWalletErr } = cost > 0
+      ? await this.supabase
+          .from('economy_wallets').select('wallet')
+          .eq('guild_id', guildId).eq('user_id', interaction.user.id).single()
+      : { data: { wallet: 0 }, error: null };
 
     // A FAILED wallet read is not an empty wallet — never fabricate "you need
     // N coins" from a read the bot could not perform.
@@ -411,9 +413,11 @@ export class PetsManager {
       return;
     }
 
-    const { error: feedDebitErr } = await this.supabase.rpc('economy_subtract_balance', {
-      p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-    });
+    const { error: feedDebitErr } = cost > 0
+      ? await this.supabase.rpc('economy_subtract_balance', {
+          p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
+        })
+      : { error: null };
     if (feedDebitErr) {
       // Insufficient balance is the only honest "you need N coins" case; any
       // other failure debited nothing and degrades honestly.
@@ -502,9 +506,11 @@ export class PetsManager {
     if (pet.level >= MAX_LEVEL) { await interaction.reply({ content: '🎓 Your pet is at max level! Try `/pet prestige`.', ephemeral: true }); return; }
 
     // Check balance before deducting
-    const { data: trainWallet, error: trainWalletErr } = await this.supabase
-      .from('economy_wallets').select('wallet')
-      .eq('guild_id', guildId).eq('user_id', interaction.user.id).single();
+    const { data: trainWallet, error: trainWalletErr } = cost > 0
+      ? await this.supabase
+          .from('economy_wallets').select('wallet')
+          .eq('guild_id', guildId).eq('user_id', interaction.user.id).single()
+      : { data: { wallet: 0 }, error: null };
 
     // A FAILED wallet read is not an empty wallet — never fabricate a balance verdict.
     if (trainWalletErr && trainWalletErr.code !== 'PGRST116') {
@@ -517,9 +523,11 @@ export class PetsManager {
       return;
     }
 
-    const { error: trainDebitErr } = await this.supabase.rpc('economy_subtract_balance', {
-      p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-    });
+    const { error: trainDebitErr } = cost > 0
+      ? await this.supabase.rpc('economy_subtract_balance', {
+          p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
+        })
+      : { error: null };
     if (trainDebitErr) {
       if (/insufficient/i.test(trainDebitErr.message ?? '')) {
         await interaction.reply({ content: `❌ Payment failed — you need **${cost.toLocaleString()}** coins.`, ephemeral: true });
@@ -539,9 +547,11 @@ export class PetsManager {
     const tr = trainResult as { success: boolean; new_xp: number; new_level: number; leveled_up: boolean; new_energy: number; stat_bonus: string | null } | null;
     if (!tr?.success) {
       // Refund since training failed
-      await Promise.resolve(this.supabase.rpc('economy_add_balance', {
-        p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-      })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
+      if (cost > 0) {
+        await Promise.resolve(this.supabase.rpc('economy_add_balance', {
+          p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
+        })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
+      }
       await interaction.reply({ content: '❌ Training failed — your coins have been refunded.', ephemeral: true });
       return;
     }

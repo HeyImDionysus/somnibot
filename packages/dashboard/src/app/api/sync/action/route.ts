@@ -220,11 +220,13 @@ export async function POST(req: NextRequest) {
 
   // For 'ignore' — just remove from drift list
   if (body.action === 'ignore') {
-    const { data: current } = await supabase
+    const { data: current, error: currentError } = await supabase
       .from('guild_desired_state')
       .select('drift_details')
       .eq('guild_id', guildId)
       .maybeSingle();
+
+    if (currentError) return dbError(currentError, 'sync/action');
 
     const items = Array.isArray(current?.drift_details) ? current.drift_details : [];
     const filtered = items.filter(
@@ -235,9 +237,13 @@ export async function POST(req: NextRequest) {
         ),
     );
 
-    // NOTE: this update's error is still swallowed (pre-existing — the route
-    // returns success either way). It is captured here only so a change that
-    // did not land is never recorded as if it had.
+    if (filtered.length === items.length) {
+      return NextResponse.json(
+        { success: false, error: 'Drift item not found' },
+        { status: 404 },
+      );
+    }
+
     const { error: ignoreError } = await supabase
       .from('guild_desired_state')
       .update({
@@ -246,23 +252,23 @@ export async function POST(req: NextRequest) {
       })
       .eq('guild_id', guildId);
 
-    if (!ignoreError) {
-      await recordAdminChange({
-        guildId,
-        actorId: discordId,
-        action: 'sync.drift_ignored',
-        targetType: 'configuration drift item',
-        targetId: body.driftItem.entityDiscordId ?? null,
-        description:
-          `Dismissed the drift reported on the "${body.driftItem.entityName}" `
-          + `${body.driftItem.entityType} without changing Discord`,
-        before: { drift_count: items.length },
-        after: { drift_count: filtered.length },
-        blastRadius: 'low',
-        undoReason:
-          'the drift list is rebuilt by the next sync scan — run a sync to bring the item back if it still differs',
-      }, supabase);
-    }
+    if (ignoreError) return dbError(ignoreError, 'sync/action');
+
+    await recordAdminChange({
+      guildId,
+      actorId: discordId,
+      action: 'sync.drift_ignored',
+      targetType: 'configuration drift item',
+      targetId: body.driftItem.entityDiscordId ?? null,
+      description:
+        `Dismissed the drift reported on the "${body.driftItem.entityName}" `
+        + `${body.driftItem.entityType} without changing Discord`,
+      before: { drift_count: items.length },
+      after: { drift_count: filtered.length },
+      blastRadius: 'low',
+      undoReason:
+        'the drift list is rebuilt by the next sync scan — run a sync to bring the item back if it still differs',
+    }, supabase);
 
     return NextResponse.json({ success: true });
   }

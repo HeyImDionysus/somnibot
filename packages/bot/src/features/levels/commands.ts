@@ -157,11 +157,18 @@ async function handleRankCustomize(
   const opacity = interaction.options.getNumber('opacity');
 
   if (reset) {
-    await client.supabase
+    const { error } = await client.supabase
       .from('member_rank_settings')
       .delete()
       .eq('guild_id', guildId)
       .eq('member_id', userId);
+
+    if (error) {
+      await interaction.editReply({
+        content: '⚠️ Rank card settings could not be reset. Nothing was changed; please try again.',
+      });
+      return;
+    }
 
     await interaction.editReply({ content: '✅ Rank card settings reset to server defaults.' });
     return;
@@ -191,9 +198,16 @@ async function handleRankCustomize(
     if (progressNum !== undefined) updates.progress_bar_color = progressNum;
     if (opacity !== null) updates.overlay_opacity = opacity;
 
-    await client.supabase
+    const { error } = await client.supabase
       .from('member_rank_settings')
       .upsert(updates, { onConflict: 'guild_id,member_id' });
+
+    if (error) {
+      await interaction.editReply({
+        content: '⚠️ Rank card customization could not be saved. Nothing was changed; please try again.',
+      });
+      return;
+    }
 
     await interaction.editReply({ content: '✅ Rank card customization saved! Use `/rank view` to see it.' });
   } else {

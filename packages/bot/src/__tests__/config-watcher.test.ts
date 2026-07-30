@@ -199,6 +199,31 @@ describe('ConfigWatcher', () => {
     expect(mocks.invalidateAlertChannelCache).toHaveBeenCalledWith('guild-1');
   });
 
+  it('rearms the sync scheduler when the dashboard changes its interval', async () => {
+    const reconfigure = vi.fn();
+    const localBus: any = { on: vi.fn(), off: vi.fn(), emit: vi.fn() };
+    const localWatcher = new ConfigWatcher(
+      makeGuild(),
+      makeSupa() as any,
+      localBus,
+      makeValkey(),
+      reconfigure,
+    );
+    localWatcher.start();
+    const handler = localBus.on.mock.calls[0][1];
+
+    await handler({
+      guildId: 'guild-1',
+      data: {
+        section: 'settings',
+        changedBy: 'owner',
+        changes: { sync_interval_minutes: 5 },
+      },
+    });
+
+    expect(reconfigure).toHaveBeenCalledWith(5);
+  });
+
   it('drops the alert-channel cache on section=all (full reload path)', async () => {
     await configHandler({ guildId: 'guild-1', data: { section: 'all', changedBy: 'user1' } });
     expect(mocks.invalidateAlertChannelCache).toHaveBeenCalledWith('guild-1');

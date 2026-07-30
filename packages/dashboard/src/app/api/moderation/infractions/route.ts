@@ -150,7 +150,12 @@ export async function POST(req: NextRequest) {
       'a newly recorded infraction cannot be removed by an undo — pardon it from the Moderation page instead',
   }, supabase);
 
-  return NextResponse.json({ success: true, data });
+  return NextResponse.json({
+    success: true,
+    data,
+    execution: 'history_only',
+    message: 'Infraction recorded in moderation history; no Discord action was executed.',
+  });
 }
 
 export async function PATCH(req: NextRequest) {

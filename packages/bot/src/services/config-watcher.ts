@@ -70,6 +70,7 @@ export class ConfigWatcher {
     private supabase: SupabaseClient,
     private eventBus: PlatformEventBus,
     private valkey: Valkey,
+    private onSyncIntervalChange?: (intervalMinutes: number) => void,
   ) {}
 
   /**
@@ -80,6 +81,15 @@ export class ConfigWatcher {
       if (event.guildId !== this.guild.id) return;
 
       const section = event.data.section;
+      const changedInterval = event.data.changes?.sync_interval_minutes;
+      if (
+        (section === 'settings' || section === 'all')
+        && typeof changedInterval === 'number'
+        && Number.isFinite(changedInterval)
+        && changedInterval > 0
+      ) {
+        this.onSyncIntervalChange?.(changedInterval);
+      }
       const now = Date.now();
 
       // Per-section cooldown to prevent rapid reloads of the SAME section,

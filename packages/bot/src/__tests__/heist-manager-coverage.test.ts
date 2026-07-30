@@ -175,6 +175,30 @@ describe('HeistManager', () => {
       );
     });
 
+    it('zero cooldown and entry fee bypass invalid Valkey and debit calls', async () => {
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({
+            data: {
+              ...defaultConfig,
+              economy_heist_cooldown_seconds: 0,
+              economy_heist_entry_fee: 0,
+            },
+            error: null,
+          });
+        }
+        if (table === 'economy_heists') return chainBuilder({ data: null, error: null });
+        if (table === 'economy_wallets') return chainBuilder({ data: { wallet: 0 }, error: null });
+        return chainBuilder();
+      });
+      const interaction = makeInteraction();
+
+      await mgr.startHeist(interaction as any);
+
+      expect(valkey.set).not.toHaveBeenCalledWith('heist:cd:g1', '1', 'EX', 0, 'NX');
+      expect(supabase.rpc).not.toHaveBeenCalledWith('economy_subtract_balance', expect.anything());
+    });
+
     it('rejects on DB cooldown fallback', async () => {
       supabase.from.mockImplementation((table: string) => {
         if (table === 'guild_config') {

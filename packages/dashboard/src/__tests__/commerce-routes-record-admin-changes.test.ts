@@ -370,8 +370,9 @@ describe('/api/store/products', () => {
     mockClient(['products']);
     const { DELETE } = await import('@/app/api/store/products/route');
 
-    await DELETE(jsonRequest(`http://x/api/store/products?id=${PRODUCT_ID}`, 'DELETE'));
+    const res = await DELETE(jsonRequest(`http://x/api/store/products?id=${PRODUCT_ID}`, 'DELETE'));
 
+    expect(res.status).toBe(404);
     expect(recordAdminChange).not.toHaveBeenCalled();
   });
 });
@@ -1100,8 +1101,9 @@ describe('/api/reconciliation', () => {
     client.chains.bot_action_queue.result = { data: null, error: { message: 'boom' } };
     const { POST } = await import('@/app/api/reconciliation/route');
 
-    await POST(jsonRequest('http://x/api/reconciliation', 'POST'));
+    const res = await POST(jsonRequest('http://x/api/reconciliation', 'POST'));
 
+    expect(res.status).toBeGreaterThanOrEqual(500);
     expect(recordAdminChange).not.toHaveBeenCalled();
   });
 });

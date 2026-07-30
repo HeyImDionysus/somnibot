@@ -48,7 +48,10 @@ vi.mock('../features/giveaways/giveaway-renderer.js', () => ({
   renderGiveaway: vi.fn(() => ({})),
 }));
 
-import { GiveawayManager } from '../features/giveaways/giveaway-manager.js';
+import {
+  GiveawayManager,
+  buildGiveawayEntryLabel,
+} from '../features/giveaways/giveaway-manager.js';
 
 function makeChain(result: any = { data: null, error: null }) {
   const chain: any = {};
@@ -130,6 +133,17 @@ function makeDiscordClient() {
 }
 
 describe('GiveawayManager', () => {
+  it('keeps the configured entry label and count suffix within Discord limits', () => {
+    const label = buildGiveawayEntryLabel('x'.repeat(80), 12_345, false);
+
+    expect(label).toHaveLength(80);
+    expect(label).toMatch(/\(12345\)$/);
+  });
+
+  it('uses the paused label while retaining the entry count', () => {
+    expect(buildGiveawayEntryLabel('Enter Giveaway', 12_345, true)).toBe('Paused (12345)');
+  });
+
   it('instantiates without errors', () => {
     const manager = new GiveawayManager(makeGuild() as any, makeSupa() as any, {} as any, { emit: vi.fn() } as any);
     expect(manager).toBeDefined();

@@ -78,6 +78,7 @@ describe.skipIf(!reachable)('LIVE: /api/levels (real-session harness)', () => {
       voice_xp_per_interval: 12,
       voice_xp_interval_minutes: 5,
       xp_multiplier_mode: 'highest',
+      rank_card_accent_color: 0x12ABEF,
       no_xp_role_id: NO_XP_ROLE,
     };
     const res = await PUT(jsonReq('PUT', cfg));
@@ -89,7 +90,7 @@ describe.skipIf(!reachable)('LIVE: /api/levels (real-session harness)', () => {
     // packages/bot/.../xp-tracker.ts loadLevelConfig selects.
     const { data } = await admin
       .from('guild_config')
-      .select('levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, no_xp_role_id')
+      .select('levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, rank_card_accent_color, no_xp_role_id')
       .eq('guild_id', guildId)
       .maybeSingle();
     expect(data).toMatchObject({
@@ -99,6 +100,7 @@ describe.skipIf(!reachable)('LIVE: /api/levels (real-session harness)', () => {
       xp_cooldown_seconds: 45,
       voice_xp_enabled: true,
       voice_xp_per_interval: 12,
+      rank_card_accent_color: 0x12ABEF,
       no_xp_role_id: NO_XP_ROLE,
     });
   });
