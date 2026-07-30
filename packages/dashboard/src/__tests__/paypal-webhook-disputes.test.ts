@@ -590,4 +590,57 @@ describe('route dispatch', () => {
       guild_id: GUILD_ID,
     });
   });
+
+  it('keeps a partially matched multi-transaction dispute unattributed and fails it', async () => {
+    const unmatchedCaptureId = 'CAPTURE-NOT-LOCAL';
+    resolvers['payments.select'] = (op) => {
+      const paymentId = filterArgs(op, 'eq')
+        .find((args) => args[0] === 'paypal_payment_id')?.[1];
+      return {
+        data: paymentId === CAPTURE_ID ? { guild_id: GUILD_ID } : null,
+        error: null,
+      };
+    };
+    rpcResolvers.commerce_apply_paypal_dispute = () => ({
+      data: null,
+      error: { message: 'PayPal dispute identity set is incomplete' },
+    });
+
+    const req = new Request('http://localhost/api/paypal/webhook', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'paypal-auth-algo': 'SHA256withRSA',
+        'paypal-cert-url': 'https://example.com/cert',
+        'paypal-transmission-id': 'EVT-DISPUTE-PARTIAL',
+        'paypal-transmission-sig': 'sig-1',
+        'paypal-transmission-time': new Date().toISOString(),
+      },
+      body: JSON.stringify({
+        id: 'EVT-DISPUTE-PARTIAL',
+        event_type: 'CUSTOMER.DISPUTE.CREATED',
+        resource: disputeResource({
+          disputed_transactions: [
+            { seller_transaction_id: CAPTURE_ID },
+            { seller_transaction_id: unmatchedCaptureId },
+          ],
+        }),
+      }),
+    });
+
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    let res: Response;
+    try {
+      res = await POST(req as never);
+    } finally {
+      global.fetch = originalFetch;
+    }
+
+    expect(res.status).toBe(500);
+    expect(opsFor('webhook_events', 'upsert')[0]!.payload)
+      .not.toHaveProperty('guild_id');
+  });
 });

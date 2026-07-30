@@ -51,6 +51,8 @@ type Resolver = (op: RecordedOp) => { data: unknown; error: unknown; count?: num
 let ops: RecordedOp[] = [];
 let resolvers: Record<string, Resolver> = {};
 let soleOperatorRpcResult: { data: unknown; error: unknown };
+let rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+let replayClaimResult: { data: unknown; error: unknown };
 
 const CHAIN_METHODS = [
   'select', 'eq', 'is', 'in', 'neq', 'gt', 'lt', 'gte', 'lte',
@@ -100,10 +102,21 @@ function makeSupabase() {
 
   return {
     from: vi.fn(from),
-    rpc: vi.fn().mockImplementation(async (name: string) =>
-      name === 'webhooks_is_sole_instance_operator'
-        ? soleOperatorRpcResult
-        : { data: null, error: null }),
+    rpc: vi.fn().mockImplementation(
+      async (name: string, args: Record<string, unknown>) => {
+        rpcCalls.push({ name, args });
+        if (name === 'webhooks_is_sole_instance_operator') {
+          return soleOperatorRpcResult;
+        }
+        if (name === 'webhooks_list_scoped') {
+          return { data: { data: [], total: 0 }, error: null };
+        }
+        if (name === 'webhooks_claim_scoped_replay') {
+          return replayClaimResult;
+        }
+        return { data: null, error: null };
+      },
+    ),
   };
 }
 
@@ -131,7 +144,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   ops = [];
   resolvers = {};
+  rpcCalls = [];
   soleOperatorRpcResult = { data: null, error: null };
+  replayClaimResult = { data: [{ outcome: 'not_found', event_data: null }], error: null };
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(makeSupabase());
   (requireGuildOwner as ReturnType<typeof vi.fn>).mockResolvedValue({
     ok: true,
@@ -226,10 +241,13 @@ describe('GET /api/webhooks scoping', () => {
     const res = await GET(listRequest());
     expect(res.status).toBe(200);
 
-    const query = opsFor('webhook_events', 'select')[0]!;
-    expect(filterMethods(query).join(' ')).toContain(
-      `or(["guild_id.eq.${GUILD_ID},guild_id.is.null"])`,
-    );
+    expect(rpcCalls).toContainEqual({
+      name: 'webhooks_list_scoped',
+      args: expect.objectContaining({
+        p_guild_id: GUILD_ID,
+        p_discord_id: OWNER_DISCORD_ID,
+      }),
+    });
   });
 
   it('falls back to strict guild scoping when another operator exists', async () => {
@@ -238,10 +256,8 @@ describe('GET /api/webhooks scoping', () => {
 
     await GET(listRequest());
 
-    const query = opsFor('webhook_events', 'select')[0]!;
-    const applied = filterMethods(query).join(' ');
-    expect(applied).toContain(`eq(["guild_id","${GUILD_ID}"])`);
-    expect(applied).not.toContain('guild_id.is.null');
+    expect(rpcCalls.filter((call) => call.name === 'webhooks_list_scoped'))
+      .toHaveLength(1);
   });
 
   it('never widens scope to another guild', async () => {
@@ -250,8 +266,8 @@ describe('GET /api/webhooks scoping', () => {
 
     await GET(listRequest());
 
-    const applied = filterMethods(opsFor('webhook_events', 'select')[0]!).join(' ');
-    expect(applied).not.toContain(OTHER_GUILD_ID);
+    const call = rpcCalls.find(({ name }) => name === 'webhooks_list_scoped');
+    expect(JSON.stringify(call?.args)).not.toContain(OTHER_GUILD_ID);
   });
 });
 
@@ -261,8 +277,18 @@ describe('POST /api/webhooks/[id]/replay scoping', () => {
   const params = (id: string) => ({ params: Promise.resolve({ id }) });
 
   function withEvent(row: Record<string, unknown> | null) {
-    resolvers['webhook_events.select'] = () => ({ data: row, error: null });
-    resolvers['webhook_events.update'] = () => ({ data: { event_id: row?.event_id }, error: null });
+    const rowGuildId = row?.guild_id ?? null;
+    const allowed = row != null && (
+      rowGuildId === GUILD_ID
+      || (rowGuildId === null && soleOperatorRpcResult.data === true)
+    );
+    replayClaimResult = {
+      data: [{
+        outcome: allowed ? 'claimed' : 'not_found',
+        event_data: allowed ? row : null,
+      }],
+      error: null,
+    };
   }
 
   it('replays an unattributed event for the sole instance operator', async () => {
@@ -286,7 +312,7 @@ describe('POST /api/webhooks/[id]/replay scoping', () => {
     );
   });
 
-  it('claims the unattributed row with IS NULL, not a never-matching equality', async () => {
+  it('claims the unattributed row through the atomic scoped RPC', async () => {
     withGuilds([OWNER_DISCORD_ID]);
     withEvent({
       event_id: 'EVT-ORPHAN-2',
@@ -299,8 +325,16 @@ describe('POST /api/webhooks/[id]/replay scoping', () => {
 
     await REPLAY(new Request('http://localhost') as never, params('EVT-ORPHAN-2'));
 
-    const claim = opsFor('webhook_events', 'update')[0]!;
-    expect(filterMethods(claim).join(' ')).toContain('is(["guild_id",null])');
+    expect(rpcCalls).toContainEqual({
+      name: 'webhooks_claim_scoped_replay',
+      args: {
+        p_event_id: 'EVT-ORPHAN-2',
+        p_guild_id: GUILD_ID,
+        p_discord_id: OWNER_DISCORD_ID,
+        p_stale_seconds: 300,
+      },
+    });
+    expect(opsFor('webhook_events', 'update')).toHaveLength(0);
   });
 
   it('404s an unattributed event when the instance has another operator', async () => {
@@ -352,8 +386,8 @@ describe('POST /api/webhooks/[id]/replay scoping', () => {
     const res = await REPLAY(new Request('http://localhost') as never, params('EVT-MINE'));
 
     expect(res.status).toBe(200);
-    const claim = opsFor('webhook_events', 'update')[0]!;
-    expect(filterMethods(claim).join(' ')).toContain(`eq(["guild_id","${GUILD_ID}"])`);
+    expect(rpcCalls.some(({ name }) => name === 'webhooks_claim_scoped_replay'))
+      .toBe(true);
   });
 
   it('404s a genuinely missing event without probing guild scope', async () => {
@@ -363,7 +397,8 @@ describe('POST /api/webhooks/[id]/replay scoping', () => {
     const res = await REPLAY(new Request('http://localhost') as never, params('EVT-NOPE'));
 
     expect(res.status).toBe(404);
-    expect(opsFor('guild')).toHaveLength(0);
+    expect(rpcCalls.some(({ name }) => name === 'webhooks_is_sole_instance_operator'))
+      .toBe(false);
   });
 
   it('raises an operator alert when the replay itself fails', async () => {

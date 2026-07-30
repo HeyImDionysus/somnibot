@@ -12,7 +12,6 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createHmac } from 'crypto';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
-import { isSoleInstanceOperator, mayAccessWebhookRow } from '../../scope';
 import { raiseWebhookProcessingErrorAlert } from '../../../paypal/webhook/alerts';
 import { recordAdminChange } from '@/lib/admin-changes';
 
@@ -71,37 +70,52 @@ export async function POST(
 
   const supabase = createAdminSupabase();
 
-  // Fetch by primary key, then authorize in code. Guild scoping is still
-  // absolute for attributed rows — another guild's event is never replayable —
-  // but an UNATTRIBUTED row (guild_id NULL) could not be replayed at all under
-  // the old `.eq('guild_id', …)` filter, because NULL never equals anything.
-  // Those are precisely the failed-capture rows an operator most needs to
-  // re-drive. See ../../scope.ts for who may touch them and why.
-  //
-  // Unauthorized rows return the same 404 as missing ones, so this cannot be
-  // used to probe which event ids exist in another guild.
-  const { data: event, error: fetchError } = await supabase
-    .from('webhook_events')
-    .select('*')
-    .eq('event_id', id)
-    .maybeSingle();
-
-  const eventGuildId = (event?.guild_id ?? null) as string | null;
-  const isUnattributed = event != null && eventGuildId === null;
-  const soleOperator = isUnattributed
-    ? await isSoleInstanceOperator(supabase, discordId)
-    : false;
-
-  if (
-    fetchError
-    || !event
-    || !mayAccessWebhookRow(eventGuildId, guildId, soleOperator)
-  ) {
+  // The database holds guild ownership stable while it authorizes and claims
+  // the row, so a newly-added operator cannot race an unattributed replay.
+  const { data: claimRows, error: claimError } = await supabase.rpc(
+    'webhooks_claim_scoped_replay',
+    {
+      p_event_id: id,
+      p_guild_id: guildId,
+      p_discord_id: discordId,
+      p_stale_seconds: WEBHOOK_REPLAY_PROCESSING_STALE_MS / 1000,
+    },
+  );
+  if (claimError) {
+    return NextResponse.json(
+      { success: false, error: 'Failed to claim webhook replay' },
+      { status: 500 },
+    );
+  }
+  const claim = Array.isArray(claimRows) ? claimRows[0] : claimRows;
+  if (!claim || claim.outcome === 'not_found') {
     return NextResponse.json(
       { success: false, error: 'Webhook event not found' },
       { status: 404 },
     );
   }
+  if (claim.outcome === 'processing') {
+    return NextResponse.json(
+      { success: false, error: 'Webhook replay already processing' },
+      { status: 409 },
+    );
+  }
+  if (
+    claim.outcome !== 'claimed'
+    || !claim.event_data
+    || typeof claim.event_data !== 'object'
+    || Array.isArray(claim.event_data)
+  ) {
+    return NextResponse.json(
+      { success: false, error: 'Failed to claim webhook replay' },
+      { status: 500 },
+    );
+  }
+  const event = claim.event_data as Record<string, unknown>;
+  const eventGuildId = (event.guild_id ?? null) as string | null;
+  const eventType = typeof event.event_type === 'string'
+    ? event.event_type
+    : 'unknown';
 
   // Determine base URL for internal replay
   const baseUrl = process.env.NEXT_PUBLIC_APP_URL
@@ -109,67 +123,9 @@ export async function POST(
     || 'http://localhost:3000';
 
   try {
-    const now = new Date();
-    const nowIso = now.toISOString();
-    const replayCount = (event.replay_count ?? 0) + 1;
-    const claimUpdate = {
-      result: null,
-      error_details: null,
-      replayed_at: nowIso,
-      replay_count: replayCount,
-      processed_at: nowIso,
-    };
-
-    // event_id is the primary key, so the guild predicate is defence in depth:
-    // it makes the claim fail rather than cross guilds if the row's
-    // attribution changed between the read above and this write. Unattributed
-    // rows keep the same guarantee via IS NULL — `.eq()` would never match.
-    let claimQuery = supabase
-      .from('webhook_events')
-      .update(claimUpdate)
-      .eq('event_id', id);
-
-    claimQuery = isUnattributed
-      ? claimQuery.is('guild_id', null)
-      : claimQuery.eq('guild_id', guildId);
-
-    if (event.result == null) {
-      const processedAt = Date.parse(String(event.processed_at ?? ''));
-      const isStale = Number.isFinite(processedAt) &&
-        Date.now() - processedAt >= WEBHOOK_REPLAY_PROCESSING_STALE_MS;
-      if (!isStale) {
-        return NextResponse.json(
-          { success: false, error: 'Webhook replay already processing' },
-          { status: 409 },
-        );
-      }
-      claimQuery = claimQuery
-        .is('result', null)
-        .lt(
-          'processed_at',
-          new Date(Date.now() - WEBHOOK_REPLAY_PROCESSING_STALE_MS).toISOString(),
-        );
-    } else {
-      claimQuery = claimQuery.eq('result', event.result);
-    }
-
-    const { data: claimed, error: claimError } = await claimQuery
-      .select('event_id')
-      .maybeSingle();
-
-    if (claimError) {
-      return NextResponse.json(
-        { success: false, error: 'Failed to claim webhook replay' },
-        { status: 500 },
-      );
-    }
-
-    if (!claimed) {
-      return NextResponse.json(
-        { success: false, error: 'Webhook replay already processing' },
-        { status: 409 },
-      );
-    }
+    const replayCount = (typeof event.replay_count === 'number'
+      ? event.replay_count
+      : 0) + 1;
 
     // Re-post to internal webhook endpoint with replay secret
     const headers: Record<string, string> = {
@@ -218,7 +174,7 @@ export async function POST(
       // replay that silently fails is not another dead end.
       await raiseWebhookProcessingErrorAlert(supabase, {
         eventId: id,
-        eventType: event.event_type ?? 'unknown',
+        eventType,
         guildId: eventGuildId,
         reason: `Replay failed: HTTP ${replayRes.status}`,
         requiresManualReplay: true,
@@ -236,7 +192,7 @@ export async function POST(
           event_type: 'webhook.replayed',
           event_data: {
             eventId: id,
-            eventType: event.event_type ?? 'unknown',
+            eventType,
             replayedBy: auth.ctx.discordId,
             replayCount,
           },
@@ -286,7 +242,7 @@ export async function POST(
 
     await raiseWebhookProcessingErrorAlert(supabase, {
       eventId: id,
-      eventType: event.event_type ?? 'unknown',
+      eventType,
       guildId: eventGuildId,
       reason: `Replay exception: ${String(err)}`,
       requiresManualReplay: true,

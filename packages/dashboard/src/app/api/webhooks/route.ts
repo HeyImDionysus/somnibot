@@ -8,7 +8,6 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
-import { buildWebhookScopeFilter, isSoleInstanceOperator } from './scope';
 
 const DEFAULT_PAGE_SIZE = 25;
 
@@ -28,44 +27,32 @@ export async function GET(req: NextRequest) {
   const result = searchParams.get('result');
   const eventType = searchParams.get('eventType');
 
-  // Finding 2: events the route could not attribute to a guild (a failed
-  // capture, or a capture whose custom_id was malformed) are stored with a
-  // NULL guild_id, and `.eq('guild_id', …)` never matches NULL — so the money
-  // events that most need an operator were the ones hidden from them. They are
-  // surfaced only to a caller who owns the whole instance; see ./scope.ts for
-  // why that is the boundary.
-  const scopeFilter = buildWebhookScopeFilter(
-    guildId,
-    await isSoleInstanceOperator(supabase, discordId),
-  );
-
-  let query = supabase
-    .from('webhook_events')
-    .select('*', { count: 'exact' })
-    .order('processed_at', { ascending: false })
-    .limit(500);
-
-  query = scopeFilter ? query.or(scopeFilter) : query.eq('guild_id', guildId);
-
-  if (result) {
-    query = query.eq('result', result);
-  }
-  if (eventType) {
-    query = query.eq('event_type', eventType);
-  }
-
   const from = (page - 1) * pageSize;
-  query = query.range(from, from + pageSize - 1);
-
-  const { data, error, count } = await query;
+  // Authorization and the protected read happen in one database operation.
+  // The RPC holds a SHARE lock on guild ownership while it proves whether
+  // unattributed rows may be included, closing the owner-addition race.
+  const { data: scoped, error } = await supabase.rpc('webhooks_list_scoped', {
+    p_guild_id: guildId,
+    p_discord_id: discordId,
+    p_result: result,
+    p_event_type: eventType,
+    p_offset: from,
+    p_limit: pageSize,
+  });
 
   if (error) {
     return dbError(error, 'webhooks');
   }
 
+  const envelope = scoped && typeof scoped === 'object' && !Array.isArray(scoped)
+    ? scoped as { data?: unknown; total?: unknown }
+    : {};
+  const data = Array.isArray(envelope.data) ? envelope.data : [];
+  const count = typeof envelope.total === 'number' ? envelope.total : 0;
+
   return NextResponse.json({
     success: true,
-    data: data ?? [],
+    data,
     pagination: {
       page,
       pageSize,

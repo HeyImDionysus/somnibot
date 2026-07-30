@@ -149,4 +149,35 @@ describe('PayPal reconciliation scheduler failure visibility', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(mocks.run).toHaveBeenCalledTimes(2);
   });
+
+  it('retries a retriable failure after five minutes', async () => {
+    vi.useFakeTimers();
+    mocks.run.mockResolvedValue({
+      status: 'failed',
+      reason: 'PayPal transaction search returned 503',
+      retriable: true,
+    });
+
+    startPayPalReconcileScheduler();
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(mocks.run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(mocks.run).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not short-poll a non-retryable configuration skip', async () => {
+    vi.useFakeTimers();
+    mocks.run.mockResolvedValue({
+      status: 'skipped',
+      reason: 'PayPal credentials are not configured',
+    });
+
+    startPayPalReconcileScheduler();
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(mocks.run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(mocks.run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync((6 * 60 * 60 * 1000) - (5 * 60 * 1000));
+    expect(mocks.run).toHaveBeenCalledTimes(2);
+  });
 });

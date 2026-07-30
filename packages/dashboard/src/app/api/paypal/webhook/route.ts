@@ -181,6 +181,8 @@ async function lookupPaymentGuildId(
     .from('payments')
     .select('guild_id')
     .eq('paypal_payment_id', paymentId)
+    .eq('provider', 'paypal')
+    .in('paypal_resource_type', ['capture', 'sale'])
     .maybeSingle();
 
   if (error) {
@@ -276,7 +278,11 @@ async function resolveWebhookGuildId(
     const matchedGuildIds = new Set<string>();
     for (const transactionId of resolveDisputedTransactionIds(event.resource)) {
       const disputeGuildId = await lookupPaymentGuildId(supabase, transactionId);
-      if (disputeGuildId) matchedGuildIds.add(disputeGuildId);
+      // Every transaction in the signed dispute must resolve locally. A
+      // partial match stays unattributed rather than filing the full payload
+      // under the one tenant we happened to recognize.
+      if (!disputeGuildId) return null;
+      matchedGuildIds.add(disputeGuildId);
     }
     return matchedGuildIds.size === 1
       ? acceptExactGuild([...matchedGuildIds][0]!)

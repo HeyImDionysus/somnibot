@@ -52,7 +52,21 @@ const FIXTURE_SQL = `
     id UUID PRIMARY KEY,
     order_id UUID,
     guild_id TEXT,
-    paypal_payment_id TEXT
+    paypal_payment_id TEXT,
+    provider TEXT,
+    paypal_resource_type TEXT
+  );
+
+  CREATE TABLE ${FIXTURE_SCHEMA}.webhook_events (
+    event_id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    processed_at TIMESTAMPTZ,
+    payload JSONB NOT NULL,
+    result TEXT,
+    error_details TEXT,
+    guild_id TEXT,
+    replayed_at TIMESTAMPTZ,
+    replay_count INTEGER DEFAULT 0
   );
 
   GRANT SELECT, UPDATE ON ${FIXTURE_SCHEMA}.orders TO service_role;
@@ -84,10 +98,16 @@ const FIXTURE_SQL = `
     ('${ORDER_PENDING}', '${GUILD_A}', 'PAYPAL-ORDER-PENDING', 'pending');
 
   INSERT INTO ${FIXTURE_SCHEMA}.payments (
-    id, order_id, guild_id, paypal_payment_id
+    id, order_id, guild_id, paypal_payment_id, provider, paypal_resource_type
   ) VALUES
-    ('20000000-0000-4000-8000-000000000001', '${ORDER_A}', '${GUILD_A}', 'CAPTURE-A'),
-    ('20000000-0000-4000-8000-000000000002', '${ORDER_B}', '${GUILD_B}', 'CAPTURE-B');
+    (
+      '20000000-0000-4000-8000-000000000001',
+      '${ORDER_A}', '${GUILD_A}', 'CAPTURE-A', 'paypal', 'capture'
+    ),
+    (
+      '20000000-0000-4000-8000-000000000002',
+      '${ORDER_B}', '${GUILD_B}', 'CAPTURE-B', 'paypal', 'capture'
+    );
 `;
 
 describe('PayPal webhook tenant/status boundary migration', () => {
@@ -110,11 +130,17 @@ describe('PayPal webhook tenant/status boundary migration', () => {
 
   beforeEach(async () => {
     await sql.unsafe(`
+      DELETE FROM ${FIXTURE_SCHEMA}.webhook_events;
+      DELETE FROM ${FIXTURE_SCHEMA}.guild;
       UPDATE ${FIXTURE_SCHEMA}.orders
          SET status = CASE
            WHEN id = '${ORDER_PENDING}' THEN 'pending'
            ELSE 'completed'
          END
+      ;
+      UPDATE ${FIXTURE_SCHEMA}.payments
+         SET provider = 'paypal',
+             paypal_resource_type = 'capture'
     `);
   });
 
@@ -172,6 +198,59 @@ describe('PayPal webhook tenant/status boundary migration', () => {
       { id: ORDER_A, status: 'completed' },
       { id: ORDER_B, status: 'completed' },
     ]);
+  });
+
+  it('requires complete local PayPal identity coverage before changing an order', async () => {
+    await expect(sql.begin(async (transaction) => {
+      await transaction.unsafe('SET LOCAL ROLE service_role');
+      await transaction.unsafe(`
+        SELECT *
+          FROM ${FIXTURE_SCHEMA}.commerce_apply_paypal_dispute(
+            ARRAY['CAPTURE-A', 'CAPTURE-NOT-LOCAL']::TEXT[],
+            true
+          )
+      `);
+    })).rejects.toMatchObject({ code: '22023' });
+
+    await sql.unsafe(`
+      UPDATE ${FIXTURE_SCHEMA}.payments
+         SET provider = 'stripe'
+       WHERE paypal_payment_id = 'CAPTURE-A'
+    `);
+    await expect(sql.begin(async (transaction) => {
+      await transaction.unsafe('SET LOCAL ROLE service_role');
+      await transaction.unsafe(`
+        SELECT *
+          FROM ${FIXTURE_SCHEMA}.commerce_apply_paypal_dispute(
+            ARRAY['CAPTURE-A']::TEXT[],
+            true
+        )
+      `);
+    })).rejects.toMatchObject({ code: '22023' });
+
+    await sql.unsafe(`
+      UPDATE ${FIXTURE_SCHEMA}.payments
+         SET provider = 'paypal',
+             paypal_resource_type = NULL
+       WHERE paypal_payment_id = 'CAPTURE-A'
+    `);
+    await expect(sql.begin(async (transaction) => {
+      await transaction.unsafe('SET LOCAL ROLE service_role');
+      await transaction.unsafe(`
+        SELECT *
+          FROM ${FIXTURE_SCHEMA}.commerce_apply_paypal_dispute(
+            ARRAY['CAPTURE-A']::TEXT[],
+            true
+          )
+      `);
+    })).rejects.toMatchObject({ code: '22023' });
+
+    const order = await sql.unsafe<Array<{ status: string }>>(`
+      SELECT status
+        FROM ${FIXTURE_SCHEMA}.orders
+       WHERE id = '${ORDER_A}'
+    `);
+    expect(order).toEqual([{ status: 'completed' }]);
   });
 
   it('blocks a direct service_role cancellation but permits the exact denied-capture RPC', async () => {
@@ -260,6 +339,70 @@ describe('PayPal webhook tenant/status boundary migration', () => {
     expect(mixed).toEqual([{ result: false }]);
   });
 
+  it('lists and claims unattributed events only inside the atomic owner boundary', async () => {
+    await sql.unsafe(`
+      INSERT INTO ${FIXTURE_SCHEMA}.guild (id, owner_discord_id)
+      VALUES ('${GUILD_A}', '${GUILD_A}');
+      INSERT INTO ${FIXTURE_SCHEMA}.webhook_events (
+        event_id, event_type, processed_at, payload, result, guild_id
+      ) VALUES
+        ('EVT-MINE', 'CHECKOUT.ORDER.APPROVED', now(), '{}', 'error', '${GUILD_A}'),
+        ('EVT-ORPHAN', 'CHECKOUT.ORDER.APPROVED', now(), '{}', 'error', NULL),
+        ('EVT-OTHER', 'CHECKOUT.ORDER.APPROVED', now(), '{}', 'error', '${GUILD_B}');
+    `);
+
+    const listed = await sql.begin(async (transaction) => {
+      await transaction.unsafe('SET LOCAL ROLE service_role');
+      return transaction.unsafe<Array<{ result: { data: unknown[]; total: number } }>>(`
+        SELECT ${FIXTURE_SCHEMA}.webhooks_list_scoped(
+          '${GUILD_A}', '${GUILD_A}', NULL, NULL, 0, 50
+        ) AS result
+      `);
+    });
+    expect(listed[0]!.result.total).toBe(2);
+    expect(listed[0]!.result.data).toHaveLength(2);
+
+    const claimed = await sql.begin(async (transaction) => {
+      await transaction.unsafe('SET LOCAL ROLE service_role');
+      return transaction.unsafe<Array<{
+        outcome: string;
+        event_data: { event_id: string; replay_count: number };
+      }>>(`
+        SELECT *
+          FROM ${FIXTURE_SCHEMA}.webhooks_claim_scoped_replay(
+            'EVT-ORPHAN', '${GUILD_A}', '${GUILD_A}', 300
+          )
+      `);
+    });
+    expect(claimed).toEqual([{
+      outcome: 'claimed',
+      event_data: expect.objectContaining({
+        event_id: 'EVT-ORPHAN',
+        replay_count: 0,
+      }),
+    }]);
+
+    await sql.unsafe(`
+      INSERT INTO ${FIXTURE_SCHEMA}.guild (id, owner_discord_id)
+      VALUES ('${GUILD_B}', '${GUILD_B}');
+      INSERT INTO ${FIXTURE_SCHEMA}.webhook_events (
+        event_id, event_type, processed_at, payload, result, guild_id
+      ) VALUES (
+        'EVT-ORPHAN-2', 'CHECKOUT.ORDER.APPROVED', now(), '{}', 'error', NULL
+      )
+    `);
+    const denied = await sql.begin(async (transaction) => {
+      await transaction.unsafe('SET LOCAL ROLE service_role');
+      return transaction.unsafe<Array<{ outcome: string; event_data: unknown }>>(`
+        SELECT *
+          FROM ${FIXTURE_SCHEMA}.webhooks_claim_scoped_replay(
+            'EVT-ORPHAN-2', '${GUILD_A}', '${GUILD_A}', 300
+          )
+      `);
+    });
+    expect(denied).toEqual([{ outcome: 'not_found', event_data: null }]);
+  });
+
   it('exposes all three boundary functions only to service_role', async () => {
     const [privileges] = await sql.unsafe<Array<{
       anon_dispute: boolean;
@@ -271,6 +414,10 @@ describe('PayPal webhook tenant/status boundary migration', () => {
       anon_scope: boolean;
       authenticated_scope: boolean;
       service_scope: boolean;
+      service_list: boolean;
+      anon_list: boolean;
+      service_claim: boolean;
+      anon_claim: boolean;
     }>>(`
       SELECT
         has_function_privilege(
@@ -317,7 +464,27 @@ describe('PayPal webhook tenant/status boundary migration', () => {
           'service_role',
           '${FIXTURE_SCHEMA}.webhooks_is_sole_instance_operator(text)',
           'EXECUTE'
-        ) AS service_scope
+        ) AS service_scope,
+        has_function_privilege(
+          'service_role',
+          '${FIXTURE_SCHEMA}.webhooks_list_scoped(text,text,text,text,integer,integer)',
+          'EXECUTE'
+        ) AS service_list,
+        has_function_privilege(
+          'anon',
+          '${FIXTURE_SCHEMA}.webhooks_list_scoped(text,text,text,text,integer,integer)',
+          'EXECUTE'
+        ) AS anon_list,
+        has_function_privilege(
+          'service_role',
+          '${FIXTURE_SCHEMA}.webhooks_claim_scoped_replay(text,text,text,integer)',
+          'EXECUTE'
+        ) AS service_claim,
+        has_function_privilege(
+          'anon',
+          '${FIXTURE_SCHEMA}.webhooks_claim_scoped_replay(text,text,text,integer)',
+          'EXECUTE'
+        ) AS anon_claim
     `);
 
     expect(privileges).toEqual({
@@ -330,6 +497,10 @@ describe('PayPal webhook tenant/status boundary migration', () => {
       anon_scope: false,
       authenticated_scope: false,
       service_scope: true,
+      service_list: true,
+      anon_list: false,
+      service_claim: true,
+      anon_claim: false,
     });
   });
 });

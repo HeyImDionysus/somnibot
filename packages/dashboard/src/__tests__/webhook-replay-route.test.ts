@@ -57,7 +57,28 @@ function makeSupabase(
   const isCalls: Array<{ table: string; column: string; value: unknown }> = [];
   const ltCalls: Array<{ table: string; column: string; value: unknown }> = [];
   const tableCallCounts = new Map<string, number>();
+  const rpc = vi.fn(async (name: string) => {
+    if (name !== 'webhooks_claim_scoped_replay') {
+      return { data: null, error: null };
+    }
+    if (options.claimResult) {
+      return options.claimResult.data == null
+        ? { data: [{ outcome: 'processing', event_data: null }], error: options.claimResult.error }
+        : options.claimResult;
+    }
+    const processedAt = Date.parse(String(event.processed_at ?? ''));
+    const recentProcessing = event.result == null
+      && (!Number.isFinite(processedAt) || Date.now() - processedAt < 5 * 60 * 1000);
+    return {
+      data: [{
+        outcome: recentProcessing ? 'processing' : 'claimed',
+        event_data: recentProcessing ? null : event,
+      }],
+      error: null,
+    };
+  });
   const supabase = {
+    rpc,
     from: vi.fn((table: string) => {
       const count = tableCallCounts.get(table) ?? 0;
       tableCallCounts.set(table, count + 1);
@@ -220,7 +241,7 @@ describe('POST /api/webhooks/[id]/replay', () => {
   it('scopes replay lookup and claim to the owner guild', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
-    const { supabase, eqCalls, updates } = makeSupabase({
+    const { supabase, updates } = makeSupabase({
       event_id: 'EVT-GUILD-SCOPED',
       event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
       guild_id: 'guild-1',
@@ -239,20 +260,13 @@ describe('POST /api/webhooks/[id]/replay', () => {
     });
 
     expect(res.status).toBe(200);
-    expect(eqCalls).toEqual(
-      expect.arrayContaining([
-        { table: 'webhook_events', column: 'event_id', value: 'EVT-GUILD-SCOPED' },
-        { table: 'webhook_events', column: 'guild_id', value: 'guild-1' },
-        { table: 'webhook_events', column: 'result', value: 'error' },
-      ]),
-    );
-    expect(updates).toContainEqual(
-      expect.objectContaining({
-        result: null,
-        error_details: null,
-        replay_count: 1,
-      }),
-    );
+    expect(supabase.rpc).toHaveBeenCalledWith('webhooks_claim_scoped_replay', {
+      p_event_id: 'EVT-GUILD-SCOPED',
+      p_guild_id: 'guild-1',
+      p_discord_id: 'discord-1',
+      p_stale_seconds: 300,
+    });
+    expect(updates).toHaveLength(0);
   });
 
   it('rejects non-stale null-result replay rows as already processing', async () => {

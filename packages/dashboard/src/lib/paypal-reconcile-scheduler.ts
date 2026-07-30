@@ -83,7 +83,11 @@ export async function runScheduledPayPalReconciliationOnce(): Promise<
         visibilityError instanceof Error ? visibilityError.message : visibilityError,
       );
     }
-    return null;
+    return {
+      status: 'failed',
+      reason,
+      retriable: true,
+    };
   } finally {
     running = false;
   }
@@ -115,7 +119,13 @@ function scheduleNext(delayMs: number): void {
     let delayMs = INTERVAL_MS;
     try {
       const result = await runScheduledPayPalReconciliationOnce();
-      if (result?.status === 'skipped') delayMs = SKIPPED_RETRY_MS;
+      const isLeaseCollision = result?.status === 'skipped'
+        && (
+          result.reason === 'another reconciliation pass is running'
+          || result.reason === 'another reconciliation pass completed recently'
+        );
+      const isRetriableFailure = result?.status === 'failed' && result.retriable;
+      if (isLeaseCollision || isRetriableFailure) delayMs = SKIPPED_RETRY_MS;
     } finally {
       // Arm only after the attempt settles. A fixed startup-relative interval
       // can fire 5h55m after the initial +5m claim, hit the 6h DB lease, and
