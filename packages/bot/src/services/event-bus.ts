@@ -31,9 +31,12 @@ export class EventBusDispatchNotStartedError extends Error {
 
 export class PlatformEventBus {
   private emitter = new EventEmitter();
+  private backpressureExemptAnyListeners = new WeakSet<
+    (event: PlatformEvent) => void | Promise<void>
+  >();
   // V11 Audit M-5: Backpressure — track in-flight async handlers and
-  // drop events when the queue exceeds MAX_IN_FLIGHT to prevent OOM
-  // under sustained event bursts (e.g. raid join floods).
+  // drop non-exempt listeners when the queue exceeds MAX_IN_FLIGHT to prevent
+  // OOM under sustained event bursts (e.g. raid join floods).
   private inFlight = 0;
   private static readonly MAX_IN_FLIGHT = 500;
 
@@ -64,12 +67,30 @@ export class PlatformEventBus {
 
     log.info(`${type} in guild ${guildId}`);
 
+    // Audit ingestion is deliberately synchronous at this boundary: its
+    // listener only enqueues work into AuditService's finite,
+    // occurrence-deduped buffer. Dispatch it before the general backpressure
+    // gate so audit evidence is not silently discarded at MAX_IN_FLIGHT.
+    const anyListeners = this.emitter.rawListeners('*') as Array<
+      (e: PlatformEvent) => void | Promise<void>
+    >;
+    for (const listener of anyListeners) {
+      if (!this.backpressureExemptAnyListeners.has(listener)) continue;
+      try {
+        void Promise.resolve(listener(event as PlatformEvent)).catch((err: unknown) => {
+          log.error('Listener error on backpressure-exempt *:', err);
+        });
+      } catch (err) {
+        log.error('Listener error on backpressure-exempt *:', err);
+      }
+    }
+
     const typedListeners = this.emitter.rawListeners(type) as Array<
       (e: PlatformEvent) => void | Promise<void>
     >;
-    const wildcardListeners = this.emitter.rawListeners('*') as Array<
-      (e: PlatformEvent) => void | Promise<void>
-    >;
+    const wildcardListeners = anyListeners.filter(
+      (listener) => !this.backpressureExemptAnyListeners.has(listener),
+    );
     const listeners = [
       ...typedListeners.map((listener) => ({ eventName: type, listener })),
       ...wildcardListeners.map((listener) => ({ eventName: '*', listener })),
@@ -221,8 +242,24 @@ export class PlatformEventBus {
    */
   onAny(
     handler: (event: PlatformEvent) => void | Promise<void>,
+    options: { backpressureExempt?: boolean } = {},
   ): void {
     this.emitter.on('*', handler as (...args: unknown[]) => void);
+    if (options.backpressureExempt) {
+      this.backpressureExemptAnyListeners.add(handler);
+    }
+  }
+
+  /**
+   * Remove an all-events listener.
+   *
+   * Keep the WeakSet in lockstep with EventEmitter: otherwise a stopped
+   * AuditService can stay reachable through `*` and be invoked again after
+   * the guild is re-initialized.
+   */
+  offAny(handler: (event: PlatformEvent) => void | Promise<void>): void {
+    this.emitter.off('*', handler as (...args: unknown[]) => void);
+    this.backpressureExemptAnyListeners.delete(handler);
   }
 
   /**
@@ -233,6 +270,7 @@ export class PlatformEventBus {
     handler: (event: PlatformEvent<T, PlatformEventMap[T]>) => void | Promise<void>,
   ): void {
     this.emitter.off(type, handler as (...args: unknown[]) => void);
+    this.backpressureExemptAnyListeners.delete(handler as (event: PlatformEvent) => void | Promise<void>);
   }
 }
 

@@ -88,10 +88,44 @@ describe('shutdownBot', () => {
     expect(exit).toHaveBeenCalledWith(0);
   });
 
-  it('continues cleanup when one guild context fails to destroy', async () => {
+  it('waits for router service drains before destroying process resources', async () => {
+    let release!: () => void;
+    const drained = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const destroyAll = vi.fn(() => drained);
+    const destroy = vi.fn();
+
+    const shutdown = shutdownBot({
+      signal: 'SIGTERM',
+      client: {
+        router: {
+          all: () => [],
+          destroyAll,
+        } as any,
+        destroy,
+      },
+      dependencies: {
+        stopHealthServer: vi.fn(),
+        exit: vi.fn(),
+        log: makeLogger(),
+      },
+    });
+
+    await Promise.resolve();
+    expect(destroyAll).toHaveBeenCalledOnce();
+    expect(destroy).not.toHaveBeenCalled();
+
+    release();
+    await shutdown;
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it('continues cleanup but exits non-zero when one guild context fails to destroy', async () => {
     const ctxA = { guildId: 'guild-a' };
     const ctxB = { guildId: 'guild-b' };
     const log = makeLogger();
+    const exit = vi.fn();
     const destroyGuildServices = vi
       .fn()
       .mockImplementationOnce(() => { throw new Error('boom'); })
@@ -109,7 +143,7 @@ describe('shutdownBot', () => {
       dependencies: {
         destroyGuildServices,
         stopHealthServer: vi.fn(),
-        exit: vi.fn(),
+        exit,
         log,
       },
     });
@@ -119,5 +153,48 @@ describe('shutdownBot', () => {
       'Guild service destruction failed',
       expect.objectContaining({ guildId: 'guild-a' }),
     );
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(log.error).toHaveBeenCalledWith(
+      'Shutdown completed with retained guild teardown residue',
+      { failureCount: 1 },
+    );
+  });
+
+  it('awaits a failed router drain, performs best-effort cleanup, and refuses exit 0', async () => {
+    const drainFailure = new Error('audit residue remains');
+    const destroyAll = vi.fn().mockRejectedValue(drainFailure);
+    const destroy = vi.fn();
+    const quit = vi.fn().mockResolvedValue(undefined);
+    const stopHealthServer = vi.fn();
+    const exit = vi.fn();
+    const log = makeLogger();
+
+    await shutdownBot({
+      signal: 'SIGTERM',
+      client: {
+        router: {
+          all: () => [],
+          destroyAll,
+        } as any,
+        destroy,
+        valkey: { quit },
+      },
+      dependencies: {
+        stopHealthServer,
+        exit,
+        log,
+      },
+    });
+
+    expect(destroyAll).toHaveBeenCalledOnce();
+    expect(log.error).toHaveBeenCalledWith(
+      'Guild router destruction failed',
+      { error: String(drainFailure) },
+    );
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(stopHealthServer).toHaveBeenCalledOnce();
+    expect(quit).toHaveBeenCalledOnce();
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(exit).not.toHaveBeenCalledWith(0);
   });
 });

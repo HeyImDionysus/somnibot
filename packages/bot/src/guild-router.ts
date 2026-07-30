@@ -43,6 +43,9 @@ const INIT_TIMEOUT_MS = 30_000; // 30 seconds
 export class GuildRouter {
   private contexts = new Map<string, GuildContext>();
   private initializing = new Map<string, Promise<GuildContext>>();
+  private removing = new Map<string, Promise<void>>();
+  private acceptingContexts = true;
+  private destroyAllInProgress: Promise<void> | null = null;
   /** Tracks last-access time per guild for LRU eviction */
   private lastAccess = new Map<string, number>();
   private evictionTimer: ReturnType<typeof setInterval> | null = null;
@@ -64,6 +67,15 @@ export class GuildRouter {
    * the same initialization promise.
    */
   async getContext(guildId: string): Promise<GuildContext> {
+    if (!this.acceptingContexts) {
+      throw new Error('GuildRouter is shutting down and cannot create contexts');
+    }
+    const removing = this.removing.get(guildId);
+    if (removing) await removing;
+    if (!this.acceptingContexts) {
+      throw new Error('GuildRouter is shutting down and cannot create contexts');
+    }
+
     // V5 Audit [14.2]: Update last-access timestamp for LRU eviction
     this.lastAccess.set(guildId, Date.now());
 
@@ -74,32 +86,43 @@ export class GuildRouter {
     const pending = this.initializing.get(guildId);
     if (pending) return pending;
 
-    // Start initialization with timeout guard (V5 Audit P3-6)
-    // V10 Audit §4: The `.catch` eviction on the stored promise is defense-in-depth.
-    // If any code path awaits the promise directly from the Map (bypassing the
-    // try/finally below), the rejected promise still self-cleans from the Map.
-    const promise = Promise.race([
+    // Store the full initialize-and-publish operation. Teardown awaits this
+    // exact promise, and the publication fence below turns a late completion
+    // into retained teardown work instead of allowing it to escape the drain.
+    let operation!: Promise<GuildContext>;
+    operation = Promise.race([
       this.initContext(guildId),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error(`Guild ${guildId} init timed out after ${INIT_TIMEOUT_MS}ms`)), INIT_TIMEOUT_MS),
       ),
-    ]).catch((err) => {
-      this.initializing.delete(guildId);
-      throw err;
-    });
-    this.initializing.set(guildId, promise);
-
-    try {
-      const ctx = await promise;
-      this.contexts.set(guildId, ctx);
-      return ctx;
-    } catch (err) {
-      // V5 Audit P3-6: Log timeout/error so the guild can retry on next event
-      log.error('Guild init failed', { guildId, error: String(err) });
-      throw err;
-    } finally {
-      this.initializing.delete(guildId);
-    }
+    ])
+      .then((ctx) => {
+        // Retain the initialized context before evaluating the fence. When a
+        // shutdown/removal won the race, its operation owns draining this
+        // context; retaining it makes any failed drain explicitly retryable.
+        this.contexts.set(guildId, ctx);
+        if (!this.acceptingContexts) {
+          throw new Error(
+            `GuildRouter is shutting down; rejected late initialization for ${guildId}`,
+          );
+        }
+        if (this.removing.has(guildId)) {
+          throw new Error(`Guild ${guildId} was removed during initialization`);
+        }
+        return ctx;
+      })
+      .catch((err: unknown) => {
+        // V5 Audit P3-6: Log timeout/error so the guild can retry on next event.
+        log.error('Guild init failed', { guildId, error: String(err) });
+        throw err;
+      })
+      .finally(() => {
+        if (this.initializing.get(guildId) === operation) {
+          this.initializing.delete(guildId);
+        }
+      });
+    this.initializing.set(guildId, operation);
+    return operation;
   }
 
   /**
@@ -107,6 +130,7 @@ export class GuildRouter {
    * Use only when you know the guild has already been seen.
    */
   getContextSync(guildId: string): GuildContext | undefined {
+    if (!this.acceptingContexts || this.removing.has(guildId)) return undefined;
     return this.contexts.get(guildId);
   }
 
@@ -136,30 +160,80 @@ export class GuildRouter {
    * Calls destroyGuildServices() first to stop per-guild timers, music players,
    * economy managers, etc., then ctx.destroy() for generic manager cleanup.
    */
-  remove(guildId: string): void {
-    const ctx = this.contexts.get(guildId);
-    if (ctx) {
-      destroyGuildServices(ctx);
+  async remove(guildId: string): Promise<void> {
+    const pending = this.removing.get(guildId);
+    if (pending) return pending;
+
+    let operation!: Promise<void>;
+    operation = Promise.resolve().then(async () => {
+      // Install the removal fence before this continuation runs. A concurrent
+      // initialization therefore publishes only as retained teardown work and
+      // rejects its callers instead of handing out a context being removed.
+      const initializing = this.initializing.get(guildId);
+      if (initializing) {
+        try {
+          await initializing;
+        } catch {
+          // A fenced late initialization rejects after retaining its context.
+          // A genuine init failure leaves no context and needs no teardown.
+        }
+      }
+
+      const ctx = this.contexts.get(guildId);
+      if (!ctx) {
+        this.lastAccess.delete(guildId);
+        return;
+      }
+      await destroyGuildServices(ctx);
       ctx.destroy();
-      this.contexts.delete(guildId);
-      this.lastAccess.delete(guildId);
-    }
+      // A failed drain throws before these deletes, retaining the context and
+      // its finite audit residue for an explicit retry.
+      if (this.contexts.get(guildId) === ctx) {
+        this.contexts.delete(guildId);
+        this.lastAccess.delete(guildId);
+      }
+    }).finally(() => {
+      if (this.removing.get(guildId) === operation) this.removing.delete(guildId);
+    });
+    this.removing.set(guildId, operation);
+    return operation;
   }
 
   /**
    * Destroy all contexts (shutdown).
    */
-  destroyAll(): void {
+  destroyAll(): Promise<void> {
+    if (this.destroyAllInProgress) return this.destroyAllInProgress;
+    this.acceptingContexts = false;
     if (this.evictionTimer) {
       clearInterval(this.evictionTimer);
       this.evictionTimer = null;
     }
-    for (const ctx of this.contexts.values()) {
-      destroyGuildServices(ctx);
-      ctx.destroy();
-    }
-    this.contexts.clear();
-    this.lastAccess.clear();
+    const operation = (async () => {
+      // No new initialization can start after acceptingContexts=false. Await
+      // the full initialize-and-publish operations already in flight so every
+      // late context is visible in `contexts` before taking the teardown set.
+      await Promise.allSettled([...this.initializing.values()]);
+      const guildIds = [...this.contexts.keys()];
+      const results = await Promise.allSettled(guildIds.map((guildId) => this.remove(guildId)));
+      const failures = results
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map((result) => result.reason);
+      if (failures.length > 0) {
+        throw new AggregateError(failures, `Failed to destroy ${failures.length} guild context(s)`);
+      }
+    })()
+      .catch((err: unknown) => {
+        // A failed drain retains contexts for retry, so re-open lookups once
+        // the failed destroyAll attempt has fully settled.
+        this.acceptingContexts = true;
+        throw err;
+      })
+      .finally(() => {
+        if (this.destroyAllInProgress === operation) this.destroyAllInProgress = null;
+      });
+    this.destroyAllInProgress = operation;
+    return operation;
   }
 
   /**
@@ -202,7 +276,9 @@ export class GuildRouter {
 
     for (const guildId of toEvict) {
       log.info('Evicting idle guild context', { guildId, idleMinutes: Math.round(IDLE_TIMEOUT_MS / 60_000) });
-      this.remove(guildId);
+      void this.remove(guildId).catch((err: unknown) => {
+        log.error('Idle guild teardown failed', { guildId, error: String(err) });
+      });
     }
   }
 

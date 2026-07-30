@@ -56,6 +56,15 @@ export type SkipMethod = 'dj_force' | 'vote' | 'self' | 'priority';
 /** Why playback was stopped and the queue torn down — recorded on music.stopped. */
 export type StopReason = 'command' | 'auto_leave' | 'inactivity' | 'connection_lost';
 
+/**
+ * Who applied a fairness-gated control, for the music.control_applied audit
+ * event. `internal: true` marks a bot-side restore rather than an owner-visible
+ * control change (re-applying the queue's stored volume when playback starts,
+ * or a public method delegating to another one) — those write no audit row, so
+ * one member action never lands two.
+ */
+export type ControlActor = { userId?: string; internal?: boolean };
+
 const DEFAULT_CONFIG: MusicConfig = {
   defaultVolume: 50,
   maxQueueLength: 500,
@@ -248,6 +257,40 @@ export class MusicPlayerManager {
   }
 
   /**
+   * The APPLIED counterpart of auditPermissionDenied — every fairness-gated
+   * control whose DENIAL is audited records its SUCCESS too, so the trail
+   * cannot show refusals for a control it never shows being used. Skip and
+   * stop are excluded: they already emit their own richer events.
+   */
+  private auditControlApplied(
+    context: ControlActor,
+    action: string,
+    value?: string | number | null,
+  ): void {
+    if (context.internal || !context.userId) return;
+    this.eventBus.emit('music.control_applied', this.guild.id, {
+      userId: context.userId,
+      action,
+      value: value ?? null,
+    });
+  }
+
+  /** Record one truthful member audit for the filter state this action applied. */
+  auditFilterActionApplied(
+    userId: string,
+    preset: FilterPreset,
+    speed?: number,
+    pitch?: number,
+    rate?: number,
+  ): void {
+    const parts = [`preset: ${preset}`];
+    if (speed !== undefined) parts.push(`speed: ${Math.max(0.1, Math.min(3.0, speed))}x`);
+    if (pitch !== undefined) parts.push(`pitch: ${Math.max(0.1, Math.min(3.0, pitch))}x`);
+    if (rate !== undefined) parts.push(`rate: ${Math.max(0.1, Math.min(3.0, rate))}x`);
+    this.auditControlApplied({ userId }, 'filter', parts.join(', '));
+  }
+
+  /**
    * [music-collaborative-queue] Store-outage lane: when the Valkey-backed queue
    * store is unreachable, emit an audit event and persist a durable owner alert
    * so an operator can see that playback is degraded. Best-effort — a failed
@@ -406,6 +449,23 @@ export class MusicPlayerManager {
     queue.entries.push(...addedEntries);
     await this.queueManager.saveQueue(queue);
 
+    // Audit the persisted ADD side of the shared queue before playback setup.
+    // music.skipped / music.stopped record only removals, so without this the
+    // trail shows tracks leaving a queue nothing was ever recorded as entering.
+    // One row per accepted /play (single track or whole playlist), matching how
+    // one skip = one row.
+    const firstAdded = addedEntries[0]!;
+    this.eventBus.emit('music.queued', this.guild.id, {
+      userId,
+      title: addedEntries.length === 1 ? firstAdded.title : (playlistName ?? firstAdded.title),
+      author: firstAdded.author,
+      uri: sanitizeAuditMediaUri(firstAdded.uri),
+      trackCount: addedEntries.length,
+      playlistName: playlistName ?? null,
+      queueLength: queue.entries.length,
+      sessionStarted: isNewQueue,
+    });
+
     // If this is the first track (or queue was empty), start playing
     const shouldPlay = isNewQueue || queue.entries.length === addedEntries.length ||
       !player.track;
@@ -414,7 +474,9 @@ export class MusicPlayerManager {
       const firstEntry = queue.entries[queue.currentIndex];
       if (firstEntry) {
         await player.playTrack({ track: { encoded: firstEntry.track } });
-        await this.setVolume(this.guild.id, queue.volume);
+        // Re-applying the queue's own stored volume is a restore, not a
+        // member-initiated control change — internal, so it writes no row.
+        await this.setVolume(this.guild.id, queue.volume, { internal: true });
       }
     }
 
@@ -549,7 +611,7 @@ export class MusicPlayerManager {
   }
 
   /** Pause or resume playback. */
-  async togglePause(guildId: string): Promise<{ success: boolean; paused: boolean; message: string }> {
+  async togglePause(guildId: string, context: ControlActor = {}): Promise<{ success: boolean; paused: boolean; message: string }> {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, paused: false, message: 'Nothing is playing' };
 
@@ -560,6 +622,7 @@ export class MusicPlayerManager {
     await player.setPaused(newPaused);
     queue.paused = newPaused;
     await this.queueManager.saveQueue(queue);
+    this.auditControlApplied(context, 'pause', newPaused ? 'paused' : 'resumed');
 
     if (newPaused) {
       this.resetInactivityTimer(guildId);
@@ -575,7 +638,7 @@ export class MusicPlayerManager {
   }
 
   /** Seek to a position in the current track. */
-  async seek(guildId: string, positionMs: number): Promise<{ success: boolean; message: string }> {
+  async seek(guildId: string, positionMs: number, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, message: 'Nothing is playing' };
 
@@ -591,11 +654,12 @@ export class MusicPlayerManager {
     }
 
     await player.seekTo(positionMs);
+    this.auditControlApplied(context, 'seek', positionMs);
     return { success: true, message: `⏩ Seeked to \`${this.formatSeekPosition(positionMs)}\`` };
   }
 
   /** Set volume (0–100). */
-  async setVolume(guildId: string, volume: number): Promise<{ success: boolean; message: string }> {
+  async setVolume(guildId: string, volume: number, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, message: 'Nothing is playing' };
 
@@ -608,23 +672,25 @@ export class MusicPlayerManager {
       await this.queueManager.saveQueue(queue);
     }
 
+    this.auditControlApplied(context, 'volume', clamped);
     return { success: true, message: `🔊 Volume set to **${clamped}%**` };
   }
 
   /** Set loop mode. */
-  async setLoopMode(guildId: string, mode: LoopMode): Promise<{ success: boolean; message: string }> {
+  async setLoopMode(guildId: string, mode: LoopMode, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
     const queue = await this.queueManager.getQueue(guildId);
     if (!queue) return { success: false, message: 'No active queue' };
 
     queue.loopMode = mode;
     await this.queueManager.saveQueue(queue);
 
+    this.auditControlApplied(context, 'loop', mode);
     const labels = { off: '▶️ Loop off', track: '🔂 Looping track', queue: '🔁 Looping queue' };
     return { success: true, message: labels[mode] };
   }
 
   /** Cycle through loop modes: off → queue → track → off. */
-  async cycleLoopMode(guildId: string): Promise<{ success: boolean; mode: LoopMode; message: string }> {
+  async cycleLoopMode(guildId: string, context: ControlActor = {}): Promise<{ success: boolean; mode: LoopMode; message: string }> {
     const queue = await this.queueManager.getQueue(guildId);
     if (!queue) return { success: false, mode: 'off', message: 'No active queue' };
 
@@ -632,19 +698,21 @@ export class MusicPlayerManager {
     const currentIdx = cycle.indexOf(queue.loopMode);
     const nextMode = cycle[(currentIdx + 1) % cycle.length]!;
 
-    const result = await this.setLoopMode(guildId, nextMode);
+    // setLoopMode writes the single 'loop' row for this one member action.
+    const result = await this.setLoopMode(guildId, nextMode, context);
     return { ...result, mode: nextMode };
   }
 
   /** Shuffle the queue. */
-  async shuffle(guildId: string): Promise<{ success: boolean; message: string }> {
+  async shuffle(guildId: string, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
     const success = await this.queueManager.shuffle(guildId);
     if (!success) return { success: false, message: 'No active queue to shuffle' };
+    this.auditControlApplied(context, 'shuffle');
     return { success: true, message: '🔀 Queue shuffled' };
   }
 
   /** Remove a track from the queue by position (1-indexed, relative to upcoming). */
-  async remove(guildId: string, position: number): Promise<{ success: boolean; message: string }> {
+  async remove(guildId: string, position: number, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
     const queue = await this.queueManager.getQueue(guildId);
     if (!queue) return { success: false, message: 'No active queue' };
 
@@ -656,6 +724,7 @@ export class MusicPlayerManager {
     const removed = await this.queueManager.removeEntry(guildId, index);
     if (!removed) return { success: false, message: 'Failed to remove track' };
 
+    this.auditControlApplied(context, 'remove', removed.title);
     return { success: true, message: `🗑️ Removed **${removed.title}** from the queue` };
   }
 
@@ -699,6 +768,9 @@ export class MusicPlayerManager {
 
     const moved = await this.queueManager.moveEntry(guildId, fromIndex, toIndex);
     if (!moved) return { success: false, message: 'Failed to move track' };
+    // A denied move already audits (auditPermissionDenied above) — an allowed
+    // one must too, or the trail only ever shows moves that did not happen.
+    this.auditControlApplied({ userId }, 'move', `${fromPosition}→${toPosition}`);
     return { success: true, message: `↔️ Moved **${entry.title}** to position ${toPosition}` };
   }
 
@@ -711,11 +783,12 @@ export class MusicPlayerManager {
   // ── Filters ─────────────────────────────────────────────
 
   /** Apply a filter preset. */
-  async applyFilter(guildId: string, preset: FilterPreset): Promise<{ success: boolean; message: string }> {
+  async applyFilter(guildId: string, preset: FilterPreset, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, message: 'Nothing is playing' };
 
     await applyFilterPreset(player, preset);
+    this.auditControlApplied(context, 'filter', preset);
 
     if (preset === 'reset') {
       return { success: true, message: '🔄 All filters cleared' };
@@ -727,7 +800,7 @@ export class MusicPlayerManager {
   }
 
   /** Apply custom speed/pitch/rate. */
-  async applyCustomSpeed(guildId: string, speed?: number, pitch?: number, rate?: number): Promise<{ success: boolean; message: string }> {
+  async applyCustomSpeed(guildId: string, speed?: number, pitch?: number, rate?: number, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, message: 'Nothing is playing' };
 
@@ -743,6 +816,8 @@ export class MusicPlayerManager {
     if (settings.pitch !== undefined) parts.push(`pitch: ${settings.pitch}x`);
     if (settings.rate !== undefined) parts.push(`rate: ${settings.rate}x`);
 
+    // Same 'filter' vocabulary as the denial (/filter gates both branches).
+    this.auditControlApplied(context, 'filter', parts.join(', '));
     return { success: true, message: `⏱️ Applied timescale — ${parts.join(', ')}` };
   }
 
@@ -830,8 +905,8 @@ export class MusicPlayerManager {
     switch (buttonId) {
       case 'music:pause_resume': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:pause_resume'); return { message: '❌ You need the DJ role to do that' }; }
-        const result = await this.togglePause(guildId);
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'pause'); return { message: '❌ You need the DJ role to do that' }; }
+        const result = await this.togglePause(guildId, { userId });
         return { message: result.message };
       }
       case 'music:skip': {
@@ -845,33 +920,33 @@ export class MusicPlayerManager {
       }
       case 'music:stop': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:stop'); return { message: '❌ You need the DJ role to stop playback' }; }
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'stop'); return { message: '❌ You need the DJ role to stop playback' }; }
         const result = await this.stop(guildId, { userId, reason: 'command' });
         return { message: result.message };
       }
       case 'music:shuffle': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:shuffle'); return { message: '❌ You need the DJ role to shuffle' }; }
-        const result = await this.shuffle(guildId);
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'shuffle'); return { message: '❌ You need the DJ role to shuffle' }; }
+        const result = await this.shuffle(guildId, { userId });
         return { message: result.message };
       }
       case 'music:loop': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:loop'); return { message: '❌ You need the DJ role to change loop mode' }; }
-        const result = await this.cycleLoopMode(guildId);
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'loop'); return { message: '❌ You need the DJ role to change loop mode' }; }
+        const result = await this.cycleLoopMode(guildId, { userId });
         return { message: result.message };
       }
       // V53 Phase 3 (3.6): Volume buttons
       case 'music:vol_down': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:vol_down'); return { message: '❌ You need the DJ role to change volume' }; }
-        const result = await this.setVolume(guildId, Math.max(0, (await this.queueManager.getQueue(guildId))?.volume ?? 50) - 10);
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'volume'); return { message: '❌ You need the DJ role to change volume' }; }
+        const result = await this.setVolume(guildId, Math.max(0, (await this.queueManager.getQueue(guildId))?.volume ?? 50) - 10, { userId });
         return { message: result.message };
       }
       case 'music:vol_up': {
         const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'button:vol_up'); return { message: '❌ You need the DJ role to change volume' }; }
-        const result = await this.setVolume(guildId, Math.min(100, ((await this.queueManager.getQueue(guildId))?.volume ?? 50) + 10));
+        if (!hasPerm) { this.auditPermissionDenied(userId, 'volume'); return { message: '❌ You need the DJ role to change volume' }; }
+        const result = await this.setVolume(guildId, Math.min(100, ((await this.queueManager.getQueue(guildId))?.volume ?? 50) + 10), { userId });
         return { message: result.message };
       }
       default:
@@ -1282,5 +1357,25 @@ export class MusicPlayerManager {
     }
 
     return stats;
+  }
+}
+
+/**
+ * Audit rows are retained far longer than a playback request. Direct stream
+ * URLs can contain basic-auth userinfo, signed query tokens, or fragments, so
+ * retain only non-secret routing identity in the append-only ledger.
+ */
+function sanitizeAuditMediaUri(uri: string | null | undefined): string | null {
+  if (!uri) return null;
+  try {
+    const parsed = new URL(uri);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    parsed.username = '';
+    parsed.password = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return null;
   }
 }

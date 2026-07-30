@@ -118,6 +118,49 @@ describe('PlatformEventBus', () => {
     eventBus.off('*' as any, handler as any);
   });
 
+  it('still dispatches a backpressure-exempt audit listener at MAX_IN_FLIGHT', () => {
+    const auditHandler = vi.fn();
+    const normalHandler = vi.fn();
+    const internals = eventBus as unknown as { inFlight: number };
+    const previousInFlight = internals.inFlight;
+
+    try {
+      eventBus.onAny(auditHandler, { backpressureExempt: true });
+      eventBus.onAny(normalHandler);
+      internals.inFlight = 500;
+
+      eventBus.emit('automod.enforced', 'g1', {
+        messageId: 'm1',
+        channelId: 'c1',
+        memberId: 'u1',
+        rule: 'No spam',
+        ruleType: 'spam',
+        violation: 'burst',
+        action: 'delete',
+      });
+
+      expect(auditHandler).toHaveBeenCalledOnce();
+      expect(normalHandler).not.toHaveBeenCalled();
+    } finally {
+      internals.inFlight = previousInFlight;
+      eventBus.off('*' as any, auditHandler as any);
+      eventBus.off('*' as any, normalHandler as any);
+    }
+  });
+
+  it('offAny removes the exact backpressure-exempt listener', () => {
+    const auditHandler = vi.fn();
+    eventBus.onAny(auditHandler, { backpressureExempt: true });
+
+    eventBus.offAny(auditHandler);
+    eventBus.emit('member.joined', 'g1', {
+      discordId: 'u1',
+      guildId: 'g1',
+    } as any);
+
+    expect(auditHandler).not.toHaveBeenCalled();
+  });
+
   it('manually removing listener after first call emulates once', async () => {
     const handler = vi.fn();
     const wrapper = (...args: unknown[]) => {

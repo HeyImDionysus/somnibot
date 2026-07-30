@@ -117,7 +117,7 @@ interface GuildServices {
   snapshotTimer?: ReturnType<typeof setInterval>;
   voiceXpTimer?: ReturnType<typeof setInterval>;
   actionQueueStaleTimer?: ReturnType<typeof setInterval>;
-  actionQueueStop?: () => void;
+  actionQueueStop?: () => Promise<void>;
   syncHandle?: { stop: () => void };
   reconTimer?: ReturnType<typeof setInterval>;
   automationEngine?: AutomationEngine;
@@ -601,7 +601,7 @@ export async function initGuildFeatures(
 
   // ── Audit & Diagnostics ──
   try {
-    services.auditService = new AuditService(guildId, supabase, eventBus);
+    services.auditService = new AuditService(guildId, supabase, eventBus, valkey);
     services.auditService.start();
     ctx.setManager('auditService', services.auditService);
 
@@ -709,76 +709,149 @@ export async function registerGuildCommands(
 /**
  * Destroy all services for a guild context (called on guild leave or shutdown).
  */
-export function destroyGuildServices(ctx: GuildContext): void {
+export async function destroyGuildServices(ctx: GuildContext): Promise<void> {
   const services = ctx.getManager<GuildServices>('_services');
   if (!services) return;
 
   const guildLog = log.child({ guildId: ctx.guildId });
   guildLog.info('Destroying guild services');
+  const stopFailures: Array<{ name: string; error: unknown }> = [];
+  const pendingProducerStops: Array<{ name: string; promise: Promise<void> }> = [];
+  const stopSyncProducer = (name: string, stop: () => void): void => {
+    try {
+      stop();
+    } catch (error) {
+      stopFailures.push({ name, error });
+    }
+  };
 
-  // Timers
+  // Phase 1: quiesce every producer while AuditService is still subscribed and
+  // accepting. Any final shutdown events therefore enter its serialized drain.
   if (services.snapshotTimer) clearInterval(services.snapshotTimer);
   if (services.voiceXpTimer) clearInterval(services.voiceXpTimer);
   if (services.actionQueueStaleTimer) clearInterval(services.actionQueueStaleTimer);
-  if (services.actionQueueStop) services.actionQueueStop();
+  if (services.actionQueueStop) {
+    try {
+      pendingProducerStops.push({
+        name: 'action queue',
+        promise: services.actionQueueStop(),
+      });
+    } catch (error) {
+      stopFailures.push({ name: 'action queue', error });
+    }
+  }
   if (services.reconTimer) clearInterval(services.reconTimer);
-  if (services.syncHandle) services.syncHandle.stop();
+  if (services.syncHandle) {
+    stopSyncProducer('sync handle', () => services.syncHandle!.stop());
+  }
 
-  // Services with stop()
+  // Services with stop(), excluding AuditService: audit is the final consumer
+  // and is stopped only after every producer below has settled.
   // V10 Audit M-5: Added notificationService and giveawayFulfillment.
   // V11 Audit H-3: Added automationEngine and forumTicketService —
   // both were started but not tracked for shutdown, leaking timers/listeners.
-  const stoppable = [
-    services.automationEngine,
-    services.tempChannelManager,
-    services.statsManager,
-    services.scheduledRunner,
-    services.triviaScheduleRunner,
-    services.giveawayManager,
-    services.auditService,
-    services.diagnosticsService,
-    services.heartbeatService,
-    services.configWatcher,
-    services.presenceManager,
-    services.crossFeatureBridge,
-    services.autoModSync,
-    services.guildOnboardingSync,
-    services.notificationService,
-    services.giveawayFulfillment,
-    services.forumTicketService,
+  const producerServices: Array<[string, unknown]> = [
+    ['automation engine', services.automationEngine],
+    ['temp channel manager', services.tempChannelManager],
+    ['stats manager', services.statsManager],
+    ['scheduled runner', services.scheduledRunner],
+    ['trivia schedule runner', services.triviaScheduleRunner],
+    ['giveaway manager', services.giveawayManager],
+    ['diagnostics service', services.diagnosticsService],
+    ['heartbeat service', services.heartbeatService],
+    ['config watcher', services.configWatcher],
+    ['presence manager', services.presenceManager],
+    ['cross-feature bridge', services.crossFeatureBridge],
+    ['auto-mod sync', services.autoModSync],
+    ['guild onboarding sync', services.guildOnboardingSync],
+    ['notification service', services.notificationService],
+    ['giveaway fulfillment', services.giveawayFulfillment],
+    ['forum ticket service', services.forumTicketService],
   ];
-  for (const svc of stoppable) {
-    if (svc && 'stop' in svc && typeof svc.stop === 'function') {
-      svc.stop();
+  for (const [name, svc] of producerServices) {
+    if (typeof svc === 'object' && svc !== null && 'stop' in svc && typeof svc.stop === 'function') {
+      try {
+        const result = (svc as { stop: () => void | Promise<void> }).stop();
+        if (result && typeof (result as Promise<void>).then === 'function') {
+          pendingProducerStops.push({ name, promise: Promise.resolve(result) });
+        }
+      } catch (error) {
+        stopFailures.push({ name, error });
+      }
     }
   }
 
-  // Music
   if (services.musicPlayer) {
-    services.musicPlayer.shutdown();
+    stopSyncProducer('music player', () => services.musicPlayer!.shutdown());
   }
   if (services.musicStatusReporter) {
-    services.musicStatusReporter.stop();
+    stopSyncProducer('music status reporter', () => services.musicStatusReporter!.stop());
   }
 
-  // Economy managers with timers
+  // Economy managers with timers are also producers and must be quiesced
+  // before the audit listener is detached.
   const lottery = ctx.getManager<LotteryManager>('lottery');
-  if (lottery && typeof lottery.stopDrawTimer === 'function') lottery.stopDrawTimer();
+  if (lottery && typeof lottery.stopDrawTimer === 'function') {
+    stopSyncProducer('lottery draw timer', () => lottery.stopDrawTimer());
+  }
   const pets = ctx.getManager<PetsManager>('pets');
-  if (pets && typeof pets.stopDecayTimer === 'function') pets.stopDecayTimer();
+  if (pets && typeof pets.stopDecayTimer === 'function') {
+    stopSyncProducer('pet decay timer', () => pets.stopDecayTimer());
+  }
   const quests = ctx.getManager<QuestsManager>('quests');
-  if (quests && typeof quests.stopResetTimer === 'function') quests.stopResetTimer();
+  if (quests && typeof quests.stopResetTimer === 'function') {
+    stopSyncProducer('quest reset timer', () => quests.stopResetTimer());
+  }
   const games = ctx.getManager<GamesManager>('games');
   if (games && typeof games.stopDailyResetTimer === 'function') {
-    games.stopDailyResetTimer();
+    stopSyncProducer('game daily reset timer', () => games.stopDailyResetTimer());
   }
   const heist = ctx.getManager<HeistManager>('heist');
-  if (heist && typeof heist.cleanup === 'function') heist.cleanup();
+  if (heist && typeof heist.cleanup === 'function') {
+    stopSyncProducer('heist manager', () => heist.cleanup());
+  }
   const trivia = ctx.getManager<TriviaManager>('trivia');
   if (trivia && typeof trivia.stopAll === 'function') {
-    trivia.stopAll();
+    stopSyncProducer('trivia manager', () => trivia.stopAll());
   }
 
+  const producerResults = await Promise.allSettled(
+    pendingProducerStops.map(({ promise }) => promise),
+  );
+  producerResults.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      stopFailures.push({
+        name: pendingProducerStops[index]!.name,
+        error: result.reason,
+      });
+    }
+  });
+
+  // Phase 2: producers are quiet; detach and fully drain audit last.
+  if (services.auditService) {
+    try {
+      await services.auditService.stop();
+    } catch (error) {
+      stopFailures.push({ name: 'audit service', error });
+    }
+  }
+
+  for (const failure of stopFailures) {
+    guildLog.warn('Guild service stop failed', {
+      service: failure.name,
+      error: String(failure.error),
+    });
+  }
+  if (stopFailures.length > 0) {
+    throw new AggregateError(
+      stopFailures.map(({ error }) => error),
+      `Failed to stop ${stopFailures.length} guild service(s) for ${ctx.guildId}`,
+    );
+  }
+
+  // Phase 3: only a fully successful audit drain authorizes irreversible
+  // registry/state removal. On failure, the context and these handles remain
+  // available for an explicit teardown retry.
   // V11 Audit M-2: Remove per-guild manager references from module-level Maps
   // to prevent unbounded memory growth over the bot's lifetime.
   unregisterEconomyManager(ctx.guildId);

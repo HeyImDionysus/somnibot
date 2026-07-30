@@ -39,7 +39,7 @@ export type BotLevelServices = {
 };
 
 type ShutdownDependencies = {
-  destroyGuildServices?: (ctx: GuildContext) => void;
+  destroyGuildServices?: (ctx: GuildContext) => void | Promise<void>;
   stopHealthServer?: () => void;
   exit?: (code: number) => never | void;
   log?: Logger;
@@ -71,21 +71,29 @@ export async function shutdownBot({
   const destroyGuildServicesFn = dependencies.destroyGuildServices ?? destroyGuildServices;
   const stopHealthServerFn = dependencies.stopHealthServer ?? stopHealthServer;
   const exit = dependencies.exit ?? process.exit;
+  const guildTeardownFailures: unknown[] = [];
 
   log.info(`Received ${signal}, shutting down gracefully...`);
 
   if (client.router) {
-    for (const ctx of client.router.all()) {
-      try {
-        destroyGuildServicesFn(ctx);
-      } catch (err) {
-        log.error('Guild service destruction failed', { guildId: ctx.guildId, error: String(err) });
+    // The production GuildRouter owns service destruction. The injectable
+    // hook is retained for shutdown-unit isolation, but both paths are awaited
+    // so an AuditService drain cannot race process cleanup.
+    if (dependencies.destroyGuildServices) {
+      for (const ctx of client.router.all()) {
+        try {
+          await destroyGuildServicesFn(ctx);
+        } catch (err) {
+          guildTeardownFailures.push(err);
+          log.error('Guild service destruction failed', { guildId: ctx.guildId, error: String(err) });
+        }
       }
     }
 
     try {
-      client.router.destroyAll();
+      await client.router.destroyAll();
     } catch (err) {
+      guildTeardownFailures.push(err);
       log.error('Guild router destruction failed', { error: String(err) });
     }
   }
@@ -111,6 +119,14 @@ export async function shutdownBot({
   stopSafely('Health server', stopHealthServerFn, log);
 
   await client.valkey?.quit().catch(() => { /* intentionally silent */ });
+
+  if (guildTeardownFailures.length > 0) {
+    log.error('Shutdown completed with retained guild teardown residue', {
+      failureCount: guildTeardownFailures.length,
+    });
+    exit(1);
+    return;
+  }
 
   log.info('Goodbye.');
   exit(0);

@@ -32,6 +32,7 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
 }));
 
 import { GuildRouter, getGuildId } from '../guild-router.js';
+import { destroyGuildServices } from '../guild-init.js';
 
 function makeGuild(id: string, name = 'Test Guild') {
   return { id, name };
@@ -72,7 +73,7 @@ describe('GuildRouter', () => {
     expect(router.has('g1')).toBe(true);
     expect(router.size).toBe(1);
 
-    router.destroyAll();
+    await router.destroyAll();
   });
 
   it('returns cached context on subsequent calls', async () => {
@@ -83,15 +84,15 @@ describe('GuildRouter', () => {
     const ctx2 = await router.getContext('g1');
     expect(ctx1).toBe(ctx2);
 
-    router.destroyAll();
+    await router.destroyAll();
   });
 
-  it('getContextSync returns undefined for uninitialized guild', () => {
+  it('getContextSync returns undefined for uninitialized guild', async () => {
     const { client, supabase, valkey, eventBus } = makeDeps();
     const router = new GuildRouter(client as any, supabase, valkey, eventBus);
 
     expect(router.getContextSync('g1')).toBeUndefined();
-    router.destroyAll();
+    await router.destroyAll();
   });
 
   it('getContextSync returns context after initialization', async () => {
@@ -101,15 +102,15 @@ describe('GuildRouter', () => {
     await router.getContext('g1');
     expect(router.getContextSync('g1')).toBeDefined();
 
-    router.destroyAll();
+    await router.destroyAll();
   });
 
-  it('has() returns false for unknown guild', () => {
+  it('has() returns false for unknown guild', async () => {
     const { client, supabase, valkey, eventBus } = makeDeps();
     const router = new GuildRouter(client as any, supabase, valkey, eventBus);
 
     expect(router.has('unknown')).toBe(false);
-    router.destroyAll();
+    await router.destroyAll();
   });
 
   it('all() iterates over active contexts', async () => {
@@ -123,7 +124,7 @@ describe('GuildRouter', () => {
     const all = [...router.all()];
     expect(all).toHaveLength(2);
 
-    router.destroyAll();
+    await router.destroyAll();
   });
 
   it('remove() destroys and removes a context', async () => {
@@ -131,21 +132,39 @@ describe('GuildRouter', () => {
     const router = new GuildRouter(client as any, supabase, valkey, eventBus);
 
     const ctx = await router.getContext('g1');
-    router.remove('g1');
+    await router.remove('g1');
 
     expect(router.has('g1')).toBe(false);
     expect(router.size).toBe(0);
     expect(ctx.destroy).toHaveBeenCalled();
 
-    router.destroyAll();
+    await router.destroyAll();
   });
 
-  it('remove() is a no-op for unknown guild', () => {
+  it('retains the context when an awaited service drain rejects', async () => {
+    const { client, supabase, valkey, eventBus } = makeDeps();
+    const router = new GuildRouter(client as any, supabase, valkey, eventBus);
+    const ctx = await router.getContext('g1');
+    vi.mocked(destroyGuildServices)
+      .mockRejectedValueOnce(new Error('audit residue remains'))
+      .mockResolvedValue(undefined);
+
+    await expect(router.remove('g1')).rejects.toThrow('audit residue remains');
+    expect(router.getContextSync('g1')).toBe(ctx);
+    expect(ctx.destroy).not.toHaveBeenCalled();
+
+    await router.remove('g1');
+    expect(router.has('g1')).toBe(false);
+    expect(ctx.destroy).toHaveBeenCalledOnce();
+    await router.destroyAll();
+  });
+
+  it('remove() is a no-op for unknown guild', async () => {
     const { client, supabase, valkey, eventBus } = makeDeps();
     const router = new GuildRouter(client as any, supabase, valkey, eventBus);
 
-    expect(() => router.remove('unknown')).not.toThrow();
-    router.destroyAll();
+    await expect(router.remove('unknown')).resolves.toBeUndefined();
+    await router.destroyAll();
   });
 
   it('destroyAll() cleans up all contexts', async () => {
@@ -155,7 +174,7 @@ describe('GuildRouter', () => {
 
     await router.getContext('g1');
     await router.getContext('g2');
-    router.destroyAll();
+    await router.destroyAll();
 
     expect(router.size).toBe(0);
   });
@@ -185,9 +204,98 @@ describe('GuildRouter', () => {
     const router = new GuildRouter(client as any, supabase, valkey, eventBus);
 
     await router.getContext('g1');
-    router.destroyAll();
+    await router.destroyAll();
 
-    expect(() => router.destroyAll()).not.toThrow();
+    await expect(router.destroyAll()).resolves.toBeUndefined();
+    expect(router.size).toBe(0);
+  });
+
+  it('does not create a new context while async destroyAll is draining', async () => {
+    const guilds = { g1: makeGuild('g1'), g2: makeGuild('g2') };
+    const { client, supabase, valkey, eventBus } = makeDeps(guilds);
+    const router = new GuildRouter(client as any, supabase, valkey, eventBus);
+    await router.getContext('g1');
+    let release!: () => void;
+    const draining = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(destroyGuildServices).mockImplementationOnce(() => draining);
+
+    const destroying = router.destroyAll();
+    await expect(router.getContext('g2')).rejects.toThrow(/shutting down/);
+
+    release();
+    await destroying;
+    expect(router.size).toBe(0);
+  });
+
+  it('fences and tears down an initialization that finishes after destroyAll starts', async () => {
+    const { client, supabase, valkey, eventBus } = makeDeps();
+    let initializedCtx: any;
+    let signalInitStarted!: () => void;
+    const initStarted = new Promise<void>((resolve) => {
+      signalInitStarted = resolve;
+    });
+    let releaseInit!: () => void;
+    const initGate = new Promise<void>((resolve) => {
+      releaseInit = resolve;
+    });
+    const router = new GuildRouter(
+      client as any,
+      supabase,
+      valkey,
+      eventBus,
+      async (ctx) => {
+        initializedCtx = ctx;
+        signalInitStarted();
+        await initGate;
+      },
+    );
+
+    const getting = router.getContext('g1');
+    await initStarted;
+    const destroying = router.destroyAll();
+    releaseInit();
+
+    await expect(getting).rejects.toThrow(/shutting down/);
+    await destroying;
+    expect(destroyGuildServices).toHaveBeenCalledWith(initializedCtx);
+    expect(initializedCtx.destroy).toHaveBeenCalledOnce();
+    expect(router.size).toBe(0);
+  });
+
+  it('fences and tears down an initialization that finishes after remove starts', async () => {
+    const { client, supabase, valkey, eventBus } = makeDeps();
+    let initializedCtx: any;
+    let signalInitStarted!: () => void;
+    const initStarted = new Promise<void>((resolve) => {
+      signalInitStarted = resolve;
+    });
+    let releaseInit!: () => void;
+    const initGate = new Promise<void>((resolve) => {
+      releaseInit = resolve;
+    });
+    const router = new GuildRouter(
+      client as any,
+      supabase,
+      valkey,
+      eventBus,
+      async (ctx) => {
+        initializedCtx = ctx;
+        signalInitStarted();
+        await initGate;
+      },
+    );
+
+    const getting = router.getContext('g1');
+    await initStarted;
+    const removing = router.remove('g1');
+    releaseInit();
+
+    await expect(getting).rejects.toThrow(/removed during initialization/);
+    await removing;
+    expect(destroyGuildServices).toHaveBeenCalledWith(initializedCtx);
+    expect(initializedCtx.destroy).toHaveBeenCalledOnce();
     expect(router.size).toBe(0);
   });
 
@@ -196,7 +304,7 @@ describe('GuildRouter', () => {
     const router = new GuildRouter(client as any, supabase, valkey, eventBus);
 
     await expect(router.getContext('missing')).rejects.toThrow('Guild missing not in cache');
-    router.destroyAll();
+    await router.destroyAll();
   });
 
   it('runs initCallback when provided', async () => {
@@ -207,7 +315,7 @@ describe('GuildRouter', () => {
     await router.getContext('g1');
     expect(callback).toHaveBeenCalledOnce();
 
-    router.destroyAll();
+    await router.destroyAll();
   });
 
   it('deduplicates concurrent getContext calls for same guild', async () => {
@@ -221,7 +329,7 @@ describe('GuildRouter', () => {
     ]);
     expect(ctx1).toBe(ctx2);
 
-    router.destroyAll();
+    await router.destroyAll();
   });
 
   it('evicts idle guild contexts', async () => {
@@ -232,14 +340,14 @@ describe('GuildRouter', () => {
     expect(router.has('g1')).toBe(true);
 
     // Advance time past the idle timeout (30 min default)
-    vi.advanceTimersByTime(31 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(31 * 60 * 1000);
 
     // Advance past the eviction check interval (5 min default) 
-    vi.advanceTimersByTime(6 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
 
     expect(router.has('g1')).toBe(false);
 
-    router.destroyAll();
+    await router.destroyAll();
   });
 });
 

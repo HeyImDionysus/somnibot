@@ -427,6 +427,19 @@ export interface PlatformEventMap {
   'webhook.received': WebhookReceivedData;
   'webhook.replayed': WebhookReplayedData;
   // ── Observability audit wave (2026-07-23): per-feature audit events ──
+  /**
+   * Auto-mod audit events (rail A — the batched event rail). Auto-mod runs on
+   * every message, so its audit writes are the hottest in the bot; they are
+   * batched rather than written inline like a config change. `messageId` is
+   * the occurrence identity: the engine executes at most one rule per message,
+   * so a redelivered messageCreate collapses onto the same row instead of
+   * duplicating it.
+   *
+   * `automod.observed` is a would-be action in the shipped observe mode
+   * (nothing is touched); `automod.enforced` is an applied one.
+   */
+  'automod.observed': { messageId: string; channelId: string; memberId: string; rule: string; ruleType: string; violation: string; wouldAction: 'delete' | 'warn' | 'mute' | 'kick' | 'ban' };
+  'automod.enforced': { messageId: string; channelId: string; memberId: string; rule: string; ruleType: string; violation: string; action: 'delete' | 'warn' | 'mute' | 'kick' | 'ban'; infractionId?: string; activeWarnings?: number; durationMinutes?: number };
   'anti_raid.detected': { joinCount: number; threshold: number; windowSeconds: number; action: string };
   'anti_raid.contained': { action: 'kick' | 'ban' | 'lockdown' | 'account_age'; userId?: string; username?: string; reason: string; invitesPaused?: number };
   'anti_raid.restored': { restorationType: 'unban' | 'invites' | 'verification'; count: number };
@@ -482,6 +495,22 @@ export interface PlatformEventMap {
   'trivia.payout_failed': { userId: string; amount: number };
   'economy.reward_claimed': { userId: string; rewardType: string; amount: number; streak: number };
   'economy.reward_failed': { userId: string; rewardType: string; amount: number };
+  /**
+   * The ADD side of the shared queue, the counterpart of music.skipped /
+   * music.stopped (which only ever record removals). Emitted once per
+   * accepted /play — a single track or a whole playlist — so the trail shows
+   * who put a track in the queue, not only who took one out.
+   */
+  'music.queued': { userId: string; title: string; author: string; uri: string | null; trackCount: number; playlistName: string | null; queueLength: number; sessionStarted: boolean };
+  /**
+   * The APPLIED side of a fairness-gated control, shaped exactly like
+   * music.denied ({ userId, action }) so an owner reading the music trail
+   * sees the same control in both outcomes. `action` uses the same vocabulary
+   * as music.denied ('volume', 'loop', 'pause', 'remove', …); `value` carries
+   * the applied setting where one exists. Skip and stop are NOT emitted here —
+   * they keep their richer dedicated events.
+   */
+  'music.control_applied': { userId: string; action: string; value?: string | number | null };
   'music.skipped': { userId?: string; method: 'dj_force' | 'vote' | 'self' | 'priority'; title: string; author: string; requestedBy: string; queueEnded: boolean };
   'music.stopped': { userId?: string; reason: 'command' | 'auto_leave' | 'inactivity' | 'connection_lost'; trackCount: number };
   'music.denied': { userId: string; action: string };
