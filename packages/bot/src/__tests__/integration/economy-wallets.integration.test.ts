@@ -18,6 +18,7 @@ const GUILD_ID = `test-economy-guild-${Date.now()}`;
 const USER_A = 'econ-user-aaa';
 const USER_B = 'econ-user-bbb';
 const USER_C = 'econ-user-ccc';
+const USER_REFUND = 'econ-user-refund';
 
 beforeAll(async () => {
   supa = await requireSupabase();
@@ -257,6 +258,48 @@ describe('economy_subtract_balance RPC', () => {
     // The RPC raises EXCEPTION 'Insufficient balance'
     expect(error).not.toBeNull();
     expect(error!.message).toContain('Insufficient balance');
+  });
+});
+
+describe('economy_refund_balance RPC', () => {
+  it('restores a debit exactly once without increasing total_earned', async () => {
+    await supa.rpc('economy_add_balance', {
+      p_guild_id: GUILD_ID,
+      p_user_id: USER_REFUND,
+      p_amount: 100,
+    });
+    await supa.rpc('economy_subtract_balance', {
+      p_guild_id: GUILD_ID,
+      p_user_id: USER_REFUND,
+      p_amount: 40,
+    });
+
+    const refundArgs = {
+      p_guild_id: GUILD_ID,
+      p_user_id: USER_REFUND,
+      p_amount: 40,
+      p_idempotency_key: 'test:pet:refund:1',
+    };
+    const first = await supa.rpc('economy_refund_balance', refundArgs);
+    const replay = await supa.rpc('economy_refund_balance', refundArgs);
+
+    expect(first.error).toBeNull();
+    expect(replay.error).toBeNull();
+
+    const { data } = await supa
+      .from('economy_wallets')
+      .select('wallet, total_earned')
+      .eq('guild_id', GUILD_ID)
+      .eq('user_id', USER_REFUND)
+      .single();
+    expect(data).toMatchObject({ wallet: 100, total_earned: 100 });
+
+    const { count } = await supa
+      .from('economy_transactions')
+      .select('id', { count: 'exact', head: true })
+      .eq('guild_id', GUILD_ID)
+      .eq('idempotency_key', refundArgs.p_idempotency_key);
+    expect(count).toBe(1);
   });
 });
 

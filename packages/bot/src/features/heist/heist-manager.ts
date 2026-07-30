@@ -410,30 +410,51 @@ export class HeistManager {
       // Refund only when a fee was charged. The positive-only balance RPC
       // rejects zero; a free heist therefore has nothing to compensate.
       const { error: refundErr } = entryFee > 0
-        ? await this.supabase.rpc('economy_add_balance', {
+        ? await this.supabase.rpc('economy_refund_balance', {
             p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
+            p_idempotency_key: `heist:start-refund:${interaction.id}`,
           })
         : { error: null };
       if (refundErr) {
         log.error('CRITICAL: heist_start failed AND refund failed', {
           guildId, userId, entryFee, startErr, refundErr,
         });
-        // Never tell the member their fee "was refunded" when the refund itself
-        // failed — that is a lie about their balance during an outage.
+        const alertResult = await raiseOwnerAlert(this.supabase, guildId, {
+          alertType: 'heist_entry_fee_refund_failed',
+          severity: 'critical',
+          title: 'Heist entry-fee refund failed',
+          message: `A failed heist start left an unconfirmed refund of ${entryFee} coins for member ${userId}.`,
+          metadata: { user_id: userId, amount: entryFee, interaction_id: interaction.id },
+          client: this.client,
+        }).catch((alertErr: unknown) => {
+          log.error('CRITICAL: heist refund owner alert failed', {
+            guildId,
+            userId,
+            error: alertErr instanceof Error ? alertErr.message : String(alertErr),
+          });
+          return { inserted: false, delivered: false, insertErrorCode: undefined };
+        });
+        const ownerSignalled =
+          alertResult.inserted ||
+          alertResult.delivered ||
+          alertResult.insertErrorCode === '23505';
         await this.replyHeistUnavailable(
           interaction,
-          ' Your entry fee could not be confirmed — an admin has been notified if your balance looks short.',
+          ownerSignalled
+            ? ' Your entry fee refund could not be confirmed — an administrator was notified.'
+            : ' Your entry fee refund and the administrator notification could not be confirmed. Please contact an administrator.',
         );
         return;
       }
+      const refundSuffix = entryFee > 0 ? ' Your entry fee was refunded.' : ' Nothing was charged.';
       if (duplicate) {
         await interaction.reply({
-          content: '❌ Someone else just started a heist! Use `/heist join` to join it. Your entry fee was refunded.',
+          content: `❌ Someone else just started a heist! Use \`/heist join\` to join it.${refundSuffix}`,
           ephemeral: true,
         });
       } else {
         await interaction.reply({
-          content: '❌ Failed to create heist. Your entry fee was refunded.',
+          content: `❌ Failed to create heist.${refundSuffix}`,
           ephemeral: true,
         });
       }

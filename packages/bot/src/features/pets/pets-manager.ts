@@ -252,14 +252,16 @@ export class PetsManager {
     userId: string,
     amount: number,
     operation: 'buy' | 'feed' | 'train',
+    requestId: string,
   ): Promise<boolean> {
     if (amount <= 0) return true;
 
     try {
-      const { error } = await this.supabase.rpc('economy_add_balance', {
+      const { error } = await this.supabase.rpc('economy_refund_balance', {
         p_guild_id: guildId,
         p_user_id: userId,
         p_amount: amount,
+        p_idempotency_key: `pet:${operation}:refund:${requestId}`,
       });
       if (!error) return true;
       log.error(`Pet ${operation} refund failed`, { guildId, userId, amount, error: error.message });
@@ -399,7 +401,7 @@ export class PetsManager {
 
     if (insertErr) {
       log.error('buyPet insert failed — refunding:', insertErr.message);
-      const refunded = await this.refundCoins(guildId, userId, price, 'buy');
+      const refunded = await this.refundCoins(guildId, userId, price, 'buy', interaction.id);
       await interaction.reply({
         content: refunded
           ? '❌ Failed to create pet — your coins have been refunded.'
@@ -486,6 +488,7 @@ export class PetsManager {
         interaction.user.id,
         cost,
         'feed',
+        interaction.id,
       );
       const outcome = cost === 0
         ? ' Nothing was charged.'
@@ -611,6 +614,7 @@ export class PetsManager {
         interaction.user.id,
         cost,
         'train',
+        interaction.id,
       );
       const outcome = cost === 0
         ? ' Nothing was charged.'

@@ -119,7 +119,7 @@ interface GuildServices {
   actionQueueStaleTimer?: ReturnType<typeof setInterval>;
   actionQueueStop?: () => Promise<void>;
   syncHandle?: {
-    stop: () => void;
+    stop: () => Promise<void>;
     reconfigure: (intervalMinutes?: number, runImmediately?: boolean) => void;
   };
   reconTimer?: ReturnType<typeof setInterval>;
@@ -756,7 +756,14 @@ export async function destroyGuildServices(ctx: GuildContext): Promise<void> {
   }
   if (services.reconTimer) clearInterval(services.reconTimer);
   if (services.syncHandle) {
-    stopSyncProducer('sync handle', () => services.syncHandle!.stop());
+    try {
+      pendingProducerStops.push({
+        name: 'sync handle',
+        promise: services.syncHandle.stop(),
+      });
+    } catch (error) {
+      stopFailures.push({ name: 'sync handle', error });
+    }
   }
 
   // Services with stop(), excluding AuditService: audit is the final consumer

@@ -78,6 +78,7 @@ function makeSupabase(overrides: Record<string, any> = {}) {
 
 function makeInteraction(overrides: Record<string, any> = {}) {
   return {
+    id: overrides.id ?? 'interaction-1',
     guildId: 'g1',
     user: { id: overrides.userId ?? 'u1', username: 'testuser' },
     reply: vi.fn().mockResolvedValue(undefined),
@@ -350,10 +351,11 @@ describe('PetsManager', () => {
 
       await mgr.feedPet(interaction as any);
 
-      expect(supabase.rpc).toHaveBeenNthCalledWith(3, 'economy_add_balance', {
+      expect(supabase.rpc).toHaveBeenNthCalledWith(3, 'economy_refund_balance', {
         p_guild_id: 'g1',
         p_user_id: 'u1',
         p_amount: 50,
+        p_idempotency_key: 'pet:feed:refund:interaction-1',
       });
       expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
         content: expect.stringContaining('have been refunded'),

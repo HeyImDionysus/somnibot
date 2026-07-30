@@ -24,7 +24,6 @@ DECLARE
   v_guild_id TEXT;
   v_count    INTEGER;
   v_chance   INTEGER;
-  v_debited  BOOLEAN;
 BEGIN
   SELECT h.status, h.guild_id
     INTO v_status, v_guild_id
@@ -68,20 +67,19 @@ BEGIN
   END IF;
 
   IF p_entry_fee = 0 THEN
-    v_debited := true;
+    NULL;
   ELSE
     BEGIN
       PERFORM public.economy_subtract_balance(v_guild_id, p_user_id, p_entry_fee);
-      v_debited := true;
-    EXCEPTION WHEN OTHERS THEN
-      v_debited := false;
+    EXCEPTION
+      WHEN raise_exception THEN
+        IF SQLERRM = 'Insufficient balance' THEN
+          v_chance := LEAST(95, GREATEST(0, p_base_chance + (v_count - 1) * 7));
+          RETURN QUERY SELECT 'insufficient_funds'::TEXT, v_count, v_chance, NULL::TEXT;
+          RETURN;
+        END IF;
+        RAISE;
     END;
-  END IF;
-
-  IF NOT v_debited THEN
-    v_chance := LEAST(95, GREATEST(0, p_base_chance + (v_count - 1) * 7));
-    RETURN QUERY SELECT 'insufficient_funds'::TEXT, v_count, v_chance, NULL::TEXT;
-    RETURN;
   END IF;
 
   INSERT INTO public.economy_heist_participants
