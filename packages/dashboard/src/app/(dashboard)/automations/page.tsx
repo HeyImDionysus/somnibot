@@ -621,7 +621,12 @@ export default function AutomationsPage() {
                       {hold.member_count} members from {hold.trigger_event}; guardrail was {hold.threshold}.
                     </p>
                     <p className="mt-1 text-xs text-discord-text-muted">
-                      Held {timeAgo(hold.created_at)}. No member-targeted action ran before the hold.
+                      Held {timeAgo(hold.created_at)}.{' '}
+                      {hold.status === 'held' || hold.status === 'approved'
+                        ? 'No member-targeted action ran before approval.'
+                        : hold.status === 'executing'
+                          ? 'Execution is in progress.'
+                          : 'Execution did not finish cleanly; inspect the audit log before applying corrective actions manually.'}
                     </p>
                     {hold.last_error && (
                       <p className="mt-2 rounded bg-red-500/10 px-3 py-2 text-xs text-red-400">

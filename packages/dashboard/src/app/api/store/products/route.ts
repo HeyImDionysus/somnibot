@@ -567,7 +567,11 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing product id' }, { status: 400 });
   }
 
-  if ('granted_role_ids' in updates || 'granted_channel_ids' in updates) {
+  if (
+    'granted_role_ids' in updates
+    || 'granted_channel_ids' in updates
+    || updates.active === true
+  ) {
     const { data: currentTargets, error: currentTargetsError } = await supabase
       .from('products')
       .select('granted_role_ids, granted_channel_ids')

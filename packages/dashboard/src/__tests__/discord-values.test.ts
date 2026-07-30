@@ -6,7 +6,7 @@ import {
 } from '@/lib/api/discord-values';
 
 describe('Discord configuration values', () => {
-  it.each(['⭐', '👨‍👩‍👧‍👦', '🇺🇸', '<:party_blob:12345678901234567>', '<a:dance:123456789012345678>'])(
+  it.each(['⭐', '👨‍👩‍👧‍👦', '🇺🇸', '1️⃣', '<:party_blob:12345678901234567>', '<a:dance:123456789012345678>'])(
     'accepts supported emoji %s',
     (value) => expect(discordEmojiSchema.safeParse(value).success).toBe(true),
   );

@@ -149,6 +149,27 @@ export class MassActionHoldService {
     return (data ?? []) as MassActionHoldRow[];
   }
 
+  /**
+   * This guild's engine is single-owner. If it is starting, any row still in
+   * `executing` survived a prior process exit and cannot safely be replayed:
+   * some member actions may already have committed. Surface that uncertainty
+   * as a terminal failure instead of leaving an unactionable zombie row.
+   */
+  async failInterruptedExecutions(): Promise<void> {
+    const { error } = await this.supabase
+      .from('automation_mass_action_holds')
+      .update({
+        status: 'failed',
+        last_error:
+          'Execution was interrupted after it started. Some member actions may have completed; inspect the audit log before retrying manually.',
+      })
+      .eq('guild_id', this.guild.id)
+      .eq('status', 'executing');
+    if (error) {
+      throw new Error(`Failed to reconcile interrupted mass actions: ${error.message}`);
+    }
+  }
+
   async claimApproved(holdId: string): Promise<MassActionHoldRow | null> {
     const { data, error } = await this.supabase.rpc(
       'claim_approved_automation_mass_action_hold',

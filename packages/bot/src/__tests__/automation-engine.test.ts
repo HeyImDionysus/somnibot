@@ -56,6 +56,7 @@ vi.mock('../features/automations/mass-action-hold.js', () => ({
     unsubscribe = vi.fn();
     listHeld = vi.fn(async () => []);
     listApproved = vi.fn(async () => []);
+    failInterruptedExecutions = vi.fn(async () => {});
     threshold = vi.fn(async () => 25);
     claimApproved = vi.fn(async () => null);
   },

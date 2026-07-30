@@ -17,6 +17,7 @@ import {
   claimDiscordOccurrence,
   completeDiscordOccurrence,
   failDiscordOccurrence,
+  releaseDiscordOccurrence,
 } from '../../services/occurrence-fence.js';
 
 const log = createLogger('ScheduledRunner');
@@ -280,7 +281,9 @@ export class ScheduledMessageRunner {
       })
       .eq('id', schedule.id);
     if (counterError) {
-      await failDiscordOccurrence(this.supabase, occurrenceId, `counter_update:${counterError.message}`).catch(() => {});
+      // Nothing reached Discord and no counter committed, so this occurrence
+      // is safe to retry. A failed fence would permanently drop the due minute.
+      await releaseDiscordOccurrence(this.supabase, occurrenceId).catch(() => {});
       log.error(`Failed to update schedule ${schedule.id} counters:`, counterError.message);
       return;
     }

@@ -32,19 +32,14 @@ export function FeatureStatusPanel() {
     if (!feature) return;
     setStatus(null);
     try {
-      const [guildResponse, diagnosticsResponse] = await Promise.all([
-        fetch('/api/guild'),
-        fetch('/api/diagnostics'),
-      ]);
-      const [guildJson, diagnosticsJson] = await Promise.all([
-        guildResponse.json(),
-        diagnosticsResponse.json(),
-      ]);
-      const config = guildResponse.ok && guildJson.success && guildJson.config && typeof guildJson.config === 'object'
-        ? guildJson.config as Record<string, unknown>
+      const response = await fetch('/api/dashboard/feature-status');
+      const payload = await response.json();
+      const config = response.ok && payload.success && payload.data?.config
+        && typeof payload.data.config === 'object'
+        ? payload.data.config as Record<string, unknown>
         : null;
-      const bot = diagnosticsResponse.ok && diagnosticsJson.success
-        ? diagnosticsJson.data?.bot
+      const bot = response.ok && payload.success
+        ? payload.data?.bot
         : null;
       setStatus(deriveFeatureReadiness({
         feature,

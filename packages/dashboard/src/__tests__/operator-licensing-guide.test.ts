@@ -14,6 +14,18 @@ describe('operator licensing guide', () => {
     expect(guide.steps.join(' ')).toContain('cannot be reused');
   });
 
+  it('keeps download guidance when the product also grants a bonus role', () => {
+    const guide = getOperatorLicensingGuide({
+      type: 'one_time',
+      deliveryType: 'file',
+      grantedRoleCount: 1,
+    });
+
+    expect(guide.kind).toBe('download');
+    expect(guide.steps.join(' ')).toContain('upload the customer download');
+    expect(guide.steps.join(' ')).toContain('bonus Discord role');
+  });
+
   it('makes the software outage-policy choice explicit', () => {
     const guide = getOperatorLicensingGuide({
       type: 'one_time',

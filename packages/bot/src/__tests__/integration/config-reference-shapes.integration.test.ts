@@ -59,6 +59,11 @@ describe('guild configuration reference shapes', () => {
     }).eq('guild_id', guildId);
     expect(unicode.error).toBeNull();
 
+    const keycap = await supa.from('guild_config').update({
+      starboard_emoji: '1️⃣',
+    }).eq('guild_id', guildId);
+    expect(keycap.error).toBeNull();
+
     const custom = await supa.from('guild_config').update({
       starboard_emoji: '<:party_blob:12345678901234567>',
     }).eq('guild_id', guildId);

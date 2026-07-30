@@ -81,12 +81,14 @@ const mockMassComplete = vi.fn().mockResolvedValue(undefined);
 const mockMassFail = vi.fn().mockResolvedValue(undefined);
 const mockMassListHeld = vi.fn().mockResolvedValue([]);
 const mockMassListApproved = vi.fn().mockResolvedValue([]);
+const mockFailInterruptedExecutions = vi.fn().mockResolvedValue(undefined);
 vi.mock('../features/automations/mass-action-hold.js', () => ({
   MassActionHoldService: class {
     subscribe = vi.fn();
     unsubscribe = vi.fn();
     listHeld = mockMassListHeld;
     listApproved = mockMassListApproved;
+    failInterruptedExecutions = mockFailInterruptedExecutions;
     threshold = mockMassThreshold;
     create = mockMassHoldCreate;
     ensureOwnerNotice = mockMassHoldNotice;
@@ -190,6 +192,7 @@ describe('AutomationEngine', () => {
     mockMassFail.mockResolvedValue(undefined);
     mockMassListHeld.mockResolvedValue([]);
     mockMassListApproved.mockResolvedValue([]);
+    mockFailInterruptedExecutions.mockResolvedValue(undefined);
     guild = makeGuild();
     eventBus = makeEventBus();
     engine = new AutomationEngine(
@@ -204,6 +207,7 @@ describe('AutomationEngine', () => {
     it('loads automations and subscribes', async () => {
       await engine.start();
       expect(mockLoad).toHaveBeenCalled();
+      expect(mockFailInterruptedExecutions).toHaveBeenCalledTimes(1);
       expect(mockSubscribe).toHaveBeenCalled();
       expect(eventBus.onAny).toHaveBeenCalled();
     });

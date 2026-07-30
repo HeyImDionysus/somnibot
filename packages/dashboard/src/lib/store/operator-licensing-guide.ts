@@ -25,11 +25,6 @@ export function getOperatorLicensingGuide(
 ): OperatorLicensingGuide {
   if (
     choice.deliveryType === 'access_pass'
-    || (
-      (choice.grantedRoleCount ?? 0) > 0
-      && choice.deliveryType !== 'license_key'
-      && choice.deliveryType !== 'mixed'
-    )
   ) {
     return {
       kind: 'discord_perk',
@@ -45,13 +40,19 @@ export function getOperatorLicensingGuide(
   }
 
   if (choice.deliveryType === 'file' || choice.deliveryType === 'link') {
+    const includesDiscordRole = (choice.grantedRoleCount ?? 0) > 0;
     return {
       kind: 'download',
       title: 'Download-once file or link',
-      summary: 'Do not issue a license key. Deliver an expiring, single-use signed link.',
+      summary: includesDiscordRole
+        ? 'Deliver the download and the configured Discord role; neither replaces the other.'
+        : 'Do not issue a license key. Deliver an expiring, single-use signed link.',
       keyRequired: false,
       steps: [
         'Use File or Link delivery and upload the customer download.',
+        ...(includesDiscordRole
+          ? ['Select every bonus Discord role and keep the bot role above it so fulfillment can deliver both benefits.']
+          : []),
         'SomniBot issues a five-minute portal link and consumes its nonce on delivery, so the same link cannot be reused.',
         'A new link still requires a live entitlement; deactivating the product does not erase prior customer access.',
       ],

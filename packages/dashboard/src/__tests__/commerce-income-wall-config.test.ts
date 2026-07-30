@@ -485,6 +485,37 @@ describe('product mutations', () => {
     expect(fake._writes.products ?? []).toHaveLength(0);
   });
 
+  it('revalidates persisted Discord targets before reactivating a product', async () => {
+    const fake = useFake({
+      products: {
+        rows: [product({
+          type: 'one_time',
+          active: false,
+          price_cents: 0,
+          granted_role_ids: [ROLE],
+          granted_channel_ids: [],
+        })],
+      },
+      guild_live_state: {
+        rows: [{
+          guild_id: GUILD,
+          snapshot_version: 2,
+          snapshot_at: new Date().toISOString(),
+          roles: [],
+          channels: [],
+        }],
+      },
+    });
+
+    const res = await productsPUT(buildRequest('/api/store/products', {
+      method: 'PUT',
+      body: { id: PRODUCT_ID, active: true },
+    }) as never);
+
+    expect(res.status).toBe(409);
+    expect(fake._writes.products ?? []).toHaveLength(0);
+  });
+
   it('includes typed temporary roles when a product update opens the purchase path', async () => {
     const fake = useFake({
       products: {

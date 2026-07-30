@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { MassActionHoldService } from '../../features/automations/mass-action-hold.js';
 import {
   getAnonTestClient,
   getAuthenticatedTestClient,
@@ -156,6 +157,38 @@ describe('automation mass-action holds', () => {
       threshold: 25,
     });
     expect(invalid.error?.code).toBe('23514');
+  });
+
+  it('turns an execution interrupted by process exit into visible failed evidence', async () => {
+    const interruptedOccurrence = randomUUID();
+    const inserted = await supa.from('automation_mass_action_holds').insert({
+      ...holdPayload(),
+      occurrence_id: interruptedOccurrence,
+    }).select('id').single();
+    expect(inserted.error).toBeNull();
+
+    const approved = await supa.from('automation_mass_action_holds').update({
+      status: 'approved',
+      approved_by: '12345678901234567',
+      approved_at: new Date().toISOString(),
+    }).eq('id', inserted.data!.id);
+    expect(approved.error).toBeNull();
+    const claimed = await supa.rpc('claim_approved_automation_mass_action_hold', {
+      p_hold_id: inserted.data!.id,
+      p_guild_id: guildId,
+    });
+    expect(claimed.data).toHaveLength(1);
+
+    const service = new MassActionHoldService(supa, { id: guildId } as never);
+    await service.failInterruptedExecutions();
+
+    const reconciled = await supa.from('automation_mass_action_holds')
+      .select('status, last_error')
+      .eq('id', inserted.data!.id)
+      .single();
+    expect(reconciled.error).toBeNull();
+    expect(reconciled.data?.status).toBe('failed');
+    expect(reconciled.data?.last_error).toContain('interrupted');
   });
 
   it('keeps held target snapshots unavailable to anon and authenticated browser roles', async () => {

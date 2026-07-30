@@ -31,15 +31,25 @@ const BASE_SCHEDULE = {
   failed_at: null, missed_run_policy: 'skip-missed',
 };
 
-function schedSupa(schedules: any[]) {
+function schedSupa(
+  schedules: any[],
+  options: { counterError?: { message: string } } = {},
+) {
   const inserts: Record<string, any[]> = { alerts: [] };
   const updates: Array<{ payload: any }> = [];
+  const deletes: string[] = [];
   function chainFor(table: string) {
-    const c: any = { _isUpdate: false, _insertRow: null };
+    const c: any = { _isUpdate: false, _insertRow: null, _updatePayload: null };
     for (const m of ['select', 'eq', 'neq', 'or', 'is', 'lt', 'gt', 'gte', 'lte', 'in', 'not', 'order', 'limit', 'range', 'match', 'delete']) {
       c[m] = () => c;
     }
-    c.update = (payload: any) => { c._isUpdate = true; updates.push({ payload }); return c; };
+    c.update = (payload: any) => {
+      c._isUpdate = true;
+      c._updatePayload = payload;
+      updates.push({ payload });
+      return c;
+    };
+    c.delete = () => { deletes.push(table); return c; };
     c.insert = (row: any) => {
       c._insertRow = row;
       (inserts[table] ||= []).push(row);
@@ -63,12 +73,20 @@ function schedSupa(schedules: any[]) {
       return { data: null, error: null };
     };
     c.then = (resolve: (v: any) => void) => {
+      if (
+        c._isUpdate
+        && table === 'scheduled_messages'
+        && c._updatePayload?.last_sent_at
+        && options.counterError
+      ) {
+        return resolve({ data: null, error: options.counterError });
+      }
       if (c._isUpdate) return resolve({ data: [{ id: 'sched1' }], error: null });
       return resolve({ data: table === 'scheduled_messages' ? schedules : [], error: null });
     };
     return c;
   }
-  return { supabase: { from: (t: string) => chainFor(t) } as any, inserts, updates };
+  return { supabase: { from: (t: string) => chainFor(t) } as any, inserts, updates, deletes };
 }
 
 function guild(sendImpl?: () => Promise<any>) {
@@ -121,6 +139,21 @@ describe('ScheduledMessageRunner — transient send retry', () => {
     // No terminal failure: nothing marked failed, no delivery-failed alert.
     expect(updates.some((u) => u.payload.status === 'failed')).toBe(false);
     expect(inserts.alerts.length).toBe(0);
+  });
+
+  it('releases a proven-unused occurrence when the counter update fails', async () => {
+    const Runner = await loadRunner();
+    const { supabase, deletes } = schedSupa(
+      [{ ...BASE_SCHEDULE }],
+      { counterError: { message: 'write unavailable' } },
+    );
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+
+    await (runner as any).tick();
+
+    expect(send).not.toHaveBeenCalled();
+    expect(deletes).toContain('discord_operation_occurrences');
   });
 });
 

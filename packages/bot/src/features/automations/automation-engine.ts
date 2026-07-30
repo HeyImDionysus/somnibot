@@ -125,6 +125,12 @@ export class AutomationEngine {
    */
   async start(): Promise<void> {
     await this.loader.load();
+    try {
+      await this.massActionHolds.failInterruptedExecutions();
+    } catch (err) {
+      // Recovery visibility must not take ordinary automations offline.
+      log.error('Failed to reconcile interrupted mass actions:', err);
+    }
     this.loader.subscribe();
     this.massActionHolds.subscribe((holdId) => {
       void this.runApprovedHold(holdId).catch((err) => {
