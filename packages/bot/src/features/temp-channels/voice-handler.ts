@@ -20,7 +20,14 @@ export async function handleVoiceStateForTempChannels(
   if (newState.channelId && newState.channelId !== oldState.channelId) {
     // Check if this is a hub channel
     if (manager.isHubChannel(newState.channelId)) {
-      await manager.handleJoinHub(member, newState.channelId);
+      // Voice gateway events do not expose an interaction id. The live-room
+      // identity is therefore guild+hub+member and is released when that room
+      // is deleted, allowing a later legitimate join to create a new room.
+      await manager.handleJoinHub(
+        member,
+        newState.channelId,
+        `${newState.guild.id}:${newState.channelId}:${member.id}`,
+      );
       return;
     }
   }

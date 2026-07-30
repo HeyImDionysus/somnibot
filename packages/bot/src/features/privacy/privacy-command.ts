@@ -41,7 +41,7 @@ export async function handlePrivacyCommand(
         : '**Privacy Policy**\nContact the server owner for a link to our privacy policy.\n\n') +
       '**Your Data Rights:**\n' +
       '• `/mydata` — Export all your data as a JSON file\n' +
-      '• `/forgetme` — Permanently delete all your data from this server\n\n' +
+      '• `/forgetme` — Erase or anonymize your account data from this server\n\n' +
       '**What we collect:**\n' +
       '• Discord ID & username (for identification)\n' +
       '• Message counts & voice minutes (for XP, not message content)\n' +
@@ -50,7 +50,7 @@ export async function handlePrivacyCommand(
       '• Purchase records (if applicable)\n\n' +
       '**Questions?** Contact us at `heyimdionysus@gmail.com`',
     )
-    .setFooter({ text: 'We never sell your data. Use /forgetme to delete everything.' });
+    .setFooter({ text: 'We never sell your data. /forgetme explains the limited security records retained.' });
   const kit = await resolveBrandKit(client.supabase, interaction.guildId!, {
     fallbackName: interaction.guild?.name,
   });

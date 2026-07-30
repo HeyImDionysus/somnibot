@@ -42,9 +42,12 @@ interface DashboardStats {
   lastSnapshot: string | null;
   recentEvents: Array<{
     type: string;
+    action: string;
     description: string;
     timestamp: string;
     success: boolean;
+    targetType: string | null;
+    targetId: string | null;
   }>;
 }
 
@@ -254,7 +257,7 @@ export default function DashboardPage() {
             <div className="divide-y divide-discord-bg-tertiary">
               {stats.recentEvents.slice(0, 8).map((event, i) => (
                 <div key={i} className="flex items-center gap-3 px-4 py-3">
-                  <ActivityDot type={event.type} />
+                  <ActivityDot type={event.type} success={event.success} />
                   <span className="flex-1 text-sm text-discord-text-secondary">
                     {event.description}
                   </span>
@@ -340,7 +343,7 @@ function MetricCard({
   );
 }
 
-function ActivityDot({ type }: { type: string }) {
+function ActivityDot({ type, success }: { type: string; success: boolean }) {
   const colorMap: Record<string, string> = {
     'ticket.opened': 'bg-yellow-400',
     'ticket.closed': 'bg-green-400',
@@ -356,7 +359,13 @@ function ActivityDot({ type }: { type: string }) {
   };
   return (
     <span
-      className={`inline-block h-2 w-2 rounded-full ${colorMap[type] ?? 'bg-discord-text-muted'}`}
+      className={`inline-block h-2 w-2 rounded-full ${
+        !success
+          ? 'bg-discord-danger'
+          : colorMap[type] ??
+            (type === 'commerce' ? 'bg-emerald-400' : 'bg-discord-text-muted')
+      }`}
+      title={success ? type : `${type} failed`}
     />
   );
 }

@@ -15,6 +15,8 @@ import { loadConfig, invalidateAntiRaidCache } from '../../features/anti-raid/in
 
 let supa!: SupabaseClient;
 const GUILD_ID = `test-antiraid-guild-${Date.now()}`;
+const ANTI_RAID_LOG_CHANNEL_ID = '111111111111111111';
+const MOD_LOG_CHANNEL_ID = '222222222222222222';
 
 beforeAll(async () => {
   supa = await requireSupabase();
@@ -43,8 +45,8 @@ describe('Anti-raid config loading', () => {
       anti_raid_action: 'ban',
       anti_raid_auto_unban: false, // non-default: proves the toggle is actually read
       anti_raid_ban_delete_seconds: 3600,
-      anti_raid_log_channel_id: 'log-chan-antiraid',
-      mod_log_channel_id: 'mod-log-antiraid',
+      anti_raid_log_channel_id: ANTI_RAID_LOG_CHANNEL_ID,
+      mod_log_channel_id: MOD_LOG_CHANNEL_ID,
     });
     expect(cfgErr).toBeNull();
 
@@ -60,8 +62,8 @@ describe('Anti-raid config loading', () => {
     expect(config.anti_raid_account_age_days).toBe(14);
     expect(config.anti_raid_action).toBe('ban');
     expect(config.anti_raid_ban_delete_seconds).toBe(3600);
-    expect(config.anti_raid_log_channel_id).toBe('log-chan-antiraid');
-    expect(config.mod_log_channel_id).toBe('mod-log-antiraid');
+    expect(config.anti_raid_log_channel_id).toBe(ANTI_RAID_LOG_CHANNEL_ID);
+    expect(config.mod_log_channel_id).toBe(MOD_LOG_CHANNEL_ID);
     // The persisted auto-unban toggle is honored (not forced to the default).
     expect(config.anti_raid_auto_unban).toBe(false);
   });

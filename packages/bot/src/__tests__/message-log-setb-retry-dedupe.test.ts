@@ -40,6 +40,8 @@ function chainBuilder(resolveValue: any) {
 function makeClient(config: any) {
   return {
     supabase: { from: vi.fn().mockReturnValue(chainBuilder({ data: config, error: null })) },
+    eventBus: { emit: vi.fn() },
+    guilds: { cache: new Map() },
   };
 }
 
@@ -49,7 +51,7 @@ function makeMessage(sendMock: any, overrides: any = {}) {
     author: { id: 'u1', tag: 'User#0001', bot: false, displayAvatarURL: () => 'https://cdn/av.png' },
     guild: {
       id: 'g1',
-      channels: { cache: new Map([['log-ch', { send: sendMock }]]) },
+      channels: { cache: new Map([['log-ch', { id: 'log-ch', send: sendMock }]]) },
     },
     channel: { id: overrides.channelId ?? 'ch1' },
     content: overrides.content ?? 'hello',
@@ -124,6 +126,12 @@ describe('message-log resilient send', () => {
     const del = makeMessage(send, { id: 'r2' });
     await logMessageDelete(client as any, del as any);
     expect(send).toHaveBeenCalledTimes(1); // no retry on 4xx
+    expect(client.eventBus.emit).toHaveBeenCalledWith(
+      'message_log.delivery_failed',
+      'g1',
+      expect.objectContaining({ channelId: 'log-ch', error: expect.stringContaining('forbidden') }),
+    );
+    expect(client.supabase.from).toHaveBeenCalledWith('alerts');
   });
 });
 

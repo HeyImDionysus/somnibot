@@ -13,6 +13,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { buildActivityEvent } from '@/lib/dashboard/activity';
 
 export async function GET(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'standard');
@@ -101,6 +102,20 @@ export async function GET(request: NextRequest) {
         .gte('timestamp', new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()),
     ]);
 
+    const sourceError = [
+      diagnosticsResult,
+      memberCountResult,
+      ticketResult,
+      infractionResult,
+      revenueResult,
+      giveawayResult,
+      recentEventsResult,
+      todayMessagesResult,
+    ].find((result) => result.error)?.error;
+    if (sourceError) {
+      throw new Error(`Dashboard source unavailable: ${sourceError.message}`);
+    }
+
     // Calculate revenue
     const revenueThisMonth = revenueResult.data
       ? revenueResult.data.reduce(
@@ -111,16 +126,8 @@ export async function GET(request: NextRequest) {
 
     // Format recent events
     const recentEvents = (recentEventsResult.data ?? [])
-      .map((log: Record<string, unknown>) => ({
-        type: formatEventType(log.action as string),
-        description: formatEventDescription(
-          log.action as string,
-          log.details as Record<string, unknown>,
-        ),
-        timestamp: log.timestamp as string,
-        success: log.success as boolean,
-      }))
-      .filter((e: { description: string }) => e.description !== '');
+      .map((log: Record<string, unknown>) => buildActivityEvent(log))
+      .filter((event) => event !== null);
 
     // Uptime formatting
     const uptimeSeconds = diagnosticsResult.data?.uptime_seconds ?? 0;
@@ -163,71 +170,5 @@ export async function GET(request: NextRequest) {
     }
     console.error('[API] Dashboard stats error:', err);
     return NextResponse.json({ error: 'Internal error' }, { status: 500 });
-  }
-}
-
-function formatEventType(action: string): string {
-  if (action.startsWith('ticket.')) return `ticket.${action.split('.')[1]}`;
-  if (
-    action.startsWith('moderation.') ||
-    action.includes('warn') ||
-    action.includes('ban') ||
-    action.includes('kick')
-  )
-    return `moderation.${action.split('.').pop()}`;
-  if (action.includes('purchase') || action.includes('fulfillment')) return 'purchase.completed';
-  if (action.includes('member') && action.includes('join')) return 'member.joined';
-  if (action.includes('giveaway')) return 'giveaway.ended';
-  return action;
-}
-
-function formatEventDescription(
-  action: string,
-  details: Record<string, unknown> | null,
-): string {
-  if (!details) {
-    // Some actions make sense without details
-    switch (action) {
-      case 'bot.started':
-        return 'Bot started';
-      default:
-        return '';
-    }
-  }
-
-  switch (action) {
-    case 'ticket.opened':
-      return `New ticket opened${details.ticketNumber ? ` #${details.ticketNumber}` : ''}`;
-    case 'ticket.closed':
-      return `Ticket closed${details.ticketNumber ? ` #${details.ticketNumber}` : ''}`;
-    case 'moderation.warn':
-    case 'bot.warn':
-      return `Warning issued${details.reason ? `: ${String(details.reason).slice(0, 60)}` : ''}`;
-    case 'moderation.ban':
-    case 'bot.ban':
-      return `Member banned${details.reason ? `: ${String(details.reason).slice(0, 60)}` : ''}`;
-    case 'moderation.kick':
-    case 'bot.kick':
-      return `Member kicked${details.reason ? `: ${String(details.reason).slice(0, 60)}` : ''}`;
-    case 'moderation.mute':
-    case 'bot.mute':
-      return `Member muted${details.reason ? `: ${String(details.reason).slice(0, 60)}` : ''}`;
-    case 'fulfillment.one_time_purchase':
-    case 'purchase_fulfilled':
-      return `Purchase fulfilled: ${details.product_name ?? details.productName ?? 'product'}`;
-    case 'fulfillment.subscription_activated':
-      return `Subscription activated: ${details.product_name ?? 'plan'}`;
-    case 'bot.started':
-      return 'Bot started';
-    case 'bot.create_role':
-      return `Role created: ${details.result && typeof details.result === 'object' ? (details.result as Record<string, unknown>).name : 'role'}`;
-    case 'bot.create_channel':
-      return `Channel created: ${details.result && typeof details.result === 'object' ? (details.result as Record<string, unknown>).name : 'channel'}`;
-    case 'giveaway.ended':
-      return `Giveaway ended: ${details.prize ?? 'giveaway'}`;
-    case 'giveaway.started':
-      return `Giveaway started: ${details.prize ?? 'giveaway'}`;
-    default:
-      return '';
   }
 }

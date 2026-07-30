@@ -25,6 +25,11 @@ import type { PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 import { resolveBrandKit } from '../branding/brand-kit.js';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
+import {
+  claimDiscordOccurrence,
+  completeDiscordOccurrence,
+  failDiscordOccurrence,
+} from '../../services/occurrence-fence.js';
 
 const log = createLogger('Tickets');
 
@@ -96,7 +101,37 @@ export async function createTicket(
   ticketType: TicketTypeConfig,
   supabase: SupabaseClient,
   eventBus: PlatformEventBus,
+  occurrenceKey?: string,
 ): Promise<{ channel: TextChannel; ticket: DbTicket } | { error: string }> {
+  let occurrenceId: string | null = null;
+  if (occurrenceKey) {
+    try {
+      const claim = await claimDiscordOccurrence(supabase, guild.id, 'ticket', occurrenceKey);
+      occurrenceId = claim.occurrence.id;
+      if (!claim.won) {
+        // A completion update can be interrupted after the ticket row commits.
+        // The ticket row's unique occurrence FK is therefore the recovery source
+        // of truth even while the fence still says "claimed".
+        const { data: existing } = await supabase
+          .from('tickets')
+          .select('*')
+          .eq('creation_occurrence_id', occurrenceId)
+          .maybeSingle();
+        if (existing?.channel_id) {
+          const channel = (guild.channels.cache.get(existing.channel_id)
+            ?? await guild.channels.fetch(existing.channel_id).catch(() => null)) as TextChannel | null;
+          if (channel?.isTextBased()) {
+            return { channel, ticket: existing as DbTicket };
+          }
+        }
+        return { error: 'This ticket request is already being processed. No duplicate ticket was created.' };
+      }
+    } catch (err) {
+      log.error('Failed to claim ticket occurrence:', { error: String(err) });
+      return { error: 'Ticket creation is temporarily unavailable. Please try again.' };
+    }
+  }
+
   // Check max open tickets per user
   const { count: openCount } = await supabase
     .from('tickets')
@@ -189,6 +224,9 @@ export async function createTicket(
       stage: 'channel_create',
       error: String(err),
     });
+    if (occurrenceId) {
+      await failDiscordOccurrence(supabase, occurrenceId, `channel_create:${String(err)}`).catch(() => {});
+    }
     return { error: 'Failed to create ticket channel. Check bot permissions.' };
   }
 
@@ -243,6 +281,7 @@ export async function createTicket(
       type: ticketType.id,
       status: 'open',
       message_count: 0,
+      creation_occurrence_id: occurrenceId,
     })
     .select()
     .single();
@@ -258,7 +297,19 @@ export async function createTicket(
       stage: 'db_save',
       error: dbError?.message ?? 'unknown',
     });
+    if (occurrenceId) {
+      await failDiscordOccurrence(supabase, occurrenceId, `db_save:${dbError?.message ?? 'unknown'}`).catch(() => {});
+    }
     return { error: 'Failed to save ticket to database.' };
+  }
+
+  if (occurrenceId) {
+    await completeDiscordOccurrence(
+      supabase,
+      occurrenceId,
+      channel.id,
+      { ticketId: ticket.id, ticketNumber },
+    ).catch((err) => log.error('Failed to complete ticket occurrence:', { error: String(err) }));
   }
 
   // Fire event

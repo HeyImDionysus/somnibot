@@ -13,6 +13,7 @@
  * ```
  */
 import { z, type ZodSchema } from 'zod';
+import { optionalHttpUrlSchema } from './discord-values';
 import { NextRequest, NextResponse } from 'next/server';
 import {
   ACTION_TYPES,
@@ -477,7 +478,7 @@ const welcomeConfig = z.object({
   welcome_channel_id: snowflake.optional().nullable(),
   welcome_message: z.string().max(2000).optional(),
   welcome_card_enabled: z.boolean().optional(),
-  welcome_card_background: z.string().max(512).optional().nullable(),
+  welcome_card_background: optionalHttpUrlSchema,
   welcome_dm_enabled: z.boolean().optional(),
   welcome_dm_message: z.string().max(2000).optional(),
   welcome_auto_roles: z.array(snowflake).max(25).optional(),

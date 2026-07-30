@@ -35,14 +35,33 @@ function schedSupa(schedules: any[]) {
   const inserts: Record<string, any[]> = { alerts: [] };
   const updates: Array<{ payload: any }> = [];
   function chainFor(table: string) {
-    const c: any = { _isUpdate: false };
+    const c: any = { _isUpdate: false, _insertRow: null };
     for (const m of ['select', 'eq', 'neq', 'or', 'is', 'lt', 'gt', 'gte', 'lte', 'in', 'not', 'order', 'limit', 'range', 'match', 'delete']) {
       c[m] = () => c;
     }
     c.update = (payload: any) => { c._isUpdate = true; updates.push({ payload }); return c; };
-    c.insert = (row: any) => { (inserts[table] ||= []).push(row); return c; };
+    c.insert = (row: any) => {
+      c._insertRow = row;
+      (inserts[table] ||= []).push(row);
+      return c;
+    };
     c.maybeSingle = async () => ({ data: null, error: null });
-    c.single = async () => ({ data: null, error: null });
+    c.single = async () => {
+      if (table === 'discord_operation_occurrences' && c._insertRow) {
+        return {
+          data: {
+            id: `occ-${inserts.discord_operation_occurrences.length}`,
+            ...c._insertRow,
+            status: 'claimed',
+            resource_id: null,
+            result: {},
+            last_error: null,
+          },
+          error: null,
+        };
+      }
+      return { data: null, error: null };
+    };
     c.then = (resolve: (v: any) => void) => {
       if (c._isUpdate) return resolve({ data: [{ id: 'sched1' }], error: null });
       return resolve({ data: table === 'scheduled_messages' ? schedules : [], error: null });

@@ -484,9 +484,49 @@ export interface DbGuildLiveState {
   members: GuildMemberSnapshot[] | null;
   bot_role_id: string | null;
   bot_role_position: number;
+  bot_permissions: string | null;
+  snapshot_version: number;
   onboarding_enabled: boolean;
   onboarding_prompts: Record<string, unknown>[];
   snapshot_at: string;
+}
+
+export interface GuildLivePermissionOverwrite {
+  id: string;
+  type: 'role' | 'member';
+  allow: string;
+  deny: string;
+}
+
+export interface GuildLiveRoleSnapshot {
+  id: string;
+  name: string;
+  color: number;
+  position: number;
+  permissions: string;
+  hoist: boolean;
+  mentionable: boolean;
+  managed: boolean;
+  templateKey: string | null;
+  tier: string | null;
+  source: string;
+  memberCount: number;
+  editableByBot: boolean;
+}
+
+export interface GuildLiveChannelSnapshot {
+  id: string;
+  name: string;
+  type: number;
+  parentId: string | null;
+  position: number;
+  topic: string | null;
+  slowmode: number;
+  nsfw: boolean;
+  templateKey: string | null;
+  botPermissions: string | null;
+  manageableByBot: boolean;
+  permissionOverwrites: GuildLivePermissionOverwrite[];
 }
 
 /** Shape of each member entry in guild_live_state.members JSONB. */
@@ -945,6 +985,18 @@ export interface DbCommerceFulfillmentOutwardIntent {
   uncertain_at: string | null;
   last_error: string | null;
   updated_at: string;
+}
+
+export interface DbCommerceDownloadDelivery {
+  id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  file_id: string;
+  entitlement_id: string | null;
+  order_id: string | null;
+  delivery_nonce_hash: string | null;
+  delivered_at: string;
 }
 
 export type CommerceRoleMetadataMigrationIssueType =

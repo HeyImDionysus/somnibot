@@ -15,6 +15,11 @@ import { writeAuditLog } from '../../services/audit.js';
 import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import { renderTempChannelTemplate } from './templates.js';
+import {
+  claimDiscordOccurrence,
+  completeDiscordOccurrence,
+  failDiscordOccurrence,
+} from '../../services/occurrence-fence.js';
 
 const log = createLogger('TempChannels');
 
@@ -45,6 +50,7 @@ export interface ActiveTempChannel {
   guild_id: string;
   hub_id: string;
   owner_id: string;
+  creation_occurrence_id?: string | null;
 }
 
 export class TempChannelManager {
@@ -117,9 +123,24 @@ export class TempChannelManager {
   /**
    * Handle a user joining a hub voice channel.
    */
-  async handleJoinHub(member: GuildMember, hubChannelId: string): Promise<void> {
+  async handleJoinHub(
+    member: GuildMember,
+    hubChannelId: string,
+    occurrenceKey?: string,
+  ): Promise<void> {
     const hub = this.hubs.get(hubChannelId);
     if (!hub) return;
+
+    // If this owner already has a live room for the hub, reuse it. This is both
+    // friendlier on a gateway replay and a recovery path after a bot restart.
+    const existingActive = [...this.activeChannels.values()].find(
+      (active) => active.owner_id === member.id && active.hub_id === hub.id,
+    );
+    if (existingActive) {
+      const existingChannel = this.guild.channels.cache.get(existingActive.channel_id);
+      if (existingChannel) await member.voice.setChannel(existingChannel as VoiceChannel);
+      return;
+    }
 
     // Join-event idempotency: a re-delivered voiceStateUpdate (Discord gateway
     // resume/reconnect can re-emit the same hub-join) must not spawn a SECOND
@@ -128,6 +149,7 @@ export class TempChannelManager {
     const joinKey = `${member.id}:${hubChannelId}`;
     if (this.inFlightJoins.has(joinKey)) return;
     this.inFlightJoins.add(joinKey);
+    let occurrenceId: string | null = null;
 
     // Format channel name. The catalog's single documented variable is
     // {owner-name}; {username}/{user}/{tag}/{count} are supported aliases.
@@ -139,6 +161,33 @@ export class TempChannelManager {
       .replace(/\{count\}/g, String(this.activeChannels.size + 1));
 
     try {
+      if (occurrenceKey) {
+        const claim = await claimDiscordOccurrence(
+          this.supabase,
+          this.guild.id,
+          'temp_channel',
+          occurrenceKey,
+        );
+        occurrenceId = claim.occurrence.id;
+        if (!claim.won) {
+          const { data: existing } = await this.supabase
+            .from('active_temp_channels')
+            .select('*')
+            .eq('creation_occurrence_id', occurrenceId)
+            .maybeSingle();
+          if (existing?.channel_id) {
+            const existingChannel = this.guild.channels.cache.get(existing.channel_id);
+            if (existingChannel) {
+              this.activeChannels.set(existing.channel_id, existing as ActiveTempChannel);
+              await member.voice.setChannel(existingChannel as VoiceChannel);
+            }
+          }
+          // A claimed-but-not-completed row is an ambiguous crash boundary.
+          // Failing closed prevents a second external channel creation.
+          return;
+        }
+      }
+
       const category = this.guild.channels.cache.get(hub.category_id) as CategoryChannel | undefined;
 
       // Create the voice channel. A single transient failure must not leave the
@@ -203,10 +252,30 @@ export class TempChannelManager {
         guild_id: this.guild.id,
         hub_id: hub.id,
         owner_id: member.id,
+        creation_occurrence_id: occurrenceId,
       };
 
-      await this.supabase.from('active_temp_channels').insert(record);
+      const { error: recordError } = await this.supabase.from('active_temp_channels').insert(record);
+      if (recordError) {
+        await vc.delete('Temp channel database record failed').catch(() => {});
+        if (textChannelId) {
+          await this.guild.channels.cache.get(textChannelId)?.delete('Temp channel database record failed').catch(() => {});
+        }
+        throw new Error(`Failed to record temp channel: ${recordError.message}`);
+      }
       this.activeChannels.set(vc.id, record);
+      if (occurrenceId) {
+        await completeDiscordOccurrence(
+          this.supabase,
+          occurrenceId,
+          vc.id,
+          { textChannelId },
+        ).catch((err) => {
+          // The active row already carries creation_occurrence_id and is the
+          // recovery source if this final status write is interrupted.
+          log.error('Failed to complete temp-channel occurrence:', { error: String(err) });
+        });
+      }
 
       this.eventBus.emit('temp_channel.created', this.guild.id, {
         channelId: vc.id,
@@ -235,6 +304,9 @@ export class TempChannelManager {
         error: String(err),
       });
       await this.notifyCreationFailure(member, hub, err);
+      if (occurrenceId) {
+        await failDiscordOccurrence(this.supabase, occurrenceId, String(err)).catch(() => {});
+      }
     } finally {
       this.inFlightJoins.delete(joinKey);
     }
@@ -488,6 +560,7 @@ export class TempChannelManager {
   }
 
   private async removeChannel(channelId: string): Promise<void> {
+    const active = this.activeChannels.get(channelId);
     this.activeChannels.delete(channelId);
     const timer = this.keepAliveTimers.get(channelId);
     if (timer) {
@@ -498,6 +571,12 @@ export class TempChannelManager {
       .from('active_temp_channels')
       .delete()
       .eq('channel_id', channelId);
+    if (active?.creation_occurrence_id) {
+      await this.supabase
+        .from('discord_operation_occurrences')
+        .delete()
+        .eq('id', active.creation_occurrence_id);
+    }
   }
 
   private async cleanupOrphans(): Promise<void> {

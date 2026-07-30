@@ -105,6 +105,18 @@ function makeGuild() {
   channelsCache.set('ch1', {
     id: 'ch1', name: 'general', type: 0, parentId: 'cat1', position: 0,
     topic: 'Welcome!', rateLimitPerUser: 5, nsfw: false,
+    manageable: true,
+    permissionsFor: vi.fn(() => ({ bitfield: 0xC00n })),
+    permissionOverwrites: {
+      cache: new MockCollection<any>([
+        ['r1', {
+          id: 'r1',
+          type: 0,
+          allow: { bitfield: 0x400n },
+          deny: { bitfield: 0n },
+        }],
+      ]),
+    },
   });
   // Voice channel
   channelsCache.set('ch2', {
@@ -156,7 +168,13 @@ function makeGuild() {
       fetch: vi.fn().mockResolvedValue(channelsCache),
     },
     members: {
-      me: { roles: { highest: { id: 'r2', position: 2 } } },
+      me: {
+        roles: { highest: { id: 'r2', position: 2 } },
+        permissions: {
+          bitfield: 0x10000000n,
+          has: vi.fn((permission: string) => permission === 'ManageRoles'),
+        },
+      },
       cache: membersCache,
       fetch: vi.fn().mockResolvedValue(membersCache),
     },
@@ -214,6 +232,26 @@ describe('writeGuildSnapshot', () => {
     expect(guild.channels.fetch).toHaveBeenCalled();
     // Check upsert was called on guild_live_state
     expect(supabase.from).toHaveBeenCalledWith('guild_live_state');
+    expect(upsertChain.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        snapshot_version: 2,
+        bot_permissions: '268435456',
+        roles: expect.arrayContaining([
+          expect.objectContaining({ id: 'r1', editableByBot: false }),
+        ]),
+        channels: expect.arrayContaining([
+          expect.objectContaining({
+            id: 'ch1',
+            botPermissions: '3072',
+            manageableByBot: true,
+            permissionOverwrites: [
+              { id: 'r1', type: 'role', allow: '1024', deny: '0' },
+            ],
+          }),
+        ]),
+      }),
+      { onConflict: 'guild_id' },
+    );
   });
 
   it('handles upsert error', async () => {

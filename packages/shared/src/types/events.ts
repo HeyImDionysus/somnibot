@@ -11,6 +11,12 @@ export interface PlatformEvent<T extends string = string, D = unknown> {
   data: D;
   /** Stable identity for one real source occurrence across retries and restarts. */
   occurrenceId?: string;
+  /**
+   * Optional resolved bulk target set. Automation actions that operate on a
+   * member are applied to each unique id; occurrences above the configured
+   * mass-action threshold are durably held before any target is touched.
+   */
+  affectedMemberIds?: string[];
   /** Automation chain depth — tracks how many automations deep this event is. */
   _chainDepth?: number;
 }
@@ -447,6 +453,7 @@ export interface PlatformEventMap {
   'infraction.pardoned': { infractionId: string; userId: string; moderatorId: string; reason: string };
   'message_log.config_updated': { changedBy: string; before: Record<string, unknown>; after: Record<string, unknown>; changes: Record<string, unknown> };
   'message_log.degraded': { error: string; reason: string };
+  'message_log.delivery_failed': { channelId: string; error: string };
   'ticket.create_failed': { userDiscordId: string; panelId: string; ticketNumber?: number; stage: string; error: string };
   'ticket.transcript_failed': { ticketId: string; ticketNumber: number; error: string };
   'custom_command.denied': { commandId: string; commandName: string; userId: string; channelId: string; reason: 'missing_allowed_role' | 'denied_role' | 'channel_not_allowed' | 'channel_denied' };
@@ -533,6 +540,7 @@ export interface PlatformEventMap {
   'profile.updated': { userId: string; field: 'title' | 'bio'; value: string; truncated: boolean };
   'starboard.post_created': { sourceMessageId: string; sourceChannelId: string; starboardMessageId: string; authorId: string; starCount: number };
   'stats_channel.updated': { statChannelId: string; channelId: string; statType: string; value: string; created: boolean };
+  'stats_channel.update_failed': { statChannelId: string; channelId: string | null; statType: string; error: string };
   'temp_channel.created': { channelId: string; textChannelId: string | null; hubId: string; hubChannelId: string; ownerId: string };
   'temp_channel.claimed': { channelId: string; previousOwnerId: string; newOwnerId: string };
   'temp_channel.deleted': { channelId: string; ownerId: string; reason: string };

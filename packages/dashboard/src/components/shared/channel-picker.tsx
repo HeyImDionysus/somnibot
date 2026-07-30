@@ -47,7 +47,31 @@ interface DiscordChannel {
   position: number;
   parent_id?: string | null;
   parent_name?: string;
+  botPermissions?: string | null;
+  manageableByBot?: boolean;
+  missing?: boolean;
 }
+
+export type RequiredChannelPermission =
+  | 'ViewChannel'
+  | 'SendMessages'
+  | 'EmbedLinks'
+  | 'AttachFiles'
+  | 'ReadMessageHistory'
+  | 'Connect'
+  | 'Speak'
+  | 'ManageChannels';
+
+const PERMISSION_BITS: Record<RequiredChannelPermission, bigint> = {
+  ManageChannels: BigInt(1) << BigInt(4),
+  ViewChannel: BigInt(1) << BigInt(10),
+  SendMessages: BigInt(1) << BigInt(11),
+  EmbedLinks: BigInt(1) << BigInt(14),
+  AttachFiles: BigInt(1) << BigInt(15),
+  ReadMessageHistory: BigInt(1) << BigInt(16),
+  Connect: BigInt(1) << BigInt(20),
+  Speak: BigInt(1) << BigInt(21),
+};
 
 interface ChannelPickerProps {
   /** Currently selected channel ID(s) */
@@ -72,6 +96,8 @@ interface ChannelPickerProps {
   allowNone?: boolean;
   /** CSS class for the container */
   className?: string;
+  /** Bot permissions that must be proven by the live snapshot before selection. */
+  requiredBotPermissions?: RequiredChannelPermission[];
 }
 
 // Channel type icon mapping
@@ -99,7 +125,13 @@ async function fetchChannels(): Promise<DiscordChannel[]> {
   }
   const res = await fetch('/api/channels');
   const json = await res.json();
-  const channels = json.success ? (json.channels ?? json.data ?? []) : [];
+  if (!res.ok || !json.success) {
+    throw new Error(json.error || 'Failed to load live Discord channels');
+  }
+  const channels = json.channels ?? json.data ?? [];
+  if (!Array.isArray(channels)) {
+    throw new Error('Live Discord channel snapshot is malformed');
+  }
   channelCache = { data: channels, ts: Date.now() };
   return channels;
 }
@@ -121,11 +153,13 @@ export function ChannelPicker({
   disabled = false,
   allowNone = false,
   className,
+  requiredBotPermissions = [],
 }: ChannelPickerProps) {
   const [channels, setChannels] = useState<DiscordChannel[]>([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
+  const [loadError, setLoadError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -139,9 +173,26 @@ export function ChannelPicker({
   useEffect(() => {
     fetchChannels()
       .then(setChannels)
-      .catch(() => {})
+      .catch(() => setLoadError('Live Discord channels are unavailable. Retry after the bot refreshes its snapshot.'))
       .finally(() => setLoading(false));
   }, []);
+
+  const permissionIssue = useCallback((channel: DiscordChannel): string | null => {
+    if (channel.missing) return 'This channel was deleted or is no longer in this server.';
+    if (requiredBotPermissions.length === 0) return null;
+    if (channel.botPermissions == null) return 'Live bot permissions are unavailable for this channel.';
+    try {
+      const available = BigInt(channel.botPermissions);
+      const missing = requiredBotPermissions.filter(
+        (permission) => (available & PERMISSION_BITS[permission]) !== PERMISSION_BITS[permission],
+      );
+      return missing.length > 0
+        ? `SomniBot is missing ${missing.join(', ')} in #${channel.name}.`
+        : null;
+    } catch {
+      return 'Live bot permissions are malformed for this channel.';
+    }
+  }, [requiredBotPermissions]);
 
   // Resolve string aliases to numeric channel types
   const resolvedTypes = useMemo(() => {
@@ -194,6 +245,8 @@ export function ChannelPicker({
 
   const toggle = useCallback(
     (id: string) => {
+      const channel = channels.find((item) => item.id === id);
+      if (id && (!channel || permissionIssue(channel))) return;
       if (multi) {
         const next = selected.includes(id)
           ? selected.filter((s) => s !== id)
@@ -205,7 +258,7 @@ export function ChannelPicker({
         setSearch('');
       }
     },
-    [multi, selected, onChange],
+    [multi, selected, onChange, channels, permissionIssue],
   );
 
   const clear = useCallback(
@@ -227,9 +280,18 @@ export function ChannelPicker({
 
   // Resolve selected channel names
   const selectedChannels = useMemo(
-    () => selected.map((id) => channels.find((c) => c.id === id)).filter(Boolean) as DiscordChannel[],
+    () => selected.map((id) => channels.find((c) => c.id === id) ?? {
+      id,
+      name: `Deleted channel (${id})`,
+      type: CHANNEL_TYPE.GUILD_TEXT,
+      position: Number.MAX_SAFE_INTEGER,
+      missing: true,
+    }),
     [selected, channels],
   );
+  const selectedIssues = selectedChannels
+    .map(permissionIssue)
+    .filter((issue): issue is string => issue !== null);
 
   return (
     <div className={cn('space-y-1', className)} ref={containerRef}>
@@ -243,10 +305,19 @@ export function ChannelPicker({
       )}
 
       {/* Trigger */}
-      <button
-        type="button"
+      <div
+        role="button"
+        aria-label={label ?? placeholder}
+        tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled}
+        aria-expanded={open}
         onClick={() => !disabled && setOpen(!open)}
-        disabled={disabled}
+        onKeyDown={(event) => {
+          if (!disabled && (event.key === 'Enter' || event.key === ' ')) {
+            event.preventDefault();
+            setOpen(!open);
+          }
+        }}
         className={cn(
           'flex w-full items-center gap-2 rounded-input border px-3 py-2 text-sm text-left transition-colors',
           'bg-discord-bg-tertiary',
@@ -271,6 +342,8 @@ export function ChannelPicker({
                 {ch.name}
                 <button
                   onClick={(e) => removeTag(ch.id, e)}
+                  onKeyDown={(event) => event.stopPropagation()}
+                  aria-label={`Remove ${ch.name}`}
                   className="text-discord-text-muted hover:text-discord-text-primary ml-0.5"
                 >
                   <X size={10} />
@@ -287,6 +360,8 @@ export function ChannelPicker({
         {selected.length > 0 && (
           <button
             onClick={clear}
+            onKeyDown={(event) => event.stopPropagation()}
+            aria-label="Clear channel selection"
             className="shrink-0 text-discord-text-muted hover:text-discord-text-primary"
           >
             <X size={14} />
@@ -296,7 +371,7 @@ export function ChannelPicker({
           size={14}
           className={cn('shrink-0 text-discord-text-muted transition-transform', open && 'rotate-180')}
         />
-      </button>
+      </div>
 
       {/* Dropdown */}
       {open && (
@@ -341,12 +416,16 @@ export function ChannelPicker({
                     )}
                     {chans.map((ch) => {
                       const isSelected = selected.includes(ch.id);
+                      const issue = permissionIssue(ch);
                       return (
                         <button
                           key={ch.id}
                           onClick={() => toggle(ch.id)}
+                          disabled={issue !== null}
+                          title={issue ?? undefined}
                           className={cn(
                             'flex w-full items-center gap-2 px-3 py-1.5 text-sm transition-colors',
+                            issue && 'cursor-not-allowed opacity-50',
                             isSelected
                               ? 'bg-discord-accent/10 text-discord-text-primary'
                               : 'text-discord-text-secondary hover:bg-discord-bg-tertiary hover:text-discord-text-primary',
@@ -370,6 +449,7 @@ export function ChannelPicker({
                           )}
                           <ChannelIcon type={ch.type} className="text-discord-text-muted shrink-0" />
                           <span className="truncate">{ch.name}</span>
+                          {issue && <span className="ml-auto text-[10px] text-discord-danger">Unavailable</span>}
                         </button>
                       );
                     })}
@@ -387,7 +467,10 @@ export function ChannelPicker({
         </div>
       )}
 
-      {error && <p className="text-xs text-discord-danger">{error}</p>}
+      {(error || loadError) && <p className="text-xs text-discord-danger">{error || loadError}</p>}
+      {selectedIssues.map((issue) => (
+        <p key={issue} className="text-xs text-discord-danger">{issue}</p>
+      ))}
     </div>
   );
 }

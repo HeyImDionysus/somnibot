@@ -37,7 +37,7 @@ import { ScheduledMessageRunner } from '../features/scheduled-messages/runner.js
 
 function chainBuilder(resolveValue: any = { data: null, error: null }) {
   const chain: any = {};
-  for (const m of ['select', 'eq', 'in', 'limit', 'order', 'maybeSingle', 'single', 'update', 'or']) {
+  for (const m of ['select', 'eq', 'in', 'limit', 'order', 'maybeSingle', 'single', 'insert', 'update', 'or']) {
     chain[m] = vi.fn().mockReturnValue(chain);
   }
   chain.then = (res: any, rej?: any) => Promise.resolve(resolveValue).then(res, rej);
@@ -53,6 +53,21 @@ function makeSupabase(schedules: any[] = [], embedConfig: any = null) {
       }
       if (table === 'embed_configs') {
         return chainBuilder({ data: embedConfig, error: null });
+      }
+      if (table === 'discord_operation_occurrences') {
+        return chainBuilder({
+          data: {
+            id: `occ-${Date.now()}`,
+            guild_id: 'g1',
+            operation_kind: 'scheduled_message',
+            occurrence_key: 'test',
+            status: 'claimed',
+            resource_id: null,
+            result: {},
+            last_error: null,
+          },
+          error: null,
+        });
       }
       return chainBuilder();
     }),

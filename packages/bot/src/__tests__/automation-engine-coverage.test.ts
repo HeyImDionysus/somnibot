@@ -73,6 +73,27 @@ vi.mock('../features/automations/execution-logger.js', () => ({
   },
 }));
 
+const mockMassHoldCreate = vi.fn();
+const mockMassHoldNotice = vi.fn().mockResolvedValue(undefined);
+const mockMassThreshold = vi.fn().mockResolvedValue(25);
+const mockMassClaimApproved = vi.fn().mockResolvedValue(null);
+const mockMassComplete = vi.fn().mockResolvedValue(undefined);
+const mockMassFail = vi.fn().mockResolvedValue(undefined);
+vi.mock('../features/automations/mass-action-hold.js', () => ({
+  MassActionHoldService: class {
+    subscribe = vi.fn();
+    unsubscribe = vi.fn();
+    listHeld = vi.fn().mockResolvedValue([]);
+    listApproved = vi.fn().mockResolvedValue([]);
+    threshold = mockMassThreshold;
+    create = mockMassHoldCreate;
+    ensureOwnerNotice = mockMassHoldNotice;
+    claimApproved = mockMassClaimApproved;
+    complete = mockMassComplete;
+    fail = mockMassFail;
+  },
+}));
+
 import { AutomationEngine } from '../features/automations/automation-engine.js';
 
 // ── Helpers ───────────────────────────────────────────────
@@ -80,12 +101,14 @@ import { AutomationEngine } from '../features/automations/automation-engine.js';
 function makeGuild() {
   const cache = new Map<string, unknown>();
   cache.set('u1', { id: 'u1', displayName: 'TestUser' });
+  cache.set('10000000000000000', { id: '10000000000000000', displayName: 'BulkOne' });
+  cache.set('10000000000000001', { id: '10000000000000001', displayName: 'BulkTwo' });
   const channels = new Map<string, unknown>();
   channels.set('ch1', { id: 'ch1', name: 'general' });
   return {
     id: 'g1',
     memberCount: 42,
-    members: { cache },
+    members: { cache, fetch: vi.fn().mockResolvedValue(null) },
     channels: { cache: channels },
   };
 }
@@ -149,6 +172,20 @@ describe('AutomationEngine', () => {
     mockLogExecution.mockResolvedValue(undefined);
     mockClaim.mockResolvedValue({ claimed: true, rowId: 'exec-1' });
     mockFinalize.mockResolvedValue(undefined);
+    mockMassThreshold.mockResolvedValue(25);
+    mockMassHoldCreate.mockResolvedValue({
+      created: true,
+      hold: {
+        id: 'hold-1',
+        automation_id: 'auto1',
+        member_count: 26,
+        threshold: 25,
+      },
+    });
+    mockMassHoldNotice.mockResolvedValue(undefined);
+    mockMassClaimApproved.mockResolvedValue(null);
+    mockMassComplete.mockResolvedValue(undefined);
+    mockMassFail.mockResolvedValue(undefined);
     guild = makeGuild();
     eventBus = makeEventBus();
     engine = new AutomationEngine(
@@ -193,6 +230,68 @@ describe('AutomationEngine', () => {
   });
 
   describe('handleEvent / processAutomation', () => {
+    it('durably holds an oversized resolved member set before any action executes', async () => {
+      mockGetForTrigger.mockReturnValue([
+        makeAutomation({
+          actions: [{ type: 'give_role', config: { role_id: 'role1' } }],
+        }),
+      ]);
+      await engine.start();
+      eventBus.fire({
+        type: 'member.verified',
+        guildId: 'g1',
+        data: { discordId: '10000000000000000', memberNumber: 1 },
+        affectedMemberIds: Array.from(
+          { length: 26 },
+          (_, index) => String(10000000000000000n + BigInt(index)),
+        ),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(mockMassHoldCreate).toHaveBeenCalledWith(expect.objectContaining({
+        automationId: 'auto1',
+        memberIds: expect.arrayContaining(['10000000000000000', '10000000000000025']),
+        threshold: 25,
+      }));
+      expect(mockMassHoldNotice).toHaveBeenCalledTimes(1);
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+      expect(mockFinalize).not.toHaveBeenCalled();
+    });
+
+    it('atomically released hold fans member actions out once and finalizes the original claim', async () => {
+      mockMassClaimApproved.mockResolvedValue({
+        id: 'hold-1',
+        automation_id: 'auto1',
+        execution_id: 'exec-1',
+        occurrence_id: '10000000-0000-8000-8000-000000000001',
+        member_ids: ['10000000000000000', '10000000000000001'],
+        member_count: 2,
+        threshold: 1,
+        trigger_event: 'member.verified',
+        triggered_by: 'system',
+        action_snapshot: [{ type: 'give_role', config: { role_id: 'role1' } }],
+        context_snapshot: { channelId: null, messageId: null, variables: {} },
+      });
+      (engine as unknown as { automationName(id: string): Promise<string> }).automationName =
+        vi.fn().mockResolvedValue('Test Automation');
+
+      await (engine as unknown as { runApprovedHold(id: string): Promise<void> })
+        .runApprovedHold('hold-1');
+
+      expect(mockMassClaimApproved).toHaveBeenCalledWith('hold-1');
+      expect(mockExecuteActions).toHaveBeenCalledTimes(2);
+      expect(mockFinalize).toHaveBeenCalledWith(
+        'exec-1',
+        expect.objectContaining({ actionsExecuted: 2, actionsFailed: 0 }),
+      );
+      expect(mockMassComplete).toHaveBeenCalledWith('hold-1');
+      expect(eventBus.emit).toHaveBeenCalledWith(
+        'automation.executed',
+        'g1',
+        expect.objectContaining({ actionsExecuted: 2, success: true }),
+      );
+    });
+
     it('drops event exceeding chain depth', async () => {
       await engine.start();
       eventBus.fire({ type: 'member.joined', guildId: 'g1', data: {}, _chainDepth: 10 });

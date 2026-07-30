@@ -20,6 +20,7 @@ interface DiscordRole {
   position: number;
   managed?: boolean;
   hoist?: boolean;
+  editableByBot?: boolean;
 }
 
 interface RolePickerProps {
@@ -45,6 +46,8 @@ interface RolePickerProps {
   hideManaged?: boolean;
   /** Hide @everyone */
   hideEveryone?: boolean;
+  /** Require a role SomniBot can currently assign (for grants and rewards). */
+  requireAssignable?: boolean;
   /** CSS class for the container */
   className?: string;
 }
@@ -86,6 +89,7 @@ export function RolePicker({
   allowNone = false,
   hideManaged = false,
   hideEveryone = true,
+  requireAssignable = false,
   className,
 }: RolePickerProps) {
   const [roles, setRoles] = useState<DiscordRole[]>([]);
@@ -171,6 +175,16 @@ export function RolePicker({
     () => selected.map((id) => roles.find((r) => r.id === id)).filter(Boolean) as DiscordRole[],
     [selected, roles],
   );
+  const missingSelected = useMemo(
+    () => selected.filter((id) => !roles.some((role) => role.id === id)),
+    [selected, roles],
+  );
+  const unreachableSelected = useMemo(
+    () => requireAssignable
+      ? selectedRoles.filter((role) => role.editableByBot === false)
+      : [],
+    [requireAssignable, selectedRoles],
+  );
 
   return (
     <div className={cn('space-y-1', className)} ref={containerRef}>
@@ -184,10 +198,18 @@ export function RolePicker({
       )}
 
       {/* Trigger */}
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled}
+        aria-expanded={open}
         onClick={() => !disabled && setOpen(!open)}
-        disabled={disabled}
+        onKeyDown={(event) => {
+          if (!disabled && (event.key === 'Enter' || event.key === ' ')) {
+            event.preventDefault();
+            setOpen(!open);
+          }
+        }}
         className={cn(
           'flex w-full items-center gap-2 rounded-input border px-3 py-2 text-sm text-left transition-colors',
           'bg-discord-bg-tertiary',
@@ -200,31 +222,55 @@ export function RolePicker({
         )}
       >
         <div className="flex-1 min-w-0 flex flex-wrap gap-1">
-          {selectedRoles.length === 0 ? (
+          {selectedRoles.length === 0 && missingSelected.length === 0 ? (
             <span className="text-discord-text-muted/60">{loading ? 'Loading…' : placeholder}</span>
+          ) : !multi && selectedRoles.length === 0 ? (
+            <span className="truncate text-discord-danger">
+              Deleted role ({missingSelected[0]})
+            </span>
           ) : multi ? (
-            selectedRoles.map((role) => (
-              <span
-                key={role.id}
-                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs"
-                style={{
-                  backgroundColor: `${roleColor(role.color)}15`,
-                  color: roleColor(role.color),
-                }}
-              >
+            <>
+              {selectedRoles.map((role) => (
                 <span
-                  className="h-2 w-2 rounded-full shrink-0"
-                  style={{ backgroundColor: roleColor(role.color) }}
-                />
-                {role.name}
-                <button
-                  onClick={(e) => removeTag(role.id, e)}
-                  className="opacity-60 hover:opacity-100 ml-0.5"
+                  key={role.id}
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs"
+                  style={{
+                    backgroundColor: `${roleColor(role.color)}15`,
+                    color: roleColor(role.color),
+                  }}
                 >
-                  <X size={10} />
-                </button>
-              </span>
-            ))
+                  <span
+                    className="h-2 w-2 rounded-full shrink-0"
+                    style={{ backgroundColor: roleColor(role.color) }}
+                  />
+                  {role.name}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${role.name}`}
+                    onClick={(e) => removeTag(role.id, e)}
+                    className="opacity-60 hover:opacity-100 ml-0.5"
+                  >
+                    <X size={10} />
+                  </button>
+                </span>
+              ))}
+              {missingSelected.map((id) => (
+                <span
+                  key={id}
+                  className="inline-flex items-center gap-1 rounded bg-discord-danger/15 px-1.5 py-0.5 text-xs text-discord-danger"
+                >
+                  Deleted role ({id})
+                  <button
+                    type="button"
+                    aria-label={`Remove deleted role ${id}`}
+                    onClick={(e) => removeTag(id, e)}
+                    className="opacity-60 hover:opacity-100"
+                  >
+                    <X size={10} />
+                  </button>
+                </span>
+              ))}
+            </>
           ) : (
             <span className="flex items-center gap-1.5 text-discord-text-primary truncate">
               <span
@@ -247,7 +293,7 @@ export function RolePicker({
           size={14}
           className={cn('shrink-0 text-discord-text-muted transition-transform', open && 'rotate-180')}
         />
-      </button>
+      </div>
 
       {/* Dropdown */}
       {open && (
@@ -283,12 +329,19 @@ export function RolePicker({
 
               {filtered.map((role) => {
                 const isSelected = selected.includes(role.id);
+                const cannotAssign = requireAssignable && role.editableByBot === false;
                 return (
                   <button
                     key={role.id}
+                    type="button"
+                    disabled={cannotAssign}
                     onClick={() => toggle(role.id)}
+                    title={cannotAssign
+                      ? 'Move SomniBot above this role and grant Manage Roles first'
+                      : undefined}
                     className={cn(
                       'flex w-full items-center gap-2 px-3 py-1.5 text-sm transition-colors',
+                      cannotAssign && 'cursor-not-allowed opacity-45',
                       isSelected
                         ? 'bg-discord-accent/10 text-discord-text-primary'
                         : 'text-discord-text-secondary hover:bg-discord-bg-tertiary hover:text-discord-text-primary',
@@ -320,6 +373,9 @@ export function RolePicker({
                     {role.managed && (
                       <span title="Managed role"><Shield size={12} className="ml-auto text-discord-text-muted/50 shrink-0" /></span>
                     )}
+                    {cannotAssign && !role.managed && (
+                      <span className="ml-auto text-[10px] text-discord-warning">Above bot</span>
+                    )}
                   </button>
                 );
               })}
@@ -335,6 +391,14 @@ export function RolePicker({
       )}
 
       {error && <p className="text-xs text-discord-danger">{error}</p>}
+      {!error && missingSelected.length > 0 && (
+        <p className="text-xs text-discord-danger">Remove the deleted role before saving.</p>
+      )}
+      {!error && unreachableSelected.length > 0 && (
+        <p className="text-xs text-discord-warning">
+          Move SomniBot above {unreachableSelected.map((role) => role.name).join(', ')} before saving.
+        </p>
+      )}
     </div>
   );
 }

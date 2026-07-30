@@ -109,6 +109,23 @@ afterEach(() => {
 });
 
 describe('POST /api/paypal/webhook reachability probe', () => {
+  it('rate-limits by the trusted proxy-derived address, not a spoofable leftmost header', async () => {
+    const previousHops = process.env.SOMNIBOT_TRUSTED_PROXY_HOPS;
+    process.env.SOMNIBOT_TRUSTED_PROXY_HOPS = '1';
+    try {
+      const challenge = createSetupWebhookProbeChallenge()!;
+      await POST(makeWebhookRequest('{}', {
+        [SETUP_WEBHOOK_PROBE_HEADER]: challenge,
+        'x-forwarded-for': '203.0.113.66, 198.51.100.8',
+      }) as never);
+
+      expect(rateLimits.paypalWebhook).toHaveBeenCalledWith('198.51.100.8');
+    } finally {
+      if (previousHops === undefined) delete process.env.SOMNIBOT_TRUSTED_PROXY_HOPS;
+      else process.env.SOMNIBOT_TRUSTED_PROXY_HOPS = previousHops;
+    }
+  });
+
   it('echoes a valid signed challenge without any PayPal or database side effects', async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);

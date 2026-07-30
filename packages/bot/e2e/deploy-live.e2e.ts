@@ -4,7 +4,7 @@
  * This script mutates Discord and Supabase. It must only run against a
  * disposable Discord guild and local Supabase database.
  */
-import { ChannelType, Client, GatewayIntentBits, type Guild } from 'discord.js';
+import { ChannelType, Client, Events, GatewayIntentBits, type Guild } from 'discord.js';
 import { createClient } from '@supabase/supabase-js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
@@ -159,6 +159,23 @@ async function captureSnapshot(supabase: SupabaseClient): Promise<SnapshotState>
   };
 }
 
+async function ensureLocalGuildRow(
+  supabase: SupabaseClient,
+  guild: Guild,
+  snapshot: SnapshotState,
+) {
+  if (snapshot.guild) {
+    return;
+  }
+
+  const { error } = await supabase.from('guild').insert({
+    id: guild.id,
+    name: guild.name,
+    owner_discord_id: guild.ownerId,
+  });
+  requireSupabaseOk(error, 'Seed local E2E guild row');
+}
+
 function getTestEntityIds(guild: Guild) {
   const roleNames = new Set(TEST_DESIRED_STATE.roles.map((role) => role.name));
   const channelNames = new Set([
@@ -295,6 +312,14 @@ async function cleanupDatabase(supabase: SupabaseClient, snapshot: SnapshotState
   if (snapshot.guild) {
     const { error: restoreGuildErr } = await supabase.from('guild').update(snapshot.guild).eq('id', DISCORD_GUILD_ID);
     requireSupabaseOk(restoreGuildErr, 'Restore guild row');
+  } else {
+    const { data: purgeResult, error: purgeErr } = await supabase.rpc('purge_guild_data', {
+      p_guild_id: DISCORD_GUILD_ID,
+    });
+    requireSupabaseOk(purgeErr, 'Purge seeded local E2E guild row');
+    if (purgeResult?.purge_status !== 'completed' || purgeResult?.guild_deleted !== 1) {
+      throw new Error('Purge seeded local E2E guild row returned an unexpected result');
+    }
   }
 }
 
@@ -318,11 +343,14 @@ async function main() {
     snapshot = await captureSnapshot(supabase);
 
     await client.login(DISCORD_TOKEN);
-    await new Promise<void>((resolve) => client.once('ready', () => resolve()));
+    if (!client.isReady()) {
+      await new Promise<void>((resolve) => client.once(Events.ClientReady, () => resolve()));
+    }
     guild = client.guilds.cache.get(DISCORD_GUILD_ID) ?? null;
     if (!guild) {
       throw new Error(`Guild ${DISCORD_GUILD_ID} is not available to the logged-in bot`);
     }
+    await ensureLocalGuildRow(supabase, guild, snapshot);
     originalEveryonePermissions = guild.roles.everyone.permissions.bitfield;
     preExistingTestEntityIds = getTestEntityIds(guild);
     console.log(`Connected: ${client.user?.tag} in ${guild.name}\n`);

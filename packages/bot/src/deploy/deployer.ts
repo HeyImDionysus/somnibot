@@ -278,22 +278,66 @@ export async function deployServerState(
     // === Step 4: Set role positions (hierarchy) ===
     step++;
     report('Setting role hierarchy positions');
+    let hierarchyContext = 'hierarchy context unavailable';
     try {
-      const botHighest = guild.members.me?.roles.highest.position ?? 1;
-      // Roles positioned below the bot's role
-      // Highest desired position = botHighest - 1
-      const positionUpdates = sortedRoles
-        .map((desired, index) => {
+      const createdRoles = sortedRoles
+        .map((desired) => {
           const discordId = roleKeyToDiscordId.get(desired.key);
-          if (!discordId) return null;
-          return {
-            role: discordId,
-            position: Math.max(1, botHighest - sortedRoles.length + index),
-          };
+          return discordId ? { desired, discordId } : null;
         })
-        .filter((p): p is NonNullable<typeof p> => p !== null);
+        .filter((role): role is NonNullable<typeof role> => role !== null);
 
-      if (positionUpdates.length > 0) {
+      if (createdRoles.length > 0) {
+        // Role creation changes every role above the insertion point. Fetch the
+        // authoritative hierarchy before calculating positions; using the
+        // pre-create cache can target the bot's own position and Discord rejects
+        // that batch with Missing Permissions.
+        await guild.roles.fetch();
+
+        const botHighest = guild.members.me?.roles.highest.position;
+        if (botHighest === undefined) {
+          throw new Error('Bot member is unavailable after refreshing the role hierarchy');
+        }
+
+        const createdRoleObjects = createdRoles.map(({ discordId }) => {
+          const role = guild.roles.cache.get(discordId);
+          if (!role) {
+            throw new Error(`Created role is missing after refreshing the hierarchy`);
+          }
+          return role;
+        });
+        // Reuse exactly the hierarchy slots Discord assigned to the new roles.
+        // Lifting them directly beneath the bot can cross integration-managed
+        // roles; Discord rejects that otherwise-valid sort with code 50013.
+        const availablePositions = createdRoleObjects
+          .map((role) => role.position)
+          .sort((a, b) => a - b);
+        const positionUpdates = createdRoles.map(({ discordId }, index) => ({
+          role: discordId,
+          position: availablePositions[index],
+        }));
+        const createdRoleStates = createdRoleObjects.map((role) => {
+          return `${role?.position ?? 'missing'}:${role?.editable ?? 'unknown'}:${role?.managed ?? 'unknown'}`;
+        });
+        hierarchyContext = [
+          `botPosition=${botHighest}`,
+          `botManageRoles=${guild.members.me?.permissions.has('ManageRoles') ?? false}`,
+          `botAdministrator=${guild.members.me?.permissions.has('Administrator') ?? false}`,
+          `targets=${positionUpdates.map(({ position }) => position).join(',')}`,
+          `created=${createdRoleStates.join(',')}`,
+        ].join('; ');
+
+        if (positionUpdates.some(({ position }) => position < 1 || position >= botHighest)) {
+          throw new Error(
+            `Cannot place ${positionUpdates.length} created roles below bot role position ${botHighest}`,
+          );
+        }
+
+        const uneditableRole = createdRoleObjects.find((role) => role.editable === false);
+        if (uneditableRole) {
+          throw new Error(`Created role is not editable by the bot: ${uneditableRole.name}`);
+        }
+
         await guild.roles.setPositions(positionUpdates);
       }
       actions.push({
@@ -301,7 +345,8 @@ export async function deployServerState(
         entityName: 'Role hierarchy', success: true,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      const msg = `${rawMessage} (${hierarchyContext})`;
       errors.push({ step, entityType: 'role', entityName: 'Role hierarchy', error: msg });
       actions.push({
         step, action: 'set', entityType: 'role',
@@ -541,9 +586,7 @@ async function createRole(guild: Guild, desired: DesiredRole): Promise<Role> {
   return guild.roles.create({
     name: desired.name,
     permissions: new PermissionsBitField(BigInt(desired.permissions)),
-    // discord.js v14.24 deprecated 'color' in favor of 'colors', but the
-    // type signature still accepts 'color'. Use 'color' until v15 migration.
-    color: desired.color,
+    colors: { primaryColor: desired.color },
     hoist: desired.hoist,
     mentionable: desired.mentionable,
     reason: `SomniBot deployment — ${desired.tier} tier role`,

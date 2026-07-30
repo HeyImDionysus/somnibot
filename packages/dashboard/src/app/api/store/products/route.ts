@@ -34,6 +34,7 @@ import {
   ensureLicenseDeliveryConfigOrDisable,
   requiresLicenseConfig,
 } from '@/lib/api/license-delivery-rail';
+import { validateAssignableDiscordTargets } from '@/lib/api/live-discord-facts';
 
 // ── PayPal Helpers ─────────────────────────────────────
 
@@ -80,6 +81,33 @@ function paypalNotReadyResponse(message: string) {
       error: message,
     },
     { status: 424 },
+  );
+}
+
+async function discordTargetsResponse(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+  roleIds: string[],
+  channelIds: string[],
+): Promise<NextResponse | null> {
+  const validation = await validateAssignableDiscordTargets(
+    supabase,
+    guildId,
+    roleIds,
+    channelIds,
+  );
+  if (validation.ok) return null;
+
+  return NextResponse.json(
+    {
+      success: false,
+      code: validation.kind === 'unavailable'
+        ? 'LIVE_STATE_UNAVAILABLE'
+        : 'LIVE_DISCORD_CONFLICT',
+      error: validation.issues.join(' '),
+      issues: validation.issues,
+    },
+    { status: validation.kind === 'unavailable' ? 503 : 409 },
   );
 }
 
@@ -369,6 +397,14 @@ export async function POST(req: NextRequest) {
     return apiServerError(err, 'store/products');
   }
 
+  const discordTargetsError = await discordTargetsResponse(
+    supabase,
+    guildId,
+    granted_role_ids ?? [],
+    granted_channel_ids ?? [],
+  );
+  if (discordTargetsError) return discordTargetsError;
+
   let paypalProductId: string | null = null;
   if (requiresPayPal) {
     const paypalProduct = await createPayPalCatalogProduct(
@@ -529,6 +565,31 @@ export async function PUT(req: NextRequest) {
 
   if (!id) {
     return NextResponse.json({ success: false, error: 'Missing product id' }, { status: 400 });
+  }
+
+  if ('granted_role_ids' in updates || 'granted_channel_ids' in updates) {
+    const { data: currentTargets, error: currentTargetsError } = await supabase
+      .from('products')
+      .select('granted_role_ids, granted_channel_ids')
+      .eq('id', id)
+      .eq('guild_id', guildId)
+      .maybeSingle();
+    if (currentTargetsError) return dbError(currentTargetsError, 'store/products/live-targets');
+    if (!currentTargets) return apiError('Product not found for this guild', 404);
+
+    const roles = 'granted_role_ids' in updates
+      ? updates.granted_role_ids ?? []
+      : currentTargets.granted_role_ids ?? [];
+    const channels = 'granted_channel_ids' in updates
+      ? updates.granted_channel_ids ?? []
+      : currentTargets.granted_channel_ids ?? [];
+    const discordTargetsError = await discordTargetsResponse(
+      supabase,
+      guildId,
+      roles,
+      channels,
+    );
+    if (discordTargetsError) return discordTargetsError;
   }
 
   const WALL_TRIGGER_FIELDS = [

@@ -588,6 +588,15 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     details: (d) => ({ error: d.error, reason: d.reason }),
     success: false,
   },
+  'message_log.delivery_failed': {
+    action: 'message_log.delivery_failed',
+    category: 'moderation',
+    targetType: 'channel',
+    actorType: 'system',
+    targetId: (d) => d.channelId as string,
+    details: (d) => ({ error: d.error }),
+    success: false,
+  },
   'ticket.create_failed': {
     action: 'ticket.create_failed',
     category: 'tickets',
@@ -1157,6 +1166,15 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'system',
     targetId: (d) => d.channelId as string,
     details: (d) => ({ statChannelId: d.statChannelId, statType: d.statType, value: d.value, created: d.created }),
+  },
+  'stats_channel.update_failed': {
+    action: 'stats_channel.update_failed',
+    category: 'stats_channels',
+    targetType: 'channel',
+    actorType: 'system',
+    targetId: (d) => (d.channelId ?? d.statChannelId) as string,
+    details: (d) => ({ statChannelId: d.statChannelId, statType: d.statType, error: d.error }),
+    success: false,
   },
   'temp_channel.created': {
     action: 'temp_channel.created',

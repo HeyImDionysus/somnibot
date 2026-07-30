@@ -12,7 +12,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
-import { raiseOwnerAlert } from '../../services/alert-service.js';
+import { raiseOwnerAlert, resolveOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('StatsManager');
 
@@ -31,6 +31,8 @@ export class StatsChannelManager {
   private channels: StatsChannelConfig[] = [];
   private timer: NodeJS.Timeout | null = null;
   private intervalMs: number;
+  private degradedChannels = new Set<string>();
+  private recoveryChecked = new Set<string>();
 
   constructor(
     private guild: Guild,
@@ -158,8 +160,10 @@ export class StatsChannelManager {
           .from('stats_channels')
           .update({ last_value: value, last_updated_at: new Date().toISOString() })
           .eq('id', config.id);
+        await this.resolveUpdateAlerts(config);
       } catch (err) {
         log.error(`Failed to update ${config.stat_type}:`, err);
+        await this.raiseUpdateFailedAlert(config, err);
       }
     }
   }
@@ -201,6 +205,60 @@ export class StatsChannelManager {
       });
     } catch (alertErr) {
       log.error('Failed to write stats-channel deleted alert:', { error: String(alertErr) });
+    }
+  }
+
+  private async raiseUpdateFailedAlert(config: StatsChannelConfig, error: unknown): Promise<void> {
+    this.degradedChannels.add(config.id);
+    const message = error instanceof Error ? error.message : String(error);
+    this.eventBus.emit('stats_channel.update_failed', this.guild.id, {
+      statChannelId: config.id,
+      channelId: config.channel_id,
+      statType: config.stat_type,
+      error: message,
+    });
+    await raiseOwnerAlert(this.supabase, this.guild.id, {
+      alertType: 'stats_channel_update_failed',
+      severity: 'warning',
+      title: 'Stats counter update failed',
+      message:
+        `The "${config.stat_type}" counter could not be updated (${message}). ` +
+        'Its channel permissions and Discord availability need attention.',
+      metadata: {
+        stats_channel_id: config.id,
+        channel_id: config.channel_id,
+        stat_type: config.stat_type,
+        error: message,
+      },
+      guild: this.guild,
+    }).catch((alertErr) => {
+      log.error('Failed to write stats-channel update alert:', { error: String(alertErr) });
+    });
+  }
+
+  private async resolveUpdateAlerts(config: StatsChannelConfig): Promise<void> {
+    const firstSuccessThisBoot = !this.recoveryChecked.has(config.id);
+    if (firstSuccessThisBoot) this.recoveryChecked.add(config.id);
+    if (!this.degradedChannels.delete(config.id) && !firstSuccessThisBoot) return;
+
+    await resolveOwnerAlert(
+      this.supabase,
+      this.guild.id,
+      'stats_channel_update_failed',
+      { stats_channel_id: config.id },
+      {
+        guild: this.guild,
+        notice: `The "${config.stat_type}" stats counter is updating again.`,
+      },
+    );
+    if (config.channel_id) {
+      await resolveOwnerAlert(
+        this.supabase,
+        this.guild.id,
+        'stats_channel_deleted',
+        { stats_channel_id: config.id },
+        { guild: this.guild },
+      );
     }
   }
 

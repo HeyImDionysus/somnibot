@@ -1,0 +1,94 @@
+'use client';
+
+import { useCallback, useEffect, useState } from 'react';
+import { usePathname } from 'next/navigation';
+import { AlertTriangle, CheckCircle2, CircleOff, HelpCircle } from 'lucide-react';
+import {
+  deriveFeatureReadiness,
+  featureForPath,
+  type FeatureReadiness,
+} from '@/lib/dashboard/feature-status';
+
+const STATE_STYLE: Record<FeatureReadiness['state'], string> = {
+  operational: 'border-green-500/30 bg-green-500/10 text-green-300',
+  disabled: 'border-discord-border-subtle bg-discord-bg-secondary text-discord-text-secondary',
+  blocked: 'border-discord-danger/40 bg-discord-danger/10 text-discord-danger',
+  unavailable: 'border-yellow-500/30 bg-yellow-500/10 text-yellow-300',
+};
+
+function StatusIcon({ state }: { state: FeatureReadiness['state'] }) {
+  if (state === 'operational') return <CheckCircle2 size={18} />;
+  if (state === 'disabled') return <CircleOff size={18} />;
+  if (state === 'blocked') return <AlertTriangle size={18} />;
+  return <HelpCircle size={18} />;
+}
+
+export function FeatureStatusPanel() {
+  const pathname = usePathname();
+  const feature = featureForPath(pathname);
+  const [status, setStatus] = useState<FeatureReadiness | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!feature) return;
+    setStatus(null);
+    try {
+      const [guildResponse, diagnosticsResponse] = await Promise.all([
+        fetch('/api/guild'),
+        fetch('/api/diagnostics'),
+      ]);
+      const [guildJson, diagnosticsJson] = await Promise.all([
+        guildResponse.json(),
+        diagnosticsResponse.json(),
+      ]);
+      const config = guildResponse.ok && guildJson.success && guildJson.config && typeof guildJson.config === 'object'
+        ? guildJson.config as Record<string, unknown>
+        : null;
+      const bot = diagnosticsResponse.ok && diagnosticsJson.success
+        ? diagnosticsJson.data?.bot
+        : null;
+      setStatus(deriveFeatureReadiness({
+        feature,
+        config,
+        botOnline: typeof bot?.online === 'boolean' ? bot.online : null,
+        staleSecs: typeof bot?.staleSecs === 'number' ? bot.staleSecs : null,
+      }));
+    } catch {
+      setStatus({
+        state: 'unavailable',
+        heading: `${feature.label}: status unavailable`,
+        detail: 'The saved configuration and bot heartbeat could not be verified.',
+      });
+    }
+  }, [feature]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  if (!feature) return null;
+
+  if (!status) {
+    return (
+      <section className="mb-5 rounded-md border border-discord-border-subtle bg-discord-bg-secondary px-4 py-3" aria-label={`${feature.label} status`}>
+        <p className="text-sm text-discord-text-muted">Checking {feature.label.toLowerCase()} status…</p>
+      </section>
+    );
+  }
+
+  return (
+    <section
+      className={`mb-5 flex items-start gap-3 rounded-md border px-4 py-3 ${STATE_STYLE[status.state]}`}
+      aria-label={`${feature.label} status`}
+      aria-live="polite"
+    >
+      <span className="mt-0.5 shrink-0"><StatusIcon state={status.state} /></span>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold">{status.heading}</p>
+        <p className="mt-0.5 text-xs opacity-80">{status.detail}</p>
+      </div>
+      <button type="button" onClick={refresh} className="text-xs font-medium underline opacity-80 hover:opacity-100">
+        Refresh
+      </button>
+    </section>
+  );
+}

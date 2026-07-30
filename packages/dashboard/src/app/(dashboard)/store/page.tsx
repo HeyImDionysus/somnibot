@@ -7,10 +7,12 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import ProductFiles from '@/components/store/product-files';
+import StoreControlRoom from '@/components/store/store-control-room';
 import { RolePicker } from '@/components/shared/role-picker';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { useToast } from '@/components/shared/toast';
 import { CardListSkeleton } from '@/components/shared/loading-skeleton';
+import { getOperatorLicensingGuide } from '@/lib/store/operator-licensing-guide';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -329,6 +331,11 @@ export default function StorePage() {
   const totalProducts = products.length;
   const oneTimeCount = products.filter((p) => p.type === 'one_time').length;
   const subCount = products.filter((p) => p.type === 'subscription').length;
+  const operatorGuide = getOperatorLicensingGuide({
+    type: form.type,
+    deliveryType: form.delivery_type,
+    grantedRoleCount: form.granted_role_ids.length,
+  });
 
   // ── Render ──
 
@@ -367,6 +374,8 @@ export default function StorePage() {
           </div>
         ))}
       </div>
+
+      <StoreControlRoom />
 
       {/* Commerce Toggles */}
       <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 space-y-4">
@@ -512,6 +521,25 @@ export default function StorePage() {
                 <option value="mixed">Mixed</option>
               </select>
             </div>
+            <div
+              className="sm:col-span-2 rounded-lg border border-discord-accent/40 bg-discord-accent/10 p-4"
+              aria-live="polite"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-sm font-semibold text-discord-text-primary">
+                  {operatorGuide.title}
+                </h3>
+                <span className="rounded-full bg-discord-bg-tertiary px-2 py-0.5 text-xs text-discord-text-secondary">
+                  {operatorGuide.keyRequired ? 'License key required' : 'No license key'}
+                </span>
+              </div>
+              <p className="mt-1 text-sm text-discord-text-secondary">
+                {operatorGuide.summary}
+              </p>
+              <ol className="mt-3 list-decimal space-y-1 pl-5 text-xs text-discord-text-muted">
+                {operatorGuide.steps.map((step) => <li key={step}>{step}</li>)}
+              </ol>
+            </div>
             <div className="sm:col-span-2">
               <label className="mb-1 block text-xs font-medium text-discord-text-muted">
                 Description
@@ -531,6 +559,8 @@ export default function StorePage() {
                 value={form.granted_role_ids}
                 onChange={(v) => setForm({ ...form, granted_role_ids: (v as string[]) ?? [] })}
                 multi
+                hideManaged
+                requireAssignable
                 placeholder="Select roles to grant…"
               />
             </div>

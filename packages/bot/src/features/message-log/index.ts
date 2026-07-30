@@ -63,6 +63,8 @@ const _degradedNotified = new Map<string, number>();
 // wipes it. One cheap resolveOwnerAlert (usually 0 open rows) per guild per
 // process lifetime closes rows raised before a restart.
 const _bootRecoveryDone = new Set<string>();
+const _deliveryDegraded = new Set<string>();
+const _deliveryRecoveryChecked = new Set<string>();
 
 /** Shallow value-equality for the audited config fields. */
 function configsEqual(a: MessageLogConfig, b: MessageLogConfig): boolean {
@@ -231,10 +233,54 @@ function alreadyPosted(key: string): boolean {
 // permissions) since retrying cannot succeed.
 const SEND_RETRY_DELAYS_MS = [250, 500, 1000];
 
-async function sendLogEmbed(logChannel: TextChannel, embed: EmbedBuilder): Promise<boolean> {
+async function notifyDeliveryFailure(
+  client: SomniClient,
+  guildId: string,
+  channelId: string,
+  error: string,
+): Promise<void> {
+  _deliveryDegraded.add(guildId);
+  client.eventBus.emit('message_log.delivery_failed', guildId, { channelId, error });
+  await raiseOwnerAlert(client.supabase, guildId, {
+    alertType: 'message_log_delivery_failed',
+    severity: 'warning',
+    title: 'Message-log delivery failed',
+    message:
+      `SomniBot could not deliver edit/delete records to channel ${channelId} (${error}). ` +
+      'The configured log channel and bot permissions need attention.',
+    channelMessage:
+      'Message-log delivery is failing. Check the configured log channel and the bot permissions; details are on the dashboard Alerts page.',
+    metadata: { channel_id: channelId, error },
+    client,
+  });
+}
+
+async function noticeDeliveryRecovered(client: SomniClient, guildId: string): Promise<void> {
+  const firstSuccessThisBoot = !_deliveryRecoveryChecked.has(guildId);
+  if (firstSuccessThisBoot) _deliveryRecoveryChecked.add(guildId);
+  if (!_deliveryDegraded.delete(guildId) && !firstSuccessThisBoot) return;
+  await resolveOwnerAlert(
+    client.supabase,
+    guildId,
+    'message_log_delivery_failed',
+    undefined,
+    {
+      client,
+      notice: 'Message-log delivery recovered — edit/delete records are reaching the configured channel again.',
+    },
+  );
+}
+
+async function sendLogEmbed(
+  client: SomniClient,
+  guildId: string,
+  logChannel: TextChannel,
+  embed: EmbedBuilder,
+): Promise<boolean> {
   for (let attempt = 0; attempt <= SEND_RETRY_DELAYS_MS.length; attempt++) {
     try {
       await logChannel.send({ embeds: [embed] });
+      await noticeDeliveryRecovered(client, guildId);
       return true;
     } catch (err) {
       const status = (err as { status?: number } | undefined)?.status;
@@ -242,6 +288,7 @@ async function sendLogEmbed(logChannel: TextChannel, embed: EmbedBuilder): Promi
       const transient = status === undefined || status === 429 || status >= 500;
       if (!transient || attempt === SEND_RETRY_DELAYS_MS.length) {
         log.error('Failed to post message-log embed:', { error: String(err), status, attempt });
+        await notifyDeliveryFailure(client, guildId, logChannel.id, String(err));
         return false;
       }
       await new Promise((resolve) => setTimeout(resolve, SEND_RETRY_DELAYS_MS[attempt]));
@@ -270,7 +317,15 @@ export async function logMessageEdit(
   if (config.message_log_ignored_channel_ids.includes(newMessage.channel.id)) return;
 
   const logChannel = newMessage.guild.channels.cache.get(config.message_log_channel_id) as TextChannel | undefined;
-  if (!logChannel) return;
+  if (!logChannel) {
+    await notifyDeliveryFailure(
+      client,
+      newMessage.guild.id,
+      config.message_log_channel_id,
+      'configured channel is missing or unavailable',
+    );
+    return;
+  }
 
   const oldContent = oldMessage.content || '*[Empty or uncached]*';
   const newContent = newMessage.content || '*[Empty]*';
@@ -300,7 +355,7 @@ export async function logMessageEdit(
 
   // Staff surface: brand colors, no powered-by attribution.
   applyBrand(embed, config.brandKit, { intent: 'warning', attribution: false });
-  await sendLogEmbed(logChannel, embed);
+  await sendLogEmbed(client, newMessage.guild.id, logChannel, embed);
 }
 
 /**
@@ -324,7 +379,15 @@ export async function logMessageDelete(
   if (message.channel.id === config.message_log_channel_id) return;
 
   const logChannel = message.guild.channels.cache.get(config.message_log_channel_id) as TextChannel | undefined;
-  if (!logChannel) return;
+  if (!logChannel) {
+    await notifyDeliveryFailure(
+      client,
+      message.guild.id,
+      config.message_log_channel_id,
+      'configured channel is missing or unavailable',
+    );
+    return;
+  }
 
   const content = message.content || '*[Uncached or empty message]*';
 
@@ -349,7 +412,7 @@ export async function logMessageDelete(
 
   // Staff surface: brand colors, no powered-by attribution.
   applyBrand(embed, config.brandKit, { intent: 'danger', attribution: false });
-  await sendLogEmbed(logChannel, embed);
+  await sendLogEmbed(client, message.guild.id, logChannel, embed);
 }
 
 /**
@@ -367,5 +430,7 @@ export function invalidateMessageLogCache(guildId?: string): void {
     _lastAuditedConfig.clear();
     _degradedNotified.clear();
     _bootRecoveryDone.clear();
+    _deliveryDegraded.clear();
+    _deliveryRecoveryChecked.clear();
   }
 }

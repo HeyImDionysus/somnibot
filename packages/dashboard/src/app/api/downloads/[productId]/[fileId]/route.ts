@@ -151,7 +151,7 @@ export async function GET(
   // active or in an unexpired grace window. ──
   const { data: entitlements, error: entitlementError } = await supabase
     .from('entitlements')
-    .select('id, status, grace_period_ends_at')
+    .select('id, order_id, status, grace_period_ends_at, created_at')
     .eq('customer_id', customerId)
     .eq('product_id', productId)
     .eq('guild_id', guildId)
@@ -165,7 +165,12 @@ export async function GET(
     return serviceUnavailable('Downloads entitlement lookup', entitlementError);
   }
 
-  if (!entitlements?.some((e) => isEntitlementAccessLive(e))) {
+  const liveEntitlement = entitlements
+    ?.filter((entitlement) => isEntitlementAccessLive(entitlement))
+    .sort((left, right) =>
+      String(right.created_at ?? '').localeCompare(String(left.created_at ?? '')),
+    )[0];
+  if (!liveEntitlement) {
     return NextResponse.json({ error: 'No active entitlement for this product' }, { status: 403 });
   }
 
@@ -219,6 +224,21 @@ export async function GET(
    */
   async function recordDeliveredDownload(): Promise<void> {
     try {
+      const { error: deliveryError } = await supabase
+        .from('commerce_download_deliveries')
+        .insert({
+          guild_id: guildId,
+          customer_id: customerId,
+          product_id: productId,
+          file_id: fileId,
+          entitlement_id: liveEntitlement.id,
+          order_id: liveEntitlement.order_id,
+          delivery_nonce_hash: deliveryNonce ? hashToken(deliveryNonce.value) : null,
+        });
+      if (deliveryError && deliveryError.code !== '23505') {
+        console.error('[Downloads delivery evidence] insert failed:', deliveryError.message);
+      }
+
       const { error } = await supabase.rpc('increment_download_count', { p_file_id: fileId });
       if (!error) return;
 

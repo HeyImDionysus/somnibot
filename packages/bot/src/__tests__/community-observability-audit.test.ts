@@ -243,6 +243,33 @@ describe('community-statistics-channels audit', () => {
     expect(eventBus.emit).toHaveBeenCalledWith('stats_channel.updated', 'g1',
       expect.objectContaining({ statChannelId: 'sc1', value: '42', created: false }));
   });
+
+  it('emits an update failure and writes an owner alert when Discord rejects a rename', async () => {
+    const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
+    const eventBus = bus();
+    const cfg = {
+      id: 'sc-fail', guild_id: 'g1', channel_id: 'vc1', stat_type: 'custom_counter',
+      stat_config: { value: 42 }, name_format: 'Members: {value}', active: true, last_value: null,
+    };
+    const supa = makeSupa({ stats_channels: { data: [cfg], error: null } });
+    const channel = { setName: vi.fn(async () => { throw new Error('Missing Permissions'); }) };
+    const guild: any = {
+      id: 'g1', memberCount: 5, premiumSubscriptionCount: 0,
+      channels: { cache: new Map([['vc1', channel]]) },
+      roles: { cache: new Map() },
+      members: { fetch: vi.fn(async () => {}), cache: { filter: () => ({ size: 0 }) } },
+    };
+    const mgr = new StatsChannelManager(guild, supa, 10, eventBus);
+
+    await mgr.reload();
+
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'stats_channel.update_failed',
+      'g1',
+      expect.objectContaining({ statChannelId: 'sc-fail', error: 'Missing Permissions' }),
+    );
+    expect(supa.from).toHaveBeenCalledWith('alerts');
+  });
 });
 
 // ── community-temporary-channels ────────────────────────────
@@ -297,13 +324,22 @@ describe('community-scheduled-messages audit', () => {
     const eventBus = bus();
     const channel = { isTextBased: () => true, name: 'general', send: vi.fn(async () => ({ id: 'm1' })) };
     const guild: any = { id: 'g1', name: 'Test', memberCount: 5, channels: { cache: new Map([['ch1', channel]]) } };
-    const supa = makeSupa({ scheduled_messages: { data: [{ id: 's1' }], error: null } });
+    const supa = makeSupa({
+      scheduled_messages: { data: [{ id: 's1' }], error: null },
+      discord_operation_occurrences: {
+        data: {
+          id: 'occ1', guild_id: 'g1', operation_kind: 'scheduled_message',
+          occurrence_key: 's1:due', status: 'claimed', resource_id: null, result: {}, last_error: null,
+        },
+        error: null,
+      },
+    });
     const runner = new ScheduledMessageRunner(guild, supa, eventBus);
 
     await (runner as any).sendMessage({
       id: 's1', guild_id: 'g1', name: 'Daily', channel_id: 'ch1', message: 'hi',
       embed_config_id: null, current_sends: 0,
-    });
+    }, new Date('2026-07-30T12:00:00.000Z'));
 
     expect(eventBus.emit).toHaveBeenCalledWith('scheduled_message.sent', 'g1',
       expect.objectContaining({ scheduleId: 's1', name: 'Daily' }));

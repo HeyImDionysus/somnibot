@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
+import { optionalHttpUrlSchema } from '@/lib/api/discord-values';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 
@@ -32,7 +33,7 @@ const levelsConfigUpdate = z.object({
   level_up_channel_id: snowflake.optional().nullable(),
   level_up_message: z.string().max(2000).optional(),
   rank_card_accent_color: z.number().int().min(0).max(0xFFFFFF).optional().nullable(),
-  rank_card_background: z.string().max(512).optional().nullable(),
+  rank_card_background: optionalHttpUrlSchema,
   no_xp_role_id: snowflake.optional().nullable(),
 });
 export async function GET(req: NextRequest) {

@@ -48,6 +48,10 @@ class MockCollection extends Map {
     for (const v of arr) result.set(v.id, v);
     return result;
   }
+  find(fn: (v: any, k: string) => boolean): any {
+    for (const [k, v] of this) if (fn(v, k)) return v;
+    return undefined;
+  }
 }
 
 function makeGuild(overrides: Record<string, any> = {}) {
@@ -59,13 +63,32 @@ function makeGuild(overrides: Record<string, any> = {}) {
   roles.set('g1', everyone);
 
   const channels = new MockCollection();
+  const createRole = vi.fn(async (opts: any) => {
+    for (const role of roles.values()) {
+      if (role.id !== 'g1' && typeof role.position === 'number') {
+        role.position += 1;
+      }
+    }
+    const role = {
+      id: `new-role-${opts.name}`,
+      name: opts.name,
+      position: 1,
+      editable: true,
+      managed: false,
+      ...opts,
+    };
+    roles.set(role.id, role);
+    return role;
+  });
 
   return {
     id: 'g1',
     roles: {
       cache: roles,
       everyone,
-      create: vi.fn(async (opts: any) => ({ id: `new-role-${opts.name}`, name: opts.name, ...opts })),
+      create: createRole,
+      fetch: vi.fn(async () => roles),
+      setPositions: vi.fn(async () => undefined),
     },
     channels: {
       cache: channels,
@@ -209,9 +232,39 @@ describe('deployServerState — role creation', () => {
     expect(guild.roles.create).toHaveBeenCalledTimes(2);
     expect(guild.roles.create).toHaveBeenCalledWith(expect.objectContaining({
       name: 'Moderator',
-      color: 0x00FF00,
+      colors: { primaryColor: 0x00FF00 },
       hoist: true,
     }));
+  });
+
+  it('refreshes role positions and keeps every created role below the bot', async () => {
+    const guild = makeGuild();
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const options: DeployOptions = { cleanExisting: false, dryRun: false };
+
+    guild.roles.fetch.mockImplementationOnce(async () => {
+      guild.members.me.roles.highest.position = 3;
+      return guild.roles.cache;
+    });
+
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(guild as any, supabase, desiredState as any, options);
+
+    expect(result.success, JSON.stringify(result.errors)).toBe(true);
+    expect(guild.roles.fetch).toHaveBeenCalledTimes(1);
+    expect(guild.roles.setPositions).toHaveBeenCalledWith([
+      { role: 'new-role-Member', position: 1 },
+      { role: 'new-role-Admin', position: 2 },
+    ]);
+    expect(guild.roles.fetch.mock.invocationCallOrder[0])
+      .toBeLessThan(guild.roles.setPositions.mock.invocationCallOrder[0]);
   });
 });
 

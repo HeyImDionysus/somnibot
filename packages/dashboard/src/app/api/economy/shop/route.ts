@@ -15,6 +15,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
 import { dbError, dbConflictOr500, apiServerError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
+import { discordSnowflakeSchema } from '@/lib/api/discord-values';
 
 const itemSchema = z.object({
   name: z.string().min(1).max(64),
@@ -25,14 +26,14 @@ const itemSchema = z.object({
   sell_price: z.number().int().min(0).optional(),
   stock: z.number().int().min(0).nullable().optional(),
   max_per_user: z.number().int().min(1).nullable().optional(),
-  require_role_id: z.string().nullable().optional(),
-  grant_role_id: z.string().nullable().optional(),
+  require_role_id: discordSnowflakeSchema.nullable().optional(),
+  grant_role_id: discordSnowflakeSchema.nullable().optional(),
   usable: z.boolean().optional(),
   use_effect: z.object({
     type: z.string(),
     duration_minutes: z.number().optional(),
     multiplier: z.number().optional(),
-    role_id: z.string().optional(),
+    role_id: discordSnowflakeSchema.optional(),
     custom_data: z.record(z.unknown()).optional(),
   }).nullable().optional(),
   durability: z.number().int().min(1).nullable().optional(),

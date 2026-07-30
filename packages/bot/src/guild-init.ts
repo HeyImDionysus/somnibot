@@ -146,6 +146,23 @@ interface GuildServices {
 }
 
 /**
+ * Market is configurable at runtime, so its manager and command must exist even
+ * while the feature is disabled. MarketManager enforces the flag at execution.
+ */
+export function initializeMarketFeature(
+  ctx: GuildContext,
+  allCommands: RESTPostAPIApplicationCommandsJSONBody[],
+): void {
+  const manager = new MarketManager(ctx.guild, ctx.supabase, ctx.valkey);
+  registerMarketManager(manager, ctx.guildId);
+  ctx.setManager('market', manager);
+  const commands = buildMarketCommands();
+  for (const command of Object.values(commands)) {
+    allCommands.push(command.toJSON());
+  }
+}
+
+/**
  * Initialize all feature managers and services for a single guild.
  * This is the GuildRouter initCallback: called once per guild on first access.
  *
@@ -450,12 +467,12 @@ export async function initGuildFeatures(
         const cmds = buildAdventureCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
-      if (guildCfg.economy_market_enabled) {
-        const mgr = new MarketManager(guild, supabase, valkey);
-        registerMarketManager(mgr, guildId); ctx.setManager('market', mgr);
-        const cmds = buildMarketCommands();
-        for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
-      }
+      // Keep /market registered even while the owner has the feature disabled.
+      // The manager already enforces economy_market_enabled and returns an honest
+      // disabled response. Conditional construction made the dashboard toggle
+      // impossible to hot-enable: ConfigWatcher could invalidate only a manager
+      // that did not exist, and Discord kept no /market command until restart.
+      initializeMarketFeature(ctx, allCommands);
       if (guildCfg.economy_trivia_enabled) {
         const mgr = new TriviaManager(supabase, valkey);
         registerTriviaManager(mgr, guildId); ctx.setManager('trivia', mgr);

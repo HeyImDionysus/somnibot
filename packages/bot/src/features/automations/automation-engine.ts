@@ -12,11 +12,19 @@ import type { PlatformEvent, PlatformEventType } from '@somnibot/shared';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { AutomationLoader, type LoadedAutomation } from './automation-loader.js';
 import { evaluateConditions, createRegexBudget, type ConditionContext, type RegexBudget } from './condition-evaluator.js';
-import { executeActions, type ActionContext } from './action-executor.js';
+import {
+  executeActions,
+  type ActionContext,
+  type AutomationAction,
+} from './action-executor.js';
 import type { AlertService } from '../../services/alert-service.js';
 import { AUTOMATION_LIMITS , createLogger } from '@somnibot/shared';
 import { AutomationRateLimiter } from './rate-limiter.js';
 import { ExecutionLogger, type ExecutionResult } from './execution-logger.js';
+import {
+  MassActionHoldService,
+  type MassActionHoldRow,
+} from './mass-action-hold.js';
 
 /**
  * A stable, uuid-shaped id derived from a durable seed. Same seed → same id, so
@@ -30,6 +38,16 @@ function stableUuid(seed: string): string {
 }
 
 const log = createLogger('AutomationEngine');
+const MEMBER_TARGETED_ACTIONS = new Set([
+  'send_dm',
+  'give_role',
+  'remove_role',
+  'grant_entitlement',
+  'create_ticket',
+  'ban_member',
+  'kick_member',
+  'mute_member',
+]);
 
 /**
  * Event context passed alongside platform events for automation processing.
@@ -43,6 +61,8 @@ export interface AutomationEventContext {
   variables: Record<string, string>;
   /** Stable for every action spawned by this one in-memory event occurrence. */
   occurrenceId: string;
+  /** Unique bulk member targets resolved by the event producer, when present. */
+  affectedMemberIds: string[];
   /**
    * PR #269 review (P2): Shared regex-evaluation budget for this event.
    * One instance per platform event (created in buildEventContext) so the
@@ -56,6 +76,7 @@ export class AutomationEngine {
   private loader: AutomationLoader;
   private rateLimiter: AutomationRateLimiter;
   private executionLogger: ExecutionLogger;
+  private massActionHolds: MassActionHoldService;
   private alertService: AlertService | null;
   private eventHandler: ((event: PlatformEvent) => Promise<void>) | null = null;
   /**
@@ -88,6 +109,7 @@ export class AutomationEngine {
     this.loader = new AutomationLoader(supabase, guild.id);
     this.rateLimiter = new AutomationRateLimiter(valkey);
     this.executionLogger = new ExecutionLogger(supabase);
+    this.massActionHolds = new MassActionHoldService(supabase, guild);
     this.alertService = alertService ?? null;
   }
 
@@ -104,6 +126,27 @@ export class AutomationEngine {
   async start(): Promise<void> {
     await this.loader.load();
     this.loader.subscribe();
+    this.massActionHolds.subscribe((holdId) => {
+      void this.runApprovedHold(holdId).catch((err) => {
+        log.error(`Failed to run approved mass-action hold ${holdId}:`, err);
+      });
+    });
+
+    // Recovery is deliberately performed on every start. Held cards whose
+    // Discord send committed before the DB acknowledgement are discovered by
+    // their stable footer; approved rows are atomically claimed so multiple
+    // bot instances or reconnects cannot execute the same release twice.
+    const [held, approved] = await Promise.all([
+      this.massActionHolds.listHeld(),
+      this.massActionHolds.listApproved(),
+    ]);
+    for (const hold of held) {
+      const name = await this.automationName(hold.automation_id);
+      await this.massActionHolds.ensureOwnerNotice(hold, name);
+    }
+    for (const hold of approved) {
+      await this.runApprovedHold(hold.id);
+    }
 
     // Listen to ALL platform events and check for matching automations.
     // V10 Audit §2: If an event arrives without _chainDepth but there are
@@ -140,6 +183,7 @@ export class AutomationEngine {
    */
   stop(): void {
     this.loader.unsubscribe();
+    this.massActionHolds.unsubscribe();
     if (this.eventHandler) {
       this.eventBus.off('*' as PlatformEventType, this.eventHandler);
       this.eventHandler = null;
@@ -269,6 +313,50 @@ export class AutomationEngine {
       return;
     }
 
+    const actions = automation.actions as AutomationAction[];
+    const hasMemberTargetedAction = actions.some((action) =>
+      MEMBER_TARGETED_ACTIONS.has(action.type),
+    );
+    const affectedMemberIds = hasMemberTargetedAction
+      ? [...new Set(ctx.affectedMemberIds)]
+      : [];
+    const massActionThreshold = affectedMemberIds.length > 1
+      ? await this.massActionHolds.threshold()
+      : null;
+
+    if (
+      massActionThreshold !== null
+      && affectedMemberIds.length > massActionThreshold
+    ) {
+      // A durable execution claim is mandatory for a held occurrence. Without
+      // it an approval retry could not be tied back to the original occurrence,
+      // so suppress safely rather than create an untracked destructive release.
+      if (!claimRowId) {
+        throw new Error('Mass-action occurrence could not obtain a durable execution claim');
+      }
+      const { hold } = await this.massActionHolds.create({
+        automationId: automation.id,
+        executionId: claimRowId,
+        occurrenceId: ctx.occurrenceId,
+        memberIds: affectedMemberIds,
+        threshold: massActionThreshold,
+        triggerEvent: event.type,
+        triggeredBy: userId,
+        actions,
+        context: {
+          channelId: ctx.channelId,
+          messageId: ctx.messageId,
+          variables: ctx.variables,
+        },
+      });
+      await this.massActionHolds.ensureOwnerNotice(hold, automation.name);
+      log.warn(
+        `Held "${automation.name}" occurrence ${ctx.occurrenceId}: ` +
+        `${affectedMemberIds.length} members exceeds threshold ${massActionThreshold}`,
+      );
+      return;
+    }
+
     // 4. Execute actions — V10 Audit §2: track chain depth per-execution
     //    so concurrent automations don't corrupt each other's depth.
     const depth = (event._chainDepth ?? 0) + 1;
@@ -291,10 +379,7 @@ export class AutomationEngine {
 
     let actionResult: { executed: number; failed: number; errors: string[] };
     try {
-      actionResult = await executeActions(
-        automation.actions as { type: string; config: Record<string, unknown> }[],
-        actionCtx,
-      );
+      actionResult = await this.executeResolvedActions(actions, actionCtx, affectedMemberIds);
     } finally {
       this._activeDepths.delete(execId);
     }
@@ -544,6 +629,11 @@ export class AutomationEngine {
       message: null, // Message object needs to be attached separately for message-based triggers
       variables,
       occurrenceId: this.occurrenceIdFor(event, data),
+      affectedMemberIds: Array.isArray(event.affectedMemberIds)
+        ? event.affectedMemberIds.filter(
+          (id): id is string => typeof id === 'string' && /^\d{17,20}$/.test(id),
+        )
+        : [],
       // One budget per event: buildEventContext is called exactly once per
       // event (handleEvent / processMessageEvent / processReactionEvent), so
       // every automation processed for this event draws from the same budget.
@@ -588,6 +678,117 @@ export class AutomationEngine {
       this.processAutomation(automation, event, ctx).catch((err) => {
         log.error(`Uncaught error in reaction automation "${automation.name}":`, err);
       });
+    }
+  }
+
+  private async automationName(automationId: string): Promise<string> {
+    const { data } = await this.supabase
+      .from('automations')
+      .select('name')
+      .eq('id', automationId)
+      .eq('guild_id', this.guild.id)
+      .maybeSingle();
+    return (data?.name as string | undefined) ?? automationId;
+  }
+
+  /**
+   * Member-targeted actions are fanned out over the resolved target set while
+   * channel/message actions execute once. The guard runs before this method, so
+   * no target can be touched before an oversized set is durably held.
+   */
+  private async executeResolvedActions(
+    actions: AutomationAction[],
+    baseContext: ActionContext,
+    affectedMemberIds: string[],
+  ): Promise<{ executed: number; failed: number; errors: string[] }> {
+    if (affectedMemberIds.length === 0) {
+      return executeActions(actions, baseContext);
+    }
+
+    const onceActions = actions.filter((action) => !MEMBER_TARGETED_ACTIONS.has(action.type));
+    const perMemberActions = actions.filter((action) => MEMBER_TARGETED_ACTIONS.has(action.type));
+    const total = { executed: 0, failed: 0, errors: [] as string[] };
+    const add = (result: { executed: number; failed: number; errors: string[] }) => {
+      total.executed += result.executed;
+      total.failed += result.failed;
+      total.errors.push(...result.errors);
+    };
+
+    if (onceActions.length > 0) add(await executeActions(onceActions, baseContext));
+    for (const memberId of affectedMemberIds) {
+      const member = this.guild.members.cache.get(memberId)
+        ?? await this.guild.members.fetch(memberId).catch(() => null);
+      if (!member) {
+        total.failed += perMemberActions.length;
+        total.errors.push(`member ${memberId}: target no longer belongs to the guild`);
+        continue;
+      }
+      add(await executeActions(perMemberActions, {
+        ...baseContext,
+        member,
+        variables: {
+          ...baseContext.variables,
+          user: `<@${member.id}>`,
+          'user.name': member.displayName,
+        },
+      }));
+    }
+    return total;
+  }
+
+  private async runApprovedHold(holdId: string): Promise<void> {
+    const hold = await this.massActionHolds.claimApproved(holdId);
+    if (!hold) return;
+    const startTime = Date.now();
+    try {
+      const context: ActionContext = {
+        guild: this.guild,
+        member: null,
+        channelId: hold.context_snapshot.channelId,
+        messageId: hold.context_snapshot.messageId,
+        // A Discord Message object is intentionally not persisted. Bulk
+        // member-targeted actions remain fully resumable; any one-shot message
+        // action receives the same explicit missing-context failure as a normal
+        // restart would instead of fabricating a stale Discord object.
+        message: null,
+        supabase: this.supabase,
+        guildId: this.guild.id,
+        rateLimiter: this.rateLimiter,
+        automationId: hold.automation_id,
+        occurrenceId: hold.occurrence_id,
+        variables: hold.context_snapshot.variables,
+      };
+      const result = await this.executeResolvedActions(
+        hold.action_snapshot,
+        context,
+        hold.member_ids,
+      );
+      const executionResult: ExecutionResult = {
+        automationId: hold.automation_id,
+        guildId: this.guild.id,
+        triggeredBy: hold.triggered_by,
+        triggerEvent: hold.trigger_event,
+        conditionsPassed: true,
+        actionsExecuted: result.executed,
+        actionsFailed: result.failed,
+        errors: result.errors,
+        durationMs: Date.now() - startTime,
+      };
+      await this.executionLogger.finalize(hold.execution_id, executionResult);
+      await this.massActionHolds.complete(hold.id);
+      this.eventBus.emit('automation.executed', this.guild.id, {
+        automationId: hold.automation_id,
+        automationName: await this.automationName(hold.automation_id),
+        trigger: hold.trigger_event,
+        actionsExecuted: result.executed,
+        actionsFailed: result.failed,
+        success: result.failed === 0,
+        duration: executionResult.durationMs,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.massActionHolds.fail(hold.id, message);
+      throw err;
     }
   }
 }

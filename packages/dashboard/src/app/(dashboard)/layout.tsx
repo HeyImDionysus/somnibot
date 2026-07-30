@@ -4,6 +4,7 @@ import { Sidebar } from '@/components/layout/sidebar';
 import { DashboardProviders } from '@/components/layout/dashboard-providers';
 import { Breadcrumb } from '@/components/shared/breadcrumb';
 import { BotStatusBanner } from '@/components/layout/bot-status-banner';
+import { FeatureStatusPanel } from '@/components/layout/feature-status-panel';
 
 /**
  * Dashboard layout — sidebar + content area with breadcrumbs.
@@ -31,6 +32,7 @@ export default async function DashboardLayout({
           <div className="mx-auto max-w-5xl p-6">
             <DashboardProviders>
               <Breadcrumb />
+              <FeatureStatusPanel />
               {children}
             </DashboardProviders>
           </div>

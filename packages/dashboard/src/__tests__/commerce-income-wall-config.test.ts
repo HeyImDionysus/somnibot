@@ -247,7 +247,23 @@ function uuidAt(index: number): string {
 }
 
 function useFake(tables: Record<string, TableConfig>) {
-  const fake = createFakeSupabase(tables);
+  const fake = createFakeSupabase({
+    guild_live_state: {
+      rows: [{
+        guild_id: GUILD,
+        snapshot_version: 2,
+        snapshot_at: new Date().toISOString(),
+        roles: [{
+          id: ROLE,
+          name: 'Customer',
+          managed: false,
+          editableByBot: true,
+        }],
+        channels: [],
+      }],
+    },
+    ...tables,
+  });
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(fake);
   return fake;
 }

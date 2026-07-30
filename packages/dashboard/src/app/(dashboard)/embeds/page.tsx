@@ -6,7 +6,6 @@
  */
 'use client';
 
-import Image from 'next/image';
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { useToast } from '@/components/shared/toast';
@@ -14,6 +13,7 @@ import { ChannelPicker } from '@/components/shared/channel-picker';
 import { CardListSkeleton } from '@/components/shared/loading-skeleton';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Send, Loader2 } from 'lucide-react';
+import { DiscordEmbedPreview } from '@/components/discord/discord-embed-preview';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -396,93 +396,22 @@ export default function EmbedBuilderPage() {
               {/* ── Preview Side ───────────────────────── */}
               <div className="rounded-card bg-discord-bg-tertiary p-4">
                 <p className="text-xs font-medium text-discord-text-muted mb-3 uppercase tracking-wide">Live Preview</p>
-                <div className="rounded-input overflow-hidden" style={{ borderLeft: `4px solid ${draft.color || '#5865f2'}` }}>
-                  <div className="relative bg-discord-bg-floating p-4">
-                    {/* Author */}
-                    {draft.author_name && (
-                      <div className="flex items-center gap-2 mb-2">
-                        {draft.author_icon_url && (
-                          <Image
-                            src={draft.author_icon_url}
-                            alt=""
-                            width={24}
-                            height={24}
-                            unoptimized
-                            className="h-6 w-6 rounded-full"
-                            onError={(e) => { e.currentTarget.style.display = 'none'; }}
-                          />
-                        )}
-                        <span className="text-xs font-medium text-discord-text-primary">{draft.author_name}</span>
-                      </div>
-                    )}
+                <DiscordEmbedPreview
+                  embed={{
+                    title: draft.title,
+                    description: draft.description,
+                    color: draft.color,
+                    fields: draft.fields,
+                    imageUrl: draft.image_url,
+                    thumbnailUrl: draft.thumbnail_url,
+                    footerText: draft.footer_text,
+                    authorName: draft.author_name,
+                    authorIconUrl: draft.author_icon_url,
+                    includeTimestamp: draft.include_timestamp,
+                  }}
+                  emptyMessage="Start filling in the form to see a live preview."
+                />
 
-                    {/* Title */}
-                    {draft.title && (
-                      <p className="text-base font-semibold text-discord-accent mb-1">{draft.title}</p>
-                    )}
-
-                    {/* Description */}
-                    {draft.description && (
-                      <p className="text-sm text-discord-text-secondary whitespace-pre-wrap mb-2">{draft.description}</p>
-                    )}
-
-                    {/* Fields */}
-                    {draft.fields.length > 0 && (
-                      <div className="grid grid-cols-3 gap-2 mt-2">
-                        {draft.fields.map((f, i) => (
-                          <div key={i} className={f.inline ? 'col-span-1' : 'col-span-3'}>
-                            <p className="text-xs font-semibold text-discord-text-primary">{f.name || '\u200b'}</p>
-                            <p className="text-sm text-discord-text-secondary">{f.value || '\u200b'}</p>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Image */}
-                    {draft.image_url && (
-                      <Image
-                        src={draft.image_url}
-                        alt=""
-                        width={500}
-                        height={300}
-                        unoptimized
-                        className="mt-3 h-auto max-w-full rounded"
-                        onError={(e) => { e.currentTarget.style.display = 'none'; }}
-                      />
-                    )}
-
-                    {/* Footer */}
-                    {(draft.footer_text || draft.include_timestamp) && (
-                      <div className="mt-3 flex items-center gap-2 text-xs text-discord-text-muted">
-                        {draft.footer_text && <span>{draft.footer_text}</span>}
-                        {draft.footer_text && draft.include_timestamp && <span>•</span>}
-                        {draft.include_timestamp && <span>{new Date().toLocaleDateString()}</span>}
-                      </div>
-                    )}
-
-                    {/* Thumbnail */}
-                    {draft.thumbnail_url && (
-                      <div className="absolute top-4 right-4">
-                        <Image
-                          src={draft.thumbnail_url}
-                          alt=""
-                          width={64}
-                          height={64}
-                          unoptimized
-                          className="h-16 w-16 rounded"
-                          onError={(e) => { e.currentTarget.style.display = 'none'; }}
-                        />
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Empty state */}
-                {!draft.title && !draft.description && draft.fields.length === 0 && (
-                  <p className="mt-4 text-center text-xs text-discord-text-muted">
-                    Start filling in the form to see a live preview
-                  </p>
-                )}
               </div>
             </div>
 
@@ -512,6 +441,7 @@ export default function EmbedBuilderPage() {
               onChange={(v) => setSendChannelId(v as string | null)}
               placeholder="Select channel…"
               channelTypes={['text', 'announcement']}
+              requiredBotPermissions={['ViewChannel', 'SendMessages', 'EmbedLinks']}
             />
             <div className="mt-6 flex justify-end gap-3">
               <button

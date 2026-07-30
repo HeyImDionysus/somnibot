@@ -13,6 +13,11 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import { createLogger } from '@somnibot/shared';
+import {
+  claimDiscordOccurrence,
+  completeDiscordOccurrence,
+  failDiscordOccurrence,
+} from '../../services/occurrence-fence.js';
 
 const log = createLogger('ScheduledRunner');
 
@@ -230,14 +235,15 @@ export class ScheduledMessageRunner {
           if (diffMs < 55_000) continue; // Skip if sent less than 55s ago
         }
 
-        await this.sendMessage(schedule);
+        const occurrenceAt = new Date(Math.floor(now.getTime() / 60_000) * 60_000);
+        await this.sendMessage(schedule, occurrenceAt);
       } catch (err) {
         log.error(`Error for schedule ${schedule.id}:`, err);
       }
     }
   }
 
-  private async sendMessage(schedule: ScheduledMessage): Promise<void> {
+  private async sendMessage(schedule: ScheduledMessage, occurrenceAt: Date): Promise<void> {
     const channel = this.guild.channels.cache.get(schedule.channel_id) as TextChannel | undefined;
     if (!channel || !channel.isTextBased()) {
       // The target channel is gone/non-text. Mark the schedule failed, alert the
@@ -248,29 +254,34 @@ export class ScheduledMessageRunner {
       return;
     }
 
-    // Atomically CLAIM this occurrence before sending. The in-memory 55s check in
-    // tick() is only a cheap pre-filter; two runner instances (multi-shard) or a
-    // replayed tick can both pass it against the same stale last_sent_at and
-    // double-post. The conditional UPDATE advances last_sent_at only when it is
-    // still null or older than the 55s window, and Postgres serializes concurrent
-    // writers on the row — so exactly one claim succeeds per occurrence. A writer
-    // that updates zero rows lost the claim and must NOT send.
-    const claimBefore = new Date(Date.now() - 55_000).toISOString();
-    const { data: claimed, error: claimErr } = await this.supabase
-      .from('scheduled_messages')
-      .update({
-        last_sent_at: new Date().toISOString(),
-        current_sends: schedule.current_sends + 1,
-      })
-      .eq('id', schedule.id)
-      .or(`last_sent_at.is.null,last_sent_at.lt.${claimBefore}`)
-      .select('id');
-    if (claimErr) {
-      log.error(`Failed to claim schedule ${schedule.id}:`, claimErr.message);
+    // The due-minute is the occurrence identity. A unique insert is a durable
+    // fence across shards, restarts, tick replay, and the crash boundary around
+    // Discord's send API.
+    let occurrenceId: string;
+    try {
+      const claim = await claimDiscordOccurrence(
+        this.supabase,
+        this.guild.id,
+        'scheduled_message',
+        `${schedule.id}:${occurrenceAt.toISOString()}`,
+      );
+      if (!claim.won) return;
+      occurrenceId = claim.occurrence.id;
+    } catch (err) {
+      log.error(`Failed to claim schedule ${schedule.id} occurrence:`, { error: String(err) });
       return;
     }
-    if (!claimed || claimed.length === 0) {
-      // Another instance/tick already claimed this occurrence — skip (no double-post).
+
+    const { error: counterError } = await this.supabase
+      .from('scheduled_messages')
+      .update({
+        last_sent_at: occurrenceAt.toISOString(),
+        current_sends: schedule.current_sends + 1,
+      })
+      .eq('id', schedule.id);
+    if (counterError) {
+      await failDiscordOccurrence(this.supabase, occurrenceId, `counter_update:${counterError.message}`).catch(() => {});
+      log.error(`Failed to update schedule ${schedule.id} counters:`, counterError.message);
       return;
     }
 
@@ -321,9 +332,16 @@ export class ScheduledMessageRunner {
     });
     if (!sent.ok) {
       log.error(`Failed to send "${schedule.name}" after retries:`, sent.error);
+      await failDiscordOccurrence(this.supabase, occurrenceId, sent.error).catch(() => {});
       await this.markFailed(schedule, `send_failed:${sent.error}`);
       return;
     }
+    await completeDiscordOccurrence(
+      this.supabase,
+      occurrenceId,
+      sent.messageId,
+      { channelId: schedule.channel_id, dueAt: occurrenceAt.toISOString() },
+    ).catch((err) => log.error('Failed to complete scheduled occurrence:', { error: String(err) }));
 
     this.eventBus.emit('scheduled_message.sent', this.guild.id, {
       scheduleId: schedule.id,
@@ -342,13 +360,13 @@ export class ScheduledMessageRunner {
   private async trySend(
     channel: TextChannel,
     payload: { content?: string; embeds?: EmbedBuilder[] },
-  ): Promise<{ ok: true } | { ok: false; error: string }> {
+  ): Promise<{ ok: true; messageId: string } | { ok: false; error: string }> {
     const maxAttempts = 3;
     let lastErr: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        await channel.send(payload);
-        return { ok: true };
+        const message = await channel.send(payload);
+        return { ok: true, messageId: message.id };
       } catch (err) {
         lastErr = err;
         if (attempt < maxAttempts) {
@@ -435,7 +453,7 @@ export class ScheduledMessageRunner {
         if (schedule.missed_run_policy === 'send-latest') {
           // Fire exactly one catch-up now; sendMessage's atomic claim prevents a
           // double-post if another instance also recovers.
-          await this.sendMessage(schedule);
+          await this.sendMessage(schedule, lastOcc);
         } else {
           // skip-missed (default): drop the occurrences but notify the owner once.
           await this.noticeMissed(schedule, baseline, lastOcc, now);

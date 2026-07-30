@@ -3,7 +3,7 @@
  *
  * V53 Phase 1.7 — S-5
  *
- * Allows any member to request deletion of ALL their personal data
+ * Allows any member to request erasure/anonymization of their account data
  * from the guild's database. This is irreversible and includes:
  * - Economy data (wallet, inventory, transactions, market listings)
  * - Level/XP data
@@ -54,7 +54,7 @@ function numericPurgeEntries(summary: PurgeSummary): Array<[string, number]> {
 export function buildForgetMeCommand() {
   return new SlashCommandBuilder()
     .setName('forgetme')
-    .setDescription('Permanently delete ALL your data from this server (irreversible)');
+    .setDescription('Erase or anonymize your account data from this server (irreversible)');
 }
 
 export async function handleForgetMeCommand(
@@ -76,17 +76,21 @@ export async function handleForgetMeCommand(
   const confirmEmbed = new EmbedBuilder()
     .setTitle('⚠️ Permanent Data Deletion')
     .setDescription(
-      'This will **permanently and irreversibly** delete all of your data from this server:\n\n' +
+      'This will **permanently and irreversibly** erase or anonymize your account data from this server:\n\n' +
       '• 💰 Economy — wallet, bank, inventory, transactions\n' +
       '• 📊 Levels — XP, level, rank, voice minutes\n' +
       '• 🎯 Progress — quests, achievements, prestige\n' +
       '• 🐾 Pets — all owned pets and battle history\n' +
       '• 🌾 Activities — farm plots, fish catches, adventures\n' +
       '• 🏪 Market — all listings (active ones will be cancelled)\n' +
-      '• 🔑 Licenses — all license keys revoked, sessions deactivated\n' +
+      '• 🔑 Licenses — keys revoked and identity removed; sessions deactivated\n' +
       '• 🎟️ Entitlements — active entitlements cancelled\n' +
       '• 👤 Profile — custom profile and member record\n' +
       '• 🎫 Tickets — creator info anonymized (transcripts preserved)\n\n' +
+      '**Security records retained:** License-validation attempts are a permanent forensic ledger. ' +
+      'Their outcome, timestamp, and anonymized key/product linkage remain. IP address, device fingerprint, ' +
+      'and app version may remain for up to 60 days, then are automatically scrubbed. Anonymized ticket and ' +
+      'audit history may also remain to preserve operational and security integrity.\n\n' +
       '**Staying in the server?** New data will accumulate as you keep using bot features. ' +
       'The bot will not re-create the deleted record on its own — only if you leave and rejoin.\n\n' +
       '**This cannot be undone.** Are you sure?',
@@ -97,7 +101,7 @@ export async function handleForgetMeCommand(
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId('forgetme_confirm')
-      .setLabel('Yes, delete everything')
+      .setLabel('Yes, erase my data')
       .setStyle(ButtonStyle.Danger)
       .setEmoji('🗑️'),
     new ButtonBuilder()
@@ -254,7 +258,10 @@ export async function handleForgetMeCommand(
     const successEmbed = new EmbedBuilder()
       .setTitle('🗑️ Data Deleted')
       .setDescription(
-        'All of your personal data has been permanently deleted from this server.\n\n' +
+        'Your account data has been permanently erased or anonymized from this server.\n\n' +
+        'The limited security records disclosed before confirmation remain under their stated retention rules: ' +
+        'license-validation outcomes and timestamps stay as a forensic ledger, while validation IP/device/app ' +
+        'details are scrubbed after 60 days.\n\n' +
         (deletedItems
           ? `**Deleted:**\n${deletedItems}`
           : 'No data was found to delete.'),

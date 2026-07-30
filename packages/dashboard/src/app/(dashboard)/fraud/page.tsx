@@ -8,6 +8,11 @@ import { TableSkeleton } from '@/components/shared/loading-skeleton';
 
 import { useEffect, useState, useCallback } from 'react';
 import { ChannelPicker } from '@/components/shared/channel-picker';
+import {
+  FraudRuleForm,
+  type EditableFraudRule,
+} from '@/components/fraud-rule-form';
+import { fetchFraudJson, invalidateFraudCache } from '@/lib/fraud-data-cache';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -28,14 +33,7 @@ interface FraudSignal {
   created_at: string;
 }
 
-interface FraudRule {
-  id: string;
-  name: string;
-  description: string | null;
-  rule_type: string;
-  enabled: boolean;
-  config: Record<string, unknown>;
-  auto_action: string;
+interface FraudRule extends EditableFraudRule {
   trigger_count: number;
   last_triggered: string | null;
 }
@@ -91,6 +89,8 @@ export default function FraudPage() {
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [ruleForm, setRuleForm] = useState<'new' | FraudRule | null>(null);
+  const [pageError, setPageError] = useState<string | null>(null);
   // Fraud notification routing. The columns and the bot's mirror have existed
   // since migration 20260723120100; the dashboard never surfaced them, so an
   // owner could not choose where critical fraud signals are announced.
@@ -105,21 +105,35 @@ export default function FraudPage() {
     try {
       const params = new URLSearchParams();
       if (statusFilter) params.set('status', statusFilter);
-      const res = await fetch(`/api/fraud/signals?${params}`);
-      const json = await res.json();
+      const url = `/api/fraud/signals?${params}`;
+      const json = await fetchFraudJson<{
+        success: boolean;
+        data: FraudSignal[];
+        summary: Summary;
+      }>(url);
       if (json.success) {
         setSignals(json.data);
         setSummary(json.summary);
       }
+      setPageError(null);
+    } catch (error) {
+      setPageError(error instanceof Error ? error.message : 'Could not load fraud signals.');
     } finally {
       setLoading(false);
     }
   }, [statusFilter]);
 
-  const loadRules = useCallback(async () => {
-    const res = await fetch('/api/fraud/rules');
-    const json = await res.json();
-    if (json.success) setRules(json.data);
+  const loadRules = useCallback(async (forceFresh = false) => {
+    try {
+      const json = await fetchFraudJson<{ success: boolean; data: FraudRule[] }>(
+        '/api/fraud/rules',
+        { forceFresh },
+      );
+      if (json.success) setRules(json.data);
+      setPageError(null);
+    } catch (error) {
+      setPageError(error instanceof Error ? error.message : 'Could not load fraud rules.');
+    }
   }, []);
 
   useEffect(() => {
@@ -133,6 +147,7 @@ export default function FraudPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, status, resolution_note: note }),
     });
+    invalidateFraudCache('/api/fraud/signals');
     loadSignals();
   };
 
@@ -142,7 +157,8 @@ export default function FraudPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, enabled }),
     });
-    loadRules();
+    invalidateFraudCache('/api/fraud/rules');
+    loadRules(true);
   };
 
   useEffect(() => {
@@ -243,6 +259,12 @@ export default function FraudPage() {
       </div>
 
       {/* Summary Cards */}
+      {pageError && (
+        <div role="alert" className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">
+          {pageError}
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
         {[
           { label: 'Total Signals', value: summary.total, color: 'text-discord-text-primary' },
@@ -382,6 +404,26 @@ export default function FraudPage() {
       {/* Rules Tab */}
       {tab === 'rules' && (
         <div className="space-y-3">
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => setRuleForm('new')}
+              className="rounded-md bg-[#FF1493] px-4 py-2 text-sm font-medium text-white"
+            >
+              Create rule
+            </button>
+          </div>
+          {ruleForm && (
+            <FraudRuleForm
+              key={ruleForm === 'new' ? 'new' : ruleForm.id}
+              rule={ruleForm === 'new' ? null : ruleForm}
+              onCancel={() => setRuleForm(null)}
+              onSaved={async () => {
+                setRuleForm(null);
+                await loadRules(true);
+              }}
+            />
+          )}
           {rules.length === 0 ? (
             <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
               <div className="text-4xl mb-3">⚙️</div>
@@ -410,18 +452,30 @@ export default function FraudPage() {
                       {rule.last_triggered && ` • Last: ${formatDate(rule.last_triggered)}`}
                     </p>
                   </div>
-                  <button
-                    onClick={() => toggleRule(rule.id, !rule.enabled)}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                      rule.enabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'
-                    }`}
-                  >
-                    <span
-                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                        rule.enabled ? 'translate-x-6' : 'translate-x-1'
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setRuleForm(rule)}
+                      className="rounded-md bg-discord-bg-tertiary px-3 py-1.5 text-xs text-discord-text-secondary hover:text-white"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`${rule.enabled ? 'Disable' : 'Enable'} ${rule.name}`}
+                      aria-pressed={rule.enabled}
+                      onClick={() => toggleRule(rule.id, !rule.enabled)}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                        rule.enabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'
                       }`}
-                    />
-                  </button>
+                    >
+                      <span
+                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                          rule.enabled ? 'translate-x-6' : 'translate-x-1'
+                        }`}
+                      />
+                    </button>
+                  </div>
                 </div>
               </div>
             ))

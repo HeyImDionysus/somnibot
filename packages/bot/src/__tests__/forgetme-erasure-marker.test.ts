@@ -115,7 +115,8 @@ describe('/forgetme erasure marker', () => {
       { onConflict: 'guild_id,discord_id' },
     );
     const finalDescription = embedDescription(interaction.editReply.mock.calls.at(-1)?.[0]);
-    expect(finalDescription).toContain('permanently deleted');
+    expect(finalDescription).toContain('permanently erased or anonymized');
+    expect(finalDescription).toContain('forensic ledger');
   });
 
   it('aborts without purging when the marker write fails', async () => {

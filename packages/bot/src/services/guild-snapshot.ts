@@ -46,6 +46,15 @@ export interface LiveRole {
   /** How this role is assigned: 'manual' | 'onboarding' | 'level' | 'purchase' | 'reaction' | 'automation' | 'managed' */
   source: string;
   memberCount: number;
+  /** True only when SomniBot can currently move or assign this role. */
+  editableByBot: boolean;
+}
+
+export interface LivePermissionOverwrite {
+  id: string;
+  type: 'role' | 'member';
+  allow: string;
+  deny: string;
 }
 
 export interface LiveChannel {
@@ -57,6 +66,10 @@ export interface LiveChannel {
   topic: string | null;
   slowmode: number;
   nsfw: boolean;
+  /** Effective Discord permission bitfield for SomniBot in this channel. */
+  botPermissions: string | null;
+  manageableByBot: boolean;
+  permissionOverwrites: LivePermissionOverwrite[];
   /** Template key from discord_id_map, if deployed by SomniBot */
   templateKey: string | null;
 }
@@ -66,6 +79,9 @@ export interface LiveCategory {
   name: string;
   position: number;
   templateKey: string | null;
+  botPermissions: string | null;
+  manageableByBot: boolean;
+  permissionOverwrites: LivePermissionOverwrite[];
 }
 
 /** Lightweight member snapshot stored in guild_live_state.members JSONB. */
@@ -126,6 +142,7 @@ export async function writeGuildSnapshot(
   // Bot role
   const botMember = guild.members.me;
   const botRole = botMember?.roles.highest;
+  const botCanManageRoles = botMember?.permissions.has('ManageRoles') ?? false;
 
   // ── Roles ──
   const roles: LiveRole[] = [];
@@ -156,6 +173,10 @@ export async function writeGuildSnapshot(
       tier,
       source: classifyRoleSource(role, templateKey),
       memberCount: role.members.size,
+      editableByBot:
+        botCanManageRoles
+        && !role.managed
+        && role.position < (botRole?.position ?? 0),
     });
   }
 
@@ -167,12 +188,31 @@ export async function writeGuildSnapshot(
   const categories: LiveCategory[] = [];
 
   for (const [, channel] of guild.channels.cache) {
+    const permissionOverwrites: LivePermissionOverwrite[] =
+      'permissionOverwrites' in channel
+        ? [...channel.permissionOverwrites.cache.values()].map((overwrite) => ({
+            id: overwrite.id,
+            type: overwrite.type === 0 ? 'role' : 'member',
+            allow: overwrite.allow.bitfield.toString(),
+            deny: overwrite.deny.bitfield.toString(),
+          }))
+        : [];
+    const botPermissions =
+      botMember && 'permissionsFor' in channel
+        ? channel.permissionsFor(botMember)?.bitfield.toString() ?? null
+        : null;
+    const manageableByBot =
+      (channel as { manageable?: boolean }).manageable ?? false;
+
     if (channel.type === ChannelType.GuildCategory) {
       categories.push({
         id: channel.id,
         name: channel.name,
         position: channel.position,
         templateKey: categoryIdToKey.get(channel.id) ?? null,
+        botPermissions,
+        manageableByBot,
+        permissionOverwrites,
       });
     } else if (
       channel.type === ChannelType.GuildText ||
@@ -190,6 +230,9 @@ export async function writeGuildSnapshot(
         topic: 'topic' in channel ? ((channel.topic as string | null) ?? null) : null,
         slowmode: 'rateLimitPerUser' in channel ? (channel.rateLimitPerUser as number) : 0,
         nsfw: 'nsfw' in channel ? (channel.nsfw as boolean) : false,
+        botPermissions,
+        manageableByBot,
+        permissionOverwrites,
         templateKey: channelIdToKey.get(channel.id) ?? null,
       });
     }
@@ -295,6 +338,8 @@ export async function writeGuildSnapshot(
       members: memberSnapshots,
       bot_role_id: botRole?.id ?? null,
       bot_role_position: botRole?.position ?? 0,
+      bot_permissions: botMember?.permissions.bitfield.toString() ?? null,
+      snapshot_version: 2,
       onboarding_enabled: onboardingEnabled,
       onboarding_prompts: onboardingPrompts,
       snapshot_at: new Date().toISOString(),
