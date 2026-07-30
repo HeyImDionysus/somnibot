@@ -117,7 +117,7 @@ interface GuildServices {
   snapshotTimer?: ReturnType<typeof setInterval>;
   voiceXpTimer?: ReturnType<typeof setInterval>;
   actionQueueStaleTimer?: ReturnType<typeof setInterval>;
-  actionQueueStop?: () => void;
+  actionQueueStop?: () => Promise<void>;
   syncHandle?: { stop: () => void };
   reconTimer?: ReturnType<typeof setInterval>;
   automationEngine?: AutomationEngine;
@@ -601,7 +601,7 @@ export async function initGuildFeatures(
 
   // ── Audit & Diagnostics ──
   try {
-    services.auditService = new AuditService(guildId, supabase, eventBus);
+    services.auditService = new AuditService(guildId, supabase, eventBus, valkey);
     services.auditService.start();
     ctx.setManager('auditService', services.auditService);
 
@@ -731,7 +731,14 @@ export async function destroyGuildServices(ctx: GuildContext): Promise<void> {
   if (services.voiceXpTimer) clearInterval(services.voiceXpTimer);
   if (services.actionQueueStaleTimer) clearInterval(services.actionQueueStaleTimer);
   if (services.actionQueueStop) {
-    stopSyncProducer('action queue', services.actionQueueStop);
+    try {
+      pendingProducerStops.push({
+        name: 'action queue',
+        promise: services.actionQueueStop(),
+      });
+    } catch (error) {
+      stopFailures.push({ name: 'action queue', error });
+    }
   }
   if (services.reconTimer) clearInterval(services.reconTimer);
   if (services.syncHandle) {

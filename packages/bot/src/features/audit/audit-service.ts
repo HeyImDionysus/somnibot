@@ -54,9 +54,11 @@ interface AuditMapping {
    * `occurrence_key` (`<action>:<id>`) is deduped in-queue and enforced by
    * the `uq_audit_logs_guild_occurrence` unique index (flush inserts with
    * ON CONFLICT DO NOTHING), so a redelivered platform event or a re-flushed
-   * batch cannot write a second row. Events without a stable occurrence
-   * identity (joins, messages, repeated state toggles) stay keyless and are
-   * inserted as-is — a wrong dedupe is worse than a duplicate row there.
+   * batch cannot write a second row. Events without a stable semantic
+   * occurrence identity (joins, messages, repeated state toggles) receive a
+   * fresh immutable delivery key. That preserves append semantics between
+   * separate events while making an ambiguously acknowledged batch retry
+   * idempotent.
    * Any emit site may alternatively pass `occurrenceId` in the event data.
    */
   occurrenceId?: (data: Record<string, unknown>) => string | undefined;
@@ -1296,6 +1298,12 @@ interface FrozenAuditGapWindow {
   row: Readonly<Record<string, unknown>>;
 }
 
+interface AuditRecoveryStore {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string): Promise<unknown>;
+  del(key: string): Promise<unknown>;
+}
+
 export class AuditService {
   // The exempt EventBus lane must not become an unbounded memory bypass.
   // Keep both buffered rows and outstanding async mapping work finite. At
@@ -1304,9 +1312,15 @@ export class AuditService {
   private static readonly MAX_PENDING_ENQUEUES = 5_000;
   private static readonly MAX_CAPACITY_LABELS = 20;
   private static readonly MAX_STOP_DRAIN_STALLS = 3;
+  private static readonly MAPPING_WAIT_TIMEOUT_MS = 10_000;
   private guildId: string;
   private supabase: SupabaseClient;
   private eventBus: PlatformEventBus;
+  private recoveryStore: AuditRecoveryStore | null;
+  private readonly recoveryStoreKey: string;
+  private persistedResidueKeys = new Set<string>();
+  private persistedResidueCleanupPending = false;
+  private persistedResidueRestorePending = false;
   private queue: Array<Record<string, unknown>> = [];
   private droppedAtCapacity = 0;
   /**
@@ -1361,10 +1375,13 @@ export class AuditService {
     guildId: string,
     supabase: SupabaseClient,
     eventBus: PlatformEventBus,
+    recoveryStore?: AuditRecoveryStore,
   ) {
     this.guildId = guildId;
     this.supabase = supabase;
     this.eventBus = eventBus;
+    this.recoveryStore = recoveryStore ?? null;
+    this.recoveryStoreKey = `guild:${guildId}:audit:shutdown-residue`;
   }
 
   /**
@@ -1377,6 +1394,14 @@ export class AuditService {
       return;
     }
     this.acceptingEntries = true;
+
+    if (this.recoveryStore) {
+      this.persistedResidueRestorePending = true;
+      this.trackPendingEnqueue(
+        this.restorePersistedResidue(),
+        'persisted audit residue',
+      );
+    }
 
     // Prime the before-snapshot baseline for config.updated diffs.
     this.snapshotLoad = this.loadGuildConfigSnapshot();
@@ -1398,15 +1423,11 @@ export class AuditService {
         return;
       }
 
-      const op: Promise<void> = this.enqueueFromEvent(event, mapping)
-        .catch((err: unknown) => {
-          log.error(`Failed to queue audit entry for ${event.type}:`, err);
-          this.recordMappingFailure(event.type, err);
-        })
-        .finally(() => {
-          this.pendingEnqueues.delete(op);
-        });
-      this.pendingEnqueues.add(op);
+      this.trackPendingEnqueue(
+        this.enqueueFromEvent(event, mapping),
+        event.type,
+        event.type,
+      );
     };
     this.eventBus.onAny(this.eventHandler, { backpressureExempt: true });
 
@@ -1418,6 +1439,59 @@ export class AuditService {
     }, 5000);
 
     log.info('Started — listening to all platform events (with before/after diffs)');
+  }
+
+  private trackPendingEnqueue(
+    operation: Promise<void>,
+    source: string,
+    eventType?: string,
+  ): void {
+    const op = operation
+      .catch((err: unknown) => {
+        log.error(`Failed to queue audit entry for ${source}:`, err);
+        this.recordMappingFailure(eventType ?? source, err);
+      })
+      .finally(() => {
+        this.pendingEnqueues.delete(op);
+      });
+    this.pendingEnqueues.add(op);
+  }
+
+  private async restorePersistedResidue(): Promise<void> {
+    if (!this.recoveryStore) return;
+    const raw = await this.withMappingDeadline(
+      this.recoveryStore.get(this.recoveryStoreKey),
+      'persisted audit residue load',
+    );
+    if (!raw) {
+      this.persistedResidueRestorePending = false;
+      return;
+    }
+
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      throw new Error('persisted audit residue is not an array');
+    }
+
+    for (const candidate of parsed) {
+      if (
+        candidate === null
+        || typeof candidate !== 'object'
+        || Array.isArray(candidate)
+      ) {
+        throw new Error('persisted audit residue contains a non-object row');
+      }
+      const row = candidate as Record<string, unknown>;
+      if (row.guild_id !== this.guildId || typeof row.occurrence_key !== 'string') {
+        throw new Error('persisted audit residue failed guild/key validation');
+      }
+      if (this.persistedResidueKeys.has(row.occurrence_key)) continue;
+      this.queue.push(Object.freeze({ ...row }));
+      this.persistedResidueKeys.add(row.occurrence_key);
+    }
+    this.persistedResidueCleanupPending = this.persistedResidueKeys.size === 0;
+    this.persistedResidueRestorePending = false;
+    log.warn(`Restored ${this.persistedResidueKeys.size} audit row(s) from shutdown residue`);
   }
 
   /** Keep audit buffering finite and reserve a coalesced ledger gap record. */
@@ -1540,7 +1614,9 @@ export class AuditService {
       before_state: beforeState,
       after_state: mapping.afterState?.(data) ?? null,
       correlation_id: mapping.correlationId?.(data) ?? null,
-      occurrence_key: occurrence ? `${action}:${occurrence}` : null,
+      occurrence_key: occurrence
+        ? `${action}:${occurrence}`
+        : `audit.delivery:${randomUUID()}`,
       success: mapping.success ?? true,
       // Keep every queued entry's key set identical to log()'s — PostgREST
       // bulk inserts require homogeneous objects in one batch.
@@ -1552,7 +1628,7 @@ export class AuditService {
     // uq_audit_logs_guild_occurrence index + ON CONFLICT DO NOTHING flush is
     // the durable backstop for redeliveries that arrive after a flush.
     const key = entry.occurrence_key;
-    if (key !== null && this.queue.some((queued) => queued.occurrence_key === key)) {
+    if (this.queue.some((queued) => queued.occurrence_key === key)) {
       return;
     }
 
@@ -1574,11 +1650,13 @@ export class AuditService {
     const changedKeys = Object.keys(changes as Record<string, unknown>);
     if (changedKeys.length === 0) return null;
 
-    if (this.snapshotLoad) await this.snapshotLoad;
+    if (this.snapshotLoad) {
+      await this.withMappingDeadline(this.snapshotLoad, 'initial guild_config snapshot');
+    }
     if (!this.guildConfigSnapshot) {
       // The boot-time load failed (transient DB error) — retry once now.
       this.snapshotLoad = this.loadGuildConfigSnapshot();
-      await this.snapshotLoad;
+      await this.withMappingDeadline(this.snapshotLoad, 'retry guild_config snapshot');
     }
     const snapshot = this.guildConfigSnapshot;
     if (!snapshot) return null;
@@ -1640,17 +1718,113 @@ export class AuditService {
       .then(() => {
         log.info('Stopped');
       })
-      .catch((err: unknown) => {
-        log.error('Stop failed; audit residue retained for retry', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-        throw err;
+      .catch(async (err: unknown) => {
+        try {
+          const persisted = await this.persistResidueForRestart();
+          log.error('Audit drain failed; residue handed off for restart recovery', {
+            error: err instanceof Error ? err.message : String(err),
+            persistedRows: persisted,
+          });
+        } catch (persistErr) {
+          log.error('Stop failed; audit residue remains only in memory', {
+            error: err instanceof Error ? err.message : String(err),
+            persistenceError:
+              persistErr instanceof Error ? persistErr.message : String(persistErr),
+          });
+          if (!this.recoveryStore) throw err;
+          throw new AggregateError(
+            [err, persistErr],
+            `Audit drain stalled with residue and restart persistence failed`,
+          );
+        }
       })
       .finally(() => {
         if (this.stopInProgress === operation) this.stopInProgress = null;
       });
     this.stopInProgress = operation;
     return operation;
+  }
+
+  private async persistResidueForRestart(): Promise<number> {
+    if (!this.recoveryStore) {
+      throw new Error('No audit restart-residue store is configured');
+    }
+    // Never overwrite an older spool we failed to read. A successful retry
+    // merges those rows into this in-memory handoff before replacing the key.
+    if (this.persistedResidueRestorePending) {
+      await this.restorePersistedResidue();
+    }
+    this.freezeActiveGapWindows();
+
+    if (this.flushOutage) {
+      const outage = this.flushOutage;
+      this.pendingFlushRecoveries.push(Object.freeze({
+        guild_id: this.guildId,
+        actor_type: 'system',
+        actor_id: 'audit-service',
+        action: 'audit.flush_failed',
+        category: 'system',
+        target_type: null,
+        target_id: null,
+        details: Object.freeze({
+          attempts: outage.attempts,
+          firstFailedAt: outage.firstFailedAt,
+          persistedAt: new Date().toISOString(),
+          pendingEntries: this.queue.length,
+        }),
+        before_state: null,
+        after_state: null,
+        correlation_id: null,
+        occurrence_key: `audit.flush_failed:${outage.firstFailedAt}`,
+        success: false,
+        error_message: outage.lastError,
+      }));
+      this.flushOutage = null;
+    }
+
+    const rows = [
+      ...this.queue,
+      ...[...this.pendingGapWindows.values()].map(({ row }) => row),
+      ...this.pendingFlushRecoveries,
+    ];
+    if (rows.length === 0) {
+      await this.maybeDeletePersistedResidue();
+      return 0;
+    }
+    await this.recoveryStore.set(this.recoveryStoreKey, JSON.stringify(rows));
+
+    this.queue = [];
+    this.activeGapWindows.clear();
+    this.pendingGapWindows.clear();
+    this.pendingFlushRecoveries = [];
+    this.persistedResidueKeys.clear();
+    this.persistedResidueCleanupPending = false;
+    return rows.length;
+  }
+
+  /**
+   * A stalled Supabase request must not wedge every later audit flush or
+   * shutdown. Rejecting the mapping records a durable mapping-gap window via
+   * the event handler's catch path; the underlying client request may settle
+   * later, but no entry remains counted as pending after this deadline.
+   */
+  private async withMappingDeadline<T>(operation: Promise<T>, label: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(
+              `${label} exceeded ${AuditService.MAPPING_WAIT_TIMEOUT_MS}ms audit mapping deadline`,
+            ));
+          }, AuditService.MAPPING_WAIT_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /**
@@ -1693,6 +1867,8 @@ export class AuditService {
       || this.pendingGapWindows.size > 0
       || this.flushOutage !== null
       || this.pendingFlushRecoveries.length > 0
+      || this.persistedResidueCleanupPending
+      || this.persistedResidueRestorePending
     );
   }
 
@@ -1731,7 +1907,7 @@ export class AuditService {
       before_state: entry.beforeState ?? null,
       after_state: entry.afterState ?? null,
       correlation_id: entry.correlationId ?? null,
-      occurrence_key: entry.occurrenceKey ?? null,
+      occurrence_key: entry.occurrenceKey ?? `audit.delivery:${randomUUID()}`,
       success: entry.success ?? true,
       error_message: entry.errorMessage ?? null,
     }, { source: 'manual audit log', action: entry.action });
@@ -1743,10 +1919,11 @@ export class AuditService {
    * Exactly-once across redeliveries, retried flushes, and restarts: the
    * batch is written with ON CONFLICT (guild_id, occurrence_key) DO NOTHING
    * against the uq_audit_logs_guild_occurrence unique index, so an
-   * occurrence-keyed entry that already landed (a prior flush that errored
-   * after commit, a redelivered platform event, a restart re-flush) is
-   * silently skipped instead of duplicating the row. Keyless entries keep
-   * plain insert semantics (NULL keys never conflict).
+   * entry that already landed (a prior flush that errored after commit, a
+   * redelivered stable platform occurrence, a restart re-flush) is silently
+   * skipped instead of duplicating the row. Semantically keyless entries use
+   * a fresh immutable delivery key per accepted entry, so distinct events
+   * remain append-only while retries of the same queued row are idempotent.
    */
   private flush(): Promise<boolean> {
     if (this.flushInProgress) return this.flushInProgress;
@@ -1762,9 +1939,18 @@ export class AuditService {
     if (this.pendingEnqueues.size > 0) {
       await Promise.all([...this.pendingEnqueues]);
     }
+    if (this.persistedResidueRestorePending) {
+      try {
+        await this.restorePersistedResidue();
+      } catch (err) {
+        this.recordMappingFailure('persisted.audit.residue', err);
+        return false;
+      }
+    }
     if (this.queue.length === 0) {
       let progressed = await this.flushGapWindows();
       progressed = await this.flushPendingRecoveries() || progressed;
+      progressed = await this.maybeDeletePersistedResidue() || progressed;
       return progressed;
     }
 
@@ -1805,6 +1991,8 @@ export class AuditService {
       }
       return false;
     }
+
+    await this.acknowledgePersistedRows(batch);
 
     // The batch landed. If earlier attempts failed, the ledger is writable
     // again — record the outage window exactly once, keyed on its start so a
@@ -1863,6 +2051,7 @@ export class AuditService {
         }
         if (this.pendingGapWindows.get(kind) === frozen) {
           this.pendingGapWindows.delete(kind);
+          await this.acknowledgePersistedRows([frozen.row]);
           progressed = true;
         }
       } catch (err) {
@@ -1962,8 +2151,38 @@ export class AuditService {
 
       const index = this.pendingFlushRecoveries.indexOf(row);
       if (index >= 0) this.pendingFlushRecoveries.splice(index, 1);
+      await this.acknowledgePersistedRows([row]);
       progressed = true;
     }
     return progressed;
+  }
+
+  private async acknowledgePersistedRows(
+    rows: ReadonlyArray<Readonly<Record<string, unknown>>>,
+  ): Promise<void> {
+    if (this.persistedResidueKeys.size === 0) return;
+    for (const row of rows) {
+      if (typeof row.occurrence_key === 'string') {
+        this.persistedResidueKeys.delete(row.occurrence_key);
+      }
+    }
+    if (this.persistedResidueKeys.size === 0) {
+      this.persistedResidueCleanupPending = true;
+      await this.maybeDeletePersistedResidue();
+    }
+  }
+
+  private async maybeDeletePersistedResidue(): Promise<boolean> {
+    if (!this.persistedResidueCleanupPending || !this.recoveryStore) return false;
+    try {
+      await this.recoveryStore.del(this.recoveryStoreKey);
+      this.persistedResidueCleanupPending = false;
+      return true;
+    } catch (err) {
+      log.warn('Could not clear acknowledged audit shutdown residue:', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
   }
 }

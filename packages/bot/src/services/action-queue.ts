@@ -3694,13 +3694,11 @@ export async function checkLanePendingDepthAlerts(
 export interface ActionQueueHandle {
   staleRecoveryTimer: ReturnType<typeof setInterval>;
   /**
-   * Stop the Realtime subscription loop. Cancels any pending reconnect timer
-   * and prevents further resubscribe attempts. Must be called on guild
-   * teardown so a scheduled reconnect can't fire after the Supabase client is
-   * torn down (which throws an uncaught error from realtime-js when it rejects
-   * `.on()` bindings on a reused/non-closed channel).
+   * Stop admission, cancel timers/subscriptions, and wait for every admitted
+   * sweep or lane task. Must be awaited before AuditService is detached so an
+   * in-flight commerce outward effect cannot outlive its audit consumer.
    */
-  stop: () => void;
+  stop: () => Promise<void>;
 }
 
 export async function startActionQueueListener(
@@ -3738,13 +3736,13 @@ export async function startActionQueueListener(
   //    exactly such a backlog. A burst the sweep drains immediately may
   //    fire one alert that auto-resolves on the next tick.
   const staleRecoveryTimer = setInterval(() => {
-    recoverStaleActions(guild, supabase, scheduler).catch((err) => {
+    trackBackground(recoverStaleActions(guild, supabase, scheduler)).catch((err) => {
       log.error('Stale recovery sweep error:', { error: String(err) });
     });
-    sweepPendingActions(guild, supabase, scheduler).catch((err) => {
+    trackBackground(sweepPendingActions(guild, supabase, scheduler)).catch((err) => {
       log.error('Due-retry sweep error:', { error: String(err) });
     });
-    checkLanePendingDepthAlerts(guild, supabase).catch((err) => {
+    trackBackground(checkLanePendingDepthAlerts(guild, supabase)).catch((err) => {
       log.error('Lane depth alert check error:', { error: String(err) });
     });
   }, STALE_RECOVERY_INTERVAL_MS);
@@ -3760,17 +3758,32 @@ export async function startActionQueueListener(
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let activeChannel: ReturnType<typeof supabase.channel> | undefined;
   let stopped = false;
+  const backgroundWork = new Set<Promise<unknown>>();
 
-  function removeChannel(channel: ReturnType<typeof supabase.channel> | undefined): void {
-    if (!channel) return;
+  function trackBackground<T>(operation: Promise<T>): Promise<T> {
+    backgroundWork.add(operation);
+    void operation.finally(() => {
+      backgroundWork.delete(operation);
+    }).catch(() => {
+      // The original caller/logging path owns the error. This branch only
+      // prevents the bookkeeping promise returned by finally() from becoming
+      // an unhandled rejection.
+    });
+    return operation;
+  }
+
+  function removeChannel(
+    channel: ReturnType<typeof supabase.channel> | undefined,
+  ): Promise<void> {
+    if (!channel) return Promise.resolve();
     if (activeChannel === channel) activeChannel = undefined;
-    void supabase.removeChannel(channel).catch((err) => {
+    return supabase.removeChannel(channel).then(() => undefined).catch((err) => {
       log.warn('Realtime channel cleanup failed', { error: String(err) });
     });
   }
 
   function scheduleReconnect(channel?: ReturnType<typeof supabase.channel>): void {
-    removeChannel(channel);
+    void trackBackground(removeChannel(channel));
     if (stopped || reconnectTimer) return;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = undefined;
@@ -3856,7 +3869,7 @@ export async function startActionQueueListener(
           // live; the atomic claim in processAction makes any overlap with
           // Realtime deliveries safe. This also heals INSERTs missed while
           // a dropped subscription was reconnecting.
-          sweepPendingActions(guild, supabase, scheduler).catch((sweepErr) => {
+          trackBackground(sweepPendingActions(guild, supabase, scheduler)).catch((sweepErr) => {
             log.error('Post-subscribe pending sweep failed:', { error: String(sweepErr) });
           });
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
@@ -3877,12 +3890,21 @@ export async function startActionQueueListener(
   return {
     staleRecoveryTimer,
     stop: () => {
+      if (stopped) return Promise.resolve();
       stopped = true;
+      clearInterval(staleRecoveryTimer);
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = undefined;
       }
-      removeChannel(activeChannel);
+      const removeActiveChannel = removeChannel(activeChannel);
+      return (async () => {
+        await removeActiveChannel;
+        while (backgroundWork.size > 0) {
+          await Promise.allSettled([...backgroundWork]);
+        }
+        await scheduler.drain();
+      })();
     },
   };
 }

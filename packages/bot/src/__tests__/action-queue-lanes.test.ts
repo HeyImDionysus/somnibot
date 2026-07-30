@@ -675,7 +675,7 @@ describe('Realtime lane budgets', () => {
     const insertHandler = supa.__realtime.handlers.INSERT;
     expect(insertHandler).toBeTypeOf('function');
 
-    listener.stop();
+    await listener.stop();
     await insertHandler!({
       new: {
         id: 'post-stop-commerce',
@@ -697,6 +697,47 @@ describe('Realtime lane budgets', () => {
     expect(supa.removeChannel).toHaveBeenCalledTimes(1);
     expect(supa.__claimOrder).toEqual([]);
     expect(mockDeliverReceiptDM).not.toHaveBeenCalled();
+  });
+
+  it('does not complete stop until an admitted Realtime commerce action settles', async () => {
+    const supa = makeLaneSupa([]);
+    const listener = await startActionQueueListener(makeGuild(), supa);
+    const insertHandler = supa.__realtime.handlers.INSERT;
+    const delivery = gate();
+    mockDeliverReceiptDM.mockImplementationOnce(async () => delivery.promise);
+
+    const dispatch = insertHandler!({
+      new: {
+        id: 'in-flight-commerce',
+        guild_id: 'guild-1',
+        action: 'deliver_receipt',
+        lane: 'commerce',
+        status: 'pending',
+        payload: {
+          guild_id: 'guild-1', customer_id: 'customer-1',
+          discord_id: 'user-1', product_id: 'product-1', order_id: 'order-1',
+          order_number: 'ORD-IN-FLIGHT', product_name: 'VIP Pass',
+          amount_cents: 999, currency: 'USD',
+        },
+        created_at: new Date().toISOString(),
+        retry_count: 0,
+      },
+    });
+    await vi.waitFor(() => {
+      expect(mockDeliverReceiptDM).toHaveBeenCalledOnce();
+    });
+
+    let stopped = false;
+    const stopping = listener.stop().then(() => {
+      stopped = true;
+    });
+    await flushMicrotasks();
+    expect(stopped).toBe(false);
+
+    delivery.release();
+    await dispatch;
+    await stopping;
+    expect(stopped).toBe(true);
   });
 
   it('dispatches staged-to-pending UPDATE releases while ignoring staged and future-backoff rows', async () => {

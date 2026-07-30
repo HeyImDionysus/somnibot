@@ -232,6 +232,44 @@ describe('music audit events', () => {
     expect(emitted).not.toContain('music.control_applied');
   });
 
+  it('strips credentials, query tokens, and fragments from queued media audit URIs', async () => {
+    queueSpies.getQueue.mockResolvedValue(null);
+    queueSpies.createQueue.mockReturnValue({
+      guildId: 'g1', entries: [], currentIndex: 0, volume: 50, voiceChannelId: 'vc1',
+    });
+    player.node.rest.resolve.mockResolvedValue({
+      loadType: 'track',
+      data: {
+        encoded: 'enc',
+        info: {
+          title: 'Private Stream',
+          author: 'Artist',
+          length: 1000,
+          uri: 'https://user:password@media.example/private/song.mp3?token=secret#signed',
+          isStream: true,
+        },
+      },
+    });
+
+    await manager.play(
+      'https://user:password@media.example/private/song.mp3?token=secret#signed',
+      'u1',
+      { id: 'vc1' } as never,
+      { id: 'tc1' } as never,
+    );
+
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'music.queued',
+      'g1',
+      expect.objectContaining({
+        uri: 'https://media.example/private/song.mp3',
+      }),
+    );
+    const serializedCalls = JSON.stringify(eventBus.emit.mock.calls);
+    expect(serializedCalls).not.toContain('password');
+    expect(serializedCalls).not.toContain('token=secret');
+  });
+
   it('waits for the populated queue save before one audit, even when playback later fails', async () => {
     let releasePopulatedSave!: () => void;
     const populatedSave = new Promise<void>((resolve) => {

@@ -128,6 +128,7 @@ export class LaneScheduler {
     commerce: [],
     game: [],
   };
+  private drainWaiters: Array<() => void> = [];
 
   constructor(budgets: Readonly<Record<ActionQueueLane, number>> = LANE_CONCURRENCY) {
     this.budgets = budgets;
@@ -156,6 +157,14 @@ export class LaneScheduler {
     }
   }
 
+  /** Resolve only after every running and FIFO-waiting task has settled. */
+  drain(): Promise<void> {
+    if (this.isIdle()) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.drainWaiters.push(resolve);
+    });
+  }
+
   private acquire(lane: ActionQueueLane): Promise<void> {
     if (this.active[lane] < this.budgets[lane]) {
       this.active[lane]++;
@@ -175,6 +184,19 @@ export class LaneScheduler {
       next(); // hand the slot to the next FIFO waiter; active count unchanged
     } else {
       this.active[lane]--;
+      if (this.isIdle()) {
+        const waiters = this.drainWaiters.splice(0);
+        for (const resolve of waiters) resolve();
+      }
     }
+  }
+
+  private isIdle(): boolean {
+    return (
+      this.active.commerce === 0
+      && this.active.game === 0
+      && this.waiters.commerce.length === 0
+      && this.waiters.game.length === 0
+    );
   }
 }

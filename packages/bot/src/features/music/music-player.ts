@@ -459,7 +459,7 @@ export class MusicPlayerManager {
       userId,
       title: addedEntries.length === 1 ? firstAdded.title : (playlistName ?? firstAdded.title),
       author: firstAdded.author,
-      uri: firstAdded.uri ?? null,
+      uri: sanitizeAuditMediaUri(firstAdded.uri),
       trackCount: addedEntries.length,
       playlistName: playlistName ?? null,
       queueLength: queue.entries.length,
@@ -1357,5 +1357,25 @@ export class MusicPlayerManager {
     }
 
     return stats;
+  }
+}
+
+/**
+ * Audit rows are retained far longer than a playback request. Direct stream
+ * URLs can contain basic-auth userinfo, signed query tokens, or fragments, so
+ * retain only non-secret routing identity in the append-only ledger.
+ */
+function sanitizeAuditMediaUri(uri: string | null | undefined): string | null {
+  if (!uri) return null;
+  try {
+    const parsed = new URL(uri);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    parsed.username = '';
+    parsed.password = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return null;
   }
 }

@@ -241,6 +241,42 @@ describe('AuditService', () => {
       });
     });
 
+    it('bounds a never-settling config snapshot and records a durable mapping gap', async () => {
+      vi.useFakeTimers();
+      try {
+        service.start();
+        const never = deferred<void>();
+        const internals = service as unknown as {
+          snapshotLoad: Promise<void>;
+          pendingEnqueues: Set<Promise<void>>;
+          flush: () => Promise<void>;
+        };
+        internals.snapshotLoad = never.promise;
+
+        await eventBus._emit({
+          type: 'config.changed',
+          guildId: 'g1',
+          data: { changedBy: 'u1', changes: { prefix: '!' } },
+        });
+        expect(internals.pendingEnqueues.size).toBe(1);
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        await internals.flush();
+
+        expect(internals.pendingEnqueues.size).toBe(0);
+        const mappingRows = supabase._upsertMock.mock.calls
+          .flatMap(([rows]) => rows as Array<Record<string, any>>)
+          .filter((row) => row.action === 'audit.mapping_failed');
+        expect(mappingRows).toHaveLength(1);
+        expect(mappingRows[0]?.details).toMatchObject({
+          count: 1,
+          eventTypes: ['config.changed'],
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('matches the append-only production grant with DO NOTHING gap writes', () => {
       const migration = readFileSync(
         new URL(
@@ -518,6 +554,59 @@ describe('AuditService', () => {
       await Promise.resolve(service.stop());
     });
 
+    it('hands failed shutdown residue to Valkey and replays it idempotently after restart', async () => {
+      const stored = new Map<string, string>();
+      const recoveryStore = {
+        get: vi.fn(async (key: string) => stored.get(key) ?? null),
+        set: vi.fn(async (key: string, value: string) => {
+          stored.set(key, value);
+          return 'OK';
+        }),
+        del: vi.fn(async (key: string) => stored.delete(key) ? 1 : 0),
+      };
+      const failedSupabase = makeSupabase();
+      failedSupabase._upsertMock.mockResolvedValue({
+        error: { message: 'audit store remains unavailable' },
+      });
+      const first = new AuditService(
+        'g1',
+        failedSupabase as any,
+        makeEventBus() as any,
+        recoveryStore,
+      );
+      await first.log({
+        action: 'must.cross.restart',
+        actorType: 'bot',
+        actorId: 'bot1',
+      });
+
+      await expect(first.stop()).resolves.toBeUndefined();
+      expect(recoveryStore.set).toHaveBeenCalledOnce();
+      const persisted = JSON.parse(stored.values().next().value as string);
+      const persistedRow = persisted.find(
+        (row: Record<string, unknown>) => row.action === 'must.cross.restart',
+      );
+      expect(persistedRow.occurrence_key).toMatch(/^audit\.delivery:/);
+
+      const recoveredSupabase = makeSupabase();
+      const restarted = new AuditService(
+        'g1',
+        recoveredSupabase as any,
+        makeEventBus() as any,
+        recoveryStore,
+      );
+      restarted.start();
+      await (restarted as unknown as { flush: () => Promise<void> }).flush();
+
+      const replayed = recoveredSupabase._upsertMock.mock.calls
+        .flatMap(([rows]) => rows as Array<Record<string, unknown>>)
+        .find((row) => row.action === 'must.cross.restart');
+      expect(replayed?.occurrence_key).toBe(persistedRow.occurrence_key);
+      expect(recoveryStore.del).toHaveBeenCalledOnce();
+      expect(stored.size).toBe(0);
+      await restarted.stop();
+    });
+
     it('rejects instead of falsely completing when persistent write failure leaves residue', async () => {
       supabase._upsertMock.mockResolvedValue({
         error: { message: 'audit store remains unavailable' },
@@ -727,6 +816,28 @@ describe('AuditService', () => {
       expect(supabase._upsertMock).toHaveBeenCalled();
       supabase._upsertMock.mockResolvedValue({ error: null });
       await service.stop();
+    });
+
+    it('retries a keyless row with the same immutable delivery key after an ambiguous failure', async () => {
+      supabase._upsertMock
+        .mockResolvedValueOnce({ error: { message: 'response lost after possible commit' } })
+        .mockResolvedValue({ error: null });
+      await service.log({
+        action: 'keyless.retry',
+        actorType: 'bot',
+        actorId: 'bot1',
+      });
+      const internals = service as unknown as { flush: () => Promise<void> };
+
+      await internals.flush();
+      await internals.flush();
+
+      const writes = supabase._upsertMock.mock.calls
+        .map(([rows]) => rows as Array<Record<string, unknown>>)
+        .filter((rows) => rows.some((row) => row.action === 'keyless.retry'));
+      expect(writes).toHaveLength(2);
+      expect(writes[0]).toEqual(writes[1]);
+      expect(writes[0]?.[0]?.occurrence_key).toMatch(/^audit\.delivery:/);
     });
 
     it('batches multiple entries in one flush', async () => {
