@@ -26,6 +26,10 @@ const SNOWFLAKE_BASE = 900_000_000_000_000_000n
   + BigInt(Date.now() % 1_000_000) * 10_000n;
 
 type DbError = { code?: string; message?: string; details?: string };
+type OrderFixture = {
+  id: string;
+  grant_snapshot_frozen_at: string | null;
+};
 
 function expectWallConflict(error: DbError | null | undefined): void {
   expect(error?.code).toBe('P0001');
@@ -49,6 +53,73 @@ function nextName(prefix: string): string {
 function nextSnowflake(): string {
   sequence += 1;
   return (SNOWFLAKE_BASE + BigInt(sequence)).toString();
+}
+
+/**
+ * Seed an order as the database owner for adversarial and legacy-state tests.
+ *
+ * Production/API callers must use sanctioned commerce RPCs. These tests need
+ * states those RPCs intentionally cannot create so they can exercise the
+ * database's replay, migration, and corruption defenses.
+ */
+async function seedOrderAsDatabaseOwner(row: {
+  orderNumber: string;
+  customerId: string;
+  guildId: string;
+  productId: string;
+  planId?: string | null;
+  paypalOrderId?: string | null;
+  paypalSubscriptionId?: string | null;
+  amountCents: number;
+  currency: string;
+  status: string;
+}): Promise<OrderFixture> {
+  const [order] = await sqlA<OrderFixture[]>`
+    INSERT INTO public.orders (
+      order_number,
+      customer_id,
+      guild_id,
+      product_id,
+      plan_id,
+      paypal_order_id,
+      paypal_subscription_id,
+      amount_cents,
+      currency,
+      source,
+      status
+    ) VALUES (
+      ${row.orderNumber},
+      ${row.customerId},
+      ${row.guildId},
+      ${row.productId},
+      ${row.planId ?? null},
+      ${row.paypalOrderId ?? null},
+      ${row.paypalSubscriptionId ?? null},
+      ${row.amountCents},
+      ${row.currency},
+      'purchase',
+      ${row.status}
+    )
+    RETURNING id, grant_snapshot_frozen_at
+  `;
+  if (!order?.id) throw new Error('database-owner order fixture returned no id');
+  return order;
+}
+
+async function updateOrderAsDatabaseOwner(
+  orderId: string,
+  patch: Record<string, unknown>,
+): Promise<DbError | null> {
+  try {
+    await sqlA`
+      UPDATE public.orders
+         SET ${sqlA(patch)}
+       WHERE id = ${orderId}
+    `;
+    return null;
+  } catch (error) {
+    return error as DbError;
+  }
 }
 
 function productRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -194,34 +265,27 @@ async function createPaidRefundFixture(options: {
   expect(customerError).toBeNull();
 
   const paypalOrderId = nextName('refund-paypal-order');
-  const { data: order, error: orderError } = await supa
-    .from('orders')
-    .insert({
-      order_number: nextName('refund-order'),
-      customer_id: customer!.id,
-      guild_id: GUILD_A,
-      product_id: productId,
-      paypal_order_id: paypalOrderId,
-      amount_cents: 1_000,
-      currency: 'USD',
-      source: 'purchase',
-      status: 'pending',
-    })
-    .select('id')
-    .single();
+  const { data: order, error: orderError } = await supa.rpc(
+    'commerce_create_active_paid_checkout',
+    {
+      p_order_number: nextName('refund-order'),
+      p_guild_id: GUILD_A,
+      p_customer_id: customer!.id,
+      p_product_id: productId,
+      p_plan_id: null,
+      p_provider_kind: 'capture',
+      p_provider_id: paypalOrderId,
+      p_approval_url: `https://paypal.test/approve/${paypalOrderId}`,
+      p_amount_cents: 1_000,
+      p_currency: 'USD',
+    },
+  );
   expect(orderError).toBeNull();
-
-  const freeze = await supa.rpc('commerce_freeze_order_grant_snapshot', {
-    p_order_id: order!.id,
-    p_guild_id: GUILD_A,
-    p_customer_id: customer!.id,
-    p_product_id: productId,
-  });
-  expect(freeze.error).toBeNull();
+  const orderId = (order as OrderFixture).id;
 
   const captureId = nextName('refund-capture');
   const capture = await supa.rpc('commerce_finalize_paypal_capture', {
-    p_order_id: order!.id,
+    p_order_id: orderId,
     p_guild_id: GUILD_A,
     p_customer_id: customer!.id,
     p_product_id: productId,
@@ -241,7 +305,7 @@ async function createPaidRefundFixture(options: {
   if (priorRefundCents > 0) {
     const priorRefund = await supa.rpc('commerce_record_paypal_refund_event', {
       p_payment_id: payment!.id,
-      p_order_id: order!.id,
+      p_order_id: orderId,
       p_guild_id: GUILD_A,
       p_customer_id: customer!.id,
       p_paypal_payment_id: captureId,
@@ -262,7 +326,7 @@ async function createPaidRefundFixture(options: {
     const { data: licenseKey, error: licenseKeyError } = await supa
       .from('license_keys')
       .insert({
-        order_id: order!.id,
+        order_id: orderId,
         customer_id: customer!.id,
         product_id: productId,
         guild_id: GUILD_A,
@@ -284,7 +348,7 @@ async function createPaidRefundFixture(options: {
         guild_id: GUILD_A,
         product_id: productId,
         license_key_id: licenseKeyId,
-        order_id: order!.id,
+        order_id: orderId,
         type: 'one_time',
         status: 'active',
         source: 'purchase',
@@ -313,7 +377,7 @@ async function createPaidRefundFixture(options: {
     productId,
     customerId: customer!.id as string,
     discordId,
-    orderId: order!.id as string,
+    orderId,
     paymentId: payment!.id as string,
     paypalOrderId,
     captureId,
@@ -344,40 +408,34 @@ async function createSaleRefundFixture(options: {
     .single();
   expect(customerError).toBeNull();
   const subscriptionId = nextName('sale-refund-subscription');
-  const { data: order, error: orderError } = await supa
-    .from('orders')
-    .insert({
-      order_number: nextName('sale-refund-order'),
-      customer_id: customer!.id,
-      guild_id: GUILD_A,
-      product_id: productId,
-      plan_id: planId,
-      paypal_subscription_id: subscriptionId,
-      amount_cents: 500,
-      currency: 'USD',
-      source: 'purchase',
-      status: 'pending',
-    })
-    .select('id')
-    .single();
+  const { data: order, error: orderError } = await supa.rpc(
+    'commerce_create_active_paid_checkout',
+    {
+      p_order_number: nextName('sale-refund-order'),
+      p_guild_id: GUILD_A,
+      p_customer_id: customer!.id,
+      p_product_id: productId,
+      p_plan_id: planId,
+      p_provider_kind: 'subscription',
+      p_provider_id: subscriptionId,
+      p_approval_url: `https://paypal.test/approve/${subscriptionId}`,
+      p_amount_cents: 500,
+      p_currency: 'USD',
+    },
+  );
   expect(orderError).toBeNull();
-  const freeze = await supa.rpc('commerce_freeze_order_grant_snapshot', {
-    p_order_id: order!.id,
-    p_guild_id: GUILD_A,
-    p_customer_id: customer!.id,
-    p_product_id: productId,
+  const orderId = (order as OrderFixture).id;
+  // Refund-focused fixtures do not build the paid-fulfillment claim that the
+  // production subscription completion RPC requires.
+  const completed = await updateOrderAsDatabaseOwner(orderId, {
+    status: 'completed',
   });
-  expect(freeze.error).toBeNull();
-  const completed = await supa
-    .from('orders')
-    .update({ status: 'completed' })
-    .eq('id', order!.id);
-  expect(completed.error).toBeNull();
+  expect(completed).toBeNull();
   const saleId = nextName('sale-refund-payment');
   const { data: payment, error: paymentError } = await supa
     .from('payments')
     .insert({
-      order_id: order!.id,
+      order_id: orderId,
       customer_id: customer!.id,
       guild_id: GUILD_A,
       paypal_payment_id: saleId,
@@ -398,7 +456,7 @@ async function createSaleRefundFixture(options: {
     const { data: licenseKey, error: licenseKeyError } = await supa
       .from('license_keys')
       .insert({
-        order_id: order!.id,
+        order_id: orderId,
         customer_id: customer!.id,
         product_id: productId,
         guild_id: GUILD_A,
@@ -420,7 +478,7 @@ async function createSaleRefundFixture(options: {
         product_id: productId,
         plan_id: planId,
         license_key_id: licenseKeyId,
-        order_id: order!.id,
+        order_id: orderId,
         type: 'subscription',
         status: 'active',
         source: 'purchase',
@@ -448,7 +506,7 @@ async function createSaleRefundFixture(options: {
     productId,
     planId,
     customerId: customer!.id as string,
-    orderId: order!.id as string,
+    orderId,
     paymentId: payment!.id as string,
     subscriptionId,
     saleId,
@@ -553,11 +611,12 @@ async function cleanFixtures(): Promise<void> {
     .in('guild_id', TEST_GUILDS);
   expect(paymentDelete.error).toBeNull();
 
-  const orderDelete = await supa
-    .from('orders')
-    .delete()
-    .in('guild_id', TEST_GUILDS);
-  expect(orderDelete.error).toBeNull();
+  // Paid-order lifecycle guards intentionally prevent service_role cleanup.
+  // The database-owner connection removes only this run's isolated fixtures.
+  await sqlA`
+    DELETE FROM public.orders
+     WHERE guild_id = ${GUILD_A} OR guild_id = ${GUILD_B}
+  `;
 
   const incomeDelete = await supa
     .from('economy_role_income')
@@ -1009,25 +1068,19 @@ describe('commerce income wall database invariant', () => {
     expect(customerError).toBeNull();
 
     const paypalOrderId = nextName('paypal-order');
-    const { data: order, error: orderError } = await supa
-      .from('orders')
-      .insert({
-        order_number: nextName('snapshot-order'),
-        customer_id: customer!.id,
-        guild_id: GUILD_A,
-        product_id: productId,
-        paypal_order_id: paypalOrderId,
-        amount_cents: 1_000,
-        currency: 'USD',
-        source: 'purchase',
-        status: 'pending',
-      })
-      .select('id')
-      .single();
-    expect(orderError).toBeNull();
+    const order = await seedOrderAsDatabaseOwner({
+      orderNumber: nextName('snapshot-order'),
+      customerId: customer!.id,
+      guildId: GUILD_A,
+      productId,
+      paypalOrderId,
+      amountCents: 1_000,
+      currency: 'USD',
+      status: 'pending',
+    });
 
     const freezeArgs = {
-      p_order_id: order!.id,
+      p_order_id: order.id,
       p_guild_id: GUILD_A,
       p_customer_id: customer!.id,
       p_product_id: productId,
@@ -1115,19 +1168,31 @@ describe('commerce income wall database invariant', () => {
     ];
 
     for (const [field, patch] of protectedMutations) {
-      const forbiddenRewrite = await supa.from('orders').update(patch).eq('id', order!.id);
-      if (forbiddenRewrite.error?.code !== '23514') {
+      let rejected: DbError | null = null;
+      try {
+        await sqlA`
+          UPDATE public.orders
+             SET ${sqlA(patch)}
+           WHERE id = ${order.id}
+        `;
+      } catch (error) {
+        rejected = error as DbError;
+      }
+      if (rejected?.code !== '23514') {
         throw new Error(
-          `expected frozen order field ${field} to reject with 23514, got ${forbiddenRewrite.error?.code ?? 'success'}: ${forbiddenRewrite.error?.message ?? ''}`,
+          `expected frozen order field ${field} to reject with 23514, got ${rejected?.code ?? 'success'}: ${rejected?.message ?? ''}`,
         );
       }
     }
 
-    const frozenOneTimeReprice = await supa
-      .from('orders')
-      .update({ amount_cents: 1_100, currency: 'EUR' })
-      .eq('id', order!.id);
-    expect(frozenOneTimeReprice.error?.code).toBe('23514');
+    await expect(
+      sqlA`
+        UPDATE public.orders
+           SET amount_cents = 1100,
+               currency = 'EUR'
+         WHERE id = ${order.id}
+      `,
+    ).rejects.toMatchObject({ code: '23514' });
 
     const captureId = nextName('capture');
     const finalizeArgs = {
@@ -1371,11 +1436,11 @@ describe('commerce income wall database invariant', () => {
       grant_status: 'applied',
     });
 
-    const liveEntitlementBlocksTerminalOrder = await supa
-      .from('orders')
-      .update({ status: 'refunded' })
-      .eq('id', order!.id);
-    expect(liveEntitlementBlocksTerminalOrder.error?.code).toBe('23503');
+    const liveEntitlementBlocksTerminalOrder = await updateOrderAsDatabaseOwner(
+      String(order!.id),
+      { status: 'refunded' },
+    );
+    expect(liveEntitlementBlocksTerminalOrder?.code).toBe('23503');
 
     const expirePurchaseEntitlement = await supa
       .from('entitlements')
@@ -1387,11 +1452,10 @@ describe('commerce income wall database invariant', () => {
     // order status: the deferred capture FK rejects an order-only rewrite, so
     // the terminal flip must move the payment and order together, exactly as
     // the production refund pipeline does in one transaction.
-    const terminalOrderOnly = await supa
-      .from('orders')
-      .update({ status: 'refunded' })
-      .eq('id', order!.id);
-    expect(terminalOrderOnly.error?.code).toBe('23503');
+    const terminalOrderOnly = await updateOrderAsDatabaseOwner(String(order!.id), {
+      status: 'refunded',
+    });
+    expect(terminalOrderOnly?.code).toBe('23503');
     await setCaptureSuccessorPair(String(order!.id), captureId, 'refunded', 'refunded');
     const terminalOrderOwner = await supa.rpc('commerce_find_live_temp_role_owner', {
       p_guild_id: GUILD_A,
@@ -1824,22 +1888,16 @@ describe('commerce income wall database invariant', () => {
       .single();
     expect(customerError).toBeNull();
 
-    const { data: order, error: orderError } = await supa
-      .from('orders')
-      .insert({
-        order_number: nextName('first-freeze-order'),
-        customer_id: customer!.id,
-        guild_id: GUILD_A,
-        product_id: productId,
-        paypal_order_id: nextName('first-freeze-paypal-order'),
-        amount_cents: 1_000,
-        currency: 'USD',
-        source: 'purchase',
-        status: 'pending',
-      })
-      .select('id')
-      .single();
-    expect(orderError).toBeNull();
+    const order = await seedOrderAsDatabaseOwner({
+      orderNumber: nextName('first-freeze-order'),
+      customerId: customer!.id,
+      guildId: GUILD_A,
+      productId,
+      paypalOrderId: nextName('first-freeze-paypal-order'),
+      amountCents: 1_000,
+      currency: 'USD',
+      status: 'pending',
+    });
 
     const canonicalFreeze = {
       granted_role_ids_snapshot: [permanentRoleId],
@@ -1875,12 +1933,15 @@ describe('commerce income wall database invariant', () => {
     ];
 
     for (const [kind, patch] of firstFreezeForgeries) {
-      const rejected = await supa.from('orders').update(patch).eq('id', order!.id);
-      if (rejected.error?.code !== '23514') {
+      const rejected = await supa.from('orders').update(patch).eq('id', order.id);
+      if (rejected.error?.code !== '42501') {
         throw new Error(
-          `expected ${kind} first-freeze forgery to reject with 23514, got ${rejected.error?.code ?? 'success'}`,
+          `expected ${kind} first-freeze forgery to reject with 42501, got ${rejected.error?.code ?? 'success'}`,
         );
       }
+      expect(rejected.error.message).toContain(
+        'API callers must mutate paid orders through a sanctioned commerce RPC',
+      );
     }
 
     const { data: unchangedOrder, error: unchangedOrderError } = await supa
@@ -1895,33 +1956,24 @@ describe('commerce income wall database invariant', () => {
     });
 
     const crossGuildProductId = await createProduct({ guild_id: GUILD_B });
-    const { data: crossGuildOrder, error: crossGuildOrderError } = await supa
-      .from('orders')
-      .insert({
-        order_number: nextName('cross-guild-first-freeze-order'),
-        customer_id: customer!.id,
-        guild_id: GUILD_A,
-        product_id: crossGuildProductId,
-        paypal_order_id: nextName('cross-guild-first-freeze-paypal-order'),
-        amount_cents: 1_000,
-        currency: 'USD',
-        source: 'purchase',
-        status: 'pending',
-      })
-      .select('id')
-      .single();
-    expect(crossGuildOrderError).toBeNull();
+    const crossGuildOrder = await seedOrderAsDatabaseOwner({
+      orderNumber: nextName('cross-guild-first-freeze-order'),
+      customerId: customer!.id,
+      guildId: GUILD_A,
+      productId: crossGuildProductId,
+      paypalOrderId: nextName('cross-guild-first-freeze-paypal-order'),
+      amountCents: 1_000,
+      currency: 'USD',
+      status: 'pending',
+    });
 
-    const crossGuildFreeze = await supa
-      .from('orders')
-      .update({
-        granted_role_ids_snapshot: [],
-        granted_channel_ids_snapshot: [],
-        temporary_role_grants_snapshot: [],
-        grant_snapshot_frozen_at: new Date().toISOString(),
-      })
-      .eq('id', crossGuildOrder!.id);
-    expect(crossGuildFreeze.error?.code).toBe('23514');
+    const crossGuildFreeze = await updateOrderAsDatabaseOwner(crossGuildOrder.id, {
+      granted_role_ids_snapshot: [],
+      granted_channel_ids_snapshot: [],
+      temporary_role_grants_snapshot: [],
+      grant_snapshot_frozen_at: new Date().toISOString(),
+    });
+    expect(crossGuildFreeze?.code).toBe('23514');
   });
 
   it('finalizes and replays a frozen capture after product catalog movement', async () => {
@@ -1947,22 +1999,16 @@ describe('commerce income wall database invariant', () => {
     expect(customerError).toBeNull();
 
     const paypalOrderId = nextName('moved-product-paypal-order');
-    const { data: order, error: orderError } = await supa
-      .from('orders')
-      .insert({
-        order_number: nextName('moved-product-order'),
-        customer_id: customer!.id,
-        guild_id: GUILD_A,
-        product_id: productId,
-        paypal_order_id: paypalOrderId,
-        amount_cents: 1_000,
-        currency: 'USD',
-        source: 'purchase',
-        status: 'pending',
-      })
-      .select('id')
-      .single();
-    expect(orderError).toBeNull();
+    const order = await seedOrderAsDatabaseOwner({
+      orderNumber: nextName('moved-product-order'),
+      customerId: customer!.id,
+      guildId: GUILD_A,
+      productId,
+      paypalOrderId,
+      amountCents: 1_000,
+      currency: 'USD',
+      status: 'pending',
+    });
 
     const frozen = await supa.rpc('commerce_freeze_order_grant_snapshot', {
       p_order_id: order!.id,
@@ -2124,23 +2170,17 @@ describe('commerce income wall database invariant', () => {
 
     const paypalOrderId = nextName('legacy-paypal-order');
     const captureId = nextName('legacy-capture');
-    const { data: order, error: orderError } = await supa
-      .from('orders')
-      .insert({
-        order_number: nextName('legacy-order'),
-        customer_id: customer!.id,
-        guild_id: GUILD_A,
-        product_id: productId,
-        paypal_order_id: paypalOrderId,
-        amount_cents: 1_000,
-        currency: 'usd',
-        source: 'purchase',
-        status: 'completed',
-      })
-      .select('id,grant_snapshot_frozen_at')
-      .single();
-    expect(orderError).toBeNull();
-    expect(order?.grant_snapshot_frozen_at).toBeNull();
+    const order = await seedOrderAsDatabaseOwner({
+      orderNumber: nextName('legacy-order'),
+      customerId: customer!.id,
+      guildId: GUILD_A,
+      productId,
+      paypalOrderId,
+      amountCents: 1_000,
+      currency: 'usd',
+      status: 'completed',
+    });
+    expect(order.grant_snapshot_frozen_at).toBeNull();
 
     const { data: payment, error: paymentError } = await supa
       .from('payments')
@@ -2219,21 +2259,19 @@ describe('commerce income wall database invariant', () => {
       .eq('id', payment!.id);
     expect(restorePaymentCurrency.error).toBeNull();
 
-    const malformedOrderCurrency = await supa
-      .from('orders')
-      .update({ currency: 'usd ' })
-      .eq('id', order!.id);
-    expect(malformedOrderCurrency.error).toBeNull();
+    const malformedOrderCurrency = await updateOrderAsDatabaseOwner(order.id, {
+      currency: 'usd ',
+    });
+    expect(malformedOrderCurrency).toBeNull();
     const malformedOrderReplay = await supa.rpc(
       'commerce_finalize_paypal_capture',
       finalizeArgs,
     );
     expect(malformedOrderReplay.error?.message).toContain('successor state mismatch');
-    const restoreOrderCurrency = await supa
-      .from('orders')
-      .update({ currency: 'usd' })
-      .eq('id', order!.id);
-    expect(restoreOrderCurrency.error).toBeNull();
+    const restoreOrderCurrency = await updateOrderAsDatabaseOwner(order.id, {
+      currency: 'usd',
+    });
+    expect(restoreOrderCurrency).toBeNull();
 
     const forgedCaptureId = nextName('forged-legacy-capture');
     const unknownCapture = await supa.rpc('commerce_finalize_paypal_capture', {
@@ -2274,22 +2312,16 @@ describe('commerce income wall database invariant', () => {
     expect(customerError).toBeNull();
 
     const paypalOrderId = nextName('pending-review-paypal-order');
-    const { data: order, error: orderError } = await supa
-      .from('orders')
-      .insert({
-        order_number: nextName('pending-review-order'),
-        customer_id: customer!.id,
-        guild_id: GUILD_A,
-        product_id: productId,
-        paypal_order_id: paypalOrderId,
-        amount_cents: 1_000,
-        currency: 'USD',
-        source: 'purchase',
-        status: 'pending',
-      })
-      .select('id')
-      .single();
-    expect(orderError).toBeNull();
+    const order = await seedOrderAsDatabaseOwner({
+      orderNumber: nextName('pending-review-order'),
+      customerId: customer!.id,
+      guildId: GUILD_A,
+      productId,
+      paypalOrderId,
+      amountCents: 1_000,
+      currency: 'USD',
+      status: 'pending',
+    });
 
     const captureId = nextName('pending-review-capture');
     const finalizeArgs = {
@@ -2339,25 +2371,24 @@ describe('commerce income wall database invariant', () => {
       payment_created: false,
     });
 
-    const pendingReviewContractRewrite = await supa
-      .from('orders')
-      .update({ paypal_order_id: nextName('rewritten-pending-review-order') })
-      .eq('id', order!.id);
-    expect(pendingReviewContractRewrite.error?.code).toBe('23514');
+    const pendingReviewContractRewrite = await updateOrderAsDatabaseOwner(order.id, {
+      paypal_order_id: nextName('rewritten-pending-review-order'),
+    });
+    expect(pendingReviewContractRewrite?.code).toBe('23514');
 
-    const unsupportedOrderResolution = await supa
-      .from('orders')
-      .update({ status: 'completed', updated_at: new Date().toISOString() })
-      .eq('id', order!.id);
-    expect(unsupportedOrderResolution.error).toBeNull();
+    const unsupportedOrderResolution = await updateOrderAsDatabaseOwner(order.id, {
+      status: 'completed',
+      updated_at: new Date().toISOString(),
+    });
+    expect(unsupportedOrderResolution).toBeNull();
     const resolvedOrderReplay = await supa.rpc('commerce_finalize_paypal_capture', finalizeArgs);
     expect(resolvedOrderReplay.error?.message).toContain('successor state mismatch');
 
-    const restorePendingReviewOrder = await supa
-      .from('orders')
-      .update({ status: 'pending_review', updated_at: new Date().toISOString() })
-      .eq('id', order!.id);
-    expect(restorePendingReviewOrder.error).toBeNull();
+    const restorePendingReviewOrder = await updateOrderAsDatabaseOwner(order.id, {
+      status: 'pending_review',
+      updated_at: new Date().toISOString(),
+    });
+    expect(restorePendingReviewOrder).toBeNull();
     // A payment-only manual completion is structurally impossible: the
     // deferred capture FK requires the parent order to be 'completed' in the
     // same transaction. Assert the guard, then install the nearest reachable
@@ -2422,23 +2453,17 @@ describe('commerce income wall database invariant', () => {
       .single();
     expect(customerError).toBeNull();
 
-    const { data: order, error: orderError } = await supa
-      .from('orders')
-      .insert({
-        order_number: nextName('subscription-snapshot-order'),
-        customer_id: customer!.id,
-        guild_id: GUILD_A,
-        product_id: productId,
-        plan_id: nonSelectedPlanId,
-        paypal_subscription_id: '   ',
-        amount_cents: 700,
-        currency: 'EUR',
-        source: 'purchase',
-        status: 'pending',
-      })
-      .select('id')
-      .single();
-    expect(orderError).toBeNull();
+    const order = await seedOrderAsDatabaseOwner({
+      orderNumber: nextName('subscription-snapshot-order'),
+      customerId: customer!.id,
+      guildId: GUILD_A,
+      productId,
+      planId: nonSelectedPlanId,
+      paypalSubscriptionId: '   ',
+      amountCents: 700,
+      currency: 'EUR',
+      status: 'pending',
+    });
 
     const freezeArgs = {
       p_order_id: order!.id,
@@ -2452,23 +2477,19 @@ describe('commerce income wall database invariant', () => {
     );
     expect(blankProviderIdentity.error).not.toBeNull();
 
-    const nonSelectedContract = await supa
-      .from('orders')
-      .update({ paypal_subscription_id: nextName('paypal-subscription') })
-      .eq('id', order!.id);
-    expect(nonSelectedContract.error).toBeNull();
+    const nonSelectedContract = await updateOrderAsDatabaseOwner(order.id, {
+      paypal_subscription_id: nextName('paypal-subscription'),
+    });
+    expect(nonSelectedContract).toBeNull();
     const wrongPlanFreeze = await supa.rpc('commerce_freeze_order_grant_snapshot', freezeArgs);
     expect(wrongPlanFreeze.error).not.toBeNull();
 
-    const selectCurrentContract = await supa
-      .from('orders')
-      .update({
-        plan_id: selectedPlanId,
-        amount_cents: 0,
-        currency: 'USD',
-      })
-      .eq('id', order!.id);
-    expect(selectCurrentContract.error).toBeNull();
+    const selectCurrentContract = await updateOrderAsDatabaseOwner(order.id, {
+      plan_id: selectedPlanId,
+      amount_cents: 0,
+      currency: 'USD',
+    });
+    expect(selectCurrentContract).toBeNull();
     const frozen = await supa.rpc('commerce_freeze_order_grant_snapshot', freezeArgs);
     expect(frozen.error).toBeNull();
     expect(frozen.data).toMatchObject({
@@ -2477,11 +2498,11 @@ describe('commerce income wall database invariant', () => {
       temporary_role_grants_snapshot: [],
     });
 
-    const providerReprice = await supa
-      .from('orders')
-      .update({ amount_cents: 650, currency: 'CAD' })
-      .eq('id', order!.id);
-    expect(providerReprice.error).toBeNull();
+    const providerReprice = await updateOrderAsDatabaseOwner(order.id, {
+      amount_cents: 650,
+      currency: 'CAD',
+    });
+    expect(providerReprice).toBeNull();
 
     const { data: repricedOrder, error: repricedOrderError } = await supa
       .from('orders')
@@ -2495,28 +2516,28 @@ describe('commerce income wall database invariant', () => {
       currency: 'CAD',
     });
 
-    const malformedProviderReprice = await supa
-      .from('orders')
-      .update({ amount_cents: -1, currency: 'usd' })
-      .eq('id', order!.id);
-    expect(malformedProviderReprice.error?.code).toBe('23514');
+    const malformedProviderReprice = await updateOrderAsDatabaseOwner(order.id, {
+      amount_cents: -1,
+      currency: 'usd',
+    });
+    expect(malformedProviderReprice?.code).toBe('23514');
 
-    const identityChangeWithReprice = await supa
-      .from('orders')
-      .update({ customer_id: randomUUID(), amount_cents: 675 })
-      .eq('id', order!.id);
-    expect(identityChangeWithReprice.error?.code).toBe('23514');
+    const identityChangeWithReprice = await updateOrderAsDatabaseOwner(order.id, {
+      customer_id: randomUUID(),
+      amount_cents: 675,
+    });
+    expect(identityChangeWithReprice?.code).toBe('23514');
 
-    const completeSubscription = await supa
-      .from('orders')
-      .update({ status: 'completed', updated_at: new Date().toISOString() })
-      .eq('id', order!.id);
-    expect(completeSubscription.error).toBeNull();
-    const completedSubscriptionReprice = await supa
-      .from('orders')
-      .update({ amount_cents: 700, currency: 'EUR' })
-      .eq('id', order!.id);
-    expect(completedSubscriptionReprice.error?.code).toBe('23514');
+    const completeSubscription = await updateOrderAsDatabaseOwner(order.id, {
+      status: 'completed',
+      updated_at: new Date().toISOString(),
+    });
+    expect(completeSubscription).toBeNull();
+    const completedSubscriptionReprice = await updateOrderAsDatabaseOwner(order.id, {
+      amount_cents: 700,
+      currency: 'EUR',
+    });
+    expect(completedSubscriptionReprice?.code).toBe('23514');
 
     // Replay is an immutable-order read, not a second authorization against
     // mutable plan/product configuration.
@@ -2620,28 +2641,17 @@ describe('commerce income wall database invariant', () => {
 
     const orderNumber = nextName('legacy-contract-order');
     const subscriptionId = nextName('legacy-contract-subscription');
-    const { data: order, error: orderError } = await supa
-      .from('orders')
-      .insert({
-        order_number: orderNumber,
-        customer_id: customer!.id,
-        guild_id: GUILD_A,
-        product_id: product!.id,
-        plan_id: plan!.id,
-        paypal_subscription_id: subscriptionId,
-        amount_cents: 500,
-        currency: 'USD',
-        source: 'purchase',
-        status: 'pending',
-      })
-      .select('id')
-      .single();
-    expect(orderError).toBeNull();
-    const completed = await supa
-      .from('orders')
-      .update({ status: 'completed' })
-      .eq('id', order!.id);
-    expect(completed.error).toBeNull();
+    const order = await seedOrderAsDatabaseOwner({
+      orderNumber,
+      customerId: customer!.id,
+      guildId: GUILD_A,
+      productId: product!.id,
+      planId: plan!.id,
+      paypalSubscriptionId: subscriptionId,
+      amountCents: 500,
+      currency: 'USD',
+      status: 'completed',
+    });
 
     const payload = {
       fulfillment_type: 'subscription_activated',
@@ -2748,11 +2758,10 @@ describe('commerce income wall database invariant', () => {
     expect(tamperedReplay.error).toBeNull();
     expect(tamperedReplay.data).toEqual(adopted.data);
 
-    const changedOrder = await supa
-      .from('orders')
-      .update({ amount_cents: 501 })
-      .eq('id', order!.id);
-    expect(changedOrder.error).toBeNull();
+    const changedOrder = await updateOrderAsDatabaseOwner(order.id, {
+      amount_cents: 501,
+    });
+    expect(changedOrder).toBeNull();
     const changedQueue = await supa
       .from('bot_action_queue')
       .update({ payload: { ...payload, amount_cents: 501 } })
@@ -2779,8 +2788,7 @@ describe('commerce income wall database invariant', () => {
 
     // Order/member retention remains authoritative and can cascade the
     // compatibility row without an immutability trigger or queue foreign key.
-    const orderDelete = await supa.from('orders').delete().eq('id', order!.id);
-    expect(orderDelete.error).toBeNull();
+    await sqlA`DELETE FROM public.orders WHERE id = ${order.id}`;
     const { data: purgedContract, error: purgedContractError } = await supa
       .from('commerce_legacy_subscription_grant_contracts')
       .select('order_id')
@@ -2804,22 +2812,16 @@ describe('commerce income wall database invariant', () => {
       .single();
     expect(customerError).toBeNull();
     const paypalOrderId = nextName('overflow-paypal-order');
-    const { data: order, error: orderError } = await supa
-      .from('orders')
-      .insert({
-        order_number: nextName('overflow-order'),
-        customer_id: customer!.id,
-        guild_id: GUILD_A,
-        product_id: productId,
-        paypal_order_id: paypalOrderId,
-        amount_cents: 1,
-        currency: 'USD',
-        source: 'purchase',
-        status: 'pending',
-      })
-      .select('id')
-      .single();
-    expect(orderError).toBeNull();
+    const order = await seedOrderAsDatabaseOwner({
+      orderNumber: nextName('overflow-order'),
+      customerId: customer!.id,
+      guildId: GUILD_A,
+      productId,
+      paypalOrderId,
+      amountCents: 1,
+      currency: 'USD',
+      status: 'pending',
+    });
     const freeze = await supa.rpc('commerce_freeze_order_grant_snapshot', {
       p_order_id: order!.id,
       p_guild_id: GUILD_A,
@@ -3780,11 +3782,10 @@ describe('commerce income wall database invariant', () => {
 
   it('atomically converges external refund status and structurally prevents a second settled capture', async () => {
     const fixture = await createPaidRefundFixture();
-    const directOrderOnly = await supa
-      .from('orders')
-      .update({ status: 'refunded' })
-      .eq('id', fixture.orderId);
-    expect(directOrderOnly.error?.code).toBe('23503');
+    const directOrderOnly = await updateOrderAsDatabaseOwner(fixture.orderId, {
+      status: 'refunded',
+    });
+    expect(directOrderOnly?.code).toBe('23503');
 
     const partialRefundId = nextName('external-partial-refund');
     const partialRefund = await supa.rpc('commerce_record_paypal_refund_event', {
@@ -5627,41 +5628,34 @@ describe('commerce income wall database invariant', () => {
         guild_id: GUILD_A,
         discord_id: nextSnowflake(),
         discord_username: nextName('subscription-refund-customer'),
-      })
-      .select('id')
-      .single();
+    })
+    .select('id')
+    .single();
     expect(customerError).toBeNull();
-    const { data: subscriptionOrder, error: orderError } = await supa
-      .from('orders')
-      .insert({
-        order_number: nextName('subscription-refund-order'),
-        customer_id: customer!.id,
-        guild_id: GUILD_A,
-        product_id: productId,
-        plan_id: planId,
-        paypal_subscription_id: nextName('subscription-provider-id'),
-        amount_cents: 500,
-        currency: 'USD',
-        source: 'purchase',
-        status: 'pending',
-      })
-      .select('id')
-      .single();
-    expect(orderError).toBeNull();
+    const subscriptionOrder = await seedOrderAsDatabaseOwner({
+      orderNumber: nextName('subscription-refund-order'),
+      customerId: customer!.id,
+      guildId: GUILD_A,
+      productId,
+      planId,
+      paypalSubscriptionId: nextName('subscription-provider-id'),
+      amountCents: 500,
+      currency: 'USD',
+      status: 'pending',
+    });
     const freeze = await supa.rpc('commerce_freeze_order_grant_snapshot', {
-      p_order_id: subscriptionOrder!.id,
+      p_order_id: subscriptionOrder.id,
       p_guild_id: GUILD_A,
       p_customer_id: customer!.id,
       p_product_id: productId,
     });
     expect(freeze.error).toBeNull();
-    const completeSubscription = await supa
-      .from('orders')
-      .update({ status: 'completed' })
-      .eq('id', subscriptionOrder!.id);
-    expect(completeSubscription.error).toBeNull();
+    const completeSubscription = await updateOrderAsDatabaseOwner(subscriptionOrder.id, {
+      status: 'completed',
+    });
+    expect(completeSubscription).toBeNull();
     const sale = await supa.from('payments').insert({
-      order_id: subscriptionOrder!.id,
+      order_id: subscriptionOrder.id,
       customer_id: customer!.id,
       guild_id: GUILD_A,
       paypal_payment_id: nextName('subscription-sale'),
@@ -5673,7 +5667,7 @@ describe('commerce income wall database invariant', () => {
     });
     expect(sale.error).toBeNull();
     const subscriptionRefund = await supa.rpc('commerce_prepare_admin_refund', {
-      p_order_id: subscriptionOrder!.id,
+      p_order_id: subscriptionOrder.id,
       p_guild_id: GUILD_A,
       p_actor_id: nextSnowflake(),
       p_reason: 'unsafe installment refund',
