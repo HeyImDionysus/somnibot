@@ -809,6 +809,46 @@ describe('AuditService', () => {
       await raced.stop();
     });
 
+    it('canonicalizes optional undefined details before save-side spool validation', async () => {
+      const stored = new Map<string, string>();
+      const recoveryStore = {
+        get: vi.fn(async (key: string) => stored.get(key) ?? null),
+        set: vi.fn(async (key: string, value: string) => {
+          stored.set(key, value);
+          return 'OK';
+        }),
+        del: vi.fn(async () => 1),
+      };
+      const failedSupabase = makeSupabase();
+      failedSupabase._upsertMock.mockResolvedValue({
+        error: { message: 'audit store remains unavailable' },
+      });
+      const first = new AuditService(
+        'g1',
+        failedSupabase as any,
+        makeEventBus() as any,
+        recoveryStore,
+      );
+      await first.log({
+        action: 'optional.details',
+        actorType: 'bot',
+        actorId: 'bot1',
+        details: { kept: 'yes', omitted: undefined },
+      });
+      await first.stop();
+
+      const envelope = JSON.parse(stored.values().next().value as string);
+      const original = envelope.rows.find(
+        (row: Record<string, unknown>) => row.action === 'optional.details',
+      );
+      expect(original).toMatchObject({ details: { kept: 'yes' } });
+      expect(original.details).not.toHaveProperty('omitted');
+      const capacity = envelope.rows.find(
+        (row: Record<string, unknown>) => row.action === 'audit.capacity_exhausted',
+      );
+      expect(capacity).toBeUndefined();
+    });
+
     it('rejects instead of falsely completing when persistent write failure leaves residue', async () => {
       supabase._upsertMock.mockResolvedValue({
         error: { message: 'audit store remains unavailable' },

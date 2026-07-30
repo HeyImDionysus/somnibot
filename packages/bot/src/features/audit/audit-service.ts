@@ -1942,8 +1942,14 @@ export class AuditService {
 
     for (const candidate of rows) {
       let row: Record<string, unknown>;
+      let serializedRow: string;
       try {
-        row = this.validateRecoveryRow(candidate);
+        // Match PostgREST/Valkey JSON semantics before validation: optional
+        // detail fields with value undefined are omitted, Date values become
+        // strings, and genuinely non-JSON values fail into bounded gap
+        // evidence instead of poisoning the spool.
+        serializedRow = JSON.stringify(candidate);
+        row = this.validateRecoveryRow(JSON.parse(serializedRow));
       } catch {
         dropped++;
         invalid++;
@@ -1955,7 +1961,7 @@ export class AuditService {
         duplicate++;
         continue;
       }
-      const rowBytes = Buffer.byteLength(JSON.stringify(row), 'utf8') + 1;
+      const rowBytes = Buffer.byteLength(serializedRow, 'utf8') + 1;
       if (
         selected.length >= rowLimit
         || rowBytes > rowByteBudget
