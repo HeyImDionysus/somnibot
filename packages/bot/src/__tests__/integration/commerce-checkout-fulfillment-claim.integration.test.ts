@@ -1728,7 +1728,7 @@ describe('checkout migration and atomic fulfillment winner', () => {
     expect(row).toEqual({ state: 'uncertain', alert_count: 1 });
   }, 45_000);
 
-  it('tombstones cancellation event and DM when a newer accepted generation becomes head', async () => {
+  it('completes cancellation and suspension tombstones after a newer generation becomes head', async () => {
     const fixture = await createFixture('subscription');
     const [identity] = await sqlObserver<{
       plan_id: string;
@@ -1949,6 +1949,121 @@ describe('checkout migration and atomic fulfillment winner', () => {
       ) AS disposition
     `;
     expect(actionDisposition.disposition).toBe('complete');
+
+    const suspendedEventId = nextValue('WH-SUSPENDED');
+    await sqlObserver`
+      INSERT INTO public.commerce_subscription_lifecycle_events (
+        webhook_event_id, paypal_subscription_id, provider_event_type,
+        provider_occurred_at, provider_paid_through_at, order_id, guild_id,
+        customer_id, product_id, plan_id, disposition, event_priority, generation
+      ) VALUES (
+        ${suspendedEventId},
+        ${fixture.providerA},
+        'BILLING.SUBSCRIPTION.SUSPENDED',
+        (${occurredAt}::TIMESTAMPTZ - INTERVAL '1 hour'),
+        NULL,
+        ${fixture.orderA}::UUID,
+        ${GUILD_ID},
+        ${fixture.customerId}::UUID,
+        ${fixture.productId}::UUID,
+        ${identity.plan_id}::UUID,
+        'accepted',
+        40,
+        1
+      )
+    `;
+    const [suspensionAction] = await sqlObserver<{
+      id: string;
+      outward_generation_id: string;
+      claim_token: string;
+    }[]>`
+      INSERT INTO public.bot_action_queue (
+        guild_id, action, lane, status, claim_token,
+        outward_generation_id, payload
+      ) VALUES (
+        ${GUILD_ID},
+        'fulfill_suspension',
+        'commerce',
+        'processing',
+        pg_catalog.gen_random_uuid(),
+        pg_catalog.gen_random_uuid(),
+        pg_catalog.jsonb_build_object(
+          'fulfillment_type', 'subscription_suspended',
+          'guild_id', ${GUILD_ID}::TEXT,
+          'customer_id', ${fixture.customerId}::TEXT,
+          'discord_id', ${identity.discord_id}::TEXT,
+          'product_id', ${fixture.productId}::TEXT,
+          'order_id', ${fixture.orderA}::TEXT,
+          'plan_id', ${identity.plan_id}::TEXT,
+          'paypal_subscription_id', ${fixture.providerA}::TEXT,
+          'webhook_event_id', ${suspendedEventId}::TEXT,
+          'provider_event_type', 'BILLING.SUBSCRIPTION.SUSPENDED',
+          'provider_occurred_at',
+            (${occurredAt}::TIMESTAMPTZ - INTERVAL '1 hour')::TEXT,
+          'provider_paid_through_at', NULL::TEXT,
+          'lifecycle_generation', 1
+        )
+      )
+      RETURNING id, outward_generation_id, claim_token
+    `;
+
+    for (const intentKind of [
+      'subscription_suspended_event',
+      'subscription_suspended_dm',
+    ]) {
+      const [begun] = await sqlObserver<{
+        result: Record<string, unknown>;
+      }[]>`
+        SELECT public.commerce_begin_fulfillment_outward_intent(
+          ${fixture.orderA}::UUID,
+          ${GUILD_ID},
+          ${intentKind},
+          ${suspensionAction.outward_generation_id}::UUID,
+          ${suspensionAction.id}::UUID,
+          ${suspensionAction.claim_token}::UUID
+        ) AS result
+      `;
+      expect(begun.result).toMatchObject({
+        order_id: fixture.orderA,
+        guild_id: GUILD_ID,
+        intent_kind: intentKind,
+        outward_generation_id: suspensionAction.outward_generation_id,
+        disposition: 'superseded',
+        state: 'superseded',
+        attempt_token: null,
+        alert_id: null,
+      });
+    }
+
+    const suspensionTombstones = await sqlObserver<{
+      intent_kind: string;
+      state: string;
+    }[]>`
+      SELECT intent_kind, state
+      FROM public.commerce_fulfillment_outward_intents
+      WHERE order_id = ${fixture.orderA}::UUID
+        AND outward_generation_id =
+          ${suspensionAction.outward_generation_id}::UUID
+        AND intent_kind IN (
+          'subscription_suspended_event',
+          'subscription_suspended_dm'
+        )
+      ORDER BY intent_kind
+    `;
+    expect(suspensionTombstones).toEqual([
+      { intent_kind: 'subscription_suspended_dm', state: 'superseded' },
+      { intent_kind: 'subscription_suspended_event', state: 'superseded' },
+    ]);
+
+    const [suspensionDisposition] = await sqlObserver<{
+      disposition: string;
+    }[]>`
+      SELECT public.commerce_classify_action_outward_state(
+        ${suspensionAction.id}::UUID,
+        ${suspensionAction.claim_token}::UUID
+      ) AS disposition
+    `;
+    expect(suspensionDisposition.disposition).toBe('complete');
   }, 45_000);
 
   it('resumes only an existing outward intent and never creates a legacy replay marker', async () => {

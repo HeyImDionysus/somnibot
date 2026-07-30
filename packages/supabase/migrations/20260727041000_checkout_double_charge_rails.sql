@@ -8690,6 +8690,14 @@ BEGIN
               'subscription_payment_failed_dm'
             )
           )
+          OR (
+            v_action.action = 'fulfill_suspension'
+            AND v_action.payload ->> 'fulfillment_type' = 'subscription_suspended'
+            AND outward.intent_kind IN (
+              'subscription_suspended_event',
+              'subscription_suspended_dm'
+            )
+          )
        )
   ) THEN
     RETURN 'operator_held';

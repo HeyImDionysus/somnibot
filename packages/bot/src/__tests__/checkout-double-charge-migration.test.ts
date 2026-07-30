@@ -255,6 +255,9 @@ describe('checkout double-charge migration safety contracts', () => {
     expect(actionClassifier).toMatch(
       /v_action\.action = 'fulfill_cancellation'[\s\S]+outward\.intent_kind IN\s*\(\s*'subscription_cancelled_event'\s*,\s*'subscription_cancelled_dm'\s*\)/i,
     );
+    expect(actionClassifier).toMatch(
+      /v_action\.action = 'fulfill_suspension'[\s\S]+fulfillment_type' = 'subscription_suspended'[\s\S]+outward\.intent_kind IN\s*\(\s*'subscription_suspended_event'\s*,\s*'subscription_suspended_dm'\s*\)/i,
+    );
   });
 
   it('defers provider cancellation fulfillment until the paid-through boundary', () => {
