@@ -37,10 +37,14 @@ const RESULT = {
 /** Supabase stub whose insert→select→single resolves to the given claim outcome. */
 function makeSupa(insertOutcome: { data: unknown; error: unknown }) {
   const update = vi.fn(() => ({ eq: vi.fn(() => Promise.resolve({ error: null })) }));
+  const removeEq = vi.fn(() => Promise.resolve({ error: null }));
+  const remove = vi.fn(() => ({ eq: removeEq }));
   const insert = vi.fn(() => ({ select: vi.fn(() => ({ single: vi.fn(() => Promise.resolve(insertOutcome)) })) }));
   return {
     _update: update,
-    from: vi.fn(() => ({ insert, update })),
+    _remove: remove,
+    _removeEq: removeEq,
+    from: vi.fn(() => ({ insert, update, delete: remove })),
     rpc: vi.fn().mockResolvedValue({ error: null }),
   } as any;
 }
@@ -69,5 +73,13 @@ describe('ExecutionLogger occurrence claim', () => {
     const logger = new ExecutionLogger(supa);
     await logger.finalize('row-1', RESULT);
     expect(supa._update).toHaveBeenCalled();
+  });
+
+  it('releases a proven-unused occurrence claim by row id', async () => {
+    const supa = makeSupa({ data: { id: 'row-1' }, error: null });
+    const logger = new ExecutionLogger(supa);
+    await logger.release('row-1');
+    expect(supa._remove).toHaveBeenCalledTimes(1);
+    expect(supa._removeEq).toHaveBeenCalledWith('id', 'row-1');
   });
 });

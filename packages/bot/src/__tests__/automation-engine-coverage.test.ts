@@ -65,11 +65,13 @@ const mockLogExecution = vi.fn().mockResolvedValue(undefined);
 // finalizes it with the result (replacing the old single log() insert).
 const mockClaim = vi.fn().mockResolvedValue({ claimed: true, rowId: 'exec-1' });
 const mockFinalize = vi.fn().mockResolvedValue(undefined);
+const mockRelease = vi.fn().mockResolvedValue(undefined);
 vi.mock('../features/automations/execution-logger.js', () => ({
   ExecutionLogger: class {
     log = mockLogExecution;
     claim = mockClaim;
     finalize = mockFinalize;
+    release = mockRelease;
   },
 }));
 
@@ -176,6 +178,7 @@ describe('AutomationEngine', () => {
     mockLogExecution.mockResolvedValue(undefined);
     mockClaim.mockResolvedValue({ claimed: true, rowId: 'exec-1' });
     mockFinalize.mockResolvedValue(undefined);
+    mockRelease.mockResolvedValue(undefined);
     mockMassThreshold.mockResolvedValue(25);
     mockMassHoldCreate.mockResolvedValue({
       created: true,
@@ -277,6 +280,30 @@ describe('AutomationEngine', () => {
       expect(mockMassHoldNotice).toHaveBeenCalledTimes(1);
       expect(mockExecuteActions).not.toHaveBeenCalled();
       expect(mockFinalize).not.toHaveBeenCalled();
+    });
+
+    it('releases the occurrence claim when the mass-action threshold read fails', async () => {
+      mockGetForTrigger.mockReturnValue([
+        makeAutomation({
+          actions: [{ type: 'give_role', config: { role_id: 'role1' } }],
+        }),
+      ]);
+      mockMassThreshold.mockRejectedValueOnce(new Error('guild_config unavailable'));
+      await engine.start();
+      eventBus.fire({
+        type: 'giveaway.ended',
+        guildId: 'g1',
+        data: {
+          title: 'Bulk winners',
+          winnerIds: ['10000000000000000', '10000000000000001'],
+        },
+      });
+
+      await vi.waitFor(() => {
+        expect(mockRelease).toHaveBeenCalledWith('exec-1');
+      });
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+      expect(mockMassHoldCreate).not.toHaveBeenCalled();
     });
 
     it('atomically released hold fans member actions out once and finalizes the original claim', async () => {

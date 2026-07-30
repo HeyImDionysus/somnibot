@@ -209,6 +209,7 @@ export class StatsChannelManager {
   }
 
   private async raiseUpdateFailedAlert(config: StatsChannelConfig, error: unknown): Promise<void> {
+    if (this.degradedChannels.has(config.id)) return;
     this.degradedChannels.add(config.id);
     const message = error instanceof Error ? error.message : String(error);
     this.eventBus.emit('stats_channel.update_failed', this.guild.id, {

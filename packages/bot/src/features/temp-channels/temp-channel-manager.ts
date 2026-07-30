@@ -179,7 +179,7 @@ export class TempChannelManager {
             .select('*')
             .eq('creation_occurrence_id', occurrenceId)
             .maybeSingle();
-          if (existing?.channel_id) {
+          if (existing?.channel_id && existing.owner_id === member.id) {
             const existingChannel = this.guild.channels.cache.get(existing.channel_id);
             if (existingChannel) {
               this.activeChannels.set(existing.channel_id, existing as ActiveTempChannel);
@@ -527,7 +527,7 @@ export class TempChannelManager {
     if (!active) return;
 
     const oldOwnerId = active.owner_id;
-    active.owner_id = newOwnerId;
+    const oldOccurrenceId = active.creation_occurrence_id ?? null;
 
     // Update permissions
     const vc = this.guild.channels.cache.get(channelId) as VoiceChannel | undefined;
@@ -547,10 +547,30 @@ export class TempChannelManager {
       }
     }
 
-    await this.supabase
+    // Creation occurrences are normally already completed by this point, so
+    // the claimed-only release helper is intentionally not used here. Once the
+    // room changes owner, the old member+hub occurrence must no longer fence a
+    // future room for the former owner.
+    if (oldOccurrenceId) {
+      const { error: occurrenceError } = await this.supabase
+        .from('discord_operation_occurrences')
+        .delete()
+        .eq('id', oldOccurrenceId);
+      if (occurrenceError) {
+        throw new Error(`Failed to retire temp-channel creation occurrence: ${occurrenceError.message}`);
+      }
+    }
+
+    const { error: transferError } = await this.supabase
       .from('active_temp_channels')
-      .update({ owner_id: newOwnerId })
+      .update({ owner_id: newOwnerId, creation_occurrence_id: null })
       .eq('channel_id', channelId);
+    if (transferError) {
+      throw new Error(`Failed to persist temp-channel ownership transfer: ${transferError.message}`);
+    }
+
+    active.owner_id = newOwnerId;
+    active.creation_occurrence_id = null;
 
     this.eventBus.emit('temp_channel.claimed', this.guild.id, {
       channelId,

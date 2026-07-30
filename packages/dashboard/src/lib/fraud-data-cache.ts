@@ -7,6 +7,13 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>();
 const inflight = new Map<string, Promise<unknown>>();
+const generations = new Map<string, number>();
+
+function advanceGeneration(url: string): number {
+  const next = (generations.get(url) ?? 0) + 1;
+  generations.set(url, next);
+  return next;
+}
 
 /**
  * Short-lived client read cache with in-flight deduplication. Fraud-page tab
@@ -18,6 +25,7 @@ export async function fetchFraudJson<T>(
   options: { forceFresh?: boolean; fetchImpl?: typeof fetch } = {},
 ): Promise<T> {
   const now = Date.now();
+  if (options.forceFresh) advanceGeneration(url);
   if (!options.forceFresh) {
     const hit = cache.get(url);
     if (hit && hit.expiresAt > now) return hit.value as T;
@@ -26,6 +34,7 @@ export async function fetchFraudJson<T>(
   }
 
   const fetchImpl = options.fetchImpl ?? fetch;
+  const requestGeneration = generations.get(url) ?? 0;
   const request = fetchImpl(url, { cache: 'no-store' })
     .then(async (response) => {
       const body = await response.json();
@@ -34,7 +43,9 @@ export async function fetchFraudJson<T>(
           typeof body?.error === 'string' ? body.error : `Fraud data request failed (${response.status})`,
         );
       }
-      cache.set(url, { value: body, expiresAt: Date.now() + CACHE_TTL_MS });
+      if ((generations.get(url) ?? 0) === requestGeneration) {
+        cache.set(url, { value: body, expiresAt: Date.now() + CACHE_TTL_MS });
+      }
       return body as T;
     })
     .finally(() => {
@@ -47,11 +58,23 @@ export async function fetchFraudJson<T>(
 
 export function invalidateFraudCache(prefix?: string): void {
   if (!prefix) {
+    for (const key of new Set([...cache.keys(), ...inflight.keys()])) {
+      advanceGeneration(key);
+    }
     cache.clear();
     inflight.clear();
     return;
   }
   for (const key of cache.keys()) {
-    if (key.startsWith(prefix)) cache.delete(key);
+    if (key.startsWith(prefix)) {
+      advanceGeneration(key);
+      cache.delete(key);
+    }
+  }
+  for (const key of inflight.keys()) {
+    if (key.startsWith(prefix)) {
+      if (!cache.has(key)) advanceGeneration(key);
+      inflight.delete(key);
+    }
   }
 }

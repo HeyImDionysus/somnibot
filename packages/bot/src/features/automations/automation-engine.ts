@@ -339,9 +339,17 @@ export class AutomationEngine {
     const affectedMemberIds = hasMemberTargetedAction
       ? [...new Set(ctx.affectedMemberIds)]
       : [];
-    const massActionThreshold = affectedMemberIds.length > 1
-      ? await this.massActionHolds.threshold()
-      : null;
+    let massActionThreshold: number | null = null;
+    if (affectedMemberIds.length > 1) {
+      try {
+        massActionThreshold = await this.massActionHolds.threshold();
+      } catch (error) {
+        // No action or hold exists yet, so the durable claim is safe to release
+        // and a stable gateway occurrence can retry after the read recovers.
+        await this.executionLogger.release(claimRowId);
+        throw error;
+      }
+    }
 
     if (
       massActionThreshold !== null

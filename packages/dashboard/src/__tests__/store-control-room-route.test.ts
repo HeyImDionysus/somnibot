@@ -17,6 +17,10 @@ function query(result: Result) {
   for (const method of ['select', 'eq', 'in', 'order', 'limit']) {
     chain[method] = vi.fn(() => chain);
   }
+  chain.range = vi.fn((from: number, to: number) => Promise.resolve({
+    ...result,
+    data: Array.isArray(result.data) ? result.data.slice(from, to + 1) : result.data,
+  }));
   chain.then = (
     resolve: (value: Result) => unknown,
     reject?: (reason: unknown) => unknown,
@@ -179,5 +183,29 @@ describe('GET /api/store/control-room', () => {
     const response = await GET(buildRequest('/api/store/control-room') as never);
     expect(response.status).toBe(500);
     expect((await response.json()).success).toBe(false);
+  });
+
+  it('paginates download evidence instead of treating rows beyond 1,000 as missing', async () => {
+    const deliveries = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `delivery-${String(index).padStart(4, '0')}`,
+      order_id: 'another-order',
+      customer_id: CUSTOMER,
+      product_id: PRODUCT,
+      delivered_at: '2026-07-28T12:02:00.000Z',
+    }));
+    deliveries.push({
+      id: 'delivery-1000',
+      order_id: ORDER,
+      customer_id: CUSTOMER,
+      product_id: PRODUCT,
+      delivered_at: '2026-07-28T12:03:00.000Z',
+    });
+    setup({ commerce_download_deliveries: { data: deliveries, error: null } });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+    expect(body.data.customers[0].stages.downloaded).toBe('complete');
+    expect(body.data.customers[0].reasons).not.toContain(
+      'No completed download was recorded within 24 hours.',
+    );
   });
 });

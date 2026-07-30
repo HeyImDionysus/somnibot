@@ -140,5 +140,47 @@ describe('TempChannelManager', () => {
     const manager = new TempChannelManager(makeGuild() as any, makeSupa() as any);
     expect(manager).toBeDefined();
   });
+
+  it('clears and releases the original creation fence when ownership transfers', async () => {
+    const updates: unknown[] = [];
+    const tables: string[] = [];
+    const equalityCalls: Array<[string, unknown]> = [];
+    const supabase = {
+      from: vi.fn((table: string) => {
+        tables.push(table);
+        const result = makeChain({ data: null, error: null });
+        result.eq = vi.fn((column: string, value: unknown) => {
+          equalityCalls.push([column, value]);
+          return result;
+        });
+        result.update = vi.fn((payload: unknown) => {
+          updates.push(payload);
+          return result;
+        });
+        return result;
+      }),
+    };
+    const manager = new TempChannelManager(makeGuild() as any, supabase as any);
+    (manager as any).activeChannels.set('room-1', {
+      channel_id: 'room-1',
+      text_channel_id: null,
+      guild_id: 'guild-1',
+      hub_id: 'hub-1',
+      owner_id: 'old-owner',
+      creation_occurrence_id: 'occurrence-1',
+    });
+
+    await manager.transferOwnership('room-1', 'new-owner');
+
+    expect(updates).toContainEqual({
+      owner_id: 'new-owner',
+      creation_occurrence_id: null,
+    });
+    expect(tables).toContain('discord_operation_occurrences');
+    expect(equalityCalls).toContainEqual(['id', 'occurrence-1']);
+    expect(equalityCalls).not.toContainEqual(['status', 'claimed']);
+    expect(manager.getChannelOwner('room-1')).toBe('new-owner');
+    expect((manager as any).activeChannels.get('room-1').creation_occurrence_id).toBeNull();
+  });
   
 });

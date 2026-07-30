@@ -57,4 +57,39 @@ describe('fraud page read cache', () => {
     await expect(fetchFraudJson('/api/fraud/signals?', { fetchImpl })).resolves.toEqual({ success: true });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
+
+  it('does not let an invalidated in-flight response repopulate stale data', async () => {
+    let resolveOld!: (response: Response) => void;
+    const oldResponse = new Promise<Response>((resolve) => { resolveOld = resolve; });
+    const fetchImpl = vi.fn()
+      .mockImplementationOnce(() => oldResponse)
+      .mockResolvedValueOnce(okJson({ version: 2 })) as unknown as typeof fetch;
+
+    const stale = fetchFraudJson<{ version: number }>('/api/fraud/rules', { fetchImpl });
+    invalidateFraudCache('/api/fraud/rules');
+    await expect(fetchFraudJson('/api/fraud/rules', { fetchImpl })).resolves.toEqual({ version: 2 });
+
+    resolveOld(okJson({ version: 1 }));
+    await expect(stale).resolves.toEqual({ version: 1 });
+    await expect(fetchFraudJson('/api/fraud/rules', { fetchImpl })).resolves.toEqual({ version: 2 });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('prevents an older request from overwriting a forced refresh', async () => {
+    let resolveOld!: (response: Response) => void;
+    const oldResponse = new Promise<Response>((resolve) => { resolveOld = resolve; });
+    const fetchImpl = vi.fn()
+      .mockImplementationOnce(() => oldResponse)
+      .mockResolvedValueOnce(okJson({ version: 2 })) as unknown as typeof fetch;
+
+    const stale = fetchFraudJson<{ version: number }>('/api/fraud/rules', { fetchImpl });
+    await expect(fetchFraudJson('/api/fraud/rules', {
+      fetchImpl,
+      forceFresh: true,
+    })).resolves.toEqual({ version: 2 });
+
+    resolveOld(okJson({ version: 1 }));
+    await expect(stale).resolves.toEqual({ version: 1 });
+    await expect(fetchFraudJson('/api/fraud/rules', { fetchImpl })).resolves.toEqual({ version: 2 });
+  });
 });

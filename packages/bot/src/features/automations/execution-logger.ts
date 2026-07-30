@@ -97,6 +97,21 @@ export class ExecutionLogger {
     await this.bumpCount(result);
   }
 
+  /**
+   * Release a claim when processing failed before any action or durable hold
+   * was created. A redelivery can then safely retry the same occurrence.
+   */
+  async release(rowId: string | null): Promise<void> {
+    if (!rowId) return;
+    const { error } = await this.supabase
+      .from('automation_executions')
+      .delete()
+      .eq('id', rowId);
+    if (error) {
+      throw new Error(`Failed to release automation execution claim: ${error.message}`);
+    }
+  }
+
   async log(result: ExecutionResult): Promise<void> {
     const { error } = await this.supabase.from('automation_executions').insert({
       automation_id: result.automationId,

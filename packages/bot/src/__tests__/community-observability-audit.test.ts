@@ -270,6 +270,32 @@ describe('community-statistics-channels audit', () => {
     );
     expect(supa.from).toHaveBeenCalledWith('alerts');
   });
+
+  it('emits a persistent stats failure only on the degraded transition', async () => {
+    const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
+    const eventBus = bus();
+    const cfg = {
+      id: 'sc-fail', guild_id: 'g1', channel_id: 'vc1', stat_type: 'custom_counter',
+      stat_config: { value: 42 }, name_format: 'Members: {value}', active: true, last_value: null,
+    };
+    const supa = makeSupa({ stats_channels: { data: [cfg], error: null } });
+    const channel = { setName: vi.fn(async () => { throw new Error('Missing Permissions'); }) };
+    const guild: any = {
+      id: 'g1', memberCount: 5, premiumSubscriptionCount: 0,
+      channels: { cache: new Map([['vc1', channel]]) },
+      roles: { cache: new Map() },
+      members: { fetch: vi.fn(async () => {}), cache: { filter: () => ({ size: 0 }) } },
+    };
+    const mgr = new StatsChannelManager(guild, supa, 10, eventBus);
+
+    await mgr.reload();
+    await mgr.reload();
+
+    const failures = eventBus.emit.mock.calls.filter(
+      (call: unknown[]) => call[0] === 'stats_channel.update_failed',
+    );
+    expect(failures).toHaveLength(1);
+  });
 });
 
 // ── community-temporary-channels ────────────────────────────

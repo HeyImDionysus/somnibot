@@ -17,6 +17,7 @@ import { colorToHex, SOMNI_PALETTE } from '@somnibot/shared/constants/brand';
 import { useToast } from '@/components/shared/toast';
 import { useUnsavedWarning } from '@/hooks/use-unsaved-warning';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
+import { fetchOptionalJsonArray } from '@/lib/optional-json';
 import {
   DiscordEmbedPreview,
   type DiscordEmbedPreviewField,
@@ -86,14 +87,8 @@ export default function BrandingPage() {
 
   const fetchConfig = useCallback(async () => {
     try {
-      const [brandingRes, embedsRes] = await Promise.all([
-        fetch('/api/branding'),
-        fetch('/api/embeds'),
-      ]);
-      const [brandingJson, embedsJson] = await Promise.all([
-        brandingRes.json(),
-        embedsRes.json(),
-      ]);
+      const brandingRes = await fetch('/api/branding');
+      const brandingJson = await brandingRes.json();
       if (brandingRes.ok && brandingJson.success) {
         setConfig({ ...DEFAULT_CONFIG, ...brandingJson.data });
       } else {
@@ -102,16 +97,13 @@ export default function BrandingPage() {
         toast({ title: message, variant: 'error' });
         return;
       }
-      if (embedsRes.ok && embedsJson.success) {
-        const embeds = Array.isArray(embedsJson.data) ? embedsJson.data as SavedEmbed[] : [];
-        setSavedEmbeds(embeds);
-        setSelectedEmbedId((current) => current || embeds[0]?.id || '');
-      } else {
-        // Saved embeds are optional preview material. Branding remains safely
-        // editable when that independent request is unavailable.
-        setSavedEmbeds([]);
-        setSelectedEmbedId('');
-      }
+
+      // Saved embeds are optional preview material. Fetch and parse them only
+      // after the authoritative branding config has been applied so a proxy or
+      // malformed optional response can never leave an editable defaults form.
+      const embeds = await fetchOptionalJsonArray<SavedEmbed>('/api/embeds');
+      setSavedEmbeds(embeds);
+      setSelectedEmbedId((current) => current || embeds[0]?.id || '');
     } catch {
       setError('Failed to load branding');
     } finally {
