@@ -22,7 +22,7 @@ const MIGRATION_DIR = new URL('../../../../supabase/migrations/', import.meta.ur
 const LICENSE_MIGRATION = migrationBody(
   new URL('20260727040000_license_delivery_requires_config.sql', MIGRATION_DIR),
 );
-const CLAIM_MIGRATION = migrationBody(
+const CLAIM_MIGRATION = checkoutClaimMigrationBody(
   new URL('20260727041000_checkout_double_charge_rails.sql', MIGRATION_DIR),
 );
 const BASE_SCHEMA = `
@@ -76,6 +76,15 @@ const BASE_SCHEMA = `
     currency TEXT NOT NULL,
     active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
+  );
+
+  CREATE TABLE public.promotions (
+    id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+    guild_id TEXT NOT NULL REFERENCES public.guild(id),
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,
+    value NUMERIC NOT NULL,
+    active BOOLEAN NOT NULL DEFAULT true
   );
 
   CREATE TABLE public.orders (
@@ -162,6 +171,30 @@ const BASE_SCHEMA = `
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
   );
 
+  -- The checkout-claim slice predates role-delivery generation wrapping but
+  -- adds the nullable generation column for forward schema compatibility.
+  CREATE TABLE public.commerce_role_delivery_intents (
+    id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid()
+  );
+
+  CREATE FUNCTION public.commerce_create_noncommerce_entitlement(
+    UUID, TEXT, UUID, UUID, TEXT, TEXT, UUID, TIMESTAMPTZ, TEXT[], TEXT[]
+  )
+  RETURNS TABLE (entitlement_id UUID, order_id UUID, request_id UUID)
+  LANGUAGE sql
+  AS $stub$
+    SELECT NULL::UUID, NULL::UUID, NULL::UUID WHERE false
+  $stub$;
+
+  CREATE FUNCTION public.license_rotate_key(
+    UUID, TEXT, TEXT, TEXT, TEXT
+  )
+  RETURNS JSONB
+  LANGUAGE sql
+  AS $stub$
+    SELECT pg_catalog.jsonb_build_object('status', 'not_found')
+  $stub$;
+
   CREATE TABLE public.alerts (
     id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
     guild_id TEXT NOT NULL,
@@ -189,6 +222,7 @@ type CheckoutBlocker = {
   reason: 'provider_checkout' | 'paid_hold' | 'paid_fulfillment' | 'active_entitlement' | null;
   order_id: string | null;
   order_number: string | null;
+  approval_url: string | null;
 };
 type Fixture = {
   customerId: string;
@@ -215,6 +249,47 @@ function migrationBody(url: URL): string {
   return readFileSync(url, 'utf8')
     .replace(/^\uFEFF?\s*BEGIN;\s*/i, '')
     .replace(/\s*COMMIT;\s*$/i, '');
+}
+
+function checkoutClaimMigrationBody(url: URL): string {
+  const migration = readFileSync(url, 'utf8');
+  const generationBoundary = migration.indexOf(
+    '-- Generation-aware outward protocol.',
+  );
+  const currentClaimStart = migration.indexOf(
+    'CREATE OR REPLACE FUNCTION public.commerce_claim_paid_fulfillment(',
+    generationBoundary,
+  );
+  const currentClaimEnd = migration.indexOf(
+    '-- Legacy paid rows with no immutable delivery snapshot',
+    currentClaimStart,
+  );
+  const currentUnknownHoldStart = migration.indexOf(
+    'CREATE OR REPLACE FUNCTION public.commerce_hold_unknown_delivery_contract(',
+    currentClaimEnd,
+  );
+  const currentUnknownHoldEnd = migration.indexOf(
+    '-- A PayPal subscription sale is authoritative money-path evidence',
+    currentUnknownHoldStart,
+  );
+  if (
+    generationBoundary < 0
+    || currentClaimStart < 0
+    || currentClaimEnd < 0
+    || currentUnknownHoldStart < 0
+    || currentUnknownHoldEnd < 0
+  ) {
+    throw new Error('checkout migration extraction boundaries were not found');
+  }
+  const checkoutAndLegacyOutward = migration
+    .slice(0, generationBoundary)
+    .replace(/^\uFEFF?\s*BEGIN;\s*/i, '')
+    .trimEnd();
+  const currentPaidClaim = migration.slice(currentClaimStart, currentClaimEnd).trim();
+  const currentUnknownHold = migration
+    .slice(currentUnknownHoldStart, currentUnknownHoldEnd)
+    .trim();
+  return `${checkoutAndLegacyOutward}\n\n${currentPaidClaim}\n\n${currentUnknownHold}`;
 }
 
 function nextValue(prefix: string): string {
@@ -1016,6 +1091,113 @@ describe('checkout migration and atomic fulfillment winner', () => {
     })).rejects.toBe(rollbackMarker);
   }, 45_000);
 
+  it('keeps a proof-backed retired checkout inactive across exact migration replay', async () => {
+    const fixture = await createFixture('subscription');
+    await sqlObserver`
+      DELETE FROM public.orders
+      WHERE id = ${fixture.orderB}::UUID
+    `;
+    await sqlObserver`
+      UPDATE public.orders
+      SET checkout_active = true
+      WHERE id = ${fixture.orderA}::UUID
+    `;
+    const proofReference = nextValue('replay-proof-reference');
+    const [deactivated] = await sqlObserver<{ result: Record<string, unknown> }[]>`
+      SELECT public.commerce_deactivate_pending_checkout(
+        ${fixture.orderA}::UUID,
+        ${GUILD_ID},
+        ${fixture.customerId}::UUID,
+        ${fixture.productId}::UUID,
+        'subscription',
+        ${fixture.providerA},
+        'provider_cancelled',
+        ${proofReference}
+      ) AS result
+    `;
+    expect(deactivated.result).toMatchObject({
+      disposition: 'deactivated',
+      checkout_active: false,
+      proof_id: expect.any(String),
+    });
+
+    await sqlObserver.begin(async (tx) => {
+      await tx.unsafe(CLAIM_MIGRATION);
+    });
+
+    const [replayed] = await sqlObserver<{
+      checkout_active: boolean;
+      proof_kind: string;
+      proof_reference: string;
+    }[]>`
+      SELECT
+        paid_order.checkout_active,
+        proof.proof_kind,
+        proof.proof_reference
+      FROM public.orders AS paid_order
+      JOIN public.commerce_checkout_deactivation_proofs AS proof
+        ON proof.order_id = paid_order.id
+      WHERE paid_order.id = ${fixture.orderA}::UUID
+    `;
+    expect(replayed).toEqual({
+      checkout_active: false,
+      proof_kind: 'provider_cancelled',
+      proof_reference: proofReference,
+    });
+
+    const [proofReplay] = await sqlObserver<{ result: Record<string, unknown> }[]>`
+      SELECT public.commerce_deactivate_pending_checkout(
+        ${fixture.orderA}::UUID,
+        ${GUILD_ID},
+        ${fixture.customerId}::UUID,
+        ${fixture.productId}::UUID,
+        'subscription',
+        ${fixture.providerA},
+        'provider_cancelled',
+        ${proofReference}
+      ) AS result
+    `;
+    expect(proofReplay.result).toMatchObject({
+      disposition: 'already_deactivated',
+      checkout_active: false,
+      proof_id: deactivated.result.proof_id,
+    });
+
+    const [replacement] = await sqlObserver<{ checkout_active: boolean }[]>`
+      INSERT INTO public.orders (
+        order_number,
+        customer_id,
+        guild_id,
+        product_id,
+        plan_id,
+        paypal_subscription_id,
+        amount_cents,
+        currency,
+        status,
+        source,
+        checkout_active
+      ) VALUES (
+        ${nextValue('ORD-REPLAY-REPLACEMENT')},
+        ${fixture.customerId}::UUID,
+        ${GUILD_ID},
+        ${fixture.productId}::UUID,
+        (
+          SELECT plan_id
+          FROM public.orders
+          WHERE id = ${fixture.orderA}::UUID
+        ),
+        ${nextValue('SUB-REPLAY-REPLACEMENT')},
+        999,
+        'USD',
+        'pending',
+        'purchase',
+        true
+      )
+      RETURNING checkout_active
+    `;
+    expect(replacement.checkout_active).toBe(true);
+  }, 45_000);
+
   it.each(['capture', 'subscription'] as const)(
     'serializes two historical %s orders, holds the loser, and preserves replay',
     async (kind) => {
@@ -1341,6 +1523,7 @@ describe('checkout migration and atomic fulfillment winner', () => {
       reason: null,
       order_id: null,
       order_number: null,
+      approval_url: null,
     });
 
     const [reserved] = await sqlObserver<{ id: string; checkout_active: boolean }[]>`
@@ -1643,88 +1826,93 @@ describe('checkout migration and atomic fulfillment winner', () => {
         )
       RETURNING id, status
     `;
-    await sqlObserver`GRANT SELECT, UPDATE, DELETE ON public.orders TO authenticated`;
+    await sqlObserver`
+      GRANT SELECT, UPDATE, DELETE ON public.orders TO authenticated, service_role
+    `;
+    const directRoles = ['authenticated', 'service_role'] as const;
 
-    await expect(sqlObserver.begin(async (tx) => {
-      await tx`SET LOCAL ROLE authenticated`;
-      await tx`
-        UPDATE public.orders
-        SET paypal_subscription_id = ${nextValue('SUB-TAMPERED')}
-        WHERE id = ${fixture.orderA}::UUID
-          AND status = 'pending'
-      `;
-    })).rejects.toMatchObject({
-      code: '42501',
-      message: expect.stringContaining(
-        'authenticated callers cannot rewrite a provider-payable checkout',
-      ),
-    });
-
-    await expect(sqlObserver.begin(async (tx) => {
-      await tx`SET LOCAL ROLE authenticated`;
-      await tx`
-        UPDATE public.orders
-        SET status = 'cancelled'
-        WHERE id = ${inactivePayable.id}::UUID
-          AND status = 'pending'
-          AND checkout_active = false
-      `;
-    })).rejects.toMatchObject({
-      code: '42501',
-      message: expect.stringContaining(
-        'authenticated callers cannot rewrite a provider-payable checkout',
-      ),
-    });
-
-    await expect(sqlObserver.begin(async (tx) => {
-      await tx`SET LOCAL ROLE authenticated`;
-      await tx`
-        UPDATE public.orders
-        SET checkout_active = false
-        WHERE id = ${fixture.orderA}::UUID
-          AND status = 'pending'
-      `;
-    })).rejects.toMatchObject({
-      code: '42501',
-      message: expect.stringContaining(
-        'authenticated callers cannot retire an active checkout',
-      ),
-    });
-
-    for (const paidRow of protectedPaidRows) {
+    for (const directRole of directRoles) {
       await expect(sqlObserver.begin(async (tx) => {
-        await tx`SET LOCAL ROLE authenticated`;
+        await tx.unsafe(`SET LOCAL ROLE ${directRole}`);
+        await tx`
+          UPDATE public.orders
+          SET paypal_subscription_id = ${nextValue(`SUB-TAMPERED-${directRole}`)}
+          WHERE id = ${fixture.orderA}::UUID
+            AND status = 'pending'
+        `;
+      })).rejects.toMatchObject({
+        code: '42501',
+        message: expect.stringContaining(
+          'must mutate paid orders through a sanctioned commerce RPC',
+        ),
+      });
+
+      await expect(sqlObserver.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL ROLE ${directRole}`);
         await tx`
           UPDATE public.orders
           SET status = 'cancelled'
-          WHERE id = ${paidRow.id}::UUID
-            AND status = ${paidRow.status}
+          WHERE id = ${inactivePayable.id}::UUID
+            AND status = 'pending'
+            AND checkout_active = false
         `;
       })).rejects.toMatchObject({
         code: '42501',
         message: expect.stringContaining(
-          'authenticated callers cannot rewrite a provider-payable checkout',
+          'must mutate paid orders through a sanctioned commerce RPC',
         ),
       });
-    }
 
-    for (const orderId of [
-      fixture.orderA,
-      inactivePayable.id,
-      ...protectedPaidRows.map((row) => row.id),
-    ]) {
       await expect(sqlObserver.begin(async (tx) => {
-        await tx`SET LOCAL ROLE authenticated`;
+        await tx.unsafe(`SET LOCAL ROLE ${directRole}`);
         await tx`
-          DELETE FROM public.orders
-          WHERE id = ${orderId}::UUID
+          UPDATE public.orders
+          SET checkout_active = false
+          WHERE id = ${fixture.orderA}::UUID
+            AND status = 'pending'
         `;
       })).rejects.toMatchObject({
         code: '42501',
         message: expect.stringContaining(
-          'authenticated callers cannot delete a provider-payable checkout',
+          'must mutate paid orders through a sanctioned commerce RPC',
         ),
       });
+
+      for (const paidRow of protectedPaidRows) {
+        await expect(sqlObserver.begin(async (tx) => {
+          await tx.unsafe(`SET LOCAL ROLE ${directRole}`);
+          await tx`
+            UPDATE public.orders
+            SET status = 'cancelled'
+            WHERE id = ${paidRow.id}::UUID
+              AND status = ${paidRow.status}
+          `;
+        })).rejects.toMatchObject({
+          code: '42501',
+          message: expect.stringContaining(
+            'must mutate paid orders through a sanctioned commerce RPC',
+          ),
+        });
+      }
+
+      for (const orderId of [
+        fixture.orderA,
+        inactivePayable.id,
+        ...protectedPaidRows.map((row) => row.id),
+      ]) {
+        await expect(sqlObserver.begin(async (tx) => {
+          await tx.unsafe(`SET LOCAL ROLE ${directRole}`);
+          await tx`
+            DELETE FROM public.orders
+            WHERE id = ${orderId}::UUID
+          `;
+        })).rejects.toMatchObject({
+          code: '42501',
+          message: expect.stringContaining(
+            'cannot delete a provider-payable checkout',
+          ),
+        });
+      }
     }
 
     await sqlObserver`
@@ -1735,18 +1923,22 @@ describe('checkout migration and atomic fulfillment winner', () => {
     `;
 
     const proofReference = nextValue('provider-cancel-proof');
-    const [deactivated] = await sqlObserver<{ result: Record<string, unknown> }[]>`
-      SELECT public.commerce_deactivate_pending_checkout(
-        ${fixture.orderA}::UUID,
-        ${GUILD_ID},
-        ${fixture.customerId}::UUID,
-        ${fixture.productId}::UUID,
-        'subscription',
-        ${fixture.providerA},
-        'approval_link_not_exposed',
-        ${proofReference}
-      ) AS result
-    `;
+    const deactivated = await sqlObserver.begin(async (tx) => {
+      await tx`SET LOCAL ROLE service_role`;
+      const [row] = await tx<{ result: Record<string, unknown> }[]>`
+        SELECT public.commerce_deactivate_pending_checkout(
+          ${fixture.orderA}::UUID,
+          ${GUILD_ID},
+          ${fixture.customerId}::UUID,
+          ${fixture.productId}::UUID,
+          'subscription',
+          ${fixture.providerA},
+          'approval_link_not_exposed',
+          ${proofReference}
+        ) AS result
+      `;
+      return row;
+    });
     expect(deactivated.result).toMatchObject({
       order_id: fixture.orderA,
       checkout_active: false,
@@ -1810,6 +2002,72 @@ describe('checkout migration and atomic fulfillment winner', () => {
     expect(replacement).toEqual({
       id: expect.any(String),
       checkout_active: true,
+    });
+  }, 45_000);
+
+  it('holds subscription financial mismatches before completion or fulfillment', async () => {
+    const fixture = await createFixture('subscription');
+    const [plan] = await sqlObserver<{ plan_id: string }[]>`
+      SELECT plan_id
+      FROM public.orders
+      WHERE id = ${fixture.orderA}::UUID
+    `;
+    const repriced = await sqlObserver.begin(async (tx) => {
+      await tx`SET LOCAL ROLE service_role`;
+      const [row] = await tx<{ result: Record<string, unknown> }[]>`
+        SELECT public.commerce_reprice_pending_subscription_order(
+          ${fixture.orderA}::UUID,
+          ${GUILD_ID},
+          ${fixture.customerId}::UUID,
+          ${fixture.productId}::UUID,
+          ${plan.plan_id}::UUID,
+          ${fixture.providerA},
+          1099,
+          'USD'
+        ) AS result
+      `;
+      return row;
+    });
+    expect(repriced.result).toMatchObject({
+      order_id: fixture.orderA,
+      status: 'pending_review',
+      amount_cents: 999,
+      currency: 'USD',
+      disposition: 'held_financial_mismatch',
+    });
+
+    await expect(sqlObserver.begin(async (tx) => {
+      await tx`SET LOCAL ROLE service_role`;
+      await tx`
+        SELECT public.commerce_complete_pending_subscription_order(
+          ${fixture.orderA}::UUID,
+          ${GUILD_ID},
+          ${fixture.customerId}::UUID,
+          ${fixture.productId}::UUID,
+          ${plan.plan_id}::UUID,
+          ${fixture.providerA},
+          1099,
+          'USD'
+        )
+      `;
+    })).rejects.toMatchObject({
+      code: '23514',
+      message: expect.stringContaining('frozen order identity mismatch'),
+    });
+
+    const [held] = await sqlObserver<{
+      status: string;
+      amount_cents: number;
+      checkout_active: boolean;
+    }[]>`
+      SELECT status, amount_cents, checkout_active
+      FROM public.orders
+      WHERE id = ${fixture.orderA}::UUID
+    `;
+    expect(held).toEqual({
+      status: 'pending_review',
+      amount_cents: 999,
+      checkout_active: false,
     });
   }, 45_000);
 

@@ -16,6 +16,28 @@ describe('checkout double-charge migration safety contracts', () => {
     );
   });
 
+  it('creates proof evidence before replay ranking and never reactivates proved rows', () => {
+    const proofTable = migration.indexOf(
+      'CREATE TABLE IF NOT EXISTS public.commerce_checkout_deactivation_proofs',
+    );
+    const ranking = migration.indexOf('WITH ranked AS');
+    const proofRetirement = migration.indexOf(
+      'UPDATE public.orders AS proved_order',
+    );
+    const rankingDefinition = migration.slice(
+      ranking,
+      migration.indexOf(
+        'CREATE UNIQUE INDEX uniq_orders_pending_one_time_checkout',
+      ),
+    );
+
+    expect(proofTable).toBeGreaterThan(0);
+    expect(proofTable).toBeLessThan(ranking);
+    expect(proofRetirement).toBeGreaterThan(proofTable);
+    expect(proofRetirement).toBeLessThan(ranking);
+    expect(rankingDefinition).toContain('commerce_checkout_deactivation_proofs');
+  });
+
   it('redefines guild purge to lock and delete holds then claims before paid parents', () => {
     const purgeDefinition = migration.slice(
       migration.lastIndexOf('CREATE OR REPLACE FUNCTION public.purge_guild_data'),
@@ -27,6 +49,14 @@ describe('checkout double-charge migration safety contracts', () => {
     const pendingGate = purgeDefinition.indexOf('IF v_pending > 0 THEN');
     const pendingOrderCancellation = purgeDefinition.indexOf(
       'UPDATE public.orders AS paid_order',
+    );
+    const pendingProofCheck = purgeDefinition.indexOf(
+      'commerce_checkout_deactivation_proofs',
+      pendingOrderCancellation,
+    );
+    const postGatePendingCancellation = purgeDefinition.indexOf(
+      "paid_order.status = 'pending';",
+      pendingGate,
     );
     const completedOrderCancellation = purgeDefinition.lastIndexOf(
       'UPDATE public.orders AS paid_order',
@@ -59,8 +89,12 @@ describe('checkout double-charge migration safety contracts', () => {
     );
     expect(entitlementCancellation).toBeGreaterThan(orderLock);
     expect(pendingOrderCancellation).toBeGreaterThan(orderLock);
+    expect(pendingProofCheck).toBeGreaterThan(pendingOrderCancellation);
+    expect(pendingProofCheck).toBeLessThan(pendingGate);
     expect(entitlementCancellation).toBeGreaterThan(pendingOrderCancellation);
+    expect(postGatePendingCancellation).toBeGreaterThan(pendingGate);
     expect(completedOrderCancellation).toBeGreaterThan(pendingGate);
+    expect(completedOrderCancellation).toBeGreaterThan(postGatePendingCancellation);
     expect(paymentDelete).toBeGreaterThan(completedOrderCancellation);
   });
 
@@ -79,6 +113,9 @@ describe('checkout double-charge migration safety contracts', () => {
     );
     expect(migration).toMatch(
       /OLD\.status IN\s*\(\s*'pending'\s*,\s*'completed'\s*,\s*'pending_review'\s*\)/i,
+    );
+    expect(migration).toMatch(
+      /CURRENT_USER IN\s*\(\s*'anon'\s*,\s*'authenticated'\s*,\s*'service_role'\s*\)/i,
     );
     expect(migration).toMatch(
       /REVOKE ALL ON FUNCTION public\.commerce_deactivate_pending_checkout[\s\S]+FROM PUBLIC, anon, authenticated/i,
@@ -112,10 +149,26 @@ describe('checkout double-charge migration safety contracts', () => {
 
   it('owns durable per-order outward event and receipt intent state', () => {
     expect(migration).toContain('commerce_fulfillment_outward_intents');
+    expect(migration).toContain('outward_generation_id');
     expect(migration).toContain('commerce_begin_fulfillment_outward_intent');
     expect(migration).toContain('commerce_resume_fulfillment_outward_intent');
     expect(migration).toContain('commerce_finish_fulfillment_outward_intent');
     expect(migration).toContain("'sending', 'sent', 'uncertain'");
+    for (const intentKind of [
+      'subscription_renewed_event',
+      'subscription_cancelled_event',
+      'subscription_cancelled_dm',
+      'subscription_payment_failed_lapsed_event',
+      'subscription_payment_failed_event',
+      'subscription_payment_failed_dm',
+      'subscription_suspended_event',
+      'subscription_suspended_dm',
+    ]) {
+      expect(migration).toContain(`'${intentKind}'`);
+    }
+    expect(migration).toMatch(
+      /p_outward_generation_id[\s\S]+outward_generation_id IS DISTINCT FROM p_outward_generation_id/i,
+    );
     const resumeDefinition = migration.slice(
       migration.indexOf(
         'CREATE OR REPLACE FUNCTION public.commerce_resume_fulfillment_outward_intent',
@@ -129,5 +182,41 @@ describe('checkout double-charge migration safety contracts', () => {
     expect(resumeDefinition).toContain(
       'RETURN public.commerce_begin_fulfillment_outward_intent',
     );
+    expect(migration).toMatch(
+      /ALTER TABLE public\.commerce_role_delivery_intents[\s\S]+ADD COLUMN IF NOT EXISTS outward_generation_id UUID/i,
+    );
+    expect(migration).toMatch(
+      /ALTER TABLE public\.bot_action_queue[\s\S]+ADD COLUMN IF NOT EXISTS outward_generation_id UUID/i,
+    );
+    expect(migration).toContain('commerce_revoke_subscription_fulfillment');
+    expect(migration).toContain('commerce_start_payment_failure_grace_fulfillment');
+    expect(migration).toContain('commerce_prepare_action_outward_generation');
+  });
+
+  it('persists a critical operator alert when a rotated key loses its receipt carrier', () => {
+    expect(migration).toContain('commerce_license_rotation_delivery_held');
+    expect(migration).toContain('uniq_alerts_unresolved_license_rotation_delivery');
+    expect(migration).toContain(
+      'commerce_rotate_license_and_stage_receipt: held delivery alert was not persisted',
+    );
+  });
+
+  it('serializes every non-commerce access activation against payable checkouts', () => {
+    expect(migration).toContain('commerce_guard_noncommerce_entitlement_activation');
+    expect(migration).toMatch(
+      /CREATE TRIGGER commerce_entitlements_checkout_guard\s+BEFORE INSERT OR UPDATE/i,
+    );
+    const activationGuard = migration.slice(
+      migration.indexOf(
+        'CREATE OR REPLACE FUNCTION public.commerce_guard_noncommerce_entitlement_activation',
+      ),
+      migration.indexOf(
+        'REVOKE ALL ON FUNCTION public.commerce_guard_noncommerce_entitlement_activation',
+      ),
+    );
+    expect(activationGuard).toContain('pg_advisory_xact_lock');
+    expect(activationGuard).toContain('commerce_checkout_deactivation_proofs');
+    expect(activationGuard).toContain("'manual', 'giveaway', 'automation'");
+    expect(activationGuard).toContain("'active', 'pending', 'grace_period', 'suspended'");
   });
 });

@@ -70,6 +70,9 @@ const { mockDeliverReceiptDM } = vi.hoisted(() => ({
 vi.mock('../features/commerce/receipt-builder.js', () => ({
   sendReceiptDM: vi.fn(async () => true),
   deliverReceiptDM: mockDeliverReceiptDM,
+  prepareReceiptDM: vi.fn(async (...args: unknown[]) => async () => {
+    await (mockDeliverReceiptDM as (...values: unknown[]) => Promise<void>)(...args);
+  }),
 }));
 
 import {
@@ -369,6 +372,55 @@ function makeLaneSupa(seedRows: any[] = [], opts: {
       return chain;
     }),
     rpc: vi.fn(async (name: string, params: Record<string, unknown>) => {
+      if (name === 'commerce_prepare_action_outward_generation') {
+        return {
+          data: {
+            action_id: params.p_action_id,
+            claim_token: params.p_claim_token,
+            order_id: params.p_order_id,
+            guild_id: params.p_guild_id,
+            customer_id: params.p_customer_id,
+            discord_id: params.p_discord_id,
+            product_id: params.p_product_id,
+            order_number: params.p_order_number,
+            product_name: params.p_product_name,
+            amount_cents: params.p_amount_cents,
+            currency: params.p_currency,
+            license_key_id: params.p_license_key_id,
+            outward_generation_id: '77777777-7777-4777-8777-777777777777',
+            disposition: 'prepared',
+          },
+          error: null,
+        };
+      }
+      if (name === 'commerce_begin_fulfillment_outward_intent') {
+        return {
+          data: {
+            order_id: params.p_order_id,
+            guild_id: params.p_guild_id,
+            intent_kind: params.p_intent_kind,
+            outward_generation_id: params.p_outward_generation_id,
+            disposition: 'send',
+            state: 'sending',
+            attempt_token: '88888888-8888-4888-8888-888888888888',
+            alert_id: null,
+          },
+          error: null,
+        };
+      }
+      if (name === 'commerce_finish_fulfillment_outward_intent') {
+        return {
+          data: {
+            order_id: params.p_order_id,
+            guild_id: params.p_guild_id,
+            intent_kind: params.p_intent_kind,
+            outward_generation_id: params.p_outward_generation_id,
+            state: 'sent',
+            alert_id: null,
+          },
+          error: null,
+        };
+      }
       if (name === 'bot_action_queue_claim') {
         claimOrder.push(params.p_action_id as string);
         const candidate = claimCandidates.get(params.p_action_id as string);
@@ -457,7 +509,9 @@ describe('sweep lane priority', () => {
       status: 'pending',
       payload: {
         guild_id: 'guild-1',
+        customer_id: 'customer-1',
         discord_id: 'user-1',
+        product_id: 'product-1',
         order_id: 'order-1',
         order_number: 'ORD-001',
         product_name: 'VIP Pass',
@@ -498,7 +552,8 @@ describe('sweep lane priority', () => {
         id: 'legacy-commerce-1', guild_id: 'guild-1', action: 'deliver_receipt',
         status: 'pending',
         payload: {
-          guild_id: 'guild-1', discord_id: 'user-1', order_id: 'order-1',
+          guild_id: 'guild-1', customer_id: 'customer-1',
+          discord_id: 'user-1', product_id: 'product-1', order_id: 'order-1',
           order_number: 'ORD-100', product_name: 'VIP Pass',
           amount_cents: 999, currency: 'USD',
         },
@@ -533,7 +588,8 @@ describe('sweep lane priority', () => {
       id: `fb-commerce-${i}`, guild_id: 'guild-1', action: 'deliver_receipt',
       status: 'pending',
       payload: {
-        guild_id: 'guild-1', discord_id: `user-${i}`, order_id: `order-${i}`,
+        guild_id: 'guild-1', customer_id: `customer-${i}`,
+        discord_id: `user-${i}`, product_id: `product-${i}`, order_id: `order-${i}`,
         order_number: `ORD-80${i}`, product_name: 'VIP Pass',
         amount_cents: 999, currency: 'USD',
       },
@@ -575,7 +631,8 @@ describe('stale recovery lane priority', () => {
       id: `stale-commerce-${i}`, guild_id: 'guild-1', action: 'deliver_receipt',
       lane: 'commerce', status: 'pending',
       payload: {
-        guild_id: 'guild-1', discord_id: `user-${i}`, order_id: `order-${i}`,
+        guild_id: 'guild-1', customer_id: `customer-${i}`,
+        discord_id: `user-${i}`, product_id: `product-${i}`, order_id: `order-${i}`,
         order_number: `ORD-90${i}`, product_name: 'VIP Pass',
         amount_cents: 999, currency: 'USD',
       },
@@ -623,7 +680,8 @@ describe('Realtime lane budgets', () => {
       action: 'deliver_receipt',
       lane: 'commerce',
       payload: {
-        guild_id: 'guild-1', discord_id: 'user-1', order_id: 'order-1',
+        guild_id: 'guild-1', customer_id: 'customer-1',
+        discord_id: 'user-1', product_id: 'product-1', order_id: 'order-1',
         order_number: 'ORD-STAGED', product_name: 'VIP Pass',
         amount_cents: 999, currency: 'USD',
       },
@@ -681,7 +739,8 @@ describe('Realtime lane budgets', () => {
         id: 'commerce-rt-1', guild_id: 'guild-1', action: 'deliver_receipt', lane: 'commerce',
         status: 'pending',
         payload: {
-          guild_id: 'guild-1', discord_id: 'user-1', order_id: 'order-1',
+          guild_id: 'guild-1', customer_id: 'customer-1',
+          discord_id: 'user-1', product_id: 'product-1', order_id: 'order-1',
           order_number: 'ORD-002', product_name: 'VIP Pass',
           amount_cents: 999, currency: 'USD',
         },
@@ -843,7 +902,8 @@ describe('SQL-owned final DLQ transitions', () => {
       id: 'act-dlq-commerce', guild_id: 'guild-1', action: 'deliver_receipt', lane: 'commerce',
       status: 'pending',
       payload: {
-        guild_id: 'guild-1', discord_id: 'user-1', order_id: 'order-1',
+        guild_id: 'guild-1', customer_id: 'customer-1',
+        discord_id: 'user-1', product_id: 'product-1', order_id: 'order-1',
         order_number: 'ORD-003', product_name: 'VIP Pass', amount_cents: 999, currency: 'USD',
       },
       created_at: new Date().toISOString(), retry_count: 0,

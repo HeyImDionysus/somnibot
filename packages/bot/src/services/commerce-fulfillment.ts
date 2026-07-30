@@ -16,6 +16,13 @@
 import type { Guild, User } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
+import {
+  preparedOutwardEffect,
+  runCommerceOutwardIntent,
+  type CommerceOutwardBeginMode,
+  type CommerceOutwardIntentKind,
+  type CommerceOutwardResult,
+} from './commerce-outward.js';
 import { inspectTemporaryRoleGrant } from './temp-role-ownership.js';
 import {
   EntitlementService,
@@ -43,6 +50,13 @@ const KNOWN_ORDER_STATUSES = [
 const TERMINAL_ORDER_STATUSES = new Set(['refunded', 'disputed', 'cancelled']);
 const PAYPAL_SUBSCRIPTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 
+class CommerceOutwardSupersededError extends Error {
+  constructor(label: string) {
+    super(`${label} was superseded by a terminal subscription lifecycle`);
+    this.name = 'CommerceOutwardSupersededError';
+  }
+}
+
 function requireTerminalOrderStatus(status: string): void {
   if (!TERMINAL_ORDER_STATUSES.has(status)) {
     throw new Error(
@@ -68,7 +82,7 @@ function hasExactPayPalSubscriptionIdentity(
 // ── Types ──────────────────────────────────────────────────
 
 export interface FulfillmentPayload {
-  /** 'one_time_purchase' | 'subscription_activated' | 'subscription_renewed' | 'subscription_cancelled' | 'subscription_suspended' */
+  /** Exact immutable fulfillment contract carried by the claimed queue action. */
   fulfillment_type: string;
   guild_id: string;
   customer_id: string;
@@ -82,6 +96,11 @@ export interface FulfillmentPayload {
   plan_id?: string;
   paypal_subscription_id?: string;
   paypal_plan_id?: string;
+  webhook_event_id?: string;
+  provider_event_type?: string;
+  provider_occurred_at?: string;
+  provider_paid_through_at?: string | null;
+  lifecycle_generation?: number;
   amount_cents: number;
   currency: string;
   granted_role_ids: string[];
@@ -96,6 +115,54 @@ export interface FulfillmentPayload {
   entitlement_type: 'one_time' | 'subscription';
   /** For renewals — existing entitlement to reactivate */
   existing_entitlement_id?: string;
+}
+
+function requireSubscriptionLifecyclePayload(
+  payload: FulfillmentPayload,
+): { paidThroughAt: string | null } {
+  const allowedEventTypes: Record<string, string[]> = {
+    subscription_activated: ['BILLING.SUBSCRIPTION.ACTIVATED'],
+    subscription_renewed: ['PAYMENT.SALE.COMPLETED'],
+    subscription_cancelled: [
+      'BILLING.SUBSCRIPTION.CANCELLED',
+      'BILLING.SUBSCRIPTION.EXPIRED',
+    ],
+    subscription_suspended: ['BILLING.SUBSCRIPTION.SUSPENDED'],
+    subscription_payment_failed: ['BILLING.SUBSCRIPTION.PAYMENT.FAILED'],
+  };
+  const eventTypes = allowedEventTypes[payload.fulfillment_type];
+  const occurredAt = Date.parse(payload.provider_occurred_at ?? '');
+  const paidThroughAt = payload.provider_paid_through_at ?? null;
+  if (
+    !eventTypes
+    || typeof payload.webhook_event_id !== 'string'
+    || payload.webhook_event_id.length === 0
+    || payload.webhook_event_id.trim() !== payload.webhook_event_id
+    || typeof payload.provider_event_type !== 'string'
+    || !eventTypes.includes(payload.provider_event_type)
+    || !Number.isFinite(occurredAt)
+    || !Number.isSafeInteger(payload.lifecycle_generation)
+    || (payload.lifecycle_generation ?? 0) < 1
+    || (
+      paidThroughAt !== null
+      && (
+        typeof paidThroughAt !== 'string'
+        || !Number.isFinite(Date.parse(paidThroughAt))
+      )
+    )
+    || (
+      ['subscription_activated', 'subscription_renewed'].includes(
+        payload.fulfillment_type,
+      )
+      && (
+        paidThroughAt === null
+        || Date.parse(paidThroughAt) <= occurredAt
+      )
+    )
+  ) {
+    throw new Error('Subscription fulfillment payload failed lifecycle validation');
+  }
+  return { paidThroughAt };
 }
 
 export interface FulfillmentExecutionContext extends RoleDeliveryActionClaim {}
@@ -249,16 +316,6 @@ export interface FulfillmentResult {
   errors: string[];
 }
 
-type FulfillmentOutwardIntentKind =
-  | 'purchase_completed_event'
-  | 'subscription_activated_event'
-  | 'receipt_dm';
-
-interface FulfillmentOutwardResult {
-  state: 'absent' | 'sent' | 'uncertain';
-  externalError?: unknown;
-}
-
 // ── Receipt Delivery Recovery ──────────────────────────────
 // A paid customer's receipt/license-key DM must never fail silently, but an
 // external timeout cannot prove Discord rejected the message. An uncertain
@@ -272,13 +329,18 @@ export const RECEIPT_DELIVERY_ACTION = 'deliver_receipt';
 
 export interface ReceiptDeliveryPayload {
   guild_id: string;
+  customer_id: string;
   discord_id: string;
+  product_id: string;
   order_id: string;
   order_number: string;
   product_name: string;
   amount_cents: number;
   currency: string;
+  license_key_id?: string;
   license_key_plaintext?: string;
+  /** Durable generation of the original receipt protocol, when known. */
+  outward_generation_id?: string;
   /**
    * ISO timestamp of the order (captured at fulfillment time — the same
    * date the initial receipt DM would have shown). A delayed redelivery
@@ -467,6 +529,9 @@ export class CommerceFulfillmentService {
         case 'subscription_suspended':
           await this.handleSubscriptionSuspended(payload, result);
           break;
+        case 'subscription_payment_failed':
+          await this.handleSubscriptionPaymentFailed(payload, result);
+          break;
         default:
           result.errors.push(`Unknown fulfillment type: ${payload.fulfillment_type}`);
           return result;
@@ -478,25 +543,21 @@ export class CommerceFulfillmentService {
 
       const activeAttempt = this.entitlementService.getActivePurchaseRoleDeliveryAttempt();
       if (activeAttempt) {
-        const finalized = await this.entitlementService.finishPurchaseRoleDeliveryAttempt(
-          activeAttempt,
-          'live',
+        throw new Error(
+          'Paid role delivery remained active after the pre-outward confirmation boundary',
         );
-        const validOwnedLive =
-          finalized.state === 'open'
-          && !finalized.settled
-          && !finalized.authorityEmpty;
-        const validZeroAuthorityLive =
-          finalized.state === 'settled'
-          && finalized.settled
-          && finalized.authorityEmpty;
-        if (!validOwnedLive && !validZeroAuthorityLive) {
-          throw new Error('Paid role delivery intent did not become idle before fulfillment success');
-        }
       }
 
       result.success = result.errors.length === 0;
     } catch (err) {
+      if (err instanceof CommerceOutwardSupersededError) {
+        if (this.entitlementService.getActivePurchaseRoleDeliveryAttempt()) {
+          throw new Error('Superseded lifecycle retained live role-delivery authority');
+        }
+        result.success = true;
+        await this.auditLog(payload, result);
+        return result;
+      }
       if (err instanceof PurchaseRoleDeliveryTerminalNoopError) {
         const activeAttempt = this.entitlementService.getActivePurchaseRoleDeliveryAttempt();
         if (activeAttempt) {
@@ -549,6 +610,55 @@ export class CommerceFulfillmentService {
       throw new Error('Fulfillment action claim is required for paid role mutation');
     }
     return this.executionContext;
+  }
+
+  private requireOutwardSent(
+    outcome: CommerceOutwardResult,
+    label: string,
+  ): void {
+    if (outcome.state === 'sent') return;
+    if (outcome.state === 'superseded') {
+      throw new CommerceOutwardSupersededError(label);
+    }
+    if (outcome.externalError !== undefined) throw outcome.externalError;
+    throw new Error(
+      `${label} delivery is ${outcome.state} and requires operator reconciliation`,
+    );
+  }
+
+  /**
+   * Make the role-delivery confirmation durable before the first externally
+   * visible side effect in this generation. Once this succeeds the active
+   * attempt is cleared, so a later event/DM failure cannot downgrade a
+   * confirmed Discord delivery to a retryable role attempt.
+   */
+  private async confirmRoleDeliveryBeforeOutward(
+    outwardGenerationId: string | null,
+  ): Promise<void> {
+    const activeAttempt = this.entitlementService.getActivePurchaseRoleDeliveryAttempt();
+    if (!activeAttempt) return;
+    if (
+      outwardGenerationId === null
+      || activeAttempt.outwardGenerationId !== outwardGenerationId
+    ) {
+      throw new Error('Paid role delivery outward generation changed before confirmation');
+    }
+
+    const finalized = await this.entitlementService.finishPurchaseRoleDeliveryAttempt(
+      activeAttempt,
+      'live',
+    );
+    const validOwnedLive =
+      finalized.state === 'open'
+      && !finalized.settled
+      && !finalized.authorityEmpty;
+    const validZeroAuthorityLive =
+      finalized.state === 'settled'
+      && finalized.settled
+      && finalized.authorityEmpty;
+    if (!validOwnedLive && !validZeroAuthorityLive) {
+      throw new Error('Paid role delivery intent did not confirm before outward delivery');
+    }
   }
 
   private async finishTerminalRoleDelivery(
@@ -667,112 +777,36 @@ export class CommerceFulfillmentService {
 
   private async runFulfillmentOutwardIntent(
     payload: FulfillmentPayload,
-    intentKind: FulfillmentOutwardIntentKind,
-    effect: () => void | Promise<void>,
-    resumeExistingOnly = false,
-  ): Promise<FulfillmentOutwardResult> {
-    const { data: beginData, error: beginError } = await this.supabase.rpc(
-      resumeExistingOnly
-        ? 'commerce_resume_fulfillment_outward_intent'
-        : 'commerce_begin_fulfillment_outward_intent',
+    intentKind: CommerceOutwardIntentKind,
+    outwardGenerationId: string | null,
+    prepared: ReturnType<typeof preparedOutwardEffect> | null,
+    mode: CommerceOutwardBeginMode,
+  ): Promise<CommerceOutwardResult> {
+    const context = this.requireExecutionContext();
+    const legacyPredecessorKind = mode === 'legacy-receipt-continuation'
+      ? payload.fulfillment_type === 'one_time_purchase'
+        ? 'purchase_completed_event'
+        : payload.fulfillment_type === 'subscription_activated'
+          ? 'subscription_activated_event'
+          : null
+      : undefined;
+    if (legacyPredecessorKind === null) {
+      throw new Error('Legacy receipt continuation has no supported predecessor');
+    }
+    return runCommerceOutwardIntent(
+      this.supabase,
       {
-        p_order_id: payload.order_id,
-        p_guild_id: payload.guild_id,
-        p_intent_kind: intentKind,
+        orderId: payload.order_id,
+        guildId: payload.guild_id,
+        intentKind,
+        outwardGenerationId,
+        actionId: context.actionId,
+        claimToken: context.claimToken,
+        ...(legacyPredecessorKind === undefined ? {} : { legacyPredecessorKind }),
       },
+      prepared,
+      mode,
     );
-    if (beginError) {
-      throw new Error(`Failed to begin fulfillment outward intent: ${beginError.message}`);
-    }
-    if (!beginData || typeof beginData !== 'object' || Array.isArray(beginData)) {
-      throw new Error('Fulfillment outward intent begin returned malformed data');
-    }
-    const begin = beginData as Record<string, unknown>;
-    if (
-      resumeExistingOnly
-      && begin.order_id === payload.order_id
-      && begin.intent_kind === intentKind
-      && begin.disposition === 'absent'
-      && begin.state === null
-      && begin.attempt_token === null
-      && begin.alert_id === null
-    ) {
-      return { state: 'absent' };
-    }
-    if (
-      begin.order_id !== payload.order_id
-      || begin.intent_kind !== intentKind
-      || !['send', 'sent', 'uncertain'].includes(String(begin.disposition))
-      || !['sending', 'sent', 'uncertain'].includes(String(begin.state))
-    ) {
-      throw new Error('Fulfillment outward intent begin returned malformed identity');
-    }
-    if (begin.disposition === 'sent' && begin.state === 'sent') {
-      return { state: 'sent' };
-    }
-    if (begin.disposition === 'uncertain' && begin.state === 'uncertain') {
-      return { state: 'uncertain' };
-    }
-    if (
-      begin.disposition !== 'send'
-      || begin.state !== 'sending'
-      || typeof begin.attempt_token !== 'string'
-      || begin.attempt_token.length === 0
-      || begin.alert_id !== null
-    ) {
-      throw new Error('Fulfillment outward intent begin returned inconsistent state');
-    }
-
-    let outcome: 'sent' | 'uncertain' = 'sent';
-    let externalError: unknown;
-    try {
-      await effect();
-    } catch (error) {
-      outcome = 'uncertain';
-      externalError = error;
-    }
-
-    const errorDetail = externalError instanceof Error
-      ? externalError.message
-      : externalError === undefined
-        ? null
-        : String(externalError);
-    const { data: finishData, error: finishError } = await this.supabase.rpc(
-      'commerce_finish_fulfillment_outward_intent',
-      {
-        p_order_id: payload.order_id,
-        p_guild_id: payload.guild_id,
-        p_intent_kind: intentKind,
-        p_attempt_token: begin.attempt_token,
-        p_outcome: outcome,
-        p_error: outcome === 'uncertain'
-          ? `external effect did not return acceptance: ${errorDetail ?? 'unknown error'}`
-          : null,
-      },
-    );
-    if (finishError) {
-      // The external effect may already have been accepted. Leave the durable
-      // row in `sending`; the queue retry converts it to `uncertain` and skips
-      // the effect instead of guessing and sending twice.
-      throw new Error(`Failed to finish fulfillment outward intent: ${finishError.message}`);
-    }
-    if (!finishData || typeof finishData !== 'object' || Array.isArray(finishData)) {
-      throw new Error('Fulfillment outward intent finish returned malformed data');
-    }
-    const finish = finishData as Record<string, unknown>;
-    if (
-      finish.order_id !== payload.order_id
-      || finish.intent_kind !== intentKind
-      || !['sent', 'uncertain'].includes(String(finish.state))
-      || (outcome === 'sent' && finish.state !== 'sent')
-      || (outcome === 'uncertain' && finish.state !== 'uncertain')
-    ) {
-      throw new Error('Fulfillment outward intent finish returned malformed identity');
-    }
-    return {
-      state: finish.state as 'sent' | 'uncertain',
-      ...(externalError === undefined ? {} : { externalError }),
-    };
   }
 
   // ── One-Time Purchase ────────────────────────────────────
@@ -840,6 +874,10 @@ export class CommerceFulfillmentService {
     // safe only after a fresh Discord read repairs and confirms the frozen
     // role vector.
     let roleDeliveryAlreadySettled = false;
+    let outwardGenerationId: string | null =
+      this.entitlementService.getActivePurchaseRoleDeliveryAttempt()
+        ?.outwardGenerationId
+      ?? null;
     if (reusedEntitlement) {
       const contract = {
         customerId: payload.customer_id,
@@ -859,13 +897,18 @@ export class CommerceFulfillmentService {
         await this.finishTerminalRoleDelivery(payload, entitlementId);
       } else if (begun.state === 'confirmed_live') {
         roleDeliveryAlreadySettled = true;
+        outwardGenerationId = begun.outwardGenerationId;
       } else {
+        outwardGenerationId = begun.attempt.outwardGenerationId ?? null;
         await this.entitlementService.ensurePurchaseGrantedRoles(
           entitlementId,
           contract,
           begun.attempt,
         );
       }
+    }
+    if (!roleDeliveryAlreadySettled && outwardGenerationId === null) {
+      throw new Error('Live paid role delivery is missing its outward generation');
     }
 
     // 2. Commit durable provenance before mutating any temporary Discord role.
@@ -876,12 +919,14 @@ export class CommerceFulfillmentService {
       await this.applyTemporaryRoleGrants(payload, temporaryRoleGrants);
     }
 
-    // 3. Emit purchase.completed once. A crash after listener acceptance but
+    // 3. Confirm the role generation before any outward row can be created.
+    await this.confirmRoleDeliveryBeforeOutward(outwardGenerationId);
+
+    // 4. Emit purchase.completed once. A crash after listener acceptance but
     // before the sent marker becomes a manual-review `uncertain`, never resend.
-    const eventOutcome = await this.runFulfillmentOutwardIntent(
-      payload,
-      'purchase_completed_event',
-      () => this.eventBus.emitAndWait('purchase.completed', payload.guild_id, {
+    const preparedEvent = outwardGenerationId === null
+      ? null
+      : this.eventBus.prepareEmitAndWait('purchase.completed', payload.guild_id, {
         discordId: payload.discord_id,
         orderId: payload.order_id,
         orderNumber: payload.order_number,
@@ -889,24 +934,30 @@ export class CommerceFulfillmentService {
         productName: payload.product_name,
         amount: payload.amount_cents,
         currency: payload.currency,
-      }),
-      roleDeliveryAlreadySettled,
+      });
+    const eventOutcome = await this.runFulfillmentOutwardIntent(
+      payload,
+      'purchase_completed_event',
+      outwardGenerationId,
+      preparedEvent,
+      outwardGenerationId === null ? 'legacy-resume' : 'generated',
     );
     if (eventOutcome.state === 'absent') return;
     result.eventEmitted = eventOutcome.state === 'sent';
-    if (eventOutcome.externalError) {
+    if (eventOutcome.state !== 'sent') {
       log.error('Purchase event delivery is uncertain; automatic replay blocked', {
         order: payload.order_number,
         detail: eventOutcome.externalError,
       });
     }
+    this.requireOutwardSent(eventOutcome, 'Purchase event');
 
-    // 4. Send receipt DM
-    await this.sendReceipt(payload, result);
+    // 5. Send receipt DM
+    await this.sendReceipt(payload, result, outwardGenerationId);
 
     if (roleDeliveryAlreadySettled) return;
 
-    // 5. Run fraud checks (non-blocking — don't fail fulfillment)
+    // 6. Run fraud checks (non-blocking — don't fail fulfillment)
     this.runFraudChecks(payload).catch((err) =>
       log.warn('Fraud check error (non-fatal)', { detail: err }),
     );
@@ -933,7 +984,7 @@ export class CommerceFulfillmentService {
       || (data.license_key_id ?? null) !== (payload.license_key_id ?? null)
       || data.type !== payload.entitlement_type
       || typeof data.status !== 'string'
-      || !['active', 'pending', 'grace_period', 'suspended', 'expired', 'cancelled', 'revoked']
+      || !['active', 'pending', 'grace_period', 'suspended', 'expired', 'cancelled']
         .includes(data.status)
       || data.source !== 'purchase'
       || !isSameUniqueStringSet(data.granted_role_ids, payload.granted_role_ids)
@@ -1080,17 +1131,21 @@ export class CommerceFulfillmentService {
   ): Promise<{
     id: string;
     status: string;
+    updatedAt: string | null;
   }> {
     if (
       payload.entitlement_type !== 'subscription'
+      || typeof payload.plan_id !== 'string'
+      || payload.plan_id.length === 0
+      || payload.plan_id.trim() !== payload.plan_id
+      || typeof payload.paypal_subscription_id !== 'string'
+      || payload.paypal_subscription_id.length === 0
+      || payload.paypal_subscription_id.trim() !== payload.paypal_subscription_id
       || (
         expectedEntitlementId !== undefined
         && (
           expectedEntitlementId.length === 0
           || expectedEntitlementId.trim() !== expectedEntitlementId
-          || typeof payload.plan_id !== 'string'
-          || payload.plan_id.length === 0
-          || payload.plan_id.trim() !== payload.plan_id
         )
       )
     ) {
@@ -1099,7 +1154,7 @@ export class CommerceFulfillmentService {
 
     let entitlementQuery = this.supabase
       .from('entitlements')
-      .select('id, guild_id, customer_id, order_id, product_id, plan_id, type, status, source, granted_role_ids, granted_channel_ids, customers(id, guild_id, discord_id)')
+      .select('id, guild_id, customer_id, order_id, product_id, plan_id, type, status, updated_at, source, granted_role_ids, granted_channel_ids, customers(id, guild_id, discord_id)')
       .eq('guild_id', payload.guild_id)
       .eq('order_id', payload.order_id);
     if (expectedEntitlementId !== undefined) {
@@ -1130,8 +1185,8 @@ export class CommerceFulfillmentService {
         'suspended',
         'cancelled',
         'expired',
-        'revoked',
       ].includes(data.status)
+      || (data.updated_at !== null && typeof data.updated_at !== 'string')
       || (data.source !== 'purchase' && data.source !== null)
       || !customer
       || customer.id !== payload.customer_id
@@ -1148,7 +1203,11 @@ export class CommerceFulfillmentService {
       throw new Error('Subscription entitlement failed exact lifecycle identity validation');
     }
 
-    return { id: data.id, status: data.status };
+    return {
+      id: data.id,
+      status: data.status,
+      updatedAt: data.updated_at ?? null,
+    };
   }
 
   private async applyTemporaryRoleGrants(
@@ -1835,6 +1894,7 @@ export class CommerceFulfillmentService {
     payload: FulfillmentPayload,
     result: FulfillmentResult,
   ): Promise<void> {
+    const lifecycle = requireSubscriptionLifecyclePayload(payload);
     if (
       payload.entitlement_type !== 'subscription'
       || typeof payload.plan_id !== 'string'
@@ -1864,28 +1924,24 @@ export class CommerceFulfillmentService {
     // 1. Grant once, or resume the exact durable entitlement after a worker
     // crash/Discord failure. Subscription actions use the same unique order_id
     // boundary as one-time purchases and therefore need the same replay path.
-    let entitlementId = await this.findOrderEntitlement(payload);
-    let reusedEntitlement = entitlementId !== null;
-    if (!entitlementId) {
-      entitlementId = await this.entitlementService.grant({
-        customerId: payload.customer_id,
-        productId: payload.product_id,
-        productName: payload.product_name,
-        orderId: payload.order_id,
-        planId: payload.plan_id,
-        licenseKeyId: payload.license_key_id,
-        discordId: payload.discord_id,
-        type: 'subscription',
-        source: 'purchase',
-        grantedRoleIds: payload.granted_role_ids,
-        grantedChannelIds: payload.granted_channel_ids,
-        roleDeliveryClaim: this.requireExecutionContext(),
-      });
-      if (!entitlementId) {
-        entitlementId = await this.findOrderEntitlement(payload);
-        reusedEntitlement = entitlementId !== null;
-      }
-    }
+    // Always pass activation through the lifecycle RPC, including replay.
+    // The database then proves or repairs the exact paid-through boundary
+    // before any Discord or outward effect can continue.
+    const entitlementId = await this.entitlementService.grant({
+      customerId: payload.customer_id,
+      productId: payload.product_id,
+      productName: payload.product_name,
+      orderId: payload.order_id,
+      planId: payload.plan_id,
+      licenseKeyId: payload.license_key_id,
+      discordId: payload.discord_id,
+      type: 'subscription',
+      source: 'purchase',
+      grantedRoleIds: payload.granted_role_ids,
+      grantedChannelIds: payload.granted_channel_ids,
+      expiresAt: lifecycle.paidThroughAt,
+      roleDeliveryClaim: this.requireExecutionContext(),
+    });
 
     if (!entitlementId) {
       result.errors.push('Failed to create subscription entitlement');
@@ -1894,60 +1950,59 @@ export class CommerceFulfillmentService {
     result.entitlementId = entitlementId;
 
     let roleDeliveryAlreadySettled = false;
-    if (reusedEntitlement) {
-      const contract = {
-        customerId: payload.customer_id,
-        productId: payload.product_id,
-        orderId: payload.order_id,
-        planId: payload.plan_id ?? null,
-        discordId: payload.discord_id,
-        grantedRoleIds: payload.granted_role_ids,
-        entitlementType: 'subscription' as const,
-      };
-      const begun = await this.entitlementService.beginPurchaseRoleDeliveryAttempt(
-        entitlementId,
-        contract,
-        this.requireExecutionContext(),
-      );
-      if (begun.state === 'terminal') {
-        await this.finishTerminalRoleDelivery(payload, entitlementId);
-      } else if (begun.state === 'live') {
-        await this.entitlementService.ensurePurchaseGrantedRoles(
-          entitlementId,
-          contract,
-          begun.attempt,
-        );
-      } else {
-        roleDeliveryAlreadySettled = true;
-      }
+    let outwardGenerationId: string | null =
+      this.entitlementService.getActivePurchaseRoleDeliveryAttempt()
+        ?.outwardGenerationId
+      ?? null;
+    roleDeliveryAlreadySettled =
+      this.entitlementService.wasPurchaseRoleDeliveryConfirmedReplay();
+    outwardGenerationId =
+      this.entitlementService.getPurchaseRoleDeliveryOutwardGeneration();
+    if (!roleDeliveryAlreadySettled && outwardGenerationId === null) {
+      throw new Error('Live paid role delivery is missing its outward generation');
     }
 
-    // 2. Emit subscription.activated once under the same crash fence.
-    const eventOutcome = await this.runFulfillmentOutwardIntent(
-      payload,
-      'subscription_activated_event',
-      () => this.eventBus.emitAndWait('subscription.activated', payload.guild_id, {
+    // 2. Temporary grants are part of the frozen subscription grant contract,
+    // so they must be reconciled before role confirmation authorizes outward
+    // event/receipt delivery.
+    if (!roleDeliveryAlreadySettled) {
+      await this.applyTemporaryRoleGrants(payload, temporaryRoleGrants);
+    }
+
+    // 3. Confirm the role generation before any outward row can be created.
+    await this.confirmRoleDeliveryBeforeOutward(outwardGenerationId);
+
+    // 4. Emit subscription.activated once under the same crash fence.
+    const preparedEvent = outwardGenerationId === null
+      ? null
+      : this.eventBus.prepareEmitAndWait('subscription.activated', payload.guild_id, {
         discordId: payload.discord_id,
         productId: payload.product_id,
         planId: payload.plan_id ?? '',
         lifecycleId: this.requireExecutionContext().actionId,
         status: 'activated',
-      }),
-      roleDeliveryAlreadySettled,
+      });
+    const eventOutcome = await this.runFulfillmentOutwardIntent(
+      payload,
+      'subscription_activated_event',
+      outwardGenerationId,
+      preparedEvent,
+      outwardGenerationId === null ? 'legacy-resume' : 'generated',
     );
     // A missing row is an action completed before outward intents existed.
     // Preserve the old delivery-confirmed dedupe boundary in that case.
     if (eventOutcome.state === 'absent') return;
     result.eventEmitted = eventOutcome.state === 'sent';
-    if (eventOutcome.externalError) {
+    if (eventOutcome.state !== 'sent') {
       log.error('Subscription event delivery is uncertain; automatic replay blocked', {
         order: payload.order_number,
         detail: eventOutcome.externalError,
       });
     }
+    this.requireOutwardSent(eventOutcome, 'Subscription activation event');
 
-    // 3. Send receipt DM
-    await this.sendReceipt(payload, result);
+    // 5. Send receipt DM
+    await this.sendReceipt(payload, result, outwardGenerationId);
 
     if (roleDeliveryAlreadySettled) return;
 
@@ -1963,6 +2018,7 @@ export class CommerceFulfillmentService {
     payload: FulfillmentPayload,
     result: FulfillmentResult,
   ): Promise<void> {
+    const lifecycle = requireSubscriptionLifecyclePayload(payload);
     if (
       payload.entitlement_type !== 'subscription'
       || typeof payload.plan_id !== 'string'
@@ -2003,7 +2059,9 @@ export class CommerceFulfillmentService {
         planId: payload.plan_id,
         discordId: payload.discord_id,
         grantedRoleIds: payload.granted_role_ids,
+        grantedChannelIds: payload.granted_channel_ids,
         entitlementType: 'subscription',
+        expiresAt: lifecycle.paidThroughAt as string,
       },
       this.requireExecutionContext(),
     );
@@ -2013,16 +2071,28 @@ export class CommerceFulfillmentService {
     }
     result.entitlementId = entitlement.id;
 
-    if (this.entitlementService.wasPurchaseRoleDeliveryConfirmedReplay()) return;
-
-    this.eventBus.emit('subscription.activated', payload.guild_id, {
-      discordId: payload.discord_id,
-      productId: payload.product_id,
-      planId: payload.plan_id,
-      lifecycleId: this.requireExecutionContext().actionId,
-      status: 'renewed',
-    });
-    result.eventEmitted = true;
+    const outwardGenerationId =
+      this.entitlementService.getPurchaseRoleDeliveryOutwardGeneration();
+    await this.confirmRoleDeliveryBeforeOutward(outwardGenerationId);
+    const preparedEvent = outwardGenerationId === null
+      ? null
+      : this.eventBus.prepareEmitAndWait('subscription.activated', payload.guild_id, {
+        discordId: payload.discord_id,
+        productId: payload.product_id,
+        planId: payload.plan_id,
+        lifecycleId: this.requireExecutionContext().actionId,
+        status: 'renewed',
+      });
+    const outward = await this.runFulfillmentOutwardIntent(
+      payload,
+      'subscription_renewed_event',
+      outwardGenerationId,
+      preparedEvent,
+      outwardGenerationId === null ? 'legacy-resume' : 'generated',
+    );
+    if (outward.state === 'absent') return;
+    result.eventEmitted = outward.state === 'sent';
+    this.requireOutwardSent(outward, 'Subscription renewal event');
   }
 
   // ── Subscription Cancelled ───────────────────────────────
@@ -2034,47 +2104,107 @@ export class CommerceFulfillmentService {
     const entitlement = await this.findSubscriptionLifecycleEntitlement(payload);
     result.entitlementId = entitlement.id;
 
-    // A completed retry must not repeat notifications. A live row still needs
-    // the exact terminal transition; every already-terminal state is an
-    // idempotent replay of cancellation/expiry and is safe to complete.
-    if (['cancelled', 'expired', 'revoked'].includes(entitlement.status)) return;
-    if (!['active', 'pending', 'grace_period', 'suspended'].includes(entitlement.status)) {
+    if (
+      ![
+        'active',
+        'pending',
+        'grace_period',
+        'suspended',
+        'cancelled',
+        'expired',
+      ].includes(entitlement.status)
+    ) {
       throw new Error(`Subscription cancellation found unsupported status ${entitlement.status}`);
     }
 
-    const revocation = await this.entitlementService.revoke(entitlement.id, 'cancelled');
-    // Another exact worker may have committed the terminal transition between
-    // our lifecycle read and the CAS. That is a successful replay, but this
-    // invocation did not win and therefore must not repeat the event or DM.
-    if (revocation.disposition === 'noop') return;
+    const revocation = await this.entitlementService.revoke(
+      entitlement.id,
+      'cancelled',
+      {
+        ...this.requireExecutionContext(),
+        orderId: payload.order_id,
+        orderNumber: payload.order_number,
+        customerId: payload.customer_id,
+        discordId: payload.discord_id,
+        productId: payload.product_id,
+        productName: payload.product_name,
+        planId: payload.plan_id!,
+        paypalSubscriptionId: payload.paypal_subscription_id!,
+        amountCents: payload.amount_cents,
+        currency: payload.currency,
+        expectedStatus: entitlement.status as
+          | 'active'
+          | 'pending'
+          | 'grace_period'
+          | 'suspended'
+          | 'expired'
+          | 'cancelled',
+        expectedUpdatedAt: entitlement.updatedAt,
+      },
+    );
+    if (
+      revocation.disposition === 'noop'
+      && (revocation.outwardGenerationId ?? null) === null
+    ) {
+      return;
+    }
     if (revocation.disposition !== 'applied') {
+      if (
+        revocation.disposition === 'noop'
+        && typeof revocation.outwardGenerationId === 'string'
+      ) {
+        // Exact same-action recovery of an already committed cancellation.
+      } else {
+        result.errors.push(
+          `Failed to revoke entitlement ${entitlement.id} (${revocation.disposition})`,
+        );
+        return;
+      }
+    }
+    const outwardGenerationId = revocation.outwardGenerationId ?? null;
+    if (outwardGenerationId === null) {
       result.errors.push(
-        `Failed to revoke entitlement ${entitlement.id} (${revocation.disposition})`,
+        `Failed to revoke entitlement ${entitlement.id} (missing outward generation)`,
       );
       return;
     }
 
-    // Emit event
-    this.eventBus.emit('subscription.lapsed', payload.guild_id, {
-      discordId: payload.discord_id,
-      productId: payload.product_id,
-      planId: payload.plan_id ?? '',
-      lifecycleId: this.requireExecutionContext().actionId,
-      status: 'cancelled',
-    });
-    result.eventEmitted = true;
+    const preparedEvent = this.eventBus.prepareEmitAndWait(
+      'subscription.lapsed',
+      payload.guild_id,
+      {
+        discordId: payload.discord_id,
+        productId: payload.product_id,
+        planId: payload.plan_id ?? '',
+        lifecycleId: this.requireExecutionContext().actionId,
+        status: 'cancelled',
+      },
+    );
+    const eventOutcome = await this.runFulfillmentOutwardIntent(
+      payload,
+      'subscription_cancelled_event',
+      outwardGenerationId,
+      preparedEvent,
+      'generated',
+    );
+    result.eventEmitted = eventOutcome.state === 'sent';
+    this.requireOutwardSent(eventOutcome, 'Subscription cancellation event');
 
-    // DM the user about cancellation
-    try {
-      const user = await this.guild.client.users.fetch(payload.discord_id);
-      await user.send({
-        content: `Your subscription to **${payload.product_name}** has been cancelled. If this was a mistake, you can re-subscribe in the server store.`,
-        // billing DM — nothing should ping.
-        allowedMentions: { parse: [] },
-      });
-    } catch {
-      // DMs may be disabled — non-fatal
-    }
+    // Prepare the immutable billing DM before its own durable begin. A failed
+    // user lookup is therefore safely retryable and creates no DM intent row.
+    const user = await this.guild.client.users.fetch(payload.discord_id);
+    const preparedDm = preparedOutwardEffect(() => user.send({
+      content: `Your subscription to **${payload.product_name}** has been cancelled. If this was a mistake, you can re-subscribe in the server store.`,
+      allowedMentions: { parse: [] },
+    }));
+    const dmOutcome = await this.runFulfillmentOutwardIntent(
+      payload,
+      'subscription_cancelled_dm',
+      outwardGenerationId,
+      preparedDm,
+      'generated',
+    );
+    this.requireOutwardSent(dmOutcome, 'Subscription cancellation DM');
   }
 
   // ── Subscription Suspended ───────────────────────────────
@@ -2086,53 +2216,213 @@ export class CommerceFulfillmentService {
     const entitlement = await this.findSubscriptionLifecycleEntitlement(payload);
     result.entitlementId = entitlement.id;
 
-    // A repeated failure event while already in grace must not extend the
-    // deadline or repeat owner/customer notifications. A late failure after a
-    // terminal transition is also a safe no-op and can never reactivate access.
+    const suspension = await this.entitlementService.revoke(
+      entitlement.id,
+      'suspended',
+      {
+        ...this.requireExecutionContext(),
+        orderId: payload.order_id,
+        orderNumber: payload.order_number,
+        customerId: payload.customer_id,
+        discordId: payload.discord_id,
+        productId: payload.product_id,
+        productName: payload.product_name,
+        planId: payload.plan_id!,
+        paypalSubscriptionId: payload.paypal_subscription_id!,
+        amountCents: payload.amount_cents,
+        currency: payload.currency,
+        expectedStatus: entitlement.status as
+          | 'active'
+          | 'pending'
+          | 'grace_period'
+          | 'suspended'
+          | 'expired'
+          | 'cancelled',
+        expectedUpdatedAt: entitlement.updatedAt,
+      },
+    );
     if (
-      entitlement.status === 'grace_period'
-      || entitlement.status === 'suspended'
-      || ['cancelled', 'expired', 'revoked'].includes(entitlement.status)
+      suspension.disposition === 'noop'
+      && (suspension.outwardGenerationId ?? null) === null
     ) {
       return;
     }
-    if (entitlement.status !== 'active') {
-      throw new Error(`Subscription suspension found unsupported status ${entitlement.status}`);
+    if (
+      suspension.disposition !== 'applied'
+      && !(
+        suspension.disposition === 'noop'
+        && typeof suspension.outwardGenerationId === 'string'
+      )
+    ) {
+      result.errors.push(
+        `Failed to suspend entitlement ${entitlement.id} (${suspension.disposition})`,
+      );
+      return;
     }
-
-    // Read configurable grace period (guild_config.grace_period_days, default
-    // DEFAULT_GRACE_PERIOD_DAYS if unset) via the shared helper that the
-    // dashboard's manual grace transition also uses — one source of truth.
-    const graceDays = await getGracePeriodDays(this.supabase, payload.guild_id);
-
-    const suspended = await this.entitlementService.suspend(entitlement.id, graceDays);
-    if (!suspended) {
-      result.errors.push(`Failed to suspend entitlement ${entitlement.id}`);
+    const outwardGenerationId = suspension.outwardGenerationId ?? null;
+    if (outwardGenerationId === null) {
+      result.errors.push(
+        `Failed to suspend entitlement ${entitlement.id} (missing outward generation)`,
+      );
       return;
     }
 
-    // Emit subscription lapsed event
-    this.eventBus.emit('subscription.lapsed', payload.guild_id, {
+    const preparedEvent = this.eventBus.prepareEmitAndWait(
+      'subscription.lapsed',
+      payload.guild_id,
+      {
+        discordId: payload.discord_id,
+        productId: payload.product_id,
+        planId: payload.plan_id ?? '',
+        lifecycleId: this.requireExecutionContext().actionId,
+        status: 'lapsed',
+      },
+    );
+    const eventOutcome = await this.runFulfillmentOutwardIntent(
+      payload,
+      'subscription_suspended_event',
+      outwardGenerationId,
+      preparedEvent,
+      'generated',
+    );
+    result.eventEmitted = eventOutcome.state === 'sent';
+    this.requireOutwardSent(eventOutcome, 'Subscription suspension event');
+
+    const user = await this.guild.client.users.fetch(payload.discord_id);
+    const preparedDm = preparedOutwardEffect(() => user.send({
+      content: `Your subscription to **${payload.product_name}** was suspended by PayPal, so access has been removed. Restore the subscription in PayPal to regain access.`,
+      allowedMentions: { parse: [] },
+    }));
+    const dmOutcome = await this.runFulfillmentOutwardIntent(
+      payload,
+      'subscription_suspended_dm',
+      outwardGenerationId,
+      preparedDm,
+      'generated',
+    );
+    this.requireOutwardSent(dmOutcome, 'Subscription suspension DM');
+  }
+
+  // ── Subscription Payment Failed ──────────────────────────
+
+  private async handleSubscriptionPaymentFailed(
+    payload: FulfillmentPayload,
+    result: FulfillmentResult,
+  ): Promise<void> {
+    const entitlement = await this.findSubscriptionLifecycleEntitlement(payload);
+    result.entitlementId = entitlement.id;
+
+    if (
+      ![
+        'active',
+        'grace_period',
+        'suspended',
+        'cancelled',
+        'expired',
+      ].includes(entitlement.status)
+    ) {
+      throw new Error(`Subscription payment failure found unsupported status ${entitlement.status}`);
+    }
+    if (['cancelled', 'expired'].includes(entitlement.status)) return;
+
+    const graceDays = await getGracePeriodDays(this.supabase, payload.guild_id);
+    const suspension = await this.entitlementService.startPaymentFailureGraceForFulfillment(
+      entitlement.id,
+      graceDays,
+      {
+        ...this.requireExecutionContext(),
+        orderId: payload.order_id,
+        orderNumber: payload.order_number,
+        customerId: payload.customer_id,
+        discordId: payload.discord_id,
+        productId: payload.product_id,
+        productName: payload.product_name,
+        planId: payload.plan_id!,
+        paypalSubscriptionId: payload.paypal_subscription_id!,
+        amountCents: payload.amount_cents,
+        currency: payload.currency,
+        expectedStatus: entitlement.status as 'active' | 'grace_period' | 'suspended',
+        expectedUpdatedAt: entitlement.updatedAt,
+      },
+    );
+    if (
+      (suspension.disposition === 'noop' || suspension.disposition === 'replay')
+      && suspension.outwardGenerationId === null
+    ) {
+      return;
+    }
+    if (
+      !['applied', 'replay'].includes(suspension.disposition)
+      || suspension.outwardGenerationId === null
+    ) {
+      result.errors.push(
+        `Failed to start payment-failure grace for entitlement ${entitlement.id} (${suspension.disposition})`,
+      );
+      return;
+    }
+    const outwardGenerationId = suspension.outwardGenerationId;
+    if (
+      typeof suspension.gracePeriodEndsAt !== 'string'
+      || !Number.isFinite(Date.parse(suspension.gracePeriodEndsAt))
+    ) {
+      throw new Error('Subscription payment failure returned no committed grace deadline');
+    }
+    const graceDeadlineTimestamp = Math.floor(
+      Date.parse(suspension.gracePeriodEndsAt) / 1_000,
+    );
+
+    const lapsedEvent = this.eventBus.prepareEmitAndWait('subscription.lapsed', payload.guild_id, {
       discordId: payload.discord_id,
       productId: payload.product_id,
       planId: payload.plan_id ?? '',
       lifecycleId: this.requireExecutionContext().actionId,
       status: 'lapsed',
     });
+    const lapsedOutcome = await this.runFulfillmentOutwardIntent(
+      payload,
+      'subscription_payment_failed_lapsed_event',
+      outwardGenerationId,
+      lapsedEvent,
+      'generated',
+    );
+    this.requireOutwardSent(lapsedOutcome, 'Subscription payment-failure lapsed event');
 
-    // Emit payment.failed so owner gets notified
-    this.eventBus.emit('payment.failed', payload.guild_id, {
+    const failedEvent = this.eventBus.prepareEmitAndWait('payment.failed', payload.guild_id, {
       discordId: payload.discord_id,
       orderId: payload.order_id,
       productName: payload.product_name,
       amount: payload.amount_cents,
       currency: payload.currency,
     });
-    result.eventEmitted = true;
+    const failedOutcome = await this.runFulfillmentOutwardIntent(
+      payload,
+      'subscription_payment_failed_event',
+      outwardGenerationId,
+      failedEvent,
+      'generated',
+    );
+    this.requireOutwardSent(failedOutcome, 'Subscription payment-failed event');
+    result.eventEmitted =
+      lapsedOutcome.state === 'sent'
+      && failedOutcome.state === 'sent';
 
-    // Check for payment pattern fraud (non-blocking). Thresholds are pulled from
-    // the guild's dashboard-configured fraud_rules, falling back to shipped
-    // catalog defaults, so a lowered rule actually takes effect bot-side.
+    const user = await this.guild.client.users.fetch(payload.discord_id);
+    const preparedDm = preparedOutwardEffect(() => user.send({
+      content: `⚠️ Your payment for **${payload.product_name}** failed. Your grace period ends <t:${graceDeadlineTimestamp}:F>, when access will be revoked if payment has not recovered. Please update your payment method on PayPal.`,
+      allowedMentions: { parse: [] },
+    }));
+    const dmOutcome = await this.runFulfillmentOutwardIntent(
+      payload,
+      'subscription_payment_failed_dm',
+      outwardGenerationId,
+      preparedDm,
+      'generated',
+    );
+    this.requireOutwardSent(dmOutcome, 'Subscription payment-failure DM');
+
+    // Run fraud checks only after the fixed customer-notification protocol has
+    // drained. These checks are non-blocking and must not interleave with the
+    // lapsed -> payment.failed -> billing-DM sequence above.
     const fraudCtx = { supabase: this.supabase, guildId: payload.guild_id, eventBus: this.eventBus };
     void (async () => {
       const thresholds = await loadFraudThresholds(this.supabase, payload.guild_id);
@@ -2141,18 +2431,6 @@ export class CommerceFulfillmentService {
       });
       await checkCriticalThreshold(fraudCtx, { threshold: thresholds.criticalIncidentThreshold });
     })().catch((err) => log.warn('Fraud check error (non-fatal)', { detail: err }));
-
-    // DM warning
-    try {
-      const user = await this.guild.client.users.fetch(payload.discord_id);
-      await user.send({
-        content: `⚠️ Your payment for **${payload.product_name}** failed. You have a *${graceDays}-day grace period* before your access is revoked. Please update your payment method on PayPal.`,
-        // billing DM — nothing should ping.
-        allowedMentions: { parse: [] },
-      });
-    } catch {
-      // DMs may be disabled — non-fatal
-    }
   }
 
   // ── Fraud Checks ──────────────────────────────────────────
@@ -2175,7 +2453,11 @@ export class CommerceFulfillmentService {
    * Deliver the receipt/license-key DM under a durable external-effect fence.
    * Any ambiguous response becomes `uncertain` and blocks automatic resend.
    */
-  private async sendReceipt(payload: FulfillmentPayload, result: FulfillmentResult): Promise<void> {
+  private async sendReceipt(
+    payload: FulfillmentPayload,
+    result: FulfillmentResult,
+    outwardGenerationId: string | null,
+  ): Promise<void> {
     // Fulfillment runs immediately after payment, so "now" is the order
     // date. Captured once so a queued redelivery renders the same date the
     // initial DM would have shown, not the date the retry succeeded.
@@ -2203,91 +2485,28 @@ export class CommerceFulfillmentService {
     const outward = await this.runFulfillmentOutwardIntent(
       payload,
       'receipt_dm',
-      deliver,
+      outwardGenerationId,
+      preparedOutwardEffect(deliver),
+      outwardGenerationId === null
+        ? 'legacy-receipt-continuation'
+        : 'generated',
     );
     if (outward.state === 'absent') {
       throw new Error('New receipt outward intent unexpectedly returned absent');
     }
     result.receiptSent = outward.state === 'sent';
     if (outward.state === 'uncertain') {
-      result.receiptRetryQueued = await this.preserveUncertainReceiptForManualReview(
-        payload,
-        outward.externalError,
-        orderDate,
-      );
+      // The queue finalizer sees this same durable uncertain intent and
+      // atomically preserves the original claimed action plus one alert.
+      // Writing a second receipt DLQ/alert here would duplicate the incident.
+      result.receiptRetryQueued = false;
       const redacted = payload.discord_id ? `***${payload.discord_id.slice(-4)}` : 'unknown';
       log.error('Receipt delivery is uncertain; automatic replay blocked', {
         user: redacted,
         detail: outward.externalError,
       });
     }
-  }
-
-  /**
-   * Preserve an uncertain receipt payload without scheduling an automatic
-   * resend. The external call may have been accepted before its response was
-   * lost, so only an operator may decide whether a manual DLQ retry is safe.
-   */
-  private async preserveUncertainReceiptForManualReview(
-    payload: FulfillmentPayload,
-    deliveryError: unknown,
-    orderDate: Date,
-  ): Promise<boolean> {
-    const deliveryPayload: ReceiptDeliveryPayload = {
-      guild_id: payload.guild_id,
-      discord_id: payload.discord_id,
-      order_id: payload.order_id,
-      order_number: payload.order_number,
-      product_name: payload.product_name,
-      amount_cents: payload.amount_cents,
-      currency: payload.currency,
-      license_key_plaintext: payload.license_key_plaintext,
-      order_date: orderDate.toISOString(),
-    };
-
-    let payloadPreserved = false;
-    try {
-      const deliveryMessage = deliveryError instanceof Error
-        ? deliveryError.message
-        : deliveryError === undefined
-          ? 'outward intent resumed in uncertain state'
-          : String(deliveryError);
-      const { error } = await this.supabase.from('action_queue_dlq').insert({
-        guild_id: payload.guild_id,
-        action: RECEIPT_DELIVERY_ACTION,
-        payload: deliveryPayload,
-        error_message:
-          `Receipt delivery acceptance is uncertain; automatic retry blocked: ${deliveryMessage}`,
-        retry_count: 0,
-        max_retries: 0,
-      });
-      if (error) throw new Error(error.message);
-      payloadPreserved = true;
-      log.info('Preserved uncertain receipt payload for manual review', {
-        order: payload.order_number,
-      });
-    } catch (dlqErr) {
-      // Last resort is the alert below: it references the order, and the
-      // hashed key for that order can still be manually revoked + reissued.
-      log.error('Failed to preserve uncertain receipt payload', {
-        order: payload.order_number,
-        detail: dlqErr,
-      });
-    }
-
-    await writeReceiptDeliveryAlert(this.supabase, {
-      guildId: payload.guild_id,
-      orderNumber: payload.order_number,
-      productName: payload.product_name,
-      discordId: payload.discord_id,
-      kind: classifyDeliveryError(deliveryError),
-      attempts: 1,
-      lastError: deliveryError instanceof Error ? deliveryError.message : String(deliveryError),
-      payloadPreserved,
-      guild: this.guild,
-    });
-    // The DLQ is a manual reconciliation surface, never an automatic retry.
-    return false;
+    this.requireOutwardSent(outward, 'Receipt DM');
   }
 
   // ── Audit ────────────────────────────────────────────────

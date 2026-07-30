@@ -48,7 +48,9 @@ interface PayPalTokenResponse {
 }
 
 interface PendingCheckoutOrder {
+  disposition: 'created' | 'replay';
   id: string;
+  order_number: string;
   customer_id: string;
   guild_id: string;
   product_id: string;
@@ -59,17 +61,84 @@ interface PendingCheckoutOrder {
   currency: string;
   status: string;
   checkout_active: boolean;
+  checkout_approval_url: string;
+  delivery_type_snapshot: string;
+  granted_role_ids_snapshot: string[];
+  granted_channel_ids_snapshot: string[];
+  temporary_role_grants_snapshot: unknown[];
+  grant_snapshot_frozen_at: string;
+}
+
+const CHECKOUT_DELIVERY_TYPES = new Set([
+  'file',
+  'link',
+  'access_pass',
+  'license_key',
+  'mixed',
+]);
+const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const TIMESTAMPTZ_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+const MAX_TEMP_ROLE_DURATION_SECONDS = 315_360_000;
+
+function isExactSnowflakeVector(value: unknown): value is string[] {
+  return (
+    Array.isArray(value)
+    && value.every((entry) =>
+      typeof entry === 'string'
+      && DISCORD_SNOWFLAKE.test(entry))
+    && new Set(value).size === value.length
+  );
+}
+
+function isExactTemporaryGrantSnapshot(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  const roleIds = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+    const grant = entry as Record<string, unknown>;
+    if (
+      Object.keys(grant).sort().join(',') !== 'duration_seconds,role_id'
+      || typeof grant.role_id !== 'string'
+      || !DISCORD_SNOWFLAKE.test(grant.role_id)
+      || roleIds.has(grant.role_id)
+      || !Number.isSafeInteger(grant.duration_seconds)
+      || (grant.duration_seconds as number) <= 0
+      || (grant.duration_seconds as number) > MAX_TEMP_ROLE_DURATION_SECONDS
+    ) {
+      return false;
+    }
+    roleIds.add(grant.role_id);
+  }
+  return true;
 }
 
 function isExactPendingCheckoutOrder(
   value: unknown,
-  expected: Omit<PendingCheckoutOrder, 'id' | 'status'>,
+  expected: Pick<
+    PendingCheckoutOrder,
+    | 'order_number'
+    | 'customer_id'
+    | 'guild_id'
+    | 'product_id'
+    | 'plan_id'
+    | 'paypal_order_id'
+    | 'paypal_subscription_id'
+    | 'amount_cents'
+    | 'currency'
+    | 'checkout_active'
+    | 'checkout_approval_url'
+  >,
 ): value is PendingCheckoutOrder {
   if (!value || typeof value !== 'object') return false;
   const order = value as Partial<PendingCheckoutOrder>;
   return (
     typeof order.id === 'string'
-    && order.id.length > 0
+    && UUID_PATTERN.test(order.id)
+    && (order.disposition === 'created' || order.disposition === 'replay')
+    && order.order_number === expected.order_number
     && order.status === 'pending'
     && order.customer_id === expected.customer_id
     && order.guild_id === expected.guild_id
@@ -80,90 +149,16 @@ function isExactPendingCheckoutOrder(
     && order.amount_cents === expected.amount_cents
     && order.currency === expected.currency
     && order.checkout_active === expected.checkout_active
+    && order.checkout_approval_url === expected.checkout_approval_url
+    && typeof order.delivery_type_snapshot === 'string'
+    && CHECKOUT_DELIVERY_TYPES.has(order.delivery_type_snapshot)
+    && isExactSnowflakeVector(order.granted_role_ids_snapshot)
+    && isExactSnowflakeVector(order.granted_channel_ids_snapshot)
+    && isExactTemporaryGrantSnapshot(order.temporary_role_grants_snapshot)
+    && typeof order.grant_snapshot_frozen_at === 'string'
+    && TIMESTAMPTZ_PATTERN.test(order.grant_snapshot_frozen_at)
+    && Number.isFinite(Date.parse(order.grant_snapshot_frozen_at))
   );
-}
-
-async function freezeCheckoutGrantSnapshot(
-  supabase: SupabaseClient,
-  order: PendingCheckoutOrder,
-): Promise<boolean> {
-  const { data, error } = await supabase.rpc('commerce_freeze_order_grant_snapshot', {
-    p_order_id: order.id,
-    p_guild_id: order.guild_id,
-    p_customer_id: order.customer_id,
-    p_product_id: order.product_id,
-  });
-  if (error) {
-    log.error('Failed to freeze checkout grant snapshot:', error.message);
-    return false;
-  }
-  if (
-    !data
-    || typeof data !== 'object'
-    || (data as Record<string, unknown>).order_id !== order.id
-    || typeof (data as Record<string, unknown>).grant_snapshot_frozen_at !== 'string'
-  ) {
-    log.error('Checkout grant snapshot returned malformed identity');
-    return false;
-  }
-  return true;
-}
-
-async function deactivateUnexposedCheckoutOrder(
-  supabase: SupabaseClient,
-  order: PendingCheckoutOrder,
-): Promise<boolean> {
-  const providerKind = order.paypal_order_id ? 'capture' : 'subscription';
-  const providerId = order.paypal_order_id ?? order.paypal_subscription_id;
-  if (!providerId) {
-    log.error('Cannot deactivate checkout without an exact provider identity');
-    return false;
-  }
-
-  const rpcArgs = {
-    p_order_id: order.id,
-    p_guild_id: order.guild_id,
-    p_customer_id: order.customer_id,
-    p_product_id: order.product_id,
-    p_provider_kind: providerKind,
-    p_provider_id: providerId,
-    p_proof_kind: 'approval_link_not_exposed',
-    p_proof_reference: `payment-handler:snapshot-freeze-failed:${order.id}`,
-  };
-
-  // A lost RPC response is outcome-ambiguous. Replay the exact deterministic
-  // proof once: the SQL boundary returns already_deactivated when the first
-  // call committed, without weakening the immutable proof.
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    const { data, error } = await supabase.rpc(
-      'commerce_deactivate_pending_checkout',
-      rpcArgs,
-    );
-    if (error) {
-      log.error(
-        `Failed to confirm unexposed checkout deactivation (attempt ${attempt}):`,
-        error.message,
-      );
-      continue;
-    }
-    if (
-      data
-      && typeof data === 'object'
-      && !Array.isArray(data)
-      && (data as Record<string, unknown>).order_id === order.id
-      && (data as Record<string, unknown>).checkout_active === false
-      && ['deactivated', 'already_deactivated'].includes(
-        String((data as Record<string, unknown>).disposition),
-      )
-      && typeof (data as Record<string, unknown>).proof_id === 'string'
-    ) {
-      return true;
-    }
-    log.error(
-      `Unexposed checkout deactivation returned malformed proof identity (attempt ${attempt})`,
-    );
-  }
-  return false;
 }
 
 type CheckoutBlockReason =
@@ -178,6 +173,7 @@ type InFlightCheckout =
       state: 'blocked';
       orderNumber: string | null;
       reason: CheckoutBlockReason;
+      approvalUrl: string | null;
     }
   | { state: 'unavailable' };
 
@@ -227,6 +223,7 @@ async function inspectInFlightCheckout(
     && result.reason === null
     && result.order_id === null
     && result.order_number === null
+    && result.approval_url === null
   ) {
     return { state: 'clear' };
   }
@@ -235,15 +232,43 @@ async function inspectInFlightCheckout(
     && ['provider_checkout', 'paid_hold', 'paid_fulfillment', 'active_entitlement']
       .includes(String(result.reason))
     && (result.order_number === null || typeof result.order_number === 'string')
+    && (
+      result.approval_url === null
+      || isPayPalApprovalUrl(result.approval_url)
+    )
+    && (
+      result.reason === 'provider_checkout'
+      || result.approval_url === null
+    )
   ) {
     return {
       state: 'blocked',
       orderNumber: result.order_number as string | null,
       reason: result.reason as CheckoutBlockReason,
+      approvalUrl: result.approval_url as string | null,
     };
   }
   log.error('Checkout blocker inspection returned malformed identity');
   return { state: 'unavailable' };
+}
+
+function isPayPalApprovalUrl(value: unknown): value is string {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.length > 2048
+    || value.trim() !== value
+  ) {
+    return false;
+  }
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return url.protocol === 'https:'
+      && (host === 'paypal.com' || host.endsWith('.paypal.com'));
+  } catch {
+    return false;
+  }
 }
 
 type CheckoutReservationBlock = {
@@ -499,6 +524,30 @@ export async function handleBuyButton(
       return;
     }
     if (inFlight.state === 'blocked') {
+      if (inFlight.reason === 'provider_checkout' && inFlight.approvalUrl) {
+        await interaction.editReply({
+          embeds: [
+            brandedEmbed(brandKit, {
+              intent: 'primary',
+              title: product.type === 'subscription'
+                ? `🔄 Resume Subscription: ${product.name}`
+                : `🛒 Resume Purchase: ${product.name}`,
+              description:
+                'Your existing PayPal checkout is still available. Continue it below; no second checkout was created.',
+            }),
+          ],
+          components: [
+            new ActionRowBuilder<ButtonBuilder>().addComponents(
+              new ButtonBuilder()
+                .setLabel(product.type === 'subscription' ? 'Continue Subscription' : 'Continue Purchase')
+                .setStyle(ButtonStyle.Link)
+                .setURL(inFlight.approvalUrl)
+                .setEmoji('💳'),
+            ),
+          ],
+        });
+        return;
+      }
       const copy = checkoutBlockCopy(inFlight, product.type === 'subscription');
       await interaction.editReply({
         embeds: [
@@ -560,13 +609,23 @@ export async function handleBuyButton(
   const brandName = brandKit.brandName;
 
   if (product.type === 'one_time') {
+    const productCurrency =
+      typeof product.currency === 'string' && /^[A-Za-z]{3}$/.test(product.currency)
+        ? product.currency.toUpperCase()
+        : null;
+    if (!productCurrency) {
+      await interaction.editReply({
+        content: '❌ This product has an invalid billing currency and cannot be purchased.',
+      });
+      return;
+    }
     // Create PayPal order
     const orderPayload = {
       intent: 'CAPTURE',
       purchase_units: [
         {
           amount: {
-            currency_code: product.currency,
+            currency_code: productCurrency,
             value: price,
           },
           description: product.name,
@@ -608,7 +667,7 @@ export async function handleBuyButton(
     const orderData = await orderRes.json() as { id: string; links?: Array<{ rel: string; href: string }> };
     const approvalLink = orderData.links?.find((l) => l.rel === 'approve');
 
-    if (!approvalLink?.href) {
+    if (!isPayPalApprovalUrl(approvalLink?.href)) {
       await interaction.editReply({ content: '❌ Failed to get checkout URL.' });
       return;
     }
@@ -618,6 +677,7 @@ export async function handleBuyButton(
     const orderNumber = seqResult || `ORD-${Date.now().toString(36).toUpperCase()}`;
 
     const expectedOrder = {
+      order_number: orderNumber,
       customer_id: customerId,
       guild_id: guildId,
       product_id: productId,
@@ -625,17 +685,35 @@ export async function handleBuyButton(
       paypal_order_id: orderData.id,
       paypal_subscription_id: null,
       amount_cents: product.price_cents,
-      currency: product.currency,
+      currency: productCurrency,
       checkout_active: true,
+      checkout_approval_url: approvalLink.href,
     };
-    const { data: pendingOrder, error: pendingOrderError } = await supabase.from('orders').insert({
-      order_number: orderNumber,
-      ...expectedOrder,
-      status: 'pending',
-      source: 'purchase',
-    })
-      .select('id,customer_id,guild_id,product_id,plan_id,paypal_order_id,paypal_subscription_id,amount_cents,currency,status,checkout_active')
-      .single();
+    let pendingOrder: unknown = null;
+    let pendingOrderError: { code?: string; message?: string } | null = null;
+    // An RPC response can be lost after commit. Replay the exact provider and
+    // order-number contract once; SQL returns the already-frozen row only when
+    // every immutable field still matches.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await supabase.rpc('commerce_create_active_paid_checkout', {
+        p_order_number: orderNumber,
+        p_guild_id: guildId,
+        p_customer_id: customerId,
+        p_product_id: productId,
+        p_plan_id: null,
+        p_provider_kind: 'capture',
+        p_provider_id: orderData.id,
+        p_approval_url: approvalLink.href,
+        p_amount_cents: product.price_cents,
+        p_currency: productCurrency,
+      });
+      pendingOrder = response.data;
+      pendingOrderError = response.error;
+      if (!pendingOrderError && isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
+        break;
+      }
+      if (parseCheckoutReservationBlock(pendingOrderError)) break;
+    }
 
     if (pendingOrderError || !isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
       // The pending-checkout unique index is the atomic version of the
@@ -661,15 +739,6 @@ export async function handleBuyButton(
       });
       return;
     }
-    if (!(await freezeCheckoutGrantSnapshot(supabase, pendingOrder))) {
-      const deactivated = await deactivateUnexposedCheckoutOrder(supabase, pendingOrder);
-      await interaction.editReply({
-        content: deactivated
-          ? '❌ Checkout configuration changed before it could be secured. No payment link was opened; please try again.'
-          : '❌ Checkout configuration changed before it could be secured. No payment link was opened, but checkout cleanup could not be confirmed. Contact the server owner before trying again.',
-      });
-      return;
-    }
 
     await interaction.editReply({
       embeds: [
@@ -677,7 +746,7 @@ export async function handleBuyButton(
           intent: 'primary',
           title: `🛒 Purchase: ${product.name}`,
           description:
-            `**Price:** $${price} ${product.currency}\n\nClick the button below to complete your purchase via PayPal.`,
+            `**Price:** $${price} ${productCurrency}\n\nClick the button below to complete your purchase via PayPal.`,
         }),
       ],
       components: [
@@ -723,6 +792,16 @@ export async function handleBuyButton(
       await interaction.editReply({ content: '❌ No active subscription plan found for this product.' });
       return;
     }
+    const planCurrency =
+      typeof plan.currency === 'string' && /^[A-Za-z]{3}$/.test(plan.currency)
+        ? plan.currency.toUpperCase()
+        : null;
+    if (!planCurrency) {
+      await interaction.editReply({
+        content: '❌ This subscription has an invalid billing currency and cannot be purchased.',
+      });
+      return;
+    }
 
     // Create PayPal subscription
     const subPayload = {
@@ -762,7 +841,7 @@ export async function handleBuyButton(
     const subData = await subRes.json() as { id: string; links?: Array<{ rel: string; href: string }> };
     const approvalLink = subData.links?.find((l) => l.rel === 'approve');
 
-    if (!approvalLink?.href) {
+    if (!isPayPalApprovalUrl(approvalLink?.href)) {
       await interaction.editReply({ content: '❌ Failed to get checkout URL.' });
       return;
     }
@@ -775,6 +854,7 @@ export async function handleBuyButton(
     const orderNumber = seqResult || `ORD-${Date.now().toString(36).toUpperCase()}`;
 
     const expectedOrder = {
+      order_number: orderNumber,
       customer_id: customerId,
       guild_id: guildId,
       product_id: productId,
@@ -782,17 +862,32 @@ export async function handleBuyButton(
       paypal_order_id: null,
       paypal_subscription_id: subData.id,
       amount_cents: plan.price_cents,
-      currency: plan.currency,
+      currency: planCurrency,
       checkout_active: true,
+      checkout_approval_url: approvalLink.href,
     };
-    const { data: pendingOrder, error: pendingOrderError } = await supabase.from('orders').insert({
-      order_number: orderNumber,
-      ...expectedOrder,
-      status: 'pending',
-      source: 'purchase',
-    })
-      .select('id,customer_id,guild_id,product_id,plan_id,paypal_order_id,paypal_subscription_id,amount_cents,currency,status,checkout_active')
-      .single();
+    let pendingOrder: unknown = null;
+    let pendingOrderError: { code?: string; message?: string } | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await supabase.rpc('commerce_create_active_paid_checkout', {
+        p_order_number: orderNumber,
+        p_guild_id: guildId,
+        p_customer_id: customerId,
+        p_product_id: productId,
+        p_plan_id: plan.id,
+        p_provider_kind: 'subscription',
+        p_provider_id: subData.id,
+        p_approval_url: approvalLink.href,
+        p_amount_cents: plan.price_cents,
+        p_currency: planCurrency,
+      });
+      pendingOrder = response.data;
+      pendingOrderError = response.error;
+      if (!pendingOrderError && isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
+        break;
+      }
+      if (parseCheckoutReservationBlock(pendingOrderError)) break;
+    }
 
     if (pendingOrderError || !isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
       const reservationBlock = parseCheckoutReservationBlock(pendingOrderError);
@@ -816,15 +911,6 @@ export async function handleBuyButton(
       });
       return;
     }
-    if (!(await freezeCheckoutGrantSnapshot(supabase, pendingOrder))) {
-      const deactivated = await deactivateUnexposedCheckoutOrder(supabase, pendingOrder);
-      await interaction.editReply({
-        content: deactivated
-          ? '❌ Checkout configuration changed before it could be secured. No subscription link was opened; please try again.'
-          : '❌ Checkout configuration changed before it could be secured. No subscription link was opened, but checkout cleanup could not be confirmed. Contact the server owner before trying again.',
-      });
-      return;
-    }
 
     await interaction.editReply({
       embeds: [
@@ -832,7 +918,7 @@ export async function handleBuyButton(
           intent: 'primary',
           title: `🔄 Subscribe: ${product.name}`,
           description:
-            `**Plan:** ${plan.name}\n**Price:** $${(plan.price_cents / 100).toFixed(2)} ${plan.currency}/${plan.interval_unit.toLowerCase()}\n\nClick the button below to start your subscription via PayPal.`,
+            `**Plan:** ${plan.name}\n**Price:** $${(plan.price_cents / 100).toFixed(2)} ${planCurrency}/${plan.interval_unit.toLowerCase()}\n\nClick the button below to start your subscription via PayPal.`,
         }),
       ],
       components: [

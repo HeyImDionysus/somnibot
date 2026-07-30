@@ -71,6 +71,9 @@ function makeQueryEngine(
   options: {
     orderInsertError?: string;
     orderInsertCode?: string;
+    activeCheckoutResponseLossOnce?: boolean;
+    malformedCheckoutField?: string;
+    malformedCheckoutAttempts?: number;
     freezeError?: string;
     deactivationError?: string;
     deactivationErrorOnce?: string;
@@ -79,7 +82,80 @@ function makeQueryEngine(
 ) {
   const inserts: Record<string, any[]> = {};
   let deactivationAttempts = 0;
+  let activeCheckoutAttempts = 0;
   const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
+    if (name === 'commerce_create_active_paid_checkout') {
+      activeCheckoutAttempts += 1;
+      if (options.orderInsertError) {
+        return {
+          data: null,
+          error: {
+            code: options.orderInsertCode,
+            message: options.orderInsertError,
+          },
+        };
+      }
+      const providerKind = args?.p_provider_kind;
+      const existing = (tables.orders ?? []).find((order) =>
+        providerKind === 'capture'
+          ? order.paypal_order_id === args?.p_provider_id
+          : order.paypal_subscription_id === args?.p_provider_id,
+      );
+      const product = (tables.products ?? []).find(
+        (row) => row.id === args?.p_product_id && row.guild_id === args?.p_guild_id,
+      );
+      const row = existing ?? {
+        id: '12000000-0000-4000-8000-000000000001',
+        order_number: args?.p_order_number,
+        customer_id: args?.p_customer_id,
+        guild_id: args?.p_guild_id,
+        product_id: args?.p_product_id,
+        plan_id: args?.p_plan_id ?? null,
+        paypal_order_id: providerKind === 'capture' ? args?.p_provider_id : null,
+        paypal_subscription_id:
+          providerKind === 'subscription' ? args?.p_provider_id : null,
+        amount_cents: args?.p_amount_cents,
+        currency: args?.p_currency,
+        status: 'pending',
+        checkout_active: true,
+        checkout_approval_url: args?.p_approval_url,
+        delivery_type_snapshot: product?.delivery_type ?? 'access_pass',
+        granted_role_ids_snapshot: product?.granted_role_ids ?? [],
+        granted_channel_ids_snapshot: product?.granted_channel_ids ?? [],
+        temporary_role_grants_snapshot: [],
+        grant_snapshot_frozen_at: '2026-07-11T00:00:00.000Z',
+      };
+      if (!existing) {
+        (tables.orders ??= []).push(row);
+        (inserts.orders ??= []).push(row);
+      }
+      if (options.activeCheckoutResponseLossOnce && activeCheckoutAttempts === 1) {
+        return {
+          data: null,
+          error: { code: '08006', message: 'connection closed after commit' },
+        };
+      }
+      const result = {
+        disposition: existing ? 'replay' : 'created',
+        ...row,
+      };
+      if (
+        options.malformedCheckoutField
+        && activeCheckoutAttempts <= (options.malformedCheckoutAttempts ?? 1)
+      ) {
+        const malformedValue =
+          options.malformedCheckoutField === 'temporary_role_grants_snapshot'
+            ? [{
+                role_id: '123456789012345678',
+                duration_seconds: 315_360_001,
+              }]
+            : options.malformedCheckoutField === 'grant_snapshot_frozen_at'
+              ? ' 2026-07-11T00:00:00.000Z'
+              : 'corrupt';
+        (result as Record<string, unknown>)[options.malformedCheckoutField] = malformedValue;
+      }
+      return { data: result, error: null };
+    }
     if (name === 'commerce_inspect_checkout_blocker') {
       if (options.checkoutInspectionError) {
         return { data: null, error: { message: options.checkoutInspectionError } };
@@ -104,6 +180,7 @@ function makeQueryEngine(
             reason: 'paid_hold',
             order_id: held.order_id,
             order_number: order?.order_number ?? null,
+            approval_url: null,
           },
           error: null,
         };
@@ -122,6 +199,7 @@ function makeQueryEngine(
             reason: 'provider_checkout',
             order_id: providerCheckout.id,
             order_number: providerCheckout.order_number,
+            approval_url: providerCheckout.checkout_approval_url ?? null,
           },
           error: null,
         };
@@ -140,6 +218,7 @@ function makeQueryEngine(
             reason: 'paid_fulfillment',
             order_id: unresolvedPaid.id,
             order_number: unresolvedPaid.order_number,
+            approval_url: null,
           },
           error: null,
         };
@@ -150,6 +229,7 @@ function makeQueryEngine(
           reason: null,
           order_id: null,
           order_number: null,
+          approval_url: null,
         },
         error: null,
       };
@@ -277,7 +357,7 @@ function makePayPalFetch() {
       return new Response(
         JSON.stringify({
           id: 'SUB-1',
-          links: [{ rel: 'approve', href: 'https://paypal.example/approve' }],
+          links: [{ rel: 'approve', href: 'https://www.sandbox.paypal.com/approve' }],
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
@@ -286,7 +366,7 @@ function makePayPalFetch() {
       return new Response(
         JSON.stringify({
           id: 'PAYPAL-ORDER-1',
-          links: [{ rel: 'approve', href: 'https://paypal.example/approve-order' }],
+          links: [{ rel: 'approve', href: 'https://www.sandbox.paypal.com/approve-order' }],
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
@@ -522,6 +602,7 @@ describe('handleBuyButton — cross-guild plan injection (subscription checkout)
             reason: null,
             order_id: null,
             order_number: null,
+            approval_url: null,
           },
           error: null,
         };
@@ -560,6 +641,9 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
       freezeError?: string;
       deactivationError?: string;
       deactivationErrorOnce?: string;
+      activeCheckoutResponseLossOnce?: boolean;
+      malformedCheckoutField?: string;
+      malformedCheckoutAttempts?: number;
     } = {},
   ) {
     const product = type === 'one_time' ? oneTimeProduct : subscriptionProduct;
@@ -575,7 +659,7 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
   }
 
   it.each(['one_time', 'subscription'] as const)(
-    'persists and freezes the exact %s order before exposing an approval link',
+    'atomically creates and freezes the exact %s checkout before exposing an approval link',
     async (type) => {
       const { supabase, rpc, interaction } = setup(type);
 
@@ -584,27 +668,40 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
         'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
       );
 
-      expect(rpc).toHaveBeenCalledWith('commerce_freeze_order_grant_snapshot', {
-        p_order_id: 'orders-new',
+      expect(rpc).toHaveBeenCalledWith('commerce_create_active_paid_checkout', {
+        p_order_number: 'ORD-TEST-1',
         p_guild_id: VICTIM_GUILD,
         p_customer_id: 'cust-1',
         p_product_id: 'prod-1',
+        p_plan_id: type === 'one_time' ? null : 'plan-legit',
+        p_provider_kind: type === 'one_time' ? 'capture' : 'subscription',
+        p_provider_id: type === 'one_time' ? 'PAYPAL-ORDER-1' : 'SUB-1',
+        p_approval_url: type === 'one_time'
+          ? 'https://www.sandbox.paypal.com/approve-order'
+          : 'https://www.sandbox.paypal.com/approve',
+        p_amount_cents: type === 'one_time' ? 1_000 : 500,
+        p_currency: 'USD',
       });
+      expect(
+        rpc.mock.calls.some(([name]) => name === 'commerce_freeze_order_grant_snapshot'),
+      ).toBe(false);
       expect(
         rpc.mock.calls.some(([name]) => name === 'commerce_deactivate_pending_checkout'),
       ).toBe(false);
       expect(interaction.editReply).toHaveBeenLastCalledWith(
         expect.objectContaining({ components: expect.any(Array) }),
       );
-      const freezeCallOrder = rpc.mock.invocationCallOrder[
-        rpc.mock.calls.findIndex(([name]) => name === 'commerce_freeze_order_grant_snapshot')
+      const reservationCallOrder = rpc.mock.invocationCallOrder[
+        rpc.mock.calls.findIndex(([name]) => name === 'commerce_create_active_paid_checkout')
       ];
-      expect(freezeCallOrder).toBeLessThan(interaction.editReply.mock.invocationCallOrder.at(-1)!);
+      expect(reservationCallOrder).toBeLessThan(
+        interaction.editReply.mock.invocationCallOrder.at(-1)!,
+      );
     },
   );
 
   it.each(['one_time', 'subscription'] as const)(
-    'does not expose a %s approval link when the local order insert fails',
+    'does not expose a %s approval link when the atomic reservation fails',
     async (type) => {
       const { supabase, rpc, interaction } = setup(type, { orderInsertError: 'database unavailable' });
 
@@ -613,7 +710,9 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
         'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
       );
 
-      expect(rpc.mock.calls.some(([name]) => name === 'commerce_freeze_order_grant_snapshot')).toBe(false);
+      expect(
+        rpc.mock.calls.some(([name]) => name === 'commerce_create_active_paid_checkout'),
+      ).toBe(true);
       expect(interaction.editReply).toHaveBeenLastCalledWith({
         content: expect.stringContaining('could not be safely recorded'),
       });
@@ -626,85 +725,106 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
   );
 
   it.each(['one_time', 'subscription'] as const)(
-    'does not expose a %s approval link when snapshot freeze fails',
+    'recovers an exact committed %s reservation after the first RPC response is lost',
     async (type) => {
-      const { supabase, rpc, interaction } = setup(type, { freezeError: 'sale contract changed' });
+      const { supabase, rpc, interaction, inserts } = setup(type, {
+        activeCheckoutResponseLossOnce: true,
+      });
 
       await handleBuyButton(
         interaction, supabase, VICTIM_GUILD,
         'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
       );
 
-      expect(rpc.mock.calls.some(([name]) => name === 'commerce_freeze_order_grant_snapshot')).toBe(true);
-      expect(rpc).toHaveBeenCalledWith('commerce_deactivate_pending_checkout', {
-        p_order_id: 'orders-new',
-        p_guild_id: VICTIM_GUILD,
-        p_customer_id: 'cust-1',
-        p_product_id: 'prod-1',
-        p_provider_kind: type === 'one_time' ? 'capture' : 'subscription',
-        p_provider_id: type === 'one_time' ? 'PAYPAL-ORDER-1' : 'SUB-1',
-        p_proof_kind: 'approval_link_not_exposed',
-        p_proof_reference: 'payment-handler:snapshot-freeze-failed:orders-new',
-      });
-      expect(interaction.editReply).toHaveBeenLastCalledWith({
-        content: expect.stringContaining('configuration changed'),
-      });
-      expect(
-        interaction.editReply.mock.calls.some(
-          (call: Array<{ components?: unknown }>) => Array.isArray(call[0]?.components),
-        ),
-      ).toBe(false);
+      const reservationCalls = rpc.mock.calls.filter(
+        ([name]) => name === 'commerce_create_active_paid_checkout',
+      );
+      expect(reservationCalls).toHaveLength(2);
+      expect(reservationCalls[1]?.[1]).toEqual(reservationCalls[0]?.[1]);
+      expect(inserts.orders).toHaveLength(1);
+      expect(interaction.editReply).toHaveBeenLastCalledWith(
+        expect.objectContaining({ components: expect.any(Array) }),
+      );
     },
   );
 
+  it.each([
+    'disposition',
+    'id',
+    'order_number',
+    'customer_id',
+    'guild_id',
+    'product_id',
+    'plan_id',
+    'paypal_order_id',
+    'paypal_subscription_id',
+    'amount_cents',
+    'currency',
+    'checkout_active',
+    'status',
+    'delivery_type_snapshot',
+    'granted_role_ids_snapshot',
+    'granted_channel_ids_snapshot',
+    'temporary_role_grants_snapshot',
+    'grant_snapshot_frozen_at',
+  ])('replays the exact reservation before exposing a link after malformed atomic %s evidence', async (field) => {
+    const { supabase, interaction, rpc, inserts } = setup('one_time', {
+      malformedCheckoutField: field,
+    });
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    const reservationCalls = rpc.mock.calls.filter(
+      ([name]) => name === 'commerce_create_active_paid_checkout',
+    );
+    expect(reservationCalls).toHaveLength(2);
+    expect(reservationCalls[1]?.[1]).toEqual(reservationCalls[0]?.[1]);
+    expect(inserts.orders).toHaveLength(1);
+    expect(inserts.orders[0]?.checkout_active).toBe(true);
+    expect(interaction.editReply).toHaveBeenLastCalledWith(
+      expect.objectContaining({ components: expect.any(Array) }),
+    );
+  });
+
   it.each(['one_time', 'subscription'] as const)(
-    'does not claim an unexposed %s checkout was cleaned up when proof is unconfirmed',
+    'canonicalizes lowercase legacy %s currency before the provider/reservation boundary',
     async (type) => {
-      const { supabase, rpc, interaction } = setup(type, {
-        freezeError: 'sale contract changed',
-        deactivationError: 'database unavailable',
+      const product = {
+        ...(type === 'one_time' ? oneTimeProduct : subscriptionProduct),
+        currency: 'usd',
+      };
+      const plan = { ...legitPlan, currency: 'eur' };
+      const engine = makeQueryEngine({
+        products: [product],
+        customers: [{ id: 'cust-1', guild_id: VICTIM_GUILD, discord_id: 'user-1' }],
+        entitlements: [],
+        plans: type === 'subscription' ? [plan] : [],
+        orders: [],
       });
+      const fetchMock = makePayPalFetch();
+      vi.stubGlobal('fetch', fetchMock);
 
       await handleBuyButton(
-        interaction, supabase, VICTIM_GUILD,
+        makeInteraction(), engine.supabase, VICTIM_GUILD,
         'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
       );
 
-      expect(interaction.editReply).toHaveBeenLastCalledWith({
-        content: expect.stringContaining('cleanup could not be confirmed'),
-      });
-      expect(
-        rpc.mock.calls.filter(([name]) => name === 'commerce_deactivate_pending_checkout'),
-      ).toHaveLength(2);
-      expect(
-        interaction.editReply.mock.calls.some(
-          (call: Array<{ components?: unknown }>) => Array.isArray(call[0]?.components),
-        ),
-      ).toBe(false);
-    },
-  );
-
-  it.each(['one_time', 'subscription'] as const)(
-    'replays the exact unexposed %s proof after an ambiguous first response',
-    async (type) => {
-      const { supabase, rpc, interaction } = setup(type, {
-        freezeError: 'sale contract changed',
-        deactivationErrorOnce: 'connection reset after commit',
-      });
-
-      await handleBuyButton(
-        interaction, supabase, VICTIM_GUILD,
-        'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+      expect(engine.rpc).toHaveBeenCalledWith(
+        'commerce_create_active_paid_checkout',
+        expect.objectContaining({
+          p_currency: type === 'one_time' ? 'USD' : 'EUR',
+        }),
       );
-
-      const deactivationCalls = rpc.mock.calls.filter(
-        ([name]) => name === 'commerce_deactivate_pending_checkout',
-      );
-      expect(deactivationCalls).toHaveLength(2);
-      expect(deactivationCalls[1]?.[1]).toEqual(deactivationCalls[0]?.[1]);
-      expect(interaction.editReply).toHaveBeenLastCalledWith({
-        content: expect.stringContaining('please try again'),
-      });
+      if (type === 'one_time') {
+        const providerCall = fetchMock.mock.calls.find(
+          ([url]) => String(url).includes('/v2/checkout/orders'),
+        );
+        const providerBody = JSON.parse((providerCall![1] as RequestInit).body as string);
+        expect(providerBody.purchase_units[0].amount.currency_code).toBe('USD');
+      }
     },
   );
 
@@ -1038,6 +1158,23 @@ describe('handleBuyButton — one live checkout per product (Finding 10)', () =>
     expect(inserts.orders ?? []).toHaveLength(0);
     expect(lastEmbedText(interaction)).toContain('ORD-LIVE-1');
     expect(lastEmbedText(interaction)).toContain('charged twice');
+  });
+
+  it('recovers the durable approval URL after the original Discord reply was lost', async () => {
+    const approvalUrl = 'https://www.sandbox.paypal.com/checkoutnow?token=PAYPAL-LIVE-1';
+    const { supabase, inserts, fetchMock, interaction } = setup([
+      pendingOrder({ checkout_approval_url: approvalUrl }),
+    ]);
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/v2/checkout/orders'))).toBe(false);
+    expect(inserts.orders ?? []).toHaveLength(0);
+    expect(lastEmbedText(interaction)).toContain(approvalUrl);
+    expect(lastEmbedText(interaction)).toContain('no second checkout was created');
   });
 
   it('keeps an extended-window one-time approval link blocked after six hours', async () => {

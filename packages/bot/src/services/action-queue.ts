@@ -42,11 +42,14 @@ import {
   CommerceFulfillmentService,
   RECEIPT_DELIVERY_ACTION,
   classifyDeliveryError,
-  writeReceiptDeliveryAlert,
   type FulfillmentPayload,
   type ReceiptDeliveryPayload,
 } from './commerce-fulfillment.js';
-import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
+import { prepareReceiptDM } from '../features/commerce/receipt-builder.js';
+import {
+  preparedOutwardEffect,
+  runCommerceOutwardIntent,
+} from './commerce-outward.js';
 import { resolveBrandKit } from '../features/branding/index.js';
 import { EntitlementService } from '../features/commerce/entitlement-service.js';
 import {
@@ -196,7 +199,14 @@ function parseRetryClaimTransition(
     : null;
 }
 
-type FinalClaimDisposition = 'completed' | 'completed_from_evidence' | 'failed';
+type FinalClaimDisposition =
+  | 'completed'
+  | 'completed_from_evidence'
+  | 'failed'
+  | 'operator_held'
+  | 'requeued'
+  | 'stale_claim'
+  | 'intent_raced';
 
 function parseFinalClaimTransition(
   value: unknown,
@@ -206,14 +216,26 @@ function parseFinalClaimTransition(
   const row = value[0];
   if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
   const evidence = row as Record<string, unknown>;
-  if (evidence.applied !== true || typeof evidence.disposition !== 'string') return null;
-  if (handlerSuccess) {
-    return evidence.disposition === 'completed' ? 'completed' : null;
+  if (
+    typeof evidence.applied !== 'boolean'
+    || typeof evidence.disposition !== 'string'
+  ) {
+    return null;
   }
-  return evidence.disposition === 'failed'
-    || evidence.disposition === 'completed_from_evidence'
-    ? evidence.disposition
-    : null;
+  const disposition = evidence.disposition as FinalClaimDisposition;
+  if (disposition === 'completed') {
+    return evidence.applied && handlerSuccess ? disposition : null;
+  }
+  if (disposition === 'failed' || disposition === 'completed_from_evidence') {
+    return evidence.applied && !handlerSuccess ? disposition : null;
+  }
+  if (disposition === 'operator_held' || disposition === 'requeued') {
+    return evidence.applied ? disposition : null;
+  }
+  if (disposition === 'stale_claim' || disposition === 'intent_raced') {
+    return evidence.applied ? null : disposition;
+  }
+  return null;
 }
 
 // ============================================================
@@ -981,12 +1003,34 @@ async function handleDeliverReceipt(
   guild: Guild,
   supabase: SupabaseClient,
   payload: Record<string, unknown>,
+  context: ClaimedActionContext,
 ): Promise<ActionResult> {
   const p = payload as unknown as Partial<ReceiptDeliveryPayload>;
-  if (!p.discord_id || !p.order_number || !p.product_name) {
+  if (
+    !p.discord_id
+    || !p.customer_id
+    || !p.product_id
+    || !p.order_id
+    || !p.order_number
+    || !p.product_name
+    || p.guild_id !== guild.id
+    || [p.customer_id, p.discord_id, p.product_id, p.order_id, p.order_number, p.product_name]
+      .some(
+      (value) => typeof value !== 'string' || value.length === 0 || value.trim() !== value,
+    )
+    || !Number.isSafeInteger(p.amount_cents)
+    || (p.amount_cents ?? -1) < 0
+    || typeof p.currency !== 'string'
+    || p.currency.length === 0
+    || p.currency.trim() !== p.currency
+    || (
+      (p.license_key_id === undefined) !== (p.license_key_plaintext === undefined)
+    )
+  ) {
     return {
       success: false,
-      error: 'Missing required fields: discord_id, order_number, product_name',
+      error:
+        'Missing or mismatched canonical receipt identity fields',
       retryable: false,
     };
   }
@@ -1001,10 +1045,12 @@ async function handleDeliverReceipt(
     parsedOrderDate && !Number.isNaN(parsedOrderDate.getTime()) ? parsedOrderDate : new Date();
 
   try {
-    // Buyer-facing receipt: framed with the owner's white-label kit (cached).
+    // All preparation is provably pre-send and happens before generation
+    // binding or outward begin. A brand/user/DM-channel failure can therefore
+    // be safely retried without creating ambiguous durable evidence.
     const brandKit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name });
     const user = await guild.client.users.fetch(p.discord_id);
-    await deliverReceiptDM(
+    const deliver = await prepareReceiptDM(
       user,
       {
         orderNumber: p.order_number,
@@ -1016,7 +1062,94 @@ async function handleDeliverReceipt(
       },
       brandKit,
     );
-    return { success: true, data: { orderNumber: p.order_number, delivered: true } };
+
+    const { data: generationData, error: generationError } = await (
+      supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof supabase.rpc>
+    )('commerce_prepare_action_outward_generation', {
+      p_action_id: context.actionId,
+      p_claim_token: context.claimToken,
+      p_guild_id: guild.id,
+      p_order_id: p.order_id,
+      p_customer_id: p.customer_id,
+      p_discord_id: p.discord_id,
+      p_product_id: p.product_id,
+      p_order_number: p.order_number,
+      p_product_name: p.product_name,
+      p_amount_cents: p.amount_cents,
+      p_currency: p.currency,
+      p_license_key_id: p.license_key_id ?? null,
+      p_license_key_plaintext: p.license_key_plaintext ?? null,
+    });
+    if (generationError) {
+      const permanentBindRejection = new Set([
+        '22023',
+        '22P02',
+        '23503',
+        '23514',
+        '42501',
+      ]).has(String((generationError as { code?: unknown }).code ?? ''));
+      return {
+        success: false,
+        error: `Receipt outward generation could not be bound: ${generationError.message}`,
+        retryable: !permanentBindRejection,
+      };
+    }
+    const generation = Array.isArray(generationData)
+      ? (generationData.length === 1 ? generationData[0] : null)
+      : generationData;
+    if (
+      !generation
+      || typeof generation !== 'object'
+      || Array.isArray(generation)
+      || generation.action_id !== context.actionId
+      || generation.claim_token !== context.claimToken
+      || generation.order_id !== p.order_id
+      || generation.guild_id !== guild.id
+      || generation.customer_id !== p.customer_id
+      || generation.discord_id !== p.discord_id
+      || generation.product_id !== p.product_id
+      || generation.order_number !== p.order_number
+      || generation.product_name !== p.product_name
+      || generation.amount_cents !== p.amount_cents
+      || generation.currency !== p.currency
+      || generation.license_key_id !== (p.license_key_id ?? null)
+      || !['prepared', 'replay'].includes(String(generation.disposition))
+      || typeof generation.outward_generation_id !== 'string'
+      || generation.outward_generation_id.length === 0
+      || generation.outward_generation_id.trim() !== generation.outward_generation_id
+    ) {
+      return {
+        success: false,
+        error: 'Receipt outward generation returned malformed or operator-held evidence',
+        retryable: false,
+      };
+    }
+
+    const outward = await runCommerceOutwardIntent(
+      supabase,
+      {
+        orderId: p.order_id,
+        guildId: guild.id,
+        intentKind: 'receipt_dm',
+        outwardGenerationId: generation.outward_generation_id,
+        actionId: context.actionId,
+        claimToken: context.claimToken,
+      },
+      preparedOutwardEffect(deliver),
+      'generated',
+    );
+    if (outward.state === 'sent') {
+      return { success: true, data: { orderNumber: p.order_number, delivered: true } };
+    }
+    return {
+      success: false,
+      error: 'Receipt delivery acceptance is uncertain and requires operator reconciliation',
+      retryable: false,
+      data: { orderNumber: p.order_number, delivered: false },
+    };
   } catch (err) {
     const kind = classifyDeliveryError(err);
     const msg = err instanceof Error ? err.message : String(err);
@@ -3161,7 +3294,22 @@ async function processAction(
     log.warn(`Final claim was no longer current for ${claimedAction.id}`);
     return;
   }
-  const finalSuccess = finalDisposition !== 'failed';
+  if (finalDisposition === 'requeued') {
+    log.info(
+      `Re-queued ${claimedAction.action} (${claimedAction.id}) for incomplete outward delivery`,
+    );
+    return;
+  }
+  if (finalDisposition === 'stale_claim' || finalDisposition === 'intent_raced') {
+    log.warn(
+      `Final claim ${finalDisposition === 'stale_claim' ? 'was stale' : 'raced an outward intent'} `
+      + `for ${claimedAction.id}`,
+    );
+    return;
+  }
+  const finalSuccess =
+    finalDisposition === 'completed'
+    || finalDisposition === 'completed_from_evidence';
 
   // Audit log. The payload is redacted first: deliver_receipt / fulfill_*
   // payloads carry the plaintext license key (by design, for retryability),
@@ -3273,7 +3421,7 @@ async function recoverStaleActions(
   const rows: Array<{
     id: string;
     action: string;
-    disposition: 'completed' | 'requeued' | 'failed' | 'operator_held';
+    disposition: 'completed' | 'requeued' | 'failed' | 'operator_held' | 'intent_raced';
   }> = [];
   const recoveredIds = new Set<string>();
   for (const value of recovered) {
@@ -3283,7 +3431,7 @@ async function recoverStaleActions(
       || !isExactNonBlankString(row.id)
       || !isExactNonBlankString(row.action)
       || typeof row.disposition !== 'string'
-      || !['completed', 'requeued', 'failed', 'operator_held'].includes(
+      || !['completed', 'requeued', 'failed', 'operator_held', 'intent_raced'].includes(
         row.disposition,
       )
       || recoveredIds.has(row.id)
@@ -3298,6 +3446,7 @@ async function recoverStaleActions(
 
   const failedCount = rows.filter((row) => row.disposition === 'failed').length;
   const operatorHeldCount = rows.filter((row) => row.disposition === 'operator_held').length;
+  const intentRacedCount = rows.filter((row) => row.disposition === 'intent_raced').length;
   const completedCount = rows.filter((row) => row.disposition === 'completed').length;
   const requeued = rows.filter((row) => row.disposition === 'requeued');
   const requeuedCount = requeued.length;
@@ -3308,6 +3457,9 @@ async function recoverStaleActions(
     log.warn(
       `Held ${operatorHeldCount} stale role-delivery action(s) for exact operator recovery`,
     );
+  }
+  if (intentRacedCount > 0) {
+    log.info(`Deferred ${intentRacedCount} stale action(s) after an outward intent race`);
   }
   if (completedCount > 0) {
     log.info(`Completed ${completedCount} stale action(s) from durable success evidence`);
