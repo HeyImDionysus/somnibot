@@ -2,7 +2,9 @@
  * Tests for POST /api/paypal/webhook — PayPal webhook handler.
  * V7 Audit §13.P2a: Critical payment path coverage.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 
 const { replaySecret } = vi.hoisted(() => {
   const secret = 'test-webhook-replay-secret';
@@ -33,6 +35,13 @@ vi.mock('@/lib/api/rate-limit', () => ({
 
 import { POST } from '@/app/api/paypal/webhook/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import {
+  getPayPalRuntimeConfig,
+  getPayPalToken,
+  getPayPalTokenResult,
+  getPayPalWebhookId,
+} from '@/lib/paypal';
+import { rateLimits } from '@/lib/api/rate-limit';
 
 const mockFrom = vi.fn();
 const mockRpc = vi.fn();
@@ -75,7 +84,22 @@ function makeReplayRequest(body: unknown) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
+  vi.mocked(getPayPalRuntimeConfig).mockResolvedValue({
+    apiBase: 'https://api-m.sandbox.paypal.com',
+    webhookId: 'test-webhook-id',
+  } as never);
+  vi.mocked(getPayPalToken).mockResolvedValue('test-token');
+  vi.mocked(getPayPalTokenResult).mockResolvedValue({
+    ok: true,
+    token: 'test-token',
+  });
+  vi.mocked(getPayPalWebhookId).mockResolvedValue('test-webhook-id');
+  vi.mocked(rateLimits.paypalWebhook).mockResolvedValue({
+    limited: false,
+    remaining: 1,
+    retryAfterMs: 0,
+  });
   mockRpc.mockImplementation(async (name: string) => ({
     data: name === 'webhooks_replay_claim_is_current'
       || name === 'webhooks_finish_replay_claim'

@@ -4,7 +4,9 @@
  * Tests the permission system, route-level authorization, and
  * auth guard behavior (401 vs 403).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 
 // ── Mock dependencies before imports ────────────────────────
 
@@ -169,7 +171,7 @@ describe('requireGuildOwner — 401/403 responses', () => {
   const mockAdminSupabase = { from: vi.fn(() => mockQuery) };
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mockCookieGet.mockReturnValue(undefined);
     mockHeaderGet.mockReturnValue(null);
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockAdminSupabase);

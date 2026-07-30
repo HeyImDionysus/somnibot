@@ -245,7 +245,7 @@ let logSpy: ReturnType<typeof vi.spyOn>;
 let errorSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
   ops = [];
   rpcOps = [];
   transactionSearchCalls = [];
@@ -289,12 +289,12 @@ function withLedger(opts: {
   guildIds?: string[];
   inferOrders?: boolean;
 }) {
-  const payments = (opts.payments ?? []).map((payment) => ({
+  const payments: Array<Record<string, unknown>> = (opts.payments ?? []).map((payment) => ({
     provider: 'paypal',
     ...payment,
   }));
   const refunds = opts.refunds ?? [];
-  const explicitOrders = (opts.orders ?? []).map((order) => ({
+  const explicitOrders: Array<Record<string, unknown>> = (opts.orders ?? []).map((order) => ({
     order_number: null,
     status: 'completed',
     source: 'purchase',
@@ -307,7 +307,7 @@ function withLedger(opts: {
     ...order,
   }));
   const explicitIds = new Set(explicitOrders.map((order) => order.id));
-  const inferredOrders = opts.inferOrders === false
+  const inferredOrders: Array<Record<string, unknown>> = opts.inferOrders === false
     ? []
     : payments
       .filter((payment) =>
@@ -315,7 +315,7 @@ function withLedger(opts: {
         && !explicitIds.has(payment.order_id),
       )
       .map((payment) => ({
-        id: payment.order_id,
+        id: payment.order_id as string,
         order_number: null,
         guild_id: payment.guild_id,
         customer_id: CUSTOMER_UUID,
@@ -329,15 +329,15 @@ function withLedger(opts: {
         paypal_subscription_id: null,
         created_at: payment.created_at,
       }));
-  const orders = [...explicitOrders, ...inferredOrders];
-  const customers = opts.customers ?? orders
+  const orders: Array<Record<string, unknown>> = [...explicitOrders, ...inferredOrders];
+  const customers: Array<Record<string, unknown>> = opts.customers ?? orders
     .filter((order) =>
       typeof order.customer_id === 'string'
       && typeof order.guild_id === 'string',
     )
     .map((order) => ({
-      id: order.customer_id,
-      guild_id: order.guild_id,
+      id: order.customer_id as string,
+      guild_id: order.guild_id as string,
       discord_id: order.customer_discord_id ?? DISCORD_ID,
     }));
   const page = (rows: Array<Record<string, unknown>>, op: RecordedOp) => {

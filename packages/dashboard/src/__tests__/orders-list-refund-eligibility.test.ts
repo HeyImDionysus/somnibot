@@ -152,7 +152,7 @@ function configureList(input: {
 
 describe('GET /api/orders durable refund projection', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
     mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>, { guildId: GUILD_ID });
   });

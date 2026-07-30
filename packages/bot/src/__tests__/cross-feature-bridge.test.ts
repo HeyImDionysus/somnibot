@@ -22,7 +22,7 @@ describe('CrossFeatureBridge — giveaway cleanup batching', () => {
   };
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mockRpc.mockResolvedValue({ data: [{ removed: true }] });
   });
 
@@ -67,7 +67,6 @@ describe('CrossFeatureBridge — giveaway cleanup batching', () => {
 
   it('skips when no active giveaways', async () => {
     const giveaways: Array<{ id: string }> = [];
-    if (giveaways.length === 0) return; // early return matches bridge logic
 
     await Promise.allSettled(
       giveaways.map((g) =>

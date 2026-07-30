@@ -85,7 +85,7 @@ function setAuth(
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockSupabase);
   setAuth({ isOwner: true });
 });

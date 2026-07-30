@@ -216,7 +216,13 @@ async function automodAuditCount(handle: LiveClientHandle): Promise<number | nul
     .from('audit_logs')
     .select('*', { count: 'exact', head: true })
     .eq('guild_id', handle.guildId)
-    .like('action', 'automod.%');
+    .in('action', [
+      'automod.delete',
+      'automod.warn',
+      'automod.mute',
+      'automod.kick',
+      'automod.ban',
+    ]);
   if (error) return null;
   return count ?? 0;
 }
@@ -508,7 +514,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
       assertionClass: 'audit',
       channel: 'audit-row',
       promise: 'No enforcement audit event (automod.delete/warn/mute/kick/ban) is written anywhere in the run under the observe default.',
-      observation: `audit_logs holds ${enforcementAudits} automod.* enforcement row(s) for the scenario guild.`,
+      observation: `audit_logs holds ${enforcementAudits} automod.delete/warn/mute/kick/ban row(s) for the scenario guild.`,
       impact: 'An automod enforcement audit row exists under the observe-only default — a member was actioned when none should be.',
     });
   }

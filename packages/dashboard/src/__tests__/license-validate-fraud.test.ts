@@ -109,7 +109,7 @@ function flushAsync() {
 let errorSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   (rateLimits.licenseValidate as ReturnType<typeof vi.fn>).mockResolvedValue({ limited: false, remaining: 29, retryAfterMs: 0 });
   (rateLimits.licensePerKey as ReturnType<typeof vi.fn>).mockResolvedValue({ limited: false, remaining: 59, retryAfterMs: 0 });
   errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

@@ -4,7 +4,9 @@
  * Verifies consistent response shapes across success, error, and server
  * error cases — the contract every API route relies on.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 import { apiSuccess, apiError, apiServerError, dbError } from '@/lib/api/response';
 
 describe('apiSuccess', () => {

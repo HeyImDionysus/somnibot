@@ -107,6 +107,8 @@ jobs:
         run: pnpm --filter @somnibot/bot type-check
       - name: Typecheck dashboard
         run: pnpm --filter @somnibot/dashboard type-check
+      - name: Typecheck dashboard tests
+        run: pnpm --filter @somnibot/dashboard type-check:test
       - name: Typecheck license-sdk
         run: pnpm --filter @somnibot/license-sdk typecheck
 
@@ -135,6 +137,8 @@ jobs:
         run: pnpm --filter @somnibot/shared build
       - name: Lint dashboard
         run: pnpm --filter @somnibot/dashboard lint
+      - name: Audit test integrity
+        run: pnpm --filter @somnibot/dashboard test:integrity
 
   # ──────────────────────────────────────────────────────────────────────────
   # 4. Build — full production build (validates all packages compile)

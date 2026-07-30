@@ -46,7 +46,10 @@ function buildRequest(params: Record<string, string> = {}) {
 // ── Tests ───────────────────────────────────────────────────
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  mockQueryChain.select.mockReturnThis();
+  mockQueryChain.eq.mockReturnThis();
+  mockSupabase.from.mockReturnValue(mockQueryChain);
   mockRateLimit.mockResolvedValue(null);
   mockRequireGuildOwner.mockResolvedValue({
     ok: true,

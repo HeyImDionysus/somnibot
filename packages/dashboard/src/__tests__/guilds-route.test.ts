@@ -29,6 +29,7 @@ import { requireAuth } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { checkRateLimit } from '@/lib/api/rate-limit';
 import { TRUSTED_PROXY_HOPS_ENV } from '@/lib/api/client-ip';
+import { cookies } from 'next/headers';
 
 const mockFrom = vi.fn();
 const mockAdmin = { from: mockFrom };
@@ -42,9 +43,15 @@ function makeRequest(headers?: Record<string, string>) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mockCookieGet.mockReturnValue(undefined);
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockAdmin);
+  vi.mocked(cookies).mockResolvedValue({ get: mockCookieGet } as never);
+  (checkRateLimit as ReturnType<typeof vi.fn>).mockResolvedValue({
+    limited: false,
+    remaining: 30,
+    retryAfterMs: 0,
+  });
   process.env[TRUSTED_PROXY_HOPS_ENV] = '1';
 });
 

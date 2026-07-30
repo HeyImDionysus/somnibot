@@ -131,7 +131,7 @@ function makeSupa(cfg = banConfig) {
 
 describe('Anti-Raid auto-unban (§8.2)', () => {
   beforeEach(async () => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     // Default: raid mode NOT active, no pending bans
     mockGet.mockResolvedValue(null);
     mockSmembers.mockResolvedValue([]);

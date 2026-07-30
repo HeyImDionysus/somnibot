@@ -148,7 +148,7 @@ function refund() {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
   recorded = [];
   ordersRow = {
     id: ORDER_ID,

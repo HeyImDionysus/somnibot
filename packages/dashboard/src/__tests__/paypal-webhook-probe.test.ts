@@ -9,6 +9,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+afterEach(() => vi.restoreAllMocks());
+
 const { replaySecret } = vi.hoisted(() => {
   const secret = 'test-webhook-replay-secret';
   process.env.NEXTAUTH_SECRET = 'test-secret-for-webhook-tests';
@@ -35,6 +37,12 @@ vi.mock('@/lib/api/rate-limit', () => ({
 
 import { POST } from '@/app/api/paypal/webhook/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import {
+  getPayPalRuntimeConfig,
+  getPayPalToken,
+  getPayPalWebhookId,
+} from '@/lib/paypal';
+import { rateLimits } from '@/lib/api/rate-limit';
 import {
   SETUP_WEBHOOK_PROBE_HEADER,
   buildSetupWebhookProbeEcho,
@@ -81,7 +89,18 @@ function makeWebhookRequest(body: string, headers?: Record<string, string>) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
+  vi.mocked(getPayPalRuntimeConfig).mockResolvedValue({
+    apiBase: 'https://api-m.sandbox.paypal.com',
+    webhookId: 'test-webhook-id',
+  } as never);
+  vi.mocked(getPayPalToken).mockResolvedValue('test-token');
+  vi.mocked(getPayPalWebhookId).mockResolvedValue('test-webhook-id');
+  vi.mocked(rateLimits.paypalWebhook).mockResolvedValue({
+    limited: false,
+    remaining: 1,
+    retryAfterMs: 0,
+  });
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockSupabase);
 });
 

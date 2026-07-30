@@ -10,7 +10,9 @@
  * explicit lists verbatim, and surface the RPC's 23514 authority rejection
  * as a conflict rather than a generic 500.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
@@ -71,7 +73,7 @@ function setup() {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
   mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);
   mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
 });

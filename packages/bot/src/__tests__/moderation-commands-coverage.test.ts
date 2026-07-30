@@ -64,7 +64,63 @@ import {
   handleInfractionsCommand,
 } from '../features/moderation/commands.js';
 
-import { getEscalationAction } from '../features/moderation/escalation.js';
+import {
+  calculateExpiryDate,
+  createInfraction,
+  getActiveWarningCount,
+  getMemberInfractions,
+  pardonInfraction,
+} from '../features/moderation/infraction-service.js';
+import {
+  executeEscalation,
+  getEscalationAction,
+} from '../features/moderation/escalation.js';
+import { postModLogEntry } from '../features/moderation/mod-log.js';
+import { EmbedBuilder } from 'discord.js';
+
+function resetModerationMocks(): void {
+  vi.resetAllMocks();
+  vi.mocked(EmbedBuilder).mockImplementation(function () {
+    const embed: any = {};
+    for (const method of [
+      'setColor',
+      'setTitle',
+      'setDescription',
+      'setFooter',
+      'setTimestamp',
+      'addFields',
+      'setAuthor',
+      'setThumbnail',
+    ]) {
+      embed[method] = vi.fn().mockReturnValue(embed);
+    }
+    return embed;
+  } as never);
+  vi.mocked(createInfraction).mockResolvedValue({
+    infraction: { id: 'inf1', type: 'warn' },
+    replayed: false,
+  } as never);
+  vi.mocked(getMemberInfractions).mockResolvedValue([
+    {
+      id: 'inf1',
+      type: 'warn',
+      reason: 'test',
+      created_at: '2026-01-01',
+      active: true,
+      moderator_id: 'mod1',
+    },
+  ] as never);
+  vi.mocked(getActiveWarningCount).mockResolvedValue(2);
+  vi.mocked(pardonInfraction).mockResolvedValue({
+    id: 'inf1',
+    type: 'warn',
+    pardoned: true,
+  } as never);
+  vi.mocked(calculateExpiryDate).mockReturnValue('2026-02-01' as never);
+  vi.mocked(executeEscalation).mockResolvedValue(null);
+  vi.mocked(getEscalationAction).mockReturnValue(null);
+  vi.mocked(postModLogEntry).mockResolvedValue(undefined);
+}
 
 function chain(val: any = { data: null, error: null }) {
   const c: any = {};
@@ -158,7 +214,7 @@ describe('buildModerationCommands', () => {
 });
 
 describe('handleWarnCommand', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(resetModerationMocks);
 
   it('warns a member', async () => {
     const c = client();
@@ -206,7 +262,7 @@ describe('handleWarnCommand', () => {
 });
 
 describe('handleMuteCommand', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(resetModerationMocks);
 
   it('mutes a member', async () => {
     const i = interaction({ duration: 60 });
@@ -234,7 +290,7 @@ describe('handleMuteCommand', () => {
 });
 
 describe('handleKickCommand', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(resetModerationMocks);
 
   it('kicks a member', async () => {
     const i = interaction();
@@ -250,7 +306,7 @@ describe('handleKickCommand', () => {
 });
 
 describe('handleBanCommand', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(resetModerationMocks);
 
   it('bans a member', async () => {
     const i = interaction();
@@ -266,7 +322,7 @@ describe('handleBanCommand', () => {
 });
 
 describe('handlePardonCommand', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(resetModerationMocks);
 
   it('pardons an infraction', async () => {
     const i = interaction({ infractionId: 'inf1' });
@@ -276,7 +332,7 @@ describe('handlePardonCommand', () => {
 });
 
 describe('handleInfractionsCommand', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(resetModerationMocks);
 
   it('lists infractions', async () => {
     const i = interaction();
@@ -306,7 +362,7 @@ describe('handleInfractionsCommand', () => {
 });
 
 describe('moderation command permission gates', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(resetModerationMocks);
 
   it('handleBanCommand denies an invoker without BanMembers', async () => {
     const i = interaction({ hasPermission: false });

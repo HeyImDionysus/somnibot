@@ -23,6 +23,7 @@ vi.mock('@/lib/api/rate-limit', () => ({
 
 import { POST as heartbeatPost } from '@/app/api/license/heartbeat/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { rateLimits } from '@/lib/api/rate-limit';
 import {
   buildRequest,
   createMockSupabase,
@@ -194,7 +195,12 @@ function heartbeatRequest() {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  vi.mocked(rateLimits.licenseHeartbeat).mockResolvedValue({
+    limited: false,
+    remaining: 19,
+    retryAfterMs: 0,
+  });
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
 });

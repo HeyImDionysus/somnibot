@@ -121,7 +121,7 @@ describe('getEscalationAction', () => {
 });
 
 describe('executeEscalation', () => {
-  beforeEach(() => { vi.clearAllMocks(); });
+  beforeEach(() => { vi.resetAllMocks(); });
 
   it('returns null when action is warn', async () => {
     mockGetActiveInfractionCount.mockResolvedValueOnce(1);

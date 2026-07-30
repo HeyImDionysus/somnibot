@@ -63,7 +63,7 @@ function req(path: string, method: string) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
 });
 
 describe('rbac/roles audit', () => {

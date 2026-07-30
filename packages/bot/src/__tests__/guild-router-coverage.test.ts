@@ -33,6 +33,7 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
 
 import { GuildRouter, getGuildId } from '../guild-router.js';
 import { destroyGuildServices } from '../guild-init.js';
+import { GuildContext } from '../guild-context.js';
 
 function makeGuild(id: string, name = 'Test Guild') {
   return { id, name };
@@ -56,7 +57,15 @@ function makeDeps(guildMap: Record<string, any> = { g1: makeGuild('g1') }) {
 describe('GuildRouter', () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.clearAllMocks();
+    vi.resetAllMocks();
+    vi.mocked(GuildContext).mockImplementation(function (this: any, guild: any) {
+      this.guild = guild;
+      this.guildId = guild.id;
+      this.loadConfig = vi.fn().mockResolvedValue(undefined);
+      this.destroy = vi.fn();
+      this.getManager = vi.fn();
+      return this;
+    } as never);
   });
 
   afterEach(() => {

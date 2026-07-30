@@ -89,7 +89,7 @@ describe('POST /api/store/products PayPal readiness', () => {
   let plansTable: ReturnType<typeof registerTable>;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mock = createMockSupabase();
     productsTable = registerTable(mock, 'products');
     plansTable = registerTable(mock, 'plans');

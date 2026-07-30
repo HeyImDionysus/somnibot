@@ -21,10 +21,11 @@ import {
   mockRateLimitPass,
 } from './helpers';
 
-const mock = createMockSupabase();
+let mock: ReturnType<typeof createMockSupabase>;
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  mock = createMockSupabase();
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
   mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
 });

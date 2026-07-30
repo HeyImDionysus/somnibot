@@ -92,7 +92,7 @@ describe('runReconciliation', () => {
   let guild: ReturnType<typeof makeGuild>;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it('runs full reconciliation with active entitlements (roles present)', async () => {

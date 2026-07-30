@@ -6,6 +6,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+afterEach(() => vi.restoreAllMocks());
+
 const { replaySecret } = vi.hoisted(() => {
   const secret = 'test-edge-webhook-replay-secret';
   process.env.NEXTAUTH_SECRET = 'test-secret-edge';
@@ -46,7 +48,13 @@ import {
   handleSubscriptionSuspended as handleSubscriptionSuspendedWithChronology,
 } from '@/app/api/paypal/webhook/handlers';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { getSubscriptionAmount } from '@/lib/paypal';
+import {
+  getPayPalRuntimeConfig,
+  getPayPalToken,
+  getPayPalTokenResult,
+  getSubscriptionAmount,
+} from '@/lib/paypal';
+import { rateLimits } from '@/lib/api/rate-limit';
 
 const handlePaymentCaptured = (
   supabase: Parameters<typeof handlePaymentCapturedWithEvent>[0],
@@ -168,7 +176,9 @@ function providerIncidentResult(args: Record<string, unknown>) {
  */
 function makeMockSupabase() {
   const fromFn = vi.fn();
-  const rpc = vi.fn(async (name: string, args: Record<string, unknown>) =>
+  const rpc = vi.fn<
+    (name: string, args: Record<string, unknown>) => Promise<MockRowResult>
+  >(async (name: string, args: Record<string, unknown>) =>
     name === 'webhooks_replay_claim_is_current'
       || name === 'webhooks_finish_replay_claim'
       ? { data: true, error: null }
@@ -1162,7 +1172,27 @@ function createCaptureRecoveryHarness(options: {
 let mockSb: ReturnType<typeof makeMockSupabase>;
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  vi.mocked(getPayPalRuntimeConfig).mockResolvedValue({
+    apiBase: 'https://api-m.sandbox.paypal.com',
+    webhookId: 'test-webhook-id',
+  } as never);
+  vi.mocked(getPayPalToken).mockResolvedValue('test-token');
+  vi.mocked(getPayPalTokenResult).mockResolvedValue({
+    ok: true,
+    token: 'test-token',
+  });
+  vi.mocked(getSubscriptionAmount).mockResolvedValue({
+    amountCents: 999,
+    currency: 'USD',
+    planId: 'PAYPAL-PLAN-1',
+    nextBillingTime: '2026-08-29T00:00:00.000Z',
+  });
+  vi.mocked(rateLimits.paypalWebhook).mockResolvedValue({
+    limited: false,
+    remaining: 1,
+    retryAfterMs: 0,
+  });
   mockSb = makeMockSupabase();
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockSb);
 });
@@ -1468,7 +1498,7 @@ describe('PayPal webhook — edge cases', () => {
     });
 
     await expect(handleSubscriptionPayment(
-      mockSb,
+      mockSb as unknown as Parameters<typeof handleSubscriptionPayment>[0],
       {
         id: 'SALE-ROUTER-FAILURE',
         billing_agreement_id: order.paypal_subscription_id,
@@ -2725,6 +2755,7 @@ describe('PayPal webhook — edge cases', () => {
         amountCents: 1_299,
         currency: 'USD',
         planId: 'PAYPAL-PLAN-1',
+        nextBillingTime: '2026-08-29T00:00:00.000Z',
       });
       const { supabase, state, rpc } = createCaptureRecoveryHarness({ subscription: true });
       state.order.status = 'completed';
@@ -2812,7 +2843,7 @@ describe('PayPal webhook — edge cases', () => {
       await handleSubscriptionActivated(supabase, resource);
       expect(state.queue.status).toBe('pending');
       expect(rpc.mock.calls.filter(
-        ([name]: [string]) => name === 'commerce_adopt_legacy_subscription_grant_contract',
+        ([name]) => name === 'commerce_adopt_legacy_subscription_grant_contract',
       )).toHaveLength(2);
 
       state.queue.payload.granted_role_ids = ['999999999999999999'];
@@ -2962,6 +2993,7 @@ describe('PayPal webhook — edge cases', () => {
         amountCents: 999,
         currency: 'USD',
         planId: 'PAYPAL-PLAN-OTHER',
+        nextBillingTime: '2026-08-29T00:00:00.000Z',
       });
       const { supabase, state, rpc } = createCaptureRecoveryHarness({ subscription: true });
       const resource = {
@@ -3040,6 +3072,7 @@ describe('PayPal webhook — edge cases', () => {
         amountCents: 1_299,
         currency: 'eur',
         planId: 'PAYPAL-PLAN-1',
+        nextBillingTime: '2026-08-29T00:00:00.000Z',
       });
       const { supabase, state } = createCaptureRecoveryHarness({ subscription: true });
       // The bot freezes this snapshot before it exposes the subscription link.
@@ -3082,6 +3115,7 @@ describe('PayPal webhook — edge cases', () => {
         amountCents: 1_299,
         currency: 'EUR',
         planId: 'PAYPAL-PLAN-1',
+        nextBillingTime: '2026-08-29T00:00:00.000Z',
       });
       const { supabase, state, rpc } = createCaptureRecoveryHarness({
         subscription: true,
@@ -3225,6 +3259,7 @@ describe('PayPal webhook — edge cases', () => {
         amountCents: 1_299,
         currency: 'EUR',
         planId: 'PAYPAL-PLAN-1',
+        nextBillingTime: '2026-08-29T00:00:00.000Z',
       });
       const { supabase, state } = createCaptureRecoveryHarness({ subscription: true });
       state.order.status = 'completed';
@@ -3259,6 +3294,7 @@ describe('PayPal webhook — edge cases', () => {
         amountCents: 1_299,
         currency: 'EUR',
         planId: 'PAYPAL-PLAN-1',
+        nextBillingTime: '2026-08-29T00:00:00.000Z',
       });
       const { supabase, state, rpc } = createCaptureRecoveryHarness({ subscription: true });
       state.order.status = 'completed';

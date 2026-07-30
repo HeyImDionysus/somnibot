@@ -81,7 +81,7 @@ const patchReq = (body: unknown) =>
 const params = (id = REQ_ID) => ({ params: Promise.resolve({ id }) });
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
   vi.mocked(requireGuildOwner).mockResolvedValue({
     ok: true,
     ctx: { userId: 'u', discordId: OWNER, guildId: GUILD },

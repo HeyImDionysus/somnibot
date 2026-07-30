@@ -30,6 +30,7 @@ import {
 } from '@/app/api/paypal/webhook/verify';
 import { POST } from '@/app/api/paypal/webhook/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { rateLimits } from '@/lib/api/rate-limit';
 import { createMockSupabase, registerTable } from './helpers';
 
 const originalEnv = { ...process.env };
@@ -103,7 +104,12 @@ let warnSpy: ReturnType<typeof vi.spyOn>;
 let errorSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  vi.mocked(rateLimits.paypalWebhook).mockResolvedValue({
+    limited: false,
+    remaining: 1,
+    retryAfterMs: 0,
+  });
   process.env = { ...originalEnv };
   // Fully env-sourced PayPal config so no Supabase read happens in config load.
   process.env.PAYPAL_API_BASE = 'https://api-m.sandbox.paypal.com';

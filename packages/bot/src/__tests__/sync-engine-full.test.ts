@@ -93,7 +93,7 @@ function makeConfig(overrides: Partial<SyncConfig> = {}): SyncConfig {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
 });
 
 describe('runSyncCycle', () => {

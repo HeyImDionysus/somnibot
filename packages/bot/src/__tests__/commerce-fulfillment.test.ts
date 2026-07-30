@@ -1145,7 +1145,7 @@ describe('CommerceFulfillmentService', () => {
   let eventBus: any;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     eventBus = {
       emit: vi.fn(),
       emitAndWait: vi.fn(async () => {}),

@@ -50,7 +50,10 @@ afterEach(() => {
 
 describe('csrf-fetch exempt-prefix passthrough (A1)', () => {
   it('passes mutations to every exempt prefix through untouched — no preflight, no header injection', async () => {
-    const baseFetch = vi.fn(async () => json({ ok: true }));
+    const baseFetch = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => json({ ok: true }));
     const wrapped = await install(baseFetch);
 
     const paths = CSRF_EXEMPT_PREFIXES.map((prefix) =>
@@ -69,7 +72,10 @@ describe('csrf-fetch exempt-prefix passthrough (A1)', () => {
   });
 
   it('still injects the token for non-exempt mutations (sanity contrast)', async () => {
-    const baseFetch = vi.fn(async (input: RequestInfo | URL) => {
+    const baseFetch = vi.fn(async (
+      input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
       if (String(input).includes('/api/csrf')) return json({ token: 'tok-1' });
       return json({ ok: true });
     });

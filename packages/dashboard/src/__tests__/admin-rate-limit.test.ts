@@ -21,7 +21,7 @@ function allow() {
 const originalHops = process.env[TRUSTED_PROXY_HOPS_ENV];
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   resetClientIpWarnings();
   // Production Compose explicitly opts into the shipped Caddy's canonical
   // single-entry X-Forwarded-For contract.

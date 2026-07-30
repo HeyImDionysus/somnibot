@@ -43,7 +43,7 @@ function makeAdmin() {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   (requirePermission as ReturnType<typeof vi.fn>).mockResolvedValue({
     guildId: 'guild-1',
     discordId: 'discord-1',

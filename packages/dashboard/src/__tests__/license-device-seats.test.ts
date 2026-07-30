@@ -30,6 +30,7 @@ vi.mock('@/lib/api/rate-limit', () => ({
 
 import { POST } from '@/app/api/license/validate/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { rateLimits } from '@/lib/api/rate-limit';
 import { createMockSupabase, registerTable, buildRequest } from './helpers';
 
 const PRODUCT_ID = '00000000-0000-4000-a000-000000000001';
@@ -89,7 +90,10 @@ function req(body: Record<string, unknown> = {}) {
 let errorSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
+  vi.mocked(rateLimits.licenseValidate).mockResolvedValue({ limited: false, remaining: 29, retryAfterMs: 0 });
+  vi.mocked(rateLimits.licensePerKey).mockResolvedValue({ limited: false, remaining: 59, retryAfterMs: 0 });
+  vi.mocked(rateLimits.licenseFailedAttempt).mockResolvedValue({ limited: false, remaining: 4, retryAfterMs: 0 });
   errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 

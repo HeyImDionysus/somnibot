@@ -40,8 +40,20 @@ vi.mock('next/headers', () => ({
   }),
 }));
 
+import { createServerSupabase } from '@/lib/supabase/server';
+import { createAdminSupabase } from '@/lib/supabase/admin';
+import { cookies, headers } from 'next/headers';
+
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  vi.mocked(createServerSupabase).mockResolvedValue({
+    auth: { getUser: mockGetUser },
+  } as never);
+  vi.mocked(createAdminSupabase).mockReturnValue({
+    from: mockAdminFrom,
+  } as never);
+  vi.mocked(cookies).mockResolvedValue({ get: mockCookieGet } as never);
+  vi.mocked(headers).mockResolvedValue({ get: mockHeaderGet } as never);
   mockCookieGet.mockReturnValue(undefined);
   mockHeaderGet.mockReturnValue(null);
 });
@@ -49,7 +61,7 @@ beforeEach(() => {
 // ── Helper to build chainable Supabase query mock ──────────
 
 function chainMock(resolvedData: unknown) {
-  const chain: Record<string, ReturnType<typeof vi.fn>> = {};
+  const chain: Record<string, unknown> = {};
   chain.select = vi.fn().mockReturnValue(chain);
   chain.eq = vi.fn().mockReturnValue(chain);
   chain.in = vi.fn().mockReturnValue(chain);

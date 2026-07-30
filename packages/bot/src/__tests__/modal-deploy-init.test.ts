@@ -254,15 +254,10 @@ describe('MusicPlayerManager', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    try {
-      ({ MusicPlayerManager } = await import('../features/music/music-player.js'));
-    } catch {
-      MusicPlayerManager = null;
-    }
+    ({ MusicPlayerManager } = await import('../features/music/music-player.js'));
   });
 
   it('constructs with 5 args', () => {
-    if (!MusicPlayerManager) return;
     const guild = { id: 'guild-1' };
     const shoukaku = { players: new Map(), on: vi.fn() };
     const supa = makeSupa();
@@ -282,15 +277,10 @@ describe('FarmingManager', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    try {
-      ({ FarmingManager } = await import('../features/farming/farming-manager.js'));
-    } catch {
-      FarmingManager = null;
-    }
+    ({ FarmingManager } = await import('../features/farming/farming-manager.js'));
   });
 
   it('constructs with args', () => {
-    if (!FarmingManager) return;
     const guild = { id: 'guild-1' };
     const supa = makeSupa();
     const valkey = { get: vi.fn(), set: vi.fn(), del: vi.fn() };

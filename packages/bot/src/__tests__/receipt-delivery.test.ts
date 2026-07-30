@@ -384,7 +384,7 @@ function permanentDmError() {
 }
 
 afterEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mockDeliverReceiptDM.mockReset();
   mockDeliverReceiptDM.mockImplementation(async () => {});
 });

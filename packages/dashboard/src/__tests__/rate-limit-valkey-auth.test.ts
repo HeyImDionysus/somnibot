@@ -1,6 +1,8 @@
 import { createServer, type Server, type Socket } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+afterEach(() => vi.restoreAllMocks());
+
 const originalValkeyUrl = process.env.VALKEY_URL;
 const originalRedisUrl = process.env.REDIS_URL;
 

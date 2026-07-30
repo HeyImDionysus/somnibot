@@ -4,7 +4,9 @@
  * Covers the V10 §6 batched upsert fix (sequential → single operation)
  * and the existing validation, auth, and rate-limiting contracts.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 
 vi.mock('@/lib/supabase/server', () => ({ createServerSupabase: vi.fn() }));
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
@@ -27,10 +29,11 @@ import {
   mockRateLimitPass,
 } from './helpers';
 
-const mock = createMockSupabase();
+let mock: ReturnType<typeof createMockSupabase>;
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  mock = createMockSupabase();
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
   mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
   mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);

@@ -122,7 +122,7 @@ function okAuth(guildId = 'guild-1', discordId = '123') {
 const validUndoBody = { action: 'undo', id: '00000000-0000-0000-0000-000000000001' };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
   mockRateLimit.mockResolvedValue(null); // not rate limited
   mockParseBody.mockResolvedValue({ ok: true, data: validUndoBody });
 });

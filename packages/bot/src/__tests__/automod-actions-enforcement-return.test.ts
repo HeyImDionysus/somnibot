@@ -81,7 +81,7 @@ const modConfig = {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
 });
 
 describe('executeAutoModAction — return contract', () => {

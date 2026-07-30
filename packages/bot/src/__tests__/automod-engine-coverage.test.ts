@@ -4,7 +4,9 @@
  * Imports the REAL processMessage & invalidateRulesCache functions
  * and mocks only external boundaries.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+afterEach(() => vi.restoreAllMocks());
 
 vi.mock('discord.js', () => ({}));
 

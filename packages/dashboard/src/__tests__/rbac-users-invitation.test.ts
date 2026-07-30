@@ -85,7 +85,7 @@ const CONSENT_CONFIG = {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mockRateLimit.mockResolvedValue(null);
   mockRequirePermission.mockResolvedValue({
     guildId: 'guild-1',

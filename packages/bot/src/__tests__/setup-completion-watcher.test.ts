@@ -25,7 +25,7 @@ const supabase = {} as any;
 
 describe('startSetupCompletionWatcher', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     vi.useFakeTimers();
   });
   afterEach(() => {

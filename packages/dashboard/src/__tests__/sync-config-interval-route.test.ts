@@ -40,7 +40,7 @@ function makeSupabase() {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   (checkAdminRateLimit as ReturnType<typeof vi.fn>).mockResolvedValue(null);
   (requireGuildOwner as ReturnType<typeof vi.fn>).mockResolvedValue({
     ok: true,

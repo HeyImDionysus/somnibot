@@ -12,6 +12,7 @@ vi.mock('@/lib/api/admin-rate-limit', () => ({
 import { GET, POST } from '@/app/api/reconciliation/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { NextRequest } from 'next/server';
 
 const mockQuery = {
@@ -25,8 +26,16 @@ const mockQuery = {
 const mockSupabase = { from: vi.fn(() => mockQuery) };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  mockQuery.select.mockReturnThis();
+  mockQuery.insert.mockReturnThis();
+  mockQuery.eq.mockReturnThis();
+  mockQuery.order.mockReturnThis();
+  mockQuery.limit.mockReturnThis();
+  mockQuery.maybeSingle.mockResolvedValue({ data: null });
+  mockSupabase.from.mockReturnValue(mockQuery);
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockSupabase);
+  vi.mocked(checkAdminRateLimit).mockResolvedValue(null);
 });
 
 describe('GET /api/reconciliation', () => {

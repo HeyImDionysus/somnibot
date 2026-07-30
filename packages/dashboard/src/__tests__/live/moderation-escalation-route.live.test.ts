@@ -17,8 +17,8 @@ import {
 
 const SUPA_URL = armDashboardLiveEnv();
 
-const holder = vi.hoisted(() => ({
-  cookies: async () => ({ getAll: () => [] as unknown[], get: () => undefined, set: () => {} }),
+const holder: ReturnType<typeof buildNextHeadersMock> = vi.hoisted(() => ({
+  cookies: async () => ({ getAll: () => [] as import('./_session-harness').CookieRecord[], get: () => undefined, set: () => {} }),
   headers: async () => ({ get: () => null, has: () => false }),
 }));
 vi.mock('next/headers', () => ({

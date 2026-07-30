@@ -43,6 +43,9 @@ import { POST as validatePost } from '@/app/api/license/validate/route';
 import { POST as heartbeatPost } from '@/app/api/license/heartbeat/route';
 import { GET as downloadGet } from '@/app/api/downloads/[productId]/[fileId]/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { rateLimits } from '@/lib/api/rate-limit';
+import { verifySignedDownloadUrl } from '@/lib/api/signed-url';
+import { consumeDownloadNonce } from '@/lib/api/download-nonce';
 import {
   createMockSupabase,
   registerTable,
@@ -67,7 +70,18 @@ type EntitlementFixture = {
 let errorSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
-  vi.clearAllMocks();
+    vi.resetAllMocks();
+  vi.mocked(rateLimits.licenseValidate).mockResolvedValue({ limited: false, remaining: 29, retryAfterMs: 0 });
+  vi.mocked(rateLimits.licensePerKey).mockResolvedValue({ limited: false, remaining: 59, retryAfterMs: 0 });
+  vi.mocked(rateLimits.licenseFailedAttempt).mockResolvedValue({ limited: false, remaining: 4, retryAfterMs: 0 });
+  vi.mocked(rateLimits.licenseHeartbeat).mockResolvedValue({ limited: false, remaining: 19, retryAfterMs: 0 });
+  vi.mocked(rateLimits.portalDownload).mockResolvedValue({ limited: false, remaining: 99, retryAfterMs: 0 });
+  vi.mocked(verifySignedDownloadUrl).mockReturnValue({
+    customerId: 'cust-1',
+    guildId: 'guild-1',
+    nonce: null,
+  });
+  vi.mocked(consumeDownloadNonce).mockResolvedValue('consumed');
   errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
