@@ -54,7 +54,6 @@ function createAdminMock(config: Record<string, QueryResult[]>) {
 
   const from = vi.fn((table: string) => {
     const result = queues[table]?.length ? queues[table].shift()! : { data: null, error: null };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const chain: any = {};
     for (const m of ['select', 'eq', 'lt', 'gte', 'gt', 'order', 'limit', 'in', 'neq']) {
       chain[m] = vi.fn(() => chain);

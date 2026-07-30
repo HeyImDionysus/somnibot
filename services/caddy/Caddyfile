@@ -1,13 +1,26 @@
 # SomniBot Dashboard — Caddy Reverse Proxy
 #
-# Replace {$DOMAIN} with your actual domain, or set the DOMAIN env var.
-# Caddy handles automatic HTTPS via Let's Encrypt.
+# DOMAIN is supplied by docker-compose.prod.yml.
+# CADDY_TRUSTED_PROXY_CIDRS is a space-separated allow-list of proxy source
+# networks that may contribute X-Forwarded-For. Its default is TEST-NET-1,
+# which deliberately matches no real production proxy.
 #
 # For local-only deployments without a domain, use:
 #   :80 { reverse_proxy dashboard:3000 }
+{
+	servers {
+		trusted_proxies static {$CADDY_TRUSTED_PROXY_CIDRS:192.0.2.0/24}
+		trusted_proxies_strict
+		client_ip_headers X-Forwarded-For
+	}
+}
 
 {$DOMAIN:localhost} {
-	reverse_proxy dashboard:3000
+	reverse_proxy dashboard:3000 {
+		# Never pass an untrusted inbound chain to the app. Caddy resolves the
+		# client through the policy above and emits one canonical address.
+		header_up X-Forwarded-For {client_ip}
+	}
 
 	# Security headers (CSP is set by Next.js middleware)
 	header {

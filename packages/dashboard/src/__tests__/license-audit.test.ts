@@ -140,8 +140,7 @@ describe('POST /api/license/deactivate — user device-deactivation audit', () =
       error: null,
     });
 
-    const sessTable = registerTable(mock, 'license_sessions');
-    sessTable.select.mockResolvedValue({ data: [{ id: 's1' }], error: null });
+    mock.rpc.mockResolvedValue({ data: true, error: null });
 
     const auditTable = registerTable(mock, 'audit_logs');
 
@@ -153,6 +152,10 @@ describe('POST /api/license/deactivate — user device-deactivation audit', () =
     );
 
     expect(res.status).toBe(200);
+    expect(mock.rpc).toHaveBeenCalledWith('license_deactivate_device', {
+      p_license_key_id: 'key-1',
+      p_session_id: SESSION_UUID,
+    });
     expect(auditTable.insert).toHaveBeenCalledWith(
       expect.objectContaining({
         guild_id: 'guild-1',
@@ -172,8 +175,7 @@ describe('POST /api/license/deactivate — user device-deactivation audit', () =
       error: null,
     });
 
-    const sessTable = registerTable(mock, 'license_sessions');
-    sessTable.select.mockResolvedValue({ data: [], error: null });
+    mock.rpc.mockResolvedValue({ data: false, error: null });
 
     const auditTable = registerTable(mock, 'audit_logs');
 
@@ -185,6 +187,56 @@ describe('POST /api/license/deactivate — user device-deactivation audit', () =
     );
 
     expect(res.status).toBe(200);
+    expect(mock.rpc).toHaveBeenCalledWith('license_deactivate_device', {
+      p_license_key_id: 'key-1',
+      p_session_id: SESSION_UUID,
+    });
+    expect(auditTable.insert).not.toHaveBeenCalled();
+  });
+
+  it('never uses a direct session update that could downgrade admin_revoked', async () => {
+    const keyTable = registerTable(mock, 'license_keys');
+    keyTable.single.mockResolvedValue({
+      data: { id: 'key-1', guild_id: 'guild-1', bound_discord_id: 'disc-1' },
+      error: null,
+    });
+    const sessTable = registerTable(mock, 'license_sessions');
+    mock.rpc.mockResolvedValue({ data: false, error: null });
+
+    const res = await deactivatePost(
+      buildRequest('/api/license/deactivate', {
+        method: 'POST',
+        body: { license_key: 'SMNI-KEY', session_id: SESSION_UUID },
+      }) as never,
+    );
+
+    expect(res.status).toBe(200);
+    expect(mock.rpc).toHaveBeenCalledOnce();
+    expect(sessTable.update).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on an RPC error without auditing or falling back to a direct update', async () => {
+    const keyTable = registerTable(mock, 'license_keys');
+    keyTable.single.mockResolvedValue({
+      data: { id: 'key-1', guild_id: 'guild-1', bound_discord_id: 'disc-1' },
+      error: null,
+    });
+    const sessTable = registerTable(mock, 'license_sessions');
+    const auditTable = registerTable(mock, 'audit_logs');
+    mock.rpc.mockResolvedValue({
+      data: null,
+      error: { code: 'XX000', message: 'database unavailable' },
+    });
+
+    const res = await deactivatePost(
+      buildRequest('/api/license/deactivate', {
+        method: 'POST',
+        body: { license_key: 'SMNI-KEY', session_id: SESSION_UUID },
+      }) as never,
+    );
+
+    expect(res.status).toBe(500);
+    expect(sessTable.update).not.toHaveBeenCalled();
     expect(auditTable.insert).not.toHaveBeenCalled();
   });
 });

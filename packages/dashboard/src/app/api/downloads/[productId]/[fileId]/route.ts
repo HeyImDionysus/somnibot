@@ -7,7 +7,7 @@
  *
  * Signed URL params: sig, exp, cid (customer ID), gid (guild ID)
  */
-import { NextRequest, NextResponse } from 'next/server';
+import { after, NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { verifySignedDownloadUrl } from '@/lib/api/signed-url';
@@ -17,6 +17,41 @@ import { isEntitlementAccessLive } from '@somnibot/shared';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+/**
+ * 503 for "we could not check" — deliberately distinct from 401/403 ("you may
+ * not") and 404 ("it isn't there"). See `@/lib/api/license-status` for the full
+ * reasoning; this route uses a plain `{ error }` body to match its own shape.
+ * The underlying message is logged, never returned (V11 Re-Audit N-1).
+ */
+function serviceUnavailable(context: string, error: { message: string }): NextResponse {
+  console.error(`[${context}] download check undetermined:`, error.message);
+  return NextResponse.json(
+    {
+      error: 'Could not verify your access right now. This is a temporary server fault — please retry.',
+      retryable: true,
+    },
+    { status: 503, headers: { 'Retry-After': '30' } },
+  );
+}
+
+/**
+ * A dispatched nonce write whose result still cannot be confirmed is not a
+ * retryable outage: the link may already be consumed. Tell the caller to mint
+ * a new link rather than inviting a replay of this one.
+ */
+function deliveryStatusUncertain(): NextResponse {
+  console.error(
+    '[Downloads nonce consumption] write outcome remained uncertain after authoritative confirmation',
+  );
+  return NextResponse.json(
+    {
+      error: 'Could not confirm this download delivery. Do not reuse this link; request a new one.',
+      retryable: false,
+    },
+    { status: 409 },
+  );
 }
 
 export async function GET(
@@ -29,6 +64,7 @@ export async function GET(
   // ── Auth: prefer signed URL, fall back to portal token header ──
   let customerId: string;
   let guildId: string;
+  let deliveryNonce: { value: string; expiresAtUnix: number } | null = null;
 
   const sig = req.nextUrl.searchParams.get('sig');
   const exp = req.nextUrl.searchParams.get('exp');
@@ -44,13 +80,11 @@ export async function GET(
       return NextResponse.json({ error: 'Invalid or expired download link' }, { status: 401 });
     }
 
-    // Single-use enforcement: each nonce can only be consumed once.
-    // If the nonce was already used, reject the request.
     if (verified.nonce) {
-      const consumed = await consumeDownloadNonce(verified.nonce, parseInt(exp, 10));
-      if (!consumed) {
-        return NextResponse.json({ error: 'Download link has already been used' }, { status: 410 });
-      }
+      deliveryNonce = {
+        value: verified.nonce,
+        expiresAtUnix: Number.parseInt(exp, 10),
+      };
     }
 
     customerId = verified.customerId;
@@ -71,13 +105,21 @@ export async function GET(
       return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
     }
 
-    const { data: session } = await supabase
+    const { data: session, error: sessionError } = await supabase
       .from('portal_sessions')
       .select('customer_id, guild_id')
       .eq('token_hash', hashToken(token))
       .eq('revoked', false)
       .gt('expires_at', new Date().toISOString())
-      .single();
+      .maybeSingle();
+
+    // A failed read is not an invalid session. Telling a paying customer their
+    // session expired because the database blinked would log them out of the
+    // portal; say "try again" instead. (Same distinction as the licence
+    // endpoints — see @/lib/api/license-status.)
+    if (sessionError) {
+      return serviceUnavailable('Downloads portal session lookup', sessionError);
+    }
 
     if (!session) {
       return NextResponse.json({ error: 'Invalid or expired session' }, { status: 401 });
@@ -107,7 +149,7 @@ export async function GET(
   // candidate set — not an arbitrary `.limit(1)` row — and grant access if ANY
   // of them is still live, so one lapsed grace row cannot mask another that is
   // active or in an unexpired grace window. ──
-  const { data: entitlements } = await supabase
+  const { data: entitlements, error: entitlementError } = await supabase
     .from('entitlements')
     .select('id, status, grace_period_ends_at')
     .eq('customer_id', customerId)
@@ -115,32 +157,108 @@ export async function GET(
     .eq('guild_id', guildId)
     .in('status', ['active', 'grace_period']);
 
+  // "The query failed" is NOT "you have no entitlement". The old code
+  // discarded the error, so a transient database fault told a paying customer
+  // they did not own the product they had just bought — a 403 that reads as an
+  // accusation. Report the fault as a fault.
+  if (entitlementError) {
+    return serviceUnavailable('Downloads entitlement lookup', entitlementError);
+  }
+
   if (!entitlements?.some((e) => isEntitlementAccessLive(e))) {
     return NextResponse.json({ error: 'No active entitlement for this product' }, { status: 403 });
   }
 
   // ── Get the file ──
-  const { data: file } = await supabase
+  const { data: file, error: fileError } = await supabase
     .from('product_files')
     .select('*')
     .eq('id', fileId)
     .eq('product_id', productId)
-    .single();
+    .maybeSingle();
+
+  if (fileError) {
+    return serviceUnavailable('Downloads file lookup', fileError);
+  }
 
   if (!file) {
     return NextResponse.json({ error: 'File not found' }, { status: 404 });
   }
 
-  // Atomically increment download counter via RPC (avoids race conditions)
-  await supabase.rpc('increment_download_count', { p_file_id: fileId }).then(async ({ error }) => {
-    if (error) {
-      // Fallback: non-atomic increment if RPC doesn't exist
-      await supabase
+  /**
+   * Consume a signed-link nonce only once every dependency check has succeeded
+   * and a redirect target is ready. A 429/503, missing file, invalid URL, or
+   * storage-signing failure is retryable with the same link; a delivered link
+   * is not.
+   */
+  async function consumeDeliveryNonce(): Promise<NextResponse | null> {
+    if (!deliveryNonce) return null;
+    const nonceResult = await consumeDownloadNonce(
+      deliveryNonce.value,
+      deliveryNonce.expiresAtUnix,
+    );
+    if (nonceResult === 'replay') {
+      return NextResponse.json({ error: 'Download link has already been used' }, { status: 410 });
+    }
+    if (nonceResult === 'unavailable') {
+      return serviceUnavailable(
+        'Downloads nonce consumption',
+        { message: 'Authoritative nonce store is unavailable' },
+      );
+    }
+    if (nonceResult === 'uncertain') {
+      return deliveryStatusUncertain();
+    }
+    return null;
+  }
+
+  /**
+   * Delivery must not turn into an error after nonce consumption merely
+   * because an analytics counter is unavailable. Keep the atomic RPC, retain
+   * the legacy fallback, and make both explicitly best-effort.
+   */
+  async function recordDeliveredDownload(): Promise<void> {
+    try {
+      const { error } = await supabase.rpc('increment_download_count', { p_file_id: fileId });
+      if (!error) return;
+
+      const { error: fallbackError } = await supabase
         .from('product_files')
         .update({ download_count: (file.download_count ?? 0) + 1 })
         .eq('id', fileId);
+      if (fallbackError) {
+        console.error('[Downloads counter] fallback update failed:', fallbackError.message);
+      }
+    } catch (error) {
+      console.error(
+        '[Downloads counter] update failed:',
+        error instanceof Error ? error.message : 'unknown error',
+      );
     }
-  });
+  }
+
+  /**
+   * Hand delivery back to the caller as soon as the nonce is consumed.
+   * Analytics belongs to the route lifecycle, not the delivery critical path:
+   * Next.js keeps this callback alive after the response is sent, bounded by
+   * the route's platform max duration.
+   */
+  async function deliver(response: NextResponse): Promise<NextResponse> {
+    const replay = await consumeDeliveryNonce();
+    if (replay) return replay;
+
+    try {
+      after(recordDeliveredDownload);
+    } catch (error) {
+      // Scheduling is best-effort too. A missing lifecycle hook must not burn a
+      // nonce and replace a ready redirect with an error.
+      console.error(
+        '[Downloads counter] scheduling failed:',
+        error instanceof Error ? error.message : 'unknown error',
+      );
+    }
+    return response;
+  }
 
   // If external URL, redirect — V6 Audit §2.4: enforce HTTPS
   if (file.external_url) {
@@ -152,7 +270,7 @@ export async function GET(
           { status: 400 },
         );
       }
-      return NextResponse.redirect(file.external_url);
+      return deliver(NextResponse.redirect(externalUrl));
     } catch {
       return NextResponse.json({ error: 'Invalid external URL' }, { status: 400 });
     }
@@ -160,12 +278,16 @@ export async function GET(
 
   // If Supabase storage path, generate signed URL
   if (file.file_path) {
-    const { data: signedUrl } = await supabase.storage
+    const { data: signedUrl, error: signedUrlError } = await supabase.storage
       .from('product_files')
       .createSignedUrl(file.file_path, 3600); // 1 hour
 
+    if (signedUrlError) {
+      return serviceUnavailable('Downloads storage signing', signedUrlError);
+    }
+
     if (signedUrl?.signedUrl) {
-      return NextResponse.redirect(signedUrl.signedUrl);
+      return deliver(NextResponse.redirect(signedUrl.signedUrl));
     }
   }
 

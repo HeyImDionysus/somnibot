@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { rateLimits } from '@/lib/api/rate-limit';
+import { getClientIp } from '@/lib/api/client-ip';
 import { requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
 
 /**
@@ -10,8 +11,10 @@ import { requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
  * and redirect to the dashboard.
  */
 export async function GET(request: Request) {
-  // V5 Audit P3-2: Rate-limit OAuth callbacks per IP
-  const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+  // V5 Audit P3-2: Rate-limit OAuth callbacks per IP.
+  // Index 0 of X-Forwarded-For is the value the CLIENT sent, so rotating the
+  // header bought a fresh bucket per request; getClientIp counts from the right.
+  const clientIp = getClientIp(request);
   const rl = await rateLimits.authCallback(clientIp);
   if (rl.limited) {
     return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
