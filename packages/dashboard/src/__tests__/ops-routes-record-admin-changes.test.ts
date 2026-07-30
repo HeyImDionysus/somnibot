@@ -1158,7 +1158,7 @@ describe('/api/webhooks/[id]/replay', () => {
 
   it('POST records the replay and never copies the PayPal payload', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })));
-    createAdminMock({
+    const client = createAdminMock({
       webhook_events: [
         {
           data: {
@@ -1174,6 +1174,21 @@ describe('/api/webhooks/[id]/replay', () => {
         },
         { data: { event_id: 'EVT-1' }, error: null },
       ],
+    });
+    client.rpc.mockResolvedValue({
+      data: [{
+        outcome: 'claimed',
+        claim_token: '11111111-1111-4111-8111-111111111111',
+        event_data: {
+          event_id: 'EVT-1',
+          event_type: 'PAYMENT.CAPTURE.COMPLETED',
+          guild_id: GUILD,
+          result: 'error',
+          replay_count: 0,
+          payload: { payer: { email_address: SECRET_MARKERS[2] } },
+        },
+      }],
+      error: null,
     });
     const { POST } = await import('@/app/api/webhooks/[id]/replay/route');
 
@@ -1194,7 +1209,7 @@ describe('/api/webhooks/[id]/replay', () => {
 
   it('records nothing when the replay claim loses its race', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })));
-    createAdminMock({
+    const client = createAdminMock({
       webhook_events: [
         {
           data: {
@@ -1205,6 +1220,10 @@ describe('/api/webhooks/[id]/replay', () => {
         },
         { data: null, error: null },
       ],
+    });
+    client.rpc.mockResolvedValue({
+      data: [{ outcome: 'processing', event_data: null }],
+      error: null,
     });
     const { POST } = await import('@/app/api/webhooks/[id]/replay/route');
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const replaySecret = 'test-webhook-replay-secret';
+const replayClaimToken = '11111111-1111-4111-8111-111111111111';
 
 vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
 vi.mock('@/lib/api/admin-rate-limit', () => ({ checkAdminRateLimit: vi.fn() }));
@@ -57,7 +58,35 @@ function makeSupabase(
   const isCalls: Array<{ table: string; column: string; value: unknown }> = [];
   const ltCalls: Array<{ table: string; column: string; value: unknown }> = [];
   const tableCallCounts = new Map<string, number>();
+  const rpc = vi.fn(async (name: string) => {
+    if (name === 'webhooks_abandon_stale_replay_claim') {
+      return { data: true, error: null };
+    }
+    if (name === 'webhooks_finish_replay_claim') {
+      return { data: true, error: null };
+    }
+    if (name !== 'webhooks_claim_scoped_replay') {
+      return { data: null, error: null };
+    }
+    if (options.claimResult) {
+      return options.claimResult.data == null
+        ? { data: [{ outcome: 'processing', event_data: null }], error: options.claimResult.error }
+        : options.claimResult;
+    }
+    const processedAt = Date.parse(String(event.processed_at ?? ''));
+    const recentProcessing = event.result == null
+      && (!Number.isFinite(processedAt) || Date.now() - processedAt < 5 * 60 * 1000);
+    return {
+      data: [{
+        outcome: recentProcessing ? 'processing' : 'claimed',
+        event_data: recentProcessing ? null : event,
+        claim_token: recentProcessing ? null : replayClaimToken,
+      }],
+      error: null,
+    };
+  });
   const supabase = {
+    rpc,
     from: vi.fn((table: string) => {
       const count = tableCallCounts.get(table) ?? 0;
       tableCallCounts.set(table, count + 1);
@@ -138,6 +167,7 @@ describe('POST /api/webhooks/[id]/replay', () => {
         headers: expect.objectContaining({
           'PayPal-Transmission-Id': 'EVT-STUCK',
           'X-Replay-Secret': replaySecret,
+          'X-Replay-Claim-Token': replayClaimToken,
           'X-Webhook-Retrying-Failed-Event': '1',
         }),
       }),
@@ -220,7 +250,7 @@ describe('POST /api/webhooks/[id]/replay', () => {
   it('scopes replay lookup and claim to the owner guild', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
-    const { supabase, eqCalls, updates } = makeSupabase({
+    const { supabase, updates } = makeSupabase({
       event_id: 'EVT-GUILD-SCOPED',
       event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
       guild_id: 'guild-1',
@@ -239,20 +269,13 @@ describe('POST /api/webhooks/[id]/replay', () => {
     });
 
     expect(res.status).toBe(200);
-    expect(eqCalls).toEqual(
-      expect.arrayContaining([
-        { table: 'webhook_events', column: 'event_id', value: 'EVT-GUILD-SCOPED' },
-        { table: 'webhook_events', column: 'guild_id', value: 'guild-1' },
-        { table: 'webhook_events', column: 'result', value: 'error' },
-      ]),
-    );
-    expect(updates).toContainEqual(
-      expect.objectContaining({
-        result: null,
-        error_details: null,
-        replay_count: 1,
-      }),
-    );
+    expect(supabase.rpc).toHaveBeenCalledWith('webhooks_claim_scoped_replay', {
+      p_event_id: 'EVT-GUILD-SCOPED',
+      p_guild_id: 'guild-1',
+      p_discord_id: 'discord-1',
+      p_stale_seconds: 300,
+    });
+    expect(updates).toHaveLength(0);
   });
 
   it('rejects non-stale null-result replay rows as already processing', async () => {
@@ -306,6 +329,69 @@ describe('POST /api/webhooks/[id]/replay', () => {
     });
 
     expect(res.status).toBe(409);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the claim fenced when internal dispatch has an ambiguous failure', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connection reset')));
+    const { supabase } = makeSupabase({
+      event_id: 'EVT-AMBIGUOUS-DISPATCH',
+      event_type: 'PAYMENT.CAPTURE.COMPLETED',
+      guild_id: 'guild-1',
+      result: 'error',
+      replay_count: 0,
+      payload: {
+        id: 'EVT-AMBIGUOUS-DISPATCH',
+        event_type: 'PAYMENT.CAPTURE.COMPLETED',
+        resource: { id: 'CAPTURE-1' },
+      },
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await POST(
+      new Request('http://localhost/api/webhooks/EVT-AMBIGUOUS-DISPATCH/replay'),
+      { params: Promise.resolve({ id: 'EVT-AMBIGUOUS-DISPATCH' }) },
+    );
+
+    expect(res.status).toBe(502);
+    expect(supabase.rpc).not.toHaveBeenCalledWith(
+      'webhooks_finish_replay_claim',
+      expect.anything(),
+    );
+  });
+
+  it('explicitly abandons a stale claim without dispatching another replay', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { supabase } = makeSupabase({
+      event_id: 'EVT-STALE-RECOVERY',
+      event_type: 'PAYMENT.CAPTURE.COMPLETED',
+      guild_id: 'guild-1',
+      result: null,
+      replay_count: 1,
+      payload: {},
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await POST(
+      new Request('http://localhost/api/webhooks/EVT-STALE-RECOVERY/replay', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'abandon_stale_claim' }),
+      }),
+      { params: Promise.resolve({ id: 'EVT-STALE-RECOVERY' }) },
+    );
+
+    expect(res.status).toBe(200);
+    expect(supabase.rpc).toHaveBeenCalledWith(
+      'webhooks_abandon_stale_replay_claim',
+      {
+        p_event_id: 'EVT-STALE-RECOVERY',
+        p_guild_id: 'guild-1',
+        p_discord_id: 'discord-1',
+        p_stale_seconds: 900,
+      },
+    );
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

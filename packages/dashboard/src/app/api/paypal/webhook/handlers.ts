@@ -16,6 +16,7 @@ import {
   type PayPalSaleResource,
 } from '@/lib/types/paypal';
 import { generateLicenseKey, queueFulfillment } from './fulfillment';
+import { raiseCaptureDeniedAlert, raiseDisputeAlert } from './alerts';
 import {
   claimPaidFulfillment,
   holdUnknownDeliveryContract,
@@ -1348,12 +1349,33 @@ export function resolveRefundPaymentId(
 
 // ── Order Approved ──────────────────────────────────
 
+/**
+ * Finding 2: PayPal reports an already-captured order as HTTP 422 with
+ * `details[0].issue === 'ORDER_ALREADY_CAPTURED'`. That is not a failure — it
+ * is proof the capture we are retrying already happened, and the resulting
+ * `PAYMENT.CAPTURE.COMPLETED` event is what actually creates the order rows.
+ *
+ * This matters because `CHECKOUT.ORDER.APPROVED` is now resumable: without it,
+ * a capture that timed out client-side but succeeded at PayPal would fail
+ * forever on every retry.
+ */
+function isAlreadyCapturedResponse(status: number, body: string): boolean {
+  if (status !== 422) return false;
+  try {
+    const parsed = JSON.parse(body) as { details?: Array<{ issue?: unknown }> };
+    return Array.isArray(parsed.details)
+      && parsed.details.some((detail) => detail?.issue === 'ORDER_ALREADY_CAPTURED');
+  } catch {
+    return false;
+  }
+}
+
 export async function handleOrderApproved(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
   options: ProviderMoneyHandlerOptions,
 ) {
-  const webhookEventId = requireProviderMoneyEventId(options, 'Order approval');
+  requireProviderMoneyEventId(options, 'Order approval');
   const paypalOrderId = resource.id;
   if (!isCanonicalPayPalResourceId(paypalOrderId)) {
     throw new Error('Approved PayPal order identity is malformed');
@@ -1382,10 +1404,6 @@ export async function handleOrderApproved(
 
   const providerOrderUrl =
     `${paypalConfig.apiBase}/v2/checkout/orders/${paypalOrderId}`;
-  const requestId = `smb-${createHash('sha256')
-    .update(`${webhookEventId}:${paypalOrderId}`)
-    .digest('hex')
-    .slice(0, 32)}`;
   let captureRes: Response | null = null;
   try {
     captureRes = await fetch(`${providerOrderUrl}/capture`, {
@@ -1393,7 +1411,8 @@ export async function handleOrderApproved(
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
-        'PayPal-Request-Id': requestId,
+        // Keep this stable across provider redelivery and manual replay.
+        'PayPal-Request-Id': `capture-${paypalOrderId}`,
       },
       signal: AbortSignal.timeout(10_000),
     });
@@ -1410,6 +1429,11 @@ export async function handleOrderApproved(
     captured =
       captureBody?.id === paypalOrderId
       && captureBody.status === 'COMPLETED';
+  } else if (captureRes) {
+    const errorText = await captureRes.text();
+    if (isAlreadyCapturedResponse(captureRes.status, errorText)) {
+      captured = true;
+    }
   }
   if (!captured) {
     const reconcileRes = await fetch(providerOrderUrl, {
@@ -3677,5 +3701,257 @@ async function handleExternalPaymentRefunded(
   console.log(
     `[Webhook] ${eventType} processed for order ${orderId} (${identifierName} ${paymentId}) — ` +
       `full refund, access revoked, payment ${finalized.payment_status}`,
+  );
+}
+
+// ── Disputes / chargebacks (Finding 9) ──────────────────────────────────────
+
+/**
+ * The transaction ids a dispute names. PayPal puts the capture (or sale) id
+ * this integration stores in `payments.paypal_payment_id` on
+ * `disputed_transactions[].seller_transaction_id`.
+ */
+export function resolveDisputedTransactionIds(
+  resource: Record<string, unknown>,
+): string[] {
+  const transactions = resource.disputed_transactions;
+  if (!Array.isArray(transactions)) return [];
+
+  const ids = new Set<string>();
+  for (const txn of transactions) {
+    if (!txn || typeof txn !== 'object') continue;
+    const sellerTxnId = (txn as { seller_transaction_id?: unknown }).seller_transaction_id;
+    // Only canonical provider ids reach a database lookup, matching the guard
+    // the refund path already applies.
+    if (isNonEmptyString(sellerTxnId) && isCanonicalPayPalResourceId(sellerTxnId)) {
+      ids.add(sellerTxnId);
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * Lossless identity set used at authorization/mutation boundaries. Unlike the
+ * display-oriented helper above, one malformed array entry invalidates the
+ * whole set so a full PayPal payload can never be scoped or partly applied
+ * from a silently filtered subset.
+ */
+export function resolveStrictDisputedTransactionIds(
+  resource: Record<string, unknown>,
+): { ids: string[]; valid: boolean } {
+  const transactions = resource.disputed_transactions;
+  if (!Array.isArray(transactions)) return { ids: [], valid: true };
+
+  const ids: string[] = [];
+  for (const txn of transactions) {
+    if (!txn || typeof txn !== 'object') return { ids: [], valid: false };
+    const sellerTxnId = (txn as { seller_transaction_id?: unknown }).seller_transaction_id;
+    if (
+      !isNonEmptyString(sellerTxnId)
+      || !isCanonicalPayPalResourceId(sellerTxnId)
+    ) {
+      return { ids: [], valid: false };
+    }
+    ids.push(sellerTxnId);
+  }
+  return { ids, valid: true };
+}
+
+/** The dispute's own identifier. PayPal uses `dispute_id`, not `id`. */
+export function resolveDisputeId(resource: Record<string, unknown>): string | null {
+  const disputeId = resource.dispute_id ?? resource.id;
+  return isNonEmptyString(disputeId) && isCanonicalPayPalResourceId(disputeId)
+    ? disputeId
+    : null;
+}
+
+function readDisputeString(value: unknown): string | null {
+  return isNonEmptyString(value) && value.length <= 128 ? value : null;
+}
+
+/**
+ * Handle `CUSTOMER.DISPUTE.CREATED` / `.UPDATED` / `.RESOLVED`.
+ *
+ * Previously these fell through to the route's `default:` branch and were then
+ * written as `result: 'success'` — a chargeback recorded as a success, with
+ * `orders.status = 'disputed'` present in the CHECK constraint but never set
+ * by anything.
+ *
+ * What this does: resolve the disputed transaction(s) back to local orders,
+ * flip `orders.status` to `'disputed'`, and alert the operator.
+ *
+ * What this deliberately does NOT do: revoke access or move money. Settlement
+ * already works — `PAYMENT.CAPTURE.REVERSED` / `.REFUNDED` revoke access when
+ * funds actually move — and a dispute is not yet a loss. Re-doing settlement
+ * here would revoke access from a customer whose dispute the seller may win.
+ *
+ * Idempotent: the status flip is conditional on the current status, so a
+ * redelivery or replay is a no-op, and the alert is DB-deduped on dispute id.
+ */
+export async function handleDisputeEvent(
+  supabase: AdminSupabase,
+  resource: Record<string, unknown>,
+  eventType: string,
+) {
+  const disputeId = resolveDisputeId(resource);
+  if (!disputeId) {
+    throw new Error('Dispute event is missing a usable dispute id');
+  }
+
+  const transactionSet = resolveStrictDisputedTransactionIds(resource);
+  if (!transactionSet.valid) {
+    throw new Error('Dispute event contains a malformed transaction identity set');
+  }
+  const transactionIds = transactionSet.ids;
+
+  const amount = resource.dispute_amount as
+    { value?: unknown; currency_code?: unknown } | undefined;
+  const amountCents = parsePayPalAmountToCents(amount?.value);
+  const currency = typeof amount?.currency_code === 'string'
+    && /^[A-Z]{3}$/.test(amount.currency_code)
+    ? amount.currency_code
+    : null;
+
+  // Resolve and mutate through one exact-identity database boundary. The RPC
+  // rejects mixed-guild matches before touching any order.
+  let guildId: string | null = null;
+  const orderIds: string[] = [];
+  let markedDisputed = 0;
+  if (transactionIds.length > 0) {
+    const { data: matches, error } = await supabase.rpc(
+      'commerce_apply_paypal_dispute',
+      {
+        p_paypal_payment_ids: transactionIds,
+        p_mark_disputed: eventType !== 'CUSTOMER.DISPUTE.RESOLVED',
+      },
+    );
+    requireSupabaseSuccess(error, 'Failed to apply PayPal dispute');
+
+    const rows = Array.isArray(matches) ? matches : matches ? [matches] : [];
+    const guildIds = new Set<string>();
+    for (const match of rows) {
+      if (isNonEmptyString(match.guild_id)) guildIds.add(match.guild_id);
+      if (isNonEmptyString(match.order_id) && !orderIds.includes(match.order_id)) {
+        orderIds.push(match.order_id);
+      }
+      if (match.marked_disputed === true) markedDisputed += 1;
+    }
+    if (guildIds.size > 1) {
+      throw new Error('PayPal dispute RPC returned mixed-guild evidence');
+    }
+    guildId = guildIds.size === 1 ? [...guildIds][0]! : null;
+  }
+
+  await raiseDisputeAlert(supabase, {
+    disputeId,
+    eventType,
+    guildId,
+    status: readDisputeString(resource.status),
+    reason: readDisputeString(resource.reason),
+    amountCents,
+    currency,
+    orderIds,
+    unmatched: orderIds.length === 0,
+  });
+
+  console.log(
+    `[Webhook] ${eventType} recorded for dispute ${disputeId} — ` +
+      `${orderIds.length} order(s) matched, ${markedDisputed} marked disputed`,
+  );
+}
+
+// ── Denied capture (Finding 9) ──────────────────────────────────────────────
+
+/**
+ * Handle `PAYMENT.CAPTURE.DENIED` — PayPal refused to settle a capture.
+ *
+ * This event type was not in `PAYPAL_HANDLED_WEBHOOK_EVENTS` at all, so the
+ * webhook was never even subscribed to it; had it arrived it would have been
+ * recorded as a success. The order sat `pending` forever with no alert.
+ *
+ * Idempotent: the cancel is conditional on `status = 'pending'`, so a replay
+ * is a no-op, and the alert is DB-deduped on capture id.
+ */
+export async function handleCaptureDenied(
+  supabase: AdminSupabase,
+  resource: Record<string, unknown>,
+) {
+  const captureId = resource.id;
+  if (!isNonEmptyString(captureId) || !isCanonicalPayPalResourceId(captureId)) {
+    throw new Error('Denied capture is missing its provider id');
+  }
+
+  const parsed = paypalCaptureResourceSchema.safeParse(resource);
+  const capture: PayPalCaptureResource = parsed.success
+    ? parsed.data
+    : { id: captureId };
+
+  const amountCents = parsePayPalAmountToCents(capture.amount?.value);
+  const currency = typeof capture.amount?.currency_code === 'string'
+    && /^[A-Z]{3}$/.test(capture.amount.currency_code)
+    ? capture.amount.currency_code
+    : null;
+
+  // custom_id carries the signed checkout identities; a capture resource keeps
+  // it at the root (unlike an Order, which keeps it on the purchase units).
+  let claimedGuildId: string | null = null;
+  if (isNonEmptyString(capture.custom_id)) {
+    try {
+      const raw = JSON.parse(capture.custom_id);
+      const candidate = raw?.g ?? raw?.guild_id;
+      if (isNonEmptyString(candidate)) claimedGuildId = candidate;
+    } catch {
+      /* malformed custom_id — only an exact local order can authorize effects */
+    }
+  }
+
+  const paypalOrderId = capture.supplementary_data?.related_ids?.order_id ?? null;
+
+  // paypal_order_id is globally unique (partial unique index). Resolve it even
+  // when custom_id is absent/malformed, then derive the tenant from the local
+  // order. custom_id is only a consistency hint; it never grants cross-guild
+  // authority.
+  let guildId: string | null = null;
+  let orderId: string | null = null;
+  let orderCancelled = false;
+  if (isNonEmptyString(paypalOrderId)) {
+    const { data: applied, error } = await supabase.rpc(
+      'commerce_apply_capture_denied',
+      {
+        p_paypal_order_id: paypalOrderId,
+        p_claimed_guild_id: claimedGuildId,
+      },
+    );
+    requireSupabaseSuccess(error, 'Failed to apply denied capture');
+    const rows = Array.isArray(applied) ? applied : applied ? [applied] : [];
+    if (rows.length > 1) {
+      throw new Error('Denied capture RPC returned multiple orders');
+    }
+    const order = rows[0];
+    if (order) {
+      if (!isNonEmptyString(order.guild_id) || !isNonEmptyString(order.order_id)) {
+        throw new Error('Denied capture order has no usable guild identity');
+      }
+      orderId = order.order_id;
+      guildId = order.guild_id;
+      orderCancelled = order.order_cancelled === true;
+    }
+  }
+
+  if (orderId && guildId) {
+    await raiseCaptureDeniedAlert(supabase, {
+      captureId,
+      guildId,
+      orderId,
+      paypalOrderId: paypalOrderId ?? null,
+      amountCents,
+      currency,
+      orderCancelled,
+    });
+  }
+
+  console.log(
+    `[Webhook] PAYMENT.CAPTURE.DENIED recorded for capture ${captureId} — ` +
+      `order ${orderId ?? 'unmatched'}${orderCancelled ? ' cancelled' : ''}`,
   );
 }

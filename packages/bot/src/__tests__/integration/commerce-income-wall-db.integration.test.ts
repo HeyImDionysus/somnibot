@@ -130,7 +130,7 @@ async function probeCanonicalFirstFreeze(
     await sqlA.begin(async (tx) => {
       await tx`
         CREATE TEMP TABLE commerce_first_freeze_probe
-          (LIKE public.orders INCLUDING ALL)
+          (LIKE public.orders INCLUDING ALL EXCLUDING GENERATED)
           ON COMMIT DROP
       `;
       await tx`

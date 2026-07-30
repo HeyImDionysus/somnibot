@@ -178,6 +178,39 @@ function isSessionlessPublicRoute(pathname: string): boolean {
   );
 }
 
+function constantTimeTextMatches(provided: string, expected: string): boolean {
+  const encoder = new TextEncoder();
+  const left = encoder.encode(provided);
+  const right = encoder.encode(expected);
+  let mismatch = left.length ^ right.length;
+  const width = Math.max(left.length, right.length);
+  for (let index = 0; index < width; index += 1) {
+    mismatch |= (left[index] ?? 0) ^ (right[index] ?? 0);
+  }
+  return mismatch === 0;
+}
+
+/**
+ * Middleware must let the machine-authenticated reconcile request reach its
+ * route before Supabase-session and CSRF checks. The bypass is deliberately
+ * narrower than a public route: exact path, configured secret, exact match.
+ * A missing or wrong secret stays on the normal owner auth + CSRF path.
+ */
+function hasValidReconcileSchedulerSecret(request: NextRequest): boolean {
+  if (request.nextUrl.pathname !== '/api/paypal/reconcile') return false;
+  const expected = process.env.PAYPAL_RECONCILE_SECRET;
+  if (!expected) return false;
+  const direct = request.headers.get('x-reconcile-secret');
+  const authorization = request.headers.get('authorization');
+  const provided = direct
+    ?? (
+      authorization?.toLowerCase().startsWith('bearer ')
+        ? authorization.slice(7)
+        : null
+    );
+  return provided !== null && constantTimeTextMatches(provided, expected);
+}
+
 /**
  * Middleware — refresh Supabase auth session on every request.
  * Redirects unauthenticated users away from protected routes.
@@ -203,6 +236,12 @@ export async function middleware(request: NextRequest) {
     const healthResponse = nextWithNonce(request, nonce);
     applyCspHeaders(healthResponse, nonce);
     return healthResponse;
+  }
+
+  if (hasValidReconcileSchedulerSecret(request)) {
+    const schedulerResponse = nextWithNonce(request, nonce);
+    applyCspHeaders(schedulerResponse, nonce);
+    return schedulerResponse;
   }
 
   if (isSessionlessPublicRoute(request.nextUrl.pathname)) {

@@ -221,6 +221,55 @@ For a **commerce-lane** alert, filter on `lane = 'commerce'` in both
 (orders, receipts, revocations) and every DLQ'd receipt delivery also raises
 its own operator alert.
 
+### PayPal money-path alerts
+
+These five alert types are raised by the dashboard, not the bot, so they still
+fire when the bot is down. All are money-path; treat them as page-worthy.
+
+| `alert_type` | Meaning | First action |
+|---|---|---|
+| `paypal_reconciliation_mismatch` | PayPal's transaction ledger disagrees with `payments`, `payment_refunds`, or `orders`. Captures/sales and each partial refund sibling are matched by their own provider ID. | Read `metadata.missing_local_payments`, `metadata.missing_provider_payments`, and `metadata.amount_mismatches`. For a payment missing locally, find the capture/sale in PayPal and replay the matching `webhook_events` row. For a refund, use its `paypal_refund_id`; never infer one sibling from another or from the cumulative refunded total. |
+| `paypal_reconciliation_failure` | The scheduled monitor could not complete or persist a trustworthy comparison. | Read the durable last-result reason, repair the provider/database/configuration failure, then rerun. Transient route failures return `503` with `Retry-After`. |
+| `paypal_webhook_processing_error` | A webhook event landed on `result = 'error'`. | `metadata.requires_manual_replay = true` means PayPal will NOT retry — replay it from Diagnostics → Webhooks. Otherwise wait one redelivery cycle first. |
+| `paypal_dispute` | A chargeback or dispute is open. | Respond in the PayPal resolution center before the deadline. Affected orders are already flipped to `status = 'disputed'`; access is intentionally NOT revoked until money actually moves. |
+| `paypal_capture_denied` | PayPal refused to settle a capture. | The buyer was not charged. A `pending` order was moved to `cancelled`; nothing else was touched. |
+
+### PayPal reconciliation
+
+Runs inside the **dashboard** container (not the bot — that is the point: it
+must work when the bot is the broken thing). It self-schedules every 6h,
+starting 5 minutes after boot, and compares PayPal's Transaction Search ledger
+against `payments.paypal_payment_id` and
+`payment_refunds.paypal_refund_id` in both directions over a rolling 7-day
+window. Every partial refund/reversal sibling is compared independently,
+including exact amount and currency. The most recent 6h is excluded so
+PayPal's reporting lag does not produce false findings.
+
+```bash
+# Last pass summary (as the signed-in owner, or with the scheduler secret)
+curl -fsS -H "X-Reconcile-Secret: $PAYPAL_RECONCILE_SECRET" \
+  https://<dashboard>/api/paypal/reconcile
+
+# Force a pass now
+curl -fsS -X POST -H "X-Reconcile-Secret: $PAYPAL_RECONCILE_SECRET" \
+  https://<dashboard>/api/paypal/reconcile
+```
+
+Requirements and knobs:
+- The PayPal REST app must have the **Transaction Search** permission, or every
+  pass fails with a 403 (reported as non-retriable).
+- `PAYPAL_RECONCILE_SECRET` is optional and only opens the machine-triggered
+  path; unset means only the signed-in owner can trigger a pass by hand.
+- `PAYPAL_RECONCILE_DISABLED=1` turns the in-dashboard scheduler off.
+- Concurrency is fenced by the singleton `paypal_reconciliation_state` table
+  through the `paypal_reconcile_acquire`, `paypal_reconcile_heartbeat`, and
+  `paypal_reconcile_finalize` security-definer RPCs. Lease expiry and cooldown
+  use the database clock after the state row is locked, and heartbeat/finalize
+  mutate only the exact opaque owner token. `service_role` can read state and
+  execute the RPCs but cannot directly insert, update, or delete the row.
+- A signed-in owner "run now" may bypass only the completed-run cooldown. It
+  never bypasses an active owner or the exact-owner lease checks.
+
 ## Database
 
 ### Migrations

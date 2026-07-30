@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 217 migration files in packages/supabase/migrations/
+ * Source: 222 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -983,6 +983,7 @@ export interface DbOrder {
   checkout_active: boolean;
   delivery_type_snapshot: string | null;
   checkout_approval_url: string | null;
+  commerce_compatible_child_status: string | null;
 }
 
 // — Commerce — Licensing —
@@ -1147,6 +1148,7 @@ export interface DbWebhookEvent {
   replayed_at: string | null;
   replay_count: number;
   guild_id: string | null;
+  replay_claim_token: string | null;
 }
 
 export interface DbBotDiagnostics {
@@ -2267,6 +2269,15 @@ export interface DbPaymentRefunds {
   created_at: string;
   is_terminal_event_witness: boolean;
   paypal_resource_type: string | null;
+}
+
+export interface DbPaypalReconciliationState {
+  singleton: boolean;
+  state: 'running' | 'completed';
+  owner_token: string | null;
+  lease_expires_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
 }
 
 export interface DbPollOptions {

@@ -1102,6 +1102,22 @@ export interface DbOrder {
     duration_seconds: number;
   }>;
   grant_snapshot_frozen_at: string | null;
+  commerce_compatible_child_status: 'completed' | 'refunded' | null;
+}
+
+export type PayPalReconciliationLeaseState = 'running' | 'completed';
+export type PayPalReconciliationAcquireResult =
+  | 'acquired'
+  | 'busy'
+  | 'cooldown';
+
+export interface DbPayPalReconciliationState {
+  singleton: boolean;
+  state: PayPalReconciliationLeaseState;
+  owner_token: string | null;
+  lease_expires_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
 }
 
 // — Commerce — Licensing —

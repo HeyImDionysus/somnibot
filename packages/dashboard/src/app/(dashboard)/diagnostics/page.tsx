@@ -206,6 +206,7 @@ export default function DiagnosticsPage() {
   const [whFilter, setWhFilter] = useState('');
   const [whLoading, setWhLoading] = useState(true);
   const [replayingId, setReplayingId] = useState<string | null>(null);
+  const [webhookActionError, setWebhookActionError] = useState<string | null>(null);
 
   // Alerting-threshold save state
   const [savingThresholds, setSavingThresholds] = useState(false);
@@ -334,18 +335,59 @@ export default function DiagnosticsPage() {
 
   const handleReplay = async (eventId: string) => {
     setReplayingId(eventId);
+    setWebhookActionError(null);
     try {
       const res = await fetch(`/api/webhooks/${eventId}/replay`, { method: 'POST' });
       const json = await res.json();
       if (json.success) {
         // Refresh webhook list
         await fetchWebhooks(whPagination.page);
+      } else {
+        setWebhookActionError(json.error ?? 'Replay failed.');
       }
     } catch (err) {
       console.error('Replay failed:', err);
+      setWebhookActionError('Could not reach the server to replay that webhook.');
     } finally {
       setReplayingId(null);
     }
+  };
+
+  const handleRecoverStaleReplay = async (eventId: string) => {
+    const confirmed = window.confirm(
+      'Only recover this claim after confirming the original replay worker has stopped. '
+      + 'Recovering it allows a new payment replay. Continue?',
+    );
+    if (!confirmed) return;
+
+    setReplayingId(eventId);
+    setWebhookActionError(null);
+    try {
+      const res = await fetch(`/api/webhooks/${eventId}/replay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'abandon_stale_claim' }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        await fetchWebhooks(whPagination.page);
+      } else {
+        setWebhookActionError(json.error ?? 'Could not recover that stale replay claim.');
+      }
+    } catch (err) {
+      console.error('Stale replay recovery failed:', err);
+      setWebhookActionError('Could not reach the server to recover that replay claim.');
+    } finally {
+      setReplayingId(null);
+    }
+  };
+
+  const isRecoverableStaleReplay = (event: WebhookEvent) => {
+    const processedAt = Date.parse(event.processed_at);
+    return event.result === null
+      && event.replay_count > 0
+      && Number.isFinite(processedAt)
+      && Date.now() - processedAt >= 15 * 60 * 1000;
   };
 
   const resultColors: Record<string, string> = {
@@ -720,6 +762,11 @@ export default function DiagnosticsPage() {
         </div>
 
         <div className="rounded-lg bg-discord-bg-secondary overflow-hidden">
+          {webhookActionError && (
+            <div className="border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
+              {webhookActionError}
+            </div>
+          )}
           {whLoading ? (
             <div className="flex items-center justify-center py-8">
               <div className="h-6 w-6 animate-spin rounded-full border-2 border-discord-accent border-t-transparent" />
@@ -767,6 +814,16 @@ export default function DiagnosticsPage() {
                           className="rounded-md bg-discord-accent/20 px-2 py-1 text-xs font-medium text-discord-accent hover:bg-discord-accent/30 disabled:opacity-50 transition-colors"
                         >
                           {replayingId === wh.event_id ? 'Replaying…' : 'Replay'}
+                        </button>
+                      )}
+                      {isRecoverableStaleReplay(wh) && (
+                        <button
+                          onClick={() => handleRecoverStaleReplay(wh.event_id)}
+                          disabled={replayingId === wh.event_id}
+                          className="rounded-md bg-amber-500/20 px-2 py-1 text-xs font-medium text-amber-300 hover:bg-amber-500/30 disabled:opacity-50 transition-colors"
+                          title="Use only after confirming the original replay worker stopped"
+                        >
+                          {replayingId === wh.event_id ? 'Recovering…' : 'Recover stale claim'}
                         </button>
                       )}
                     </td>

@@ -37,6 +37,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 const mockFrom = vi.fn();
 const mockRpc = vi.fn();
 const mockSupabase = { from: mockFrom, rpc: mockRpc };
+const replayClaimToken = '11111111-1111-4111-8111-111111111111';
 
 function mockUpsertSuccess() {
   const chain = {
@@ -67,11 +68,21 @@ function makeWebhookRequest(body: unknown, headers?: Record<string, string>) {
 }
 
 function makeReplayRequest(body: unknown) {
-  return makeWebhookRequest(body, { 'x-replay-secret': replaySecret });
+  return makeWebhookRequest(body, {
+    'x-replay-secret': replaySecret,
+    'x-replay-claim-token': replayClaimToken,
+  });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockRpc.mockImplementation(async (name: string) => ({
+    data: name === 'webhooks_replay_claim_is_current'
+      || name === 'webhooks_finish_replay_claim'
+      ? true
+      : null,
+    error: null,
+  }));
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockSupabase);
 });
 
@@ -106,6 +117,27 @@ describe('POST /api/paypal/webhook', () => {
     expect(res.status).toBe(400);
     const data = await res.json();
     expect(data.error).toMatch(/payload/i);
+  });
+
+  it('rejects an internal replay without its claim token', async () => {
+    const req = makeWebhookRequest(
+      { event_type: 'BILLING.SUBSCRIPTION.UNKNOWN', resource: {}, id: 'EVT-NO-CLAIM' },
+      { 'x-replay-secret': replaySecret },
+    );
+    const res = await POST(req as never);
+    expect(res.status).toBe(409);
+  });
+
+  it('rejects an internal replay whose claim token is no longer current', async () => {
+    mockRpc.mockResolvedValueOnce({ data: false, error: null });
+    const req = makeReplayRequest({
+      event_type: 'BILLING.SUBSCRIPTION.UNKNOWN',
+      resource: {},
+      id: 'EVT-STALE-CLAIM',
+    });
+    const res = await POST(req as never);
+    expect(res.status).toBe(409);
+    expect(mockFrom).not.toHaveBeenCalled();
   });
 
   it('keeps an unresolved but authenticated capture replayable', async () => {

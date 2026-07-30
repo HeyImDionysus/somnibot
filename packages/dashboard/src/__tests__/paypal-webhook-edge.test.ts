@@ -100,6 +100,7 @@ const EXACT_SUBSCRIPTION_CUSTOMER = {
   guild_id: 'guild-1',
   discord_id: 'discord-1',
 };
+const REPLAY_CLAIM_TOKEN = '11111111-1111-4111-8111-111111111111';
 
 function makeReplay(body: unknown, headers: Record<string, string> = {}) {
   const payload = body && typeof body === 'object' && !Array.isArray(body)
@@ -110,6 +111,7 @@ function makeReplay(body: unknown, headers: Record<string, string> = {}) {
     headers: {
       'Content-Type': 'application/json',
       'x-replay-secret': replaySecret,
+      'x-replay-claim-token': REPLAY_CLAIM_TOKEN,
       ...headers,
     },
     body: JSON.stringify(payload),
@@ -167,7 +169,10 @@ function providerIncidentResult(args: Record<string, unknown>) {
 function makeMockSupabase() {
   const fromFn = vi.fn();
   const rpc = vi.fn(async (name: string, args: Record<string, unknown>) =>
-    name === 'commerce_record_provider_incident'
+    name === 'webhooks_replay_claim_is_current'
+      || name === 'webhooks_finish_replay_claim'
+      ? { data: true, error: null }
+      : name === 'commerce_record_provider_incident'
       ? providerIncidentResult(args)
       : { data: null, error: null });
 
@@ -283,6 +288,12 @@ function useWebhookRows(
   const orderCalls: Array<{ table: string; column: string; options: unknown }> = [];
   const tableCallCounts = new Map<string, number>();
   mockSb.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+    if (
+      name === 'webhooks_replay_claim_is_current'
+      || name === 'webhooks_finish_replay_claim'
+    ) {
+      return { data: true, error: null };
+    }
     if (name === 'commerce_record_provider_incident') {
       return providerIncidentResult(args);
     }
@@ -550,6 +561,12 @@ function createCaptureRecoveryHarness(options: {
   state.orders = [state.order];
 
   const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    if (
+      name === 'webhooks_replay_claim_is_current'
+      || name === 'webhooks_finish_replay_claim'
+    ) {
+      return { data: true, error: null };
+    }
     if (name === 'commerce_record_provider_incident') {
       state.providerIncidents.push(structuredClone(args));
       return providerIncidentResult(args);
@@ -1592,7 +1609,7 @@ describe('PayPal webhook — edge cases', () => {
   ])('subscription expiry fails closed on an exact-order %s', async (_caseName, orderResult) => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      const { inserts, updates } = useWebhookRows({ orders: orderResult });
+      const { inserts, updates, rpc } = useWebhookRows({ orders: orderResult });
       const req = makeReplay({
         event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
         resource: { id: 'SUB-EXPIRED' },
@@ -1602,11 +1619,43 @@ describe('PayPal webhook — edge cases', () => {
       const res = await POST(req as never);
       expect(res.status).toBe(500);
       expect(inserts).toEqual([]);
-      expect(updates).toContainEqual({
-        table: 'webhook_events',
-        payload: expect.objectContaining({ result: 'error' }),
-      });
+      expect(rpc).toHaveBeenCalledWith(
+        'webhooks_finish_replay_claim',
+        expect.objectContaining({
+          p_result: 'error',
+          p_claim_token: REPLAY_CLAIM_TOKEN,
+        }),
+      );
       expect(updates.filter(({ table }) => table !== 'webhook_events')).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('routes an internal replay failure alert to the claimed event guild', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { inserts } = useWebhookRows({
+        orders: { data: null, error: { message: 'order lookup unavailable' } },
+      });
+      const req = makeReplay({
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        resource: { id: 'SUB-EXPIRED' },
+        id: 'EVT-SUB-EXPIRED-ALERT-GUILD',
+      }, {
+        'x-replay-guild-id': 'guild-1',
+      });
+
+      const res = await POST(req as never);
+
+      expect(res.status).toBe(500);
+      expect(inserts).toContainEqual({
+        table: 'alerts',
+        payload: expect.objectContaining({
+          guild_id: 'guild-1',
+          alert_type: 'paypal_webhook_processing_error',
+        }),
+      });
     } finally {
       errorSpy.mockRestore();
     }
@@ -1735,6 +1784,12 @@ describe('PayPal webhook — edge cases', () => {
 
 
 
+  // Finding 2 note: these two cases originally used CHECKOUT.ORDER.APPROVED as
+  // their stand-in for "a non-resumable event type". That type is now
+  // deliberately resumable — a failed capture must be recoverable by PayPal's
+  // own redelivery — so they use CHECKOUT.ORDER.COMPLETED instead. The
+  // invariant under test is unchanged: a type that is NOT in
+  // RESUMABLE_FAILED_EVENT_TYPES is never silently auto-retried.
   it('does not blindly retry non-resumable failed duplicate webhooks', async () => {
     const originalFetch = global.fetch;
     global.fetch = vi.fn().mockResolvedValue(
@@ -1748,9 +1803,9 @@ describe('PayPal webhook — edge cases', () => {
         ],
       });
       const req = makeSignedWebhook({
-        event_type: 'CUSTOMER.DISPUTE.CREATED',
-        resource: { id: 'DISPUTE-FAILED-RETRY' },
-        id: 'EVT-DISPUTE-FAILED-RETRY',
+        event_type: 'CHECKOUT.ORDER.COMPLETED',
+        resource: { id: 'ORDER-FAILED-RETRY' },
+        id: 'EVT-CAPTURE-FAILED-RETRY',
       });
 
       const res = await POST(req as never);
@@ -1787,9 +1842,9 @@ describe('PayPal webhook — edge cases', () => {
         ],
       });
       const req = makeSignedWebhook({
-        event_type: 'CUSTOMER.DISPUTE.CREATED',
-        resource: { id: 'DISPUTE-STALE-NON-RESUMABLE' },
-        id: 'EVT-DISPUTE-STALE-NON-RESUMABLE',
+        event_type: 'CHECKOUT.ORDER.COMPLETED',
+        resource: { id: 'ORDER-STALE-NON-RESUMABLE' },
+        id: 'EVT-CAPTURE-STALE-NON-RESUMABLE',
       });
 
       const res = await POST(req as never);
@@ -1964,7 +2019,7 @@ describe('PayPal webhook — edge cases', () => {
         expect.stringContaining('/v2/checkout/orders/ORDER-CAPTURE-1/capture'),
         expect.objectContaining({
           headers: expect.objectContaining({
-            'PayPal-Request-Id': expect.stringMatching(/^smb-[a-f0-9]{32}$/),
+            'PayPal-Request-Id': 'capture-ORDER-CAPTURE-1',
           }),
         }),
       );
@@ -2103,11 +2158,15 @@ describe('PayPal webhook — edge cases', () => {
     }
   });
 
+  // Finding 9: this case used to assert that CUSTOMER.DISPUTE.CREATED hit the
+  // `default:` branch and was recorded as a SUCCESS — i.e. it encoded the bug
+  // where a chargeback was filed as a success. Disputes are handled now, so
+  // the "unhandled event" contract is proven with a genuinely unhandled type.
   it('unhandled event type returns 200 without error', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const req = makeReplay({
-      event_type: 'CUSTOMER.DISPUTE.CREATED',
-      resource: { id: 'DISPUTE-1' },
+      event_type: 'BILLING.PLAN.UPDATED',
+      resource: { id: 'PLAN-1' },
       id: 'EVT-UNHANDLED',
     });
 
@@ -2115,7 +2174,29 @@ describe('PayPal webhook — edge cases', () => {
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.status).toBe('ok');
-    expect(logSpy).toHaveBeenCalledWith('[Webhook] Unhandled event: CUSTOMER.DISPUTE.CREATED');
+    expect(logSpy).toHaveBeenCalledWith('[Webhook] Unhandled event: BILLING.PLAN.UPDATED');
+    logSpy.mockRestore();
+  });
+
+  it('CUSTOMER.DISPUTE.CREATED is no longer swallowed as an unhandled success', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const req = makeReplay({
+      event_type: 'CUSTOMER.DISPUTE.CREATED',
+      resource: {
+        dispute_id: 'PP-D-27803',
+        status: 'WAITING_FOR_SELLER_RESPONSE',
+        reason: 'MERCHANDISE_OR_SERVICE_NOT_RECEIVED',
+        dispute_amount: { currency_code: 'USD', value: '9.99' },
+        disputed_transactions: [{ seller_transaction_id: 'CAPTURE-DISPUTED-1' }],
+      },
+      id: 'EVT-DISPUTE-HANDLED',
+    });
+
+    await POST(req as never);
+
+    expect(logSpy).not.toHaveBeenCalledWith(
+      '[Webhook] Unhandled event: CUSTOMER.DISPUTE.CREATED',
+    );
     logSpy.mockRestore();
   });
 

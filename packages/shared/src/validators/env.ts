@@ -116,6 +116,12 @@ export const DashboardEnvSchema = z.object({
   PAYPAL_API_BASE: z.string().optional().default('https://api-m.sandbox.paypal.com'),
   PAYPAL_WEBHOOK_ID: z.string().optional().default(''),
   PAYPAL_WEBHOOK_URL: z.string().optional().default(''),
+  // PayPal-truth reconciliation (Finding 1). Both optional: the dashboard
+  // container schedules the pass itself, so no operator config is required.
+  // The secret only opens the ADDITIONAL machine-triggered path for an
+  // external scheduler — unset means that path is closed, not open.
+  PAYPAL_RECONCILE_SECRET: z.string().optional().default(''),
+  PAYPAL_RECONCILE_DISABLED: z.string().optional().default(''),
 
   // Optional
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),

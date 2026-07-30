@@ -42,7 +42,15 @@ import {
 } from '@/lib/setup-webhook-probe';
 
 const mockFrom = vi.fn();
-const mockSupabase = { from: mockFrom };
+const mockRpc = vi.fn(async (name: string) => ({
+  data: name === 'webhooks_replay_claim_is_current'
+    || name === 'webhooks_finish_replay_claim'
+    ? true
+    : null,
+  error: null,
+}));
+const mockSupabase = { from: mockFrom, rpc: mockRpc };
+const replayClaimToken = '11111111-1111-4111-8111-111111111111';
 
 function mockUpsertSuccess() {
   const chain = {
@@ -160,18 +168,25 @@ describe('POST /api/paypal/webhook reachability probe', () => {
 
   it('leaves real webhook processing untouched when no probe header is present', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const chain = mockUpsertSuccess();
+    mockUpsertSuccess();
 
     const res = await POST(makeWebhookRequest(
       JSON.stringify({ event_type: 'BILLING.SUBSCRIPTION.UNKNOWN_EVENT', resource: { id: 'SUB-1' }, id: 'EVT-3' }),
-      { 'x-replay-secret': replaySecret },
+      {
+        'x-replay-secret': replaySecret,
+        'x-replay-claim-token': replayClaimToken,
+      },
     ) as never);
 
     expect(res.status).toBe(200);
     expect(logSpy).toHaveBeenCalledWith('[Webhook] Unhandled event: BILLING.SUBSCRIPTION.UNKNOWN_EVENT');
     // Real events still record their result in webhook_events.
-    expect(mockFrom).toHaveBeenCalledWith('webhook_events');
-    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ result: 'success' }));
+    expect(mockFrom).not.toHaveBeenCalled();
+    expect(mockRpc).toHaveBeenCalledWith('webhooks_finish_replay_claim', expect.objectContaining({
+      p_event_id: 'EVT-3',
+      p_claim_token: replayClaimToken,
+      p_result: 'success',
+    }));
     logSpy.mockRestore();
   });
 });
