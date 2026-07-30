@@ -75,6 +75,10 @@ type Resolver = (op: RecordedOp) => { data: unknown; error: unknown };
 
 let ops: RecordedOp[] = [];
 let resolvers: Record<string, Resolver> = {};
+let rpcResolvers: Record<
+  string,
+  (args: Record<string, unknown>) => { data: unknown; error: unknown }
+> = {};
 
 const CHAIN_METHODS = [
   'select', 'eq', 'is', 'in', 'neq', 'gt', 'lt', 'gte', 'lte',
@@ -122,7 +126,11 @@ function makeSupabase() {
     return chain;
   };
 
-  return { from: vi.fn(from), rpc: vi.fn().mockResolvedValue({ data: null, error: null }) };
+  const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    const resolver = rpcResolvers[name];
+    return resolver ? resolver(args) : { data: null, error: null };
+  });
+  return { from: vi.fn(from), rpc };
 }
 
 function opsFor(table: string, op?: RecordedOp['op']) {
@@ -181,8 +189,25 @@ function makeReplay(body: unknown) {
 
 /** Payments lookup resolves the disputed capture to a local order + guild. */
 function withMatchedPayment() {
-  resolvers['payments'] = () => ({
-    data: [{ order_id: ORDER_UUID, guild_id: GUILD_ID }],
+  resolvers['payments'] = () => ({ data: { guild_id: GUILD_ID }, error: null });
+  rpcResolvers.commerce_apply_paypal_dispute = () => ({
+    data: [{ order_id: ORDER_UUID, guild_id: GUILD_ID, marked_disputed: true }],
+    error: null,
+  });
+}
+
+function withDeniedOrder(
+  guildId = GUILD_ID,
+  orderCancelled = true,
+  previousStatus = orderCancelled ? 'pending' : 'completed',
+) {
+  rpcResolvers.commerce_apply_capture_denied = () => ({
+    data: [{
+      order_id: ORDER_UUID,
+      guild_id: guildId,
+      previous_status: previousStatus,
+      order_cancelled: orderCancelled,
+    }],
     error: null,
   });
 }
@@ -190,6 +215,7 @@ function withMatchedPayment() {
 beforeEach(() => {
   vi.clearAllMocks();
   ops = [];
+  rpcResolvers = {};
   resolvers = {
     'webhook_events.upsert': () => ({ data: [{ event_id: 'inserted' }], error: null }),
     'alerts.update': () => ({ data: [], error: null }),
@@ -269,15 +295,14 @@ describe('dispute resource parsing', () => {
 describe('handleDisputeEvent', () => {
   it('marks the matched order disputed and alerts, without revoking access', async () => {
     withMatchedPayment();
-    resolvers['orders.update'] = () => ({ data: [{ id: ORDER_UUID }], error: null });
 
     await handleDisputeEvent(supabase as never, disputeResource(), 'CUSTOMER.DISPUTE.CREATED');
 
-    const orderUpdate = opsFor('orders', 'update')[0];
-    expect(orderUpdate).toBeDefined();
-    expect(orderUpdate!.payload).toMatchObject({ status: 'disputed' });
-    // Only a completed order is flipped — never a pending or refunded one.
-    expect(filterArgs(orderUpdate!, 'eq')).toContainEqual(['status', 'completed']);
+    expect(supabase.rpc).toHaveBeenCalledWith('commerce_apply_paypal_dispute', {
+      p_paypal_payment_ids: [CAPTURE_ID],
+      p_mark_disputed: true,
+    });
+    expect(opsFor('orders', 'update')).toHaveLength(0);
 
     const alert = opsFor('alerts', 'insert')[0];
     expect(alert!.payload).toMatchObject({
@@ -289,12 +314,10 @@ describe('handleDisputeEvent', () => {
     // Settlement is NOT re-done here.
     expect(opsFor('entitlements')).toHaveLength(0);
     expect(opsFor('license_keys')).toHaveLength(0);
-    expect(supabase.rpc).not.toHaveBeenCalled();
   });
 
   it('records the dispute amount as integer cents, never a float', async () => {
     withMatchedPayment();
-    resolvers['orders.update'] = () => ({ data: [], error: null });
 
     await handleDisputeEvent(
       supabase as never,
@@ -315,13 +338,17 @@ describe('handleDisputeEvent', () => {
 
     await handleDisputeEvent(supabase as never, disputeResource(), 'CUSTOMER.DISPUTE.RESOLVED');
 
+    expect(supabase.rpc).toHaveBeenCalledWith('commerce_apply_paypal_dispute', {
+      p_paypal_payment_ids: [CAPTURE_ID],
+      p_mark_disputed: false,
+    });
     expect(opsFor('orders', 'update')).toHaveLength(0);
     // Resolved is informational, so it is a warning rather than critical.
     expect(opsFor('alerts', 'insert')[0]!.payload).toMatchObject({ severity: 'warning' });
   });
 
   it('still alerts when no local payment matches the disputed transaction', async () => {
-    resolvers['payments'] = () => ({ data: [], error: null });
+    rpcResolvers.commerce_apply_paypal_dispute = () => ({ data: [], error: null });
     process.env.DISCORD_GUILD_ID = '333333333333333333';
 
     await handleDisputeEvent(supabase as never, disputeResource(), 'CUSTOMER.DISPUTE.CREATED');
@@ -335,7 +362,6 @@ describe('handleDisputeEvent', () => {
 
   it('refreshes the open alert in place across CREATED -> UPDATED', async () => {
     withMatchedPayment();
-    resolvers['orders.update'] = () => ({ data: [], error: null });
     resolvers['alerts.update'] = () => ({ data: [{ id: 'alert-1' }], error: null });
 
     await handleDisputeEvent(supabase as never, disputeResource(), 'CUSTOMER.DISPUTE.UPDATED');
@@ -352,11 +378,14 @@ describe('handleDisputeEvent', () => {
   });
 
   it('fails loudly if the payments lookup errors, rather than alerting a wrong guild', async () => {
-    resolvers['payments'] = () => ({ data: null, error: { message: 'db down' } });
+    rpcResolvers.commerce_apply_paypal_dispute = () => ({
+      data: null,
+      error: { message: 'db down' },
+    });
 
     await expect(
       handleDisputeEvent(supabase as never, disputeResource(), 'CUSTOMER.DISPUTE.CREATED'),
-    ).rejects.toThrow(/disputed payments/i);
+    ).rejects.toThrow(/apply PayPal dispute/i);
   });
 });
 
@@ -364,18 +393,15 @@ describe('handleDisputeEvent', () => {
 
 describe('handleCaptureDenied', () => {
   it('cancels the pending order and alerts', async () => {
-    resolvers['orders.select'] = () => ({
-      data: { id: ORDER_UUID, status: 'pending', guild_id: GUILD_ID },
-      error: null,
-    });
-    resolvers['orders.update'] = () => ({ data: [{ id: ORDER_UUID }], error: null });
+    withDeniedOrder();
 
     await handleCaptureDenied(supabase as never, deniedCaptureResource());
 
-    const orderUpdate = opsFor('orders', 'update')[0]!;
-    expect(orderUpdate.payload).toMatchObject({ status: 'cancelled' });
-    // Conditional on pending, so a replay is a no-op and nothing else is clobbered.
-    expect(filterArgs(orderUpdate, 'eq')).toContainEqual(['status', 'pending']);
+    expect(supabase.rpc).toHaveBeenCalledWith('commerce_apply_capture_denied', {
+      p_paypal_order_id: 'PAYPAL-ORDER-1',
+      p_claimed_guild_id: GUILD_ID,
+    });
+    expect(opsFor('orders', 'update')).toHaveLength(0);
 
     const alert = opsFor('alerts', 'insert')[0]!;
     expect(alert.payload).toMatchObject({
@@ -388,10 +414,7 @@ describe('handleCaptureDenied', () => {
   });
 
   it('never touches an order that is no longer pending', async () => {
-    resolvers['orders.select'] = () => ({
-      data: { id: ORDER_UUID, status: 'completed', guild_id: GUILD_ID },
-      error: null,
-    });
+    withDeniedOrder(GUILD_ID, false, 'completed');
 
     await handleCaptureDenied(supabase as never, deniedCaptureResource());
 
@@ -402,45 +425,42 @@ describe('handleCaptureDenied', () => {
 
   it('does not cancel or alert from valid foreign custom data without an exact local order', async () => {
     process.env.DISCORD_GUILD_ID = GUILD_ID;
-    resolvers['orders.select'] = () => ({ data: null, error: null });
+    rpcResolvers.commerce_apply_capture_denied = () => ({ data: [], error: null });
 
     await handleCaptureDenied(supabase as never, deniedCaptureResource());
 
-    const lookup = opsFor('orders', 'select')[0]!;
-    expect(filterArgs(lookup, 'eq')).toContainEqual(['paypal_order_id', 'PAYPAL-ORDER-1']);
-    expect(filterArgs(lookup, 'eq').some((args) => args[0] === 'guild_id')).toBe(false);
+    expect(supabase.rpc).toHaveBeenCalledWith('commerce_apply_capture_denied', {
+      p_paypal_order_id: 'PAYPAL-ORDER-1',
+      p_claimed_guild_id: GUILD_ID,
+    });
     expect(opsFor('orders', 'update')).toHaveLength(0);
     expect(opsFor('alerts')).toHaveLength(0);
   });
 
   it('cancels and alerts in the local order guild when custom_id is malformed', async () => {
-    resolvers['orders.select'] = () => ({
-      data: { id: ORDER_UUID, status: 'pending', guild_id: GUILD_ID },
-      error: null,
-    });
-    resolvers['orders.update'] = () => ({ data: [{ id: ORDER_UUID }], error: null });
+    withDeniedOrder();
 
     await handleCaptureDenied(
       supabase as never,
       deniedCaptureResource({ custom_id: 'not-json' }),
     );
 
-    expect(opsFor('orders', 'select')).toHaveLength(1);
-    expect(opsFor('orders', 'update')).toHaveLength(1);
+    expect(opsFor('orders', 'select')).toHaveLength(0);
+    expect(opsFor('orders', 'update')).toHaveLength(0);
     expect(opsFor('alerts', 'insert')[0]!.payload).toMatchObject({
       guild_id: GUILD_ID,
     });
   });
 
   it('fails closed when custom_id claims a different guild than the local order', async () => {
-    resolvers['orders.select'] = () => ({
-      data: { id: ORDER_UUID, status: 'pending', guild_id: SECOND_GUILD_ID },
-      error: null,
+    rpcResolvers.commerce_apply_capture_denied = () => ({
+      data: null,
+      error: { message: 'denied-capture metadata conflicts with the local tenant' },
     });
 
     await expect(
       handleCaptureDenied(supabase as never, deniedCaptureResource()),
-    ).rejects.toThrow(/guild/i);
+    ).rejects.toThrow(/tenant|guild/i);
 
     expect(opsFor('orders', 'update')).toHaveLength(0);
   });
@@ -457,7 +477,6 @@ describe('handleCaptureDenied', () => {
 describe('route dispatch', () => {
   it('routes CUSTOMER.DISPUTE.CREATED to the dispute handler, not default:', async () => {
     withMatchedPayment();
-    resolvers['orders.update'] = () => ({ data: [{ id: ORDER_UUID }], error: null });
 
     const res = await POST(makeReplay({
       event_type: 'CUSTOMER.DISPUTE.CREATED',
@@ -469,16 +488,15 @@ describe('route dispatch', () => {
     expect(logSpy).not.toHaveBeenCalledWith(
       '[Webhook] Unhandled event: CUSTOMER.DISPUTE.CREATED',
     );
-    expect(opsFor('orders', 'update')[0]!.payload).toMatchObject({ status: 'disputed' });
+    expect(supabase.rpc).toHaveBeenCalledWith(
+      'commerce_apply_paypal_dispute',
+      expect.objectContaining({ p_mark_disputed: true }),
+    );
     expect(opsFor('alerts', 'insert')).toHaveLength(1);
   });
 
   it('routes PAYMENT.CAPTURE.DENIED to the denied-capture handler', async () => {
-    resolvers['orders.select'] = () => ({
-      data: { id: ORDER_UUID, status: 'pending', guild_id: GUILD_ID },
-      error: null,
-    });
-    resolvers['orders.update'] = () => ({ data: [{ id: ORDER_UUID }], error: null });
+    withDeniedOrder();
 
     const res = await POST(makeReplay({
       event_type: 'PAYMENT.CAPTURE.DENIED',
@@ -490,7 +508,10 @@ describe('route dispatch', () => {
     expect(logSpy).not.toHaveBeenCalledWith(
       '[Webhook] Unhandled event: PAYMENT.CAPTURE.DENIED',
     );
-    expect(opsFor('orders', 'update')[0]!.payload).toMatchObject({ status: 'cancelled' });
+    expect(supabase.rpc).toHaveBeenCalledWith('commerce_apply_capture_denied', {
+      p_paypal_order_id: 'PAYPAL-ORDER-1',
+      p_claimed_guild_id: GUILD_ID,
+    });
   });
 
   it('keeps an unmatched denied capture unattributed despite valid foreign custom data', async () => {
@@ -527,21 +548,16 @@ describe('route dispatch', () => {
     expect(res.status).toBe(200);
     expect(opsFor('orders', 'update')).toHaveLength(0);
     expect(opsFor('alerts')).toHaveLength(0);
-    // Both route attribution and the handler perform the exact global order
-    // lookup; neither short-circuits through custom_id.
-    expect(opsFor('orders', 'select')).toHaveLength(2);
+    // Route attribution performs the exact global order lookup; the handler
+    // uses the exact-identity database transition RPC.
+    expect(opsFor('orders', 'select')).toHaveLength(1);
     expect(opsFor('webhook_events', 'upsert')[0]!.payload)
       .not.toHaveProperty('guild_id');
   });
 
   it('attributes a dispute webhook row to the guild that owns the payment', async () => {
     withMatchedPayment();
-    resolvers['orders.update'] = () => ({ data: [], error: null });
-    resolvers['payments.select'] = (op) =>
-      // resolveWebhookGuildId uses maybeSingle(); handleDisputeEvent uses in().
-      filterArgs(op, 'in').length > 0
-        ? { data: [{ order_id: ORDER_UUID, guild_id: GUILD_ID }], error: null }
-        : { data: { guild_id: GUILD_ID }, error: null };
+    resolvers['payments.select'] = () => ({ data: { guild_id: GUILD_ID }, error: null });
 
     const req = new Request('http://localhost/api/paypal/webhook', {
       method: 'POST',

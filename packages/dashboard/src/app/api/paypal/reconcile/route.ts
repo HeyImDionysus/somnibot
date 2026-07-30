@@ -196,5 +196,15 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  if (!auth.scheduled && lastRun && typeof lastRun === 'object') {
+    const summary = lastRun as Record<string, unknown>;
+    lastRun = {
+      status: summary.status ?? null,
+      ran_at: summary.ran_at ?? null,
+      window_start: summary.window_start ?? null,
+      window_end: summary.window_end ?? null,
+    };
+  }
+
   return NextResponse.json({ success: true, lastRun });
 }

@@ -33,15 +33,19 @@ const INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 /** Let the server settle (and Supabase/PayPal config load) before the first pass. */
 const INITIAL_DELAY_MS = 5 * 60 * 1000;
+/** Retry lease/cooldown collisions promptly without creating a hot loop. */
+const SKIPPED_RETRY_MS = 5 * 60 * 1000;
 
 let started = false;
 let running = false;
 let nextRun: ReturnType<typeof setTimeout> | null = null;
 
-export async function runScheduledPayPalReconciliationOnce(): Promise<void> {
+export async function runScheduledPayPalReconciliationOnce(): Promise<
+  Awaited<ReturnType<typeof runPayPalReconciliation>> | null
+> {
   // Cheap in-process guard on top of the DB lease: no point issuing PayPal
   // requests if this instance's previous pass is still going.
-  if (running) return;
+  if (running) return null;
   running = true;
   try {
     const supabase = createAdminSupabase();
@@ -54,6 +58,7 @@ export async function runScheduledPayPalReconciliationOnce(): Promise<void> {
     if (result.status === 'failed') {
       console.error(`[PayPalReconcile] Scheduled pass failed: ${result.reason}`);
     }
+    return result;
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     console.error(
@@ -78,6 +83,7 @@ export async function runScheduledPayPalReconciliationOnce(): Promise<void> {
         visibilityError instanceof Error ? visibilityError.message : visibilityError,
       );
     }
+    return null;
   } finally {
     running = false;
   }
@@ -106,13 +112,15 @@ export function startPayPalReconcileScheduler(): void {
 function scheduleNext(delayMs: number): void {
   nextRun = setTimeout(async () => {
     nextRun = null;
+    let delayMs = INTERVAL_MS;
     try {
-      await runScheduledPayPalReconciliationOnce();
+      const result = await runScheduledPayPalReconciliationOnce();
+      if (result?.status === 'skipped') delayMs = SKIPPED_RETRY_MS;
     } finally {
       // Arm only after the attempt settles. A fixed startup-relative interval
       // can fire 5h55m after the initial +5m claim, hit the 6h DB lease, and
       // accidentally turn the real cadence into roughly twelve hours.
-      if (started) scheduleNext(INTERVAL_MS);
+      if (started) scheduleNext(delayMs);
     }
   }, delayMs);
 

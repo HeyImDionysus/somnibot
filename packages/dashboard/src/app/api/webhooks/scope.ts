@@ -35,7 +35,7 @@
  * instance is genuinely multi-tenant, nobody can prove ownership of an
  * unattributed row, and it stays hidden from everyone — the operator resolves
  * it by backfilling `guild_id` directly. Fail closed: every uncertainty
- * (query error, no guilds, unreadably large guild set) denies access.
+ * (query error, no guilds, malformed result) denies access.
  *
  * This is deliberately narrower than filing unattributed rows under
  * `DISCORD_GUILD_ID` (the instance-primary fallback used for *alerts*):
@@ -44,13 +44,6 @@
 import type { createAdminSupabase } from '@/lib/supabase/admin';
 
 type AdminSupabase = ReturnType<typeof createAdminSupabase>;
-
-/**
- * Upper bound on the guild scan. `requireGuildOwner` uses the same 1000-row
- * cap; we request one extra row so a truncated read is detectable rather than
- * silently reading as "all guilds are mine".
- */
-const GUILD_SCAN_LIMIT = 1000;
 
 /**
  * True when `discordId` owns every guild in this instance.
@@ -64,24 +57,21 @@ export async function isSoleInstanceOperator(
 ): Promise<boolean> {
   if (!discordId) return false;
 
-  const { data, error } = await admin
-    .from('guild')
-    .select('owner_discord_id')
-    .limit(GUILD_SCAN_LIMIT + 1);
-
-  if (error || !Array.isArray(data)) {
+  const { data, error } = await admin.rpc(
+    'webhooks_is_sole_instance_operator',
+    { p_discord_id: discordId },
+  );
+  if (error || typeof data !== 'boolean') {
     console.error(
       '[Webhooks] Could not determine instance operator scope:',
-      error?.message ?? 'malformed guild query result',
+      error?.message ?? 'malformed sole-operator result',
     );
     return false;
   }
 
-  // No guilds at all, or more than we can read in one page — cannot prove
-  // sole ownership, so deny.
-  if (data.length === 0 || data.length > GUILD_SCAN_LIMIT) return false;
-
-  return data.every((row) => row.owner_discord_id === discordId);
+  // One database snapshot avoids both PostgREST row caps and a two-query
+  // ownership race.
+  return data;
 }
 
 /**

@@ -2759,10 +2759,12 @@ describe('GET /api/paypal/reconcile', () => {
     const res = await GET(new Request('http://localhost/api/paypal/reconcile') as never);
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({
+    const body = await res.json();
+    expect(body).toMatchObject({
       success: true,
-      lastRun: { ran_at: '2026-07-27T00:00:00.000Z', missing_local: 0 },
+      lastRun: { ran_at: '2026-07-27T00:00:00.000Z' },
     });
+    expect(body.lastRun).not.toHaveProperty('missing_local');
   });
 
   it('requires authentication', async () => {

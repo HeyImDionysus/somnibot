@@ -3781,41 +3781,34 @@ export async function handleDisputeEvent(
     ? amount.currency_code
     : null;
 
-  // Map disputed transactions back to local payments.
+  // Resolve and mutate through one exact-identity database boundary. The RPC
+  // rejects mixed-guild matches before touching any order.
   let guildId: string | null = null;
   const orderIds: string[] = [];
-
-  if (transactionIds.length > 0) {
-    const { data: payments, error } = await supabase
-      .from('payments')
-      .select('order_id, guild_id')
-      .in('paypal_payment_id', transactionIds)
-      .limit(transactionIds.length);
-    requireSupabaseSuccess(error, 'Failed to resolve disputed payments');
-
-    for (const payment of payments ?? []) {
-      if (isNonEmptyString(payment.guild_id) && guildId === null) {
-        guildId = payment.guild_id;
-      }
-      if (isNonEmptyString(payment.order_id) && !orderIds.includes(payment.order_id)) {
-        orderIds.push(payment.order_id);
-      }
-    }
-  }
-
-  // Flip completed orders to 'disputed'. Restricted to 'completed' on purpose:
-  // a 'refunded' order already tells a truer story, and a still-'pending' one
-  // has in-flight fulfillment that must not be pushed into a terminal state.
   let markedDisputed = 0;
-  if (orderIds.length > 0 && eventType !== 'CUSTOMER.DISPUTE.RESOLVED') {
-    const { data: updated, error: updateError } = await supabase
-      .from('orders')
-      .update({ status: 'disputed', updated_at: new Date().toISOString() })
-      .in('id', orderIds)
-      .eq('status', 'completed')
-      .select('id');
-    requireSupabaseSuccess(updateError, 'Failed to mark orders disputed');
-    markedDisputed = updated?.length ?? 0;
+  if (transactionIds.length > 0) {
+    const { data: matches, error } = await supabase.rpc(
+      'commerce_apply_paypal_dispute',
+      {
+        p_paypal_payment_ids: transactionIds,
+        p_mark_disputed: eventType !== 'CUSTOMER.DISPUTE.RESOLVED',
+      },
+    );
+    requireSupabaseSuccess(error, 'Failed to apply PayPal dispute');
+
+    const rows = Array.isArray(matches) ? matches : matches ? [matches] : [];
+    const guildIds = new Set<string>();
+    for (const match of rows) {
+      if (isNonEmptyString(match.guild_id)) guildIds.add(match.guild_id);
+      if (isNonEmptyString(match.order_id) && !orderIds.includes(match.order_id)) {
+        orderIds.push(match.order_id);
+      }
+      if (match.marked_disputed === true) markedDisputed += 1;
+    }
+    if (guildIds.size > 1) {
+      throw new Error('PayPal dispute RPC returned mixed-guild evidence');
+    }
+    guildId = guildIds.size === 1 ? [...guildIds][0]! : null;
   }
 
   await raiseDisputeAlert(supabase, {
@@ -3889,41 +3882,29 @@ export async function handleCaptureDenied(
   // authority.
   let guildId: string | null = null;
   let orderId: string | null = null;
-  let orderStatus: string | null = null;
+  let orderCancelled = false;
   if (isNonEmptyString(paypalOrderId)) {
-    const { data: order, error } = await supabase
-      .from('orders')
-      .select('id, status, guild_id')
-      .eq('paypal_order_id', paypalOrderId)
-      .maybeSingle();
-    requireSupabaseSuccess(error, 'Failed to resolve denied capture order');
+    const { data: applied, error } = await supabase.rpc(
+      'commerce_apply_capture_denied',
+      {
+        p_paypal_order_id: paypalOrderId,
+        p_claimed_guild_id: claimedGuildId,
+      },
+    );
+    requireSupabaseSuccess(error, 'Failed to apply denied capture');
+    const rows = Array.isArray(applied) ? applied : applied ? [applied] : [];
+    if (rows.length > 1) {
+      throw new Error('Denied capture RPC returned multiple orders');
+    }
+    const order = rows[0];
     if (order) {
-      if (!isNonEmptyString(order.guild_id)) {
+      if (!isNonEmptyString(order.guild_id) || !isNonEmptyString(order.order_id)) {
         throw new Error('Denied capture order has no usable guild identity');
       }
-      if (claimedGuildId && claimedGuildId !== order.guild_id) {
-        throw new Error('Denied capture custom_id guild conflicts with the local order');
-      }
-      orderId = order.id as string;
-      orderStatus = order.status as string;
+      orderId = order.order_id;
       guildId = order.guild_id;
+      orderCancelled = order.order_cancelled === true;
     }
-  }
-
-  // A denied capture is terminal for that capture: the buyer was never
-  // charged, so a still-pending order will never complete. Only 'pending' is
-  // touched, so this can never clobber a completed/refunded/disputed order.
-  let orderCancelled = false;
-  if (orderId && guildId && orderStatus === 'pending') {
-    const { data: cancelled, error: cancelError } = await supabase
-      .from('orders')
-      .update({ status: 'cancelled', updated_at: new Date().toISOString() })
-      .eq('id', orderId)
-      .eq('guild_id', guildId)
-      .eq('status', 'pending')
-      .select('id');
-    requireSupabaseSuccess(cancelError, 'Failed to cancel denied-capture order');
-    orderCancelled = (cancelled?.length ?? 0) > 0;
   }
 
   if (orderId && guildId) {

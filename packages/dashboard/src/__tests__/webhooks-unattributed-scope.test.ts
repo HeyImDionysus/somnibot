@@ -50,6 +50,7 @@ type Resolver = (op: RecordedOp) => { data: unknown; error: unknown; count?: num
 
 let ops: RecordedOp[] = [];
 let resolvers: Record<string, Resolver> = {};
+let soleOperatorRpcResult: { data: unknown; error: unknown };
 
 const CHAIN_METHODS = [
   'select', 'eq', 'is', 'in', 'neq', 'gt', 'lt', 'gte', 'lte',
@@ -97,7 +98,13 @@ function makeSupabase() {
     return chain;
   };
 
-  return { from: vi.fn(from), rpc: vi.fn().mockResolvedValue({ data: null, error: null }) };
+  return {
+    from: vi.fn(from),
+    rpc: vi.fn().mockImplementation(async (name: string) =>
+      name === 'webhooks_is_sole_instance_operator'
+        ? soleOperatorRpcResult
+        : { data: null, error: null }),
+  };
 }
 
 function opsFor(table: string, op?: RecordedOp['op']) {
@@ -110,10 +117,11 @@ function filterMethods(op: RecordedOp) {
 
 /** Guild table contents => whether the caller is the sole instance operator. */
 function withGuilds(owners: Array<string | null>) {
-  resolvers['guild'] = () => ({
-    data: owners.map((owner_discord_id) => ({ owner_discord_id })),
+  soleOperatorRpcResult = {
+    data: owners.length > 0
+      && owners.every((owner) => owner === OWNER_DISCORD_ID),
     error: null,
-  });
+  };
 }
 
 const mockFetch = vi.fn();
@@ -123,6 +131,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   ops = [];
   resolvers = {};
+  soleOperatorRpcResult = { data: null, error: null };
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(makeSupabase());
   (requireGuildOwner as ReturnType<typeof vi.fn>).mockResolvedValue({
     ok: true,
@@ -160,7 +169,7 @@ describe('isSoleInstanceOperator', () => {
   });
 
   it('fails closed on a query error', async () => {
-    resolvers['guild'] = () => ({ data: null, error: { message: 'boom' } });
+    soleOperatorRpcResult = { data: null, error: { message: 'boom' } };
     await expect(isSoleInstanceOperator(makeSupabase() as never, OWNER_DISCORD_ID))
       .resolves.toBe(false);
   });
@@ -171,8 +180,17 @@ describe('isSoleInstanceOperator', () => {
       .resolves.toBe(false);
   });
 
-  it('fails closed when the guild set is too large to read in one page', async () => {
+  it('proves sole ownership beyond PostgREST max_rows using exact counts', async () => {
     withGuilds(Array.from({ length: 1001 }, () => OWNER_DISCORD_ID));
+    await expect(isSoleInstanceOperator(makeSupabase() as never, OWNER_DISCORD_ID))
+      .resolves.toBe(true);
+  });
+
+  it('detects a different owner beyond the first 1000 guilds', async () => {
+    withGuilds([
+      ...Array.from({ length: 1000 }, () => OWNER_DISCORD_ID),
+      OTHER_DISCORD_ID,
+    ]);
     await expect(isSoleInstanceOperator(makeSupabase() as never, OWNER_DISCORD_ID))
       .resolves.toBe(false);
   });

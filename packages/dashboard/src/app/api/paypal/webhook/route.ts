@@ -140,17 +140,17 @@ function parseCustomIdGuildId(customId: unknown): string | null {
  * so an ambiguous resource resolves to null rather than guessing — the same
  * fail-closed answer as before, but now only for genuinely ambiguous input.
  */
-function parsePurchaseUnitsGuildId(purchaseUnits: unknown): string | null {
-  if (!Array.isArray(purchaseUnits)) return null;
-
+function parsePurchaseUnitsGuildIds(purchaseUnits: unknown): Set<string> {
   const guildIds = new Set<string>();
+  if (!Array.isArray(purchaseUnits)) return guildIds;
+
   for (const unit of purchaseUnits) {
     if (!unit || typeof unit !== 'object') continue;
     const guildId = parseCustomIdGuildId((unit as { custom_id?: unknown }).custom_id);
     if (guildId) guildIds.add(guildId);
   }
 
-  return guildIds.size === 1 ? [...guildIds][0]! : null;
+  return guildIds;
 }
 
 async function lookupSubscriptionGuildId(
@@ -212,31 +212,47 @@ async function resolveWebhookGuildId(
   supabase: ReturnType<typeof createAdminSupabase>,
   event: PayPalWebhookEvent,
 ): Promise<string | null> {
+  const metadataGuildIds = new Set<string>();
+  const rootGuildId = parseCustomIdGuildId(event.resource.custom_id);
+  if (rootGuildId) metadataGuildIds.add(rootGuildId);
+  for (const guildId of parsePurchaseUnitsGuildIds(event.resource.purchase_units)) {
+    metadataGuildIds.add(guildId);
+  }
+
+  const acceptExactGuild = (exactGuildId: string | null): string | null => {
+    if (!exactGuildId) return null;
+    return [...metadataGuildIds].every((hint) => hint === exactGuildId)
+      ? exactGuildId
+      : null;
+  };
+
   if (event.event_type === 'PAYMENT.CAPTURE.DENIED') {
     const supplementary = event.resource.supplementary_data as
       { related_ids?: { order_id?: unknown } } | undefined;
     const paypalOrderId = supplementary?.related_ids?.order_id;
     return typeof paypalOrderId === 'string'
-      ? lookupPayPalOrderGuildId(supabase, paypalOrderId)
+      ? acceptExactGuild(await lookupPayPalOrderGuildId(supabase, paypalOrderId))
       : null;
   }
 
-  const customIdGuildId = parseCustomIdGuildId(event.resource.custom_id);
-  if (customIdGuildId) return customIdGuildId;
-
-  // Order-shaped resources keep custom_id on the purchase units.
-  const purchaseUnitGuildId = parsePurchaseUnitsGuildId(event.resource.purchase_units);
-  if (purchaseUnitGuildId) return purchaseUnitGuildId;
+  if (event.event_type === 'PAYMENT.CAPTURE.COMPLETED') {
+    const supplementary = event.resource.supplementary_data as
+      { related_ids?: { order_id?: unknown } } | undefined;
+    const paypalOrderId = supplementary?.related_ids?.order_id;
+    return typeof paypalOrderId === 'string'
+      ? acceptExactGuild(await lookupPayPalOrderGuildId(supabase, paypalOrderId))
+      : null;
+  }
 
   const resourceId = event.resource.id;
   if (
     typeof resourceId === 'string'
     && event.event_type === 'CHECKOUT.ORDER.APPROVED'
   ) {
-    return lookupPayPalOrderGuildId(supabase, resourceId);
+    return acceptExactGuild(await lookupPayPalOrderGuildId(supabase, resourceId));
   }
   if (typeof resourceId === 'string' && event.event_type.startsWith('BILLING.SUBSCRIPTION.')) {
-    return lookupSubscriptionGuildId(supabase, resourceId);
+    return acceptExactGuild(await lookupSubscriptionGuildId(supabase, resourceId));
   }
 
   const billingAgreementId = event.resource.billing_agreement_id;
@@ -244,12 +260,12 @@ async function resolveWebhookGuildId(
     typeof billingAgreementId === 'string' &&
     event.event_type === 'PAYMENT.SALE.COMPLETED'
   ) {
-    return lookupSubscriptionGuildId(supabase, billingAgreementId);
+    return acceptExactGuild(await lookupSubscriptionGuildId(supabase, billingAgreementId));
   }
 
   const refundPaymentId = resolveRefundPaymentId(event.resource, event.event_type);
   if (refundPaymentId) {
-    return lookupPaymentGuildId(supabase, refundPaymentId);
+    return acceptExactGuild(await lookupPaymentGuildId(supabase, refundPaymentId));
   }
 
   // Finding 9: a dispute resource carries no custom_id at all — it identifies
@@ -257,10 +273,14 @@ async function resolveWebhookGuildId(
   // capture/sale id stored in payments.paypal_payment_id. Without this, every
   // chargeback would land as an unattributed row.
   if (event.event_type.startsWith('CUSTOMER.DISPUTE.')) {
+    const matchedGuildIds = new Set<string>();
     for (const transactionId of resolveDisputedTransactionIds(event.resource)) {
       const disputeGuildId = await lookupPaymentGuildId(supabase, transactionId);
-      if (disputeGuildId) return disputeGuildId;
+      if (disputeGuildId) matchedGuildIds.add(disputeGuildId);
     }
+    return matchedGuildIds.size === 1
+      ? acceptExactGuild([...matchedGuildIds][0]!)
+      : null;
   }
 
   return null;
@@ -578,7 +598,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (shouldRecordEventResult) {
-      await supabase
+      const { error: completionError } = await supabase
         .from('webhook_events')
         .update({
           result: 'success',
@@ -586,6 +606,9 @@ export async function POST(req: NextRequest) {
           ...(webhookGuildId ? { guild_id: webhookGuildId } : {}),
         })
         .eq('event_id', resolvedEventId);
+      if (completionError) {
+        throw new Error(`Failed to persist webhook completion: ${completionError.message}`);
+      }
     }
 
     // Emit webhook.received audit event via bot action queue (Finding #4)

@@ -256,7 +256,6 @@ describe('CHECKOUT.ORDER.APPROVED guild attribution', () => {
   });
 
   it('leaves guild_id unset when purchase units disagree, rather than guessing', async () => {
-    resolvers['orders.select'] = () => ({ data: null, error: null });
     const resource = {
       id: 'ORDER-MIXED',
       purchase_units: [
@@ -269,6 +268,18 @@ describe('CHECKOUT.ORDER.APPROVED guild attribution', () => {
 
     const upsert = opsFor('webhook_events', 'upsert')[0];
     expect(upsert!.payload).not.toHaveProperty('guild_id');
+  });
+
+  it('leaves guild_id unset when untrusted root metadata contradicts the exact local order', async () => {
+    const resource = {
+      ...orderResource('ORDER-ROOT-MISMATCH'),
+      custom_id: JSON.stringify({ g: '999999999999999999' }),
+    };
+
+    await POST(signedOrderApproved('EVT-ROOT-MISMATCH', resource) as never);
+
+    expect(opsFor('webhook_events', 'upsert')[0]!.payload)
+      .not.toHaveProperty('guild_id');
   });
 
   it('ignores malformed purchase units without throwing', async () => {
@@ -343,6 +354,10 @@ describe('capture failure is recorded and surfaced', () => {
 
   it('marks the alert manual-replay-only for event types PayPal will not retry', async () => {
     // BILLING.SUBSCRIPTION.UPDATED is not in RESUMABLE_FAILED_EVENT_TYPES.
+    resolvers['orders.select'] = () => ({
+      data: [{ guild_id: GUILD_ID, status: 'completed', created_at: new Date().toISOString() }],
+      error: null,
+    });
     resolvers['webhook_events.upsert'] = () => ({ data: [], error: null });
     resolvers['webhook_events.select'] = () => ({
       data: { result: null, processed_at: new Date(Date.now() - 60 * 60 * 1000).toISOString() },
@@ -440,5 +455,23 @@ describe('capture retries are idempotent at PayPal', () => {
 
     expect(res.status).toBe(500);
     expect(opsFor('alerts', 'insert')).toHaveLength(1);
+  });
+
+  it('returns 500 and records an error when the success marker cannot be persisted', async () => {
+    resolvers['webhook_events.update'] = (op) =>
+      op.payload?.result === 'success'
+        ? { data: null, error: { message: 'completion marker unavailable' } }
+        : { data: null, error: null };
+
+    const res = await POST(signedOrderApproved('EVT-MARKER-FAIL', orderResource()) as never);
+
+    expect(res.status).toBe(500);
+    expect(opsFor('webhook_events', 'update').map((op) => op.payload?.result))
+      .toEqual(['success', 'error']);
+    expect(opsFor('alerts', 'insert')[0]!.payload).toMatchObject({
+      guild_id: GUILD_ID,
+      alert_type: 'paypal_webhook_processing_error',
+      severity: 'critical',
+    });
   });
 });

@@ -118,4 +118,35 @@ describe('PayPal reconciliation scheduler failure visibility', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(mocks.run).toHaveBeenCalledTimes(2);
   });
+
+  it('retries a busy or cooldown skip after five minutes instead of twelve hours', async () => {
+    vi.useFakeTimers();
+    mocks.run
+      .mockResolvedValueOnce({
+        status: 'skipped',
+        reason: 'another reconciliation pass completed recently',
+      })
+      .mockResolvedValueOnce({
+        status: 'completed',
+        windowStart: '2026-07-20T00:00:00.000Z',
+        windowEnd: '2026-07-21T00:00:00.000Z',
+        providerTransactions: 0,
+        localPayments: 0,
+        localRefunds: 0,
+        missingLocalPayments: [],
+        missingProviderPayments: [],
+        amountMismatches: [],
+        unsettledLocalPayments: [],
+        alerted: false,
+      });
+
+    startPayPalReconcileScheduler();
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(mocks.run).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync((5 * 60 * 1000) - 1);
+    expect(mocks.run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mocks.run).toHaveBeenCalledTimes(2);
+  });
 });
