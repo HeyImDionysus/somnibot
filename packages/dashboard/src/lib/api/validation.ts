@@ -261,7 +261,10 @@ const productCreate = z.object({
   type: z.enum(['one_time', 'subscription', 'free']).default('one_time'),
   delivery_type: z.string().max(32).optional(),
   price_cents: z.number().int().min(0).max(999999).default(0),
-  currency: z.string().length(3).default('USD'),
+  currency: z.string()
+    .regex(/^[A-Za-z]{3}$/)
+    .transform((value) => value.toUpperCase())
+    .default('USD'),
   granted_role_ids: snowflakeArray,
   granted_channel_ids: snowflakeArray,
   active: z.boolean().default(true),
@@ -307,7 +310,10 @@ const planCreate = z.object({
   interval_unit: z.string().max(32),
   interval_count: z.number().int().min(1).max(12).default(1),
   price_cents: z.number().int().min(0).max(999999),
-  currency: z.string().length(3).default('USD'),
+  currency: z.string()
+    .regex(/^[A-Za-z]{3}$/)
+    .transform((value) => value.toUpperCase())
+    .default('USD'),
   trial_days: z.number().int().min(0).max(365).optional(),
   active: z.boolean().default(true),
 }).strict();

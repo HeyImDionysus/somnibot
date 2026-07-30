@@ -26,6 +26,13 @@ const ENT_ID = '11111111-1111-1111-1111-111111111111';
 
 let entitlement: any;
 let paypalCancelCalls: number;
+let orderResult: any;
+let orderError: any;
+let entitlementReadError: any;
+let entitlementUpdateError: any;
+let suppressEntitlementUpdate: boolean;
+let currentReadError: any;
+let entitlementSelectCalls: number;
 
 function makeAdmin() {
   return {
@@ -35,7 +42,11 @@ function makeAdmin() {
         return chain;
       }
       if (table === 'orders') {
-        const chain: any = { select: () => chain, eq: () => chain, maybeSingle: async () => ({ data: { paypal_subscription_id: 'SUB-123' }, error: null }) };
+        const chain: any = {
+          select: () => chain,
+          eq: () => chain,
+          maybeSingle: async () => ({ data: orderResult, error: orderError }),
+        };
         return chain;
       }
       // entitlements
@@ -49,6 +60,12 @@ function makeAdmin() {
         is: (col: string) => { if (col === 'cancelled_at') guardCancelledNull = true; return chain; },
         maybeSingle: async () => {
           if (mode === 'update') {
+            if (entitlementUpdateError) {
+              return { data: null, error: entitlementUpdateError };
+            }
+            if (suppressEntitlementUpdate) {
+              return { data: null, error: null };
+            }
             if (guardCancelledNull && entitlement.cancelled_at) {
               return { data: null, error: null };
             }
@@ -58,7 +75,14 @@ function makeAdmin() {
               error: null,
             };
           }
-          return { data: { ...entitlement }, error: null };
+          entitlementSelectCalls += 1;
+          if (entitlementSelectCalls > 1 && currentReadError) {
+            return { data: null, error: currentReadError };
+          }
+          return {
+            data: entitlementReadError ? null : { ...entitlement },
+            error: entitlementReadError,
+          };
         },
       };
       return chain;
@@ -77,6 +101,18 @@ function makeRequest(body: Record<string, unknown>) {
 beforeEach(() => {
   vi.clearAllMocks();
   paypalCancelCalls = 0;
+  orderResult = {
+    id: 'order-1',
+    guild_id: 'guild-1',
+    customer_id: 'cust-1',
+    paypal_subscription_id: 'SUB-123',
+  };
+  orderError = null;
+  entitlementReadError = null;
+  entitlementUpdateError = null;
+  suppressEntitlementUpdate = false;
+  currentReadError = null;
+  entitlementSelectCalls = 0;
   entitlement = {
     id: ENT_ID,
     status: 'active',
@@ -130,5 +166,81 @@ describe('POST /api/portal/cancel', () => {
     });
     const res = await POST(req);
     expect(res.status).toBe(401);
+  });
+
+  it('fails closed when the billing-order lookup errors', async () => {
+    orderError = { message: 'database unavailable' };
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+
+    expect(res.status).toBe(503);
+    expect(paypalCancelCalls).toBe(0);
+    expect(entitlement.cancelled_at).toBeNull();
+  });
+
+  it('accepts PayPal 422 only after GET proves the exact subscription is cancelled', async () => {
+    global.fetch = vi.fn(async (url: any, init?: any) => {
+      if (String(url).endsWith('/cancel')) {
+        paypalCancelCalls += 1;
+        return { ok: false, status: 422 } as any;
+      }
+      expect(init?.method).toBeUndefined();
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'SUB-123', status: 'CANCELLED' }),
+      } as any;
+    }) as any;
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+
+    expect(res.status).toBe(200);
+    expect(entitlement.cancelled_at).toBeTruthy();
+  });
+
+  it('rejects generic PayPal 422 when reconciliation does not prove cancellation', async () => {
+    global.fetch = vi.fn(async (url: any) => {
+      if (String(url).endsWith('/cancel')) {
+        paypalCancelCalls += 1;
+        return { ok: false, status: 422 } as any;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'SUB-123', status: 'ACTIVE' }),
+      } as any;
+    }) as any;
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+
+    expect(res.status).toBe(502);
+    expect(entitlement.cancelled_at).toBeNull();
+  });
+
+  it('does not fabricate success when the local schedule update fails', async () => {
+    entitlementUpdateError = { message: 'write failed' };
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+
+    expect(res.status).toBe(503);
+    expect(entitlement.cancelled_at).toBeNull();
+  });
+
+  it('does not fabricate a concurrent winner when the guarded update and reread are empty', async () => {
+    suppressEntitlementUpdate = true;
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+
+    expect(res.status).toBe(503);
+    expect(entitlement.cancelled_at).toBeNull();
+  });
+
+  it('requires a finite paid-through boundary before cancelling the provider', async () => {
+    entitlement.expires_at = null;
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+
+    expect(res.status).toBe(409);
+    expect(paypalCancelCalls).toBe(0);
   });
 });

@@ -155,3 +155,27 @@ describe('schemas.product.update — strict mass-assignment guard', () => {
     expect(undoData?.has('paypal_product_id')).toBe(false);
   });
 });
+
+describe('commerce currency canonicalization', () => {
+  it('normalizes product and plan writes to the provider/database currency domain', () => {
+    expect(schemas.product.update.parse({
+      id: VALID_ID,
+      currency: 'usd',
+    }).currency).toBe('USD');
+    expect(schemas.plan.update.parse({
+      id: VALID_ID,
+      currency: 'eUr',
+    }).currency).toBe('EUR');
+  });
+
+  it('rejects non-letter three-character currency values', () => {
+    expect(schemas.product.update.safeParse({
+      id: VALID_ID,
+      currency: 'U$D',
+    }).success).toBe(false);
+    expect(schemas.plan.update.safeParse({
+      id: VALID_ID,
+      currency: '12A',
+    }).success).toBe(false);
+  });
+});

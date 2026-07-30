@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 215 migration files in packages/supabase/migrations/
+ * Source: 217 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -980,6 +980,9 @@ export interface DbOrder {
   granted_channel_ids_snapshot: string[];
   temporary_role_grants_snapshot: Array<{ role_id: string; duration_seconds: number }>;
   grant_snapshot_frozen_at: string | null;
+  checkout_active: boolean;
+  delivery_type_snapshot: string | null;
+  checkout_approval_url: string | null;
 }
 
 // — Commerce — Licensing —
@@ -1087,6 +1090,7 @@ export interface DbPayment {
   paypal_resource_type: string | null;
   commerce_required_order_status: string | null;
   commerce_settled_capture_order_id: string | null;
+  commerce_customer_totals_recorded_at: string | null;
 }
 
 // — Commerce — Giveaways —
@@ -1184,6 +1188,7 @@ export interface DbBotActionQueue {
   lane: 'commerce' | 'game';
   claim_token: string | null;
   idempotency_key: string | null;
+  outward_generation_id: string | null;
 }
 
 export interface DbAlert {
@@ -1513,6 +1518,55 @@ export interface DbCommerceAdminRefundOperations {
   completed_at: string | null;
 }
 
+export interface DbCommerceCheckoutDeactivationProofs {
+  id: string;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  provider_kind: 'capture' | 'subscription';
+  provider_id: string;
+  proof_kind: 'provider_cancelled' | 'provider_expired' | 'approval_link_not_exposed' | 'operator_verified_unpayable';
+  proof_reference: string;
+  proved_at: string;
+}
+
+export interface DbCommerceFulfillmentClaims {
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  order_id: string;
+  claimed_at: string;
+}
+
+export interface DbCommerceFulfillmentHolds {
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  winning_order_id: string | null;
+  conflicting_entitlement_id: string | null;
+  provider_kind: 'capture' | 'subscription';
+  provider_id: string;
+  hold_reason: 'duplicate_paid_fulfillment' | 'unknown_delivery_contract';
+  held_at: string;
+}
+
+export interface DbCommerceFulfillmentOutwardIntents {
+  id: string;
+  order_id: string;
+  guild_id: string;
+  outward_generation_id: string | null;
+  intent_kind: 'purchase_completed_event' | 'subscription_activated_event' | 'receipt_dm' | 'subscription_renewed_event' | 'subscription_cancelled_event' | 'subscription_cancelled_dm' | 'subscription_payment_failed_lapsed_event' | 'subscription_payment_failed_event' | 'subscription_payment_failed_dm' | 'subscription_suspended_event' | 'subscription_suspended_dm';
+  state: 'sending' | 'sent' | 'uncertain' | 'superseded';
+  attempt_token: string | null;
+  started_at: string;
+  sent_at: string | null;
+  uncertain_at: string | null;
+  last_error: string | null;
+  updated_at: string;
+}
+
 export interface DbCommerceLegacySubscriptionGrantContracts {
   order_id: string;
   source_queue_id: string;
@@ -1582,6 +1636,20 @@ export interface DbCommerceProductTempRoleConfig {
   updated_at: string;
 }
 
+export interface DbCommerceProviderIncidents {
+  id: string;
+  webhook_event_id: string;
+  provider_event_type: 'PAYMENT.CAPTURE.COMPLETED' | 'BILLING.SUBSCRIPTION.ACTIVATED' | 'PAYMENT.SALE.COMPLETED';
+  provider_resource_id: string | null;
+  provider_parent_id: string | null;
+  observed_guild_id: string | null;
+  routable_guild_id: string | null;
+  incident_reason: 'provider_identity_malformed' | 'custom_identity_missing_or_malformed' | 'customer_identity_missing_or_mismatched' | 'order_identity_missing_or_ambiguous' | 'product_identity_missing_or_mismatched' | 'plan_identity_missing_or_mismatched' | 'financial_identity_malformed' | 'subscription_sale_router_failed';
+  evidence: Json;
+  alert_id: string | null;
+  created_at: string;
+}
+
 export interface DbCommerceRoleDeliveryIntents {
   id: string;
   contract_kind: 'paid' | 'noncommerce';
@@ -1621,6 +1689,7 @@ export interface DbCommerceRoleDeliveryIntents {
   mutation_started_at: string | null;
   cleanup_mutation_started_at: string | null;
   last_error: string | null;
+  outward_generation_id: string | null;
 }
 
 export interface DbCommerceRoleMetadataMigrationIssues {
@@ -1632,6 +1701,61 @@ export interface DbCommerceRoleMetadataMigrationIssues {
   details: Json;
   resolved_at: string | null;
   created_at: string;
+}
+
+export interface DbCommerceSubscriptionLifecycleEvents {
+  webhook_event_id: string;
+  paypal_subscription_id: string;
+  provider_event_type: string;
+  provider_occurred_at: string;
+  provider_paid_through_at: string | null;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  plan_id: string;
+  disposition: 'accepted' | 'stale';
+  event_priority: number;
+  generation: number;
+  recorded_at: string;
+}
+
+export interface DbCommerceSubscriptionLifecycleHeads {
+  paypal_subscription_id: string;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  plan_id: string;
+  last_webhook_event_id: string;
+  last_provider_event_type: string;
+  last_provider_occurred_at: string;
+  last_event_priority: number;
+  generation: number;
+  paid_through_at: string | null;
+  cancellation_effective_at: string | null;
+  updated_at: string;
+}
+
+export interface DbCommerceSubscriptionSaleHolds {
+  payment_id: string;
+  paypal_payment_id: string;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  plan_id: string;
+  paypal_subscription_id: string;
+  hold_reason: 'financial_mismatch' | 'terminal_or_held_order' | 'renewal_contract_invalid' | 'renewal_action_failed';
+  contract_detail: string;
+  observed_order_status: 'pending' | 'completed' | 'refunded' | 'disputed' | 'cancelled' | 'pending_review';
+  provider_amount_cents: number;
+  provider_currency: string;
+  stored_order_amount_cents: number;
+  stored_order_currency: string;
+  alert_id: string;
+  action_id: string | null;
+  held_at: string;
 }
 
 export interface DbCommerceTempRoleMigrationIssues {

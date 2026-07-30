@@ -37,6 +37,7 @@ import {
   handleSubscriptionCancelled,
   handleSubscriptionExpired,
   handleSubscriptionSuspended,
+  handleSubscriptionPaymentFailed,
   handleSubscriptionPayment,
   handleCaptureRefunded,
   handleSaleRefunded,
@@ -46,11 +47,21 @@ import {
 // ── Main handler ────────────────────────────────────
 
 const WEBHOOK_PROCESSING_STALE_MS = 5 * 60 * 1000;
+const DURABLE_PROVIDER_EVENT_TYPES = new Set([
+  'CHECKOUT.ORDER.APPROVED',
+  'PAYMENT.CAPTURE.COMPLETED',
+  'BILLING.SUBSCRIPTION.ACTIVATED',
+  'BILLING.SUBSCRIPTION.CANCELLED',
+  'BILLING.SUBSCRIPTION.SUSPENDED',
+  'BILLING.SUBSCRIPTION.PAYMENT.FAILED',
+  'PAYMENT.SALE.COMPLETED',
+]);
 const RESUMABLE_FAILED_EVENT_TYPES = new Set([
   // Capture/activation handlers freeze order grants and use a staged outbox
   // keyed by the provider id, so any partial database/queue failure resumes
   // the exact snapshot without duplicating totals, license keys, or actions.
   'PAYMENT.CAPTURE.COMPLETED',
+  'CHECKOUT.ORDER.APPROVED',
   'BILLING.SUBSCRIPTION.ACTIVATED',
   'BILLING.SUBSCRIPTION.EXPIRED',
   // Subscription sale persistence is idempotent on paypal_payment_id. A
@@ -65,14 +76,9 @@ const RESUMABLE_FAILED_EVENT_TYPES = new Set([
   'PAYMENT.CAPTURE.REVERSED',
   'PAYMENT.SALE.REFUNDED',
   'PAYMENT.SALE.REVERSED',
-  // W2 codex round 2: cancellation/suspension handlers throw when the bot
-  // fulfillment can't be queued. Without being resumable here, that
-  // transient failure records result='error' and PayPal's redelivery hits
-  // failed_requires_manual_replay — the event is permanently lost. The
-  // handlers are retry-safe: the fulfillment payload is stamped with the
-  // webhook event id and a resumed retry probes bot_action_queue for it
-  // before queueing again (exactly-once), while the bot-side handlers only
-  // touch active/grace-period entitlements.
+  // Cancellation/suspension enqueue their exact provider event and lifecycle
+  // transition atomically. Redelivery can therefore recover the same action,
+  // while a conflicting payload for that event id is rejected.
   'BILLING.SUBSCRIPTION.CANCELLED',
   'BILLING.SUBSCRIPTION.SUSPENDED',
   'BILLING.SUBSCRIPTION.PAYMENT.FAILED',
@@ -82,6 +88,7 @@ type PayPalWebhookEvent = {
   event_type: string;
   resource: Record<string, unknown>;
   id?: string;
+  create_time?: string;
 };
 
 function parseCustomIdGuildId(customId: unknown): string | null {
@@ -136,6 +143,24 @@ async function lookupPaymentGuildId(
   return typeof data?.guild_id === 'string' ? data.guild_id : null;
 }
 
+async function lookupCheckoutOrderGuildId(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  paypalOrderId: string,
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from('orders')
+    .select('guild_id, paypal_order_id')
+    .eq('paypal_order_id', paypalOrderId)
+    .maybeSingle();
+  if (error) {
+    throw new Error(`Failed to resolve checkout webhook guild: ${error.message}`);
+  }
+  return data?.paypal_order_id === paypalOrderId
+    && typeof data.guild_id === 'string'
+    ? data.guild_id
+    : null;
+}
+
 async function resolveWebhookGuildId(
   supabase: ReturnType<typeof createAdminSupabase>,
   event: PayPalWebhookEvent,
@@ -144,6 +169,12 @@ async function resolveWebhookGuildId(
   if (customIdGuildId) return customIdGuildId;
 
   const resourceId = event.resource.id;
+  if (
+    typeof resourceId === 'string'
+    && event.event_type === 'CHECKOUT.ORDER.APPROVED'
+  ) {
+    return lookupCheckoutOrderGuildId(supabase, resourceId);
+  }
   if (typeof resourceId === 'string' && event.event_type.startsWith('BILLING.SUBSCRIPTION.')) {
     return lookupSubscriptionGuildId(supabase, resourceId);
   }
@@ -233,6 +264,7 @@ export async function POST(req: NextRequest) {
       event_type: z.string().min(1),
       resource: z.record(z.unknown()),
       id: z.string().optional(),
+      create_time: z.string().optional(),
     });
     const parsed = paypalEventSchema.safeParse(raw);
     if (!parsed.success) {
@@ -245,6 +277,12 @@ export async function POST(req: NextRequest) {
 
   // I-3: Atomic dedup — INSERT the event row first; if a duplicate already exists
   // (event_id is PRIMARY KEY), the ON CONFLICT DO NOTHING makes the insert a no-op
+  if (!event.id && DURABLE_PROVIDER_EVENT_TYPES.has(event.event_type)) {
+    return NextResponse.json(
+      { error: 'Missing webhook event identity' },
+      { status: 400 },
+    );
+  }
   const eventId = event.id ?? req.headers.get('paypal-transmission-id') ?? '';
   const resolvedEventId = eventId || randomBytes(16).toString('hex');
   const shouldRecordEventResult = Boolean(eventId) || !replay;
@@ -383,32 +421,54 @@ export async function POST(req: NextRequest) {
   try {
     switch (event.event_type) {
       case 'CHECKOUT.ORDER.APPROVED':
-        await handleOrderApproved(supabase, event.resource);
+        await handleOrderApproved(supabase, event.resource, {
+          webhookEventId: resolvedEventId,
+        });
         break;
       case 'PAYMENT.CAPTURE.COMPLETED':
-        await handlePaymentCaptured(supabase, event.resource);
+        await handlePaymentCaptured(supabase, event.resource, {
+          webhookEventId: resolvedEventId,
+        });
         break;
       case 'BILLING.SUBSCRIPTION.ACTIVATED':
-        await handleSubscriptionActivated(supabase, event.resource);
+        await handleSubscriptionActivated(supabase, event.resource, {
+          webhookEventId: resolvedEventId,
+          providerOccurredAt: event.create_time,
+        });
         break;
       case 'BILLING.SUBSCRIPTION.CANCELLED':
         await handleSubscriptionCancelled(supabase, event.resource, {
           retryingFailedEvent,
           webhookEventId: resolvedEventId,
+          providerOccurredAt: event.create_time,
         });
         break;
       case 'BILLING.SUBSCRIPTION.EXPIRED':
-        await handleSubscriptionExpired(supabase, event.resource, { retryingFailedEvent });
+        await handleSubscriptionExpired(supabase, event.resource, {
+          retryingFailedEvent,
+          webhookEventId: resolvedEventId,
+          providerOccurredAt: event.create_time,
+        });
         break;
       case 'BILLING.SUBSCRIPTION.SUSPENDED':
-      case 'BILLING.SUBSCRIPTION.PAYMENT.FAILED':
         await handleSubscriptionSuspended(supabase, event.resource, {
           retryingFailedEvent,
           webhookEventId: resolvedEventId,
+          providerOccurredAt: event.create_time,
+        });
+        break;
+      case 'BILLING.SUBSCRIPTION.PAYMENT.FAILED':
+        await handleSubscriptionPaymentFailed(supabase, event.resource, {
+          retryingFailedEvent,
+          webhookEventId: resolvedEventId,
+          providerOccurredAt: event.create_time,
         });
         break;
       case 'PAYMENT.SALE.COMPLETED':
-        await handleSubscriptionPayment(supabase, event.resource);
+        await handleSubscriptionPayment(supabase, event.resource, {
+          webhookEventId: resolvedEventId,
+          providerOccurredAt: event.create_time,
+        });
         break;
       case 'PAYMENT.CAPTURE.REFUNDED':
       case 'PAYMENT.CAPTURE.REVERSED':

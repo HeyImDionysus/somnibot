@@ -68,6 +68,21 @@ function ensureChainReturnsSelf(table: ReturnType<typeof registerTable>) {
   table.eq.mockReturnValue(table);
 }
 
+/**
+ * The DB trigger `commerce_products_provision_license_config` guarantees a
+ * `product_license_config` row for every licence-key product; the create route
+ * verifies that rail held before reporting success (Finding 6). Model it here so
+ * these PayPal-readiness cases exercise the readiness gates, not the rail.
+ */
+function registerProvisionedLicenseConfig(mock: ReturnType<typeof createMockSupabase>) {
+  const table = registerTable(mock, 'product_license_config');
+  table.upsert.mockResolvedValue({ error: null });
+  table.select.mockReturnValue(table);
+  table.eq.mockReturnValue(table);
+  table.maybeSingle.mockResolvedValue({ data: { product_id: 'product-1' }, error: null });
+  return table;
+}
+
 describe('POST /api/store/products PayPal readiness', () => {
   let mock: ReturnType<typeof createMockSupabase>;
   let productsTable: ReturnType<typeof registerTable>;
@@ -80,6 +95,7 @@ describe('POST /api/store/products PayPal readiness', () => {
     plansTable = registerTable(mock, 'plans');
     ensureChainReturnsSelf(productsTable);
     ensureChainReturnsSelf(plansTable);
+    registerProvisionedLicenseConfig(mock);
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
     mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);
     mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);

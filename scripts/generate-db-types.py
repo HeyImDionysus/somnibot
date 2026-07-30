@@ -1237,6 +1237,13 @@ TYPE_OVERRIDES: dict[tuple[str, str], str] = {
     ("bot_action_queue", "payload"): "Record<string, unknown>",
     ("bot_action_queue", "result"): "Record<string, unknown> | null",
     ("bot_action_queue", "status"): "'staged' | 'pending' | 'processing' | 'completed' | 'failed'",
+    # commerce_fulfillment_outward_intents — CHECK widened later in
+    # 20260727041000_checkout_double_charge_rails.sql after the table's initial
+    # CREATE statement. The generator currently needs an explicit override for
+    # replacement CHECK constraints.
+    ("commerce_fulfillment_outward_intents", "state"): (
+        "'sending' | 'sent' | 'uncertain' | 'superseded'"
+    ),
     # orders
     ("orders", "status"): "'pending' | 'completed' | 'refunded' | 'disputed' | 'cancelled' | 'pending_review'",
     # license_validations — CHECK widened by

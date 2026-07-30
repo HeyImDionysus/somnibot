@@ -37,12 +37,14 @@ const {
   mockBeginRoleDelivery,
   mockFinishRoleDelivery,
   mockExecuteRoleCleanup,
+  MockTerminalNoopError,
 } = vi.hoisted(() => ({
   mockGrant: vi.fn(async () => 'ent-123'),
   mockRevoke: vi.fn(async () => ({
     disposition: 'applied',
     transitionId: '11111111-1111-4111-8111-111111111111',
     status: 'cancelled',
+    outwardGenerationId: '44444444-4444-4444-8444-444444444444',
   })),
   mockSuspend: vi.fn(async () => true),
   mockReactivate: vi.fn(async () => true),
@@ -50,21 +52,23 @@ const {
   mockBeginRoleDelivery: vi.fn(async (_entitlementId, _contract, claim) => ({
     state: 'live',
     attempt: {
-      ...claim,
-      intentId: '11111111-1111-4111-8111-111111111111',
-      mutationToken: '22222222-2222-4222-8222-222222222222',
-    },
-  })),
+       ...claim,
+       intentId: '11111111-1111-4111-8111-111111111111',
+       mutationToken: '22222222-2222-4222-8222-222222222222',
+       outwardGenerationId: '33333333-3333-4333-8333-333333333333',
+     },
+   })),
   mockFinishRoleDelivery: vi.fn(async () => ({
     state: 'open', settled: false, authorityEmpty: false, disposition: 'confirmed_open',
   })),
   mockExecuteRoleCleanup: vi.fn(async () => ({ state: 'settled', settled: true })),
+  MockTerminalNoopError: class extends Error {
+    constructor(readonly entitlementId: string | null) { super('terminal noop'); }
+  },
 }));
 
 vi.mock('../features/commerce/entitlement-service.js', () => ({
-  PurchaseRoleDeliveryTerminalNoopError: class extends Error {
-    constructor(readonly entitlementId: string | null) { super('terminal noop'); }
-  },
+  PurchaseRoleDeliveryTerminalNoopError: MockTerminalNoopError,
   EntitlementService: class {
     private activeAttempt: any = null;
     private confirmedReplay = false;
@@ -72,25 +76,59 @@ vi.mock('../features/commerce/entitlement-service.js', () => ({
       const result = await (mockGrant as any)(opts);
       if (result && opts.roleDeliveryClaim) {
         this.activeAttempt = {
-          ...opts.roleDeliveryClaim,
-          intentId: '11111111-1111-4111-8111-111111111111',
-          mutationToken: '22222222-2222-4222-8222-222222222222',
+           ...opts.roleDeliveryClaim,
+           intentId: '11111111-1111-4111-8111-111111111111',
+           mutationToken: '22222222-2222-4222-8222-222222222222',
+           outwardGenerationId: '33333333-3333-4333-8333-333333333333',
+         };
+      }
+      return result;
+    };
+    revoke = async (...args: any[]) => {
+      const result: any = await (mockRevoke as any)(...args);
+      if (
+        args[2]
+        && result
+        && ['applied', 'noop'].includes(result.disposition)
+        && !Object.hasOwn(result, 'outwardGenerationId')
+      ) {
+        return {
+          ...result,
+          outwardGenerationId: '44444444-4444-4444-8444-444444444444',
         };
       }
       return result;
     };
-    revoke = mockRevoke;
     suspend = mockSuspend;
-    reactivate = async (...args: any[]) => {
-      const result = await (mockReactivate as any)(...args);
-      if (result) {
-        const claim = args[2];
-        this.activeAttempt = claim ? {
-          ...claim,
-          intentId: '11111111-1111-4111-8111-111111111111',
-          mutationToken: '22222222-2222-4222-8222-222222222222',
-        } : null;
+    startPaymentFailureGraceForFulfillment = async (...args: any[]) => {
+      const result: any = await (mockSuspend as any)(...args);
+      if (typeof result === 'boolean') {
+        return result
+          ? {
+              disposition: 'applied',
+              outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+              gracePeriodEndsAt: '2026-08-01T00:00:00.000Z',
+            }
+          : { disposition: 'failed', outwardGenerationId: null };
       }
+      if (
+        result
+        && ['applied', 'replay'].includes(result.disposition)
+        && typeof result.outwardGenerationId === 'string'
+        && !Object.hasOwn(result, 'gracePeriodEndsAt')
+      ) {
+        return {
+          ...result,
+          gracePeriodEndsAt: '2026-08-01T00:00:00.000Z',
+        };
+      }
+      return result;
+    };
+    reactivate = async (...args: any[]) => {
+      const begun: any = await (mockBeginRoleDelivery as any)(...args);
+      this.confirmedReplay = begun?.state === 'confirmed_live';
+      this.activeAttempt = begun?.state === 'live' ? begun.attempt : null;
+      const result = await (mockReactivate as any)(...args);
       return result;
     };
     ensurePurchaseGrantedRoles = mockEnsurePurchaseGrantedRoles;
@@ -102,6 +140,9 @@ vi.mock('../features/commerce/entitlement-service.js', () => ({
     };
     getActivePurchaseRoleDeliveryAttempt = () => this.activeAttempt;
     wasPurchaseRoleDeliveryConfirmedReplay = () => this.confirmedReplay;
+    getPurchaseRoleDeliveryOutwardGeneration = () =>
+      this.activeAttempt?.outwardGenerationId
+      ?? (this.confirmedReplay ? TEST_OUTWARD_GENERATION : null);
     finishPurchaseRoleDeliveryAttempt = async (...args: any[]) => {
       const result = await (mockFinishRoleDelivery as any)(...args);
       this.activeAttempt = null;
@@ -115,13 +156,17 @@ vi.mock('../features/commerce/entitlement-service.js', () => ({
   },
 }));
 
-const { mockDeliverReceiptDM } = vi.hoisted(() => ({
-  mockDeliverReceiptDM: vi.fn(async () => {}),
-}));
+const { mockPrepareReceiptDM, mockPreparedReceiptSend } = vi.hoisted(() => {
+  const preparedSend = vi.fn(async () => {});
+  return {
+    mockPrepareReceiptDM: vi.fn(async () => preparedSend),
+    mockPreparedReceiptSend: preparedSend,
+  };
+});
 
 vi.mock('../features/commerce/receipt-builder.js', () => ({
   sendReceiptDM: vi.fn(async () => true),
-  deliverReceiptDM: mockDeliverReceiptDM,
+  prepareReceiptDM: mockPrepareReceiptDM,
 }));
 
 vi.mock('../services/fraud-detection.js', () => ({
@@ -138,6 +183,8 @@ import { CommerceFulfillmentService, type FulfillmentPayload } from '../services
 // Mocked above — imported here so the wiring test can override its return
 // value and assert commerce-fulfillment threads it into suspend().
 import { getGracePeriodDays } from '@somnibot/shared';
+
+const TEST_OUTWARD_GENERATION = '33333333-3333-4333-8333-333333333333';
 
 function makeChain(result: any = { data: null, error: null }) {
   const chain: any = {};
@@ -162,6 +209,66 @@ function makeChain(result: any = { data: null, error: null }) {
   }
   chain.then = (resolve: Function) => resolve(result);
   return chain;
+}
+
+function paidClaimWinner(args: Record<string, unknown>) {
+  return {
+    data: {
+      order_id: args.p_order_id,
+      disposition: 'winner',
+      winning_order_id: args.p_order_id,
+      conflicting_entitlement_id: null,
+      alert_id: null,
+    },
+    error: null,
+  };
+}
+
+function defaultOutwardIntentRpc(name: string, args: Record<string, unknown>) {
+  if (name === 'commerce_resume_fulfillment_outward_intent') {
+    return {
+      data: {
+        order_id: args.p_order_id,
+        guild_id: args.p_guild_id,
+        intent_kind: args.p_intent_kind,
+        outward_generation_id: args.p_outward_generation_id,
+        disposition: 'absent',
+        state: null,
+        attempt_token: null,
+        alert_id: null,
+      },
+      error: null,
+    };
+  }
+  if (name === 'commerce_begin_fulfillment_outward_intent') {
+    return {
+      data: {
+        order_id: args.p_order_id,
+        guild_id: args.p_guild_id,
+        intent_kind: args.p_intent_kind,
+        outward_generation_id: args.p_outward_generation_id,
+        disposition: 'send',
+        state: 'sending',
+        attempt_token: '55555555-5555-4555-8555-555555555555',
+        alert_id: null,
+      },
+      error: null,
+    };
+  }
+  if (name === 'commerce_finish_fulfillment_outward_intent') {
+    return {
+      data: {
+        order_id: args.p_order_id,
+        guild_id: args.p_guild_id,
+        intent_kind: args.p_intent_kind,
+        outward_generation_id: args.p_outward_generation_id,
+        state: args.p_outcome,
+        alert_id: args.p_outcome === 'uncertain' ? 'alert-outward-uncertain' : null,
+      },
+      error: null,
+    };
+  }
+  return { data: null, error: null };
 }
 
 function makeSupa(overrides: Record<string, any> = {}) {
@@ -192,8 +299,238 @@ function makeSupa(overrides: Record<string, any> = {}) {
           : null;
       return makeChain({ data, error: null });
     }),
-    rpc: vi.fn(async () => ({ data: null, error: null })),
+    rpc: vi.fn(async (name: string, args: Record<string, unknown>) =>
+      name === 'commerce_claim_paid_fulfillment'
+        ? paidClaimWinner(args)
+        : defaultOutwardIntentRpc(name, args)),
   };
+}
+
+function makeOutwardIntentSupa(
+  failFinishOnceFor:
+    | 'purchase_completed_event'
+    | 'subscription_activated_event'
+    | 'subscription_renewed_event'
+    | 'subscription_cancelled_event'
+    | 'subscription_cancelled_dm'
+    | 'subscription_payment_failed_lapsed_event'
+    | 'subscription_payment_failed_event'
+    | 'subscription_payment_failed_dm'
+    | 'subscription_suspended_event'
+    | 'subscription_suspended_dm'
+    | 'receipt_dm'
+    | null,
+  overrides: {
+    entitlement?: Record<string, unknown>;
+    order?: Record<string, unknown>;
+  } = {},
+  failBeginOnceFor:
+    | 'purchase_completed_event'
+    | 'subscription_activated_event'
+    | 'subscription_renewed_event'
+    | 'subscription_cancelled_event'
+    | 'subscription_cancelled_dm'
+    | 'subscription_payment_failed_lapsed_event'
+    | 'subscription_payment_failed_event'
+    | 'subscription_payment_failed_dm'
+    | 'subscription_suspended_event'
+    | 'subscription_suspended_dm'
+    | 'receipt_dm'
+    | null = null,
+) {
+  const entitlement = {
+    id: 'ent-123',
+    customer_id: 'cust-1',
+    product_id: 'prod-1',
+    plan_id: null,
+    license_key_id: null,
+    type: 'one_time',
+    status: 'active',
+    source: 'purchase',
+    granted_role_ids: ['role-1'],
+    granted_channel_ids: [],
+    ...overrides.entitlement,
+  };
+  const supa: any = makeSupa({
+    entitlements: entitlement,
+    ...(overrides.order === undefined ? {} : { orders: overrides.order }),
+  });
+  const intents = new Map<string, {
+    state: 'sending' | 'sent' | 'uncertain';
+    attemptToken: string | null;
+    outwardGenerationId: string | null;
+  }>();
+  let finishFailurePending = true;
+  let beginFailurePending = failBeginOnceFor !== null;
+  const resolveIntentKey = (
+    args: Record<string, unknown>,
+    create: boolean,
+  ): string => {
+    const base = `${String(args.p_order_id)}:${String(args.p_intent_kind)}`;
+    const generation = (args.p_outward_generation_id ?? null) as string | null;
+    const baseIntent = intents.get(base);
+    if (baseIntent?.outwardGenerationId === generation) return base;
+    const generated = `${base}:${generation ?? 'legacy'}`;
+    if (intents.get(generated)?.outwardGenerationId === generation) return generated;
+    return create && baseIntent ? generated : base;
+  };
+  supa.rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    if (name === 'commerce_claim_paid_fulfillment') {
+      return paidClaimWinner(args);
+    }
+    if (
+      name === 'commerce_begin_fulfillment_outward_intent'
+      || name === 'commerce_resume_fulfillment_outward_intent'
+      || name === 'commerce_continue_legacy_receipt_outward_intent'
+    ) {
+      const outwardArgs: Record<string, unknown> =
+        name === 'commerce_continue_legacy_receipt_outward_intent'
+        ? {
+            ...args,
+            p_intent_kind: 'receipt_dm',
+            p_outward_generation_id: null,
+          }
+        : {
+            ...args,
+            p_outward_generation_id: args.p_outward_generation_id ?? null,
+          };
+      const key = resolveIntentKey(
+        outwardArgs,
+        name !== 'commerce_resume_fulfillment_outward_intent',
+      );
+      const existing = intents.get(key);
+      if (
+        name === 'commerce_begin_fulfillment_outward_intent'
+        && outwardArgs.p_intent_kind === failBeginOnceFor
+        && beginFailurePending
+      ) {
+        beginFailurePending = false;
+        return {
+          data: null,
+          error: { message: 'worker crashed before outward dispatch', code: '08006' },
+        };
+      }
+      if (!existing) {
+        if (name === 'commerce_resume_fulfillment_outward_intent') {
+          return {
+            data: {
+              order_id: outwardArgs.p_order_id,
+              guild_id: outwardArgs.p_guild_id,
+              intent_kind: outwardArgs.p_intent_kind,
+              outward_generation_id: outwardArgs.p_outward_generation_id,
+              disposition: 'absent',
+              state: null,
+              attempt_token: null,
+              alert_id: null,
+            },
+            error: null,
+          };
+        }
+        const attemptToken = '55555555-5555-4555-8555-555555555555';
+        const legacyReceiptHasPredecessor =
+          name === 'commerce_continue_legacy_receipt_outward_intent'
+          && outwardArgs.p_intent_kind === 'receipt_dm'
+          && outwardArgs.p_outward_generation_id === null
+          && args.p_action_id === TEST_ACTION_CLAIM.actionId
+          && args.p_claim_token === TEST_ACTION_CLAIM.claimToken
+          && [
+            'purchase_completed_event',
+            'subscription_activated_event',
+          ].includes(String(args.p_predecessor_kind))
+          && [...intents.entries()].some(([candidateKey, candidate]) =>
+            candidateKey.startsWith(`${String(outwardArgs.p_order_id)}:`)
+            && candidateKey.includes(String(args.p_predecessor_kind))
+            && candidate.outwardGenerationId === null
+            && candidate.state === 'sent');
+        if (
+          typeof outwardArgs.p_outward_generation_id !== 'string'
+          && !legacyReceiptHasPredecessor
+        ) {
+          return {
+            data: null,
+            error: { message: 'new outward generation is required', code: '23514' },
+          };
+        }
+        intents.set(key, {
+          state: 'sending',
+          attemptToken,
+          outwardGenerationId: outwardArgs.p_outward_generation_id as string | null,
+        });
+        return {
+          data: {
+            order_id: outwardArgs.p_order_id,
+            guild_id: outwardArgs.p_guild_id,
+            intent_kind: outwardArgs.p_intent_kind,
+            outward_generation_id: outwardArgs.p_outward_generation_id,
+            disposition: 'send',
+            state: 'sending',
+            attempt_token: attemptToken,
+            alert_id: null,
+          },
+          error: null,
+        };
+      }
+      if (existing.outwardGenerationId !== outwardArgs.p_outward_generation_id) {
+        return {
+          data: null,
+          error: { message: 'outward generation mismatch', code: '23514' },
+        };
+      }
+      if (existing.state === 'sending') {
+        existing.state = 'uncertain';
+        existing.attemptToken = null;
+      }
+      return {
+        data: {
+          order_id: outwardArgs.p_order_id,
+          guild_id: outwardArgs.p_guild_id,
+          intent_kind: outwardArgs.p_intent_kind,
+          outward_generation_id: existing.outwardGenerationId,
+          disposition: existing.state === 'sent' ? 'sent' : 'uncertain',
+          state: existing.state,
+          attempt_token: null,
+          alert_id: existing.state === 'uncertain' ? 'alert-outward-uncertain' : null,
+        },
+        error: null,
+      };
+    }
+    if (name === 'commerce_finish_fulfillment_outward_intent') {
+      if (
+        failFinishOnceFor !== null
+        && args.p_intent_kind === failFinishOnceFor
+        && finishFailurePending
+      ) {
+        finishFailurePending = false;
+        return { data: null, error: { message: 'commit result unavailable', code: '08006' } };
+      }
+      const key = resolveIntentKey(args, false);
+      const existing = intents.get(key);
+      if (
+        !existing
+        || existing.attemptToken !== args.p_attempt_token
+        || existing.outwardGenerationId !== args.p_outward_generation_id
+      ) {
+        return { data: null, error: { message: 'intent identity mismatch', code: '23514' } };
+      }
+      existing.state = args.p_outcome === 'sent' ? 'sent' : 'uncertain';
+      existing.attemptToken = null;
+      return {
+        data: {
+          order_id: args.p_order_id,
+          guild_id: args.p_guild_id,
+          intent_kind: args.p_intent_kind,
+          outward_generation_id: existing.outwardGenerationId,
+          state: existing.state,
+          alert_id: existing.state === 'uncertain' ? 'alert-outward-uncertain' : null,
+        },
+        error: null,
+      };
+    }
+    return { data: null, error: null };
+  });
+  supa.__intents = intents;
+  supa.__entitlement = entitlement;
+  return supa;
 }
 
 function makeGuild() {
@@ -268,6 +605,16 @@ function makeTemporaryRoleHarness(opts: {
 
   const supabase: any = {
     rpc: vi.fn(async (name: string, args: Record<string, unknown>) => {
+      if (name === 'commerce_claim_paid_fulfillment') {
+        return paidClaimWinner(args);
+      }
+      if (
+        name === 'commerce_begin_fulfillment_outward_intent'
+        || name === 'commerce_resume_fulfillment_outward_intent'
+        || name === 'commerce_finish_fulfillment_outward_intent'
+      ) {
+        return defaultOutwardIntentRpc(name, args);
+      }
       if (name === 'commerce_attach_temp_role_delivery') {
         const scripted = opts.attachResults?.shift();
         if (scripted) return scripted;
@@ -598,11 +945,39 @@ const TEST_ACTION_CLAIM = {
   claimToken: '44444444-4444-4444-8444-444444444444',
 };
 
+function withSubscriptionLifecycle(
+  payload: FulfillmentPayload,
+): FulfillmentPayload {
+  const eventTypes: Record<string, string> = {
+    subscription_activated: 'BILLING.SUBSCRIPTION.ACTIVATED',
+    subscription_renewed: 'PAYMENT.SALE.COMPLETED',
+    subscription_cancelled: 'BILLING.SUBSCRIPTION.CANCELLED',
+    subscription_suspended: 'BILLING.SUBSCRIPTION.SUSPENDED',
+    subscription_payment_failed: 'BILLING.SUBSCRIPTION.PAYMENT.FAILED',
+  };
+  const providerEventType = eventTypes[payload.fulfillment_type];
+  if (!providerEventType) return payload;
+  const requiresPaidThrough = [
+    'subscription_activated',
+    'subscription_renewed',
+  ].includes(payload.fulfillment_type);
+  return {
+    ...payload,
+    webhook_event_id: payload.webhook_event_id ?? 'WH-EVENT-001',
+    provider_event_type: providerEventType,
+    provider_occurred_at: payload.provider_occurred_at ?? '2026-07-29T00:00:00.000Z',
+    provider_paid_through_at: requiresPaidThrough
+      ? payload.provider_paid_through_at ?? '2026-08-29T00:00:00.000Z'
+      : null,
+    lifecycle_generation: payload.lifecycle_generation ?? 1,
+  };
+}
+
 function fulfillClaimed(
   service: CommerceFulfillmentService,
   payload: FulfillmentPayload,
 ) {
-  return service.fulfill(payload, TEST_ACTION_CLAIM);
+  return service.fulfill(withSubscriptionLifecycle(payload), TEST_ACTION_CLAIM);
 }
 
 const basePayload: FulfillmentPayload = {
@@ -614,6 +989,7 @@ const basePayload: FulfillmentPayload = {
   product_name: 'VIP Pass',
   order_id: 'order-1',
   order_number: 'ORD-001',
+  paypal_capture_id: 'CAPTURE-001',
   amount_cents: 999,
   currency: 'USD',
   granted_role_ids: ['role-1'],
@@ -642,6 +1018,7 @@ const subscriptionOrderSnapshot = {
 const subscriptionActivationPayload: FulfillmentPayload = {
   ...basePayload,
   fulfillment_type: 'subscription_activated',
+  paypal_capture_id: undefined,
   plan_id: 'plan-monthly',
   paypal_subscription_id: 'SUB-001',
   entitlement_type: 'subscription',
@@ -717,6 +1094,14 @@ const subscriptionLifecyclePayload: FulfillmentPayload = {
   ...basePayload,
   fulfillment_type: 'subscription_cancelled',
   entitlement_type: 'subscription',
+  paypal_capture_id: undefined,
+  plan_id: 'plan-monthly',
+  paypal_subscription_id: 'SUB-001',
+  webhook_event_id: 'WH-EVENT-001',
+  provider_event_type: 'BILLING.SUBSCRIPTION.CANCELLED',
+  provider_occurred_at: '2026-07-29T00:00:00.000Z',
+  provider_paid_through_at: null,
+  lifecycle_generation: 1,
 };
 
 function subscriptionLifecycleEntitlement(
@@ -732,6 +1117,7 @@ function subscriptionLifecycleEntitlement(
     plan_id: 'plan-monthly',
     type: 'subscription',
     status,
+    updated_at: '2026-07-27T00:00:00.000Z',
     source: 'purchase',
     customers: {
       id: 'cust-1',
@@ -747,7 +1133,10 @@ function makeEntitlementLookupResult(result: { data: unknown; error: unknown }) 
     from: vi.fn((table: string) => makeChain(
       table === 'entitlements' ? result : { data: null, error: null },
     )),
-    rpc: vi.fn(async () => ({ data: null, error: null })),
+    rpc: vi.fn(async (name: string, args: Record<string, unknown>) =>
+      name === 'commerce_claim_paid_fulfillment'
+        ? paidClaimWinner(args)
+        : defaultOutwardIntentRpc(name, args)),
   };
 }
 
@@ -757,7 +1146,29 @@ describe('CommerceFulfillmentService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    eventBus = { emit: vi.fn(), on: vi.fn(), off: vi.fn() };
+    eventBus = {
+      emit: vi.fn(),
+      emitAndWait: vi.fn(async () => {}),
+      on: vi.fn(),
+      off: vi.fn(),
+    };
+    eventBus.prepareEmitAndWait = vi.fn((
+      type: string,
+      guildId: string,
+      data: Record<string, unknown>,
+    ) => {
+      let state: 'prepared' | 'dispatched' | 'cancelled' = 'prepared';
+      return {
+        dispatch: vi.fn(async () => {
+          if (state !== 'prepared') throw new Error(`Prepared event is ${state}`);
+          state = 'dispatched';
+          await eventBus.emitAndWait(type, guildId, data);
+        }),
+        cancel: vi.fn(() => {
+          if (state === 'prepared') state = 'cancelled';
+        }),
+      };
+    });
     service = new CommerceFulfillmentService(makeGuild(), makeSupa() as any, eventBus);
   });
 
@@ -777,7 +1188,9 @@ describe('CommerceFulfillmentService', () => {
   });
 
   describe('one_time_purchase', () => {
-    it('grants entitlement, emits event, sends receipt', async () => {
+    it('durably confirms the role generation before an exact claimed action begins outward delivery', async () => {
+      const supabase = makeSupa();
+      service = new CommerceFulfillmentService(makeGuild(), supabase as any, eventBus);
       const result = await fulfillClaimed(service, basePayload);
       expect(result.success).toBe(true);
       expect(result.entitlementId).toBe('ent-123');
@@ -797,6 +1210,466 @@ describe('CommerceFulfillmentService', () => {
         roleDeliveryClaim: TEST_ACTION_CLAIM,
       });
       expect(mockEnsurePurchaseGrantedRoles).not.toHaveBeenCalled();
+      expect(mockFinishRoleDelivery).toHaveBeenCalledTimes(1);
+      expect(mockFinishRoleDelivery).toHaveBeenCalledWith(
+        expect.objectContaining({ outwardGenerationId: TEST_OUTWARD_GENERATION }),
+        'live',
+      );
+      const beginIndex = supabase.rpc.mock.calls.findIndex(
+        (call: [string, Record<string, unknown>]) =>
+          call[0] === 'commerce_begin_fulfillment_outward_intent',
+      );
+      expect(beginIndex).toBeGreaterThanOrEqual(0);
+      expect(supabase.rpc.mock.calls[beginIndex]?.[1]).toMatchObject({
+        p_action_id: TEST_ACTION_CLAIM.actionId,
+        p_claim_token: TEST_ACTION_CLAIM.claimToken,
+        p_outward_generation_id: TEST_OUTWARD_GENERATION,
+      });
+      expect(mockFinishRoleDelivery.mock.invocationCallOrder[0])
+        .toBeLessThan(supabase.rpc.mock.invocationCallOrder[beginIndex]!);
+    });
+
+    it('marks a rejected awaited purchase listener uncertain instead of sent', async () => {
+      eventBus.emitAndWait.mockRejectedValueOnce(new Error('automation listener failed'));
+      const supabase = makeSupa();
+      service = new CommerceFulfillmentService(makeGuild(), supabase as any, eventBus);
+
+      const result = await fulfillClaimed(service, basePayload);
+
+      expect(result.success).toBe(false);
+      expect(result.eventEmitted).toBe(false);
+      expect(result.receiptSent).toBeUndefined();
+      expect(eventBus.emitAndWait).toHaveBeenCalledOnce();
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'commerce_finish_fulfillment_outward_intent',
+        expect.objectContaining({
+          p_intent_kind: 'purchase_completed_event',
+          p_outcome: 'uncertain',
+          p_error: expect.stringContaining('automation listener failed'),
+        }),
+      );
+    });
+
+    it('does not begin a receipt intent when pre-send Discord preparation fails', async () => {
+      mockPrepareReceiptDM.mockRejectedValueOnce(new Error('createDM failed'));
+      const supabase = makeSupa();
+      service = new CommerceFulfillmentService(makeGuild(), supabase as any, eventBus);
+
+      const result = await fulfillClaimed(service, basePayload);
+
+      expect(result.success).toBe(false);
+      expect(result.errors.join(' ')).toContain('createDM failed');
+      expect(mockPreparedReceiptSend).not.toHaveBeenCalled();
+      expect(supabase.rpc).not.toHaveBeenCalledWith(
+        'commerce_begin_fulfillment_outward_intent',
+        expect.objectContaining({ p_intent_kind: 'receipt_dm' }),
+      );
+    });
+
+    it.each([
+      'purchase_completed_event',
+      'receipt_dm',
+    ] as const)(
+      'never repeats an externally accepted effect after the %s sent marker commit is lost',
+      async (failedIntentKind) => {
+        const supabase = makeOutwardIntentSupa(failedIntentKind);
+        const guild = makeGuild();
+        const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+        const second = new CommerceFulfillmentService(guild, supabase, eventBus);
+
+        const firstResult = await fulfillClaimed(first, basePayload);
+        const replayResult = await fulfillClaimed(second, basePayload);
+
+        expect(firstResult.success).toBe(false);
+        expect(replayResult.success).toBe(false);
+        expect(replayResult.errors.join(' ')).toContain('operator reconciliation');
+        expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
+        expect(mockPreparedReceiptSend).toHaveBeenCalledTimes(
+          failedIntentKind === 'receipt_dm' ? 1 : 0,
+        );
+        expect(supabase.__intents.get(`order-1:${failedIntentKind}`)?.state)
+          .toBe('uncertain');
+        expect(supabase.rpc).toHaveBeenCalledWith(
+          'commerce_begin_fulfillment_outward_intent',
+          expect.objectContaining({
+            p_order_id: 'order-1',
+            p_guild_id: 'guild-1',
+            p_intent_kind: failedIntentKind,
+          }),
+        );
+      },
+    );
+
+    it('resumes a lost purchase event marker after role delivery settled without re-emitting', async () => {
+      const supabase = makeOutwardIntentSupa('purchase_completed_event');
+      const guild = makeGuild();
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockBeginRoleDelivery as any)
+        .mockResolvedValueOnce({
+          state: 'live',
+          attempt: {
+            ...TEST_ACTION_CLAIM,
+            intentId: '11111111-1111-4111-8111-111111111111',
+            mutationToken: '22222222-2222-4222-8222-222222222222',
+            outwardGenerationId: TEST_OUTWARD_GENERATION,
+          },
+        })
+        .mockResolvedValueOnce({
+          state: 'confirmed_live',
+          intentId: '11111111-1111-4111-8111-111111111111',
+          outwardGenerationId: TEST_OUTWARD_GENERATION,
+        });
+
+      const firstResult = await fulfillClaimed(first, basePayload);
+      const replayResult = await fulfillClaimed(replay, basePayload);
+
+      expect(firstResult.success).toBe(false);
+      expect(replayResult).toMatchObject({
+        success: false,
+        eventEmitted: false,
+        errors: [
+          expect.stringContaining('operator reconciliation'),
+        ],
+      });
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
+      expect(mockPreparedReceiptSend).not.toHaveBeenCalled();
+      expect(supabase.__intents.get('order-1:purchase_completed_event')?.state)
+        .toBe('uncertain');
+      expect(supabase.__intents.get('order-1:receipt_dm')).toBeUndefined();
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'commerce_begin_fulfillment_outward_intent',
+        expect.objectContaining({
+          p_order_id: 'order-1',
+          p_guild_id: 'guild-1',
+          p_intent_kind: 'purchase_completed_event',
+        }),
+      );
+    });
+
+    it('keeps a null-generation legacy confirmed purchase with no event row fully deduped', async () => {
+      const supabase = makeOutwardIntentSupa(null);
+      const guild = makeGuild();
+      service = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockBeginRoleDelivery as any).mockResolvedValueOnce({
+        state: 'confirmed_live',
+        intentId: '11111111-1111-4111-8111-111111111111',
+        outwardGenerationId: null,
+      });
+
+      const result = await fulfillClaimed(service, basePayload);
+
+      expect(result).toMatchObject({
+        success: true,
+        eventEmitted: false,
+        errors: [],
+      });
+      expect(result.receiptSent).toBeUndefined();
+      expect(eventBus.emitAndWait).not.toHaveBeenCalled();
+      expect(mockPreparedReceiptSend).not.toHaveBeenCalled();
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'commerce_resume_fulfillment_outward_intent',
+        {
+          p_order_id: 'order-1',
+          p_guild_id: 'guild-1',
+          p_intent_kind: 'purchase_completed_event',
+        },
+      );
+    });
+
+    it('continues a null-generation partial protocol with one missing receipt and then dedupes it', async () => {
+      const supabase = makeOutwardIntentSupa(null);
+      supabase.__intents.set('order-1:purchase_completed_event', {
+        state: 'sent',
+        attemptToken: null,
+        outwardGenerationId: null,
+      });
+      const guild = makeGuild();
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockBeginRoleDelivery as any)
+        .mockResolvedValueOnce({
+          state: 'confirmed_live',
+          intentId: '11111111-1111-4111-8111-111111111111',
+          outwardGenerationId: null,
+        })
+        .mockResolvedValueOnce({
+          state: 'confirmed_live',
+          intentId: '11111111-1111-4111-8111-111111111111',
+          outwardGenerationId: null,
+        });
+
+      const result = await fulfillClaimed(first, basePayload);
+      const replayResult = await fulfillClaimed(replay, basePayload);
+
+      expect(result).toMatchObject({
+        success: true,
+        eventEmitted: true,
+        receiptSent: true,
+        errors: [],
+      });
+      expect(replayResult).toMatchObject({
+        success: true,
+        eventEmitted: true,
+        receiptSent: true,
+        errors: [],
+      });
+      expect(eventBus.emitAndWait).not.toHaveBeenCalled();
+      expect(mockPreparedReceiptSend).toHaveBeenCalledTimes(1);
+      expect(supabase.__intents.get('order-1:receipt_dm')).toMatchObject({
+        state: 'sent',
+        outwardGenerationId: null,
+      });
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'commerce_continue_legacy_receipt_outward_intent',
+        {
+          p_order_id: 'order-1',
+          p_guild_id: 'guild-1',
+          p_predecessor_kind: 'purchase_completed_event',
+          p_action_id: TEST_ACTION_CLAIM.actionId,
+          p_claim_token: TEST_ACTION_CLAIM.claimToken,
+        },
+      );
+    });
+
+    it('does not continue a legacy receipt after an uncertain predecessor', async () => {
+      const supabase = makeOutwardIntentSupa(null);
+      supabase.__intents.set('order-1:purchase_completed_event', {
+        state: 'uncertain',
+        attemptToken: null,
+        outwardGenerationId: null,
+      });
+      service = new CommerceFulfillmentService(makeGuild(), supabase, eventBus);
+      (mockBeginRoleDelivery as any).mockResolvedValueOnce({
+        state: 'confirmed_live',
+        intentId: '11111111-1111-4111-8111-111111111111',
+        outwardGenerationId: null,
+      });
+
+      const result = await fulfillClaimed(service, basePayload);
+
+      expect(result.success).toBe(false);
+      expect(result.errors.join(' ')).toContain('operator reconciliation');
+      expect(mockPreparedReceiptSend).not.toHaveBeenCalled();
+      expect(supabase.__intents.get('order-1:receipt_dm')).toBeUndefined();
+      expect(supabase.rpc).not.toHaveBeenCalledWith(
+        'commerce_continue_legacy_receipt_outward_intent',
+        expect.anything(),
+      );
+    });
+
+    it('recovers a crash after role confirmation but before the first purchase outward dispatch', async () => {
+      const supabase = makeOutwardIntentSupa(
+        null,
+        {},
+        'purchase_completed_event',
+      );
+      const guild = makeGuild();
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockBeginRoleDelivery as any)
+        .mockResolvedValueOnce({
+          state: 'live',
+          attempt: {
+            ...TEST_ACTION_CLAIM,
+            intentId: '11111111-1111-4111-8111-111111111111',
+            mutationToken: '22222222-2222-4222-8222-222222222222',
+            outwardGenerationId: TEST_OUTWARD_GENERATION,
+          },
+        })
+        .mockResolvedValueOnce({
+          state: 'confirmed_live',
+          intentId: '11111111-1111-4111-8111-111111111111',
+          outwardGenerationId: TEST_OUTWARD_GENERATION,
+        });
+
+      const firstResult = await fulfillClaimed(first, basePayload);
+      const replayResult = await fulfillClaimed(replay, basePayload);
+
+      expect(firstResult.success).toBe(false);
+      expect(replayResult).toMatchObject({
+        success: true,
+        eventEmitted: true,
+        receiptSent: true,
+        errors: [],
+      });
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
+      expect(mockPreparedReceiptSend).toHaveBeenCalledTimes(1);
+      expect(supabase.__intents.get('order-1:purchase_completed_event')?.state)
+        .toBe('sent');
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'commerce_begin_fulfillment_outward_intent',
+        expect.objectContaining({
+          p_order_id: 'order-1',
+          p_guild_id: 'guild-1',
+          p_intent_kind: 'purchase_completed_event',
+          p_outward_generation_id: TEST_OUTWARD_GENERATION,
+          p_action_id: TEST_ACTION_CLAIM.actionId,
+          p_claim_token: TEST_ACTION_CLAIM.claimToken,
+        }),
+      );
+      expect(mockFinishRoleDelivery.mock.calls).toHaveLength(1);
+      expect((mockFinishRoleDelivery.mock.calls as unknown[][])[0]?.[1]).toBe('live');
+      const firstBeginIndex = supabase.rpc.mock.calls.findIndex(
+        ([name]: [string]) => name === 'commerce_begin_fulfillment_outward_intent',
+      );
+      expect(mockFinishRoleDelivery.mock.invocationCallOrder[0])
+        .toBeLessThan(supabase.rpc.mock.invocationCallOrder[firstBeginIndex]!);
+    });
+
+    it('does not create outward state under zero-dispatch backpressure and dispatches once on retry', async () => {
+      const supabase = makeOutwardIntentSupa(null);
+      const guild = makeGuild();
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const preDispatchError = Object.assign(
+        new Error('Backpressure: awaited listener capacity exhausted'),
+        {
+          name: 'EventBusDispatchNotStartedError',
+          dispatchState: 'not_started',
+          reason: 'backpressure',
+        },
+      );
+      let acceptedDispatches = 0;
+      eventBus.prepareEmitAndWait.mockImplementationOnce(() => {
+        throw preDispatchError;
+      });
+      eventBus.emitAndWait.mockImplementation(async () => {
+        acceptedDispatches += 1;
+      });
+      (mockBeginRoleDelivery as any)
+        .mockResolvedValueOnce({
+          state: 'live',
+          attempt: {
+            ...TEST_ACTION_CLAIM,
+            intentId: '11111111-1111-4111-8111-111111111111',
+            mutationToken: '22222222-2222-4222-8222-222222222222',
+            outwardGenerationId: TEST_OUTWARD_GENERATION,
+          },
+        })
+        .mockResolvedValueOnce({
+          state: 'confirmed_live',
+          intentId: '11111111-1111-4111-8111-111111111111',
+          outwardGenerationId: TEST_OUTWARD_GENERATION,
+        });
+
+      const firstResult = await fulfillClaimed(first, basePayload);
+      const outwardCallsAfterBackpressure = supabase.rpc.mock.calls.filter(
+        ([name]: [string]) => name.includes('fulfillment_outward_intent'),
+      );
+      const replayResult = await fulfillClaimed(replay, basePayload);
+      expect(firstResult).toMatchObject({
+        success: false,
+        eventEmitted: false,
+      });
+      expect(firstResult.receiptSent).not.toBe(true);
+      expect(outwardCallsAfterBackpressure).toEqual([]);
+
+      expect(replayResult).toMatchObject({
+        success: true,
+        eventEmitted: true,
+        receiptSent: true,
+        errors: [],
+      });
+      expect(acceptedDispatches).toBe(1);
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
+      expect(supabase.__intents.get('order-1:purchase_completed_event')?.state)
+        .toBe('sent');
+    });
+
+    it('completes a backfilled losing queue row as held before any entitlement or Discord effect', async () => {
+      const supabase: any = makeSupa();
+      supabase.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+        if (name !== 'commerce_claim_paid_fulfillment') {
+          return { data: null, error: null };
+        }
+        expect(args).toEqual({
+          p_order_id: 'order-1',
+          p_guild_id: 'guild-1',
+          p_customer_id: 'cust-1',
+          p_product_id: 'prod-1',
+          p_provider_kind: 'capture',
+          p_provider_id: 'CAPTURE-001',
+          p_amount_cents: 999,
+          p_currency: 'USD',
+        });
+        return {
+          data: {
+            order_id: 'order-1',
+            disposition: 'held',
+            winning_order_id: 'order-winner',
+            conflicting_entitlement_id: null,
+            alert_id: 'alert-duplicate-capture',
+          },
+          error: null,
+        };
+      });
+      const guild = makeGuild();
+      service = new CommerceFulfillmentService(guild, supabase as any, eventBus);
+
+      const result = await fulfillClaimed(service, basePayload);
+
+      expect(result).toMatchObject({
+        success: true,
+        paidFulfillmentHeld: true,
+        eventEmitted: false,
+        errors: [],
+      });
+      expect(mockGrant).not.toHaveBeenCalled();
+      expect(mockBeginRoleDelivery).not.toHaveBeenCalled();
+      expect(mockEnsurePurchaseGrantedRoles).not.toHaveBeenCalled();
+      expect(eventBus.emit).not.toHaveBeenCalled();
+      expect(guild.members.fetch).not.toHaveBeenCalled();
+      expect(guild.client.users.fetch).not.toHaveBeenCalled();
+      expect(supabase.from.mock.calls.some(([table]: [string]) => table === 'entitlements'))
+        .toBe(false);
+    });
+
+    it('fails closed before entitlement mutation when the durable paid claim is unavailable', async () => {
+      const supabase: any = makeSupa();
+      supabase.rpc.mockResolvedValue({
+        data: null,
+        error: { message: 'claim database unavailable' },
+      });
+      const guild = makeGuild();
+      service = new CommerceFulfillmentService(guild, supabase as any, eventBus);
+
+      const result = await fulfillClaimed(service, basePayload);
+
+      expect(result.success).toBe(false);
+      expect(result.errors.join(' ')).toContain('Failed to claim paid fulfillment');
+      expect(mockGrant).not.toHaveBeenCalled();
+      expect(mockBeginRoleDelivery).not.toHaveBeenCalled();
+      expect(eventBus.emit).not.toHaveBeenCalled();
+      expect(guild.members.fetch).not.toHaveBeenCalled();
+      expect(guild.client.users.fetch).not.toHaveBeenCalled();
+    });
+
+    it('does not trust a syntactically valid but wrong capture ID from a queued payload', async () => {
+      const supabase: any = makeSupa();
+      supabase.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+        expect(name).toBe('commerce_claim_paid_fulfillment');
+        expect(args.p_provider_id).toBe('CAPTURE-WRONG-ORDER');
+        return {
+          data: null,
+          error: { message: 'completed capture payment identity mismatch' },
+        };
+      });
+      const guild = makeGuild();
+      service = new CommerceFulfillmentService(guild, supabase, eventBus);
+
+      const result = await fulfillClaimed(service, {
+        ...basePayload,
+        paypal_capture_id: 'CAPTURE-WRONG-ORDER',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors.join(' ')).toContain('completed capture payment identity mismatch');
+      expect(mockGrant).not.toHaveBeenCalled();
+      expect(mockBeginRoleDelivery).not.toHaveBeenCalled();
+      expect(eventBus.emit).not.toHaveBeenCalled();
+      expect(guild.members.fetch).not.toHaveBeenCalled();
+      expect(guild.client.users.fetch).not.toHaveBeenCalled();
     });
 
     it('reports error when entitlement grant fails', async () => {
@@ -860,7 +1733,14 @@ describe('CommerceFulfillmentService', () => {
       expect(result.errors.join(' ')).toContain(expectedError);
       expect(mockGrant).not.toHaveBeenCalled();
       expect(mockEnsurePurchaseGrantedRoles).not.toHaveBeenCalled();
-      expect(supabase.rpc).not.toHaveBeenCalled();
+      if (orderPatch.status === 'pending_review') {
+        expect(supabase.rpc).toHaveBeenCalledWith(
+          'commerce_claim_paid_fulfillment',
+          expect.objectContaining({ p_order_id: 'order-1' }),
+        );
+      } else {
+        expect(supabase.rpc).not.toHaveBeenCalled();
+      }
       expect(guild.members.fetch).not.toHaveBeenCalled();
     });
 
@@ -937,7 +1817,10 @@ describe('CommerceFulfillmentService', () => {
       expect(result.success).toBe(false);
       expect(result.errors.join(' ')).toContain('identity validation');
       expect(mockGrant).not.toHaveBeenCalled();
-      expect(supabase.rpc).not.toHaveBeenCalled();
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'commerce_claim_paid_fulfillment',
+        expect.objectContaining({ p_order_id: 'order-1' }),
+      );
     });
 
     it('re-confirms permanent roles before reusing an exact order entitlement', async () => {
@@ -973,6 +1856,7 @@ describe('CommerceFulfillmentService', () => {
         ...TEST_ACTION_CLAIM,
         intentId: '11111111-1111-4111-8111-111111111111',
         mutationToken: '22222222-2222-4222-8222-222222222222',
+        outwardGenerationId: TEST_OUTWARD_GENERATION,
       });
     });
 
@@ -999,7 +1883,7 @@ describe('CommerceFulfillmentService', () => {
       expect(result.success).toBe(false);
       expect(result.errors.join(' ')).toContain('Discord did not confirm role');
       expect(result.eventEmitted).not.toBe(true);
-      expect(mockDeliverReceiptDM).not.toHaveBeenCalled();
+      expect(mockPreparedReceiptSend).not.toHaveBeenCalled();
     });
 
     it('rejects a customer/Discord mismatch before permanent or temporary mutation', async () => {
@@ -1099,8 +1983,15 @@ describe('CommerceFulfillmentService', () => {
       const result = await fulfillClaimed(service, payload);
 
       expect(result.success).toBe(true);
+      const prepareCallIndex = harness.supabase.rpc.mock.calls.findIndex(
+        ([name]: [string]) => name === 'commerce_prepare_temp_role_grant',
+      );
+      expect(prepareCallIndex).toBeGreaterThan(-1);
+      expect(harness.supabase.rpc.mock.invocationCallOrder[0]).toBeLessThan(
+        mockGrant.mock.invocationCallOrder[0],
+      );
       expect(mockGrant.mock.invocationCallOrder[0]).toBeLessThan(
-        harness.supabase.rpc.mock.invocationCallOrder[0],
+        harness.supabase.rpc.mock.invocationCallOrder[prepareCallIndex],
       );
       expect(harness.supabase.rpc).toHaveBeenCalledWith(
         'commerce_prepare_temp_role_grant',
@@ -1250,7 +2141,11 @@ describe('CommerceFulfillmentService', () => {
       expect(result.success).toBe(false);
       expect(harness.member.roles.add).not.toHaveBeenCalled();
       expect(harness.tempUpdates).toEqual([]);
-      expect(eventBus.emit).not.toHaveBeenCalledWith('purchase.completed', expect.anything(), expect.anything());
+      expect(eventBus.emitAndWait).not.toHaveBeenCalledWith(
+        'purchase.completed',
+        expect.anything(),
+        expect.anything(),
+      );
     });
 
     it('starts the full duration at atomic promotion after a delayed pending retry', async () => {
@@ -1552,6 +2447,7 @@ describe('CommerceFulfillmentService', () => {
           ...TEST_ACTION_CLAIM,
           intentId: '11111111-1111-4111-8111-111111111111',
           mutationToken: '22222222-2222-4222-8222-222222222222',
+          outwardGenerationId: TEST_OUTWARD_GENERATION,
         },
       );
       expect(harness.member.roles.remove).not.toHaveBeenCalled();
@@ -1611,6 +2507,7 @@ describe('CommerceFulfillmentService', () => {
           ...TEST_ACTION_CLAIM,
           intentId: '11111111-1111-4111-8111-111111111111',
           mutationToken: '22222222-2222-4222-8222-222222222222',
+          outwardGenerationId: TEST_OUTWARD_GENERATION,
         },
       );
       expect(harness.member.roles.remove).not.toHaveBeenCalled();
@@ -1748,6 +2645,83 @@ describe('CommerceFulfillmentService', () => {
   });
 
   describe('subscription_activated', () => {
+    it.each([
+      {
+        label: 'provider event type does not match activation',
+        patch: { provider_event_type: 'PAYMENT.SALE.COMPLETED' },
+      },
+      {
+        label: 'lifecycle generation is missing',
+        patch: { lifecycle_generation: undefined },
+      },
+      {
+        label: 'provider occurrence time is invalid',
+        patch: { provider_occurred_at: 'not-a-timestamp' },
+      },
+      {
+        label: 'paid-through time does not follow occurrence time',
+        patch: { provider_paid_through_at: '2026-07-29T00:00:00.000Z' },
+      },
+      {
+        label: 'paid-through time is missing',
+        patch: { provider_paid_through_at: null },
+      },
+    ])('rejects lifecycle payload when $label', async ({ patch }) => {
+      const supabase = makeSupa({ orders: subscriptionOrderSnapshot });
+      service = new CommerceFulfillmentService(makeGuild(), supabase as any, eventBus);
+      const payload = {
+        ...withSubscriptionLifecycle(subscriptionActivationPayload),
+        ...patch,
+      } as FulfillmentPayload;
+
+      const result = await service.fulfill(payload, TEST_ACTION_CLAIM);
+
+      expect(result).toMatchObject({
+        success: false,
+        eventEmitted: false,
+        errors: [expect.stringContaining('lifecycle validation')],
+      });
+      expect(mockGrant).not.toHaveBeenCalled();
+      expect(mockBeginRoleDelivery).not.toHaveBeenCalled();
+      expect(eventBus.emitAndWait).not.toHaveBeenCalled();
+      expect(supabase.rpc).not.toHaveBeenCalled();
+    });
+
+    it('replays a pending-review subscription hold as a terminal worker no-op', async () => {
+      const supabase: any = makeSupa({
+        orders: {
+          ...subscriptionOrderSnapshot,
+          status: 'pending_review',
+        },
+      });
+      supabase.rpc.mockResolvedValue({
+        data: {
+          order_id: 'order-1',
+          disposition: 'held',
+          winning_order_id: 'order-winner',
+          conflicting_entitlement_id: null,
+          alert_id: 'alert-duplicate-subscription',
+        },
+        error: null,
+      });
+      const guild = makeGuild();
+      service = new CommerceFulfillmentService(guild, supabase as any, eventBus);
+
+      const result = await fulfillClaimed(service, subscriptionActivationPayload);
+
+      expect(result).toMatchObject({
+        success: true,
+        paidFulfillmentHeld: true,
+        eventEmitted: false,
+        errors: [],
+      });
+      expect(mockGrant).not.toHaveBeenCalled();
+      expect(mockBeginRoleDelivery).not.toHaveBeenCalled();
+      expect(eventBus.emitAndWait).not.toHaveBeenCalled();
+      expect(guild.members.fetch).not.toHaveBeenCalled();
+      expect(guild.client.users.fetch).not.toHaveBeenCalled();
+    });
+
     it('grants subscription entitlement', async () => {
       const payload = subscriptionActivationPayload;
       service = new CommerceFulfillmentService(
@@ -1764,15 +2738,156 @@ describe('CommerceFulfillmentService', () => {
         productName: 'VIP Pass',
         orderId: 'order-1',
         planId: 'plan-monthly',
+        licenseKeyId: undefined,
         discordId: 'user-1',
         type: 'subscription',
         source: 'purchase',
         grantedRoleIds: ['role-1'],
         grantedChannelIds: [],
+        expiresAt: '2026-08-29T00:00:00.000Z',
         roleDeliveryClaim: TEST_ACTION_CLAIM,
       });
       expect(mockEnsurePurchaseGrantedRoles).not.toHaveBeenCalled();
-      expect(eventBus.emit).toHaveBeenCalledWith('subscription.activated', 'guild-1', expect.objectContaining({ status: 'activated' }));
+      expect(eventBus.emitAndWait).toHaveBeenCalledWith(
+        'subscription.activated',
+        'guild-1',
+        expect.objectContaining({ status: 'activated' }),
+      );
+    });
+
+    it('resumes a lost subscription event marker after role delivery settled without re-emitting', async () => {
+      const supabase = makeOutwardIntentSupa(
+        'subscription_activated_event',
+        {
+          entitlement: {
+            plan_id: 'plan-monthly',
+            type: 'subscription',
+          },
+          order: subscriptionOrderSnapshot,
+        },
+      );
+      const guild = makeGuild();
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockBeginRoleDelivery as any)
+        .mockResolvedValueOnce({
+          state: 'live',
+          attempt: {
+            ...TEST_ACTION_CLAIM,
+            intentId: '11111111-1111-4111-8111-111111111111',
+            mutationToken: '22222222-2222-4222-8222-222222222222',
+            outwardGenerationId: TEST_OUTWARD_GENERATION,
+          },
+        })
+        .mockResolvedValueOnce({
+          state: 'confirmed_live',
+          intentId: '11111111-1111-4111-8111-111111111111',
+          outwardGenerationId: TEST_OUTWARD_GENERATION,
+        });
+
+      const firstResult = await fulfillClaimed(first, subscriptionActivationPayload);
+      const replayResult = await fulfillClaimed(replay, subscriptionActivationPayload);
+
+      expect(firstResult.success).toBe(false);
+      expect(replayResult).toMatchObject({
+        success: false,
+        eventEmitted: false,
+        errors: [
+          expect.stringContaining('operator reconciliation'),
+        ],
+      });
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
+      expect(mockPreparedReceiptSend).not.toHaveBeenCalled();
+      expect(supabase.__intents.get('order-1:subscription_activated_event')?.state)
+        .toBe('uncertain');
+      expect(supabase.__intents.get('order-1:receipt_dm')).toBeUndefined();
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'commerce_begin_fulfillment_outward_intent',
+        expect.objectContaining({
+          p_order_id: 'order-1',
+          p_guild_id: 'guild-1',
+          p_intent_kind: 'subscription_activated_event',
+        }),
+      );
+    });
+
+    it('recovers a crash after role confirmation but before the first subscription outward dispatch', async () => {
+      const supabase = makeOutwardIntentSupa(
+        null,
+        {
+          entitlement: {
+            plan_id: 'plan-monthly',
+            type: 'subscription',
+          },
+          order: subscriptionOrderSnapshot,
+        },
+        'subscription_activated_event',
+      );
+      const guild = makeGuild();
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockBeginRoleDelivery as any)
+        .mockResolvedValueOnce({
+          state: 'live',
+          attempt: {
+            ...TEST_ACTION_CLAIM,
+            intentId: '11111111-1111-4111-8111-111111111111',
+            mutationToken: '22222222-2222-4222-8222-222222222222',
+            outwardGenerationId: TEST_OUTWARD_GENERATION,
+          },
+        })
+        .mockResolvedValueOnce({
+          state: 'confirmed_live',
+          intentId: '11111111-1111-4111-8111-111111111111',
+          outwardGenerationId: TEST_OUTWARD_GENERATION,
+        });
+
+      const firstResult = await fulfillClaimed(first, subscriptionActivationPayload);
+      const replayResult = await fulfillClaimed(replay, subscriptionActivationPayload);
+
+      expect(firstResult.success).toBe(false);
+      expect(replayResult).toMatchObject({
+        success: true,
+        eventEmitted: true,
+        receiptSent: true,
+        errors: [],
+      });
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
+      expect(mockPreparedReceiptSend).toHaveBeenCalledTimes(1);
+      expect(supabase.__intents.get('order-1:subscription_activated_event')?.state)
+        .toBe('sent');
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'commerce_begin_fulfillment_outward_intent',
+        expect.objectContaining({
+          p_order_id: 'order-1',
+          p_guild_id: 'guild-1',
+          p_intent_kind: 'subscription_activated_event',
+          p_outward_generation_id: TEST_OUTWARD_GENERATION,
+        }),
+      );
+    });
+
+    it('binds a staged subscription licence key to the granted entitlement', async () => {
+      const payload: FulfillmentPayload = {
+        ...subscriptionActivationPayload,
+        license_key_id: 'license-subscription-1',
+        license_key_plaintext: 'SMNI-AAAA-BBBB-CCCC-DDDD',
+      };
+      service = new CommerceFulfillmentService(
+        makeGuild(),
+        makeSupa({ orders: subscriptionOrderSnapshot }) as any,
+        eventBus,
+      );
+
+      const result = await fulfillClaimed(service, payload);
+
+      expect(result.success).toBe(true);
+      expect(mockGrant).toHaveBeenCalledWith(expect.objectContaining({
+        orderId: 'order-1',
+        planId: 'plan-monthly',
+        type: 'subscription',
+        licenseKeyId: 'license-subscription-1',
+      }));
     });
 
     it('reports error when subscription grant fails', async () => {
@@ -1841,7 +2956,7 @@ describe('CommerceFulfillmentService', () => {
         expect(result.errors.join(' ')).toContain('frozen snapshot');
         expect(mockGrant).not.toHaveBeenCalled();
         expect(mockBeginRoleDelivery).not.toHaveBeenCalled();
-        expect(eventBus.emit).not.toHaveBeenCalled();
+        expect(eventBus.emitAndWait).not.toHaveBeenCalled();
       },
     );
 
@@ -1865,10 +2980,11 @@ describe('CommerceFulfillmentService', () => {
 
       expect(result.success).toBe(true);
       expect(mockGrant).toHaveBeenCalledOnce();
-      expect(eventBus.emit).toHaveBeenCalled();
+      expect(eventBus.emitAndWait).toHaveBeenCalled();
     });
 
     it('reuses and re-confirms the exact subscription entitlement after a worker replay', async () => {
+      mockGrant.mockResolvedValueOnce('ent-sub');
       const payload: FulfillmentPayload = {
         ...subscriptionActivationPayload,
         fulfillment_type: 'subscription_activated',
@@ -1896,20 +3012,12 @@ describe('CommerceFulfillmentService', () => {
 
       expect(result.success).toBe(true);
       expect(result.entitlementId).toBe('ent-sub');
-      expect(mockGrant).not.toHaveBeenCalled();
-      expect(mockEnsurePurchaseGrantedRoles).toHaveBeenCalledWith('ent-sub', {
-        customerId: 'cust-1',
-        productId: 'prod-1',
+      expect(mockGrant).toHaveBeenCalledWith(expect.objectContaining({
         orderId: 'order-1',
-        planId: 'plan-monthly',
-        discordId: 'user-1',
-        grantedRoleIds: ['role-1'],
-        entitlementType: 'subscription',
-      }, {
-        ...TEST_ACTION_CLAIM,
-        intentId: '11111111-1111-4111-8111-111111111111',
-        mutationToken: '22222222-2222-4222-8222-222222222222',
-      });
+        expiresAt: '2026-08-29T00:00:00.000Z',
+        roleDeliveryClaim: TEST_ACTION_CLAIM,
+      }));
+      expect(mockEnsurePurchaseGrantedRoles).not.toHaveBeenCalled();
     });
 
     it('does not emit or send a receipt when reused subscription purchase proof becomes terminal', async () => {
@@ -1934,17 +3042,16 @@ describe('CommerceFulfillmentService', () => {
           granted_channel_ids: [],
         },
       });
-      mockEnsurePurchaseGrantedRoles.mockRejectedValueOnce(
-        new Error('Purchase entitlement ent-sub became terminal during Discord delivery'),
-      );
+      mockGrant.mockRejectedValueOnce(new MockTerminalNoopError('ent-sub'));
       service = new CommerceFulfillmentService(makeGuild(), supabase as any, eventBus);
 
       const result = await fulfillClaimed(service, payload);
 
-      expect(result.success).toBe(false);
-      expect(result.errors.join(' ')).toContain('became terminal during Discord delivery');
-      expect(eventBus.emit).not.toHaveBeenCalled();
-      expect(mockDeliverReceiptDM).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+      expect(result.entitlementId).toBe('ent-sub');
+      expect(result.eventEmitted).toBe(false);
+      expect(eventBus.emitAndWait).not.toHaveBeenCalled();
+      expect(mockPreparedReceiptSend).not.toHaveBeenCalled();
     });
 
     it('accepts the exact immutable contract persisted before a dashboard legacy release', async () => {
@@ -2113,6 +3220,40 @@ describe('CommerceFulfillmentService', () => {
       expect(harness.supabase.rpc).not.toHaveBeenCalled();
       expect(harness.member.roles.add).not.toHaveBeenCalled();
     });
+
+    it('applies a frozen subscription temporary grant before role confirmation and outward delivery', async () => {
+      const harness = makeTemporaryRoleHarness({
+        orderPlanId: 'plan-monthly',
+        orderPaypalSubscriptionId: 'SUB-001',
+        orderTemporaryRoleGrants: [
+          { role_id: TEMP_ROLE_ID, duration_seconds: 60 },
+        ],
+      });
+      service = new CommerceFulfillmentService(harness.guild, harness.supabase, eventBus);
+      const payload: FulfillmentPayload = {
+        ...subscriptionActivationPayload,
+        temporary_role_grants: [{ role_id: TEMP_ROLE_ID, duration_seconds: 60 }],
+      };
+
+      const result = await fulfillClaimed(service, payload);
+
+      expect(result.success).toBe(true);
+      expect(harness.member.roles.add).toHaveBeenCalledWith(
+        TEMP_ROLE_ID,
+        expect.stringContaining('temporary commerce role'),
+      );
+      expect(mockFinishRoleDelivery).toHaveBeenCalledWith(
+        expect.objectContaining({ outwardGenerationId: TEST_OUTWARD_GENERATION }),
+        'live',
+      );
+      const beginIndex = harness.supabase.rpc.mock.calls.findIndex(
+        ([name]: [string]) => name === 'commerce_begin_fulfillment_outward_intent',
+      );
+      expect(harness.member.roles.add.mock.invocationCallOrder[0])
+        .toBeLessThan(mockFinishRoleDelivery.mock.invocationCallOrder[0]!);
+      expect(mockFinishRoleDelivery.mock.invocationCallOrder[0])
+        .toBeLessThan(harness.supabase.rpc.mock.invocationCallOrder[beginIndex]!);
+    });
   });
 
   describe('subscription_renewed', () => {
@@ -2154,10 +3295,12 @@ describe('CommerceFulfillmentService', () => {
           planId: 'plan-monthly',
           discordId: 'user-1',
           grantedRoleIds: ['role-1'],
+          grantedChannelIds: [],
+          expiresAt: '2026-08-29T00:00:00.000Z',
           entitlementType: 'subscription',
         }, TEST_ACTION_CLAIM);
         expect(result.entitlementId).toBe('ent-old');
-        expect(eventBus.emit).toHaveBeenCalledWith(
+        expect(eventBus.emitAndWait).toHaveBeenCalledWith(
           'subscription.activated',
           'guild-1',
           expect.objectContaining({ status: 'renewed', planId: 'plan-monthly' }),
@@ -2218,7 +3361,7 @@ describe('CommerceFulfillmentService', () => {
 
       expect(result.success).toBe(true);
       expect(mockReactivate).toHaveBeenCalledOnce();
-      expect(eventBus.emit).toHaveBeenCalled();
+      expect(eventBus.emitAndWait).toHaveBeenCalled();
     });
 
     it('fails without an event when existing_entitlement_id is missing', async () => {
@@ -2230,6 +3373,95 @@ describe('CommerceFulfillmentService', () => {
       expect(result.errors.join(' ')).toContain('exact existing entitlement');
       expect(mockReactivate).not.toHaveBeenCalled();
       expect(eventBus.emit).not.toHaveBeenCalled();
+    });
+
+    it('recovers a confirmed renewal crash before its first durable outward row exactly once', async () => {
+      const supabase = makeOutwardIntentSupa(
+        null,
+        {
+          entitlement: renewalEntitlement('active'),
+          order: subscriptionOrderSnapshot,
+        },
+        'subscription_renewed_event',
+      );
+      const guild = makeGuild();
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockBeginRoleDelivery as any)
+        .mockResolvedValueOnce({
+          state: 'live',
+          attempt: {
+            ...TEST_ACTION_CLAIM,
+            intentId: '11111111-1111-4111-8111-111111111111',
+            mutationToken: '22222222-2222-4222-8222-222222222222',
+            outwardGenerationId: TEST_OUTWARD_GENERATION,
+          },
+        })
+        .mockResolvedValueOnce({
+          state: 'confirmed_live',
+          intentId: '11111111-1111-4111-8111-111111111111',
+          outwardGenerationId: TEST_OUTWARD_GENERATION,
+        });
+
+      const firstResult = await fulfillClaimed(first, renewalPayload);
+      const replayResult = await fulfillClaimed(replay, renewalPayload);
+
+      expect(firstResult.success).toBe(false);
+      expect(replayResult).toMatchObject({
+        success: true,
+        eventEmitted: true,
+        errors: [],
+      });
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
+      expect(eventBus.emitAndWait).toHaveBeenCalledWith(
+        'subscription.activated',
+        'guild-1',
+        expect.objectContaining({ status: 'renewed' }),
+      );
+      expect(supabase.__intents.get('order-1:subscription_renewed_event')?.state).toBe('sent');
+    });
+
+    it('keeps renewal backpressure pre-dispatch and retries one accepted event', async () => {
+      const supabase = makeOutwardIntentSupa(null, {
+        entitlement: renewalEntitlement('active'),
+        order: subscriptionOrderSnapshot,
+      });
+      const guild = makeGuild();
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      eventBus.prepareEmitAndWait.mockImplementationOnce(() => {
+        throw Object.assign(new Error('Backpressure: awaited listener capacity exhausted'), {
+          name: 'EventBusDispatchNotStartedError',
+          dispatchState: 'not_started',
+          reason: 'backpressure',
+        });
+      });
+      (mockBeginRoleDelivery as any)
+        .mockResolvedValueOnce({
+          state: 'live',
+          attempt: {
+            ...TEST_ACTION_CLAIM,
+            intentId: '11111111-1111-4111-8111-111111111111',
+            mutationToken: '22222222-2222-4222-8222-222222222222',
+            outwardGenerationId: TEST_OUTWARD_GENERATION,
+          },
+        })
+        .mockResolvedValueOnce({
+          state: 'confirmed_live',
+          intentId: '11111111-1111-4111-8111-111111111111',
+          outwardGenerationId: TEST_OUTWARD_GENERATION,
+        });
+
+      const firstResult = await fulfillClaimed(first, renewalPayload);
+      const outwardCallsAfterBackpressure = supabase.rpc.mock.calls.filter(
+        ([name]: [string]) => name.includes('fulfillment_outward_intent'),
+      );
+      const replayResult = await fulfillClaimed(replay, renewalPayload);
+
+      expect(firstResult.success).toBe(false);
+      expect(outwardCallsAfterBackpressure).toEqual([]);
+      expect(replayResult.success).toBe(true);
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
     });
 
     it('fails without an event when exact reactivation returns false', async () => {
@@ -2247,7 +3479,7 @@ describe('CommerceFulfillmentService', () => {
       expect(eventBus.emit).not.toHaveBeenCalled();
     });
 
-    it.each(['pending', 'cancelled', 'expired', 'revoked'])(
+    it.each(['pending', 'cancelled', 'expired'])(
       'rejects %s without reactivation or an event',
       async (status) => {
         const supabase = makeSupa({
@@ -2293,21 +3525,35 @@ describe('CommerceFulfillmentService', () => {
   describe('subscription_cancelled', () => {
     it('revokes the exact live subscription entitlement and sends DM', async () => {
       const supa = makeSupa({ entitlements: subscriptionLifecycleEntitlement('active') });
-      eventBus = { emit: vi.fn(), on: vi.fn(), off: vi.fn() };
       service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
 
       const result = await fulfillClaimed(service, subscriptionLifecyclePayload);
 
       expect(result.success).toBe(true);
       expect(result.entitlementId).toBe('ent-subscription');
-      expect(mockRevoke).toHaveBeenCalledWith('ent-subscription', 'cancelled');
+      expect(mockRevoke).toHaveBeenCalledWith(
+        'ent-subscription',
+        'cancelled',
+        expect.objectContaining({
+          ...TEST_ACTION_CLAIM,
+          orderId: 'order-1',
+          expectedStatus: 'active',
+        }),
+      );
       expect(result.eventEmitted).toBe(true);
-      expect(eventBus.emit).toHaveBeenCalledWith('subscription.lapsed', 'guild-1', expect.any(Object));
+      expect(eventBus.emitAndWait).toHaveBeenCalledWith(
+        'subscription.lapsed',
+        'guild-1',
+        expect.any(Object),
+      );
     });
 
     it('treats a CAS no-op race as success without repeating event or DM', async () => {
       (mockRevoke as any).mockResolvedValueOnce({
-        disposition: 'noop', transitionId: null, status: 'cancelled',
+        disposition: 'noop',
+        transitionId: null,
+        status: 'cancelled',
+        outwardGenerationId: null,
       });
       const supa = makeSupa({ entitlements: subscriptionLifecycleEntitlement('active') });
       const guild = makeGuild();
@@ -2319,6 +3565,130 @@ describe('CommerceFulfillmentService', () => {
       expect(result.eventEmitted).toBe(false);
       expect(eventBus.emit).not.toHaveBeenCalled();
       expect(guild.client.users.fetch).not.toHaveBeenCalled();
+    });
+
+    it('recovers a cancellation winner crash before its first outward row and drains event plus DM once', async () => {
+      const supabase = makeOutwardIntentSupa(
+        null,
+        { entitlement: subscriptionLifecycleEntitlement('active') },
+        'subscription_cancelled_event',
+      );
+      const guild = makeGuild();
+      const send = vi.fn(async () => {});
+      guild.client.users.fetch.mockResolvedValue({ id: 'user-1', send });
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockRevoke as any)
+        .mockResolvedValueOnce({
+          disposition: 'applied',
+          transitionId: '11111111-1111-4111-8111-111111111111',
+          status: 'cancelled',
+          outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+        })
+        .mockResolvedValueOnce({
+          disposition: 'noop',
+          transitionId: null,
+          status: 'cancelled',
+          outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+        });
+
+      const firstResult = await fulfillClaimed(first, subscriptionLifecyclePayload);
+      supabase.__entitlement.status = 'cancelled';
+      supabase.__entitlement.updated_at = '2026-07-27T00:00:01.000Z';
+      const replayResult = await fulfillClaimed(replay, subscriptionLifecyclePayload);
+
+      expect(firstResult.success).toBe(false);
+      expect(replayResult.success).toBe(true);
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(supabase.__intents.get('order-1:subscription_cancelled_event')?.state).toBe('sent');
+      expect(supabase.__intents.get('order-1:subscription_cancelled_dm')?.state).toBe('sent');
+    });
+
+    it('keeps cancellation event backpressure out of outward state and retries exactly once', async () => {
+      const supabase = makeOutwardIntentSupa(null, {
+        entitlement: subscriptionLifecycleEntitlement('active'),
+      });
+      const guild = makeGuild();
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      eventBus.prepareEmitAndWait.mockImplementationOnce(() => {
+        throw Object.assign(new Error('Backpressure: awaited listener capacity exhausted'), {
+          name: 'EventBusDispatchNotStartedError',
+          dispatchState: 'not_started',
+          reason: 'backpressure',
+        });
+      });
+      (mockRevoke as any)
+        .mockResolvedValueOnce({
+          disposition: 'applied',
+          transitionId: '11111111-1111-4111-8111-111111111111',
+          status: 'cancelled',
+          outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+        })
+        .mockResolvedValueOnce({
+          disposition: 'noop',
+          transitionId: null,
+          status: 'cancelled',
+          outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+        });
+
+      const firstResult = await fulfillClaimed(first, subscriptionLifecyclePayload);
+      const outwardCallsAfterBackpressure = supabase.rpc.mock.calls.filter(
+        ([name]: [string]) => name.includes('fulfillment_outward_intent'),
+      );
+      supabase.__entitlement.status = 'cancelled';
+      supabase.__entitlement.updated_at = '2026-07-27T00:00:01.000Z';
+      const replayResult = await fulfillClaimed(replay, subscriptionLifecyclePayload);
+
+      expect(firstResult.success).toBe(false);
+      expect(outwardCallsAfterBackpressure).toEqual([]);
+      expect(replayResult.success).toBe(true);
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
+    });
+
+    it('gives only the winning cancellation CAS a generation under racing actions', async () => {
+      const supabase = makeOutwardIntentSupa(null, {
+        entitlement: subscriptionLifecycleEntitlement('active'),
+      });
+      const guild = makeGuild();
+      const send = vi.fn(async () => {});
+      guild.client.users.fetch.mockResolvedValue({ id: 'user-1', send });
+      const winner = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const loser = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockRevoke as any)
+        .mockResolvedValueOnce({
+          disposition: 'applied',
+          transitionId: '11111111-1111-4111-8111-111111111111',
+          status: 'cancelled',
+          outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+        })
+        .mockResolvedValueOnce({
+          disposition: 'noop',
+          transitionId: null,
+          status: 'cancelled',
+          outwardGenerationId: null,
+        });
+
+      const winnerResult = await winner.fulfill(
+        subscriptionLifecyclePayload,
+        TEST_ACTION_CLAIM,
+      );
+      supabase.__entitlement.status = 'cancelled';
+      supabase.__entitlement.updated_at = '2026-07-27T00:00:01.000Z';
+      const loserResult = await loser.fulfill(
+        subscriptionLifecyclePayload,
+        {
+          actionId: '55555555-5555-4555-8555-555555555555',
+          claimToken: '66666666-6666-4666-8666-666666666666',
+        },
+      );
+
+      expect(winnerResult.success).toBe(true);
+      expect(loserResult.success).toBe(true);
+      expect(loserResult.eventEmitted).toBe(false);
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledTimes(1);
     });
 
     it('fails a stale live-state CAS without notifications so the claim can retry', async () => {
@@ -2372,9 +3742,15 @@ describe('CommerceFulfillmentService', () => {
       expect(guild.client.users.fetch).not.toHaveBeenCalled();
     });
 
-    it.each(['cancelled', 'expired', 'revoked'])(
+    it.each(['cancelled', 'expired'])(
       'treats exact terminal status %s as an idempotent replay',
       async (status) => {
+        (mockRevoke as any).mockResolvedValueOnce({
+          disposition: 'noop',
+          transitionId: null,
+          status: status === 'cancelled' ? 'cancelled' : 'expired',
+          outwardGenerationId: null,
+        });
         const supa = makeSupa({ entitlements: subscriptionLifecycleEntitlement(status) });
         const guild = makeGuild();
         service = new CommerceFulfillmentService(guild, supa as any, eventBus);
@@ -2382,7 +3758,7 @@ describe('CommerceFulfillmentService', () => {
         const result = await fulfillClaimed(service, subscriptionLifecyclePayload);
 
         expect(result.success).toBe(true);
-        expect(mockRevoke).not.toHaveBeenCalled();
+        expect(mockRevoke).toHaveBeenCalledOnce();
         expect(eventBus.emit).not.toHaveBeenCalled();
         expect(guild.client.users.fetch).not.toHaveBeenCalled();
       },
@@ -2390,18 +3766,86 @@ describe('CommerceFulfillmentService', () => {
   });
 
   describe('subscription_suspended', () => {
-    it('suspends the exact active subscription entitlement', async () => {
+    it('atomically suspends access without emitting payment-failure grace effects', async () => {
+      const supa = makeSupa({ entitlements: subscriptionLifecycleEntitlement('active') });
+      const guild = makeGuild();
+      service = new CommerceFulfillmentService(guild, supa as any, eventBus);
+      const payload = {
+        ...subscriptionLifecyclePayload,
+        fulfillment_type: 'subscription_suspended',
+      };
+
+      const result = await fulfillClaimed(service, payload);
+
+      expect(result.success).toBe(true);
+      expect(mockRevoke).toHaveBeenCalledWith(
+        'ent-subscription',
+        'suspended',
+        expect.objectContaining({
+          ...TEST_ACTION_CLAIM,
+          orderId: 'order-1',
+          expectedStatus: 'active',
+        }),
+      );
+      expect(mockSuspend).not.toHaveBeenCalled();
+      expect(eventBus.emitAndWait).toHaveBeenCalledOnce();
+      expect(eventBus.emitAndWait).toHaveBeenCalledWith(
+        'subscription.lapsed',
+        'guild-1',
+        expect.objectContaining({ status: 'lapsed' }),
+      );
+      expect(eventBus.emitAndWait).not.toHaveBeenCalledWith(
+        'payment.failed',
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(guild.client.users.fetch).toHaveBeenCalledWith('user-1');
+    });
+
+    it('does not manufacture new outward effects for an already-suspended replay', async () => {
+      (mockRevoke as any).mockResolvedValueOnce({
+        disposition: 'noop',
+        transitionId: null,
+        status: 'suspended',
+        outwardGenerationId: null,
+      });
+      const supa = makeSupa({ entitlements: subscriptionLifecycleEntitlement('suspended') });
+      const guild = makeGuild();
+      service = new CommerceFulfillmentService(guild, supa as any, eventBus);
+
+      const result = await fulfillClaimed(service, {
+        ...subscriptionLifecyclePayload,
+        fulfillment_type: 'subscription_suspended',
+      });
+
+      expect(result.success).toBe(true);
+      expect(eventBus.emitAndWait).not.toHaveBeenCalled();
+      expect(guild.client.users.fetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('subscription_payment_failed', () => {
+    it('starts grace for the exact active subscription entitlement', async () => {
       const supa = makeSupa({ entitlements: subscriptionLifecycleEntitlement('active') });
       service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
 
-      const payload = { ...subscriptionLifecyclePayload, fulfillment_type: 'subscription_suspended' };
+      const payload = { ...subscriptionLifecyclePayload, fulfillment_type: 'subscription_payment_failed' };
       const result = await fulfillClaimed(service, payload);
       expect(result.success).toBe(true);
-      expect(mockSuspend).toHaveBeenCalledWith('ent-subscription', 3);
+      expect(mockSuspend).toHaveBeenCalledWith(
+        'ent-subscription',
+        3,
+        expect.objectContaining({
+          ...TEST_ACTION_CLAIM,
+          orderId: 'order-1',
+          expectedStatus: 'active',
+        }),
+      );
       expect(result.eventEmitted).toBe(true);
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(2);
     });
 
-    it("suspends with the guild's configured grace window from getGracePeriodDays (single source of truth)", async () => {
+    it("uses the guild's configured grace window from getGracePeriodDays (single source of truth)", async () => {
       // Codex round-2 finding #1: the bot's suspend path must read the
       // configured window via the shared helper, not a hardcoded value —
       // the same source of truth the dashboard's manual PUT uses. Return a
@@ -2410,11 +3854,34 @@ describe('CommerceFulfillmentService', () => {
       const supa = makeSupa({ entitlements: subscriptionLifecycleEntitlement('active') });
       service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
 
-      const payload = { ...subscriptionLifecyclePayload, fulfillment_type: 'subscription_suspended' };
+      const payload = { ...subscriptionLifecyclePayload, fulfillment_type: 'subscription_payment_failed' };
       await fulfillClaimed(service, payload);
 
       expect(getGracePeriodDays).toHaveBeenCalledWith(supa, payload.guild_id);
-      expect(mockSuspend).toHaveBeenCalledWith('ent-subscription', 9);
+      expect(mockSuspend).toHaveBeenCalledWith(
+        'ent-subscription',
+        9,
+        expect.objectContaining({ orderId: 'order-1' }),
+      );
+    });
+
+    it('accepts a configured zero-day grace window as immediate expiry', async () => {
+      (getGracePeriodDays as ReturnType<typeof vi.fn>).mockResolvedValueOnce(0);
+      const supa = makeSupa({ entitlements: subscriptionLifecycleEntitlement('active') });
+      service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
+      const payload = {
+        ...subscriptionLifecyclePayload,
+        fulfillment_type: 'subscription_payment_failed',
+      };
+
+      const result = await fulfillClaimed(service, payload);
+
+      expect(result.success).toBe(true);
+      expect(mockSuspend).toHaveBeenCalledWith(
+        'ent-subscription',
+        0,
+        expect.objectContaining({ orderId: 'order-1' }),
+      );
     });
 
     it('fails without notifications when the exact entitlement lookup errors', async () => {
@@ -2424,7 +3891,7 @@ describe('CommerceFulfillmentService', () => {
       });
       const guild = makeGuild();
       service = new CommerceFulfillmentService(guild, supa as any, eventBus);
-      const payload = { ...subscriptionLifecyclePayload, fulfillment_type: 'subscription_suspended' };
+      const payload = { ...subscriptionLifecyclePayload, fulfillment_type: 'subscription_payment_failed' };
 
       const result = await fulfillClaimed(service, payload);
 
@@ -2436,27 +3903,270 @@ describe('CommerceFulfillmentService', () => {
     });
 
     it('treats an exact grace-period row as a replay without extending or notifying again', async () => {
+      (mockSuspend as any).mockResolvedValueOnce({
+        disposition: 'replay',
+        outwardGenerationId: null,
+      });
       const supa = makeSupa({ entitlements: subscriptionLifecycleEntitlement('grace_period') });
       const guild = makeGuild();
       service = new CommerceFulfillmentService(guild, supa as any, eventBus);
-      const payload = { ...subscriptionLifecyclePayload, fulfillment_type: 'subscription_suspended' };
+      const payload = { ...subscriptionLifecyclePayload, fulfillment_type: 'subscription_payment_failed' };
 
       const result = await fulfillClaimed(service, payload);
 
       expect(result.success).toBe(true);
-      expect(mockSuspend).not.toHaveBeenCalled();
-      expect(getGracePeriodDays).not.toHaveBeenCalled();
+      expect(mockSuspend).toHaveBeenCalledOnce();
       expect(eventBus.emit).not.toHaveBeenCalled();
       expect(guild.client.users.fetch).not.toHaveBeenCalled();
     });
 
-    it.each(['cancelled', 'expired', 'revoked'])(
-      'safely ignores a late suspension for terminal status %s',
+    it('recovers a payment-failure winner crash before its first outward row and drains all effects once', async () => {
+      const payload = {
+        ...subscriptionLifecyclePayload,
+        fulfillment_type: 'subscription_payment_failed',
+      };
+      const supabase = makeOutwardIntentSupa(
+        null,
+        { entitlement: subscriptionLifecycleEntitlement('active') },
+        'subscription_payment_failed_lapsed_event',
+      );
+      const guild = makeGuild();
+      const send = vi.fn(async () => {});
+      guild.client.users.fetch.mockResolvedValue({ id: 'user-1', send });
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockSuspend as any)
+        .mockResolvedValueOnce({
+          disposition: 'applied',
+          outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+        })
+        .mockResolvedValueOnce({
+          disposition: 'replay',
+          outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+        });
+
+      const firstResult = await fulfillClaimed(first, payload);
+      supabase.__entitlement.status = 'grace_period';
+      supabase.__entitlement.updated_at = '2026-07-27T00:00:01.000Z';
+      const replayResult = await fulfillClaimed(replay, payload);
+
+      expect(firstResult.success).toBe(false);
+      expect(replayResult.success).toBe(true);
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(2);
+      expect(eventBus.emitAndWait).toHaveBeenCalledWith(
+        'subscription.lapsed',
+        'guild-1',
+        expect.objectContaining({ status: 'lapsed' }),
+      );
+      expect(eventBus.emitAndWait).toHaveBeenCalledWith(
+        'payment.failed',
+        'guild-1',
+        expect.any(Object),
+      );
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(supabase.__intents.get('order-1:subscription_payment_failed_lapsed_event')?.state)
+        .toBe('sent');
+      expect(supabase.__intents.get(
+        'order-1:subscription_payment_failed_event',
+      )?.state).toBe('sent');
+      expect(supabase.__intents.get('order-1:subscription_payment_failed_dm')?.state).toBe('sent');
+    });
+
+    it('uses the committed grace deadline when config changes before same-action replay', async () => {
+      const payload = {
+        ...subscriptionLifecyclePayload,
+        fulfillment_type: 'subscription_payment_failed',
+      };
+      const supabase = makeOutwardIntentSupa(
+        null,
+        { entitlement: subscriptionLifecycleEntitlement('active') },
+        'subscription_payment_failed_lapsed_event',
+      );
+      const guild = makeGuild();
+      const send = vi.fn(async () => {});
+      guild.client.users.fetch.mockResolvedValue({ id: 'user-1', send });
+      const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const committedDeadline = '2026-08-01T12:34:56.000Z';
+      (getGracePeriodDays as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(3)
+        .mockResolvedValueOnce(9);
+      (mockSuspend as any)
+        .mockResolvedValueOnce({
+          disposition: 'applied',
+          outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+          gracePeriodEndsAt: committedDeadline,
+        })
+        .mockResolvedValueOnce({
+          disposition: 'replay',
+          outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+          gracePeriodEndsAt: committedDeadline,
+        });
+
+      const firstResult = await fulfillClaimed(first, payload);
+      supabase.__entitlement.status = 'grace_period';
+      supabase.__entitlement.updated_at = '2026-07-27T00:00:01.000Z';
+      const replayResult = await fulfillClaimed(replay, payload);
+
+      expect(firstResult.success).toBe(false);
+      expect(replayResult.success).toBe(true);
+      expect(send).toHaveBeenCalledOnce();
+      expect(send).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining(
+          `<t:${Math.floor(Date.parse(committedDeadline) / 1_000)}:F>`,
+        ),
+      }));
+      const sentPayload = (send.mock.calls as unknown[][])[0]?.[0] as
+        | { content?: unknown }
+        | undefined;
+      expect(String(sentPayload?.content)).not.toContain('9-day');
+    });
+
+    it.each([
+      ['subscription_payment_failed_lapsed_event', 1],
+      ['subscription_payment_failed_event', 2],
+    ] as const)(
+      'keeps %s backpressure pre-dispatch and delivers each payment-failure event once',
+      async (blockedKind, blockedPreparation) => {
+        const payload = {
+          ...subscriptionLifecyclePayload,
+          fulfillment_type: 'subscription_payment_failed',
+        };
+        const supabase = makeOutwardIntentSupa(null, {
+          entitlement: subscriptionLifecycleEntitlement('active'),
+        });
+        const guild = makeGuild();
+        const first = new CommerceFulfillmentService(guild, supabase, eventBus);
+        const replay = new CommerceFulfillmentService(guild, supabase, eventBus);
+        const prepare = eventBus.prepareEmitAndWait.getMockImplementation();
+        let preparationCount = 0;
+        eventBus.prepareEmitAndWait.mockImplementation((...args: any[]) => {
+          preparationCount += 1;
+          if (preparationCount === blockedPreparation) {
+            throw Object.assign(new Error('Backpressure: awaited listener capacity exhausted'), {
+              name: 'EventBusDispatchNotStartedError',
+              dispatchState: 'not_started',
+              reason: 'backpressure',
+            });
+          }
+          return prepare!(...args);
+        });
+        (mockSuspend as any)
+          .mockResolvedValueOnce({
+            disposition: 'applied',
+            outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+          })
+          .mockResolvedValueOnce({
+            disposition: 'replay',
+            outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+          });
+
+        const firstResult = await fulfillClaimed(first, payload);
+        const blockedState =
+          supabase.__intents.get(`order-1:${blockedKind}`);
+        supabase.__entitlement.status = 'grace_period';
+        supabase.__entitlement.updated_at = '2026-07-27T00:00:01.000Z';
+        const replayResult = await fulfillClaimed(replay, payload);
+
+        expect(firstResult.success).toBe(false);
+        expect(blockedState).toBeUndefined();
+        expect(replayResult.success).toBe(true);
+        expect(eventBus.emitAndWait).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it('gives only the winning payment-failure CAS a generation under racing actions', async () => {
+      const payload = {
+        ...subscriptionLifecyclePayload,
+        fulfillment_type: 'subscription_payment_failed',
+      };
+      const supabase = makeOutwardIntentSupa(null, {
+        entitlement: subscriptionLifecycleEntitlement('active'),
+      });
+      const guild = makeGuild();
+      const send = vi.fn(async () => {});
+      guild.client.users.fetch.mockResolvedValue({ id: 'user-1', send });
+      const winner = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const loser = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockSuspend as any)
+        .mockResolvedValueOnce({
+          disposition: 'applied',
+          outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+        })
+        .mockResolvedValueOnce({
+          disposition: 'noop',
+          outwardGenerationId: null,
+        });
+
+      const winnerResult = await winner.fulfill(
+        withSubscriptionLifecycle(payload),
+        TEST_ACTION_CLAIM,
+      );
+      supabase.__entitlement.status = 'grace_period';
+      supabase.__entitlement.updated_at = '2026-07-27T00:00:01.000Z';
+      const loserResult = await loser.fulfill(withSubscriptionLifecycle(payload), {
+        actionId: '55555555-5555-4555-8555-555555555555',
+        claimToken: '66666666-6666-4666-8666-666666666666',
+      });
+
+      expect(winnerResult.success).toBe(true);
+      expect(loserResult.success).toBe(true);
+      expect(loserResult.eventEmitted).toBe(false);
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(2);
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses distinct generations for repeated payment-failure episodes on one subscription order', async () => {
+      const payload = {
+        ...subscriptionLifecyclePayload,
+        fulfillment_type: 'subscription_payment_failed',
+      };
+      const supabase = makeOutwardIntentSupa(null, {
+        entitlement: subscriptionLifecycleEntitlement('active'),
+      });
+      const guild = makeGuild();
+      const firstEpisode = new CommerceFulfillmentService(guild, supabase, eventBus);
+      const secondEpisode = new CommerceFulfillmentService(guild, supabase, eventBus);
+      (mockSuspend as any)
+        .mockResolvedValueOnce({
+          disposition: 'applied',
+          outwardGenerationId: '44444444-4444-4444-8444-444444444444',
+        })
+        .mockResolvedValueOnce({
+          disposition: 'applied',
+          outwardGenerationId: '77777777-7777-4777-8777-777777777777',
+        });
+
+      const firstResult = await firstEpisode.fulfill(
+        withSubscriptionLifecycle(payload),
+        TEST_ACTION_CLAIM,
+      );
+      const secondResult = await secondEpisode.fulfill(withSubscriptionLifecycle(payload), {
+        actionId: '55555555-5555-4555-8555-555555555555',
+        claimToken: '66666666-6666-4666-8666-666666666666',
+      });
+
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(true);
+      expect(eventBus.emitAndWait).toHaveBeenCalledTimes(4);
+      const lapsedRows = [...supabase.__intents.entries()].filter(
+        ([key]: [string]) => key.includes('subscription_payment_failed_lapsed_event'),
+      );
+      expect(lapsedRows).toHaveLength(2);
+      expect(new Set(lapsedRows.map(([, row]: [string, any]) =>
+        row.outwardGenerationId))).toEqual(new Set([
+        '44444444-4444-4444-8444-444444444444',
+        '77777777-7777-4777-8777-777777777777',
+      ]));
+    });
+
+    it.each(['cancelled', 'expired'])(
+      'safely ignores a late payment failure for terminal status %s',
       async (status) => {
         const supa = makeSupa({ entitlements: subscriptionLifecycleEntitlement(status) });
         const guild = makeGuild();
         service = new CommerceFulfillmentService(guild, supa as any, eventBus);
-        const payload = { ...subscriptionLifecyclePayload, fulfillment_type: 'subscription_suspended' };
+        const payload = { ...subscriptionLifecyclePayload, fulfillment_type: 'subscription_payment_failed' };
 
         const result = await fulfillClaimed(service, payload);
 
@@ -2487,28 +4197,21 @@ describe('CommerceFulfillmentService', () => {
   });
 
   describe('receipt delivery failure handling', () => {
-    // Defect fix: a failed receipt/license-key DM must never be dropped
-    // silently — it is queued for persistent re-delivery via bot_action_queue.
-    // The queue insert itself is retried with backoff (the queue row is the
-    // only at-rest copy of the plaintext key); if it keeps failing, the
-    // payload is preserved in the retryable DLQ and an operator alert
-    // (never containing the key) is written.
+    // A failed receipt/license-key DM has ambiguous external acceptance. Its
+    // outward intent becomes uncertain, so automatic replay is blocked. The
+    // plaintext payload is preserved in the DLQ for deliberate operator
+    // reconciliation and the alert never contains the key.
 
     /**
-     * `queueInsertError` makes bot_action_queue inserts fail; combine with
-     * `queueInsertFailures: n` to fail only the first n attempts.
      * `dlqInsertError` makes action_queue_dlq inserts fail too (the
      * worst-case path where the key cannot be preserved anywhere).
      */
     function makeRecordingSupa(
       opts: {
-        queueInsertError?: { message: string };
-        queueInsertFailures?: number;
         dlqInsertError?: { message: string };
       } = {},
     ) {
       const inserts: Record<string, any[]> = {};
-      let queueInsertAttempts = 0;
       const supa: any = {
         from: vi.fn((table: string) => {
           const chain: any = {};
@@ -2548,13 +4251,6 @@ describe('CommerceFulfillmentService', () => {
           chain.insert = vi.fn((row: any) => {
             (inserts[table] ??= []).push(row);
             let result: any = { data: null, error: null };
-            if (table === 'bot_action_queue' && opts.queueInsertError) {
-              queueInsertAttempts++;
-              const stillFailing =
-                opts.queueInsertFailures === undefined ||
-                queueInsertAttempts <= opts.queueInsertFailures;
-              if (stillFailing) result = { data: null, error: opts.queueInsertError };
-            }
             if (table === 'action_queue_dlq' && opts.dlqInsertError) {
               result = { data: null, error: opts.dlqInsertError };
             }
@@ -2565,7 +4261,10 @@ describe('CommerceFulfillmentService', () => {
           chain.then = (resolve: Function) => resolve({ data: null, error: null });
           return chain;
         }),
-        rpc: vi.fn(async () => ({ data: null, error: null })),
+        rpc: vi.fn(async (name: string, args: Record<string, unknown>) =>
+          name === 'commerce_claim_paid_fulfillment'
+            ? paidClaimWinner(args)
+            : defaultOutwardIntentRpc(name, args)),
       };
       supa.__inserts = inserts;
       return supa;
@@ -2589,149 +4288,22 @@ describe('CommerceFulfillmentService', () => {
       expect(supa.__inserts['alerts']).toBeUndefined();
     });
 
-    it('queues persistent re-delivery when the receipt DM fails, without failing fulfillment', async () => {
-      mockDeliverReceiptDM.mockRejectedValueOnce(new Error('503 Service Unavailable'));
+    it('leaves an uncertain receipt to the single atomic action-finalizer hold', async () => {
+      mockPreparedReceiptSend.mockRejectedValueOnce(
+        Object.assign(new Error('Cannot send messages to this user'), { code: 50007 }),
+      );
       const supa = makeRecordingSupa();
       service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
 
       const result = await fulfillClaimed(service, keyedPayload);
 
-      // Entitlement was granted — the fulfillment itself must NOT be retried
-      // (that would double-grant); only the delivery is re-queued.
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
+      expect(result.errors.join(' ')).toContain('Cannot send messages');
       expect(result.receiptSent).toBe(false);
-      expect(result.receiptRetryQueued).toBe(true);
-
-      const queued = supa.__inserts['bot_action_queue'];
-      expect(queued).toHaveLength(1);
-      expect(queued[0]).toMatchObject({
-        guild_id: 'guild-1',
-        action: 'deliver_receipt',
-        status: 'pending',
-      });
-      expect(queued[0].payload).toMatchObject({
-        discord_id: 'user-1',
-        order_number: 'ORD-001',
-        product_name: 'VIP Pass',
-        license_key_plaintext: 'SMNI-AAAA-BBBB-CCCC-DDDD',
-      });
-      // The order date rides along so a delayed redelivery renders the
-      // date of the order, not the date the retry finally succeeded.
-      expect(new Date(queued[0].payload.order_date).getTime()).not.toBeNaN();
-      // Alerting is handled by the queue's final-failure path, not here
+      expect(result.receiptRetryQueued).toBe(false);
+      expect(supa.__inserts['bot_action_queue']).toBeUndefined();
+      expect(supa.__inserts['action_queue_dlq']).toBeUndefined();
       expect(supa.__inserts['alerts']).toBeUndefined();
-    });
-
-    it('retries the queue insert with backoff and recovers on a later attempt', async () => {
-      vi.useFakeTimers();
-      try {
-        mockDeliverReceiptDM.mockRejectedValueOnce(new Error('503 Service Unavailable'));
-        const supa = makeRecordingSupa({
-          queueInsertError: { message: 'transient db blip' },
-          queueInsertFailures: 1,
-        });
-        service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
-
-        const resultPromise = fulfillClaimed(service, keyedPayload);
-        await vi.advanceTimersByTimeAsync(10_000); // flush insert backoff sleeps
-        const result = await resultPromise;
-
-        expect(result.success).toBe(true);
-        expect(result.receiptRetryQueued).toBe(true);
-        // Failed once, then queued successfully — no DLQ, no alert
-        expect(supa.__inserts['bot_action_queue']).toHaveLength(2);
-        expect(supa.__inserts['action_queue_dlq']).toBeUndefined();
-        expect(supa.__inserts['alerts']).toBeUndefined();
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('preserves the payload in the DLQ and alerts when the queue insert keeps failing', async () => {
-      vi.useFakeTimers();
-      try {
-        mockDeliverReceiptDM.mockRejectedValueOnce(
-          Object.assign(new Error('Cannot send messages to this user'), { code: 50007 }),
-        );
-        const supa = makeRecordingSupa({ queueInsertError: { message: 'db unavailable' } });
-        service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
-
-        const resultPromise = fulfillClaimed(service, keyedPayload);
-        await vi.advanceTimersByTimeAsync(10_000); // flush insert backoff sleeps
-        const result = await resultPromise;
-
-        expect(result.receiptSent).toBe(false);
-        expect(result.receiptRetryQueued).toBe(false);
-
-        // Queue insert retried before giving up
-        expect(supa.__inserts['bot_action_queue']).toHaveLength(3);
-
-        // The delivery payload — the only remaining copy of the plaintext
-        // key — is preserved in the dashboard-retryable DLQ, not dropped
-        const dlq = supa.__inserts['action_queue_dlq'];
-        expect(dlq).toHaveLength(1);
-        expect(dlq[0]).toMatchObject({
-          guild_id: 'guild-1',
-          action: 'deliver_receipt',
-        });
-        expect(dlq[0].payload).toMatchObject({
-          discord_id: 'user-1',
-          order_number: 'ORD-001',
-          license_key_plaintext: 'SMNI-AAAA-BBBB-CCCC-DDDD',
-        });
-        expect(dlq[0].error_message).toContain('db unavailable');
-
-        // Operator alert written — and it never contains the plaintext key.
-        // It directs the operator to the recovery path that actually works
-        // (DLQ retry / manual resend from the preserved payload) — NOT the
-        // customer portal, which only shows a masked prefix…suffix key.
-        const alerts = supa.__inserts['alerts'];
-        expect(alerts).toHaveLength(1);
-        expect(alerts[0]).toMatchObject({
-          guild_id: 'guild-1',
-          alert_type: 'receipt_delivery_failed',
-          severity: 'critical',
-        });
-        expect(alerts[0].message).toContain('dead-letter queue');
-        expect(alerts[0].message).not.toContain('remains available through the customer portal');
-        expect(alerts[0].metadata).toMatchObject({
-          kind: 'permanent',
-          orderNumber: 'ORD-001',
-          payloadPreserved: true,
-        });
-        expect(JSON.stringify(alerts[0])).not.toContain('SMNI-AAAA-BBBB-CCCC-DDDD');
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('tells the operator the key is unrecoverable when even the DLQ write fails', async () => {
-      vi.useFakeTimers();
-      try {
-        mockDeliverReceiptDM.mockRejectedValueOnce(new Error('503 Service Unavailable'));
-        const supa = makeRecordingSupa({
-          queueInsertError: { message: 'db unavailable' },
-          dlqInsertError: { message: 'db unavailable' },
-        });
-        service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
-
-        const resultPromise = fulfillClaimed(service, keyedPayload);
-        await vi.advanceTimersByTimeAsync(10_000); // flush insert backoff sleeps
-        const result = await resultPromise;
-
-        expect(result.receiptRetryQueued).toBe(false);
-
-        // The alert must NOT claim the payload sits in the DLQ — it never
-        // made it there. The remaining remediation is revoke + reissue.
-        const alerts = supa.__inserts['alerts'];
-        expect(alerts).toHaveLength(1);
-        expect(alerts[0].message).toContain('could NOT be preserved');
-        expect(alerts[0].message).toContain('revoke');
-        expect(alerts[0].metadata).toMatchObject({ payloadPreserved: false });
-        expect(JSON.stringify(alerts[0])).not.toContain('SMNI-AAAA-BBBB-CCCC-DDDD');
-      } finally {
-        vi.useRealTimers();
-      }
     });
   });
 });
