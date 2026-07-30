@@ -174,7 +174,15 @@ const BASE_SCHEMA = `
   -- The checkout-claim slice predates role-delivery generation wrapping but
   -- adds the nullable generation column for forward schema compatibility.
   CREATE TABLE public.commerce_role_delivery_intents (
-    id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid()
+    id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+    action_id UUID,
+    cleanup_action_id UUID,
+    contract_kind TEXT,
+    order_id UUID,
+    guild_id TEXT,
+    outward_generation_id UUID,
+    delivery_confirmed_at TIMESTAMPTZ,
+    last_delivery_outcome TEXT
   );
 
   CREATE FUNCTION public.commerce_create_noncommerce_entitlement(
@@ -280,6 +288,29 @@ function checkoutClaimMigrationBody(url: URL): string {
     'REVOKE ALL ON FUNCTION public.commerce_classify_lifecycle_outward_authority(',
     lifecycleClassifierStart,
   );
+  const outwardActionAuthorityStart = migration.lastIndexOf(
+    'CREATE OR REPLACE FUNCTION public.commerce_assert_outward_action_authority(',
+    lifecycleClassifierStart,
+  );
+  const outwardActionAuthorityEnd = migration.indexOf(
+    'REVOKE ALL ON FUNCTION public.commerce_assert_outward_action_authority(',
+    outwardActionAuthorityStart,
+  );
+  const generatedOutwardBeginStart = migration.indexOf(
+    'CREATE OR REPLACE FUNCTION public.commerce_begin_fulfillment_outward_intent(',
+    lifecycleClassifierEnd,
+  );
+  const generatedOutwardBeginEnd = migration.indexOf(
+    'REVOKE ALL ON FUNCTION public.commerce_begin_fulfillment_outward_intent(',
+    generatedOutwardBeginStart,
+  );
+  const actionOutwardClassifierStart = migration.lastIndexOf(
+    'CREATE OR REPLACE FUNCTION public.commerce_classify_action_outward_state(',
+  );
+  const actionOutwardClassifierEnd = migration.indexOf(
+    'REVOKE ALL ON FUNCTION public.commerce_classify_action_outward_state(',
+    actionOutwardClassifierStart,
+  );
   if (
     generationBoundary < 0
     || currentClaimStart < 0
@@ -288,6 +319,12 @@ function checkoutClaimMigrationBody(url: URL): string {
     || currentUnknownHoldEnd < 0
     || lifecycleClassifierStart < 0
     || lifecycleClassifierEnd < 0
+    || outwardActionAuthorityStart < 0
+    || outwardActionAuthorityEnd < 0
+    || generatedOutwardBeginStart < 0
+    || generatedOutwardBeginEnd < 0
+    || actionOutwardClassifierStart < 0
+    || actionOutwardClassifierEnd < 0
   ) {
     throw new Error('checkout migration extraction boundaries were not found');
   }
@@ -302,7 +339,24 @@ function checkoutClaimMigrationBody(url: URL): string {
   const lifecycleClassifier = migration
     .slice(lifecycleClassifierStart, lifecycleClassifierEnd)
     .trim();
-  return `${checkoutAndLegacyOutward}\n\n${currentPaidClaim}\n\n${currentUnknownHold}\n\n${lifecycleClassifier}`;
+  const outwardActionAuthority = migration
+    .slice(outwardActionAuthorityStart, outwardActionAuthorityEnd)
+    .trim();
+  const generatedOutwardBegin = migration
+    .slice(generatedOutwardBeginStart, generatedOutwardBeginEnd)
+    .trim();
+  const actionOutwardClassifier = migration
+    .slice(actionOutwardClassifierStart, actionOutwardClassifierEnd)
+    .trim();
+  return [
+    checkoutAndLegacyOutward,
+    currentPaidClaim,
+    currentUnknownHold,
+    outwardActionAuthority,
+    lifecycleClassifier,
+    generatedOutwardBegin,
+    actionOutwardClassifier,
+  ].join('\n\n');
 }
 
 function nextValue(prefix: string): string {
@@ -1674,7 +1728,7 @@ describe('checkout migration and atomic fulfillment winner', () => {
     expect(row).toEqual({ state: 'uncertain', alert_count: 1 });
   }, 45_000);
 
-  it('supersedes lifecycle outward effects when a newer accepted generation becomes head', async () => {
+  it('tombstones cancellation event and DM when a newer accepted generation becomes head', async () => {
     const fixture = await createFixture('subscription');
     const [identity] = await sqlObserver<{
       plan_id: string;
@@ -1701,7 +1755,7 @@ describe('checkout migration and atomic fulfillment winner', () => {
         ${identity.plan_id}::UUID,
         ${fixture.orderA}::UUID,
         'subscription',
-        'suspended',
+        'cancelled',
         'purchase',
         ARRAY[]::TEXT[],
         ARRAY[]::TEXT[]
@@ -1718,7 +1772,7 @@ describe('checkout migration and atomic fulfillment winner', () => {
       ) VALUES (
         ${oldEventId},
         ${fixture.providerA},
-        'BILLING.SUBSCRIPTION.SUSPENDED',
+        'BILLING.SUBSCRIPTION.CANCELLED',
         ${occurredAt}::TIMESTAMPTZ,
         NULL,
         ${fixture.orderA}::UUID,
@@ -1727,7 +1781,7 @@ describe('checkout migration and atomic fulfillment winner', () => {
         ${fixture.productId}::UUID,
         ${identity.plan_id}::UUID,
         'accepted',
-        40,
+        50,
         1
       )
     `;
@@ -1744,26 +1798,29 @@ describe('checkout migration and atomic fulfillment winner', () => {
         ${fixture.productId}::UUID,
         ${identity.plan_id}::UUID,
         ${oldEventId},
-        'BILLING.SUBSCRIPTION.SUSPENDED',
+        'BILLING.SUBSCRIPTION.CANCELLED',
         ${occurredAt}::TIMESTAMPTZ,
-        40,
+        50,
         1
       )
     `;
     const [action] = await sqlObserver<{
       id: string;
       outward_generation_id: string;
+      claim_token: string;
     }[]>`
       INSERT INTO public.bot_action_queue (
-        guild_id, action, lane, status, outward_generation_id, payload
+        guild_id, action, lane, status, claim_token,
+        outward_generation_id, payload
       ) VALUES (
         ${GUILD_ID},
-        'fulfill_suspension',
+        'fulfill_cancellation',
         'commerce',
         'processing',
         pg_catalog.gen_random_uuid(),
+        pg_catalog.gen_random_uuid(),
         pg_catalog.jsonb_build_object(
-          'fulfillment_type', 'subscription_suspended',
+          'fulfillment_type', 'subscription_cancelled',
           'guild_id', ${GUILD_ID}::TEXT,
           'customer_id', ${fixture.customerId}::TEXT,
           'discord_id', ${identity.discord_id}::TEXT,
@@ -1772,20 +1829,20 @@ describe('checkout migration and atomic fulfillment winner', () => {
           'plan_id', ${identity.plan_id}::TEXT,
           'paypal_subscription_id', ${fixture.providerA}::TEXT,
           'webhook_event_id', ${oldEventId}::TEXT,
-          'provider_event_type', 'BILLING.SUBSCRIPTION.SUSPENDED',
+          'provider_event_type', 'BILLING.SUBSCRIPTION.CANCELLED',
           'provider_occurred_at', ${occurredAt}::TEXT,
           'provider_paid_through_at', NULL::TEXT,
           'lifecycle_generation', 1
         )
       )
-      RETURNING id, outward_generation_id
+      RETURNING id, outward_generation_id, claim_token
     `;
 
     const [authorized] = await sqlObserver<{ disposition: string }[]>`
       SELECT public.commerce_classify_lifecycle_outward_authority(
         ${fixture.orderA}::UUID,
         ${GUILD_ID},
-        'subscription_suspended_dm',
+        'subscription_cancelled_dm',
         ${action.outward_generation_id}::UUID,
         ${action.id}::UUID
       ) AS disposition
@@ -1830,12 +1887,68 @@ describe('checkout migration and atomic fulfillment winner', () => {
       SELECT public.commerce_classify_lifecycle_outward_authority(
         ${fixture.orderA}::UUID,
         ${GUILD_ID},
-        'subscription_suspended_dm',
+        'subscription_cancelled_dm',
         ${action.outward_generation_id}::UUID,
         ${action.id}::UUID
       ) AS disposition
     `;
     expect(superseded.disposition).toBe('superseded');
+
+    await sqlObserver`
+      UPDATE public.orders
+         SET status = 'completed'
+       WHERE id = ${fixture.orderA}::UUID
+    `;
+    for (const intentKind of [
+      'subscription_cancelled_event',
+      'subscription_cancelled_dm',
+    ]) {
+      const [begun] = await sqlObserver<{
+        result: Record<string, unknown>;
+      }[]>`
+        SELECT public.commerce_begin_fulfillment_outward_intent(
+          ${fixture.orderA}::UUID,
+          ${GUILD_ID},
+          ${intentKind},
+          ${action.outward_generation_id}::UUID,
+          ${action.id}::UUID,
+          ${action.claim_token}::UUID
+        ) AS result
+      `;
+      expect(begun.result).toMatchObject({
+        order_id: fixture.orderA,
+        guild_id: GUILD_ID,
+        intent_kind: intentKind,
+        outward_generation_id: action.outward_generation_id,
+        disposition: 'superseded',
+        state: 'superseded',
+        attempt_token: null,
+        alert_id: null,
+      });
+    }
+
+    const tombstones = await sqlObserver<{
+      intent_kind: string;
+      state: string;
+    }[]>`
+      SELECT intent_kind, state
+      FROM public.commerce_fulfillment_outward_intents
+      WHERE order_id = ${fixture.orderA}::UUID
+        AND outward_generation_id = ${action.outward_generation_id}::UUID
+      ORDER BY intent_kind
+    `;
+    expect(tombstones).toEqual([
+      { intent_kind: 'subscription_cancelled_dm', state: 'superseded' },
+      { intent_kind: 'subscription_cancelled_event', state: 'superseded' },
+    ]);
+
+    const [actionDisposition] = await sqlObserver<{ disposition: string }[]>`
+      SELECT public.commerce_classify_action_outward_state(
+        ${action.id}::UUID,
+        ${action.claim_token}::UUID
+      ) AS disposition
+    `;
+    expect(actionDisposition.disposition).toBe('complete');
   }, 45_000);
 
   it('resumes only an existing outward intent and never creates a legacy replay marker', async () => {

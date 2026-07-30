@@ -5691,6 +5691,13 @@ BEGIN
     v_required_kinds := CASE
       WHEN p_intent_kind = 'subscription_renewed_event'
         THEN ARRAY['subscription_renewed_event']::TEXT[]
+      WHEN p_intent_kind IN (
+        'subscription_cancelled_event',
+        'subscription_cancelled_dm'
+      ) THEN ARRAY[
+        'subscription_cancelled_event',
+        'subscription_cancelled_dm'
+      ]::TEXT[]
       ELSE ARRAY[
         'subscription_payment_failed_lapsed_event',
         'subscription_payment_failed_event',
@@ -5715,7 +5722,7 @@ BEGIN
       required.required_kind,
       'superseded',
       NULL,
-      'superseded by terminal subscription cancellation'
+      'superseded by a newer subscription lifecycle generation'
     FROM pg_catalog.unnest(v_required_kinds) AS required(required_kind)
     ON CONFLICT DO NOTHING;
   END IF;
@@ -8666,6 +8673,14 @@ BEGIN
            AND v_action.payload ->> 'fulfillment_type' = 'subscription_renewed'
            AND outward.intent_kind = 'subscription_renewed_event'
          )
+          OR (
+            v_action.action = 'fulfill_cancellation'
+            AND v_action.payload ->> 'fulfillment_type' = 'subscription_cancelled'
+            AND outward.intent_kind IN (
+              'subscription_cancelled_event',
+              'subscription_cancelled_dm'
+            )
+          )
           OR (
             v_action.action = 'fulfill_suspension'
             AND v_action.payload ->> 'fulfillment_type' = 'subscription_payment_failed'

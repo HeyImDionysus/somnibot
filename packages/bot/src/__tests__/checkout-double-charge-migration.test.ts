@@ -225,6 +225,36 @@ describe('checkout double-charge migration safety contracts', () => {
       'v_head.generation IS DISTINCT FROM v_event.generation',
     );
     expect(classifier).toContain("RETURN 'superseded'");
+
+    const generatedBegin = migration.slice(
+      migration.indexOf(
+        'CREATE OR REPLACE FUNCTION public.commerce_begin_fulfillment_outward_intent(',
+        migration.indexOf(
+          'CREATE OR REPLACE FUNCTION public.commerce_classify_lifecycle_outward_authority',
+        ),
+      ),
+      migration.indexOf(
+        'REVOKE ALL ON FUNCTION public.commerce_begin_fulfillment_outward_intent(',
+        migration.indexOf(
+          'CREATE OR REPLACE FUNCTION public.commerce_classify_lifecycle_outward_authority',
+        ),
+      ),
+    );
+    expect(generatedBegin).toMatch(
+      /p_intent_kind IN\s*\(\s*'subscription_cancelled_event'\s*,\s*'subscription_cancelled_dm'\s*\)[\s\S]+ARRAY\[\s*'subscription_cancelled_event'\s*,\s*'subscription_cancelled_dm'\s*\]::TEXT\[\]/i,
+    );
+
+    const actionClassifier = migration.slice(
+      migration.lastIndexOf(
+        'CREATE OR REPLACE FUNCTION public.commerce_classify_action_outward_state',
+      ),
+      migration.lastIndexOf(
+        'REVOKE ALL ON FUNCTION public.commerce_classify_action_outward_state',
+      ),
+    );
+    expect(actionClassifier).toMatch(
+      /v_action\.action = 'fulfill_cancellation'[\s\S]+outward\.intent_kind IN\s*\(\s*'subscription_cancelled_event'\s*,\s*'subscription_cancelled_dm'\s*\)/i,
+    );
   });
 
   it('defers provider cancellation fulfillment until the paid-through boundary', () => {

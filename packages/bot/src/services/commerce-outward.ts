@@ -40,6 +40,8 @@ export type CommerceOutwardBeginMode =
 
 const SUPERSEDABLE_LIFECYCLE_KINDS = new Set<CommerceOutwardIntentKind>([
   'subscription_renewed_event',
+  'subscription_cancelled_event',
+  'subscription_cancelled_dm',
   'subscription_payment_failed_lapsed_event',
   'subscription_payment_failed_event',
   'subscription_payment_failed_dm',
