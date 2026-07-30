@@ -27,6 +27,10 @@ const MIGRATION_PATH = fileURLToPath(new URL(
   '../../../../supabase/migrations/20260711030000_canonicalize_commerce_role_metadata.sql',
   import.meta.url,
 ));
+const CHECKOUT_RAIL_MIGRATION = migrationBody(fileURLToPath(new URL(
+  '../../../../supabase/migrations/20260727041000_checkout_double_charge_rails.sql',
+  import.meta.url,
+)));
 const SNOWFLAKE_BASE = 920_000_000_000_000_000n
   + BigInt(Date.now() % 1_000_000) * 10_000n;
 
@@ -49,6 +53,7 @@ type DeliveryBegin = {
   intent_state: string;
   may_mutate: boolean;
   contract_live: boolean;
+  outward_generation_id: string;
 };
 
 type RetryResult = {
@@ -77,12 +82,20 @@ type ActiveDelivery = {
   claimToken: string;
   intentId: string;
   mutationToken: string;
+  orderId: string;
+  outwardGenerationId: string;
 };
 
 type FailedDelivery = ActiveDelivery & {
   dlqId: string;
   finishDisposition: string;
 };
+
+function migrationBody(path: string): string {
+  return readFileSync(path, 'utf8')
+    .replace(/^\uFEFF?\s*BEGIN;\s*/i, '')
+    .replace(/\s*COMMIT;\s*$/i, '');
+}
 
 function nextName(prefix: string): string {
   sequence += 1;
@@ -180,6 +193,16 @@ async function cleanFixtures(): Promise<void> {
   await sqlA`DELETE FROM public.bot_action_queue WHERE guild_id = ${GUILD_ID}`;
   await sqlA`DELETE FROM public.giveaways WHERE guild_id = ${GUILD_ID}`;
   await sqlA`DELETE FROM public.temp_role_grants WHERE guild_id = ${GUILD_ID}`;
+  await sqlA`DELETE FROM public.commerce_fulfillment_holds WHERE guild_id = ${GUILD_ID}`;
+  await sqlA`DELETE FROM public.commerce_fulfillment_claims WHERE guild_id = ${GUILD_ID}`;
+  await sqlA`
+    DELETE FROM public.commerce_fulfillment_outward_intents
+     WHERE guild_id = ${GUILD_ID}
+  `;
+  await sqlA`
+    DELETE FROM public.commerce_checkout_deactivation_proofs
+     WHERE guild_id = ${GUILD_ID}
+  `;
   await sqlA`DELETE FROM public.entitlements WHERE guild_id = ${GUILD_ID}`;
   await sqlA`DELETE FROM public.payment_refunds WHERE guild_id = ${GUILD_ID}`;
   await sqlA`DELETE FROM public.payments WHERE guild_id = ${GUILD_ID}`;
@@ -256,24 +279,35 @@ async function createPaidFixture(options: {
 
   const orderNumber = nextName('recovery-order');
   const paypalOrderId = nextName('paypal-order');
-  const { data: order, error: orderError } = await supa
-    .from('orders')
-    .insert({
-      order_number: orderNumber,
-      customer_id: customerId,
-      guild_id: GUILD_ID,
-      product_id: productId,
-      paypal_order_id: paypalOrderId,
-      amount_cents: 1_000,
-      currency: 'USD',
-      source: 'purchase',
-      status: 'pending',
-    })
-    .select('id')
-    .single();
-  expect(orderError).toBeNull();
+  // Fixture construction is owner-only setup. API/service callers are
+  // intentionally barred from direct paid-order inserts by the production
+  // reservation trigger and must use sanctioned commerce RPCs.
+  const [order] = await sqlObserver<{ id: string }[]>`
+    INSERT INTO public.orders (
+      order_number,
+      customer_id,
+      guild_id,
+      product_id,
+      paypal_order_id,
+      amount_cents,
+      currency,
+      source,
+      status
+    ) VALUES (
+      ${orderNumber},
+      ${customerId},
+      ${GUILD_ID},
+      ${productId},
+      ${paypalOrderId},
+      1000,
+      'USD',
+      'purchase',
+      'pending'
+    )
+    RETURNING id
+  `;
   if (!order?.id) throw new Error('order fixture returned no id');
-  const orderId = order.id as string;
+  const orderId = order.id;
 
   // The freeze/capture pair below models a one-time PayPal checkout. The
   // shipped freeze RPC fail-closes on subscription products unless the order
@@ -309,12 +343,12 @@ async function createPaidFixture(options: {
     // provider-side subscription activation by completing the never-frozen
     // order directly; the snapshot-protection trigger only locks orders after
     // their first freeze, and 'completed' is not a terminal-cleanup signal.
-    const { error: completeError } = await supa
-      .from('orders')
-      .update({ status: 'completed' })
-      .eq('id', orderId)
-      .eq('guild_id', GUILD_ID);
-    expect(completeError).toBeNull();
+    await sqlObserver`
+      UPDATE public.orders
+         SET status = 'completed'
+       WHERE id = ${orderId}
+         AND guild_id = ${GUILD_ID}
+    `;
   }
 
   const { data: entitlement, error: entitlementError } = await supa
@@ -655,6 +689,8 @@ async function startDelivery(fixture: PaidFixture, actionId: string): Promise<Ac
     claimToken: claim.claim_token,
     intentId: begun.intent_id,
     mutationToken: begun.mutation_token,
+    orderId: fixture.orderId,
+    outwardGenerationId: begun.outward_generation_id,
   };
 }
 
@@ -752,6 +788,39 @@ async function finishLive(delivery: ActiveDelivery): Promise<string> {
     'live delivery confirmation',
   ).disposition;
   expect(['confirmed_open', 'settled']).toContain(disposition);
+
+  for (const intentKind of ['purchase_completed_event', 'receipt_dm']) {
+    const begun = await supa.rpc('commerce_begin_fulfillment_outward_intent', {
+      p_order_id: delivery.orderId,
+      p_guild_id: GUILD_ID,
+      p_intent_kind: intentKind,
+      p_outward_generation_id: delivery.outwardGenerationId,
+      p_action_id: delivery.actionId,
+      p_claim_token: delivery.claimToken,
+    });
+    expect(begun.error).toBeNull();
+    const outward = begun.data as {
+      disposition: string;
+      attempt_token: string | null;
+    };
+    expect(outward.disposition).toBe('send');
+    expect(outward.attempt_token).toBeTruthy();
+
+    const outwardFinished = await supa.rpc(
+      'commerce_finish_fulfillment_outward_intent',
+      {
+        p_order_id: delivery.orderId,
+        p_guild_id: GUILD_ID,
+        p_intent_kind: intentKind,
+        p_outward_generation_id: delivery.outwardGenerationId,
+        p_attempt_token: outward.attempt_token,
+        p_outcome: 'sent',
+        p_error: null,
+      },
+    );
+    expect(outwardFinished.error).toBeNull();
+    expect((outwardFinished.data as { state: string }).state).toBe('sent');
+  }
 
   const queueFinished = await supa.rpc('bot_action_queue_finish_claim', {
     p_action_id: delivery.actionId,
@@ -868,6 +937,9 @@ beforeAll(async () => {
   const [backend] = await sqlB<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
   if (!backend?.pid) throw new Error('failed to capture concurrency client PID');
   sqlBBackendPid = backend.pid;
+  await sqlA.begin(async (tx) => {
+    await tx.unsafe(CHECKOUT_RAIL_MIGRATION);
+  });
   const { error } = await supa.from('guild').insert({
     id: GUILD_ID,
     name: 'Role recovery integration',
@@ -939,6 +1011,8 @@ describe('exact bound carrier recovery', () => {
       claimToken: nextClaim.claim_token,
       intentId: nextBegin.intent_id,
       mutationToken: nextBegin.mutation_token,
+      orderId: fixture.orderId,
+      outwardGenerationId: nextBegin.outward_generation_id,
     };
     expect(await finishRetry(second, 'second deterministic failure')).toBe('safe_retry_owned');
     const secondDlqId = await finishQueueFailure(second);
@@ -1282,7 +1356,11 @@ describe('intent-binding gap serialization', () => {
     allowBegin.open();
     const [begun, recoveryRows] = await Promise.all([beginTransaction, recovering]);
     expect(begun).toHaveLength(1);
-    expect(recoveryRows).toEqual([]);
+    expect(recoveryRows).toEqual([{
+      id: actionId,
+      action: 'fulfill_purchase',
+      disposition: 'intent_raced',
+    }]);
 
     const [state] = await sqlA<{
       status: string;
@@ -2209,6 +2287,318 @@ describe('atomic owner entitlement administration', () => {
 
     await completeNoncommerceActivation(firstReactivation!.id as string);
   });
+});
+
+describe('checkout and noncommerce grant serialization', () => {
+  type GrantSource = 'manual' | 'giveaway' | 'automation';
+  type GrantRaceFixture = {
+    customerId: string;
+    productId: string;
+    requestId: string;
+    checkoutOrderId: string;
+    checkoutProviderId: string;
+    checkoutOrderNumber: string;
+    source: GrantSource;
+  };
+
+  async function createGrantRaceFixture(source: GrantSource): Promise<GrantRaceFixture> {
+    const [customer] = await sqlA<{ id: string }[]>`
+      INSERT INTO public.customers (
+        guild_id,
+        discord_id,
+        discord_username
+      ) VALUES (
+        ${GUILD_ID},
+        ${nextSnowflake()},
+        ${nextName(`grant-race-${source}-customer`)}
+      )
+      RETURNING id
+    `;
+    const [product] = await sqlA<{ id: string }[]>`
+      INSERT INTO public.products (
+        guild_id,
+        name,
+        description,
+        type,
+        delivery_type,
+        price_cents,
+        currency,
+        granted_role_ids,
+        granted_channel_ids,
+        active
+      ) VALUES (
+        ${GUILD_ID},
+        ${nextName(`grant-race-${source}-product`)},
+        'checkout/noncommerce serialization fixture',
+        'one_time',
+        'access_pass',
+        100,
+        'USD',
+        ARRAY[]::TEXT[],
+        ARRAY[]::TEXT[],
+        true
+      )
+      RETURNING id
+    `;
+    return {
+      customerId: customer!.id,
+      productId: product!.id,
+      requestId: uuidV7Fixture(),
+      checkoutOrderId: randomUUID(),
+      checkoutProviderId: nextName(`grant-race-${source}-provider`),
+      checkoutOrderNumber: nextName(`grant-race-${source}-order`),
+      source,
+    };
+  }
+
+  function createNoncommerceGrant(
+    sql: any,
+    fixture: GrantRaceFixture,
+  ) {
+    return sql<{
+      entitlement_id: string;
+      order_id: string;
+      request_id: string;
+    }[]>`
+      SELECT *
+      FROM public.commerce_create_noncommerce_entitlement(
+        ${fixture.requestId}::UUID,
+        ${GUILD_ID},
+        ${fixture.customerId}::UUID,
+        ${fixture.productId}::UUID,
+        ${fixture.source},
+        'one_time',
+        NULL::UUID,
+        NULL::TIMESTAMPTZ,
+        ARRAY[]::TEXT[],
+        ARRAY[]::TEXT[]
+      )
+    `;
+  }
+
+  function createPayableCheckout(
+    sql: any,
+    fixture: GrantRaceFixture,
+  ) {
+    return sql<{ id: string; checkout_active: boolean }[]>`
+      INSERT INTO public.orders (
+        id,
+        order_number,
+        customer_id,
+        guild_id,
+        product_id,
+        paypal_order_id,
+        amount_cents,
+        currency,
+        source,
+        status,
+        checkout_active
+      ) VALUES (
+        ${fixture.checkoutOrderId}::UUID,
+        ${fixture.checkoutOrderNumber},
+        ${fixture.customerId}::UUID,
+        ${GUILD_ID},
+        ${fixture.productId}::UUID,
+        ${fixture.checkoutProviderId},
+        100,
+        'USD',
+        'purchase',
+        'pending',
+        true
+      )
+      RETURNING id, checkout_active
+    `;
+  }
+
+  it.each(['manual', 'giveaway', 'automation'] as const)(
+    'lets a first %s grant commit and rejects the checkout waiting behind it',
+    async (source) => {
+      const fixture = await createGrantRaceFixture(source);
+      const grantReady = makeGate();
+      const releaseGrant = makeGate();
+      const granting = sqlA.begin(async (tx) => {
+        const rows = await createNoncommerceGrant(tx, fixture);
+        grantReady.open();
+        await releaseGrant.promise;
+        return rows;
+      });
+      await Promise.race([grantReady.promise, granting]);
+
+      const checkout = createPayableCheckout(sqlB, fixture).execute();
+      try {
+        await waitForDatabaseLock(
+          sqlBBackendPid,
+          `${source} checkout behind noncommerce grant`,
+        );
+      } catch (error) {
+        releaseGrant.open();
+        await Promise.allSettled([granting, checkout]);
+        throw error;
+      }
+      releaseGrant.open();
+      const grantRows = await granting;
+      expect(grantRows).toEqual([{
+        entitlement_id: expect.any(String),
+        order_id: fixture.requestId,
+        request_id: fixture.requestId,
+      }]);
+      await expect(checkout).rejects.toMatchObject({
+        code: '23505',
+        message: expect.stringContaining('commerce_checkout_blocked: active_entitlement'),
+      });
+
+      const [evidence] = await sqlObserver<{
+        grant_order_count: number;
+        entitlement_count: number;
+        checkout_count: number;
+      }[]>`
+        SELECT
+          (
+            SELECT pg_catalog.count(*)::INTEGER
+            FROM public.orders
+            WHERE id = ${fixture.requestId}::UUID
+          ) AS grant_order_count,
+          (
+            SELECT pg_catalog.count(*)::INTEGER
+            FROM public.entitlements
+            WHERE order_id = ${fixture.requestId}::UUID
+          ) AS entitlement_count,
+          (
+            SELECT pg_catalog.count(*)::INTEGER
+            FROM public.orders
+            WHERE id = ${fixture.checkoutOrderId}::UUID
+          ) AS checkout_count
+      `;
+      expect(evidence).toEqual({
+        grant_order_count: 1,
+        entitlement_count: 1,
+        checkout_count: 0,
+      });
+    },
+    45_000,
+  );
+
+  it.each(['manual', 'giveaway', 'automation'] as const)(
+    'lets a first checkout commit and rejects the %s grant waiting behind it without orphans',
+    async (source) => {
+      const fixture = await createGrantRaceFixture(source);
+      const checkoutReady = makeGate();
+      const releaseCheckout = makeGate();
+      const reserving = sqlA.begin(async (tx) => {
+        const rows = await createPayableCheckout(tx, fixture);
+        checkoutReady.open();
+        await releaseCheckout.promise;
+        return rows;
+      });
+      await Promise.race([checkoutReady.promise, reserving]);
+
+      const granting = createNoncommerceGrant(sqlB, fixture).execute();
+      try {
+        await waitForDatabaseLock(
+          sqlBBackendPid,
+          `${source} noncommerce grant behind checkout`,
+        );
+      } catch (error) {
+        releaseCheckout.open();
+        await Promise.allSettled([reserving, granting]);
+        throw error;
+      }
+      releaseCheckout.open();
+      expect(await reserving).toEqual([{
+        id: fixture.checkoutOrderId,
+        checkout_active: true,
+      }]);
+      await expect(granting).rejects.toMatchObject({
+        code: '23505',
+        message: expect.stringContaining('commerce_noncommerce_grant_blocked: provider_checkout'),
+      });
+
+      const [evidence] = await sqlObserver<{
+        grant_order_count: number;
+        entitlement_count: number;
+        checkout_count: number;
+      }[]>`
+        SELECT
+          (
+            SELECT pg_catalog.count(*)::INTEGER
+            FROM public.orders
+            WHERE id = ${fixture.requestId}::UUID
+          ) AS grant_order_count,
+          (
+            SELECT pg_catalog.count(*)::INTEGER
+            FROM public.entitlements
+            WHERE order_id = ${fixture.requestId}::UUID
+          ) AS entitlement_count,
+          (
+            SELECT pg_catalog.count(*)::INTEGER
+            FROM public.orders
+            WHERE id = ${fixture.checkoutOrderId}::UUID
+          ) AS checkout_count
+      `;
+      expect(evidence).toEqual({
+        grant_order_count: 0,
+        entitlement_count: 0,
+        checkout_count: 1,
+      });
+    },
+    45_000,
+  );
+
+  it.each(['manual', 'giveaway', 'automation'] as const)(
+    'blocks direct and admin %s reactivation while a provider checkout is payable',
+    async (source) => {
+      const fixture = await createGrantRaceFixture(source);
+      const [created] = await createNoncommerceGrant(sqlA, fixture);
+      const terminal = await supa.rpc('commerce_update_entitlement_status_admin', {
+        p_entitlement_id: created!.entitlement_id,
+        p_customer_id: fixture.customerId,
+        p_guild_id: GUILD_ID,
+        p_status: 'cancelled',
+        p_grace_period_ends_at: null,
+      });
+      expect(terminal.error).toBeNull();
+      expect(await createPayableCheckout(sqlA, fixture)).toEqual([{
+        id: fixture.checkoutOrderId,
+        checkout_active: true,
+      }]);
+
+      await expect(sqlA.begin(async (tx) => {
+        await tx`SET LOCAL ROLE service_role`;
+        await tx`
+          UPDATE public.entitlements
+          SET status = 'active'
+          WHERE id = ${created!.entitlement_id}::UUID
+            AND status = 'cancelled'
+        `;
+      })).rejects.toMatchObject({
+        code: '23505',
+        message: expect.stringContaining('commerce_noncommerce_grant_blocked: provider_checkout'),
+      });
+
+      const adminReactivation = await supa.rpc(
+        'commerce_update_entitlement_status_admin',
+        {
+          p_entitlement_id: created!.entitlement_id,
+          p_customer_id: fixture.customerId,
+          p_guild_id: GUILD_ID,
+          p_status: 'active',
+          p_grace_period_ends_at: null,
+        },
+      );
+      expect(adminReactivation.error).toMatchObject({
+        code: '23505',
+        message: expect.stringContaining('commerce_noncommerce_grant_blocked: provider_checkout'),
+      });
+      const { data: retained, error } = await supa
+        .from('entitlements')
+        .select('status')
+        .eq('id', created!.entitlement_id)
+        .single();
+      expect(error).toBeNull();
+      expect(retained?.status).toBe('cancelled');
+    },
+    45_000,
+  );
 });
 
 describe('atomic giveaway winner authority and notification outbox', () => {
@@ -3619,6 +4009,238 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
         .select('id')
         .single();
       expect(customerError).toBeNull();
+      const paidOrders = await sqlA<{
+        id: string;
+        order_number: string;
+      }[]>`
+        INSERT INTO public.orders (
+          order_number,
+          customer_id,
+          guild_id,
+          product_id,
+          paypal_order_id,
+          amount_cents,
+          currency,
+          source,
+          status,
+          checkout_active
+        ) VALUES
+          (
+            ${nextName('purge-paid-winner')},
+            ${customer!.id}::UUID,
+            ${guildId},
+            ${product!.id}::UUID,
+            ${nextName('purge-paypal-winner')},
+            100,
+            'USD',
+            'purchase',
+            'completed',
+            false
+          ),
+          (
+            ${nextName('purge-paid-loser')},
+            ${customer!.id}::UUID,
+            ${guildId},
+            ${product!.id}::UUID,
+            ${nextName('purge-paypal-loser')},
+            100,
+            'USD',
+            'purchase',
+            'completed',
+            false
+          )
+        RETURNING id, order_number
+      `;
+      const captureWinner = nextName('purge-capture-winner');
+      const captureLoser = nextName('purge-capture-loser');
+      await sqlA`
+        INSERT INTO public.payments (
+          order_id,
+          customer_id,
+          guild_id,
+          paypal_payment_id,
+          amount_cents,
+          currency,
+          status,
+          provider,
+          paypal_resource_type
+        ) VALUES
+          (
+            ${paidOrders[0]!.id}::UUID,
+            ${customer!.id}::UUID,
+            ${guildId},
+            ${captureWinner},
+            100,
+            'USD',
+            'completed',
+            'paypal',
+            'capture'
+          ),
+          (
+            ${paidOrders[1]!.id}::UUID,
+            ${customer!.id}::UUID,
+            ${guildId},
+            ${captureLoser},
+            100,
+            'USD',
+            'completed',
+            'paypal',
+            'capture'
+          )
+      `;
+      const [winnerClaim] = await sqlA<{ result: Record<string, unknown> }[]>`
+        SELECT public.commerce_claim_paid_fulfillment(
+          ${paidOrders[0]!.id}::UUID,
+          ${guildId},
+          ${customer!.id}::UUID,
+          ${product!.id}::UUID,
+          'capture',
+          ${captureWinner},
+          100,
+          'USD'
+        ) AS result
+      `;
+      const [loserClaim] = await sqlA<{ result: Record<string, unknown> }[]>`
+        SELECT public.commerce_claim_paid_fulfillment(
+          ${paidOrders[1]!.id}::UUID,
+          ${guildId},
+          ${customer!.id}::UUID,
+          ${product!.id}::UUID,
+          'capture',
+          ${captureLoser},
+          100,
+          'USD'
+        ) AS result
+      `;
+      expect(winnerClaim!.result).toMatchObject({
+        order_id: paidOrders[0]!.id,
+        disposition: 'winner',
+      });
+      expect(loserClaim!.result).toMatchObject({
+        order_id: paidOrders[1]!.id,
+        disposition: 'held',
+        winning_order_id: paidOrders[0]!.id,
+      });
+      const [outwardIntent] = await sqlA<{
+        order_id: string;
+        state: string;
+      }[]>`
+        INSERT INTO public.commerce_fulfillment_outward_intents (
+          order_id,
+          guild_id,
+          outward_generation_id,
+          intent_kind,
+          state,
+          attempt_token
+        ) VALUES (
+          ${paidOrders[0]!.id}::UUID,
+          ${guildId},
+          NULL,
+          'purchase_completed_event',
+          'sending',
+          pg_catalog.gen_random_uuid()
+        )
+        RETURNING order_id, state
+      `;
+      expect(outwardIntent).toMatchObject({
+        order_id: paidOrders[0]!.id,
+        state: 'sending',
+      });
+      const [checkoutProofProduct] = await sqlA<{ id: string }[]>`
+        INSERT INTO public.products (
+          guild_id,
+          name,
+          type,
+          delivery_type,
+          price_cents,
+          currency,
+          active,
+          granted_role_ids,
+          granted_channel_ids
+        ) VALUES (
+          ${guildId},
+          ${nextName('purge-proof-product')},
+          'one_time',
+          'access_pass',
+          100,
+          'USD',
+          true,
+          ARRAY[]::TEXT[],
+          ARRAY[]::TEXT[]
+        )
+        RETURNING id
+      `;
+      const checkoutProofProviderId = nextName('purge-proof-provider');
+      const [proofOrder] = await sqlA<{ id: string }[]>`
+        INSERT INTO public.orders (
+          order_number,
+          customer_id,
+          guild_id,
+          product_id,
+          paypal_order_id,
+          amount_cents,
+          currency,
+          source,
+          status,
+          checkout_active
+        ) VALUES (
+          ${nextName('purge-proof-order')},
+          ${customer!.id}::UUID,
+          ${guildId},
+          ${checkoutProofProduct!.id}::UUID,
+          ${checkoutProofProviderId},
+          100,
+          'USD',
+          'purchase',
+          'pending',
+          true
+        )
+        RETURNING id
+      `;
+      const [deactivatedCheckout] = await sqlA<{ result: Record<string, unknown> }[]>`
+        SELECT public.commerce_deactivate_pending_checkout(
+          ${proofOrder!.id}::UUID,
+          ${guildId},
+          ${customer!.id}::UUID,
+          ${checkoutProofProduct!.id}::UUID,
+          'capture',
+          ${checkoutProofProviderId},
+          'provider_cancelled',
+          ${nextName('purge-proof-reference')}
+        ) AS result
+      `;
+      expect(deactivatedCheckout!.result).toMatchObject({
+        order_id: proofOrder!.id,
+        disposition: 'deactivated',
+        checkout_active: false,
+      });
+      const payableCheckoutProviderId = nextName('purge-payable-provider');
+      const [payableCheckout] = await sqlA<{ id: string }[]>`
+        INSERT INTO public.orders (
+          order_number,
+          customer_id,
+          guild_id,
+          product_id,
+          paypal_order_id,
+          amount_cents,
+          currency,
+          source,
+          status,
+          checkout_active
+        ) VALUES (
+          ${nextName('purge-payable-order')},
+          ${customer!.id}::UUID,
+          ${guildId},
+          ${checkoutProofProduct!.id}::UUID,
+          ${payableCheckoutProviderId},
+          100,
+          'USD',
+          'purchase',
+          'pending',
+          true
+        )
+        RETURNING id
+      `;
       const { data: entitlement, error: entitlementError } = await supa
         .from('entitlements')
         .insert({
@@ -3671,6 +4293,76 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
       expect(pending.data).toMatchObject({
         purge_status: 'pending_role_cleanup',
         guild_deleted: 0,
+      });
+      const pendingPaidRows = await sqlA<{
+        order_status: string;
+        payment_status: string;
+      }[]>`
+        SELECT paid_order.status AS order_status,
+               payment.status AS payment_status
+          FROM public.orders AS paid_order
+          JOIN public.payments AS payment
+            ON payment.order_id = paid_order.id
+         WHERE paid_order.id = ANY(${paidOrders.map((order) => order.id)}::UUID[])
+         ORDER BY paid_order.id
+      `;
+      expect(pendingPaidRows).toEqual([
+        { order_status: 'completed', payment_status: 'completed' },
+        { order_status: 'completed', payment_status: 'completed' },
+      ]);
+      const [retiredPendingCheckout] = await sqlA<{
+        status: string;
+        checkout_active: boolean;
+      }[]>`
+        SELECT status, checkout_active
+          FROM public.orders
+         WHERE id = ${proofOrder!.id}::UUID
+      `;
+      expect(retiredPendingCheckout).toEqual({
+        status: 'cancelled',
+        checkout_active: false,
+      });
+      const [preservedPayableCheckout] = await sqlA<{
+        status: string;
+        checkout_active: boolean;
+        paypal_order_id: string;
+      }[]>`
+        SELECT status, checkout_active, paypal_order_id
+          FROM public.orders
+         WHERE id = ${payableCheckout!.id}::UUID
+      `;
+      expect(preservedPayableCheckout).toEqual({
+        status: 'pending',
+        checkout_active: true,
+        paypal_order_id: payableCheckoutProviderId,
+      });
+      await expect(sqlA`
+        INSERT INTO public.orders (
+          order_number,
+          customer_id,
+          guild_id,
+          product_id,
+          paypal_order_id,
+          amount_cents,
+          currency,
+          source,
+          status,
+          checkout_active
+        ) VALUES (
+          ${nextName('purge-second-checkout')},
+          ${customer!.id}::UUID,
+          ${guildId},
+          ${checkoutProofProduct!.id}::UUID,
+          ${nextName('purge-second-provider')},
+          100,
+          'USD',
+          'purchase',
+          'pending',
+          true
+        )
+      `).rejects.toMatchObject({
+        code: '23505',
+        message: expect.stringContaining('commerce_checkout_blocked: provider_checkout'),
       });
       const retried = await supa.rpc('bot_action_queue_retry_dlq', {
         p_dlq_id: relinkDlq!.id,
@@ -3731,6 +4423,55 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
         guild_deleted: 1,
       });
       guildDeleted = true;
+
+      const [paidRailResidue] = await sqlA<{
+        hold_count: number;
+        claim_count: number;
+        outward_intent_count: number;
+        checkout_proof_count: number;
+        order_count: number;
+        guild_count: number;
+      }[]>`
+        SELECT
+          (
+            SELECT pg_catalog.count(*)::INTEGER
+            FROM public.commerce_fulfillment_holds
+            WHERE guild_id = ${guildId}
+          ) AS hold_count,
+          (
+            SELECT pg_catalog.count(*)::INTEGER
+            FROM public.commerce_fulfillment_claims
+            WHERE guild_id = ${guildId}
+          ) AS claim_count,
+          (
+            SELECT pg_catalog.count(*)::INTEGER
+            FROM public.commerce_fulfillment_outward_intents
+            WHERE guild_id = ${guildId}
+          ) AS outward_intent_count,
+          (
+            SELECT pg_catalog.count(*)::INTEGER
+            FROM public.commerce_checkout_deactivation_proofs
+            WHERE guild_id = ${guildId}
+          ) AS checkout_proof_count,
+          (
+            SELECT pg_catalog.count(*)::INTEGER
+            FROM public.orders
+            WHERE guild_id = ${guildId}
+          ) AS order_count,
+          (
+            SELECT pg_catalog.count(*)::INTEGER
+            FROM public.guild
+            WHERE id = ${guildId}
+          ) AS guild_count
+      `;
+      expect(paidRailResidue).toEqual({
+        hold_count: 0,
+        claim_count: 0,
+        outward_intent_count: 0,
+        checkout_proof_count: 0,
+        order_count: 0,
+        guild_count: 0,
+      });
 
       // The row persists forever, scrubbed: action/actor type/outcome remain
       // for forensics; every identity-bearing field is anonymized and the
@@ -3800,7 +4541,25 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
         await sqlA`DELETE FROM public.alerts WHERE guild_id = ${guildId}`;
         await sqlA`DELETE FROM public.action_queue_dlq WHERE guild_id = ${guildId}`;
         await sqlA`DELETE FROM public.bot_action_queue WHERE guild_id = ${guildId}`;
+        await sqlA`
+          DELETE FROM public.commerce_fulfillment_holds
+           WHERE guild_id = ${guildId}
+        `;
+        await sqlA`
+          DELETE FROM public.commerce_fulfillment_claims
+           WHERE guild_id = ${guildId}
+        `;
+        await sqlA`
+          DELETE FROM public.commerce_fulfillment_outward_intents
+           WHERE guild_id = ${guildId}
+        `;
+        await sqlA`
+          DELETE FROM public.commerce_checkout_deactivation_proofs
+           WHERE guild_id = ${guildId}
+        `;
         await sqlA`DELETE FROM public.entitlements WHERE guild_id = ${guildId}`;
+        await sqlA`DELETE FROM public.payments WHERE guild_id = ${guildId}`;
+        await sqlA`DELETE FROM public.orders WHERE guild_id = ${guildId}`;
         await sqlA`DELETE FROM public.customers WHERE guild_id = ${guildId}`;
         await sqlA`DELETE FROM public.products WHERE guild_id = ${guildId}`;
         // Immutable audit_logs rows may pin the guild via FK when an audited

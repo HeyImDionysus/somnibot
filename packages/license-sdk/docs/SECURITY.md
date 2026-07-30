@@ -80,6 +80,36 @@ const agent = new https.Agent({
 
 **Key rotation:** When rotating your server certificate, update the pinned fingerprint in your next client release. Consider pinning both the current and next certificate during the transition period to avoid breaking existing installations.
 
+### Responses Are Not Signed — Known Trade-Off
+
+Validation and heartbeat responses carry **no cryptographic signature**. The SDK
+trusts whatever answers at `apiBase`, so a customer who controls their own
+machine can point the SDK at a proxy that returns `{"valid": true}` and get a
+working install without a valid licence.
+
+This is normal for this class of product and is an accepted trade-off, not an
+oversight. Signing raises the cost of the attack; it does not remove it, because
+a client that can redirect `apiBase` can equally patch out the signature check —
+the verifying key has to ship inside the binary. Anyone determined enough to run
+a fake licence server is past the point where any client-side check helps.
+
+What to rely on instead, in order of value:
+
+1. **Server-side value.** Anything the product cannot function without —
+   downloads, hosted features, updates — is gated by the server
+   (`/api/downloads/...`, entitlement checks), which a fake validator cannot
+   fabricate. This is the only defence that actually holds.
+2. **Certificate pinning** (above). This is the closest thing to signing that is
+   worth doing, and it is strictly better: it blocks the redirect *and* the MITM,
+   at the transport layer, before any response is parsed.
+3. **Heartbeats + short cache TTLs**, so an install that loses its connection to
+   the real server stops working within the offline grace window.
+
+If you later decide the extra cost is worth it, sign the response body with a
+per-product Ed25519 key and embed the public key in the client build — but treat
+it as raising the bar for casual sharing, not as an enforcement boundary, and do
+not weaken (1) on the strength of it.
+
 ## Anti-Tampering
 
 For high-value products:

@@ -179,6 +179,7 @@ describe('getSubscriptionAmount', () => {
           plan_id: 'P-PROVIDER-PLAN-1',
           billing_info: {
             last_payment: { amount: { value: '10.25', currency_code: 'eur' } },
+            next_billing_time: '2026-08-29T00:00:00.000Z',
           },
         }),
       });
@@ -188,6 +189,7 @@ describe('getSubscriptionAmount', () => {
       amountCents: 1_025,
       currency: 'EUR',
       planId: 'P-PROVIDER-PLAN-1',
+      nextBillingTime: '2026-08-29T00:00:00.000Z',
     });
   });
 

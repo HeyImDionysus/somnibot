@@ -18,6 +18,7 @@ import { type NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkRateLimit } from '@/lib/api/rate-limit';
+import { getClientIp } from '@/lib/api/client-ip';
 import { parseBody } from '@/lib/api/validation';
 import { z } from 'zod';
 import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
@@ -30,9 +31,7 @@ export async function GET(req: NextRequest) {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
 
-  const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
-    ?? req.headers.get('x-real-ip')
-    ?? '127.0.0.1';
+  const clientIp = getClientIp(req);
   const rl = await checkRateLimit(`retention:read:${clientIp}`, 30, 60_000);
   if (rl.limited) {
     return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
@@ -55,9 +54,7 @@ export async function POST(req: NextRequest) {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
 
-  const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
-    ?? req.headers.get('x-real-ip')
-    ?? '127.0.0.1';
+  const clientIp = getClientIp(req);
   const rl = await checkRateLimit(`retention:write:${clientIp}`, 5, 60_000);
   if (rl.limited) {
     return NextResponse.json({ error: 'Too many requests' }, { status: 429 });

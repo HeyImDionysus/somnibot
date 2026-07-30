@@ -883,6 +883,70 @@ export interface DbCommerceLegacySubscriptionGrantContract {
   persisted_at: string;
 }
 
+export interface DbCommerceFulfillmentClaim {
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  order_id: string;
+  claimed_at: string;
+}
+
+export interface DbCommerceFulfillmentHold {
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  winning_order_id: string | null;
+  conflicting_entitlement_id: string | null;
+  provider_kind: 'capture' | 'subscription';
+  provider_id: string;
+  hold_reason: 'duplicate_paid_fulfillment' | 'unknown_delivery_contract';
+  held_at: string;
+}
+
+export interface DbCommerceCheckoutDeactivationProof {
+  id: string;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  provider_kind: 'capture' | 'subscription';
+  provider_id: string;
+  proof_kind:
+    | 'provider_cancelled'
+    | 'provider_expired'
+    | 'approval_link_not_exposed'
+    | 'operator_verified_unpayable';
+  proof_reference: string;
+  proved_at: string;
+}
+
+export interface DbCommerceFulfillmentOutwardIntent {
+  id: string;
+  order_id: string;
+  guild_id: string;
+  outward_generation_id: string | null;
+  intent_kind:
+    | 'purchase_completed_event'
+    | 'subscription_activated_event'
+    | 'receipt_dm'
+    | 'subscription_renewed_event'
+    | 'subscription_cancelled_event'
+    | 'subscription_cancelled_dm'
+    | 'subscription_payment_failed_lapsed_event'
+    | 'subscription_payment_failed_event'
+    | 'subscription_payment_failed_dm'
+    | 'subscription_suspended_event'
+    | 'subscription_suspended_dm';
+  state: 'sending' | 'sent' | 'uncertain' | 'superseded';
+  attempt_token: string | null;
+  started_at: string;
+  sent_at: string | null;
+  uncertain_at: string | null;
+  last_error: string | null;
+  updated_at: string;
+}
+
 export type CommerceRoleMetadataMigrationIssueType =
   | 'invalid_role_id'
   | 'invalid_duration'
@@ -1028,6 +1092,7 @@ export interface DbOrder {
   promotion_id: string | null;
   source: 'purchase' | 'giveaway' | 'manual' | 'automation';
   status: 'pending' | 'completed' | 'refunded' | 'disputed' | 'cancelled' | 'pending_review';
+  checkout_active: boolean;
   created_at: string;
   updated_at: string;
   granted_role_ids_snapshot: string[];
@@ -1137,7 +1202,21 @@ export interface DbLicenseValidation {
   license_key_id: string | null;
   product_id: string | null;
   device_fingerprint: string | null;
-  result: 'valid' | 'invalid_key' | 'expired' | 'suspended' | 'revoked' | 'over_device_limit' | 'product_mismatch';
+  result:
+    | 'valid'
+    | 'invalid_key'
+    | 'expired'
+    | 'suspended'
+    | 'revoked'
+    | 'over_device_limit'
+    | 'product_mismatch'
+    | 'cancelled'
+    | 'pending'
+    | 'grace_period'
+    | 'unavailable'
+    | 'rate_limited'
+    | 'session_invalidated'
+    | 'device_fingerprint_required';
   ip_address: string | null;
   app_version: string | null;
   created_at: string;
@@ -1367,6 +1446,7 @@ export interface DbFraudSignal {
   resolved_by: string | null;
   resolution_note: string | null;
   updated_at: string;
+  last_observed_at: string;
   // V19 Audit: added missing schema fields
   action: string | null;
   details: Record<string, unknown> | null;

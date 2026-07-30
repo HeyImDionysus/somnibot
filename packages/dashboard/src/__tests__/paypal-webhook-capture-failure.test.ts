@@ -114,7 +114,7 @@ const CHECKOUT_META = JSON.stringify({
   d: '222222222222222222',
 });
 
-let captureResponse: () => Response;
+let captureResponse: (orderId: string) => Response;
 
 function scriptPayPal() {
   mockFetch.mockImplementation(async (url: unknown, init?: RequestInit) => {
@@ -127,7 +127,8 @@ function scriptPayPal() {
     }
     if (target.includes('/capture')) {
       captureCalls.push({ url: target, init });
-      return captureResponse();
+      const orderId = target.match(/\/orders\/([^/]+)\/capture$/)?.[1] ?? '';
+      return captureResponse(orderId);
     }
     throw new Error(`Unexpected fetch call: ${target}`);
   });
@@ -169,8 +170,8 @@ function orderResource(orderId = 'ORDER-1') {
   };
 }
 
-const captureOk = () =>
-  new Response(JSON.stringify({ id: 'ORDER-1', status: 'COMPLETED' }), { status: 200 });
+const captureOk = (orderId: string) =>
+  new Response(JSON.stringify({ id: orderId, status: 'COMPLETED' }), { status: 200 });
 const captureOutage = () => new Response('upstream unavailable', { status: 503 });
 const captureAlreadyDone = () =>
   new Response(
@@ -204,6 +205,22 @@ beforeEach(() => {
   resolvers = {
     'webhook_events.upsert': () => ({ data: [{ event_id: 'inserted' }], error: null }),
     'alerts.update': () => ({ data: [], error: null }),
+    'orders.select': (op) => {
+      const paypalOrderId = op.filters
+        .find(({ method, args }) => method === 'eq' && args[0] === 'paypal_order_id')
+        ?.args[1];
+      return {
+        data: typeof paypalOrderId === 'string'
+          ? {
+              id: `local-${paypalOrderId}`,
+              guild_id: GUILD_ID,
+              paypal_order_id: paypalOrderId,
+              status: 'pending',
+            }
+          : null,
+        error: null,
+      };
+    },
   };
 
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(makeSupabase());
@@ -239,6 +256,7 @@ describe('CHECKOUT.ORDER.APPROVED guild attribution', () => {
   });
 
   it('leaves guild_id unset when purchase units disagree, rather than guessing', async () => {
+    resolvers['orders.select'] = () => ({ data: null, error: null });
     const resource = {
       id: 'ORDER-MIXED',
       purchase_units: [
@@ -312,6 +330,7 @@ describe('capture failure is recorded and surfaced', () => {
   it('files an unattributable failure under the instance primary guild', async () => {
     captureResponse = captureOutage;
     process.env.DISCORD_GUILD_ID = '333333333333333333';
+    resolvers['orders.select'] = () => ({ data: null, error: null });
 
     // No custom_id anywhere — the guild is genuinely unknowable.
     await POST(signedOrderApproved('EVT-ORPHAN', { id: 'ORDER-ORPHAN' }) as never);

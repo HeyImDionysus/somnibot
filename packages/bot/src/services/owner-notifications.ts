@@ -112,7 +112,7 @@ export class OwnerNotificationService {
       }
     });
 
-    // payment.failed — emitted by commerce-fulfillment on subscription_suspended
+    // payment.failed — emitted by commerce-fulfillment on subscription_payment_failed
     this.listen('payment.failed', (event) => {
       const data = event.data as Record<string, unknown>;
       this.notify('payment.failed', {

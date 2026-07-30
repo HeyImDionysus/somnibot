@@ -136,6 +136,21 @@ function stepStatuses(status: ReturnType<typeof buildSetupStatus>): Record<strin
   return Object.fromEntries(status.steps.map(step => [step.id, step.status]));
 }
 
+/**
+ * The DB trigger `commerce_products_provision_license_config` guarantees a
+ * `product_license_config` row for every licence-key product; the create route
+ * verifies that rail held before reporting success (Finding 6). Model it here so
+ * these PayPal-readiness cases exercise the readiness gates, not the rail.
+ */
+function registerProvisionedLicenseConfig(mock: ReturnType<typeof createMockSupabase>) {
+  const table = registerTable(mock, 'product_license_config');
+  table.upsert.mockResolvedValue({ error: null });
+  table.select.mockReturnValue(table);
+  table.eq.mockReturnValue(table);
+  table.maybeSingle.mockResolvedValue({ data: { product_id: 'product-1' }, error: null });
+  return table;
+}
+
 function configureReadySetupDatabase(mock: ReturnType<typeof createMockSupabase>) {
   const guildTable = registerTable(mock, 'guild');
   guildTable.limit
@@ -154,6 +169,8 @@ function configureReadySetupDatabase(mock: ReturnType<typeof createMockSupabase>
 
   const instanceSettingsTable = registerTable(mock, 'instance_settings');
   instanceSettingsTable.maybeSingle.mockResolvedValue({ data: null, error: null });
+
+  registerProvisionedLicenseConfig(mock);
 
   return {
     productsTable: registerTable(mock, 'products'),

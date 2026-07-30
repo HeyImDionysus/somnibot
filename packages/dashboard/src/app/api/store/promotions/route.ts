@@ -1,19 +1,61 @@
 /**
- * /api/store/promotions — Promotion/Coupon CRUD.
+ * /api/store/promotions — Promotion/Coupon read + cleanup.
  *
  * GET: List all promotions
- * POST: Create a promotion
- * PUT: Update a promotion
+ * POST: REFUSED (501) — see PROMOTIONS_DISABLED_MESSAGE
+ * PUT: REFUSED (501) — see PROMOTIONS_DISABLED_MESSAGE
  * DELETE: Delete a promotion
+ *
+ * ── Why writes are refused (Finding 8) ──────────────────────────────────────
+ * There is NO redemption path for a promotion anywhere in the codebase.
+ * `promotions` is read only by this route and by `api/analytics` (display).
+ * Checkout (`packages/bot/src/features/commerce/payment-handler.ts`) prices the
+ * PayPal order straight from `product.price_cents`, never consults
+ * `promotions`, and never writes `orders.discount_cents`. A coupon code created
+ * here would be advertised to customers and then silently ignored — every buyer
+ * charged full price.
+ *
+ * The write path was also dead on arrival and has never created a row: the DB
+ * CHECK is `type IN ('percentage','fixed_amount')` while `schemas.promotion.create`
+ * is `z.enum(['percent','fixed'])`, so a request that satisfies one violates the
+ * other. The dashboard form additionally posted `discount_value`/`starts_at`/
+ * `ends_at` against a schema expecting `value`/`start_date`/`end_date`, and
+ * ignored the resulting 400 while toasting success.
+ *
+ * Refusing here — not just hiding the form — is what makes the promise
+ * impossible to make: a stale tab, a bookmarked page, or a direct API call
+ * cannot create a coupon that will not be honoured. Reads and deletes stay open
+ * so existing rows remain visible and removable.
+ *
+ * Reinstating writes means shipping redemption with it: integer-cents
+ * arithmetic only (`promotions.value` is the codebase's one NUMERIC money-ish
+ * column and must become integer columns), a unique index on `coupon_code`,
+ * validity/expiry/usage enforced server-side under the same lock that freezes
+ * the order price, and the discount recorded in `orders.discount_cents`.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
-import { parseBody, schemas } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
-import { dbError } from '@/lib/api/response';
+import { apiError, dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
+
+// NOT exported. A Next.js App Router route module may only export the HTTP
+// method handlers and Next's own route config keys (`dynamic`, `revalidate`,
+// `runtime`, `maxDuration`, …); any other export fails the route-type check that
+// `next build` generates. Nothing outside this file needs it, and `type-check`
+// does NOT catch this — only a full build does.
+const PROMOTIONS_DISABLED_MESSAGE =
+  'Coupons and promotions are disabled: nothing in checkout redeems them, so a '
+  + 'discount code created here would never be applied and every customer would '
+  + 'still be charged the full price. Existing promotions can be viewed and '
+  + 'deleted.';
+
+/** 501 Not Implemented — the feature is absent, not the request malformed. */
+function promotionsDisabled() {
+  return apiError(PROMOTIONS_DISABLED_MESSAGE, 501);
+}
 
 export async function GET() {
   const auth = await requireGuildOwner();
@@ -42,73 +84,10 @@ export async function POST(req: NextRequest) {
 
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
 
-  const supabase = createAdminSupabase();
-  const parsed = await parseBody(req, schemas.promotion.create);
-  if (!parsed.ok) return parsed.response;
-  const body = parsed.data;
-
-  const {
-    name,
-    type,
-    value,
-    coupon_code,
-    applies_to_product_ids,
-    applies_to_plan_ids,
-    start_date,
-    end_date,
-    max_uses,
-    min_purchase_cents,
-    first_purchase_only,
-    active,
-  } = body;
-
-  if (!name || !type || value == null) {
-    return NextResponse.json(
-      { success: false, error: 'Missing required fields: name, type, value' },
-      { status: 400 },
-    );
-  }
-
-  const { data, error } = await supabase
-    .from('promotions')
-    .insert({
-      guild_id: guildId,
-      name,
-      type,
-      value,
-      coupon_code: coupon_code ?? null,
-      applies_to_product_ids: applies_to_product_ids ?? [],
-      applies_to_plan_ids: applies_to_plan_ids ?? [],
-      start_date: start_date ?? null,
-      end_date: end_date ?? null,
-      max_uses: max_uses ?? null,
-      min_purchase_cents: min_purchase_cents ?? null,
-      first_purchase_only: first_purchase_only ?? false,
-      active: active ?? true,
-    })
-    .select()
-    .single();
-
-  if (error) {
-    return dbError(error, 'store/promotions');
-  }
-
-  await recordCrudChange({
-    guildId: auth.ctx.guildId,
-    actorId: auth.ctx.discordId,
-    operation: 'created',
-    action: 'store.promotion_created',
-    table: 'promotions',
-    targetType: 'promotion',
-    targetId: (data as { id?: string } | null)?.id ?? null,
-    label: undefined,
-    after: data as Record<string, unknown> | null,
-    blastRadius: 'medium',
-  }, supabase);
-
-  return NextResponse.json({ success: true, data });
+  // Refused before any write: a coupon that checkout will not redeem must not
+  // be creatable from a stale tab, a bookmark, or a direct API call.
+  return promotionsDisabled();
 }
 
 export async function PUT(req: NextRequest) {
@@ -117,73 +96,8 @@ export async function PUT(req: NextRequest) {
 
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
 
-  const supabase = createAdminSupabase();
-
-  // Validate shape — use innerType() to get the raw ZodObject before .refine(),
-  // so .partial() works correctly. Cross-field validation is done manually below.
-  const promoUpdateSchema = schemas.promotion.create.innerType().partial().extend({ id: z.string().uuid() });
-  const parsed = await parseBody(req, promoUpdateSchema);
-  if (!parsed.ok) return parsed.response;
-  const { id, ...updates } = parsed.data;
-
-  if (!id) {
-    return NextResponse.json({ success: false, error: 'Missing promotion id' }, { status: 400 });
-  }
-
-  // If value is being updated, enforce percent ≤ 100 using the effective type
-  // (either from the payload or fetched from DB).
-  if (updates.value !== undefined) {
-    let effectiveType = updates.type;
-    if (!effectiveType) {
-      const { data: existing } = await supabase
-        .from('promotions')
-        .select('type')
-        .eq('id', id)
-        .eq('guild_id', guildId)
-        .single();
-      effectiveType = existing?.type;
-    }
-    if (effectiveType === 'percent' && updates.value > 100) {
-      return NextResponse.json(
-        { success: false, error: 'Percent discount cannot exceed 100%' },
-        { status: 400 },
-      );
-    }
-  }
-
-  const before = await readRowBefore(supabase, 'promotions', { id, guild_id: auth.ctx.guildId });
-
-  const { data, error } = await supabase
-    .from('promotions')
-    .update({ ...updates, updated_at: new Date().toISOString() })
-    .eq('id', id)
-    .eq('guild_id', guildId)
-    .select()
-    .single();
-
-  if (error) {
-    return dbError(error, 'store/promotions');
-  }
-
-  await recordCrudChange({
-    guildId: auth.ctx.guildId,
-    actorId: auth.ctx.discordId,
-    operation: 'updated',
-    action: 'store.promotion_updated',
-    table: 'promotions',
-    targetType: 'promotion',
-    targetId: id,
-    label: before?.code as string | undefined,
-
-    before,
-    after: updates as Record<string, unknown>,
-    match: { id: id, guild_id: auth.ctx.guildId },
-    blastRadius: 'medium',
-  }, supabase);
-
-  return NextResponse.json({ success: true, data });
+  return promotionsDisabled();
 }
 
 export async function DELETE(req: NextRequest) {

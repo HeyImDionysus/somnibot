@@ -104,6 +104,7 @@ function purchaseGrantRow(overrides: Record<string, unknown> = {}) {
     status: 'active',
     source: 'purchase',
     granted_role_ids: ['r1'],
+    granted_channel_ids: [],
     ...overrides,
   };
 }
@@ -123,12 +124,28 @@ function purchaseOrderRow(overrides: Record<string, unknown> = {}) {
 function makeRoleDeliveryRpc(input: {
   ownerProof?: 'confirmed' | 'pending' | 'none';
   ownerProofError?: { message: string } | null;
+  lifecycleResult?: Record<string, unknown> | null;
+  lifecycleError?: { message: string } | null;
 } = {}) {
   const reservedRoleIds = new Set<string>();
   const ownedRoleIds = new Set<string>();
   const completedRoleIds = new Set<string>();
   let permanentRoleIds: string[] = [];
   return vi.fn(async (name: string, args: Record<string, unknown>) => {
+    if (name === 'commerce_apply_subscription_entitlement_lifecycle') {
+      return {
+        data: input.lifecycleResult === undefined
+          ? {
+            disposition: args.p_entitlement_id === null ? 'created' : 'advanced',
+            entitlement_id: args.p_entitlement_id ?? 'ent1',
+            status: 'active',
+            expires_at: args.p_expires_at,
+            lifecycle_generation: 1,
+          }
+          : input.lifecycleResult,
+        error: input.lifecycleError ?? null,
+      };
+    }
     if (name === 'commerce_classify_live_role_owner') {
       return {
         data: input.ownerProof ?? 'none',
@@ -148,6 +165,7 @@ function makeRoleDeliveryRpc(input: {
           contract_live: true,
           delivery_confirmed: false,
           cleanup_needed: false,
+          outward_generation_id: '55555555-5555-4555-8555-555555555555',
         },
         error: null,
       };
@@ -322,7 +340,9 @@ function purchaseGrantSupabase(input: {
     from: vi.fn((table: string) => {
       if (table === 'entitlements') {
         entitlementCall += 1;
-        if (entitlementCall === 1) return supaChain({ id: 'ent1' });
+        if (entitlementCall === 1 && input.entitlementType !== 'subscription') {
+          return supaChain({ id: 'ent1' });
+        }
         const chain = supaChain();
         chain.maybeSingle = vi.fn(async () => {
           const configured = typeof input.verification === 'function'
@@ -394,9 +414,8 @@ function purchaseGrantSupabase(input: {
 function purchaseReactivateSupabase(input: {
   entitlement?: Record<string, unknown> | null;
   entitlementError?: { message: string } | null;
-  updateResult?: Record<string, unknown> | null;
-  updateError?: { message: string } | null;
-  raceResult?: Record<string, unknown> | null;
+  lifecycleResult?: Record<string, unknown> | null;
+  lifecycleError?: { message: string } | null;
   verification?: Record<string, unknown> | null | (() => Record<string, unknown> | null);
   verificationError?: { message: string } | null | (() => { message: string } | null);
   orderVerification?: Record<string, unknown> | null | (() => Record<string, unknown> | null);
@@ -412,6 +431,7 @@ function purchaseReactivateSupabase(input: {
       plan_id: 'plan1',
       type: 'subscription',
       status: 'grace_period',
+      expires_at: '2026-07-29T00:00:00.000Z',
     }),
     granted_role_ids: ['r1'],
   };
@@ -421,16 +441,18 @@ function purchaseReactivateSupabase(input: {
   const exactEntitlement = entitlement ?? defaultEntitlement;
   let entitlementCall = 0;
   let customerCall = 0;
-  const update = vi.fn();
   const supabase = {
-    rpc: makeRoleDeliveryRpc(),
+    rpc: makeRoleDeliveryRpc({
+      lifecycleResult: input.lifecycleResult,
+      lifecycleError: input.lifecycleError,
+    }),
     from: vi.fn((table: string) => {
       if (table === 'entitlements') {
         entitlementCall += 1;
         if (entitlementCall === 1) {
           return supaChain(entitlement, input.entitlementError ?? null);
         }
-        if (entitlementCall === 2 && entitlement?.status === 'active') {
+        if (entitlementCall >= 2) {
           const configured = typeof input.verification === 'function'
             ? input.verification()
             : input.verification;
@@ -439,39 +461,12 @@ function purchaseReactivateSupabase(input: {
             : input.verificationError;
           return supaChain(
             configured === undefined
-              ? { ...exactEntitlement, status: 'active', grace_period_ends_at: null }
-              : configured,
-            configuredError ?? null,
-          );
-        }
-        if (entitlementCall === 2) {
-          const fromChain = supaChain();
-          fromChain.update = update.mockImplementation(() => supaChain(
-            input.updateResult === undefined
-              ? { ...exactEntitlement, status: 'active', grace_period_ends_at: null }
-              : input.updateResult,
-            input.updateError ?? null,
-          ));
-          return fromChain;
-        }
-        if (input.updateResult === null && entitlementCall === 3) {
-          return supaChain(
-            input.raceResult === undefined
-              ? { ...exactEntitlement, status: 'active', grace_period_ends_at: null }
-              : input.raceResult,
-          );
-        }
-        const verificationCall = input.updateResult === null ? 4 : 3;
-        if (entitlementCall >= verificationCall) {
-          const configured = typeof input.verification === 'function'
-            ? input.verification()
-            : input.verification;
-          const configuredError = typeof input.verificationError === 'function'
-            ? input.verificationError()
-            : input.verificationError;
-          return supaChain(
-            configured === undefined
-              ? { ...exactEntitlement, status: 'active', grace_period_ends_at: null }
+              ? {
+                ...exactEntitlement,
+                status: 'active',
+                grace_period_ends_at: null,
+                expires_at: '2026-08-29T00:00:00.000Z',
+              }
               : configured,
             configuredError ?? null,
           );
@@ -513,7 +508,7 @@ function purchaseReactivateSupabase(input: {
       return supaChain();
     }),
   } as any;
-  return { supabase, update, getCustomerCalls: () => customerCall };
+  return { supabase, getCustomerCalls: () => customerCall };
 }
 
 function subscriptionReactivationContract(overrides: Record<string, unknown> = {}) {
@@ -524,6 +519,8 @@ function subscriptionReactivationContract(overrides: Record<string, unknown> = {
     planId: 'plan1',
     discordId: 'u1',
     grantedRoleIds: ['r1'],
+    grantedChannelIds: [],
+    expiresAt: '2026-08-29T00:00:00.000Z',
     entitlementType: 'subscription' as const,
     ...overrides,
   };
@@ -984,6 +981,7 @@ describe('EntitlementService.grant', () => {
       source: 'purchase',
       grantedRoleIds: [],
       grantedChannelIds: [],
+      expiresAt: '2026-08-29T00:00:00.000Z',
     });
 
     expect(member.roles.add).not.toHaveBeenCalled();
@@ -2348,6 +2346,36 @@ describe('EntitlementService.suspend', () => {
 });
 
 describe('EntitlementService.reactivate', () => {
+  it('rejects malformed or mismatched channel vectors before lifecycle mutation', async () => {
+    const malformed = purchaseReactivateSupabase();
+    const malformedService = new EntitlementService(makeGuild(), malformed.supabase, eventBus);
+
+    await expect(reactivateClaimed(
+      malformedService,
+      'ent1',
+      subscriptionReactivationContract({ grantedChannelIds: ['channel-1', 'channel-1'] }),
+    )).rejects.toThrow('Subscription reactivation channel vector');
+    expect(malformed.supabase.rpc).not.toHaveBeenCalled();
+
+    const mismatched = purchaseReactivateSupabase({
+      entitlement: purchaseGrantRow({
+        plan_id: 'plan1',
+        type: 'subscription',
+        status: 'grace_period',
+        expires_at: '2026-07-29T00:00:00.000Z',
+        granted_channel_ids: ['channel-other'],
+      }),
+    });
+    const mismatchedService = new EntitlementService(makeGuild(), mismatched.supabase, eventBus);
+
+    await expect(reactivateClaimed(
+      mismatchedService,
+      'ent1',
+      subscriptionReactivationContract({ grantedChannelIds: ['channel-1'] }),
+    )).rejects.toThrow('entitlement identity mismatch');
+    expect(mismatched.supabase.rpc).not.toHaveBeenCalled();
+  });
+
   it('sets active status and re-grants a paid role only after exact purchase verification', async () => {
     const member = makeMember('u1', []);
     const guild = makeGuild([member]);
@@ -2370,7 +2398,8 @@ describe('EntitlementService.reactivate', () => {
       verification: () => purchaseGrantRow({
         plan_id: 'plan1',
         type: 'subscription',
-        status: verificationRead++ === 0 ? 'active' : 'expired',
+        status: verificationRead++ <= 1 ? 'active' : 'expired',
+        expires_at: '2026-08-29T00:00:00.000Z',
       }),
       orderVerification: () => purchaseOrderRow({
         plan_id: 'plan1',
@@ -2404,6 +2433,7 @@ describe('EntitlementService.reactivate', () => {
           plan_id: 'plan1',
           type: 'subscription',
           status: 'grace_period',
+          expires_at: '2026-08-29T00:00:00.000Z',
         }),
         granted_role_ids: ['r-existing', 'r-new'],
       };
@@ -2412,11 +2442,11 @@ describe('EntitlementService.reactivate', () => {
         entitlement,
         verification: () => {
           verificationRead += 1;
-          return verificationRead === 1
+          return verificationRead <= 2
             ? { ...entitlement, status: 'active', grace_period_ends_at: null }
             : verification;
         },
-        verificationError: () => verificationRead === 1 ? null : verificationError,
+        verificationError: () => verificationRead <= 2 ? null : verificationError,
       });
       const service = new EntitlementService(guild, supabase, eventBus);
 
@@ -2479,15 +2509,16 @@ describe('EntitlementService.reactivate', () => {
     expect(member.roles.remove).not.toHaveBeenCalled();
   });
 
-  it('returns false on DB update error', async () => {
+  it('rejects on lifecycle transition error', async () => {
     const guild = makeGuild();
     const { supabase } = purchaseReactivateSupabase({
-      updateError: { message: 'fail' },
+      lifecycleError: { message: 'fail' },
     });
 
     const service = new EntitlementService(guild, supabase, eventBus);
-    const result = await reactivateClaimed(service, 'ent1', subscriptionReactivationContract());
-    expect(result).toBe(false);
+    await expect(
+      reactivateClaimed(service, 'ent1', subscriptionReactivationContract()),
+    ).rejects.toThrow('Failed to advance subscription entitlement lifecycle: fail');
   });
 
   it('resolves the outstanding grace-period operator alert on reactivation', async () => {

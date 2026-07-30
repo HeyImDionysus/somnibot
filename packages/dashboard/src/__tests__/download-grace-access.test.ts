@@ -27,7 +27,7 @@ vi.mock('@/lib/api/signed-url', () => ({
   verifySignedDownloadUrl: vi.fn(() => ({ customerId: 'cust-1', guildId: 'guild-1', nonce: undefined })),
 }));
 vi.mock('@/lib/api/download-nonce', () => ({
-  consumeDownloadNonce: vi.fn().mockResolvedValue(true),
+  consumeDownloadNonce: vi.fn().mockResolvedValue('consumed'),
 }));
 
 import { NextRequest } from 'next/server';
@@ -54,16 +54,20 @@ function setupMocks(rows: Array<Record<string, unknown>>) {
   const mock = createMockSupabase();
 
   const sessions = registerTable(mock, 'portal_sessions');
-  sessions.single.mockResolvedValue({
-    data: { customer_id: 'cust-1', guild_id: 'guild-1' },
-    error: null,
-  });
+  // Both terminals: the download-link route still uses `.single()`, the
+  // file-download route uses `.maybeSingle()` so that a missing row is
+  // data-null rather than an error (an error there now means a real fault).
+  const portalSession = { data: { customer_id: 'cust-1', guild_id: 'guild-1' }, error: null };
+  sessions.single.mockResolvedValue(portalSession);
+  sessions.maybeSingle.mockResolvedValue(portalSession);
 
   const entitlements = registerTable(mock, 'entitlements');
   entitlements.in.mockResolvedValue({ data: rows, error: null });
 
   const files = registerTable(mock, 'product_files');
-  files.single.mockResolvedValue({ data: { id: FILE_ID, file_path: 'p/f.zip' }, error: null });
+  const productFile = { data: { id: FILE_ID, file_path: 'p/f.zip' }, error: null };
+  files.single.mockResolvedValue(productFile);
+  files.maybeSingle.mockResolvedValue(productFile);
 
   // The file-download route increments a counter via RPC and mints a storage
   // signed URL — the flat helper's mock has neither, so stub them here.

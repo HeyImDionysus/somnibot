@@ -3,8 +3,12 @@
  *
  * Tests receipt embed generation for commerce orders.
  */
-import { describe, it, expect } from 'vitest';
-import { buildReceiptEmbed } from '../features/commerce/receipt-builder.js';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  buildReceiptEmbed,
+  deliverReceiptDM,
+  prepareReceiptDM,
+} from '../features/commerce/receipt-builder.js';
 
 describe('buildReceiptEmbed', () => {
   const baseData = {
@@ -105,5 +109,30 @@ describe('buildReceiptEmbed', () => {
     const json = embed.toJSON();
     const amountField = json.fields!.find(f => f.name === 'Amount');
     expect(amountField!.value).toBe('$999.99 USD');
+  });
+
+  it('prepares the DM channel and payload before performing one external send', async () => {
+    const send = vi.fn(async () => ({ id: 'message-1' }));
+    const createDM = vi.fn(async () => ({ send }));
+    const deliver = await prepareReceiptDM({ createDM } as any, baseData);
+
+    expect(createDM).toHaveBeenCalledOnce();
+    expect(send).not.toHaveBeenCalled();
+
+    await deliver();
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith({ embeds: [expect.anything()] });
+  });
+
+  it('never falls back to a second send after an ambiguous Discord failure', async () => {
+    const send = vi.fn(async () => {
+      throw new Error('response lost after acceptance');
+    });
+    const user = { createDM: vi.fn(async () => ({ send })) };
+
+    await expect(deliverReceiptDM(user as any, baseData))
+      .rejects.toThrow('response lost after acceptance');
+    expect(send).toHaveBeenCalledOnce();
   });
 });

@@ -15,6 +15,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { randomBytes, createHash } from 'crypto';
 import { rateLimits } from '@/lib/api/rate-limit';
+import { getClientIp } from '@/lib/api/client-ip';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { dbError, apiServerError } from '@/lib/api/response';
@@ -94,8 +95,15 @@ async function exchangeCodeForUser(
 }
 
 export async function POST(request: NextRequest) {
-  // Rate limit: 10 attempts per 5 minutes per IP
-  const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+  // Rate limit: 10 attempts per 5 minutes per IP.
+  //
+  // This one mattered twice over. The old index-0 read let an attacker rotate
+  // X-Forwarded-For for a fresh bucket on every login attempt, defeating the
+  // brute-force limit outright — and the same value is persisted as
+  // `portal_sessions.ip_address` and into the commerce audit trail, so a forged
+  // header wrote attacker-chosen addresses into the record used to investigate
+  // account takeover. Both are fixed by counting from the right.
+  const clientIp = getClientIp(request);
   const rl = await rateLimits.portalAuth(clientIp);
   if (rl.limited) {
     return NextResponse.json(

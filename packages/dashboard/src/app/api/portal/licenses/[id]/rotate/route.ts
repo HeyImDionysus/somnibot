@@ -8,8 +8,9 @@
  * it. The customer had to contact the seller and wait.
  *
  * ── How the new key reaches the customer ──────────────────────────────────
- * NOT in this response. The plaintext is never returned over HTTP, logged, or
- * stored — only its SHA-256 hash is persisted, exactly as at purchase time.
+ * NOT in this response. The plaintext is never returned over HTTP or written
+ * to logs/audit records. Its hash is persisted on the licence row, while the
+ * plaintext exists only in the protected receipt carrier until DM delivery.
  *
  * Instead the new key is delivered down the SAME channel the original arrived
  * on: a `deliver_receipt` row on `bot_action_queue`, which the bot DMs to the
@@ -20,10 +21,9 @@
  * mean re-earning all of that.
  *
  * ── Ordering ──────────────────────────────────────────────────────────────
- * The RPC rotates first, then delivery is queued. If the queue insert fails,
- * the rotation still stands and the response says so explicitly, because the
- * old key is already dead — claiming success would be a lie, but so would
- * reporting failure and inviting a retry that mints a third key.
+ * One database transaction rotates the key and stages its exact receipt
+ * carrier. The successor hash can therefore never commit without the only
+ * recoverable copy of its plaintext already being in the delivery queue.
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createHash, randomInt } from 'crypto';
@@ -33,6 +33,25 @@ import { rateLimits } from '@/lib/api/rate-limit';
 import { dbError } from '@/lib/api/response';
 
 const keyIdSchema = z.string().uuid();
+const stagedRotationResultSchema = z.object({
+  status: z.enum(['rotated', 'already_rotated']),
+  old_key_id: keyIdSchema,
+  new_key_id: keyIdSchema,
+  action_id: keyIdSchema,
+  action_status: z.enum(['pending', 'processing', 'completed', 'failed']),
+  guild_id: z.string().min(1),
+  customer_id: keyIdSchema,
+  product_id: keyIdSchema,
+  order_id: keyIdSchema,
+  discord_id: z.string().min(1),
+  new_key_suffix: z.string().regex(/^[ACDEFGHJKMNPQRTVWXY34679]{4}$/),
+  license_key_id: keyIdSchema,
+  order_number: z.string().min(1),
+  product_name: z.string().min(1),
+  amount_cents: z.number().int().nonnegative(),
+  currency: z.string().regex(/^[A-Za-z]{3}$/),
+  delivery: z.literal('queued'),
+}).strict();
 
 /**
  * Unambiguous alphabet: one character from each pair that is misread when a
@@ -100,7 +119,7 @@ export async function POST(
   // anything else, so a customer cannot probe for other customers' key ids.
   const { data: key, error: lookupError } = await admin
     .from('license_keys')
-    .select('id, status, bound_discord_id, order_id, orders(order_number), products(name)')
+    .select('id, status, customer_id, guild_id, product_id, bound_discord_id, order_id, orders(order_number, amount_cents, currency), products(name)')
     .eq('id', licenseKeyId)
     .eq('customer_id', portalSession.customer_id)
     .eq('guild_id', portalSession.guild_id)
@@ -111,25 +130,52 @@ export async function POST(
     return NextResponse.json({ error: 'Licence not found' }, { status: 404 });
   }
 
-  // A key already revoked for any reason cannot be rotated — there is nothing
-  // live to replace, and minting a key against a dead licence would hand out
-  // access that was deliberately withdrawn.
-  if (key.status === 'revoked') {
+  // Do not short-circuit revoked rows here. A committed rotation revokes its
+  // predecessor, and a response-loss retry must reach the locked RPC so it can
+  // distinguish exact `already_rotated` carrier evidence from an unrelated
+  // revocation (`not_rotatable`).
+  if (
+    key.id !== licenseKeyId
+    || key.customer_id !== portalSession.customer_id
+    || key.guild_id !== portalSession.guild_id
+    || !keyIdSchema.safeParse(key.customer_id).success
+    || !keyIdSchema.safeParse(key.product_id).success
+    || !keyIdSchema.safeParse(key.order_id).success
+    || typeof key.bound_discord_id !== 'string'
+    || key.bound_discord_id.length === 0
+    || key.bound_discord_id.trim() !== key.bound_discord_id
+  ) {
     return NextResponse.json(
-      { error: 'This licence has been revoked and cannot be rotated.' },
+      { error: 'This licence has no complete delivery identity and cannot be rotated.' },
       { status: 409 },
     );
   }
 
   const { plaintext, suffix } = generateLicenseKey();
 
-  const { data: result, error: rpcError } = await admin.rpc('license_rotate_key', {
+  const rotationArgs = {
     p_license_key_id: licenseKeyId,
-    p_new_key_hash: hashToken(plaintext),
+    p_guild_id: key.guild_id,
+    p_customer_id: key.customer_id,
+    p_product_id: key.product_id,
+    p_order_id: key.order_id,
+    p_discord_id: key.bound_discord_id,
+    p_new_key_plaintext: plaintext,
     p_new_key_prefix: KEY_PREFIX,
     p_new_key_suffix: suffix,
-    p_actor_discord_id: key.bound_discord_id ?? null,
-  });
+    p_actor_discord_id: key.bound_discord_id,
+  };
+  let result: unknown = null;
+  let rpcError: { message: string } | null = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await admin.rpc(
+      'commerce_rotate_license_and_stage_receipt',
+      rotationArgs,
+    );
+    result = response.data;
+    rpcError = response.error;
+    if (!rpcError) break;
+  }
 
   if (rpcError) return dbError(rpcError, 'portal/licenses/rotate');
 
@@ -138,50 +184,94 @@ export async function POST(
   if (status === 'not_found') {
     return NextResponse.json({ error: 'Licence not found' }, { status: 404 });
   }
+  if (status === 'not_rotatable') {
+    return NextResponse.json(
+      { error: 'This licence is not in a state that can be rotated.' },
+      { status: 409 },
+    );
+  }
+  if (status === 'held') {
+    return NextResponse.json(
+      {
+        error: 'The prior rotation cannot be safely matched to a delivery. Contact the seller.',
+        delivery: 'held',
+      },
+      { status: 409 },
+    );
+  }
 
-  // The RPC is replay-safe: a losing racer or a retried request gets the
-  // rotation that already happened rather than a further key. Report that
-  // honestly instead of pretending this call minted one.
-  if (status === 'already_rotated') {
+  const orderNumber = (key.orders as { order_number?: unknown } | null)?.order_number;
+  const amountCents = (key.orders as { amount_cents?: unknown } | null)?.amount_cents;
+  const currency = (key.orders as { currency?: unknown } | null)?.currency;
+  if (
+    typeof orderNumber !== 'string'
+    || orderNumber.length === 0
+    || orderNumber.trim() !== orderNumber
+    || !Number.isSafeInteger(amountCents)
+    || (amountCents as number) < 0
+    || typeof currency !== 'string'
+    || !/^[A-Za-z]{3}$/.test(currency)
+  ) {
+    return NextResponse.json(
+      { error: 'This licence has no complete financial identity and cannot be rotated.' },
+      { status: 409 },
+    );
+  }
+  const canonicalCurrency = currency.toUpperCase();
+
+  const rotated = stagedRotationResultSchema.safeParse(result);
+  if (
+    !rotated.success
+    || rotated.data.old_key_id !== licenseKeyId
+    || rotated.data.new_key_id === licenseKeyId
+    || rotated.data.guild_id !== key.guild_id
+    || rotated.data.customer_id !== key.customer_id
+    || rotated.data.product_id !== key.product_id
+    || rotated.data.order_id !== key.order_id
+    || rotated.data.discord_id !== key.bound_discord_id
+    || rotated.data.license_key_id !== rotated.data.new_key_id
+    || rotated.data.order_number !== orderNumber
+    || rotated.data.amount_cents !== amountCents
+    || rotated.data.currency !== canonicalCurrency
+    || (rotated.data.status === 'rotated' && rotated.data.action_status !== 'pending')
+    || (rotated.data.status === 'rotated' && rotated.data.new_key_suffix !== suffix)
+  ) {
+    return NextResponse.json(
+      { error: 'Licence rotation returned inconsistent staged delivery evidence.' },
+      { status: 500 },
+    );
+  }
+
+  // A replay is safe only because the original atomic transaction returned
+  // the exact durable carrier. The retry's freshly generated plaintext was
+  // never stored and the authoritative successor suffix comes from SQL.
+  if (rotated.data.status === 'already_rotated') {
+    if (rotated.data.action_status === 'failed') {
+      return NextResponse.json(
+        {
+          error: 'The replacement key delivery needs seller attention.',
+          alreadyRotated: true,
+          newKeySuffix: rotated.data.new_key_suffix,
+          delivery: 'held',
+        },
+        { status: 409 },
+      );
+    }
     return NextResponse.json({
       success: true,
       alreadyRotated: true,
-      message: 'This licence was already rotated. Check your DMs for the replacement key.',
+      newKeySuffix: rotated.data.new_key_suffix,
+      delivery: rotated.data.delivery,
+      message: rotated.data.action_status === 'completed'
+        ? 'This licence was already rotated and its replacement delivery completed.'
+        : 'This licence was already rotated. Check your DMs for the replacement key.',
     });
   }
 
-  // Deliver down the same audited, retrying path the original key used.
-  const orderNumber = (key.orders as { order_number?: string } | null)?.order_number;
-  const productName = (key.products as { name?: string } | null)?.name;
-
-  let delivery: 'queued' | 'not_queued' = 'queued';
-  if (key.bound_discord_id && orderNumber && productName) {
-    const { error: queueError } = await admin.from('bot_action_queue').insert({
-      guild_id: portalSession.guild_id,
-      action: 'deliver_receipt',
-      payload: {
-        discord_id: key.bound_discord_id,
-        order_number: orderNumber,
-        product_name: productName,
-        license_key_plaintext: plaintext,
-        order_date: new Date().toISOString(),
-      } as never,
-      status: 'pending',
-    });
-    if (queueError) delivery = 'not_queued';
-  } else {
-    delivery = 'not_queued';
-  }
-
-  // The old key is dead either way — say precisely what happened rather than
-  // reporting a blanket success or inviting a retry that mints a third key.
   return NextResponse.json({
     success: true,
-    newKeySuffix: suffix,
-    delivery,
-    message: delivery === 'queued'
-      ? 'Your old key stopped working and a new one is on its way by DM.'
-      : 'Your old key stopped working, but the new one could not be sent automatically. '
-        + 'Contact the seller — they can re-send it without another rotation.',
+    newKeySuffix: rotated.data.new_key_suffix,
+    delivery: rotated.data.delivery,
+    message: 'Your old key stopped working and a new one is on its way by DM.',
   });
 }

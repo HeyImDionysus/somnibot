@@ -204,6 +204,7 @@ export interface PayPalSubscriptionContract {
   amountCents: number;
   currency: string;
   planId: string;
+  nextBillingTime: string;
 }
 
 function parsePayPalAmountCents(value: unknown): number | null {
@@ -243,17 +244,30 @@ export async function getSubscriptionAmount(
       ? amount.currency_code.toUpperCase()
       : null;
     const planId = typeof data.plan_id === 'string' ? data.plan_id : null;
+    const nextBillingTime = typeof data.billing_info?.next_billing_time === 'string'
+      ? data.billing_info.next_billing_time
+      : null;
+    const nextBillingTimestamp = nextBillingTime === null
+      ? Number.NaN
+      : Date.parse(nextBillingTime);
     if (
       amountCents == null ||
       !currency ||
       !/^[A-Z]{3}$/.test(currency) ||
       !planId ||
-      planId.trim() !== planId
+      planId.trim() !== planId ||
+      !nextBillingTime ||
+      !Number.isFinite(nextBillingTimestamp)
     ) {
       return null;
     }
 
-    return { amountCents, currency, planId };
+    return {
+      amountCents,
+      currency,
+      planId,
+      nextBillingTime: new Date(nextBillingTimestamp).toISOString(),
+    };
   } catch {
     return null;
   }

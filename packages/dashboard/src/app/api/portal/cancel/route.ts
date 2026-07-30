@@ -77,7 +77,7 @@ export async function POST(request: NextRequest) {
     const { entitlement_id } = parsed.data;
 
     // The entitlement MUST be a subscription owned by this customer in this guild.
-    const { data: entitlement } = await admin
+    const { data: entitlement, error: entitlementError } = await admin
       .from('entitlements')
       .select('id, status, type, expires_at, cancelled_at, order_id')
       .eq('id', entitlement_id)
@@ -85,11 +85,26 @@ export async function POST(request: NextRequest) {
       .eq('guild_id', session.guild_id)
       .maybeSingle();
 
+    if (entitlementError) {
+      return NextResponse.json(
+        { error: 'Could not verify the subscription. Please try again.' },
+        { status: 503 },
+      );
+    }
     if (!entitlement || entitlement.type !== 'subscription') {
       return NextResponse.json({ error: 'Subscription not found' }, { status: 404 });
     }
     if (!['active', 'grace_period'].includes(entitlement.status)) {
       return NextResponse.json({ error: 'This subscription is not active.' }, { status: 409 });
+    }
+    if (
+      typeof entitlement.expires_at !== 'string'
+      || !Number.isFinite(Date.parse(entitlement.expires_at))
+    ) {
+      return NextResponse.json(
+        { error: 'The paid-through date is unavailable. Cancellation was not scheduled.' },
+        { status: 409 },
+      );
     }
 
     // Idempotent: already scheduled → return the single scheduled cancellation
@@ -100,45 +115,84 @@ export async function POST(request: NextRequest) {
 
     // Cancel the PayPal subscription so it stops renewing. Access continues until
     // the current term end (expires_at) — this is the end-of-term effect.
-    if (entitlement.order_id) {
-      const { data: order } = await admin
-        .from('orders')
-        .select('paypal_subscription_id')
-        .eq('id', entitlement.order_id)
-        .maybeSingle();
-      const subscriptionId = order?.paypal_subscription_id ?? null;
+    if (!entitlement.order_id) {
+      return NextResponse.json(
+        { error: 'The subscription billing record is unavailable. Cancellation was not scheduled.' },
+        { status: 409 },
+      );
+    }
+    const { data: order, error: orderError } = await admin
+      .from('orders')
+      .select('id, guild_id, customer_id, paypal_subscription_id')
+      .eq('id', entitlement.order_id)
+      .eq('guild_id', session.guild_id)
+      .eq('customer_id', session.customer_id)
+      .maybeSingle();
+    if (orderError) {
+      return NextResponse.json(
+        { error: 'Could not verify the billing record. Please try again.' },
+        { status: 503 },
+      );
+    }
+    const subscriptionId = order?.paypal_subscription_id ?? null;
+    if (
+      !order
+      || order.id !== entitlement.order_id
+      || order.guild_id !== session.guild_id
+      || order.customer_id !== session.customer_id
+      || typeof subscriptionId !== 'string'
+      || subscriptionId.length === 0
+      || subscriptionId.trim() !== subscriptionId
+    ) {
+      return NextResponse.json(
+        { error: 'The subscription billing record is unavailable. Cancellation was not scheduled.' },
+        { status: 409 },
+      );
+    }
 
-      if (subscriptionId) {
-        const config = await getPayPalRuntimeConfig();
-        const paypalToken = await getPayPalToken(config);
-        if (!paypalToken) {
-          return NextResponse.json(
-            { error: 'Payment provider unavailable. Please try again shortly.' },
-            { status: 502 },
-          );
-        }
-        const res = await fetch(`${config.apiBase}/v1/billing/subscriptions/${subscriptionId}/cancel`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${paypalToken}` },
-          body: JSON.stringify({ reason: 'Customer requested cancellation via self-service portal' }),
+    const config = await getPayPalRuntimeConfig();
+    const paypalToken = await getPayPalToken(config);
+    if (!paypalToken) {
+      return NextResponse.json(
+        { error: 'Payment provider unavailable. Please try again shortly.' },
+        { status: 502 },
+      );
+    }
+    const providerUrl = `${config.apiBase}/v1/billing/subscriptions/${subscriptionId}`;
+    const res = await fetch(`${providerUrl}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${paypalToken}` },
+      body: JSON.stringify({ reason: 'Customer requested cancellation via self-service portal' }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      let reconciled = false;
+      if (res.status === 422) {
+        const providerState = await fetch(providerUrl, {
+          headers: { Authorization: `Bearer ${paypalToken}` },
           signal: AbortSignal.timeout(10_000),
         });
-        // 204 = cancelled. 422 = subscription already cancelled/invalid state at
-        // PayPal — treat as the desired end state (idempotent). Any other status
-        // means we could not stop renewal; do NOT mark scheduled.
-        if (!res.ok && res.status !== 422) {
-          return NextResponse.json(
-            { error: 'Could not schedule cancellation with the payment provider. Please try again.' },
-            { status: 502 },
-          );
+        if (providerState.ok) {
+          const providerBody = await providerState.json().catch(() => null) as
+            | { id?: unknown; status?: unknown }
+            | null;
+          reconciled =
+            providerBody?.id === subscriptionId
+            && ['CANCELLED', 'EXPIRED'].includes(String(providerBody?.status));
         }
+      }
+      if (!reconciled) {
+        return NextResponse.json(
+          { error: 'Could not schedule cancellation with the payment provider. Please try again.' },
+          { status: 502 },
+        );
       }
     }
 
     // Mark the scheduled cancellation. The `.is('cancelled_at', null)` guard makes
     // the write single-winner under a race; status stays 'active' until expires_at.
     const now = new Date().toISOString();
-    const { data: updated } = await admin
+    const { data: updated, error: updateError } = await admin
       .from('entitlements')
       .update({ cancelled_at: now, updated_at: now })
       .eq('id', entitlement.id)
@@ -147,20 +201,51 @@ export async function POST(request: NextRequest) {
       .select('id, status, expires_at, cancelled_at')
       .maybeSingle();
 
+    if (updateError) {
+      return NextResponse.json(
+        { error: 'The provider cancelled renewal, but the local schedule could not be saved. Please retry.' },
+        { status: 503 },
+      );
+    }
     if (updated) {
+      if (
+        updated.id !== entitlement.id
+        || !['active', 'grace_period'].includes(updated.status)
+        || updated.expires_at !== entitlement.expires_at
+        || typeof updated.cancelled_at !== 'string'
+        || !Number.isFinite(Date.parse(updated.cancelled_at))
+      ) {
+        return NextResponse.json(
+          { error: 'Cancellation scheduling returned inconsistent state. Please retry.' },
+          { status: 503 },
+        );
+      }
       return scheduledResponse(updated, false);
     }
 
     // A concurrent confirm already scheduled it — resolve to that single entry.
-    const { data: current } = await admin
+    const { data: current, error: currentError } = await admin
       .from('entitlements')
       .select('id, status, expires_at, cancelled_at')
       .eq('id', entitlement.id)
+      .eq('customer_id', session.customer_id)
+      .eq('guild_id', session.guild_id)
       .maybeSingle();
-    return scheduledResponse(
-      current ?? { id: entitlement.id, status: entitlement.status, expires_at: entitlement.expires_at, cancelled_at: now },
-      true,
-    );
+    if (
+      currentError
+      || !current
+      || current.id !== entitlement.id
+      || !['active', 'grace_period'].includes(current.status)
+      || current.expires_at !== entitlement.expires_at
+      || typeof current.cancelled_at !== 'string'
+      || !Number.isFinite(Date.parse(current.cancelled_at))
+    ) {
+      return NextResponse.json(
+        { error: 'The provider cancelled renewal, but the local schedule is unconfirmed. Please retry.' },
+        { status: 503 },
+      );
+    }
+    return scheduledResponse(current, true);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: msg }, { status: 500 });

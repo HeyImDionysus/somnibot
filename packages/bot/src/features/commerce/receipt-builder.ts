@@ -151,41 +151,45 @@ export function buildReceiptComponents(
 }
 
 /**
- * Deliver the receipt DM to a user. Tries Components v2, falls back to embed.
+ * Prepare one deterministic receipt send.
  *
- * Throws on delivery failure so callers can classify the error (e.g. DMs
- * disabled vs transient Discord outage) and route it to persistent retry —
- * a paid customer's license key must never be dropped silently.
+ * All local construction and Discord channel lookup complete before the
+ * returned function can perform the external send. The returned function makes
+ * exactly one Discord API call. This matters for crash-fenced commerce:
+ * retrying a different payload after an ambiguous send response can deliver
+ * the same receipt twice.
+ */
+export async function prepareReceiptDM(
+  user: User,
+  data: ReceiptData,
+  kit: BrandKit = defaultBrandKit(),
+): Promise<() => Promise<void>> {
+  const dm = await user.createDM();
+  const embed = buildReceiptEmbed(data, kit);
+  const payload: Parameters<typeof dm.send>[0] = { embeds: [embed] };
+
+  return async () => {
+    await dm.send(payload);
+  };
+}
+
+/**
+ * Deliver the receipt DM to a user with exactly one external send attempt.
+ *
+ * Throws on preparation or delivery failure so callers can classify the error
+ * and route it to the appropriate retry/manual-review boundary.
  */
 export async function deliverReceiptDM(
   user: User,
   data: ReceiptData,
   kit: BrandKit = defaultBrandKit(),
 ): Promise<void> {
-  const dm = await user.createDM();
-
-  // Try Components v2 first
-  const container = buildReceiptComponents(data, kit);
-  if (container) {
-    try {
-      await dm.send({
-        components: [container],
-        flags: [4096], // IS_COMPONENTS_V2
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Discord Components V2 not yet typed in discord.js
-      } as Parameters<typeof dm.send>[0]);
-      return;
-    } catch {
-      // Fall through to embed
-    }
-  }
-
-  // Fallback: standard embed
-  const embed = buildReceiptEmbed(data, kit);
-  await dm.send({ embeds: [embed] });
+  const deliver = await prepareReceiptDM(user, data, kit);
+  await deliver();
 }
 
 /**
- * Send receipt DM to a user. Tries Components v2, falls back to embed.
+ * Send a receipt DM to a user.
  * Swallows errors — use deliverReceiptDM when the caller needs to classify
  * and handle delivery failures.
  */

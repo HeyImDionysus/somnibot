@@ -66,16 +66,17 @@ Application code imports the hand-maintained `packages/shared/src/types/
 database.ts`; the snapshot exists only to force a review whenever a migration
 changes the schema. When a migration adds/removes a column or table, regenerate
 the snapshot and — if the change touches a table the hand-maintained
-`database.ts` models — update `database.ts` in the same PR.
+`database.ts` models — update `database.ts` in the same PR. CI also runs the
+generator's focused parser regressions before checking the committed snapshot.
 
 The generator (`scripts/generate-db-types.py`) is a best-effort SQL parser. It
-tracks `CREATE TABLE`, `ALTER TABLE ... ADD/DROP COLUMN` (including
-schema-qualified names and idempotent `DO $$ ... $$` guards), `ADD PRIMARY KEY`,
-and `DROP TABLE`. Known limitations (why the snapshot is a tripwire, not the
-source of truth): it does **not** track `ALTER COLUMN` type/nullability changes,
-`DROP/ADD CONSTRAINT` (so enum unions reflect only the original `CHECK`), or
-`CREATE TYPE`/enums. Column ordering follows migration order, not the curated
-order in `database.ts`.
+tracks `CREATE TABLE`, `ALTER TABLE ... ADD/DROP COLUMN`, `ALTER COLUMN ...
+SET/DROP NOT NULL` (including schema-qualified names and idempotent `DO $$ ...
+$$` guards), `ADD PRIMARY KEY`, and `DROP TABLE`. Known limitations (why the
+snapshot is a tripwire, not the source of truth): it does **not** track `ALTER
+COLUMN` type changes, `DROP/ADD CONSTRAINT` (so enum unions reflect only the
+original `CHECK`), or `CREATE TYPE`/enums. Column ordering follows migration
+order, not the curated order in `database.ts`.
 
 ## Rollback
 
