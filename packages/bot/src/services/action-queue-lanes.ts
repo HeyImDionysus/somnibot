@@ -129,6 +129,8 @@ export class LaneScheduler {
     game: [],
   };
   private drainWaiters: Array<() => void> = [];
+  private retryTimers = new Set<ReturnType<typeof setTimeout>>();
+  private closed = false;
 
   constructor(budgets: Readonly<Record<ActionQueueLane, number>> = LANE_CONCURRENCY) {
     this.budgets = budgets;
@@ -149,12 +151,42 @@ export class LaneScheduler {
    * saturated; always releases the slot, including when the task throws.
    */
   async run<T>(lane: ActionQueueLane, task: () => Promise<T>): Promise<T> {
+    if (this.closed) throw new Error('LaneScheduler is closed');
     await this.acquire(lane);
     try {
       return await task();
     } finally {
       this.release(lane);
     }
+  }
+
+  /**
+   * Own a delayed retry so close() can cancel it before audit/client teardown.
+   * The queue row is already durably pending and will be recovered by the next
+   * listener sweep.
+   */
+  schedule(
+    lane: ActionQueueLane,
+    delayMs: number,
+    task: () => Promise<void>,
+    onError: (error: unknown) => void,
+  ): boolean {
+    if (this.closed) return false;
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(timer);
+      this.run(lane, task).catch(onError);
+    }, delayMs);
+    timer.unref?.();
+    this.retryTimers.add(timer);
+    return true;
+  }
+
+  /** Reject new work, cancel delayed retries, and let admitted work drain. */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const timer of this.retryTimers) clearTimeout(timer);
+    this.retryTimers.clear();
   }
 
   /** Resolve only after every running and FIFO-waiting task has settled. */

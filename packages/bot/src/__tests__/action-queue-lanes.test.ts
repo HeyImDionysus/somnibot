@@ -184,6 +184,26 @@ describe('laneForAction', () => {
 // ── LaneScheduler ──────────────────────────────────────────
 
 describe('LaneScheduler', () => {
+  it('cancels delayed retries and rejects new admission after close', async () => {
+    vi.useFakeTimers();
+    try {
+      const scheduler = new LaneScheduler({ commerce: 1, game: 1 });
+      const task = vi.fn(async () => {});
+      const onError = vi.fn();
+      expect(scheduler.schedule('commerce', 30_000, task, onError)).toBe(true);
+
+      scheduler.close();
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(task).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+      await expect(scheduler.run('commerce', task)).rejects.toThrow(/closed/);
+      await expect(scheduler.drain()).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('caps concurrent tasks per lane at the lane budget', async () => {
     const scheduler = new LaneScheduler({ commerce: 2, game: 2 });
     const g = gate();

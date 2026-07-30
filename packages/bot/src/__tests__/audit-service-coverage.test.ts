@@ -583,7 +583,8 @@ describe('AuditService', () => {
       await expect(first.stop()).resolves.toBeUndefined();
       expect(recoveryStore.set).toHaveBeenCalledOnce();
       const persisted = JSON.parse(stored.values().next().value as string);
-      const persistedRow = persisted.find(
+      expect(persisted).toMatchObject({ version: 1, guildId: 'g1' });
+      const persistedRow = persisted.rows.find(
         (row: Record<string, unknown>) => row.action === 'must.cross.restart',
       );
       expect(persistedRow.occurrence_key).toMatch(/^audit\.delivery:/);
@@ -604,6 +605,100 @@ describe('AuditService', () => {
       expect(replayed?.occurrence_key).toBe(persistedRow.occurrence_key);
       expect(recoveryStore.del).toHaveBeenCalledOnce();
       expect(stored.size).toBe(0);
+      await restarted.stop();
+    });
+
+    it('deletes an oversized restart spool and records bounded integrity-gap evidence', async () => {
+      const oversized = JSON.stringify({
+        version: 1,
+        guildId: 'g1',
+        rows: new Array(10_000).fill({}),
+      });
+      const recoveryStore = {
+        get: vi.fn(async () => oversized),
+        set: vi.fn(async () => 'OK'),
+        del: vi.fn(async () => 1),
+      };
+      const guarded = new AuditService(
+        'g1',
+        supabase as any,
+        makeEventBus() as any,
+        recoveryStore,
+      );
+      guarded.start();
+      await (guarded as unknown as { flush: () => Promise<void> }).flush();
+
+      expect(recoveryStore.del).toHaveBeenCalledOnce();
+      const writes = supabase._upsertMock.mock.calls
+        .flatMap(([rows]) => rows as Array<Record<string, any>>);
+      expect(writes).toHaveLength(1);
+      expect(writes[0]).toMatchObject({
+        action: 'audit.mapping_failed',
+        success: false,
+        details: expect.objectContaining({
+          eventTypes: ['persisted audit residue'],
+        }),
+      });
+      await guarded.stop();
+    });
+
+    it('replays a mixed gap and flush-recovery spool as one homogeneous batch', async () => {
+      const stored = new Map<string, string>();
+      const recoveryStore = {
+        get: vi.fn(async (key: string) => stored.get(key) ?? null),
+        set: vi.fn(async (key: string, value: string) => {
+          stored.set(key, value);
+          return 'OK';
+        }),
+        del: vi.fn(async (key: string) => stored.delete(key) ? 1 : 0),
+      };
+      const failedSupabase = makeSupabase();
+      failedSupabase._upsertMock
+        .mockResolvedValueOnce({ error: { message: 'batch outage' } })
+        .mockResolvedValueOnce({ error: null })
+        .mockResolvedValue({ error: { message: 'ledger unavailable again' } });
+      const first = new AuditService(
+        'g1',
+        failedSupabase as any,
+        makeEventBus() as any,
+        recoveryStore,
+      );
+      await first.log({
+        action: 'batch.before.mixed.spool',
+        actorType: 'bot',
+        actorId: 'bot1',
+      });
+      const firstInternals = first as unknown as {
+        flush: () => Promise<void>;
+        recordMappingFailure: (eventType: string, error: unknown) => void;
+      };
+      await firstInternals.flush();
+      await firstInternals.flush();
+      firstInternals.recordMappingFailure('mixed.spool.test', new Error('mapping failed'));
+      await first.stop();
+
+      const envelope = JSON.parse(stored.values().next().value as string);
+      expect(envelope.rows.map((row: Record<string, unknown>) => row.action).sort())
+        .toEqual(['audit.flush_failed', 'audit.mapping_failed']);
+      const rowKeySets = envelope.rows.map((row: Record<string, unknown>) =>
+        Object.keys(row).sort());
+      expect(rowKeySets[1]).toEqual(rowKeySets[0]);
+
+      const recoveredSupabase = makeSupabase();
+      const restarted = new AuditService(
+        'g1',
+        recoveredSupabase as any,
+        makeEventBus() as any,
+        recoveryStore,
+      );
+      restarted.start();
+      await (restarted as unknown as { flush: () => Promise<void> }).flush();
+
+      const replayBatch = recoveredSupabase._upsertMock.mock.calls[0]?.[0] as
+        Array<Record<string, unknown>>;
+      expect(replayBatch.map((row) => row.action).sort())
+        .toEqual(['audit.flush_failed', 'audit.mapping_failed']);
+      expect(recoveryStore.del).toHaveBeenCalledOnce();
       await restarted.stop();
     });
 
@@ -655,6 +750,13 @@ describe('AuditService', () => {
       expect(recoveryRows[1]?.details).toMatchObject({
         attempts: 1,
         recoveredEntries: 1,
+      });
+      expect(recoveryRows[0]).toMatchObject({
+        target_type: null,
+        target_id: null,
+        before_state: null,
+        after_state: null,
+        correlation_id: null,
       });
 
       const internals = service as unknown as {

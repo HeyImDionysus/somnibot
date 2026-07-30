@@ -1304,6 +1304,24 @@ interface AuditRecoveryStore {
   del(key: string): Promise<unknown>;
 }
 
+const AUDIT_RESIDUE_VERSION = 1;
+const AUDIT_ROW_KEYS = new Set([
+  'guild_id',
+  'actor_type',
+  'actor_id',
+  'action',
+  'category',
+  'target_type',
+  'target_id',
+  'details',
+  'before_state',
+  'after_state',
+  'correlation_id',
+  'occurrence_key',
+  'success',
+  'error_message',
+]);
+
 export class AuditService {
   // The exempt EventBus lane must not become an unbounded memory bypass.
   // Keep both buffered rows and outstanding async mapping work finite. At
@@ -1313,6 +1331,8 @@ export class AuditService {
   private static readonly MAX_CAPACITY_LABELS = 20;
   private static readonly MAX_STOP_DRAIN_STALLS = 3;
   private static readonly MAPPING_WAIT_TIMEOUT_MS = 10_000;
+  private static readonly MAX_RECOVERY_ROWS = AuditService.MAX_BUFFERED_ENTRIES + 1_024;
+  private static readonly MAX_RECOVERY_BYTES = 8 * 1024 * 1024;
   private guildId: string;
   private supabase: SupabaseClient;
   private eventBus: PlatformEventBus;
@@ -1468,30 +1488,117 @@ export class AuditService {
       return;
     }
 
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      throw new Error('persisted audit residue is not an array');
-    }
-
-    for (const candidate of parsed) {
+    try {
+      if (Buffer.byteLength(raw, 'utf8') > AuditService.MAX_RECOVERY_BYTES) {
+        throw new Error('persisted audit residue exceeds the byte limit');
+      }
+      const parsed: unknown = JSON.parse(raw);
       if (
-        candidate === null
-        || typeof candidate !== 'object'
-        || Array.isArray(candidate)
+        parsed === null
+        || typeof parsed !== 'object'
+        || Array.isArray(parsed)
       ) {
-        throw new Error('persisted audit residue contains a non-object row');
+        throw new Error('persisted audit residue envelope is invalid');
       }
-      const row = candidate as Record<string, unknown>;
-      if (row.guild_id !== this.guildId || typeof row.occurrence_key !== 'string') {
-        throw new Error('persisted audit residue failed guild/key validation');
+      const envelope = parsed as Record<string, unknown>;
+      if (
+        envelope.version !== AUDIT_RESIDUE_VERSION
+        || envelope.guildId !== this.guildId
+        || !Array.isArray(envelope.rows)
+        || Object.keys(envelope).some((key) => !['version', 'guildId', 'rows'].includes(key))
+      ) {
+        throw new Error('persisted audit residue envelope failed version/guild validation');
       }
-      if (this.persistedResidueKeys.has(row.occurrence_key)) continue;
-      this.queue.push(Object.freeze({ ...row }));
-      this.persistedResidueKeys.add(row.occurrence_key);
+      if (envelope.rows.length > AuditService.MAX_RECOVERY_ROWS) {
+        throw new Error('persisted audit residue exceeds the row limit');
+      }
+
+      const validatedRows: Array<Readonly<Record<string, unknown>>> = [];
+      const seenKeys = new Set<string>();
+      for (const candidate of envelope.rows) {
+        const row = this.validateRecoveryRow(candidate);
+        const key = row.occurrence_key as string;
+        if (seenKeys.has(key)) throw new Error('persisted audit residue contains duplicate keys');
+        seenKeys.add(key);
+        validatedRows.push(Object.freeze({ ...row }));
+      }
+      for (const row of validatedRows) {
+        const key = row.occurrence_key as string;
+        if (this.persistedResidueKeys.has(key)) continue;
+        this.queue.push(row);
+        this.persistedResidueKeys.add(key);
+      }
+    } catch (err) {
+      // Never replay or preserve a poison spool forever. Delete it and let the
+      // caller coalesce a bounded audit.mapping_failed integrity observation.
+      await this.recoveryStore.del(this.recoveryStoreKey);
+      this.persistedResidueRestorePending = false;
+      throw err;
     }
     this.persistedResidueCleanupPending = this.persistedResidueKeys.size === 0;
     this.persistedResidueRestorePending = false;
     log.warn(`Restored ${this.persistedResidueKeys.size} audit row(s) from shutdown residue`);
+  }
+
+  private validateRecoveryRow(candidate: unknown): Record<string, unknown> {
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new Error('persisted audit residue contains a non-object row');
+    }
+    const row = candidate as Record<string, unknown>;
+    if (
+      Object.keys(row).length !== AUDIT_ROW_KEYS.size
+      || Object.keys(row).some((key) => !AUDIT_ROW_KEYS.has(key))
+      || row.guild_id !== this.guildId
+      || !this.isBoundedString(row.actor_id, 256)
+      || !['user', 'bot', 'system', 'webhook', 'automation'].includes(String(row.actor_type))
+      || !this.isBoundedString(row.action, 256)
+      || !this.isBoundedString(row.category, 128)
+      || !this.isNullableBoundedString(row.target_type, 128)
+      || !this.isNullableBoundedString(row.target_id, 512)
+      || !this.isSafeJsonRecord(row.details)
+      || !(row.before_state === null || this.isSafeJsonRecord(row.before_state))
+      || !(row.after_state === null || this.isSafeJsonRecord(row.after_state))
+      || !this.isNullableBoundedString(row.correlation_id, 512)
+      || !this.isBoundedString(row.occurrence_key, 512)
+      || typeof row.success !== 'boolean'
+      || !this.isNullableBoundedString(row.error_message, 4_096)
+    ) {
+      throw new Error('persisted audit residue row failed schema validation');
+    }
+    return row;
+  }
+
+  private isBoundedString(value: unknown, maxLength: number): value is string {
+    return typeof value === 'string' && value.length > 0 && value.length <= maxLength;
+  }
+
+  private isNullableBoundedString(value: unknown, maxLength: number): boolean {
+    return value === null || this.isBoundedString(value, maxLength);
+  }
+
+  private isSafeJsonRecord(value: unknown): value is Record<string, unknown> {
+    return this.isSafeJson(value, 0) && value !== null && !Array.isArray(value);
+  }
+
+  private isSafeJson(value: unknown, depth: number): boolean {
+    if (depth > 12) return false;
+    if (value === null || typeof value === 'boolean') return true;
+    if (typeof value === 'number') return Number.isFinite(value);
+    if (typeof value === 'string') return value.length <= 65_536;
+    if (Array.isArray(value)) {
+      return value.length <= 1_000 && value.every((item) => this.isSafeJson(item, depth + 1));
+    }
+    if (typeof value !== 'object') return false;
+    const entries = Object.entries(value as Record<string, unknown>);
+    return (
+      entries.length <= 200
+      && entries.every(([key, item]) =>
+        key.length <= 256
+        && key !== '__proto__'
+        && key !== 'constructor'
+        && key !== 'prototype'
+        && this.isSafeJson(item, depth + 1))
+    );
   }
 
   /** Keep audit buffering finite and reserve a coalesced ledger gap record. */
@@ -1791,7 +1898,11 @@ export class AuditService {
       await this.maybeDeletePersistedResidue();
       return 0;
     }
-    await this.recoveryStore.set(this.recoveryStoreKey, JSON.stringify(rows));
+    await this.recoveryStore.set(this.recoveryStoreKey, JSON.stringify({
+      version: AUDIT_RESIDUE_VERSION,
+      guildId: this.guildId,
+      rows,
+    }));
 
     this.queue = [];
     this.activeGapWindows.clear();
@@ -2011,8 +2122,13 @@ export class AuditService {
         actor_id: 'audit-service',
         action: 'audit.flush_failed',
         category: 'system',
+        target_type: null,
+        target_id: null,
         success: false,
         error_message: outage.lastError,
+        before_state: null,
+        after_state: null,
+        correlation_id: null,
         occurrence_key: `audit.flush_failed:${outage.firstFailedAt}`,
         details: Object.freeze({
           attempts: outage.attempts,

@@ -3250,13 +3250,14 @@ async function processAction(
           `Scheduling retry #${retryCount} for ${claimedAction.id} `
           + `in ${backoffMs / 1000}s`,
         );
-        setTimeout(() => {
-          scheduler
-            .run(claimedAction.lane, () => processAction(guild, supabase, claimedAction, scheduler))
-            .catch((e) => {
-              log.error(`Retry #${retryCount} failed for ${claimedAction.id}:`, e);
-            });
-        }, backoffMs);
+        scheduler.schedule(
+          claimedAction.lane,
+          backoffMs,
+          () => processAction(guild, supabase, claimedAction, scheduler),
+          (e) => {
+            log.error(`Retry #${retryCount} failed for ${claimedAction.id}:`, e);
+          },
+        );
 
         return; // Don't mark as failed yet — retry scheduled
       }
@@ -3892,6 +3893,7 @@ export async function startActionQueueListener(
     stop: () => {
       if (stopped) return Promise.resolve();
       stopped = true;
+      scheduler.close();
       clearInterval(staleRecoveryTimer);
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
