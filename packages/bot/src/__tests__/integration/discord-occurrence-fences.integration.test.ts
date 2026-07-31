@@ -77,6 +77,67 @@ describe('durable Discord occurrence fences', () => {
     expect(retry.occurrence.id).not.toBe(first.occurrence.id);
   });
 
+  it('atomically transfers a temp-room owner before retiring its creation fence', async () => {
+    const hub = await supa.from('temp_channel_hubs').insert({
+      guild_id: guildId,
+      hub_channel_id: `${guildId}:hub`,
+      category_id: `${guildId}:category`,
+    }).select('id').single();
+    expect(hub.error).toBeNull();
+
+    const occurrence = await supa.from('discord_operation_occurrences').insert({
+      guild_id: guildId,
+      operation_kind: 'temp_channel',
+      occurrence_key: `${guildId}:temp-channel:ownership-transfer`,
+      status: 'completed',
+      resource_id: `${guildId}:room`,
+    }).select('id').single();
+    expect(occurrence.error).toBeNull();
+
+    const active = await supa.from('active_temp_channels').insert({
+      channel_id: `${guildId}:room`,
+      guild_id: guildId,
+      hub_id: hub.data!.id,
+      owner_id: 'old-owner',
+      creation_occurrence_id: occurrence.data!.id,
+    });
+    expect(active.error).toBeNull();
+
+    const staleAttempt = await supa.rpc('transfer_temp_channel_ownership', {
+      p_guild_id: guildId,
+      p_channel_id: `${guildId}:room`,
+      p_new_owner_id: 'wrong-owner',
+      p_expected_occurrence_id: '00000000-0000-0000-0000-000000000000',
+    });
+    expect(staleAttempt).toMatchObject({ data: false, error: null });
+
+    const transferred = await supa.rpc('transfer_temp_channel_ownership', {
+      p_guild_id: guildId,
+      p_channel_id: `${guildId}:room`,
+      p_new_owner_id: 'new-owner',
+      p_expected_occurrence_id: occurrence.data!.id,
+    });
+    expect(transferred).toMatchObject({ data: true, error: null });
+
+    const [persisted, retired] = await Promise.all([
+      supa
+        .from('active_temp_channels')
+        .select('owner_id,creation_occurrence_id')
+        .eq('channel_id', `${guildId}:room`)
+        .single(),
+      supa
+        .from('discord_operation_occurrences')
+        .select('id')
+        .eq('id', occurrence.data!.id)
+        .maybeSingle(),
+    ]);
+    expect(persisted.data).toEqual({
+      owner_id: 'new-owner',
+      creation_occurrence_id: null,
+    });
+    expect(retired).toMatchObject({ data: null, error: null });
+  });
+
   it('atomically grants only one final scheduled-message send slot across occurrences', async () => {
     const schedule = await supa.from('scheduled_messages').insert({
       guild_id: guildId,

@@ -306,12 +306,29 @@ export async function deployServerState(
           }
           return role;
         });
-        // Reuse exactly the hierarchy slots Discord assigned to the new roles.
-        // Lifting them directly beneath the bot can cross integration-managed
-        // roles; Discord rejects that otherwise-valid sort with code 50013.
-        const availablePositions = createdRoleObjects
-          .map((role) => role.position)
-          .sort((a, b) => a - b);
+        // The desired list is ordered low-to-high. Put it directly beneath the
+        // bot so newly deployed moderators remain above surviving member roles.
+        // Integration-managed roles form an immovable barrier; report that
+        // explicitly instead of claiming success with an ineffective hierarchy.
+        const lowestTargetPosition = botHighest - createdRoles.length;
+        const lowestCreatedPosition = Math.min(
+          ...createdRoleObjects.map((role) => role.position),
+        );
+        const managedBarrier = [...guild.roles.cache.values()].find((role) =>
+          role.managed
+          && !createdRoles.some(({ discordId }) => discordId === role.id)
+          && role.position > lowestCreatedPosition
+          && role.position < botHighest,
+        );
+        if (managedBarrier) {
+          throw new Error(
+            `Cannot preserve the requested hierarchy because managed role ${managedBarrier.name} `
+            + `at position ${managedBarrier.position} blocks placement directly below the bot`,
+          );
+        }
+        const availablePositions = createdRoles.map(
+          (_, index) => lowestTargetPosition + index,
+        );
         const positionUpdates = createdRoles.map(({ discordId }, index) => ({
           role: discordId,
           position: availablePositions[index],

@@ -278,6 +278,7 @@ describe('AutomationEngine', () => {
         expect.objectContaining({ id: 'hold-after-start' }),
         'Test Automation',
       );
+      expect(mockFailInterruptedExecutions).toHaveBeenCalledTimes(2);
       engine.stop();
       vi.useRealTimers();
     });

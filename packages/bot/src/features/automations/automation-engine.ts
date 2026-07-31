@@ -862,9 +862,22 @@ export class AutomationEngine {
     if (this.heldNoticeRecoveryRunning) return;
     this.heldNoticeRecoveryRunning = true;
     try {
+      // A replacement process may start while another worker's lease is still
+      // live, then inherit the row only after that worker crashes. Reconcile
+      // expired leases on every scan so those rows cannot remain executing
+      // forever after the one-time startup pass.
+      try {
+        await this.massActionHolds.failInterruptedExecutions();
+      } catch (err) {
+        log.error('Failed to reconcile expired mass-action leases:', err);
+      }
       if (Date.now() - this.lastTerminalPruneAt >= 6 * 60 * 60 * 1_000) {
-        await this.massActionHolds.pruneTerminal();
-        this.lastTerminalPruneAt = Date.now();
+        try {
+          await this.massActionHolds.pruneTerminal();
+          this.lastTerminalPruneAt = Date.now();
+        } catch (err) {
+          log.error('Failed to prune terminal mass-action holds:', err);
+        }
       }
       const held = await this.massActionHolds.listHeld();
       await Promise.all(held.map(async (hold) => {

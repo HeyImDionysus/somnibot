@@ -40,7 +40,7 @@ const CHANNEL_TYPE_ALIAS: Record<string, ChannelType> = {
 
 type ChannelTypeInput = ChannelType | keyof typeof CHANNEL_TYPE_ALIAS;
 
-interface DiscordChannel {
+export interface DiscordChannel {
   id: string;
   name: string;
   type: number;
@@ -115,11 +115,16 @@ function ChannelIcon({ type, className }: { type: number; className?: string }) 
   }
 }
 
+interface ChannelSnapshot {
+  channels: DiscordChannel[];
+  authoritative: boolean;
+}
+
 // Shared channel cache to avoid re-fetching per picker instance
-let channelCache: { data: DiscordChannel[]; ts: number } | null = null;
+let channelCache: { data: ChannelSnapshot; ts: number } | null = null;
 const CACHE_TTL = 30_000; // 30s
 
-async function fetchChannels(): Promise<DiscordChannel[]> {
+async function fetchChannels(): Promise<ChannelSnapshot> {
   if (channelCache && Date.now() - channelCache.ts < CACHE_TTL) {
     return channelCache.data;
   }
@@ -132,13 +137,33 @@ async function fetchChannels(): Promise<DiscordChannel[]> {
   if (!Array.isArray(channels)) {
     throw new Error('Live Discord channel snapshot is malformed');
   }
-  channelCache = { data: channels, ts: Date.now() };
-  return channels;
+  const snapshot = {
+    channels,
+    authoritative: json.awaitingSnapshot !== true,
+  };
+  channelCache = { data: snapshot, ts: Date.now() };
+  return snapshot;
 }
 
 /** Invalidate the channel cache (call after creating/deleting channels) */
 export function invalidateChannelCache() {
   channelCache = null;
+}
+
+export function resolveSelectedChannels(
+  selected: string[],
+  channels: DiscordChannel[],
+  snapshotAuthoritative: boolean,
+): DiscordChannel[] {
+  return selected.map((id) => channels.find((channel) => channel.id === id) ?? {
+    id,
+    name: snapshotAuthoritative
+      ? `Deleted channel (${id})`
+      : `Configured channel (${id}) — awaiting live snapshot`,
+    type: CHANNEL_TYPE.GUILD_TEXT,
+    position: Number.MAX_SAFE_INTEGER,
+    missing: snapshotAuthoritative,
+  });
 }
 
 export function ChannelPicker({
@@ -156,6 +181,7 @@ export function ChannelPicker({
   requiredBotPermissions = [],
 }: ChannelPickerProps) {
   const [channels, setChannels] = useState<DiscordChannel[]>([]);
+  const [snapshotAuthoritative, setSnapshotAuthoritative] = useState(false);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -172,7 +198,10 @@ export function ChannelPicker({
   // Load channels
   useEffect(() => {
     fetchChannels()
-      .then(setChannels)
+      .then((snapshot) => {
+        setChannels(snapshot.channels);
+        setSnapshotAuthoritative(snapshot.authoritative);
+      })
       .catch(() => setLoadError('Live Discord channels are unavailable. Retry after the bot refreshes its snapshot.'))
       .finally(() => setLoading(false));
   }, []);
@@ -280,14 +309,8 @@ export function ChannelPicker({
 
   // Resolve selected channel names
   const selectedChannels = useMemo(
-    () => selected.map((id) => channels.find((c) => c.id === id) ?? {
-      id,
-      name: `Deleted channel (${id})`,
-      type: CHANNEL_TYPE.GUILD_TEXT,
-      position: Number.MAX_SAFE_INTEGER,
-      missing: true,
-    }),
-    [selected, channels],
+    () => resolveSelectedChannels(selected, channels, snapshotAuthoritative),
+    [selected, channels, snapshotAuthoritative],
   );
   const selectedIssues = selectedChannels
     .map(permissionIssue)
@@ -482,8 +505,8 @@ export function useChannelName(channelId: string | null | undefined): string | n
 
   useEffect(() => {
     if (!channelId) { setName(null); return; }
-    fetchChannels().then((channels) => {
-      const ch = channels.find((c) => c.id === channelId);
+    fetchChannels().then((snapshot) => {
+      const ch = snapshot.channels.find((channel) => channel.id === channelId);
       setName(ch ? `#${ch.name}` : null);
     });
   }, [channelId]);

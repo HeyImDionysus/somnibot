@@ -266,6 +266,71 @@ describe('deployServerState — role creation', () => {
     expect(guild.roles.fetch.mock.invocationCallOrder[0])
       .toBeLessThan(guild.roles.setPositions.mock.invocationCallOrder[0]);
   });
+
+  it('places newly deployed staff above surviving ordinary member roles', async () => {
+    const guild = makeGuild();
+    guild.roles.cache.set('surviving-member', {
+      id: 'surviving-member',
+      name: 'Existing Member',
+      position: 5,
+      managed: false,
+      editable: true,
+    });
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: false, dryRun: false },
+    );
+
+    expect(result.success, JSON.stringify(result.errors)).toBe(true);
+    expect(guild.roles.setPositions).toHaveBeenCalledWith([
+      { role: 'new-role-Member', position: 8 },
+      { role: 'new-role-Admin', position: 9 },
+    ]);
+  });
+
+  it('fails explicitly when a managed-role barrier blocks intended staff placement', async () => {
+    const guild = makeGuild();
+    guild.roles.cache.set('managed-member', {
+      id: 'managed-member',
+      name: 'Integration Member',
+      position: 5,
+      managed: true,
+      editable: false,
+    });
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: false, dryRun: false },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors.some((error) =>
+      error.error.includes('managed role Integration Member')
+      && error.error.includes('blocks placement directly below the bot'),
+    )).toBe(true);
+    expect(guild.roles.setPositions).not.toHaveBeenCalled();
+  });
 });
 
 describe('deployServerState — clean existing', () => {

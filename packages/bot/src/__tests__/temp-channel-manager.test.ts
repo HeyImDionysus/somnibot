@@ -142,23 +142,10 @@ describe('TempChannelManager', () => {
   });
 
   it('clears and releases the original creation fence when ownership transfers', async () => {
-    const updates: unknown[] = [];
-    const tables: string[] = [];
-    const equalityCalls: Array<[string, unknown]> = [];
+    const rpc = vi.fn(async () => ({ data: true, error: null }));
     const supabase = {
-      from: vi.fn((table: string) => {
-        tables.push(table);
-        const result = makeChain({ data: null, error: null });
-        result.eq = vi.fn((column: string, value: unknown) => {
-          equalityCalls.push([column, value]);
-          return result;
-        });
-        result.update = vi.fn((payload: unknown) => {
-          updates.push(payload);
-          return result;
-        });
-        return result;
-      }),
+      from: vi.fn(() => makeChain({ data: null, error: null })),
+      rpc,
     };
     const manager = new TempChannelManager(makeGuild() as any, supabase as any);
     (manager as any).activeChannels.set('room-1', {
@@ -172,15 +159,36 @@ describe('TempChannelManager', () => {
 
     await manager.transferOwnership('room-1', 'new-owner');
 
-    expect(updates).toContainEqual({
-      owner_id: 'new-owner',
-      creation_occurrence_id: null,
+    expect(rpc).toHaveBeenCalledWith('transfer_temp_channel_ownership', {
+      p_guild_id: 'guild-1',
+      p_channel_id: 'room-1',
+      p_new_owner_id: 'new-owner',
+      p_expected_occurrence_id: 'occurrence-1',
     });
-    expect(tables).toContain('discord_operation_occurrences');
-    expect(equalityCalls).toContainEqual(['id', 'occurrence-1']);
-    expect(equalityCalls).not.toContainEqual(['status', 'claimed']);
     expect(manager.getChannelOwner('room-1')).toBe('new-owner');
     expect((manager as any).activeChannels.get('room-1').creation_occurrence_id).toBeNull();
+  });
+
+  it('keeps the cached owner and fence when the atomic transfer loses its compare-and-set', async () => {
+    const supabase = {
+      from: vi.fn(() => makeChain({ data: null, error: null })),
+      rpc: vi.fn(async () => ({ data: false, error: null })),
+    };
+    const manager = new TempChannelManager(makeGuild() as any, supabase as any);
+    (manager as any).activeChannels.set('room-1', {
+      channel_id: 'room-1',
+      text_channel_id: null,
+      guild_id: 'guild-1',
+      hub_id: 'hub-1',
+      owner_id: 'old-owner',
+      creation_occurrence_id: 'occurrence-1',
+    });
+
+    await expect(manager.transferOwnership('room-1', 'new-owner'))
+      .rejects.toThrow('active ownership changed');
+    expect(manager.getChannelOwner('room-1')).toBe('old-owner');
+    expect((manager as any).activeChannels.get('room-1').creation_occurrence_id)
+      .toBe('occurrence-1');
   });
 
   it('removes a stale active-room record and continues replacement creation', async () => {

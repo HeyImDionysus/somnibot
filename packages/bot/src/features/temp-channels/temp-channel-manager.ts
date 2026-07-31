@@ -532,7 +532,29 @@ export class TempChannelManager {
     const oldOwnerId = active.owner_id;
     const oldOccurrenceId = active.creation_occurrence_id ?? null;
 
-    // Update permissions
+    // Commit the durable owner and creation-fence transition in one database
+    // transaction before changing Discord. A partial database failure must
+    // never leave the old owner recorded after their fence was retired.
+    const { data: transferred, error: transferError } = await this.supabase.rpc(
+      'transfer_temp_channel_ownership',
+      {
+        p_guild_id: this.guild.id,
+        p_channel_id: channelId,
+        p_new_owner_id: newOwnerId,
+        p_expected_occurrence_id: oldOccurrenceId,
+      },
+    );
+    if (transferError) {
+      throw new Error(`Failed to persist temp-channel ownership transfer: ${transferError.message}`);
+    }
+    if (transferred !== true) {
+      throw new Error('Failed to persist temp-channel ownership transfer: active ownership changed');
+    }
+
+    active.owner_id = newOwnerId;
+    active.creation_occurrence_id = null;
+
+    // Update permissions only after the durable owner is authoritative.
     const vc = this.guild.channels.cache.get(channelId) as VoiceChannel | undefined;
     if (vc) {
       try {
@@ -549,31 +571,6 @@ export class TempChannelManager {
         log.error('Failed to update permissions:', { error: String(err) });
       }
     }
-
-    // Creation occurrences are normally already completed by this point, so
-    // the claimed-only release helper is intentionally not used here. Once the
-    // room changes owner, the old member+hub occurrence must no longer fence a
-    // future room for the former owner.
-    if (oldOccurrenceId) {
-      const { error: occurrenceError } = await this.supabase
-        .from('discord_operation_occurrences')
-        .delete()
-        .eq('id', oldOccurrenceId);
-      if (occurrenceError) {
-        throw new Error(`Failed to retire temp-channel creation occurrence: ${occurrenceError.message}`);
-      }
-    }
-
-    const { error: transferError } = await this.supabase
-      .from('active_temp_channels')
-      .update({ owner_id: newOwnerId, creation_occurrence_id: null })
-      .eq('channel_id', channelId);
-    if (transferError) {
-      throw new Error(`Failed to persist temp-channel ownership transfer: ${transferError.message}`);
-    }
-
-    active.owner_id = newOwnerId;
-    active.creation_occurrence_id = null;
 
     this.eventBus.emit('temp_channel.claimed', this.guild.id, {
       channelId,
