@@ -91,7 +91,9 @@ export default function FraudPage() {
   const [statusFilter, setStatusFilter] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [ruleForm, setRuleForm] = useState<'new' | FraudRule | null>(null);
-  const [pageError, setPageError] = useState<string | null>(null);
+  const [signalsError, setSignalsError] = useState<string | null>(null);
+  const [rulesError, setRulesError] = useState<string | null>(null);
+  const pageError = tab === 'signals' ? signalsError : rulesError;
   // Fraud notification routing. The columns and the bot's mirror have existed
   // since migration 20260723120100; the dashboard never surfaced them, so an
   // owner could not choose where critical fraud signals are announced.
@@ -116,9 +118,9 @@ export default function FraudPage() {
         setSignals(json.data);
         setSummary(json.summary);
       }
-      setPageError(null);
+      setSignalsError(null);
     } catch (error) {
-      setPageError(error instanceof Error ? error.message : 'Could not load fraud signals.');
+      setSignalsError(error instanceof Error ? error.message : 'Could not load fraud signals.');
     } finally {
       setLoading(false);
     }
@@ -131,9 +133,9 @@ export default function FraudPage() {
         { forceFresh },
       );
       if (json.success) setRules(json.data);
-      setPageError(null);
+      setRulesError(null);
     } catch (error) {
-      setPageError(error instanceof Error ? error.message : 'Could not load fraud rules.');
+      setRulesError(error instanceof Error ? error.message : 'Could not load fraud rules.');
     }
   }, []);
 

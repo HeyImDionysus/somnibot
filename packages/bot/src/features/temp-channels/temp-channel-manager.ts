@@ -420,7 +420,15 @@ export class TempChannelManager {
             const channel = candidate as TextChannel;
             return channel.name === pairedTextName
               && channel.parentId === hub.category_id
-              && channel.permissionOverwrites.cache.has(member.id);
+              && channel.createdTimestamp >= claimedAt - 5_000
+              && channel.permissionOverwrites.cache
+                .get(member.id)?.allow.has(PermissionFlagsBits.ViewChannel) === true
+              && channel.permissionOverwrites.cache
+                .get(member.id)?.allow.has(PermissionFlagsBits.SendMessages) === true
+              && channel.permissionOverwrites.cache
+                .get(member.id)?.allow.has(PermissionFlagsBits.ManageMessages) === true
+              && channel.permissionOverwrites.cache
+                .get(this.guild.id)?.deny.has(PermissionFlagsBits.ViewChannel) === true;
           }) as TextChannel | undefined
         : undefined;
       const recovered: ActiveTempChannel = {

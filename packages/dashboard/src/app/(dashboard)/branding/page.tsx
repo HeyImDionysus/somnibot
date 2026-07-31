@@ -101,6 +101,9 @@ export default function BrandingPage() {
       // Saved embeds are optional preview material. Fetch and parse them only
       // after the authoritative branding config has been applied so a proxy or
       // malformed optional response can never leave an editable defaults form.
+      // Release the editor before awaiting this secondary request: an optional
+      // preview endpoint that stalls must not block authoritative branding.
+      setLoading(false);
       const embeds = await fetchOptionalJsonArray<SavedEmbed>('/api/embeds');
       setSavedEmbeds(embeds);
       setSelectedEmbedId((current) => current || embeds[0]?.id || '');

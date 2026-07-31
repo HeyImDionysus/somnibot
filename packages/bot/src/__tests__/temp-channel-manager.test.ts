@@ -349,6 +349,20 @@ describe('TempChannelManager', () => {
       },
     };
     guild.channels.cache.set(survivor.id, survivor);
+    const unrelatedOldText = {
+      id: 'old-paired-text',
+      type: 0,
+      name: 'Tester room-chat',
+      parentId: 'category-1',
+      createdTimestamp: Date.parse('2026-07-29T00:00:00.000Z'),
+      permissionOverwrites: {
+        cache: new Map([
+          ['user-1', { allow: { has: () => true } }],
+          ['guild-1', { deny: { has: () => true } }],
+        ]),
+      },
+    };
+    guild.channels.cache.set(unrelatedOldText.id, unrelatedOldText);
     const supabase = makeSupa();
     const manager = new TempChannelManager(guild as any, supabase as any);
     const member = {
@@ -375,7 +389,7 @@ describe('TempChannelManager', () => {
         categoryId: 'category-1',
         ownerId: 'user-1',
         channelName: 'Tester room',
-        pairedTextName: null,
+        pairedTextName: 'Tester room-chat',
       },
       last_error: null,
       claimed_at: '2026-07-30T00:00:00.000Z',
@@ -388,6 +402,7 @@ describe('TempChannelManager', () => {
     expect((manager as any).activeChannels.get('survivor-room')).toMatchObject({
       creation_occurrence_id: 'occurrence-1',
       owner_id: 'user-1',
+      text_channel_id: null,
     });
   });
 
