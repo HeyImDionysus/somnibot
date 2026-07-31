@@ -15,6 +15,30 @@ interface ControlRoomRow {
   reasons: string[];
 }
 
+/**
+ * The stuck-row visibility contract, extracted so it is testable as plain
+ * logic rather than pinned by source-text assertions:
+ *
+ *  - only stuck rows are ever shown;
+ *  - collapsed view caps at {@link STUCK_ROW_DEFAULT_LIMIT} for readability;
+ *  - expanded view shows EVERY stuck row — a hard cap here once hid stuck
+ *    customers 21+ entirely while the summary still counted them;
+ *  - `total` is always the full stuck count, so the expander label and the
+ *    summary can never disagree with the list.
+ */
+export const STUCK_ROW_DEFAULT_LIMIT = 20;
+
+export function stuckRowView<T extends { stuck: boolean }>(
+  rows: readonly T[],
+  showAll: boolean,
+): { visible: T[]; total: number } {
+  const stuck = rows.filter((row) => row.stuck);
+  return {
+    visible: showAll ? stuck : stuck.slice(0, STUCK_ROW_DEFAULT_LIMIT),
+    total: stuck.length,
+  };
+}
+
 interface ControlRoomData {
   summary: {
     paid: number;
@@ -134,14 +158,7 @@ export default function StoreControlRoom() {
           </div>
 
           <div className="space-y-2">
-            {/* Every stuck order must be reachable. The 20-row default keeps a
-                bad morning readable, but a hard cap hid stuck customers 21+
-                entirely — the summary counted them while the list gave the
-                operator no way to see who they were or why. */}
-            {(showAllStuck
-              ? data.customers.filter((row) => row.stuck)
-              : data.customers.filter((row) => row.stuck).slice(0, 20)
-            )
+            {stuckRowView(data.customers, showAllStuck).visible
               .map((row) => (
                 <article
                   key={row.orderId}
@@ -167,7 +184,7 @@ export default function StoreControlRoom() {
                   </ul>
                 </article>
               ))}
-            {data.customers.filter((row) => row.stuck).length > 20 && (
+            {stuckRowView(data.customers, showAllStuck).total > STUCK_ROW_DEFAULT_LIMIT && (
               <button
                 type="button"
                 onClick={() => setShowAllStuck((current) => !current)}
@@ -175,7 +192,7 @@ export default function StoreControlRoom() {
               >
                 {showAllStuck
                   ? 'Show fewer'
-                  : `Show all ${data.customers.filter((row) => row.stuck).length} stuck orders`}
+                  : `Show all ${stuckRowView(data.customers, showAllStuck).total} stuck orders`}
               </button>
             )}
             {data.summary.stuck === 0 && (
