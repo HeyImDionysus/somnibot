@@ -161,15 +161,23 @@ export async function GET(req: NextRequest) {
   const keySampleTruncated = totalKeys > keys.length;
   const validationSampleTruncated =
     (validationsResult.count ?? validationsResult.data.length) > validationsResult.data.length;
+  const sessionSampleTruncated =
+    (sessionsResult.count ?? sessionsResult.data.length) > sessionsResult.data.length;
 
   return NextResponse.json({
     success: true,
     data: {
-      // A partial key sample can never establish whole-guild health.
+      // A partial sample can never establish whole-guild health — and that
+      // includes SESSIONS: a truncated session sample under-reports the
+      // active-device count, so declaring 'healthy' beside an admittedly
+      // incomplete number would be the green banner lying.
       state:
         totalKeys === 0 && issueCount === 0
           ? 'empty'
-          : issueCount > 0 || keySampleTruncated || validationSampleTruncated
+          : issueCount > 0
+              || keySampleTruncated
+              || validationSampleTruncated
+              || sessionSampleTruncated
             ? 'needs_attention'
             : 'healthy',
       keyCounts,
@@ -186,7 +194,7 @@ export async function GET(req: NextRequest) {
       unresolvedAlerts: alertsResult.data,
       truncated:
         keySampleTruncated
-        || (sessionsResult.count ?? 0) > sessionsResult.data.length
+        || sessionSampleTruncated
         || validationSampleTruncated,
       checkedAt: new Date().toISOString(),
     },

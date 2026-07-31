@@ -41,6 +41,8 @@ function schedSupa(
     reclaimResult?: boolean | { error: { message: string } };
     /** Row served for the reclaimed-counter reconcile read on scheduled_messages. */
     priorCounterRow?: { current_sends: number; last_sent_at: string | null };
+    /** When set, the reclaimed-counter reconcile read FAILS with this error. */
+    priorCounterError?: { message: string };
   } = {},
 ) {
   const inserts: Record<string, any[]> = { alerts: [] };
@@ -69,6 +71,9 @@ function schedSupa(
         return { data: options.existingOccurrence, error: null };
       }
       // The reclaimed-counter reconcile read against the authoritative row.
+      if (table === 'scheduled_messages' && options.priorCounterError) {
+        return { data: null, error: options.priorCounterError };
+      }
       if (table === 'scheduled_messages' && options.priorCounterRow) {
         return { data: options.priorCounterRow, error: null };
       }
@@ -266,6 +271,10 @@ describe('ScheduledMessageRunner — stale crashed claims are reclaimed, not sup
     const { supabase, updates } = schedSupa([{ ...BASE_SCHEDULE }], {
       existingOccurrence: staleOccurrence(STALE),
       reclaimResult: true,
+      // The crashed holder died BEFORE committing its counter: the
+      // authoritative row shows this minute not yet counted, so the normal
+      // counter claim proceeds.
+      priorCounterRow: { current_sends: 0, last_sent_at: null },
     });
     const { guild: g, send } = guild();
     const runner = new Runner(g, supabase);
@@ -362,5 +371,88 @@ describe('ScheduledMessageRunner — stale crashed claims are reclaimed, not sup
     expect(send).not.toHaveBeenCalled();
     const rpcNames = (supabase.rpc as any).mock.calls.map((c: any[]) => c[0]);
     expect(rpcNames).not.toContain('reclaim_stale_discord_occurrence');
+  });
+});
+
+describe('ScheduledMessageRunner — recovery is not gated on exhaustion', () => {
+  const STALE_AT = new Date(Date.now() - 10 * 60_000).toISOString();
+
+  it('recovers a crashed counted minute on a schedule with REMAINING sends', async () => {
+    // The crashed holder advanced last_sent_at/current_sends and died before
+    // Discord got the message. The schedule has capacity left, and its cron
+    // does not even match the current minute — the ONLY path to this delivery
+    // is the per-schedule probe running independently of the max_sends guard.
+    const Runner = await loadRunner();
+    const crashedMinute = new Date(Math.floor((Date.now() - 10 * 60_000) / 60_000) * 60_000)
+      .toISOString();
+    const { supabase } = schedSupa(
+      [{
+        ...BASE_SCHEDULE,
+        cron_expression: '0 0 1 1 *', // never due during this test
+        max_sends: 10,
+        current_sends: 3,
+        last_sent_at: crashedMinute,
+      }],
+      {
+        existingOccurrence: {
+          id: 'occ-stale', guild_id: 'g1', operation_kind: 'scheduled_message',
+          occurrence_key: 'k', status: 'claimed',
+          claimed_at: STALE_AT, updated_at: STALE_AT,
+          resource_id: null, result: {}, last_error: null,
+        },
+        reclaimResult: true,
+        priorCounterRow: { current_sends: 3, last_sent_at: crashedMinute },
+      },
+    );
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+
+    await (runner as any).tick();
+
+    expect(send).toHaveBeenCalledTimes(1);
+    const rpcNames = (supabase.rpc as any).mock.calls.map((c: any[]) => c[0]);
+    expect(rpcNames).toContain('reclaim_stale_discord_occurrence');
+    // The minute was already counted by the crashed holder — no second slot.
+    expect(rpcNames).not.toContain('claim_scheduled_message_send');
+  });
+
+  it('halts recovery when the counter reconcile read is INCONCLUSIVE', async () => {
+    // A transient read failure is indistinguishable from "never counted".
+    // Guessing runs the counter RPC again: double-counting a minute with
+    // capacity, or terminally completing an exhausted one as
+    // max_sends_reached without delivering. The claim must be retained.
+    const Runner = await loadRunner();
+    const crashedMinute = new Date(Math.floor((Date.now() - 10 * 60_000) / 60_000) * 60_000)
+      .toISOString();
+    const { supabase, updates } = schedSupa(
+      [{
+        ...BASE_SCHEDULE,
+        cron_expression: '0 0 1 1 *',
+        max_sends: 10,
+        current_sends: 3,
+        last_sent_at: crashedMinute,
+      }],
+      {
+        existingOccurrence: {
+          id: 'occ-stale', guild_id: 'g1', operation_kind: 'scheduled_message',
+          occurrence_key: 'k', status: 'claimed',
+          claimed_at: STALE_AT, updated_at: STALE_AT,
+          resource_id: null, result: {}, last_error: null,
+        },
+        reclaimResult: true,
+        priorCounterError: { message: 'read replica unavailable' },
+      },
+    );
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+
+    await (runner as any).tick();
+
+    expect(send).not.toHaveBeenCalled();
+    const rpcNames = (supabase.rpc as any).mock.calls.map((c: any[]) => c[0]);
+    expect(rpcNames).not.toContain('claim_scheduled_message_send');
+    // No terminal write: the reclaimed claim survives for a later retry.
+    expect(updates.some((u) => u.payload.status === 'completed')).toBe(false);
+    expect(updates.some((u) => u.payload.status === 'failed')).toBe(false);
   });
 });

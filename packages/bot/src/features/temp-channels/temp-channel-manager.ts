@@ -122,9 +122,24 @@ export class TempChannelManager {
     }
     if (!this.pendingChannelCleanupTimer) {
       this.pendingChannelCleanupTimer = setInterval(() => {
-        void this.reconcilePendingChannelCleanup().catch((error) => {
-          log.error('Temp-channel cleanup reconciliation failed:', { error: String(error) });
-        });
+        // Both halves retry here, each contained. cleanupOrphans matters just
+        // as much as the occurrence reconcile: a stale active_temp_channels
+        // row whose Discord channel is gone is an ACTIVE record, not a
+        // cleanup-pending occurrence — if its startup retirement failed
+        // transiently, nothing else would ever retry it before the next
+        // process restart.
+        void (async () => {
+          try {
+            await this.cleanupOrphans();
+          } catch (error) {
+            log.error('Periodic orphan cleanup failed:', { error: String(error) });
+          }
+          try {
+            await this.reconcilePendingChannelCleanup();
+          } catch (error) {
+            log.error('Temp-channel cleanup reconciliation failed:', { error: String(error) });
+          }
+        })();
       }, PENDING_CHANNEL_CLEANUP_INTERVAL_MS);
       this.pendingChannelCleanupTimer.unref();
     }

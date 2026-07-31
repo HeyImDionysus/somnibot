@@ -48,6 +48,7 @@ export default function StoreControlRoom() {
   const [data, setData] = useState<ControlRoomData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [showAllStuck, setShowAllStuck] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -133,9 +134,14 @@ export default function StoreControlRoom() {
           </div>
 
           <div className="space-y-2">
-            {data.customers
-              .filter((row) => row.stuck)
-              .slice(0, 20)
+            {/* Every stuck order must be reachable. The 20-row default keeps a
+                bad morning readable, but a hard cap hid stuck customers 21+
+                entirely — the summary counted them while the list gave the
+                operator no way to see who they were or why. */}
+            {(showAllStuck
+              ? data.customers.filter((row) => row.stuck)
+              : data.customers.filter((row) => row.stuck).slice(0, 20)
+            )
               .map((row) => (
                 <article
                   key={row.orderId}
@@ -161,6 +167,17 @@ export default function StoreControlRoom() {
                   </ul>
                 </article>
               ))}
+            {data.customers.filter((row) => row.stuck).length > 20 && (
+              <button
+                type="button"
+                onClick={() => setShowAllStuck((current) => !current)}
+                className="w-full rounded-input border border-discord-border-subtle bg-discord-bg-tertiary p-2 text-sm text-discord-text-secondary transition-standard hover:bg-discord-bg-hover hover:text-discord-text-primary"
+              >
+                {showAllStuck
+                  ? 'Show fewer'
+                  : `Show all ${data.customers.filter((row) => row.stuck).length} stuck orders`}
+              </button>
+            )}
             {data.summary.stuck === 0 && (
               <div className="rounded-input border border-discord-success/30 bg-discord-success/10 p-3">
                 <p className="text-sm font-medium text-discord-success">

@@ -235,20 +235,23 @@ export class ScheduledMessageRunner {
         if (schedule.start_date && new Date(schedule.start_date) > now) continue;
         if (schedule.end_date && new Date(schedule.end_date) < now) continue;
 
-        // Check max sends. An exhausted schedule is normally done — but if the
-        // slot that exhausted it belongs to a CRASHED holder (counter
-        // committed, send never confirmed), skipping here would strand the
-        // schedule forever having delivered nothing. Probe that one occurrence
-        // and route it back through sendMessage, whose stale-claim reclaim
-        // path recovers it without consuming another slot.
-        if (schedule.max_sends != null && schedule.current_sends >= schedule.max_sends) {
-          await this.recoverExhaustedUnsentClaim(schedule).catch((err) => {
-            log.error(`Exhausted-claim recovery failed for schedule ${schedule.id}:`, {
-              error: String(err),
-            });
+        // Recover the last counted minute if its claim is stale — for EVERY
+        // schedule, not only exhausted ones. A holder that crashed after
+        // `claim_scheduled_message_send` advanced the counter but before the
+        // send leaves nothing that revisits the old occurrence key: later
+        // ticks construct new due minutes, and missed-run handling reads the
+        // advanced `last_sent_at` as a delivered baseline. Without this probe
+        // the claimed occurrence and its missing delivery stay unreconciled
+        // forever on any schedule with remaining sends. (An in-memory cache of
+        // confirmed-terminal keys keeps the steady-state cost at zero.)
+        await this.recoverUnconfirmedLastSend(schedule).catch((err) => {
+          log.error(`Stale-claim recovery failed for schedule ${schedule.id}:`, {
+            error: String(err),
           });
-          continue;
-        }
+        });
+
+        // Check max sends
+        if (schedule.max_sends != null && schedule.current_sends >= schedule.max_sends) continue;
 
         // Convert now to schedule's timezone
         const localNow = dateInTimezone(now, schedule.timezone || 'UTC');
@@ -272,39 +275,60 @@ export class ScheduledMessageRunner {
   }
 
   /**
-   * Recover the one occurrence that can strand an exhausted schedule: its LAST
-   * counted due minute, when that minute's claim is still `claimed` past the
-   * stale threshold — i.e. the holder crashed after committing the counter but
+   * Occurrence keys whose terminal state (completed / failed / absent) has been
+   * confirmed, so the per-tick recovery probe never re-queries them. Bounded:
+   * cleared wholesale past 5000 entries — the cost of a clear is one extra
+   * probe round, not correctness.
+   */
+  private readonly confirmedSendKeys = new Set<string>();
+
+  /**
+   * Recover the one occurrence that can strand a schedule: its LAST counted
+   * due minute, when that minute's claim is still `claimed` past the stale
+   * threshold — i.e. the holder crashed after committing the counter but
    * before the send was confirmed. Everything funnels back through
-   * sendMessage(), whose reclaim path re-delivers WITHOUT claiming another
-   * counter slot (the prior-counter reconcile sees this exact minute already
-   * counted).
+   * sendMessage(), whose reclaim path re-delivers without double-counting a
+   * minute that was already counted.
    *
    * Bounded on purpose: only the single occurrence named by `last_sent_at`,
-   * and only within a 7-day window — a schedule exhausted long ago with a
-   * completed occurrence must not cost a probe query every minute forever.
+   * only within a 7-day window, and cached once confirmed terminal — so the
+   * steady-state cost for a healthy schedule is zero queries.
    */
-  private async recoverExhaustedUnsentClaim(schedule: ScheduledMessage): Promise<void> {
+  private async recoverUnconfirmedLastSend(schedule: ScheduledMessage): Promise<void> {
     if (!schedule.last_sent_at) return;
     const lastCounted = new Date(schedule.last_sent_at);
     if (!Number.isFinite(lastCounted.getTime())) return;
     if (Date.now() - lastCounted.getTime() > EXHAUSTED_RECOVERY_WINDOW_MS) return;
 
-    const { data: occurrence } = await this.supabase
+    const occurrenceKey = `${schedule.id}:${lastCounted.toISOString()}`;
+    if (this.confirmedSendKeys.has(occurrenceKey)) return;
+
+    const { data: occurrence, error: probeError } = await this.supabase
       .from('discord_operation_occurrences')
       .select('id, status, claimed_at')
       .eq('guild_id', this.guild.id)
       .eq('operation_kind', 'scheduled_message')
-      .eq('occurrence_key', `${schedule.id}:${lastCounted.toISOString()}`)
+      .eq('occurrence_key', occurrenceKey)
       .maybeSingle();
-    if (!occurrence || occurrence.status !== 'claimed') return;
+    if (probeError) {
+      // Inconclusive probe: retry next tick rather than caching a guess.
+      log.error(`Could not probe last-send occurrence for schedule ${schedule.id}:`, {
+        error: probeError.message,
+      });
+      return;
+    }
+    if (!occurrence || occurrence.status !== 'claimed') {
+      if (this.confirmedSendKeys.size >= 5000) this.confirmedSendKeys.clear();
+      this.confirmedSendKeys.add(occurrenceKey);
+      return;
+    }
 
     const claimedAtMs = Date.parse(String(occurrence.claimed_at ?? ''));
     if (!Number.isFinite(claimedAtMs) || Date.now() - claimedAtMs < STALE_SCHEDULE_CLAIM_MS) {
       return;
     }
     log.warn(
-      `Schedule "${schedule.name}" is exhausted by an unconfirmed send `
+      `Schedule "${schedule.name}" has an unconfirmed counted send `
       + `(due ${lastCounted.toISOString()}); attempting stale-claim recovery.`,
     );
     await this.sendMessage(schedule, lastCounted);
@@ -397,16 +421,33 @@ export class ScheduledMessageRunner {
     let claimedSendCount: number | null | undefined;
     let counterAlreadyClaimed = false;
     if (reclaimedStaleClaim) {
-      const { data: priorCounter } = await this.supabase
+      const { data: priorCounter, error: priorCounterError } = await this.supabase
         .from('scheduled_messages')
         .select('current_sends,last_sent_at')
         .eq('id', schedule.id)
         .eq('guild_id', this.guild.id)
         .maybeSingle();
-      if (
-        priorCounter
-        && new Date(priorCounter.last_sent_at ?? 0).getTime() === occurrenceAt.getTime()
-      ) {
+      if (priorCounterError || !priorCounter) {
+        // The read must AUTHORITATIVELY establish whether this minute was
+        // already counted before any counter action. On a transient failure,
+        // "never committed" and "read failed" are indistinguishable — running
+        // the counter RPC on that guess double-counts a minute with capacity,
+        // or terminally completes an exhausted one as max_sends_reached
+        // without delivering. Leave the reclaimed claim in place: it goes
+        // stale again and is retried on a later tick.
+        log.error(
+          `Could not reconcile reclaimed counter for schedule ${schedule.id}; retaining claim for retry:`,
+          { error: priorCounterError?.message ?? 'schedule row missing' },
+        );
+        return;
+      }
+      const lastCountedMs = new Date(priorCounter.last_sent_at ?? 0).getTime();
+      if (lastCountedMs >= occurrenceAt.getTime()) {
+        // This minute (===) or a later one (>) is already on the counter. In
+        // the strictly-later case this minute's own counted-ness is no longer
+        // recorded anywhere; claiming a fresh slot risks paying twice for one
+        // due minute, so deliver WITHOUT a new claim — consistent with the
+        // documented at-least-once bias of reclaim recovery.
         counterAlreadyClaimed = true;
         claimedSendCount = priorCounter.current_sends;
       }

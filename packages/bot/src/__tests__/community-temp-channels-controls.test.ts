@@ -351,3 +351,62 @@ describe('TempChannelManager — startup cleanup failures stay contained', () =>
     expect((mgr as any).pendingChannelCleanupTimer).toBeNull();
   });
 });
+
+describe('TempChannelManager — startup orphan cleanup retries on the periodic timer', () => {
+  it('retries a transiently failed orphan retirement without waiting for a restart', async () => {
+    vi.useFakeTimers();
+    try {
+      const TempChannelManager = await loadManager();
+      const retireCalls: number[] = [];
+      // First retirement attempt fails (transient DB error → startup cleanup
+      // is contained); the second, fired by the periodic timer, succeeds.
+      const rpc = vi.fn(async (name: string) => {
+        if (name === 'retire_temp_channel') {
+          retireCalls.push(Date.now());
+          if (retireCalls.length === 1) {
+            return { data: null, error: { message: 'db momentarily unavailable' } };
+          }
+          return { data: true, error: null };
+        }
+        return { data: null, error: null };
+      });
+      function chainFor(table: string) {
+        const c: any = {};
+        for (const m of ['select', 'eq', 'neq', 'or', 'is', 'lt', 'gt', 'gte', 'lte', 'in', 'not', 'order', 'limit', 'range', 'match', 'contains', 'insert', 'update', 'delete']) {
+          c[m] = () => c;
+        }
+        c.maybeSingle = async () => ({ data: null, error: null });
+        c.single = async () => ({ data: null, error: null });
+        c.then = (resolve: (v: any) => void) => resolve({
+          data: table === 'temp_channel_hubs'
+            ? [HUB]
+            : table === 'active_temp_channels'
+              ? [{
+                  channel_id: 'gone-vc', text_channel_id: null, guild_id: 'g1',
+                  hub_id: 'hub1', owner_id: 'u1', creation_occurrence_id: null,
+                }]
+              : [],
+          error: null,
+        });
+        return c;
+      }
+      const supabase = { from: (t: string) => chainFor(t), rpc } as any;
+      // 'gone-vc' is absent from the guild cache — a genuine orphan.
+      const g = guild(async () => ({ id: 'vc-x', members: new Map() }));
+      const mgr = new TempChannelManager(g, supabase);
+
+      // Startup: the retirement fails, but start() must still resolve.
+      await mgr.start();
+      expect(retireCalls.length).toBe(1);
+
+      // One periodic interval later the ORPHAN cleanup (not just the
+      // cleanup-pending reconcile) must run again and retire the row.
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 50);
+      expect(retireCalls.length).toBe(2);
+
+      mgr.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

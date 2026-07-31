@@ -245,4 +245,30 @@ describe('GET /api/license/health', () => {
         .every((call: [string, string[]]) => call[1].length <= 100)).toBe(true);
     }
   });
+
+  it('never declares health from a truncated SESSION sample', async () => {
+    // The active-device count is computed from the session sample. When that
+    // sample is cut off, the response already admitted `truncated: true` and
+    // an incomplete device count — while the state predicate ignored sessions
+    // and still said 'healthy', so the page showed the green banner beside a
+    // number it had just disclaimed.
+    setup({
+      license_sessions: {
+        data: [{
+          id: '00000000-0000-0000-0000-000000000003',
+          license_key_id: '00000000-0000-0000-0000-000000000001',
+          active: true,
+          last_seen_at: '2026-07-30T00:00:00.000Z',
+        }],
+        error: null,
+        count: 5_001,
+      },
+    });
+    const body = await (await GET(buildRequest('/api/license/health') as never)).json();
+    expect(body.data).toMatchObject({
+      state: 'needs_attention',
+      truncated: true,
+      totalSessions: 5_001,
+    });
+  });
 });
