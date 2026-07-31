@@ -285,6 +285,45 @@ describe('GET /api/store/control-room', () => {
     expect(body.data.customers[0].stuck).toBe(true);
   });
 
+  it('gives a late-fulfilled order its FULL 24h download window (round 16)', async () => {
+    // Created three days ago, fulfilled one hour ago: the deadline runs from
+    // fulfillment — the customer has had one hour, not three days.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-02T12:00:00.000Z'));
+    setup({
+      orders: {
+        data: [{
+          id: ORDER,
+          order_number: 'ORD-LATE-FULFILL-WINDOW',
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'completed',
+          delivery_type_snapshot: 'file',
+          created_at: '2026-07-30T12:00:00.000Z',
+        }],
+        error: null,
+        count: 1,
+      },
+      entitlements: {
+        data: [{
+          id: 'ent-recent',
+          order_id: ORDER,
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'active',
+          created_at: '2026-08-02T11:00:00.000Z',
+        }],
+        error: null,
+      },
+      commerce_download_deliveries: { data: [], error: null },
+    });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+    expect(body.data.customers[0].reasons).not.toContain(
+      'No completed download was recorded within 24 hours.',
+    );
+  });
+
   it('uses the persisted deployment cutover instead of the migration filename time', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-02T12:00:00.000Z'));

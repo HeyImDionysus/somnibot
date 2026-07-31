@@ -164,7 +164,7 @@ describe('GET /api/license/health', () => {
     const alertsCallIndex = supabase.from.mock.calls.findIndex((call) => call[0] === 'alerts');
     const alertsQuery = supabase.from.mock.results[alertsCallIndex].value;
     expect(alertsQuery.or).toHaveBeenCalledWith(
-      'alert_type.ilike.license%,alert_type.eq.commerce_missing_license_delivery',
+      'alert_type.ilike.license%,alert_type.ilike.commerce_license%,alert_type.eq.commerce_missing_license_delivery',
     );
   });
 

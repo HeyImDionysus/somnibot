@@ -734,9 +734,13 @@ export class ScheduledMessageRunner {
     lastOcc: Date,
     now: Date,
   ): Promise<void> {
+    // Advance to the last MISSED occurrence, not the recovery time: stamping
+    // "now" made the next legitimate tick look like a duplicate to the
+    // ordinary send guard (a minutely schedule recovered at :30 lost its :00
+    // of the following minute). lastOcc still prevents repeat notices.
     const { data: won, error } = await this.supabase
       .from('scheduled_messages')
-      .update({ last_sent_at: now.toISOString() })
+      .update({ last_sent_at: lastOcc.toISOString() })
       .eq('id', schedule.id)
       .or(`last_sent_at.is.null,last_sent_at.lt.${lastOcc.toISOString()}`)
       .select('id');

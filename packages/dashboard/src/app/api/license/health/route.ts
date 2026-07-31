@@ -103,7 +103,10 @@ export async function GET(req: NextRequest) {
       .select('id, alert_type, severity, title, created_at')
       .eq('guild_id', guildId)
       .is('resolved_at', null)
-      .or('alert_type.ilike.license%,alert_type.eq.commerce_missing_license_delivery')
+      // The commerce-prefixed license alerts (missing delivery, rotation
+      // receipt held) are license incidents too — a revoked old key whose
+      // replacement receipt cannot be delivered must not read 'healthy'.
+      .or('alert_type.ilike.license%,alert_type.ilike.commerce_license%,alert_type.eq.commerce_missing_license_delivery')
       .order('created_at', { ascending: false })
       .limit(100),
   ]);

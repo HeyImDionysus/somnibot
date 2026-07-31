@@ -263,11 +263,18 @@ export async function GET(req: NextRequest) {
     if (licenseRequired && !key && age > 15 * 60 * 1_000) {
       reasons.push('No license key was issued within 15 minutes of payment.');
     }
+    // The 24-hour download window starts when the customer can actually
+    // download — at FULFILLMENT. An order pending for a day and then
+    // fulfilled must get its full advertised window, not be stuck instantly.
+    const fulfillmentAge = elapsedMs(
+      typeof entitlement?.created_at === 'string' ? entitlement.created_at : order.created_at,
+      now,
+    );
     if (
       downloadRequired
       && downloadEvidenceAvailable
       && !download
-      && age > 24 * 60 * 60 * 1_000
+      && fulfillmentAge > 24 * 60 * 60 * 1_000
     ) {
       reasons.push('No completed download was recorded within 24 hours.');
     }

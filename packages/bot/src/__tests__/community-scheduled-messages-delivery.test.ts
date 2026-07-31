@@ -244,6 +244,25 @@ describe('ScheduledMessageRunner — missed-run policy', () => {
     expect(inserts.alerts[0].alert_type).toBe('scheduled_message_missed_occurrence');
   });
 
+  it('skip-missed advances last_sent_at to the last MISSED occurrence, not the recovery time (round 16)', async () => {
+    // Stamping "now" made the next legitimate tick look like a duplicate to
+    // the ordinary send guard: a minutely schedule recovered at :30 lost the
+    // following :00.
+    const Runner = await loadRunner();
+    const sched = { ...BASE_SCHEDULE, missed_run_policy: 'skip-missed' };
+    const { supabase, updates } = schedSupa([sched]);
+    const { guild: g } = guild();
+    const runner = new Runner(g, supabase);
+    const baseline = new Date('2026-07-27T11:00:00.000Z');
+    const lastOcc = new Date('2026-07-27T11:59:00.000Z');
+    const now = new Date('2026-07-27T11:59:30.000Z');
+
+    await (runner as any).noticeMissed(sched, baseline, lastOcc, now);
+
+    const stamped = updates.find((u) => u.payload?.last_sent_at);
+    expect(stamped?.payload.last_sent_at).toBe(lastOcc.toISOString());
+  });
+
   it('a brand-new schedule (no baseline) never triggers a spurious catch-up', async () => {
     const Runner = await loadRunner();
     const sched = { ...BASE_SCHEDULE, missed_run_policy: 'send-latest', last_sent_at: null, start_date: null };

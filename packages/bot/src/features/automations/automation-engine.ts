@@ -776,11 +776,13 @@ export class AutomationEngine {
         const k = s(data.giveawayId) ?? s(data.messageId);
         return k ? `${t}:${g}:${k}` : null;
       }
-      case 'level.up': {
-        const u = s(data.discordId);
-        const lvl = s(data.newLevel);
-        return u && lvl ? `${t}:${g}:${u}:${lvl}` : null;
-      }
+      // level.up deliberately has NO durable identity: user+level is not a
+      // lifetime-unique occurrence — /xp reset|remove|set can lower a member
+      // below a milestone they then legitimately re-cross, and a finalized
+      // executions row behind the permanent unique index would suppress every
+      // automation for that milestone forever. The producer only emits on an
+      // actual stored-level transition, so gateway redelivery cannot re-emit
+      // it; the in-memory occurrence id is the correct dedupe scope.
       case 'member.verified': {
         const u = s(data.discordId);
         return u ? `${t}:${g}:${u}` : null;

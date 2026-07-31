@@ -1146,6 +1146,34 @@ describe('AutomationEngine', () => {
       expect(ctx?.variables['role']).toBe('<@&r1>');
     });
 
+    it('gives level.up NO durable occurrence identity (round 16)', async () => {
+      // user+level is not lifetime-unique: /xp reset|remove|set can drop a
+      // member below a milestone they legitimately re-cross, and a durable
+      // key behind the permanent executions index would suppress that
+      // milestone's automations forever.
+      const seed = (engine as unknown as {
+        durableOccurrenceKey(
+          event: { type: string; guildId: string },
+          data: Record<string, unknown>,
+        ): string | null;
+      }).durableOccurrenceKey(
+        { type: 'level.up', guildId: 'g1' },
+        { discordId: 'u1', newLevel: 6 },
+      );
+      expect(seed).toBeNull();
+      // Genuinely unique lifetime occurrences keep their durable identity.
+      const verified = (engine as unknown as {
+        durableOccurrenceKey(
+          event: { type: string; guildId: string },
+          data: Record<string, unknown>,
+        ): string | null;
+      }).durableOccurrenceKey(
+        { type: 'member.verified', guildId: 'g1' },
+        { discordId: 'u1' },
+      );
+      expect(verified).toContain('member.verified');
+    });
+
     it('resolves level.up variables', async () => {
       const ctx = await fireAndCapture('level.up', { discordId: 'u1', previousLevel: 5, newLevel: 6 });
       expect(ctx?.variables.oldLevel).toBe('5');

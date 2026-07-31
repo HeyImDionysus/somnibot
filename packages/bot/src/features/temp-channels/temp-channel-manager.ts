@@ -493,7 +493,23 @@ export class TempChannelManager {
         creation_occurrence_id: occurrenceId,
       };
 
-      const { error: recordError } = await this.supabase.from('active_temp_channels').insert(record);
+      let { error: recordError } = await this.supabase.from('active_temp_channels').insert(record);
+      if (recordError && occurrenceId) {
+        // The insert response can be lost AFTER commit. If a durable row now
+        // owns these channels, deleting them would leave that committed row
+        // pointing at nothing — and it never entered activeChannels, so the
+        // periodic orphan cleanup would not retire it either. Read back by
+        // the creation occurrence before treating the insert as absent.
+        const { data: committed, error: readBackError } = await this.supabase
+          .from('active_temp_channels')
+          .select('channel_id')
+          .eq('guild_id', this.guild.id)
+          .eq('creation_occurrence_id', occurrenceId)
+          .maybeSingle();
+        if (!readBackError && committed?.channel_id === vc.id) {
+          recordError = null;
+        }
+      }
       if (recordError) {
         const cleanup: Array<{ channelId: string; remove: () => Promise<unknown> }> = [
           {
