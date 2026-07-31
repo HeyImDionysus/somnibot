@@ -470,6 +470,39 @@ describe('TicketService', () => {
     expect(supa._deletedOccurrences).toEqual(['occ-ticket-1']);
   });
 
+  it('releases a claimed occurrence after deleting a channel whose intro send failed', async () => {
+    const { createTicket } = await import('../features/tickets/ticket-service.js');
+    const g = guild();
+    const channel = {
+      id: 'newch',
+      name: 'ticket-1-user',
+      type: 0,
+      send: vi.fn().mockRejectedValue(new Error('Missing Permissions')),
+      delete: vi.fn().mockResolvedValue({}),
+    };
+    g.channels.create.mockResolvedValueOnce(channel);
+    const member = {
+      id: 'u1', user: { id: 'u1', username: 'User', tag: 'User#0001' },
+      displayName: 'User', guild: g,
+      permissions: { has: () => true },
+    } as any;
+    const supa = ticketSupa();
+
+    const result = await createTicket(
+      g,
+      member,
+      panel as any,
+      ticketType as any,
+      supa,
+      eb(),
+      'ticket-click-1',
+    );
+
+    expect(result).toEqual({ error: 'Failed to initialize ticket channel. Please try again.' });
+    expect(channel.delete).toHaveBeenCalledTimes(1);
+    expect(supa._deletedOccurrences).toEqual(['occ-ticket-1']);
+  });
+
   it('closeTicket', async () => {
     const { closeTicket } = await import('../features/tickets/ticket-service.js');
     const g = guild();

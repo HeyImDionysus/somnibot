@@ -74,7 +74,7 @@ export async function GET(req: NextRequest) {
       .select('id, alert_type, severity, title, created_at')
       .eq('guild_id', guildId)
       .is('resolved_at', null)
-      .ilike('alert_type', 'license%')
+      .or('alert_type.ilike.license%,alert_type.eq.commerce_missing_license_delivery')
       .order('created_at', { ascending: false })
       .limit(100),
   ]);
@@ -126,6 +126,7 @@ export async function GET(req: NextRequest) {
     + keyCounts.suspended
     + unavailable24h
     + deviceLimit24h
+    + invalid24h
     + alertsResult.data.length;
   const totalKeys = keyTotal ?? keys.length;
   const keySampleTruncated = totalKeys > keys.length;
@@ -135,7 +136,7 @@ export async function GET(req: NextRequest) {
     data: {
       // A partial key sample can never establish whole-guild health.
       state:
-        totalKeys === 0
+        totalKeys === 0 && issueCount === 0
           ? 'empty'
           : issueCount > 0 || keySampleTruncated
             ? 'needs_attention'

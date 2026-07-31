@@ -76,6 +76,7 @@ vi.mock('../features/automations/execution-logger.js', () => ({
 }));
 
 const mockMassHoldCreate = vi.fn();
+const mockMassFindByOccurrence = vi.fn();
 const mockMassHoldNotice = vi.fn().mockResolvedValue(undefined);
 const mockMassThreshold = vi.fn().mockResolvedValue(25);
 const mockMassClaimApproved = vi.fn().mockResolvedValue(null);
@@ -93,6 +94,7 @@ vi.mock('../features/automations/mass-action-hold.js', () => ({
     failInterruptedExecutions = mockFailInterruptedExecutions;
     threshold = mockMassThreshold;
     create = mockMassHoldCreate;
+    findByOccurrence = mockMassFindByOccurrence;
     ensureOwnerNotice = mockMassHoldNotice;
     claimApproved = mockMassClaimApproved;
     complete = mockMassComplete;
@@ -189,6 +191,7 @@ describe('AutomationEngine', () => {
         threshold: 25,
       },
     });
+    mockMassFindByOccurrence.mockResolvedValue(null);
     mockMassHoldNotice.mockResolvedValue(undefined);
     mockMassClaimApproved.mockResolvedValue(null);
     mockMassComplete.mockResolvedValue(undefined);
@@ -237,6 +240,14 @@ describe('AutomationEngine', () => {
         automation_id: 'auto1',
       }]);
       mockMassHoldNotice.mockRejectedValueOnce(new Error('Missing Permissions'));
+
+      await expect(engine.start()).resolves.toBeUndefined();
+      expect(eventBus.onAny).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps ordinary automations online when hold recovery scans fail', async () => {
+      mockMassListHeld.mockRejectedValueOnce(new Error('held read unavailable'));
+      mockMassListApproved.mockRejectedValueOnce(new Error('approved read unavailable'));
 
       await expect(engine.start()).resolves.toBeUndefined();
       expect(eventBus.onAny).toHaveBeenCalledTimes(1);
@@ -306,6 +317,27 @@ describe('AutomationEngine', () => {
       expect(mockMassHoldCreate).not.toHaveBeenCalled();
     });
 
+    it('releases the occurrence claim only after proving a failed hold insert did not commit', async () => {
+      mockGetForTrigger.mockReturnValue([
+        makeAutomation({
+          actions: [{ type: 'give_role', config: { role_id: 'role1' } }],
+        }),
+      ]);
+      mockMassThreshold.mockResolvedValueOnce(1);
+      mockMassHoldCreate.mockRejectedValueOnce(new Error('insert unavailable'));
+      mockMassFindByOccurrence.mockResolvedValueOnce(null);
+      await engine.start();
+      eventBus.fire({
+        type: 'giveaway.ended',
+        guildId: 'g1',
+        data: { winnerIds: ['10000000000000000', '10000000000000001'] },
+      });
+
+      await vi.waitFor(() => expect(mockRelease).toHaveBeenCalledWith('exec-1'));
+      expect(mockMassFindByOccurrence).toHaveBeenCalledWith('auto1', expect.any(String));
+      expect(mockMassHoldNotice).not.toHaveBeenCalled();
+    });
+
     it('preserves configured action order while fanning member actions out', async () => {
       mockGetForTrigger.mockReturnValue([
         makeAutomation({
@@ -333,6 +365,7 @@ describe('AutomationEngine', () => {
         'remove_role',
         'remove_role',
       ]);
+      expect(mockExecuteActions.mock.calls.map((call) => call[2])).toEqual([0, 0, 1, 2, 2]);
     });
 
     it('applies user include and exclude scopes to each resolved bulk member', async () => {

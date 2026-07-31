@@ -52,6 +52,7 @@ function message(send: ReturnType<typeof vi.fn>, id: string) {
 describe('message-log recovery boundary', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    raiseOwnerAlert.mockReset().mockResolvedValue({ inserted: true, delivered: false });
     resolveOwnerAlert.mockReset().mockResolvedValue(undefined);
     invalidateMessageLogCache();
   });
@@ -84,6 +85,37 @@ describe('message-log recovery boundary', () => {
     expect(send).toHaveBeenCalledTimes(2);
     expect(resolveOwnerAlert.mock.calls.filter(
       (call) => call[2] === 'message_log_delivery_failed',
+    )).toHaveLength(1);
+  });
+
+  it('retries owner notification while emitting the degraded transition once', async () => {
+    const send = vi.fn().mockRejectedValue(Object.assign(new Error('forbidden'), { status: 403 }));
+    raiseOwnerAlert
+      .mockResolvedValueOnce({ inserted: false, delivered: false })
+      .mockResolvedValueOnce({ inserted: true, delivered: false });
+    const client = {
+      supabase: {
+        from: vi.fn(() => chain({
+          data: {
+            message_log_enabled: true,
+            message_log_channel_id: 'log-ch',
+            message_log_edits_enabled: true,
+            message_log_deletes_enabled: true,
+            message_log_ignored_channel_ids: [],
+          },
+          error: null,
+        })),
+      },
+      eventBus: { emit: vi.fn() },
+      guilds: { cache: new Map() },
+    };
+
+    await logMessageDelete(client as any, message(send, 'failed-1'));
+    await logMessageDelete(client as any, message(send, 'failed-2'));
+
+    expect(raiseOwnerAlert).toHaveBeenCalledTimes(2);
+    expect(client.eventBus.emit.mock.calls.filter(
+      (call) => call[0] === 'message_log.delivery_failed',
     )).toHaveLength(1);
   });
 });

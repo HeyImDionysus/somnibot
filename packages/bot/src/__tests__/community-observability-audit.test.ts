@@ -297,6 +297,36 @@ describe('community-statistics-channels audit', () => {
     expect(failures).toHaveLength(1);
   });
 
+  it('retries an undelivered stats owner alert without duplicating the transition event', async () => {
+    const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
+    const eventBus = bus();
+    const cfg = {
+      id: 'sc-fail', guild_id: 'g1', channel_id: 'vc1', stat_type: 'custom_counter',
+      stat_config: { value: 42 }, name_format: 'Members: {value}', active: true, last_value: null,
+    };
+    const supa = makeSupa({
+      stats_channels: { data: [cfg], error: null },
+      alerts: { data: null, error: { message: 'alerts unavailable' } },
+      guild_config: { data: null, error: null },
+    });
+    const channel = { setName: vi.fn(async () => { throw new Error('Missing Permissions'); }) };
+    const guild: any = {
+      id: 'g1', memberCount: 5, premiumSubscriptionCount: 0,
+      channels: { cache: new Map([['vc1', channel]]) },
+      roles: { cache: new Map() },
+      members: { fetch: vi.fn(async () => {}), cache: { filter: () => ({ size: 0 }) } },
+    };
+    const mgr = new StatsChannelManager(guild, supa, 10, eventBus);
+
+    await mgr.reload();
+    await mgr.reload();
+
+    expect(supa.from.mock.calls.filter((call: unknown[]) => call[0] === 'alerts')).toHaveLength(2);
+    expect(eventBus.emit.mock.calls.filter(
+      (call: unknown[]) => call[0] === 'stats_channel.update_failed',
+    )).toHaveLength(1);
+  });
+
   it('does not classify alert-recovery failure as a counter update failure', async () => {
     const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
     const eventBus = bus();

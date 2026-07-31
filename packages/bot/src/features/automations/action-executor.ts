@@ -55,6 +55,7 @@ export interface ActionResult {
 export async function executeActions(
   actions: AutomationAction[],
   ctx: ActionContext,
+  actionIndexOffset = 0,
 ): Promise<{ executed: number; failed: number; errors: string[] }> {
   let executed = 0;
   let failed = 0;
@@ -67,7 +68,7 @@ export async function executeActions(
     }
 
     try {
-      const result = await executeAction(action, ctx, actionIndex);
+      const result = await executeAction(action, ctx, actionIndex + actionIndexOffset);
       if (result.success) {
         executed++;
       } else {

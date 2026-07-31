@@ -32,6 +32,7 @@ export class StatsChannelManager {
   private timer: NodeJS.Timeout | null = null;
   private intervalMs: number;
   private degradedChannels = new Set<string>();
+  private alertedDegradedChannels = new Set<string>();
   private recoveryChecked = new Set<string>();
 
   constructor(
@@ -214,16 +215,18 @@ export class StatsChannelManager {
   }
 
   private async raiseUpdateFailedAlert(config: StatsChannelConfig, error: unknown): Promise<void> {
-    if (this.degradedChannels.has(config.id)) return;
-    this.degradedChannels.add(config.id);
+    if (this.alertedDegradedChannels.has(config.id)) return;
     const message = error instanceof Error ? error.message : String(error);
-    this.eventBus.emit('stats_channel.update_failed', this.guild.id, {
-      statChannelId: config.id,
-      channelId: config.channel_id,
-      statType: config.stat_type,
-      error: message,
-    });
-    await raiseOwnerAlert(this.supabase, this.guild.id, {
+    if (!this.degradedChannels.has(config.id)) {
+      this.degradedChannels.add(config.id);
+      this.eventBus.emit('stats_channel.update_failed', this.guild.id, {
+        statChannelId: config.id,
+        channelId: config.channel_id,
+        statType: config.stat_type,
+        error: message,
+      });
+    }
+    const result = await raiseOwnerAlert(this.supabase, this.guild.id, {
       alertType: 'stats_channel_update_failed',
       severity: 'warning',
       title: 'Stats counter update failed',
@@ -239,7 +242,11 @@ export class StatsChannelManager {
       guild: this.guild,
     }).catch((alertErr) => {
       log.error('Failed to write stats-channel update alert:', { error: String(alertErr) });
+      return { inserted: false, insertErrorCode: undefined, delivered: false };
     });
+    if (result.inserted || result.insertErrorCode === '23505' || result.delivered) {
+      this.alertedDegradedChannels.add(config.id);
+    }
   }
 
   private async resolveUpdateAlerts(config: StatsChannelConfig): Promise<void> {
@@ -267,6 +274,7 @@ export class StatsChannelManager {
     }
     this.recoveryChecked.add(config.id);
     this.degradedChannels.delete(config.id);
+    this.alertedDegradedChannels.delete(config.id);
   }
 
   private async gatherStats(): Promise<Record<string, string>> {

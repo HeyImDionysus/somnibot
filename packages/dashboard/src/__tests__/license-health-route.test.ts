@@ -12,7 +12,7 @@ import { buildRequest, mockAuthSuccess, mockRateLimitPass } from './helpers';
 
 function query(result: { data: unknown; error: unknown; count?: number }) {
   const chain: Record<string, unknown> = {};
-  for (const method of ['select', 'eq', 'order', 'limit', 'in', 'gte', 'is', 'ilike']) {
+  for (const method of ['select', 'eq', 'order', 'limit', 'in', 'gte', 'is', 'ilike', 'or']) {
     chain[method] = vi.fn(() => chain);
   }
   chain.then = (
@@ -120,6 +120,52 @@ describe('GET /api/license/health', () => {
       deviceLimit24h: 1,
     });
     expect(body.data.unresolvedAlerts).toHaveLength(1);
+  });
+
+  it('treats invalid validation traffic as a health issue', async () => {
+    setup({
+      license_validations: {
+        data: [
+          { id: 'v1', license_key_id: '00000000-0000-0000-0000-000000000001', result: 'invalid_key', created_at: '2026-07-30T00:00:00Z' },
+        ],
+        error: null,
+        count: 1,
+      },
+    });
+
+    const body = await (await GET(buildRequest('/api/license/health') as never)).json();
+    expect(body.data).toMatchObject({
+      state: 'needs_attention',
+      invalid24h: 1,
+    });
+  });
+
+  it('surfaces commerce license-delivery alerts even when no keys remain', async () => {
+    const supabase = setup({
+      license_keys: { data: [], error: null, count: 0 },
+      alerts: {
+        data: [{
+          id: 'a1',
+          alert_type: 'commerce_missing_license_delivery',
+          severity: 'critical',
+          title: 'Missing license delivery',
+          created_at: '2026-07-30T00:00:00Z',
+        }],
+        error: null,
+      },
+    });
+
+    const body = await (await GET(buildRequest('/api/license/health') as never)).json();
+    expect(body.data).toMatchObject({
+      state: 'needs_attention',
+      totalKeys: 0,
+    });
+    expect(body.data.unresolvedAlerts).toHaveLength(1);
+    const alertsCallIndex = supabase.from.mock.calls.findIndex((call) => call[0] === 'alerts');
+    const alertsQuery = supabase.from.mock.results[alertsCallIndex].value;
+    expect(alertsQuery.or).toHaveBeenCalledWith(
+      'alert_type.ilike.license%,alert_type.eq.commerce_missing_license_delivery',
+    );
   });
 
   it('fails closed when a required health dependency cannot be read', async () => {

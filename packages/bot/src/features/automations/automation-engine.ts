@@ -143,6 +143,29 @@ export class AutomationEngine {
       log.error('Failed to reconcile interrupted mass actions:', err);
     }
     this.loader.subscribe();
+
+    // Register ordinary event handling before best-effort hold recovery. A
+    // transient recovery read must never leave every automation offline.
+    this.eventHandler = async (event: PlatformEvent) => {
+      if (event.guildId !== this.guild.id) return;
+      if (
+        event.data !== null
+        && typeof event.data === 'object'
+        && this._specializedEventData.delete(event.data as object)
+      ) {
+        return;
+      }
+      if (event._chainDepth === undefined && this._activeDepths.size > 0) {
+        let maxDepth = 0;
+        for (const d of this._activeDepths.values()) {
+          if (d > maxDepth) maxDepth = d;
+        }
+        if (maxDepth > 0) event._chainDepth = maxDepth;
+      }
+      await this.handleEvent(event);
+    };
+    this.eventBus.onAny(this.eventHandler);
+
     try {
       await this.massActionHolds.subscribe((holdId) => {
         void this.runApprovedHold(holdId).catch((err) => {
@@ -159,10 +182,18 @@ export class AutomationEngine {
     // Discord send committed before the DB acknowledgement are discovered by
     // their stable footer; approved rows are atomically claimed so multiple
     // bot instances or reconnects cannot execute the same release twice.
-    const [held, approved] = await Promise.all([
+    const [heldResult, approvedResult] = await Promise.allSettled([
       this.massActionHolds.listHeld(),
       this.massActionHolds.listApproved(),
     ]);
+    const held = heldResult.status === 'fulfilled' ? heldResult.value : [];
+    const approved = approvedResult.status === 'fulfilled' ? approvedResult.value : [];
+    if (heldResult.status === 'rejected') {
+      log.error('Failed to scan held mass actions during recovery:', heldResult.reason);
+    }
+    if (approvedResult.status === 'rejected') {
+      log.error('Failed to scan approved mass actions during recovery:', approvedResult.reason);
+    }
     await Promise.all(held.map(async (hold) => {
       try {
         const name = await this.automationName(hold.automation_id);
@@ -183,31 +214,6 @@ export class AutomationEngine {
         log.error(`Failed to recover approved mass-action hold ${hold.id}:`, err);
       }
     }));
-
-    // Listen to ALL platform events and check for matching automations.
-    // V10 Audit §2: If an event arrives without _chainDepth but there are
-    // active automation executions, inherit the highest active depth.
-    // This handles side-effect events (e.g., role.gained from give_role)
-    // that round-trip through Discord and lose async context.
-    this.eventHandler = async (event: PlatformEvent) => {
-      if (event.guildId !== this.guild.id) return;
-      if (
-        event.data !== null
-        && typeof event.data === 'object'
-        && this._specializedEventData.delete(event.data as object)
-      ) {
-        return;
-      }
-      if (event._chainDepth === undefined && this._activeDepths.size > 0) {
-        let maxDepth = 0;
-        for (const d of this._activeDepths.values()) {
-          if (d > maxDepth) maxDepth = d;
-        }
-        if (maxDepth > 0) event._chainDepth = maxDepth;
-      }
-      await this.handleEvent(event);
-    };
-    this.eventBus.onAny(this.eventHandler);
 
     log.info('Started and listening for events');
   }
@@ -419,7 +425,7 @@ export class AutomationEngine {
       if (!claimRowId) {
         throw new Error('Mass-action occurrence could not obtain a durable execution claim');
       }
-      const { hold } = await this.massActionHolds.create({
+      const holdInput = {
         automationId: automation.id,
         executionId: claimRowId,
         occurrenceId: ctx.occurrenceId,
@@ -433,7 +439,24 @@ export class AutomationEngine {
           messageId: ctx.messageId,
           variables: ctx.variables,
         },
-      });
+      };
+      let hold: MassActionHoldRow;
+      try {
+        ({ hold } = await this.massActionHolds.create(holdInput));
+      } catch (error) {
+        // The insert response can fail after commit. Re-read by the unique
+        // occurrence identity before deciding whether the execution claim is
+        // safe to release.
+        const recovered = await this.massActionHolds.findByOccurrence(
+          automation.id,
+          ctx.occurrenceId,
+        );
+        if (!recovered) {
+          await this.executionLogger.release(claimRowId);
+          throw error;
+        }
+        hold = recovered;
+      }
       await this.massActionHolds.ensureOwnerNotice(hold, automation.name);
       log.warn(
         `Held "${automation.name}" occurrence ${ctx.occurrenceId}: ` +
@@ -815,9 +838,9 @@ export class AutomationEngine {
       total.errors.push(...result.errors);
     };
 
-    for (const action of actions) {
+    for (const [actionIndex, action] of actions.entries()) {
       if (!MEMBER_TARGETED_ACTIONS.has(action.type)) {
-        add(await executeActions([action], baseContext));
+        add(await executeActions([action], baseContext, actionIndex));
         continue;
       }
       for (const memberId of affectedMemberIds) {
@@ -840,7 +863,7 @@ export class AutomationEngine {
             user: `<@${member.id}>`,
             'user.name': member.displayName,
           },
-        }));
+        }, actionIndex));
       }
     }
     return total;

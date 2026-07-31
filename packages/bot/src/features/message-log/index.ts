@@ -64,6 +64,7 @@ const _degradedNotified = new Map<string, number>();
 // process lifetime closes rows raised before a restart.
 const _bootRecoveryDone = new Set<string>();
 const _deliveryDegraded = new Set<string>();
+const _deliveryAlerted = new Set<string>();
 const _deliveryRecoveryChecked = new Set<string>();
 
 /** Shallow value-equality for the audited config fields. */
@@ -239,10 +240,12 @@ async function notifyDeliveryFailure(
   channelId: string,
   error: string,
 ): Promise<void> {
-  if (_deliveryDegraded.has(guildId)) return;
-  _deliveryDegraded.add(guildId);
-  client.eventBus.emit('message_log.delivery_failed', guildId, { channelId, error });
-  await raiseOwnerAlert(client.supabase, guildId, {
+  if (_deliveryAlerted.has(guildId)) return;
+  if (!_deliveryDegraded.has(guildId)) {
+    _deliveryDegraded.add(guildId);
+    client.eventBus.emit('message_log.delivery_failed', guildId, { channelId, error });
+  }
+  const result = await raiseOwnerAlert(client.supabase, guildId, {
     alertType: 'message_log_delivery_failed',
     severity: 'warning',
     title: 'Message-log delivery failed',
@@ -254,6 +257,9 @@ async function notifyDeliveryFailure(
     metadata: { channel_id: channelId, error },
     client,
   });
+  if (result.inserted || result.insertErrorCode === '23505' || result.delivered) {
+    _deliveryAlerted.add(guildId);
+  }
 }
 
 async function noticeDeliveryRecovered(client: SomniClient, guildId: string): Promise<void> {
@@ -271,6 +277,7 @@ async function noticeDeliveryRecovered(client: SomniClient, guildId: string): Pr
   );
   _deliveryRecoveryChecked.add(guildId);
   _deliveryDegraded.delete(guildId);
+  _deliveryAlerted.delete(guildId);
 }
 
 async function sendLogEmbed(
@@ -439,6 +446,7 @@ export function invalidateMessageLogCache(guildId?: string): void {
     _degradedNotified.clear();
     _bootRecoveryDone.clear();
     _deliveryDegraded.clear();
+    _deliveryAlerted.clear();
     _deliveryRecoveryChecked.clear();
   }
 }

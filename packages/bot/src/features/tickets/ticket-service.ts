@@ -241,44 +241,87 @@ export async function createTicket(
     return { error: 'Failed to create ticket channel. Check bot permissions.' };
   }
 
-  // Build intro message
-  const introText =
-    ticketType.introMessageOverride ||
-    panel.introduction_message ||
-    `Welcome <@${member.id}>! A staff member will be with you shortly.`;
+  try {
+    // Build intro message
+    const introText =
+      ticketType.introMessageOverride ||
+      panel.introduction_message ||
+      `Welcome <@${member.id}>! A staff member will be with you shortly.`;
 
-  // White-label: member-facing ticket embeds carry the owner brand kit colors
-  // rather than the hardcoded SomniBot palette.
-  const brandKit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name });
+    // White-label: member-facing ticket embeds carry the owner brand kit colors
+    // rather than the hardcoded SomniBot palette.
+    const brandKit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name });
 
-  const introEmbed = new EmbedBuilder()
-    .setColor(brandKit.accentColor)
-    .setTitle(`🎫 Ticket #${ticketNumber} — ${ticketType.label}`)
-    .setDescription(
-      `${introText}\n\n💡 **Tip:** Include your order number (e.g., INS-00042) for faster assistance.`,
-    )
-    .setTimestamp()
-    .setFooter({ text: `Ticket created by ${member.user.tag}` });
+    const introEmbed = new EmbedBuilder()
+      .setColor(brandKit.accentColor)
+      .setTitle(`🎫 Ticket #${ticketNumber} — ${ticketType.label}`)
+      .setDescription(
+        `${introText}\n\n💡 **Tip:** Include your order number (e.g., INS-00042) for faster assistance.`,
+      )
+      .setTimestamp()
+      .setFooter({ text: `Ticket created by ${member.user.tag}` });
 
-  const actionRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`ticket:close:${ticketNumber}`)
-      .setLabel('Close Ticket')
-      .setEmoji('🔒')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(`ticket:claim:${ticketNumber}`)
-      .setLabel('Claim')
-      .setEmoji('🙋')
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId(`ticket:transcript:${ticketNumber}`)
-      .setLabel('Transcript')
-      .setEmoji('📋')
-      .setStyle(ButtonStyle.Secondary),
-  );
+    const actionRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`ticket:close:${ticketNumber}`)
+        .setLabel('Close Ticket')
+        .setEmoji('🔒')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`ticket:claim:${ticketNumber}`)
+        .setLabel('Claim')
+        .setEmoji('🙋')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`ticket:transcript:${ticketNumber}`)
+        .setLabel('Transcript')
+        .setEmoji('📋')
+        .setStyle(ButtonStyle.Secondary),
+    );
 
-  await channel.send({ embeds: [introEmbed], components: [actionRow] });
+    await channel.send({ embeds: [introEmbed], components: [actionRow] });
+  } catch (err) {
+    log.error('Failed to initialize ticket channel:', { error: String(err) });
+    let channelRemoved = false;
+    try {
+      await channel.delete();
+      channelRemoved = true;
+    } catch (deleteErr) {
+      log.error('Failed to remove uninitialized ticket channel:', {
+        channelId: channel.id,
+        error: String(deleteErr),
+      });
+    }
+    await reportTicketCreateFailure(supabase, eventBus, guild, {
+      userDiscordId: member.id,
+      panelId: panel.id,
+      ticketNumber,
+      stage: 'intro_send',
+      error: String(err),
+    });
+    if (occurrenceId) {
+      if (channelRemoved) {
+        await releaseDiscordOccurrence(supabase, occurrenceId).catch((releaseErr) => {
+          log.error('Failed to release ticket occurrence after channel cleanup:', {
+            error: String(releaseErr),
+          });
+        });
+      } else {
+        await failDiscordOccurrence(
+          supabase,
+          occurrenceId,
+          `intro_send:${String(err)}`,
+          channel.id,
+          { stage: 'intro_send', channelCleanupFailed: true },
+        ).catch((failErr) => {
+          log.error('Failed to record orphaned ticket channel occurrence:', {
+            error: String(failErr),
+          });
+        });
+      }
+    }
+    return { error: 'Failed to initialize ticket channel. Please try again.' };
+  }
 
   // Save ticket record
   const { data: ticket, error: dbError } = await supabase

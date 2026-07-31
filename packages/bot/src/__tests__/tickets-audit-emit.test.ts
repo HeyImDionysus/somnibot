@@ -85,6 +85,27 @@ describe('ticket creation failure observability', () => {
       expect.objectContaining({ alert_type: 'ticket_create_failed' }),
     );
   });
+
+  it('deletes the channel and reports failure when the intro message cannot be sent', async () => {
+    const emit = vi.fn();
+    const supa = makeCreateSupa();
+    const channel = {
+      id: 'tc1',
+      send: vi.fn().mockRejectedValue(new Error('Missing Permissions')),
+      delete: vi.fn().mockResolvedValue({}),
+    };
+    const guild = makeGuild(vi.fn().mockResolvedValue(channel));
+
+    const result = await createTicket(guild, member, panel, ticketType, supa, { emit } as any);
+
+    expect(result).toEqual({ error: 'Failed to initialize ticket channel. Please try again.' });
+    expect(channel.delete).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith(
+      'ticket.create_failed',
+      'g1',
+      expect.objectContaining({ panelId: 'panel-1', stage: 'intro_send' }),
+    );
+  });
 });
 
 const ticket = {

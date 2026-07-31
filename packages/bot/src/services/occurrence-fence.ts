@@ -80,11 +80,15 @@ export async function failDiscordOccurrence(
   supabase: SupabaseClient,
   occurrenceId: string,
   error: string,
+  resourceId: string | null = null,
+  result: Record<string, unknown> = {},
 ): Promise<void> {
   const { error: updateError } = await supabase
     .from('discord_operation_occurrences')
     .update({
       status: 'failed',
+      resource_id: resourceId,
+      result,
       last_error: error,
       completed_at: new Date().toISOString(),
     })

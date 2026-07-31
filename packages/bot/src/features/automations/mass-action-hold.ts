@@ -128,6 +128,23 @@ export class MassActionHoldService {
     return { created: false, hold: existing as MassActionHoldRow };
   }
 
+  async findByOccurrence(
+    automationId: string,
+    occurrenceId: string,
+  ): Promise<MassActionHoldRow | null> {
+    const { data, error } = await this.supabase
+      .from('automation_mass_action_holds')
+      .select('*')
+      .eq('guild_id', this.guild.id)
+      .eq('automation_id', automationId)
+      .eq('occurrence_id', occurrenceId)
+      .maybeSingle();
+    if (error) {
+      throw new Error(`Failed to verify mass-action hold persistence: ${error.message}`);
+    }
+    return (data as MassActionHoldRow | null) ?? null;
+  }
+
   async listHeld(): Promise<MassActionHoldRow[]> {
     const { data, error } = await this.supabase
       .from('automation_mass_action_holds')
