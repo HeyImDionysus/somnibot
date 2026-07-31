@@ -993,6 +993,7 @@ export class AutomationEngine {
           log.error('Failed to prune terminal mass-action holds:', err);
         }
       }
+      this.pruneExpiredDepthHints();
       const held = await this.massActionHolds.listHeldNeedingNotice();
       await Promise.all(held.map(async (hold) => {
         try {
@@ -1006,6 +1007,21 @@ export class AutomationEngine {
       log.error('Failed to scan held mass actions for notice retry:', err);
     } finally {
       this.heldNoticeRecoveryRunning = false;
+    }
+  }
+
+  /**
+   * Drop expired depth-hint entries. Recording and consumption both prune
+   * lazily, but a large FAILED hold whose members never emit another event
+   * would otherwise retain its entire target set until the next hold runs.
+   */
+  private pruneExpiredDepthHints(): void {
+    const now = Date.now();
+    for (const [key, queue] of this._holdMemberDepthHints) {
+      for (let index = queue.length - 1; index >= 0; index--) {
+        if (queue[index]!.expiresAt < now) queue.splice(index, 1);
+      }
+      if (queue.length === 0) this._holdMemberDepthHints.delete(key);
     }
   }
 
@@ -1071,13 +1087,6 @@ export class AutomationEngine {
       }
       for (const memberId of affectedMemberIds) {
         assertLease?.();
-        onMemberAction?.(
-          memberId,
-          action.type,
-          typeof (action.config as { role_id?: unknown } | undefined)?.role_id === 'string'
-            ? (action.config as { role_id: string }).role_id
-            : null,
-        );
         let member = memberCache.get(memberId);
         if (member === undefined) {
           member = this.guild.members.cache.get(memberId)
@@ -1089,7 +1098,7 @@ export class AutomationEngine {
           total.errors.push(`member ${memberId}: target no longer belongs to the guild`);
           continue;
         }
-        add(await executeActions([action], {
+        const memberResult = await executeActions([action], {
           ...baseContext,
           member,
           variables: {
@@ -1097,7 +1106,22 @@ export class AutomationEngine {
             user: `<@${member.id}>`,
             'user.name': member.displayName,
           },
-        }, actionIndex));
+        }, actionIndex);
+        add(memberResult);
+        // A depth hint exists to correlate the SIDE EFFECT of an action that
+        // actually ran. Recording before the member fetch/execution left
+        // hints behind for missing members and failed Discord calls, where a
+        // matching-but-unrelated event within the window would inherit a
+        // failed hold's depth.
+        if (memberResult.executed > 0 && memberResult.failed === 0) {
+          onMemberAction?.(
+            memberId,
+            action.type,
+            typeof (action.config as { role_id?: unknown } | undefined)?.role_id === 'string'
+              ? (action.config as { role_id: string }).role_id
+              : null,
+          );
+        }
       }
     }
     return total;

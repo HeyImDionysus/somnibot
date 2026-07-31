@@ -590,13 +590,8 @@ describe('AutomationEngine', () => {
       // MEMBER (one-shot hints), never published through the guild-wide
       // _activeDepths map — a long bulk run would otherwise tax every
       // unrelated event with the hold's depth.
-      const observedHints: Array<number | undefined> = [];
       const observedGlobalDepths: number[][] = [];
       mockExecuteActions.mockImplementation(async () => {
-        const hints = (engine as unknown as {
-          _holdMemberDepthHints: Map<string, Array<{ depth: number }>>;
-        })._holdMemberDepthHints;
-        observedHints.push(hints.get('10000000000000000')?.[0]?.depth);
         observedGlobalDepths.push([
           ...(engine as unknown as { _activeDepths: Map<string, number> })._activeDepths.values(),
         ]);
@@ -621,8 +616,12 @@ describe('AutomationEngine', () => {
       await (engine as unknown as { runApprovedHold(id: string): Promise<void> })
         .runApprovedHold('hold-depth');
 
-      // The persisted depth was hinted for the MEMBER being acted on…
-      expect(observedHints).toContain(4);
+      // The persisted depth was hinted for the MEMBER being acted on (hints
+      // are recorded once the member action SUCCEEDS, so observe after)…
+      const hints = (engine as unknown as {
+        _holdMemberDepthHints: Map<string, Array<{ depth: number }>>;
+      })._holdMemberDepthHints;
+      expect(hints.get('10000000000000000')?.[0]?.depth).toBe(4);
       // …and never published guild-wide, where it would tax unrelated events.
       expect(observedGlobalDepths.every((depths) => depths.length === 0)).toBe(true);
       expect(
@@ -1144,6 +1143,37 @@ describe('AutomationEngine', () => {
     it('resolves role.lost variables', async () => {
       const ctx = await fireAndCapture('role.lost', { discordId: 'u1', roleId: 'r1', roleName: 'Admin' });
       expect(ctx?.variables['role']).toBe('<@&r1>');
+    });
+
+    it('records no depth hint when the held member action fails (round 17)', async () => {
+      // A hint correlates the side effect of an action that RAN. A failed
+      // Discord call produces no side effect — leaving the hint queued let a
+      // matching-but-unrelated event within the window inherit the failed
+      // hold's depth and die at the chain guard.
+      mockExecuteActions.mockResolvedValue({ executed: 0, failed: 1, errors: ['boom'] });
+      mockMassClaimApproved.mockResolvedValue({
+        id: 'hold-failed-action',
+        automation_id: 'auto1',
+        execution_id: 'exec-1',
+        occurrence_id: '10000000-0000-8000-8000-000000000005',
+        member_ids: ['10000000000000000'],
+        member_count: 1,
+        threshold: 1,
+        trigger_event: 'member.verified',
+        triggered_by: 'system',
+        action_snapshot: [{ type: 'give_role', config: { role_id: 'role1' } }],
+        context_snapshot: { channelId: null, messageId: null, variables: {}, chainDepth: 2 },
+      });
+      (engine as unknown as { automationName(id: string): Promise<string> }).automationName =
+        vi.fn().mockResolvedValue('Test Automation');
+
+      await (engine as unknown as { runApprovedHold(id: string): Promise<void> })
+        .runApprovedHold('hold-failed-action');
+
+      expect(
+        (engine as unknown as { _holdMemberDepthHints: Map<string, unknown> })
+          ._holdMemberDepthHints.size,
+      ).toBe(0);
     });
 
     it('gives level.up NO durable occurrence identity (round 16)', async () => {

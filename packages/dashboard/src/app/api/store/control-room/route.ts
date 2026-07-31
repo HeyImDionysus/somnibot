@@ -257,10 +257,14 @@ export async function GET(req: NextRequest) {
 
     if (order.status === 'pending_review') reasons.push('Payment is held for operator review.');
     if (hold) reasons.push(`Fulfillment is held: ${String(hold.hold_reason).replaceAll('_', ' ')}.`);
-    if (!entitlement && age > 15 * 60 * 1_000) {
+    // Post-payment SLAs only start once payment actually COMPLETED: a
+    // pending_review order is expectedly unfulfilled (the branch above
+    // already explains the hold) and must not read as a delivery failure.
+    const paymentCompleted = order.status === 'completed';
+    if (paymentCompleted && !entitlement && age > 15 * 60 * 1_000) {
       reasons.push('No entitlement was recorded within 15 minutes of payment.');
     }
-    if (licenseRequired && !key && age > 15 * 60 * 1_000) {
+    if (paymentCompleted && licenseRequired && !key && age > 15 * 60 * 1_000) {
       reasons.push('No license key was issued within 15 minutes of payment.');
     }
     // The 24-hour download window starts when the customer can actually
@@ -271,7 +275,8 @@ export async function GET(req: NextRequest) {
       now,
     );
     if (
-      downloadRequired
+      paymentCompleted
+      && downloadRequired
       && downloadEvidenceAvailable
       && !download
       && fulfillmentAge > 24 * 60 * 60 * 1_000
