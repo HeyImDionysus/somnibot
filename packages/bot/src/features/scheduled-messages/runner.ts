@@ -231,24 +231,29 @@ export class ScheduledMessageRunner {
 
     for (const schedule of this.schedules) {
       try {
-        // Check date bounds
-        if (schedule.start_date && new Date(schedule.start_date) > now) continue;
-        if (schedule.end_date && new Date(schedule.end_date) < now) continue;
-
-        // Recover the last counted minute if its claim is stale — for EVERY
-        // schedule, not only exhausted ones. A holder that crashed after
+        // Recover the last counted minute if its claim is stale — BEFORE any
+        // guard can `continue` past it. A holder that crashed after
         // `claim_scheduled_message_send` advanced the counter but before the
         // send leaves nothing that revisits the old occurrence key: later
         // ticks construct new due minutes, and missed-run handling reads the
-        // advanced `last_sent_at` as a delivered baseline. Without this probe
-        // the claimed occurrence and its missing delivery stay unreconciled
-        // forever on any schedule with remaining sends. (An in-memory cache of
-        // confirmed-terminal keys keeps the steady-state cost at zero.)
+        // advanced `last_sent_at` as a delivered baseline. The ordering
+        // matters for every guard below: an exhausted schedule skips at the
+        // max_sends check, and a schedule whose END DATE passed while its
+        // final claim sat stale skips at the date bounds — the claim only
+        // becomes reclaimable five minutes after the crash, and the window
+        // can close in the meantime. Recovering an ALREADY-COUNTED minute is
+        // legitimate regardless of the window having since closed; ordinary
+        // new sends remain fully bounded by the guards below. (An in-memory
+        // cache of confirmed-terminal keys keeps the steady-state cost zero.)
         await this.recoverUnconfirmedLastSend(schedule).catch((err) => {
           log.error(`Stale-claim recovery failed for schedule ${schedule.id}:`, {
             error: String(err),
           });
         });
+
+        // Check date bounds
+        if (schedule.start_date && new Date(schedule.start_date) > now) continue;
+        if (schedule.end_date && new Date(schedule.end_date) < now) continue;
 
         // Check max sends
         if (schedule.max_sends != null && schedule.current_sends >= schedule.max_sends) continue;

@@ -456,3 +456,83 @@ describe('ScheduledMessageRunner — recovery is not gated on exhaustion', () =>
     expect(updates.some((u) => u.payload.status === 'failed')).toBe(false);
   });
 });
+
+describe('ScheduledMessageRunner — recovery outruns the date bounds', () => {
+  it('delivers a crashed final send even after the schedule end date has passed', async () => {
+    // The crash window near an end date: the holder reserved the FINAL minute
+    // inside the window, advanced the counter, and died. The claim only turns
+    // reclaimable five minutes later — by which time end_date has passed, and
+    // the date guard used to `continue` before recovery could run. The final
+    // message stayed undelivered and its claim stranded, forever.
+    const Runner = await loadRunner();
+    const crashedMinute = new Date(Math.floor((Date.now() - 10 * 60_000) / 60_000) * 60_000)
+      .toISOString();
+    const staleAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    const { supabase, updates } = schedSupa(
+      [{
+        ...BASE_SCHEDULE,
+        end_date: new Date(Date.now() - 2 * 60_000).toISOString(), // window closed
+        max_sends: 5,
+        current_sends: 5, // the crashed reservation consumed the final slot
+        last_sent_at: crashedMinute,
+      }],
+      {
+        existingOccurrence: {
+          id: 'occ-final', guild_id: 'g1', operation_kind: 'scheduled_message',
+          occurrence_key: 'k-final', status: 'claimed',
+          claimed_at: staleAt, updated_at: staleAt,
+          resource_id: null, result: {}, last_error: null,
+        },
+        reclaimResult: true,
+        priorCounterRow: { current_sends: 5, last_sent_at: crashedMinute },
+      },
+    );
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+
+    await (runner as any).tick();
+
+    // The already-counted minute is delivered despite the closed window…
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(updates.some((u) => u.payload.status === 'completed')).toBe(true);
+    // …and no NEW counter slot is claimed for it.
+    const rpcNames = (supabase.rpc as any).mock.calls.map((c: any[]) => c[0]);
+    expect(rpcNames).not.toContain('claim_scheduled_message_send');
+  });
+
+  it('never uses recovery to sneak a NEW send past a closed window', async () => {
+    // Same closed window, but the last counted minute completed cleanly.
+    // Recovery must do nothing, and the date guard must keep blocking new
+    // sends exactly as before.
+    const Runner = await loadRunner();
+    const doneMinute = new Date(Math.floor((Date.now() - 10 * 60_000) / 60_000) * 60_000)
+      .toISOString();
+    const { supabase } = schedSupa(
+      [{
+        ...BASE_SCHEDULE,
+        end_date: new Date(Date.now() - 2 * 60_000).toISOString(),
+        max_sends: 5,
+        current_sends: 3,
+        last_sent_at: doneMinute,
+      }],
+      {
+        existingOccurrence: {
+          id: 'occ-done', guild_id: 'g1', operation_kind: 'scheduled_message',
+          occurrence_key: 'k-done', status: 'completed',
+          claimed_at: doneMinute, updated_at: doneMinute,
+          resource_id: 'msg-1', result: {}, last_error: null,
+        },
+        reclaimResult: true,
+      },
+    );
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+
+    await (runner as any).tick();
+
+    expect(send).not.toHaveBeenCalled();
+    const rpcNames = (supabase.rpc as any).mock.calls.map((c: any[]) => c[0]);
+    expect(rpcNames).not.toContain('reclaim_stale_discord_occurrence');
+    expect(rpcNames).not.toContain('claim_scheduled_message_send');
+  });
+});
