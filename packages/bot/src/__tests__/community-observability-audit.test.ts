@@ -386,7 +386,7 @@ describe('community-scheduled-messages audit', () => {
         },
         error: null,
       },
-    });
+    }, vi.fn(async () => ({ data: 1, error: null })));
     const runner = new ScheduledMessageRunner(guild, supa, eventBus);
 
     await (runner as any).sendMessage({

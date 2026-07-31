@@ -5,7 +5,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 
 type StageState = 'complete' | 'pending' | 'unknown' | 'not_applicable';
-const DOWNLOAD_LEDGER_AVAILABLE_AT_MS = Date.parse('2026-07-30T03:10:00.000Z');
+const DOWNLOAD_LEDGER_CUTOVER_KEY = 'commerce_download_ledger_available_at';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -108,13 +108,16 @@ export async function GET(req: NextRequest) {
     }
   })();
 
-  const [keys, entitlements, downloads, holds, customers, products] = await Promise.all([
-    supabase
-      .from('license_keys')
-      .select('id, order_id, customer_id, product_id, status, activated_at, created_at')
-      .eq('guild_id', guildId)
-      .in('order_id', orderIds)
-      .limit(500),
+  const liveKeysPromise = supabase
+    .from('license_keys')
+    .select('id, order_id, customer_id, product_id, status, activated_at, created_at')
+    .eq('guild_id', guildId)
+    .in('order_id', orderIds)
+    .in('status', ['pending_activation', 'active', 'suspended'])
+    .limit(200);
+
+  const [keys, entitlements, downloads, holds, customers, products, downloadCutover] = await Promise.all([
+    liveKeysPromise,
     supabase
       .from('entitlements')
       .select('id, order_id, customer_id, product_id, status, created_at')
@@ -144,6 +147,11 @@ export async function GET(req: NextRequest) {
           .eq('guild_id', guildId)
           .in('id', productIds)
           .limit(200),
+    supabase
+      .from('instance_settings')
+      .select('value')
+      .eq('key', DOWNLOAD_LEDGER_CUTOVER_KEY)
+      .maybeSingle(),
   ]);
 
   const dependencies = [
@@ -163,6 +171,15 @@ export async function GET(req: NextRequest) {
       );
     }
   }
+  if (downloadCutover.error) {
+    return dbError(downloadCutover.error, 'store/control-room/download-cutover');
+  }
+  if (downloadCutover.data !== null && !isRecord(downloadCutover.data)) {
+    return NextResponse.json(
+      { success: false, error: 'Store control-room download cutover data is malformed' },
+      { status: 500 },
+    );
+  }
 
   // The loop above runtime-validates every dependency as an object array.
   const keyRows = keys.data as Record<string, unknown>[];
@@ -171,6 +188,10 @@ export async function GET(req: NextRequest) {
   const holdRows = holds.data as Record<string, unknown>[];
   const customerRows = customers.data as Record<string, unknown>[];
   const productRows = products.data as Record<string, unknown>[];
+  const downloadCutoverAtMs = isRecord(downloadCutover.data)
+    && typeof downloadCutover.data.value === 'string'
+    ? Date.parse(downloadCutover.data.value)
+    : Number.NaN;
   const keyByOrder = new Map(keyRows.map((row) => [row.order_id, row]));
   const entitlementByOrder = new Map(entitlementRows.map((row) => [row.order_id, row]));
   const downloadByOrder = new Map(downloadRows.map((row) => [row.order_id, row]));
@@ -192,7 +213,8 @@ export async function GET(req: NextRequest) {
       typeof order.created_at === 'string' ? Date.parse(order.created_at) : Number.NaN;
     const downloadEvidenceAvailable =
       Number.isFinite(orderCreatedAtMs)
-      && orderCreatedAtMs >= DOWNLOAD_LEDGER_AVAILABLE_AT_MS;
+      && Number.isFinite(downloadCutoverAtMs)
+      && orderCreatedAtMs >= downloadCutoverAtMs;
     const reasons: string[] = [];
 
     if (order.status === 'pending_review') reasons.push('Payment is held for operator review.');

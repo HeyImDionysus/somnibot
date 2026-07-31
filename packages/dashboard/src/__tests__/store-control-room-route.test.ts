@@ -17,6 +17,7 @@ function query(result: Result) {
   for (const method of ['select', 'eq', 'in', 'order', 'limit']) {
     chain[method] = vi.fn(() => chain);
   }
+  chain.maybeSingle = vi.fn(() => Promise.resolve(result));
   chain.range = vi.fn((from: number, to: number) => Promise.resolve({
     ...result,
     data: Array.isArray(result.data) ? result.data.slice(from, to + 1) : result.data,
@@ -87,6 +88,10 @@ function setup(overrides: Partial<Record<string, Result>> = {}) {
     },
     products: {
       data: [{ id: PRODUCT, guild_id: 'guild-1', name: 'Pro Bundle' }],
+      error: null,
+    },
+    instance_settings: {
+      data: { value: '2026-07-30T03:10:00.000Z' },
       error: null,
     },
     ...overrides,
@@ -174,6 +179,37 @@ describe('GET /api/store/control-room', () => {
       'No completed download was recorded within 24 hours.',
     );
     expect(body.data.customers[0].stuck).toBe(false);
+  });
+
+  it('uses the persisted deployment cutover instead of the migration filename time', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-02T12:00:00.000Z'));
+    setup({
+      orders: {
+        data: [{
+          id: ORDER,
+          order_number: 'ORD-BETWEEN-MIGRATION-AND-DEPLOY',
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'completed',
+          delivery_type_snapshot: 'file',
+          created_at: '2026-07-30T04:00:00.000Z',
+        }],
+        error: null,
+        count: 1,
+      },
+      commerce_download_deliveries: { data: [], error: null },
+      instance_settings: {
+        data: { value: '2026-07-30T08:00:00.000Z' },
+        error: null,
+      },
+    });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+    expect(body.data.customers[0].stages.downloaded).toBe('unknown');
+    expect(body.data.customers[0].reasons).not.toContain(
+      'No completed download was recorded within 24 hours.',
+    );
   });
 
   it('fails closed when any required pipeline source errors', async () => {

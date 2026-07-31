@@ -386,7 +386,9 @@ describe('TicketService', () => {
   };
 
   function ticketSupa(tickets: any[] = [], ticket: any = null) {
+    const deletedOccurrences: string[] = [];
     return {
+      _deletedOccurrences: deletedOccurrences,
       from: vi.fn((table: string) => {
         if (table === 'tickets') {
           const c = chainAsync(tickets, tickets.length);
@@ -405,6 +407,24 @@ describe('TicketService', () => {
         }
         if (table === 'ticket_panels') return chain(panel);
         if (table === 'guild_config') return chain({ ticket_log_channel_id: 'ch1' });
+        if (table === 'discord_operation_occurrences') {
+          const occurrence = {
+            id: 'occ-ticket-1',
+            guild_id: 'g1',
+            operation_kind: 'ticket',
+            occurrence_key: 'ticket-click-1',
+            status: 'claimed',
+            resource_id: null,
+            result: {},
+            last_error: null,
+          };
+          const c = chain(occurrence);
+          c.delete = vi.fn(() => {
+            deletedOccurrences.push(occurrence.id);
+            return c;
+          });
+          return c;
+        }
         return chain(null);
       }),
       rpc: vi.fn(async (fn: string) => {
@@ -424,6 +444,30 @@ describe('TicketService', () => {
     } as any;
     const result = await createTicket(g, member, panel as any, ticketType as any, ticketSupa(), eb());
     expect(result).toBeDefined();
+  });
+
+  it('releases a claimed occurrence when the member is already at the open-ticket limit', async () => {
+    const { createTicket } = await import('../features/tickets/ticket-service.js');
+    const g = guild();
+    const member = {
+      id: 'u1', user: { id: 'u1', username: 'User', tag: 'User#0001' },
+      displayName: 'User', guild: g,
+      permissions: { has: () => true },
+    } as any;
+    const supa = ticketSupa([{ id: 't1' }, { id: 't2' }, { id: 't3' }]);
+
+    const result = await createTicket(
+      g,
+      member,
+      panel as any,
+      ticketType as any,
+      supa,
+      eb(),
+      'ticket-click-1',
+    );
+
+    expect(result).toEqual({ error: 'You already have 3 open ticket(s). Maximum is 3.' });
+    expect(supa._deletedOccurrences).toEqual(['occ-ticket-1']);
   });
 
   it('closeTicket', async () => {

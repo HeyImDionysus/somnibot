@@ -77,6 +77,49 @@ describe('durable Discord occurrence fences', () => {
     expect(retry.occurrence.id).not.toBe(first.occurrence.id);
   });
 
+  it('atomically grants only one final scheduled-message send slot across occurrences', async () => {
+    const schedule = await supa.from('scheduled_messages').insert({
+      guild_id: guildId,
+      name: 'Atomic final-slot proof',
+      channel_id: '12345678901234567',
+      message: 'proof',
+      cron_expression: '* * * * *',
+      timezone: 'UTC',
+      max_sends: 1,
+      current_sends: 0,
+      active: true,
+      status: 'active',
+    }).select('id').single();
+    expect(schedule.error).toBeNull();
+
+    const claims = await Promise.all([
+      supa.rpc('claim_scheduled_message_send', {
+        p_schedule_id: schedule.data!.id,
+        p_guild_id: guildId,
+        p_occurrence_at: '2026-07-30T12:00:00.000Z',
+      }),
+      supa.rpc('claim_scheduled_message_send', {
+        p_schedule_id: schedule.data!.id,
+        p_guild_id: guildId,
+        p_occurrence_at: '2026-07-30T12:01:00.000Z',
+      }),
+    ]);
+    expect(claims.every((claim) => claim.error === null)).toBe(true);
+    expect(claims.filter((claim) => claim.data === 1)).toHaveLength(1);
+    expect(claims.filter((claim) => claim.data === null)).toHaveLength(1);
+
+    const persisted = await supa
+      .from('scheduled_messages')
+      .select('current_sends,last_sent_at')
+      .eq('id', schedule.data!.id)
+      .single();
+    expect(persisted.data?.current_sends).toBe(1);
+    expect([
+      '2026-07-30T12:00:00+00:00',
+      '2026-07-30T12:01:00+00:00',
+    ]).toContain(persisted.data?.last_sent_at);
+  });
+
   it('prunes only unreferenced terminal fences outside the retention window', async () => {
     const oldTimestamp = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000).toISOString();
     const recentTimestamp = new Date().toISOString();

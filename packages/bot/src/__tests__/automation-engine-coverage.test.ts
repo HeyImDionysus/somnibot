@@ -357,6 +357,32 @@ describe('AutomationEngine', () => {
       expect(targetIds).toEqual(['10000000000000000']);
     });
 
+    it('evaluates member conditions independently for every resolved bulk target', async () => {
+      mockGetForTrigger.mockReturnValue([
+        makeAutomation({
+          actions: [{ type: 'give_role', config: { role_id: 'role1' } }],
+          conditions: [{ type: 'user_is', config: { value: '10000000000000000' } }],
+        }),
+      ]);
+      mockEvaluateConditions.mockImplementation(async (conditions, ctx) => {
+        if (conditions.length === 0) return true;
+        return ctx.member?.id === '10000000000000000';
+      });
+      await engine.start();
+      eventBus.fire({
+        type: 'giveaway.ended',
+        guildId: 'g1',
+        data: {
+          winnerIds: ['10000000000000000', '10000000000000001'],
+        },
+      });
+
+      await vi.waitFor(() => expect(mockFinalize).toHaveBeenCalled());
+      const targetIds = mockExecuteActions.mock.calls.map((call) => call[1].member?.id);
+      expect(targetIds).toEqual(['10000000000000000']);
+      expect(mockEvaluateConditions).toHaveBeenCalledTimes(3);
+    });
+
     it('atomically released hold fans member actions out once and finalizes the original claim', async () => {
       mockMassClaimApproved.mockResolvedValue({
         id: 'hold-1',

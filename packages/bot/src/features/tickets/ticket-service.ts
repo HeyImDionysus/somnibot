@@ -29,6 +29,7 @@ import {
   claimDiscordOccurrence,
   completeDiscordOccurrence,
   failDiscordOccurrence,
+  releaseDiscordOccurrence,
 } from '../../services/occurrence-fence.js';
 
 const log = createLogger('Tickets');
@@ -142,6 +143,16 @@ export async function createTicket(
     .in('status', ['open', 'claimed']);
 
   if ((openCount ?? 0) >= panel.max_open_per_user) {
+    // The winning occurrence has not created any Discord or database resource,
+    // so it is safe—and necessary—to release. Otherwise every rejected click
+    // leaves a permanent claimed fence that terminal-only retention cannot reap.
+    if (occurrenceId) {
+      await releaseDiscordOccurrence(supabase, occurrenceId).catch((err) => {
+        log.error('Failed to release ticket occurrence rejected by open-ticket limit:', {
+          error: String(err),
+        });
+      });
+    }
     return { error: `You already have ${openCount} open ticket(s). Maximum is ${panel.max_open_per_user}.` };
   }
 

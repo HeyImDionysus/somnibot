@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 232 migration files in packages/supabase/migrations/
+ * Source: 233 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1569,7 +1569,8 @@ export interface DbCommerceDownloadDeliveries {
   guild_id: string;
   customer_id: string;
   product_id: string;
-  file_id: string;
+  file_id: string | null;
+  file_name_snapshot: string | null;
   entitlement_id: string | null;
   order_id: string | null;
   delivery_nonce_hash: string | null;

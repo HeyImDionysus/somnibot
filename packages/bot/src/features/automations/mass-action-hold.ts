@@ -62,6 +62,9 @@ function isConflict(error: unknown): boolean {
  */
 export class MassActionHoldService {
   private channel: RealtimeChannel | null = null;
+  private approvedPoller: NodeJS.Timeout | null = null;
+  private approvalHandler: ((holdId: string) => void) | null = null;
+  private approvedScanInFlight = false;
 
   constructor(
     private readonly supabase: SupabaseClient,
@@ -251,7 +254,41 @@ export class MassActionHoldService {
     if (error) throw new Error(`Failed to record mass-action owner notice: ${error.message}`);
   }
 
-  subscribe(onApproved: (holdId: string) => void): void {
+  private async scanApproved(): Promise<void> {
+    if (this.approvedScanInFlight || !this.approvalHandler) return;
+    this.approvedScanInFlight = true;
+    try {
+      const approved = await this.listApproved();
+      for (const hold of approved) this.approvalHandler(hold.id);
+    } catch (err) {
+      log.error('Failed to poll approved mass-action holds:', {
+        error: String(err),
+      });
+    } finally {
+      this.approvedScanInFlight = false;
+    }
+  }
+
+  async subscribe(onApproved: (holdId: string) => void): Promise<void> {
+    this.approvalHandler = onApproved;
+    if (!this.approvedPoller) {
+      this.approvedPoller = setInterval(() => {
+        void this.scanApproved();
+      }, 30_000);
+      this.approvedPoller.unref?.();
+    }
+
+    let settle!: () => void;
+    let reject!: (error: Error) => void;
+    const ready = new Promise<void>((resolve, rejectReady) => {
+      settle = resolve;
+      reject = rejectReady;
+    });
+    const timeout = setTimeout(() => {
+      reject(new Error('Timed out waiting for mass-action Realtime subscription'));
+    }, 15_000);
+    timeout.unref?.();
+
     this.channel = this.supabase
       .channel(`automation-mass-action-holds-${this.guild.id}-${Date.now()}`)
       .on(
@@ -267,10 +304,26 @@ export class MassActionHoldService {
           if (row.status === 'approved' && row.id) onApproved(row.id);
         },
       )
-      .subscribe();
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') settle();
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          reject(new Error(`Mass-action Realtime subscription ended with ${status}`));
+        }
+      });
+
+    try {
+      await ready;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   unsubscribe(): void {
+    if (this.approvedPoller) {
+      clearInterval(this.approvedPoller);
+      this.approvedPoller = null;
+    }
+    this.approvalHandler = null;
     if (this.channel) {
       this.supabase.removeChannel(this.channel);
       this.channel = null;

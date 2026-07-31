@@ -273,18 +273,33 @@ export class ScheduledMessageRunner {
       return;
     }
 
-    const { error: counterError } = await this.supabase
-      .from('scheduled_messages')
-      .update({
-        last_sent_at: occurrenceAt.toISOString(),
-        current_sends: schedule.current_sends + 1,
-      })
-      .eq('id', schedule.id);
+    const { data: claimedSendCount, error: counterError } = await this.supabase.rpc(
+      'claim_scheduled_message_send',
+      {
+        p_schedule_id: schedule.id,
+        p_guild_id: this.guild.id,
+        p_occurrence_at: occurrenceAt.toISOString(),
+      },
+    );
     if (counterError) {
       // Nothing reached Discord and no counter committed, so this occurrence
       // is safe to retry. A failed fence would permanently drop the due minute.
       await releaseDiscordOccurrence(this.supabase, occurrenceId).catch(() => {});
       log.error(`Failed to update schedule ${schedule.id} counters:`, counterError.message);
+      return;
+    }
+    if (typeof claimedSendCount !== 'number') {
+      // Another occurrence consumed the final max_sends slot while this
+      // occurrence was being claimed. Nothing reached Discord, but the fence
+      // is terminal so this due minute does not churn forever.
+      await completeDiscordOccurrence(
+        this.supabase,
+        occurrenceId,
+        null,
+        { skipped: 'max_sends_reached', dueAt: occurrenceAt.toISOString() },
+      ).catch((err) => log.error('Failed to complete skipped scheduled occurrence:', {
+        error: String(err),
+      }));
       return;
     }
 
@@ -350,7 +365,7 @@ export class ScheduledMessageRunner {
       scheduleId: schedule.id,
       name: schedule.name,
       channelId: schedule.channel_id,
-      currentSends: schedule.current_sends + 1,
+      currentSends: claimedSendCount,
     });
 
     log.info(`Sent "${schedule.name}" to #${channel.name}`);

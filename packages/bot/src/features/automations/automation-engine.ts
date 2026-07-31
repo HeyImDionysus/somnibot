@@ -48,6 +48,17 @@ const MEMBER_TARGETED_ACTIONS = new Set([
   'kick_member',
   'mute_member',
 ]);
+const MEMBER_CONDITION_TYPES = new Set([
+  'has_role',
+  'missing_role',
+  'min_level',
+  'max_level',
+  'has_entitlement',
+  'missing_entitlement',
+  'is_returning_member',
+  'is_new_member',
+  'user_is',
+]);
 
 /**
  * Event context passed alongside platform events for automation processing.
@@ -132,11 +143,17 @@ export class AutomationEngine {
       log.error('Failed to reconcile interrupted mass actions:', err);
     }
     this.loader.subscribe();
-    this.massActionHolds.subscribe((holdId) => {
-      void this.runApprovedHold(holdId).catch((err) => {
-        log.error(`Failed to run approved mass-action hold ${holdId}:`, err);
+    try {
+      await this.massActionHolds.subscribe((holdId) => {
+        void this.runApprovedHold(holdId).catch((err) => {
+          log.error(`Failed to run approved mass-action hold ${holdId}:`, err);
+        });
       });
-    });
+    } catch (err) {
+      // The periodic approved-row scan remains active even if Realtime cannot
+      // acknowledge. Recovery degrades to polling instead of losing approvals.
+      log.error('Mass-action Realtime subscription was not ready; polling remains active:', err);
+    }
 
     // Recovery is deliberately performed on every start. Held cards whose
     // Discord send committed before the DB acknowledgement are discovered by
@@ -267,7 +284,7 @@ export class AutomationEngine {
     if (
       bulkMemberIds
         ? !this.checkChannelScope(automation, ctx.channelId)
-          || (hasMemberTargetedAction && scopedBulkMemberIds?.length === 0)
+          || scopedBulkMemberIds?.length === 0
         : !this.checkScope(automation, userId, ctx.channelId)
     ) {
       return; // Silently skip — scope filters are lightweight pre-checks
@@ -325,11 +342,41 @@ export class AutomationEngine {
       guildId: this.guild.id,
       regexBudget: ctx.regexBudget,
     };
+    const conditions =
+      automation.conditions as { type: string; config: Record<string, unknown> }[];
+    let conditionedBulkMemberIds = scopedBulkMemberIds;
+    let conditionsPassed: boolean;
 
-    const conditionsPassed = await evaluateConditions(
-      automation.conditions as { type: string; config: Record<string, unknown> }[],
-      conditionCtx,
-    );
+    if (bulkMemberIds) {
+      const eventConditions = conditions.filter((condition) =>
+        !MEMBER_CONDITION_TYPES.has(condition.type),
+      );
+      const memberConditions = conditions.filter((condition) =>
+        MEMBER_CONDITION_TYPES.has(condition.type),
+      );
+      const eventConditionsPassed = await evaluateConditions(eventConditions, conditionCtx);
+      conditionedBulkMemberIds = [];
+
+      if (eventConditionsPassed) {
+        if (memberConditions.length === 0) {
+          conditionedBulkMemberIds = scopedBulkMemberIds ?? [];
+        } else {
+          for (const memberId of scopedBulkMemberIds ?? []) {
+            const member = this.guild.members.cache.get(memberId)
+              ?? await this.guild.members.fetch(memberId).catch(() => null);
+            if (!member) continue;
+            const passed = await evaluateConditions(memberConditions, {
+              ...conditionCtx,
+              member,
+            });
+            if (passed) conditionedBulkMemberIds.push(memberId);
+          }
+        }
+      }
+      conditionsPassed = eventConditionsPassed && conditionedBulkMemberIds.length > 0;
+    } else {
+      conditionsPassed = await evaluateConditions(conditions, conditionCtx);
+    }
 
     if (!conditionsPassed) {
       // Finalize the claimed row as conditions-failed (no actions ran).
@@ -348,7 +395,7 @@ export class AutomationEngine {
     }
 
     const affectedMemberIds = hasMemberTargetedAction
-      ? scopedBulkMemberIds ?? [...new Set(ctx.affectedMemberIds)]
+      ? conditionedBulkMemberIds ?? [...new Set(ctx.affectedMemberIds)]
       : [];
     let massActionThreshold: number | null = null;
     if (affectedMemberIds.length > 1) {

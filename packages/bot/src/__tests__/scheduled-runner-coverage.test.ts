@@ -44,8 +44,13 @@ function chainBuilder(resolveValue: any = { data: null, error: null }) {
   return chain;
 }
 
-function makeSupabase(schedules: any[] = [], embedConfig: any = null) {
+function makeSupabase(
+  schedules: any[] = [],
+  embedConfig: any = null,
+  claimedSendCount: number | null = (schedules[0]?.current_sends ?? 0) + 1,
+) {
   return {
+    rpc: vi.fn().mockResolvedValue({ data: claimedSendCount, error: null }),
     from: vi.fn().mockImplementation((table: string) => {
       if (table === 'scheduled_messages') {
         if (schedules.length > 0) return chainBuilder({ data: schedules, error: null });
@@ -270,6 +275,36 @@ describe('ScheduledMessageRunner', () => {
 
     expect(channel.send).not.toHaveBeenCalled();
     runner.stop();
+  });
+
+  it('does not send when another occurrence consumes the final max_sends slot', async () => {
+    const channel = makeChannel();
+    const guild = makeGuild({ ch1: channel });
+    const supabase = makeSupabase([{
+      id: 'sched-race',
+      guild_id: 'g1',
+      name: 'Final Slot Race',
+      channel_id: 'ch1',
+      message: 'Test',
+      embed_config_id: null,
+      cron_expression: '* * * * *',
+      timezone: 'UTC',
+      start_date: null,
+      end_date: null,
+      max_sends: 1,
+      current_sends: 0,
+      active: true,
+      last_sent_at: null,
+    }], null, null);
+
+    const runner = new ScheduledMessageRunner(guild as any, supabase as any);
+    await (runner as any).sendMessage(
+      (await (supabase.from('scheduled_messages') as any)).data[0],
+      new Date('2026-07-30T12:00:00.000Z'),
+    );
+
+    expect(channel.send).not.toHaveBeenCalled();
+    expect(supabase.rpc).toHaveBeenCalledWith('claim_scheduled_message_send', expect.any(Object));
   });
 
   it('skips when channel not found', async () => {

@@ -231,6 +231,7 @@ export async function GET(
           customer_id: customerId,
           product_id: productId,
           file_id: fileId,
+          file_name_snapshot: file.name,
           entitlement_id: liveEntitlement.id,
           order_id: liveEntitlement.order_id,
           delivery_nonce_hash: deliveryNonce ? hashToken(deliveryNonce.value) : null,

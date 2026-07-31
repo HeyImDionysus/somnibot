@@ -86,7 +86,11 @@ function schedSupa(
     };
     return c;
   }
-  return { supabase: { from: (t: string) => chainFor(t) } as any, inserts, updates, deletes };
+  const rpc = vi.fn(async () => {
+    if (options.counterError) return { data: null, error: options.counterError };
+    return { data: (schedules[0]?.current_sends ?? 0) + 1, error: null };
+  });
+  return { supabase: { from: (t: string) => chainFor(t), rpc } as any, inserts, updates, deletes };
 }
 
 function guild(sendImpl?: () => Promise<any>) {
@@ -141,7 +145,7 @@ describe('ScheduledMessageRunner — transient send retry', () => {
     expect(inserts.alerts.length).toBe(0);
   });
 
-  it('releases a proven-unused occurrence when the counter update fails', async () => {
+  it('releases a proven-unused occurrence when the atomic counter claim fails', async () => {
     const Runner = await loadRunner();
     const { supabase, deletes } = schedSupa(
       [{ ...BASE_SCHEDULE }],
