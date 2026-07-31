@@ -160,10 +160,15 @@ export class StatsChannelManager {
           .from('stats_channels')
           .update({ last_value: value, last_updated_at: new Date().toISOString() })
           .eq('id', config.id);
-        await this.resolveUpdateAlerts(config);
       } catch (err) {
         log.error(`Failed to update ${config.stat_type}:`, err);
         await this.raiseUpdateFailedAlert(config, err);
+        continue;
+      }
+      try {
+        await this.resolveUpdateAlerts(config);
+      } catch (recoveryError) {
+        log.error(`Failed to reconcile recovered ${config.stat_type} alert:`, recoveryError);
       }
     }
   }
@@ -239,8 +244,7 @@ export class StatsChannelManager {
 
   private async resolveUpdateAlerts(config: StatsChannelConfig): Promise<void> {
     const firstSuccessThisBoot = !this.recoveryChecked.has(config.id);
-    if (firstSuccessThisBoot) this.recoveryChecked.add(config.id);
-    if (!this.degradedChannels.delete(config.id) && !firstSuccessThisBoot) return;
+    if (!this.degradedChannels.has(config.id) && !firstSuccessThisBoot) return;
 
     await resolveOwnerAlert(
       this.supabase,
@@ -261,6 +265,8 @@ export class StatsChannelManager {
         { guild: this.guild },
       );
     }
+    this.recoveryChecked.add(config.id);
+    this.degradedChannels.delete(config.id);
   }
 
   private async gatherStats(): Promise<Record<string, string>> {

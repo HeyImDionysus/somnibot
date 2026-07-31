@@ -24,10 +24,10 @@ describe('dashboard activity projection', () => {
     expect(event).toMatchObject({
       type: 'rbac',
       action: 'rbac.role_updated',
-      description: 'Rbac Role Updated · role staff',
-      targetType: 'role',
-      targetId: 'staff',
+      description: 'Rbac Role Updated',
     });
+    expect(event).not.toHaveProperty('targetType');
+    expect(event).not.toHaveProperty('targetId');
   });
 
   it('keeps specific operator-friendly descriptions for known events', () => {

@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { invalidateFraudCache } from '@/lib/fraud-data-cache';
+import { velocityRuleConfigError } from '@/lib/fraud-rule-config';
 
 export const FRAUD_RULE_TYPES = ['velocity_limit'] as const;
 
@@ -44,9 +45,7 @@ export function FraudRuleForm({ rule, onCancel, onSaved }: Props) {
   const configError = useMemo(() => {
     try {
       const parsed = JSON.parse(configText) as unknown;
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-        ? null
-        : 'Configuration must be a JSON object.';
+      return velocityRuleConfigError(parsed);
     } catch {
       return 'Configuration must be valid JSON.';
     }

@@ -296,6 +296,33 @@ describe('community-statistics-channels audit', () => {
     );
     expect(failures).toHaveLength(1);
   });
+
+  it('does not classify alert-recovery failure as a counter update failure', async () => {
+    const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
+    const eventBus = bus();
+    const cfg = {
+      id: 'sc-ok', guild_id: 'g1', channel_id: 'vc1', stat_type: 'custom_counter',
+      stat_config: { value: 42 }, name_format: 'Members: {value}', active: true, last_value: null,
+    };
+    const supa = makeSupa({ stats_channels: { data: [cfg], error: null } });
+    const channel = { setName: vi.fn(async () => {}) };
+    const guild: any = {
+      id: 'g1', memberCount: 5, premiumSubscriptionCount: 0,
+      channels: { cache: new Map([['vc1', channel]]) },
+      roles: { cache: new Map() },
+      members: { fetch: vi.fn(async () => {}), cache: { filter: () => ({ size: 0 }) } },
+    };
+    const mgr = new StatsChannelManager(guild, supa, 10, eventBus);
+    (mgr as any).resolveUpdateAlerts = vi.fn().mockRejectedValue(new Error('alerts unavailable'));
+
+    await mgr.reload();
+
+    expect(eventBus.emit).not.toHaveBeenCalledWith(
+      'stats_channel.update_failed',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
 });
 
 // ── community-temporary-channels ────────────────────────────

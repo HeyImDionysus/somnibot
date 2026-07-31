@@ -306,6 +306,57 @@ describe('AutomationEngine', () => {
       expect(mockMassHoldCreate).not.toHaveBeenCalled();
     });
 
+    it('preserves configured action order while fanning member actions out', async () => {
+      mockGetForTrigger.mockReturnValue([
+        makeAutomation({
+          actions: [
+            { type: 'give_role', config: { role_id: 'role1' } },
+            { type: 'wait_delay', config: { seconds: 1 } },
+            { type: 'remove_role', config: { role_id: 'role1' } },
+          ],
+        }),
+      ]);
+      await engine.start();
+      eventBus.fire({
+        type: 'giveaway.ended',
+        guildId: 'g1',
+        data: {
+          winnerIds: ['10000000000000000', '10000000000000001'],
+        },
+      });
+
+      await vi.waitFor(() => expect(mockFinalize).toHaveBeenCalled());
+      expect(mockExecuteActions.mock.calls.map((call) => call[0][0].type)).toEqual([
+        'give_role',
+        'give_role',
+        'wait_delay',
+        'remove_role',
+        'remove_role',
+      ]);
+    });
+
+    it('applies user include and exclude scopes to each resolved bulk member', async () => {
+      mockGetForTrigger.mockReturnValue([
+        makeAutomation({
+          actions: [{ type: 'give_role', config: { role_id: 'role1' } }],
+          scopeTargetUserIds: ['10000000000000000', '10000000000000001'],
+          scopeExcludeUserIds: ['10000000000000001'],
+        }),
+      ]);
+      await engine.start();
+      eventBus.fire({
+        type: 'giveaway.ended',
+        guildId: 'g1',
+        data: {
+          winnerIds: ['10000000000000000', '10000000000000001'],
+        },
+      });
+
+      await vi.waitFor(() => expect(mockFinalize).toHaveBeenCalled());
+      const targetIds = mockExecuteActions.mock.calls.map((call) => call[1].member?.id);
+      expect(targetIds).toEqual(['10000000000000000']);
+    });
+
     it('atomically released hold fans member actions out once and finalizes the original claim', async () => {
       mockMassClaimApproved.mockResolvedValue({
         id: 'hold-1',

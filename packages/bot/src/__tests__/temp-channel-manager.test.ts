@@ -182,5 +182,56 @@ describe('TempChannelManager', () => {
     expect(manager.getChannelOwner('room-1')).toBe('new-owner');
     expect((manager as any).activeChannels.get('room-1').creation_occurrence_id).toBeNull();
   });
+
+  it('removes a stale active-room record and continues replacement creation', async () => {
+    const guild = makeGuild();
+    const replacement = {
+      id: 'replacement-room',
+      name: 'Tester room',
+      delete: vi.fn().mockResolvedValue(undefined),
+      isTextBased: () => false,
+    };
+    guild.channels.create = vi.fn().mockResolvedValue(replacement);
+    const manager = new TempChannelManager(guild as any, makeSupa() as any);
+    (manager as any).hubs.set('hub-voice', {
+      id: 'hub-1',
+      guild_id: 'guild-1',
+      hub_channel_id: 'hub-voice',
+      category_id: 'category-1',
+      naming_format: '{owner-name} room',
+      default_user_limit: 0,
+      default_bitrate: 64_000,
+      keep_alive_minutes: 0,
+      empty_grace_seconds: null,
+      allow_text_channel: false,
+      allow_claim: true,
+      moderator_roles: [],
+      active: true,
+      room_created_template: null,
+      control_applied_template: null,
+      control_denied_template: null,
+    });
+    (manager as any).activeChannels.set('missing-room', {
+      channel_id: 'missing-room',
+      text_channel_id: null,
+      guild_id: 'guild-1',
+      hub_id: 'hub-1',
+      owner_id: 'user-1',
+      creation_occurrence_id: null,
+    });
+    const removeChannel = vi.spyOn(manager as any, 'removeChannel').mockResolvedValue(undefined);
+    const member = {
+      id: 'user-1',
+      displayName: 'Tester',
+      user: { username: 'tester' },
+      voice: { setChannel: vi.fn().mockResolvedValue(undefined) },
+    };
+
+    await manager.handleJoinHub(member as any, 'hub-voice');
+
+    expect(removeChannel).toHaveBeenCalledWith('missing-room');
+    expect(guild.channels.create).toHaveBeenCalledTimes(1);
+    expect(member.voice.setChannel).toHaveBeenCalledWith(replacement);
+  });
   
 });

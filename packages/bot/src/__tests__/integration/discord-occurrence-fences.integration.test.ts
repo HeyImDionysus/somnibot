@@ -76,4 +76,55 @@ describe('durable Discord occurrence fences', () => {
     expect(retry.won).toBe(true);
     expect(retry.occurrence.id).not.toBe(first.occurrence.id);
   });
+
+  it('prunes only unreferenced terminal fences outside the retention window', async () => {
+    const oldTimestamp = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000).toISOString();
+    const recentTimestamp = new Date().toISOString();
+    const rows = [
+      {
+        guild_id: guildId,
+        operation_kind: 'scheduled_message',
+        occurrence_key: `${guildId}:retention:old-completed`,
+        status: 'completed',
+        updated_at: oldTimestamp,
+      },
+      {
+        guild_id: guildId,
+        operation_kind: 'scheduled_message',
+        occurrence_key: `${guildId}:retention:old-failed`,
+        status: 'failed',
+        updated_at: oldTimestamp,
+      },
+      {
+        guild_id: guildId,
+        operation_kind: 'scheduled_message',
+        occurrence_key: `${guildId}:retention:old-claimed`,
+        status: 'claimed',
+        updated_at: oldTimestamp,
+      },
+      {
+        guild_id: guildId,
+        operation_kind: 'scheduled_message',
+        occurrence_key: `${guildId}:retention:recent-completed`,
+        status: 'completed',
+        updated_at: recentTimestamp,
+      },
+    ];
+    const seeded = await supa.from('discord_operation_occurrences').insert(rows);
+    expect(seeded.error).toBeNull();
+
+    const pruned = await supa.rpc('prune_discord_operation_occurrences');
+    expect(pruned.error).toBeNull();
+    expect(pruned.data).toBe(2);
+
+    const remaining = await supa
+      .from('discord_operation_occurrences')
+      .select('occurrence_key')
+      .like('occurrence_key', `${guildId}:retention:%`);
+    expect(remaining.error).toBeNull();
+    expect((remaining.data ?? []).map((row) => row.occurrence_key).sort()).toEqual([
+      `${guildId}:retention:old-claimed`,
+      `${guildId}:retention:recent-completed`,
+    ]);
+  });
 });

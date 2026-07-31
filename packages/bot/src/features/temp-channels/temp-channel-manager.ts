@@ -140,8 +140,11 @@ export class TempChannelManager {
     );
     if (existingActive) {
       const existingChannel = this.guild.channels.cache.get(existingActive.channel_id);
-      if (existingChannel) await member.voice.setChannel(existingChannel as VoiceChannel);
-      return;
+      if (existingChannel) {
+        await member.voice.setChannel(existingChannel as VoiceChannel);
+        return;
+      }
+      await this.removeChannel(existingActive.channel_id);
     }
 
     // Join-event idempotency: a re-delivered voiceStateUpdate (Discord gateway

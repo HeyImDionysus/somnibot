@@ -133,11 +133,17 @@ ALTER TABLE public.guild_config
 UPDATE public.guild_config
    SET welcome_card_background = NULL
  WHERE welcome_card_background IS NOT NULL
-   AND welcome_card_background !~ '^https?://[^[:space:]]+$';
+   AND (
+     pg_catalog.char_length(welcome_card_background) > 512
+     OR welcome_card_background !~ '^https?://[^[:space:]]+$'
+   );
 UPDATE public.guild_config
    SET rank_card_background = NULL
  WHERE rank_card_background IS NOT NULL
-   AND rank_card_background !~ '^https?://[^[:space:]]+$';
+   AND (
+     pg_catalog.char_length(rank_card_background) > 512
+     OR rank_card_background !~ '^https?://[^[:space:]]+$'
+   );
 
 ALTER TABLE public.guild_config
   DROP CONSTRAINT IF EXISTS guild_config_welcome_card_background_url_check;

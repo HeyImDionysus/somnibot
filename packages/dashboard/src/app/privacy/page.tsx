@@ -101,7 +101,7 @@ export default function PrivacyPolicyPage() {
           <li>
             <strong className="text-white">Audit logs</strong> — never hard-deleted. Identity and
             payload details are anonymized after the guild&apos;s configured retention period
-            (with a 60-day minimum), while the action, timestamp, and outcome remain for security
+            (with a 30-day minimum), while the action, timestamp, and outcome remain for security
             forensics.
           </li>
           <li>

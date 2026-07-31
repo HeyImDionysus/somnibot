@@ -252,9 +252,24 @@ export class AutomationEngine {
   ): Promise<void> {
     const startTime = Date.now();
     const userId = ctx.member?.id ?? 'system';
+    const actions = automation.actions as AutomationAction[];
+    const hasMemberTargetedAction = actions.some((action) =>
+      MEMBER_TARGETED_ACTIONS.has(action.type),
+    );
+    const bulkMemberIds = !ctx.member && ctx.affectedMemberIds.length > 0
+      ? [...new Set(ctx.affectedMemberIds)]
+      : null;
+    const scopedBulkMemberIds = bulkMemberIds?.filter((memberId) =>
+      this.checkUserScope(automation, memberId),
+    ) ?? null;
 
     // 1. Scope check
-    if (!this.checkScope(automation, userId, ctx.channelId)) {
+    if (
+      bulkMemberIds
+        ? !this.checkChannelScope(automation, ctx.channelId)
+          || (hasMemberTargetedAction && scopedBulkMemberIds?.length === 0)
+        : !this.checkScope(automation, userId, ctx.channelId)
+    ) {
       return; // Silently skip — scope filters are lightweight pre-checks
     }
 
@@ -332,12 +347,8 @@ export class AutomationEngine {
       return;
     }
 
-    const actions = automation.actions as AutomationAction[];
-    const hasMemberTargetedAction = actions.some((action) =>
-      MEMBER_TARGETED_ACTIONS.has(action.type),
-    );
     const affectedMemberIds = hasMemberTargetedAction
-      ? [...new Set(ctx.affectedMemberIds)]
+      ? scopedBulkMemberIds ?? [...new Set(ctx.affectedMemberIds)]
       : [];
     let massActionThreshold: number | null = null;
     if (affectedMemberIds.length > 1) {
@@ -466,6 +477,11 @@ export class AutomationEngine {
     userId: string,
     channelId: string | null,
   ): boolean {
+    return this.checkUserScope(automation, userId)
+      && this.checkChannelScope(automation, channelId);
+  }
+
+  private checkUserScope(automation: LoadedAutomation, userId: string): boolean {
     // Target user filter
     if (automation.scopeTargetUserIds.length > 0) {
       if (!automation.scopeTargetUserIds.includes(userId)) return false;
@@ -474,6 +490,10 @@ export class AutomationEngine {
     if (automation.scopeExcludeUserIds.length > 0) {
       if (automation.scopeExcludeUserIds.includes(userId)) return false;
     }
+    return true;
+  }
+
+  private checkChannelScope(automation: LoadedAutomation, channelId: string | null): boolean {
     // Target channel filter
     if (automation.scopeTargetChannelIds.length > 0 && channelId) {
       if (!automation.scopeTargetChannelIds.includes(channelId)) return false;
@@ -740,33 +760,41 @@ export class AutomationEngine {
       return executeActions(actions, baseContext);
     }
 
-    const onceActions = actions.filter((action) => !MEMBER_TARGETED_ACTIONS.has(action.type));
-    const perMemberActions = actions.filter((action) => MEMBER_TARGETED_ACTIONS.has(action.type));
     const total = { executed: 0, failed: 0, errors: [] as string[] };
+    const memberCache = new Map<string, GuildMember | null>();
     const add = (result: { executed: number; failed: number; errors: string[] }) => {
       total.executed += result.executed;
       total.failed += result.failed;
       total.errors.push(...result.errors);
     };
 
-    if (onceActions.length > 0) add(await executeActions(onceActions, baseContext));
-    for (const memberId of affectedMemberIds) {
-      const member = this.guild.members.cache.get(memberId)
-        ?? await this.guild.members.fetch(memberId).catch(() => null);
-      if (!member) {
-        total.failed += perMemberActions.length;
-        total.errors.push(`member ${memberId}: target no longer belongs to the guild`);
+    for (const action of actions) {
+      if (!MEMBER_TARGETED_ACTIONS.has(action.type)) {
+        add(await executeActions([action], baseContext));
         continue;
       }
-      add(await executeActions(perMemberActions, {
-        ...baseContext,
-        member,
-        variables: {
-          ...baseContext.variables,
-          user: `<@${member.id}>`,
-          'user.name': member.displayName,
-        },
-      }));
+      for (const memberId of affectedMemberIds) {
+        let member = memberCache.get(memberId);
+        if (member === undefined) {
+          member = this.guild.members.cache.get(memberId)
+            ?? await this.guild.members.fetch(memberId).catch(() => null);
+          memberCache.set(memberId, member);
+        }
+        if (!member) {
+          total.failed += 1;
+          total.errors.push(`member ${memberId}: target no longer belongs to the guild`);
+          continue;
+        }
+        add(await executeActions([action], {
+          ...baseContext,
+          member,
+          variables: {
+            ...baseContext.variables,
+            user: `<@${member.id}>`,
+            'user.name': member.displayName,
+          },
+        }));
+      }
     }
     return total;
   }

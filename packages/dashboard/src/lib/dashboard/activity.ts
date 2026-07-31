@@ -4,8 +4,6 @@ export interface DashboardActivityEvent {
   description: string;
   timestamp: string;
   success: boolean;
-  targetType: string | null;
-  targetId: string | null;
 }
 
 function text(value: unknown): string | null {
@@ -92,16 +90,11 @@ export function buildActivityEvent(log: Record<string, unknown>): DashboardActiv
   const details = log.details && typeof log.details === 'object' && !Array.isArray(log.details)
     ? log.details as Record<string, unknown>
     : {};
-  const targetType = text(log.target_type);
-  const targetId = text(log.target_id);
-
   return {
     type: activityType(action),
     action,
-    description: activityDescription(action, details, targetType, targetId),
+    description: activityDescription(action, details, null, null),
     timestamp,
     success: log.success !== false,
-    targetType,
-    targetId,
   };
 }

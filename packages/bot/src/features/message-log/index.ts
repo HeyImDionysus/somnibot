@@ -258,8 +258,7 @@ async function notifyDeliveryFailure(
 
 async function noticeDeliveryRecovered(client: SomniClient, guildId: string): Promise<void> {
   const firstSuccessThisBoot = !_deliveryRecoveryChecked.has(guildId);
-  if (firstSuccessThisBoot) _deliveryRecoveryChecked.add(guildId);
-  if (!_deliveryDegraded.delete(guildId) && !firstSuccessThisBoot) return;
+  if (!_deliveryDegraded.has(guildId) && !firstSuccessThisBoot) return;
   await resolveOwnerAlert(
     client.supabase,
     guildId,
@@ -270,6 +269,8 @@ async function noticeDeliveryRecovered(client: SomniClient, guildId: string): Pr
       notice: 'Message-log delivery recovered — edit/delete records are reaching the configured channel again.',
     },
   );
+  _deliveryRecoveryChecked.add(guildId);
+  _deliveryDegraded.delete(guildId);
 }
 
 async function sendLogEmbed(
@@ -281,7 +282,13 @@ async function sendLogEmbed(
   for (let attempt = 0; attempt <= SEND_RETRY_DELAYS_MS.length; attempt++) {
     try {
       await logChannel.send({ embeds: [embed] });
-      await noticeDeliveryRecovered(client, guildId);
+      try {
+        await noticeDeliveryRecovered(client, guildId);
+      } catch (recoveryError) {
+        log.error('Failed to reconcile recovered message-log delivery:', {
+          error: String(recoveryError),
+        });
+      }
       return true;
     } catch (err) {
       const status = (err as { status?: number } | undefined)?.status;

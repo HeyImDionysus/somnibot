@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
+import { velocityRuleConfigSchema } from '@/lib/fraud-rule-config';
 
 // Only expose detectors that production actually evaluates. Historical rows
 // of other constrained types remain readable but cannot be presented as live
@@ -25,7 +26,7 @@ const fraudRuleCreate = z.object({
   // string accepted here died later as a raw 23514 the owner could not act on.
   rule_type: fraudRuleType,
   enabled: z.boolean().default(true),
-  config: z.record(z.unknown()).default({}),
+  config: velocityRuleConfigSchema,
   auto_action: z.literal('flag').default('flag'),
 });
 
@@ -35,7 +36,7 @@ const fraudRuleUpdate = z.object({
   description: z.string().max(500).optional().nullable(),
   rule_type: fraudRuleType.optional(),
   enabled: z.boolean().optional(),
-  config: z.record(z.unknown()).optional(),
+  config: velocityRuleConfigSchema.optional(),
   auto_action: z.literal('flag').optional(),
 });
 

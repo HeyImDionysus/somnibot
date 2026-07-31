@@ -62,4 +62,22 @@ describe('POST /api/fraud/rules validation', () => {
     expect(response.status).toBe(400);
     expect(createAdminSupabase).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { threshold: 0, window_minutes: 60 },
+    { threshold: 5, window_minutes: -1 },
+    { threshold: 5, window_minutes: 1e308 },
+    { threshold: 5, window_minute: 60 },
+    { threshold: 5, window_minutes: 60, window_ms: 3_600_000 },
+  ])('rejects invalid or ambiguous velocity config %#', async (config) => {
+    const response = await POST(request({
+      name: 'Invalid velocity rule',
+      rule_type: 'velocity_limit',
+      config,
+      auto_action: 'flag',
+    }));
+
+    expect(response.status).toBe(400);
+    expect(createAdminSupabase).not.toHaveBeenCalled();
+  });
 });
