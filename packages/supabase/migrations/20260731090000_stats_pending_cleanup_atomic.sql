@@ -13,8 +13,9 @@
 --                                    preserving concurrent appends
 --
 -- Both return TRUE when the config row matched (the caller's read-back) and
--- NULL row-absence otherwise. SECURITY DEFINER, service_role only, same
--- conventions as reclaim_stale_automation_execution (20260731050000).
+-- NULL row-absence otherwise. Definer-rights with an empty search_path,
+-- service_role only — the same conventions as
+-- reclaim_stale_automation_execution (20260731050000).
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION public.append_stats_pending_cleanup(
