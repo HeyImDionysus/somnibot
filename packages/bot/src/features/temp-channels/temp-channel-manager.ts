@@ -4,6 +4,7 @@
 import {
   ChannelType,
   PermissionFlagsBits,
+  RESTJSONErrorCodes,
   type Guild,
   type VoiceChannel,
   type TextChannel,
@@ -20,6 +21,7 @@ import {
   claimDiscordOccurrence,
   completeDiscordOccurrence,
   failDiscordOccurrence,
+  markDiscordOccurrenceCleanupPending,
   reclaimStaleDiscordOccurrence,
   releaseDiscordOccurrence,
   type DiscordOperationOccurrence,
@@ -30,6 +32,7 @@ const CLEANUP_RETRY_BASE_MS = 5_000;
 const CLEANUP_RETRY_MAX_MS = 60_000;
 const CLEANUP_RETRY_LIMIT = 5;
 const CREATION_CLAIM_LEASE_MS = 2 * 60_000;
+const PENDING_CHANNEL_CLEANUP_INTERVAL_MS = 5 * 60_000;
 
 
 export interface HubConfig {
@@ -66,6 +69,7 @@ export class TempChannelManager {
   private activeChannels: Map<string, ActiveTempChannel> = new Map(); // channel_id → active
   private keepAliveTimers: Map<string, NodeJS.Timeout> = new Map();
   private inFlightJoins: Set<string> = new Set(); // `${memberId}:${hubChannelId}` currently spawning
+  private pendingChannelCleanupTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private guild: Guild,
@@ -103,6 +107,15 @@ export class TempChannelManager {
 
     // Clean up any orphaned channels
     await this.cleanupOrphans();
+    await this.reconcilePendingChannelCleanup();
+    if (!this.pendingChannelCleanupTimer) {
+      this.pendingChannelCleanupTimer = setInterval(() => {
+        void this.reconcilePendingChannelCleanup().catch((error) => {
+          log.error('Temp-channel cleanup reconciliation failed:', { error: String(error) });
+        });
+      }, PENDING_CHANNEL_CLEANUP_INTERVAL_MS);
+      this.pendingChannelCleanupTimer.unref();
+    }
 
     log.info(`Loaded ${this.hubs.size} hubs, ${this.activeChannels.size} active channels`);
   }
@@ -163,6 +176,7 @@ export class TempChannelManager {
     let occurrenceId: string | null = null;
     let externalRoomExists = false;
     let activeRecordCommitted = false;
+    let cleanupJobCommitted = false;
 
     // Format channel name. The catalog's single documented variable is
     // {owner-name}; {username}/{user}/{tag}/{count} are supported aliases.
@@ -293,15 +307,36 @@ export class TempChannelManager {
 
       const { error: recordError } = await this.supabase.from('active_temp_channels').insert(record);
       if (recordError) {
-        const cleanup: Promise<unknown>[] = [
-          vc.delete('Temp channel database record failed'),
+        const cleanup: Array<{ channelId: string; promise: Promise<unknown> }> = [
+          {
+            channelId: vc.id,
+            promise: vc.delete('Temp channel database record failed'),
+          },
         ];
         if (textChannel) {
-          cleanup.push(textChannel.delete('Temp channel database record failed'));
+          cleanup.push({
+            channelId: textChannel.id,
+            promise: textChannel.delete('Temp channel database record failed'),
+          });
         }
-        const cleanupResults = await Promise.allSettled(cleanup);
-        if (cleanupResults.every((result) => result.status === 'fulfilled')) {
+        const cleanupResults = await Promise.allSettled(cleanup.map((target) => target.promise));
+        const survivingChannelIds = cleanup
+          .filter((_, index) => cleanupResults[index]?.status === 'rejected')
+          .map((target) => target.channelId);
+        if (survivingChannelIds.length === 0) {
           externalRoomExists = false;
+        } else if (occurrenceId) {
+          await markDiscordOccurrenceCleanupPending(
+            this.supabase,
+            occurrenceId,
+            survivingChannelIds[0],
+            `Temp-channel database record failed: ${recordError.message}`,
+            {
+              stage: 'active_row_insert',
+              channelIds: survivingChannelIds,
+            },
+          );
+          cleanupJobCommitted = true;
         }
         throw new Error(`Failed to record temp channel: ${recordError.message}`);
       }
@@ -348,7 +383,9 @@ export class TempChannelManager {
       });
       await this.notifyCreationFailure(member, hub, err);
       if (occurrenceId) {
-        if (!externalRoomExists && !activeRecordCommitted) {
+        if (cleanupJobCommitted) {
+          // The durable cleanup job owns the surviving external channels.
+        } else if (!externalRoomExists && !activeRecordCommitted) {
           await releaseDiscordOccurrence(this.supabase, occurrenceId).catch(() => {});
         } else {
           // A room or durable active row may exist. Preserve the fence so a
@@ -830,7 +867,81 @@ export class TempChannelManager {
     }
   }
 
+  async reconcilePendingChannelCleanup(): Promise<number> {
+    const { data, error } = await this.supabase
+      .from('discord_operation_occurrences')
+      .select('id,result')
+      .eq('guild_id', this.guild.id)
+      .eq('operation_kind', 'temp_channel')
+      .eq('status', 'claimed')
+      .contains('result', { channelCleanupPending: true })
+      .limit(100);
+    if (error) {
+      throw new Error(`Unable to load temp-channel cleanup jobs: ${error.message}`);
+    }
+
+    let reconciled = 0;
+    for (const row of data ?? []) {
+      if (typeof row.id !== 'string') continue;
+      const result =
+        row.result && typeof row.result === 'object' && !Array.isArray(row.result)
+          ? row.result as Record<string, unknown>
+          : {};
+      const channelIds = Array.isArray(result.channelIds)
+        ? result.channelIds.filter((value): value is string => typeof value === 'string')
+        : [];
+      if (channelIds.length === 0) continue;
+
+      let allConfirmedMissing = true;
+      for (const channelId of channelIds) {
+        let channel = this.guild.channels.cache.get(channelId);
+        if (!channel) {
+          try {
+            channel = await this.guild.channels.fetch(channelId) ?? undefined;
+          } catch (fetchError) {
+            const code =
+              typeof fetchError === 'object' && fetchError !== null && 'code' in fetchError
+                ? Number((fetchError as { code: unknown }).code)
+                : Number.NaN;
+            if (code === RESTJSONErrorCodes.UnknownChannel) continue;
+            allConfirmedMissing = false;
+            log.warn('Could not verify temp-channel cleanup target', {
+              channelId,
+              error: String(fetchError),
+            });
+            continue;
+          }
+        }
+        if (!channel) continue;
+        try {
+          await channel.delete('Retrying cleanup after failed temp-channel creation');
+        } catch (deleteError) {
+          const code =
+            typeof deleteError === 'object' && deleteError !== null && 'code' in deleteError
+              ? Number((deleteError as { code: unknown }).code)
+              : Number.NaN;
+          if (code === RESTJSONErrorCodes.UnknownChannel) continue;
+          allConfirmedMissing = false;
+          log.warn('Temp-channel cleanup will be retried', {
+            channelId,
+            error: String(deleteError),
+          });
+        }
+      }
+
+      if (allConfirmedMissing) {
+        await releaseDiscordOccurrence(this.supabase, row.id);
+        reconciled++;
+      }
+    }
+    return reconciled;
+  }
+
   stop(): void {
+    if (this.pendingChannelCleanupTimer) {
+      clearInterval(this.pendingChannelCleanupTimer);
+      this.pendingChannelCleanupTimer = null;
+    }
     for (const timer of this.keepAliveTimers.values()) {
       clearTimeout(timer);
     }

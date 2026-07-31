@@ -31,6 +31,7 @@ vi.mock('discord.js', () => {
     ButtonBuilder: class { setCustomId() { return this; } setLabel() { return this; } setStyle() { return this; } setEmoji() { return this; } setDisabled() { return this; } },
     StringSelectMenuBuilder: class { setCustomId() { return this; } setPlaceholder() { return this; } addOptions() { return this; } },
     ChannelType: { GuildText: 0, GuildVoice: 2, GuildCategory: 4 },
+    RESTJSONErrorCodes: { UnknownChannel: 10003 },
     PermissionFlagsBits: { ViewChannel: 1n, SendMessages: 2n, ManageChannels: 4n, ManageRoles: 8n, ManageMessages: 8192n },
     ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4 },
     Collection: C,
@@ -143,6 +144,40 @@ describe('TempChannelManager', () => {
   it('instantiates without errors', () => {
     const manager = new TempChannelManager(makeGuild() as any, makeSupa() as any);
     expect(manager).toBeDefined();
+  });
+
+  it('deletes every durable cleanup survivor before releasing its occurrence', async () => {
+    const voice = { id: 'voice-survivor', delete: vi.fn().mockResolvedValue(undefined) };
+    const text = { id: 'text-survivor', delete: vi.fn().mockResolvedValue(undefined) };
+    const occurrenceDeletes = vi.fn();
+    const occurrenceChain = makeChain({
+      data: [{
+        id: 'occurrence-cleanup',
+        result: {
+          channelCleanupPending: true,
+          channelIds: ['voice-survivor', 'text-survivor'],
+        },
+      }],
+      error: null,
+    });
+    occurrenceChain.delete = vi.fn(() => {
+      occurrenceDeletes();
+      return occurrenceChain;
+    });
+    const supabase = {
+      from: vi.fn(() => occurrenceChain),
+    };
+    const guild = makeGuild();
+    guild.channels.cache = new Map([
+      ['voice-survivor', voice],
+      ['text-survivor', text],
+    ]);
+    const manager = new TempChannelManager(guild, supabase as any);
+
+    await expect(manager.reconcilePendingChannelCleanup()).resolves.toBe(1);
+    expect(voice.delete).toHaveBeenCalledTimes(1);
+    expect(text.delete).toHaveBeenCalledTimes(1);
+    expect(occurrenceDeletes).toHaveBeenCalledTimes(1);
   });
 
   it('clears and releases the original creation fence when ownership transfers', async () => {

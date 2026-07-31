@@ -101,7 +101,6 @@ export async function GET(req: NextRequest) {
     .select('id, order_id, customer_id, product_id, status, activated_at, created_at')
     .eq('guild_id', guildId)
     .in('order_id', orderIds)
-    .in('status', ['pending_activation', 'active', 'suspended'])
     .limit(200);
 
   const [keys, entitlements, downloads, holds, customers, products, downloadCutover] = await Promise.all([

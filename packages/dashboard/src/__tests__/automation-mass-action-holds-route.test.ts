@@ -36,6 +36,7 @@ function request(method: string, body: unknown) {
 
 function makeAdmin(options: {
   holds?: unknown[];
+  failedHolds?: unknown[];
   threshold?: number;
   decided?: unknown;
   configUpdated?: unknown;
@@ -43,9 +44,13 @@ function makeAdmin(options: {
   const calls: Record<string, unknown[][]> = {};
   const makeChain = (table: string) => {
     const chain: Record<string, unknown> = {};
+    let statusFilter: unknown = null;
     for (const method of ['select', 'eq', 'in', 'order', 'limit', 'update']) {
       chain[method] = vi.fn((...args: unknown[]) => {
         (calls[`${table}.${method}`] ??= []).push(args);
+        if ((method === 'eq' || method === 'in') && args[0] === 'status') {
+          statusFilter = args[1];
+        }
         return chain;
       });
     }
@@ -59,7 +64,9 @@ function makeAdmin(options: {
       error: null,
     }));
     chain.then = (resolve: (value: unknown) => unknown) => resolve({
-      data: table === 'automation_mass_action_holds' ? options.holds ?? [] : null,
+      data: table === 'automation_mass_action_holds'
+        ? statusFilter === 'failed' ? options.failedHolds ?? [] : options.holds ?? []
+        : null,
       error: null,
     });
     return chain;
@@ -88,6 +95,21 @@ describe('/api/automations/holds', () => {
 
     expect(json).toMatchObject({ success: true, data: [HOLD], threshold: 30 });
     expect(calls['automation_mass_action_holds.eq']).toContainEqual(['guild_id', 'guild-1']);
+  });
+
+  it('keeps unresolved holds visible even when the failure history is full', async () => {
+    const failedHolds = Array.from({ length: 200 }, (_, index) => ({
+      ...HOLD,
+      id: `failed-${index}`,
+      status: 'failed',
+    }));
+    const { admin } = makeAdmin({ holds: [HOLD], failedHolds });
+    vi.mocked(createAdminSupabase).mockReturnValue(admin as never);
+
+    const json = await (await GET()).json();
+
+    expect(json.data[0]).toEqual(HOLD);
+    expect(json.data).toHaveLength(201);
   });
 
   it('approves only a still-held occurrence with the authenticated owner identity', async () => {

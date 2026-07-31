@@ -12,12 +12,19 @@ export async function GET() {
   if (!auth.ok) return auth.response;
   const supabase = createAdminSupabase();
 
-  const [holdsResult, configResult] = await Promise.all([
+  const [pendingResult, failedResult, configResult] = await Promise.all([
     supabase
       .from('automation_mass_action_holds')
       .select('*')
       .eq('guild_id', auth.ctx.guildId)
-      .in('status', ['held', 'approved', 'executing', 'failed'])
+      .in('status', ['held', 'approved', 'executing'])
+      .order('created_at', { ascending: false })
+      .limit(500),
+    supabase
+      .from('automation_mass_action_holds')
+      .select('*')
+      .eq('guild_id', auth.ctx.guildId)
+      .eq('status', 'failed')
       .order('created_at', { ascending: false })
       .limit(200),
     supabase
@@ -26,11 +33,12 @@ export async function GET() {
       .eq('guild_id', auth.ctx.guildId)
       .maybeSingle(),
   ]);
-  if (holdsResult.error) return dbError(holdsResult.error, 'automations/holds');
+  if (pendingResult.error) return dbError(pendingResult.error, 'automations/holds/pending');
+  if (failedResult.error) return dbError(failedResult.error, 'automations/holds/failed');
   if (configResult.error) return dbError(configResult.error, 'automations/holds/config');
   return NextResponse.json({
     success: true,
-    data: holdsResult.data ?? [],
+    data: [...(pendingResult.data ?? []), ...(failedResult.data ?? [])],
     threshold: configResult.data?.automation_mass_action_threshold ?? 25,
   });
 }

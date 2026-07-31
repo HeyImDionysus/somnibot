@@ -66,21 +66,13 @@ GRANT EXECUTE ON FUNCTION public.reclaim_stale_discord_occurrence(
 ALTER TABLE public.orders
   ADD COLUMN IF NOT EXISTS download_required_snapshot BOOLEAN;
 
--- Historical file/link contracts are unambiguous. For historical mixed
--- contracts, today's file catalog is the best available recovery evidence;
--- all newly created checkout rows are frozen by the trigger below.
+-- Historical file/link contracts are unambiguous. Historical mixed contracts
+-- remain unknown because today's mutable file catalog is not order-time
+-- evidence. All newly created checkout rows are frozen by the trigger below.
 UPDATE public.orders AS sold_order
    SET download_required_snapshot = CASE
      WHEN sold_order.delivery_type_snapshot IN ('file', 'link') THEN true
-     WHEN sold_order.delivery_type_snapshot = 'mixed' THEN EXISTS (
-       SELECT 1
-         FROM public.product_files AS product_file
-        WHERE product_file.product_id = sold_order.product_id
-          AND (
-            product_file.file_path IS NOT NULL
-            OR product_file.external_url IS NOT NULL
-          )
-     )
+     WHEN sold_order.delivery_type_snapshot = 'mixed' THEN NULL
      ELSE false
    END
  WHERE sold_order.download_required_snapshot IS NULL;

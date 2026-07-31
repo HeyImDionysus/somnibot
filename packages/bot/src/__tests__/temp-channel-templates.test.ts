@@ -18,6 +18,7 @@ vi.mock('discord.js', () => ({
     addIntegerOption() { return this; } addStringOption() { return this; } addUserOption() { return this; }
   },
   ChannelType: { GuildText: 0, GuildVoice: 2, GuildCategory: 4 },
+  RESTJSONErrorCodes: { UnknownChannel: 10003 },
   PermissionFlagsBits: {
     ManageChannels: 4n, MoveMembers: 8n, MuteMembers: 16n, DeafenMembers: 32n,
     ViewChannel: 1n, SendMessages: 2n, ManageMessages: 64n, Connect: 128n,
@@ -131,7 +132,7 @@ function makeSupa(hubs: any[] = [HUB], active: any[] = []) {
   function chainFor(table: string) {
     const data = table === 'temp_channel_hubs' ? hubs : table === 'active_temp_channels' ? active : [];
     const c: any = {};
-    for (const m of ['select', 'eq', 'neq', 'or', 'is', 'lt', 'gt', 'gte', 'lte', 'in', 'not', 'order', 'limit', 'range', 'match', 'update', 'delete']) {
+    for (const m of ['select', 'eq', 'neq', 'or', 'is', 'lt', 'gt', 'gte', 'lte', 'in', 'not', 'order', 'limit', 'range', 'match', 'contains', 'update', 'delete']) {
       c[m] = () => c;
     }
     c.insert = (row: any) => { (inserts[table] ||= []).push(row); return c; };

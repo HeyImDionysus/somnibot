@@ -58,6 +58,37 @@ export async function reconcileTicketOrphanChannels(
   let reconciled = 0;
   for (const row of data ?? []) {
     if (typeof row.id !== 'string' || typeof row.resource_id !== 'string') continue;
+    const result =
+      row.result && typeof row.result === 'object' && !Array.isArray(row.result)
+        ? row.result as Record<string, unknown>
+        : {};
+    if (result.verifyTicketBeforeCleanup === true) {
+      const { data: committedTicket, error: verificationError } = await supabase
+        .from('tickets')
+        .select('id,channel_id')
+        .eq('creation_occurrence_id', row.id)
+        .maybeSingle();
+      if (verificationError) {
+        log.warn('Ticket cleanup is waiting for authoritative insert verification', {
+          occurrenceId: row.id,
+          channelId: row.resource_id,
+          error: verificationError.message,
+        });
+        continue;
+      }
+      if (committedTicket) {
+        const ticket = committedTicket as Pick<DbTicket, 'id' | 'channel_id'>;
+        await completeDiscordOccurrence(
+          supabase,
+          row.id,
+          ticket.channel_id || row.resource_id,
+          { ticketId: ticket.id, recovered: true },
+        );
+        reconciled++;
+        continue;
+      }
+    }
+
     let channel = guild.channels.cache.get(row.resource_id);
     let confirmedMissing = false;
     if (!channel) {
@@ -429,6 +460,16 @@ export async function createTicket(
           channelId: channel.id,
           error: reconciliationError.message,
         });
+        await markDiscordOccurrenceCleanupPending(
+          supabase,
+          occurrenceId,
+          channel.id,
+          `Ticket insert verification failed: ${reconciliationError.message}`,
+          {
+            stage: 'db_save_verification',
+            verifyTicketBeforeCleanup: true,
+          },
+        );
         return {
           error: 'Ticket creation could not be confirmed. The channel was preserved for automatic recovery.',
         };

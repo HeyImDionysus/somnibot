@@ -144,6 +144,30 @@ describe('GET /api/store/control-room', () => {
     });
   });
 
+  it('treats a revoked historical key as proof that a license was issued', async () => {
+    setup({
+      license_keys: {
+        data: [{
+          id: 'key-revoked',
+          order_id: ORDER,
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'revoked',
+          activated_at: null,
+          created_at: '2026-07-28T12:01:00.000Z',
+        }],
+        error: null,
+      },
+    });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+
+    expect(body.data.customers[0].stages.licensed).toBe('complete');
+    expect(body.data.customers[0].reasons).not.toContain(
+      'No license key was issued within 15 minutes of payment.',
+    );
+  });
+
   it('marks missing fulfillment evidence as stuck without using aggregate file counts', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-01T12:00:00.000Z'));

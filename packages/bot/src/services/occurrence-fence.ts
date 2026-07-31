@@ -94,7 +94,7 @@ export async function markDiscordOccurrenceCleanupPending(
   error: string,
   result: Record<string, unknown>,
 ): Promise<void> {
-  const { error: updateError } = await supabase
+  const { data: updated, error: updateError } = await supabase
     .from('discord_operation_occurrences')
     .update({
       resource_id: resourceId,
@@ -102,9 +102,16 @@ export async function markDiscordOccurrenceCleanupPending(
       last_error: error,
     })
     .eq('id', occurrenceId)
-    .eq('status', 'claimed');
+    .eq('status', 'claimed')
+    .select('id')
+    .maybeSingle();
   if (updateError) {
     throw new Error(`Unable to preserve Discord occurrence cleanup job: ${updateError.message}`);
+  }
+  if (!updated) {
+    throw new Error(
+      `Unable to preserve Discord occurrence cleanup job: occurrence ${occurrenceId} is no longer claimed`,
+    );
   }
 }
 
