@@ -185,6 +185,73 @@ describe('ticket creation failure observability', () => {
     );
   });
 
+  it('retries a transient cleanup-persist failure instead of stranding the channel', async () => {
+    // Review 3691625803: one transient DB error on the cleanup-pending write
+    // used to be swallowed — the claim stayed WITHOUT channelCleanupPending,
+    // invisible to reconcileTicketOrphanChannels forever. The write now
+    // retries; the first attempt fails here and the second must land.
+    let persistAttempts = 0;
+    let ticketQuery = 0;
+    const occurrence = {
+      id: 'occurrence-retry', guild_id: 'g1', operation_kind: 'ticket',
+      occurrence_key: 'interaction-retry', status: 'claimed',
+      resource_id: null, result: {}, last_error: null,
+    };
+    const supa = {
+      from: vi.fn((table: string) => {
+        const chain = makeCreateSupa().from('tickets');
+        if (table === 'alerts') return { insert: vi.fn(async () => ({ error: null })) };
+        if (table === 'discord_operation_occurrences') {
+          chain.single = vi.fn(async () => ({ data: occurrence, error: null }));
+          chain.update = vi.fn(() => chain);
+          chain.maybeSingle = vi.fn(async () => {
+            persistAttempts++;
+            if (persistAttempts === 1) {
+              return { data: null, error: { message: 'transient write failure' } };
+            }
+            return { data: { id: occurrence.id }, error: null };
+          });
+          return chain;
+        }
+        if (table === 'tickets') {
+          ticketQuery++;
+          if (ticketQuery === 1) {
+            chain.then = (resolve: Function) => resolve({ data: [], error: null, count: 0 });
+          } else if (ticketQuery === 2) {
+            chain.single = vi.fn(async () => ({
+              data: null, error: { message: 'connection lost after commit' },
+            }));
+          } else {
+            chain.maybeSingle = vi.fn(async () => ({
+              data: null, error: { message: 'read replica unavailable' },
+            }));
+          }
+        }
+        return chain;
+      }),
+      rpc: vi.fn(async () => ({ data: 1, error: null })),
+    } as any;
+    const channel = {
+      id: 'tc-retry',
+      send: vi.fn().mockResolvedValue({}),
+      delete: vi.fn().mockResolvedValue({}),
+    };
+
+    const result = await createTicket(
+      makeGuild(vi.fn().mockResolvedValue(channel)),
+      member, panel, ticketType, supa, { emit: vi.fn() } as any,
+      'interaction-retry',
+    );
+
+    // The retry landed: the member still gets the honest recovery answer, and
+    // the channel is preserved for the reconciler rather than stranded.
+    expect(result).toEqual({
+      error: 'Ticket creation could not be confirmed. The channel was preserved for automatic recovery.',
+    });
+    expect(persistAttempts).toBe(2);
+    expect(channel.delete).not.toHaveBeenCalled();
+  });
+
   it('queues durable verification when an uncertain ticket insert cannot be read back', async () => {
     const occurrenceUpdates = vi.fn();
     let ticketQuery = 0;

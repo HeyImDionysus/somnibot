@@ -17,6 +17,7 @@ import {
   claimDiscordOccurrence,
   completeDiscordOccurrence,
   failDiscordOccurrence,
+  markDiscordOccurrenceCounterReserved,
 } from '../../services/occurrence-fence.js';
 
 const log = createLogger('ScheduledRunner');
@@ -372,6 +373,7 @@ export class ScheduledMessageRunner {
     // Discord's send API.
     let occurrenceId: string;
     let reclaimedStaleClaim = false;
+    let reclaimedResult: Record<string, unknown> = {};
     try {
       const claim = await claimDiscordOccurrence(
         this.supabase,
@@ -426,6 +428,10 @@ export class ScheduledMessageRunner {
           + `(due ${occurrenceAt.toISOString()}); the previous holder crashed before completing.`,
         );
         reclaimedStaleClaim = true;
+        reclaimedResult =
+          existing.result && typeof existing.result === 'object' && !Array.isArray(existing.result)
+            ? existing.result as Record<string, unknown>
+            : {};
         occurrenceId = existing.id;
       } else {
         occurrenceId = claim.occurrence.id;
@@ -464,14 +470,23 @@ export class ScheduledMessageRunner {
         return;
       }
       const lastCountedMs = new Date(priorCounter.last_sent_at ?? 0).getTime();
-      if (lastCountedMs >= occurrenceAt.getTime()) {
-        // This minute (===) or a later one (>) is already on the counter. In
-        // the strictly-later case this minute's own counted-ness is no longer
-        // recorded anywhere; claiming a fresh slot risks paying twice for one
-        // due minute, so deliver WITHOUT a new claim — consistent with the
-        // documented at-least-once bias of reclaim recovery.
+      if (lastCountedMs === occurrenceAt.getTime()) {
+        // The authoritative row names this exact minute: its slot is paid.
         counterAlreadyClaimed = true;
         claimedSendCount = priorCounter.current_sends;
+      } else if (lastCountedMs > occurrenceAt.getTime()) {
+        // A LATER minute is on the counter, which proves nothing about THIS
+        // one: the crashed holder may have died before its counter call while
+        // later minutes advanced last_sent_at past it. Only the occurrence's
+        // own durable counterReserved flag (written after a successful
+        // claim_scheduled_message_send) proves the slot was paid. Without it,
+        // fall through to a normal counter claim — an exhausted schedule then
+        // completes the occurrence as skipped, respecting max_sends instead
+        // of delivering past the cap on a guess.
+        if (reclaimedResult.counterReserved === true) {
+          counterAlreadyClaimed = true;
+          claimedSendCount = priorCounter.current_sends;
+        }
       }
     }
 
@@ -511,6 +526,18 @@ export class ScheduledMessageRunner {
       }
       claimedSendCount = reconciled.current_sends;
     }
+    if (typeof claimedSendCount === 'number' && !counterAlreadyClaimed) {
+      // Durably mark that THIS occurrence paid a counter slot, so recovery can
+      // later distinguish "already counted" from "died before counting".
+      // Best-effort: a missed write only makes recovery claim a fresh slot,
+      // which errs toward respecting the cap.
+      await markDiscordOccurrenceCounterReserved(this.supabase, occurrenceId).catch((err) => {
+        log.warn(`Could not record counter reservation for schedule ${schedule.id}:`, {
+          error: String(err),
+        });
+      });
+    }
+
     if (typeof claimedSendCount !== 'number') {
       // Another occurrence consumed the final max_sends slot while this
       // occurrence was being claimed. Nothing reached Discord, but the fence

@@ -45,6 +45,8 @@ function schedSupa(
     priorCounterError?: { message: string };
     /** When set, the scheduled_messages LIST load fails (non-authoritative). */
     schedulesLoadError?: { message: string };
+    /** When set, claim_scheduled_message_send returns null (max_sends reached). */
+    counterExhausted?: boolean;
   } = {},
 ) {
   const inserts: Record<string, any[]> = { alerts: [] };
@@ -132,6 +134,7 @@ function schedSupa(
       return { data: r === true, error: null };
     }
     if (options.counterError) return { data: null, error: options.counterError };
+    if (options.counterExhausted) return { data: null, error: null };
     return { data: (schedules[0]?.current_sends ?? 0) + 1, error: null };
   });
   return { supabase: { from: (t: string) => chainFor(t), rpc } as any, inserts, updates, deletes };
@@ -574,11 +577,11 @@ describe('ScheduledMessageRunner — a crashed minute cannot hide behind a later
           id: 'occ-t', guild_id: 'g1', operation_kind: 'scheduled_message',
           occurrence_key: `sched1:${minuteT}`, status: 'claimed',
           claimed_at: staleAt, updated_at: staleAt,
-          resource_id: null, result: {}, last_error: null,
+          // The crashed holder committed its counter before dying — the
+          // durable reservation flag is what authorizes slot-free delivery.
+          resource_id: null, result: { counterReserved: true }, last_error: null,
         },
         reclaimResult: true,
-        // last_sent_at (T+1) is strictly LATER than T: T's own counted-ness is
-        // unknowable, so delivery proceeds WITHOUT claiming a fresh slot.
         priorCounterRow: { current_sends: 5, last_sent_at: minuteT1 },
       },
     );
@@ -643,5 +646,51 @@ describe('ScheduledMessageRunner — dead-schedule claims cannot pin the scan', 
     await (runner as any).tick();
 
     expect(updates.some((u) => u.payload.status === 'failed')).toBe(false);
+  });
+});
+
+describe('ScheduledMessageRunner — recovery never bypasses max_sends on a guess', () => {
+  it('claims a real slot for an UNRESERVED reclaimed minute, and skips when exhausted', async () => {
+    // Review 3691625823: last_sent_at > dueMinute does NOT prove this minute
+    // paid a slot — the holder can die before its counter call while later
+    // minutes advance the counter. Without the durable counterReserved flag,
+    // recovery must claim a fresh slot; on an exhausted schedule that claim
+    // returns null and the occurrence completes as SKIPPED — the cap holds.
+    const Runner = await loadRunner();
+    const minuteT = new Date(Math.floor((Date.now() - 20 * 60_000) / 60_000) * 60_000)
+      .toISOString();
+    const minuteT1 = new Date(Date.parse(minuteT) + 60_000).toISOString();
+    const staleAt = new Date(Date.now() - 20 * 60_000).toISOString();
+    const { supabase, updates } = schedSupa(
+      [{
+        ...BASE_SCHEDULE,
+        cron_expression: '0 0 1 1 *',
+        max_sends: 2,
+        current_sends: 2, // two LATER minutes consumed the cap
+        last_sent_at: minuteT1,
+      }],
+      {
+        existingOccurrence: {
+          id: 'occ-unreserved', guild_id: 'g1', operation_kind: 'scheduled_message',
+          occurrence_key: `sched1:${minuteT}`, status: 'claimed',
+          claimed_at: staleAt, updated_at: staleAt,
+          resource_id: null, result: {}, last_error: null, // NO reservation flag
+        },
+        reclaimResult: true,
+        priorCounterRow: { current_sends: 2, last_sent_at: minuteT1 },
+        counterExhausted: true,
+      },
+    );
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+
+    await (runner as any).tick();
+
+    expect(send).not.toHaveBeenCalled();
+    const rpcNames = (supabase.rpc as any).mock.calls.map((c: any[]) => c[0]);
+    // The slot WAS honestly attempted…
+    expect(rpcNames).toContain('claim_scheduled_message_send');
+    // …and the exhausted answer terminalized the occurrence as skipped.
+    expect(updates.some((u) => u.payload.status === 'completed')).toBe(true);
   });
 });

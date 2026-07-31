@@ -17,6 +17,25 @@ UPDATE public.guild_config
         pg_catalog.octet_length(starboard_emoji) = pg_catalog.char_length(starboard_emoji)
         OR pg_catalog.char_length(starboard_emoji) > 16
         OR starboard_emoji ~ '[[:alnum:][:space:]]'
+        -- Review 3691625811: a value like two bare stars passed every rule
+        -- above (non-ASCII, short, no alphanumerics) yet is TWO reactions'
+        -- worth of emoji — Discord reactions carry one, and the handler
+        -- compares exactly, so such configs could never match and starboard
+        -- silently never fired. Normalize them to the default.
+        OR NOT (
+        pg_catalog.char_length(starboard_emoji) = 1
+        -- Joiner/modifier-glued clusters: ZWJ sequences, VS16 presentation,
+        -- keycaps, skin tones, tag sequences — many codepoints, ONE emoji.
+        OR starboard_emoji ~ (
+          '[' || pg_catalog.chr(8205) || pg_catalog.chr(65039) || pg_catalog.chr(8419)
+              || pg_catalog.chr(127995) || '-' || pg_catalog.chr(127999)
+              || pg_catalog.chr(917536) || '-' || pg_catalog.chr(917631) || ']'
+        )
+        -- Flags: exactly two regional indicators.
+        OR starboard_emoji ~ (
+          '^[' || pg_catalog.chr(127462) || '-' || pg_catalog.chr(127487) || ']{2}$'
+        )
+      )
       )
     );
 
@@ -35,6 +54,26 @@ ALTER TABLE public.guild_config
         pg_catalog.octet_length(starboard_emoji) > pg_catalog.char_length(starboard_emoji)
         AND pg_catalog.char_length(starboard_emoji) <= 16
         AND starboard_emoji !~ '[[:alnum:][:space:]]'
+        -- Single emoji CLUSTER only (see the normalization above). Residual,
+        -- stated: a multi-cluster string that happens to contain a joiner or
+        -- modifier (e.g. star+VS16+star) still passes — full grapheme
+        -- segmentation is not expressible here; the API-side validator
+        -- remains the precise gate, and this blocks the common bare
+        -- multi-emoji case.
+        AND (
+        pg_catalog.char_length(starboard_emoji) = 1
+        -- Joiner/modifier-glued clusters: ZWJ sequences, VS16 presentation,
+        -- keycaps, skin tones, tag sequences — many codepoints, ONE emoji.
+        OR starboard_emoji ~ (
+          '[' || pg_catalog.chr(8205) || pg_catalog.chr(65039) || pg_catalog.chr(8419)
+              || pg_catalog.chr(127995) || '-' || pg_catalog.chr(127999)
+              || pg_catalog.chr(917536) || '-' || pg_catalog.chr(917631) || ']'
+        )
+        -- Flags: exactly two regional indicators.
+        OR starboard_emoji ~ (
+          '^[' || pg_catalog.chr(127462) || '-' || pg_catalog.chr(127487) || ']{2}$'
+        )
+      )
       )
     )
   );

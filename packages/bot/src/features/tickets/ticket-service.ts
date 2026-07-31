@@ -169,6 +169,40 @@ async function touchBlockedCleanupJob(
   }
 }
 
+/**
+ * Durably record an orphaned ticket channel as a cleanup-pending job, with
+ * bounded retries. A single transient database error here used to be swallowed
+ * by the caller's .catch — the occurrence stayed `claimed` WITHOUT
+ * channelCleanupPending, invisible to reconcileTicketOrphanChannels forever,
+ * while redelivery lost the claim and found no ticket row: channel and ticket
+ * request both stranded. Returns true when the job landed.
+ */
+async function persistTicketCleanupJob(
+  supabase: SupabaseClient,
+  occurrenceId: string,
+  channelId: string,
+  cause: string,
+  extra: Record<string, unknown> = {},
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await markDiscordOccurrenceCleanupPending(supabase, occurrenceId, channelId, cause, extra);
+      return true;
+    } catch (persistError) {
+      if (attempt === 3) {
+        log.error('Could not persist ticket cleanup job after retries; the orphaned channel is only recoverable manually:', {
+          occurrenceId,
+          channelId,
+          error: String(persistError),
+        });
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+      }
+    }
+  }
+  return false;
+}
+
 // ── Failure observability ────────────────────────────────
 
 /**
@@ -442,17 +476,13 @@ export async function createTicket(
           });
         });
       } else {
-        await markDiscordOccurrenceCleanupPending(
+        await persistTicketCleanupJob(
           supabase,
           occurrenceId,
           channel.id,
           `intro_send:${String(err)}`,
           { stage: 'intro_send' },
-        ).catch((failErr) => {
-          log.error('Failed to record orphaned ticket channel occurrence:', {
-            error: String(failErr),
-          });
-        });
+        );
       }
     }
     return { error: 'Failed to initialize ticket channel. Please try again.' };
@@ -496,7 +526,7 @@ export async function createTicket(
           channelId: channel.id,
           error: reconciliationError.message,
         });
-        await markDiscordOccurrenceCleanupPending(
+        const verificationJobPersisted = await persistTicketCleanupJob(
           supabase,
           occurrenceId,
           channel.id,
@@ -506,6 +536,9 @@ export async function createTicket(
             verifyTicketBeforeCleanup: true,
           },
         );
+        if (!verificationJobPersisted) {
+          throw new Error('Ticket recovery state could not be persisted');
+        }
         return {
           error: 'Ticket creation could not be confirmed. The channel was preserved for automatic recovery.',
         };
@@ -539,17 +572,13 @@ export async function createTicket(
             });
           });
         } else {
-          await markDiscordOccurrenceCleanupPending(
+          await persistTicketCleanupJob(
             supabase,
             occurrenceId,
             channel.id,
             `db_save:${dbError?.message ?? 'unknown'}`,
             { stage: 'db_save' },
-          ).catch((failError) => {
-            log.error('Failed to record orphaned ticket channel occurrence:', {
-              error: String(failError),
-            });
-          });
+          );
         }
       }
       return { error: 'Failed to save ticket to database.' };

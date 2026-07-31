@@ -397,13 +397,21 @@ export async function POST(req: NextRequest) {
     return apiServerError(err, 'store/products');
   }
 
-  const discordTargetsError = await discordTargetsResponse(
-    supabase,
-    guildId,
-    granted_role_ids ?? [],
-    granted_channel_ids ?? [],
-  );
-  if (discordTargetsError) return discordTargetsError;
+  // Live-target validation applies to products that will actually SELL. A
+  // draft (active: false) is not purchasable, the income wall already accounts
+  // for its inactive state, and validating here blocked owners from preparing
+  // drafts while the bot was offline (503) or before Discord permissions were
+  // finished (409). Activation re-validates: the PUT handler checks targets
+  // whenever a product becomes active.
+  if (active !== false) {
+    const discordTargetsError = await discordTargetsResponse(
+      supabase,
+      guildId,
+      granted_role_ids ?? [],
+      granted_channel_ids ?? [],
+    );
+    if (discordTargetsError) return discordTargetsError;
+  }
 
   let paypalProductId: string | null = null;
   if (requiresPayPal) {
@@ -574,26 +582,36 @@ export async function PUT(req: NextRequest) {
   ) {
     const { data: currentTargets, error: currentTargetsError } = await supabase
       .from('products')
-      .select('granted_role_ids, granted_channel_ids')
+      .select('granted_role_ids, granted_channel_ids, active')
       .eq('id', id)
       .eq('guild_id', guildId)
       .maybeSingle();
     if (currentTargetsError) return dbError(currentTargetsError, 'store/products/live-targets');
     if (!currentTargets) return apiError('Product not found for this guild', 404);
 
-    const roles = 'granted_role_ids' in updates
-      ? updates.granted_role_ids ?? []
-      : currentTargets.granted_role_ids ?? [];
-    const channels = 'granted_channel_ids' in updates
-      ? updates.granted_channel_ids ?? []
-      : currentTargets.granted_channel_ids ?? [];
-    const discordTargetsError = await discordTargetsResponse(
-      supabase,
-      guildId,
-      roles,
-      channels,
-    );
-    if (discordTargetsError) return discordTargetsError;
+    // Drafts stay editable while the bot is offline or Discord permissions
+    // are unfinished; the gate that matters is ACTIVATION. Validate whenever
+    // the product will be active after this update — which covers both
+    // flipping a draft live (explicit active: true) and editing the targets
+    // of an already-active product. Editing a draft that stays a draft skips
+    // the live check entirely.
+    const willBeActive = updates.active === true
+      || (updates.active === undefined && currentTargets.active === true);
+    if (willBeActive) {
+      const roles = 'granted_role_ids' in updates
+        ? updates.granted_role_ids ?? []
+        : currentTargets.granted_role_ids ?? [];
+      const channels = 'granted_channel_ids' in updates
+        ? updates.granted_channel_ids ?? []
+        : currentTargets.granted_channel_ids ?? [];
+      const discordTargetsError = await discordTargetsResponse(
+        supabase,
+        guildId,
+        roles,
+        channels,
+      );
+      if (discordTargetsError) return discordTargetsError;
+    }
   }
 
   const WALL_TRIGGER_FIELDS = [

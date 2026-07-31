@@ -78,6 +78,24 @@ describe('guild configuration reference shapes', () => {
       starboard_emoji: 'stars 😀 please',
     }).eq('guild_id', guildId);
     expect(embedded.error?.code).toBe('23514');
+
+    // Review 3691625811: two bare pictographs are TWO reactions' worth of
+    // emoji. Discord reactions carry one, the handler compares exactly, so
+    // this value could never match — the boundary now refuses it.
+    const multi = await supa.from('guild_config').update({
+      starboard_emoji: '⭐⭐',
+    }).eq('guild_id', guildId);
+    expect(multi.error?.code).toBe('23514');
+
+    // Multi-codepoint SINGLE clusters stay valid: flags and ZWJ sequences.
+    const flag = await supa.from('guild_config').update({
+      starboard_emoji: '🇺🇸',
+    }).eq('guild_id', guildId);
+    expect(flag.error).toBeNull();
+    const zwj = await supa.from('guild_config').update({
+      starboard_emoji: '👨‍👩‍👧',
+    }).eq('guild_id', guildId);
+    expect(zwj.error).toBeNull();
   });
 
   it('accepts web card backgrounds and rejects non-web schemes', async () => {
