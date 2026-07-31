@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { AlertTriangle, CheckCircle2, CircleOff, HelpCircle } from 'lucide-react';
 import {
@@ -27,10 +27,20 @@ export function FeatureStatusPanel() {
   const pathname = usePathname();
   const feature = featureForPath(pathname);
   const [status, setStatus] = useState<FeatureReadiness | null>(null);
+  // Monotonic request sequence. Navigating features while a status request is
+  // in flight left BOTH requests able to call setStatus, so a slower response
+  // for the previous route could overwrite the newer route's result — e.g. an
+  // Economy page wearing "Store and fulfillment: enabled and reachable" until
+  // the next refresh. Only the most recent request may publish.
+  const requestSeq = useRef(0);
 
   const refresh = useCallback(async () => {
     if (!feature) return;
-    setStatus(null);
+    const seq = ++requestSeq.current;
+    const publish = (next: FeatureReadiness | null) => {
+      if (seq === requestSeq.current) setStatus(next);
+    };
+    publish(null);
     try {
       const response = await fetch('/api/dashboard/feature-status');
       const payload = await response.json();
@@ -41,14 +51,14 @@ export function FeatureStatusPanel() {
       const bot = response.ok && payload.success
         ? payload.data?.bot
         : null;
-      setStatus(deriveFeatureReadiness({
+      publish(deriveFeatureReadiness({
         feature,
         config,
         botOnline: typeof bot?.online === 'boolean' ? bot.online : null,
         staleSecs: typeof bot?.staleSecs === 'number' ? bot.staleSecs : null,
       }));
     } catch {
-      setStatus({
+      publish({
         state: 'unavailable',
         heading: `${feature.label}: status unavailable`,
         detail: 'The saved configuration and bot heartbeat could not be verified.',

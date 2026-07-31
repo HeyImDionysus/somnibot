@@ -52,6 +52,12 @@ export async function reconcileTicketOrphanChannels(
     .eq('operation_kind', 'ticket')
     .eq('status', 'claimed')
     .contains('result', { channelCleanupPending: true })
+    // Oldest-touched first. Together with touchBlockedCleanupJob() below this
+    // makes the bounded batch a ROTATION: a cohort of permanently blocked
+    // rows (e.g. channels in a category the bot cannot delete from) is pushed
+    // to the back after each failed attempt instead of occupying all 100
+    // slots on every pass and starving newer, deletable jobs forever.
+    .order('updated_at', { ascending: true })
     .limit(100);
   if (error) throw new Error(`Unable to load ticket cleanup jobs: ${error.message}`);
 
@@ -107,6 +113,7 @@ export async function reconcileTicketOrphanChannels(
             channelId: row.resource_id,
             error: String(fetchError),
           });
+          await touchBlockedCleanupJob(supabase, row.id, `verify_failed:${String(fetchError)}`);
           continue;
         }
       }
@@ -121,6 +128,7 @@ export async function reconcileTicketOrphanChannels(
           channelId: row.resource_id,
           error: String(deleteError),
         });
+        await touchBlockedCleanupJob(supabase, row.id, `delete_failed:${String(deleteError)}`);
         continue;
       }
     }
@@ -131,6 +139,29 @@ export async function reconcileTicketOrphanChannels(
     }
   }
   return reconciled;
+}
+
+/**
+ * Send a blocked cleanup job to the back of the rotation. Best-effort and
+ * conditional on the row still being claimed — bookkeeping must never turn a
+ * blocked job into a lost one.
+ */
+async function touchBlockedCleanupJob(
+  supabase: SupabaseClient,
+  occurrenceId: string,
+  reason: string,
+): Promise<void> {
+  const { error } = await supabase
+    .from('discord_operation_occurrences')
+    .update({ updated_at: new Date().toISOString(), last_error: reason.slice(0, 500) })
+    .eq('id', occurrenceId)
+    .eq('status', 'claimed');
+  if (error) {
+    log.warn('Could not rotate blocked ticket cleanup job', {
+      occurrenceId,
+      error: error.message,
+    });
+  }
 }
 
 // ── Failure observability ────────────────────────────────

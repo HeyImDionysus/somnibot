@@ -73,6 +73,41 @@ const PERMISSION_BITS: Record<RequiredChannelPermission, bigint> = {
   Speak: BigInt(1) << BigInt(21),
 };
 
+/**
+ * Why a channel cannot be safely enabled, or null when it can.
+ *
+ * The snapshot-authority gate is the review-3689375357 repair: a
+ * non-authoritative snapshot (stale cache, legacy shape) may carry permission
+ * bits from BEFORE the bot lost View Channel / Send Messages / Embed Links.
+ * Trusting them let a channel be enabled whose delivery was guaranteed to
+ * fail — and /api/embeds/send does no live re-validation, so the queued
+ * request still reported success. Required permissions are therefore treated
+ * as unavailable until the snapshot is authoritative.
+ */
+export function channelPermissionIssue(
+  channel: Pick<DiscordChannel, 'missing' | 'botPermissions' | 'name'>,
+  requiredBotPermissions: readonly RequiredChannelPermission[],
+  snapshotAuthoritative: boolean,
+): string | null {
+  if (channel.missing) return 'This channel was deleted or is no longer in this server.';
+  if (requiredBotPermissions.length === 0) return null;
+  if (!snapshotAuthoritative) {
+    return 'Live bot permissions cannot be verified right now — retry after the bot refreshes its snapshot.';
+  }
+  if (channel.botPermissions == null) return 'Live bot permissions are unavailable for this channel.';
+  try {
+    const available = BigInt(channel.botPermissions);
+    const missing = requiredBotPermissions.filter(
+      (permission) => (available & PERMISSION_BITS[permission]) !== PERMISSION_BITS[permission],
+    );
+    return missing.length > 0
+      ? `SomniBot is missing ${missing.join(', ')} in #${channel.name}.`
+      : null;
+  } catch {
+    return 'Live bot permissions are malformed for this channel.';
+  }
+}
+
 interface ChannelPickerProps {
   /** Currently selected channel ID(s) */
   value: string | string[] | null;
@@ -268,22 +303,11 @@ export function ChannelPicker({
       .finally(() => setLoading(false));
   }, []);
 
-  const permissionIssue = useCallback((channel: DiscordChannel): string | null => {
-    if (channel.missing) return 'This channel was deleted or is no longer in this server.';
-    if (requiredBotPermissions.length === 0) return null;
-    if (channel.botPermissions == null) return 'Live bot permissions are unavailable for this channel.';
-    try {
-      const available = BigInt(channel.botPermissions);
-      const missing = requiredBotPermissions.filter(
-        (permission) => (available & PERMISSION_BITS[permission]) !== PERMISSION_BITS[permission],
-      );
-      return missing.length > 0
-        ? `SomniBot is missing ${missing.join(', ')} in #${channel.name}.`
-        : null;
-    } catch {
-      return 'Live bot permissions are malformed for this channel.';
-    }
-  }, [requiredBotPermissions]);
+  const permissionIssue = useCallback(
+    (channel: DiscordChannel): string | null =>
+      channelPermissionIssue(channel, requiredBotPermissions, snapshotAuthoritative),
+    [requiredBotPermissions, snapshotAuthoritative],
+  );
 
   // Resolve string aliases to numeric channel types
   const resolvedTypes = useMemo(() => {

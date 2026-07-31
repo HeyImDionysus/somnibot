@@ -63,6 +63,12 @@ function isConflict(error: unknown): boolean {
  * Execution remains in AutomationEngine so the same action runner and audit
  * behavior are used before and after a restart.
  */
+/**
+ * Age past which a `pending:` notice-delivery claim is treated as a dead
+ * holder's leftovers. A live send completes in seconds.
+ */
+const STALE_NOTICE_CLAIM_MS = 10 * 60_000;
+
 export class MassActionHoldService {
   private channel: RealtimeChannel | null = null;
   private approvedPoller: NodeJS.Timeout | null = null;
@@ -277,7 +283,27 @@ export class MassActionHoldService {
    * message and Postgres storing its id without posting a second card.
    */
   async ensureOwnerNotice(hold: MassActionHoldRow, automationName: string): Promise<void> {
-    if (hold.notification_message_id) return;
+    if (hold.notification_message_id) {
+      if (!hold.notification_message_id.startsWith('pending:')) return; // delivered
+      // A delivery CLAIM, not a message id. Fresh → a live path is mid-send,
+      // leave it alone. Stale → that path died between claiming and sending;
+      // release the exact sentinel (CAS) and fall through to claim delivery
+      // ourselves. Without this, a crash inside the claim window would strand
+      // the owner notice behind the delivered-check forever.
+      const claimedAtMs = Number(hold.notification_message_id.split(':')[2]);
+      if (Number.isFinite(claimedAtMs) && Date.now() - claimedAtMs < STALE_NOTICE_CLAIM_MS) {
+        return;
+      }
+      const { error: releaseError } = await this.supabase
+        .from('automation_mass_action_holds')
+        .update({ notification_message_id: null })
+        .eq('id', hold.id)
+        .eq('guild_id', this.guild.id)
+        .eq('notification_message_id', hold.notification_message_id);
+      if (releaseError) {
+        throw new Error(`Failed to release stale notice claim: ${releaseError.message}`);
+      }
+    }
     const { data: config, error: configError } = await this.supabase
       .from('guild_config')
       .select('alert_channel_id')
@@ -295,26 +321,69 @@ export class MassActionHoldService {
     const existing = recent?.find((message) =>
       message.embeds.some((embed) => embed.footer?.text === footerText),
     );
-    const message = existing ?? await textChannel.send({
-      embeds: [{
-        title: '🛑 Automation held for approval',
-        description:
-          `Held automation **${automationName}**: it tried to affect ` +
-          `**${hold.member_count} members** at once, above the **${hold.threshold}** guardrail.\n\n` +
-          'No member-targeted action ran. Approve or reject this occurrence from the Automations dashboard.',
-        color: 0xffa500,
-        footer: { text: footerText },
-        timestamp: new Date(hold.created_at).toISOString(),
-      }],
-      allowedMentions: { parse: [] },
-    });
+    if (existing) {
+      // A card already exists (crash landed between send and record). Adopt
+      // its id; the conditional update below keeps whoever recorded first.
+      const { error } = await this.supabase
+        .from('automation_mass_action_holds')
+        .update({ notification_message_id: existing.id })
+        .eq('id', hold.id)
+        .eq('guild_id', this.guild.id)
+        .is('notification_message_id', null);
+      if (error) throw new Error(`Failed to record mass-action owner notice: ${error.message}`);
+      return;
+    }
+
+    // CLAIM delivery before calling Discord. Two concurrent recovery paths
+    // (rolling deploy, periodic scan overlapping the creation path) can both
+    // pass the message scan above before either has posted — recording the id
+    // only AFTER the send then merely elects which duplicate card's id is
+    // stored, it cannot unsend the other one. The claim is a conditional write
+    // of a sentinel; exactly one caller wins the NULL row and sends.
+    const claimSentinel = `pending:${hold.id}:${Date.now()}`;
+    const { data: claimedRows, error: claimError } = await this.supabase
+      .from('automation_mass_action_holds')
+      .update({ notification_message_id: claimSentinel })
+      .eq('id', hold.id)
+      .eq('guild_id', this.guild.id)
+      .is('notification_message_id', null)
+      .select('id');
+    if (claimError) throw new Error(`Failed to claim mass-action owner notice: ${claimError.message}`);
+    if (!Array.isArray(claimedRows) || claimedRows.length === 0) return; // another path owns delivery
+
+    let message;
+    try {
+      message = await textChannel.send({
+        embeds: [{
+          title: '🛑 Automation held for approval',
+          description:
+            `Held automation **${automationName}**: it tried to affect ` +
+            `**${hold.member_count} members** at once, above the **${hold.threshold}** guardrail.\n\n` +
+            'No member-targeted action ran. Approve or reject this occurrence from the Automations dashboard.',
+          color: 0xffa500,
+          footer: { text: footerText },
+          timestamp: new Date(hold.created_at).toISOString(),
+        }],
+        allowedMentions: { parse: [] },
+      });
+    } catch (sendError) {
+      // Release the claim so a later pass can retry delivery; the footer scan
+      // above still guards the crash window inside Discord itself.
+      await this.supabase
+        .from('automation_mass_action_holds')
+        .update({ notification_message_id: null })
+        .eq('id', hold.id)
+        .eq('guild_id', this.guild.id)
+        .eq('notification_message_id', claimSentinel);
+      throw sendError;
+    }
 
     const { error } = await this.supabase
       .from('automation_mass_action_holds')
       .update({ notification_message_id: message.id })
       .eq('id', hold.id)
       .eq('guild_id', this.guild.id)
-      .is('notification_message_id', null);
+      .eq('notification_message_id', claimSentinel);
     if (error) throw new Error(`Failed to record mass-action owner notice: ${error.message}`);
   }
 

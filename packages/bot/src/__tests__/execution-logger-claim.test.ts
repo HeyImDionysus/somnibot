@@ -37,8 +37,18 @@ const RESULT = {
 /** Supabase stub whose insert→select→single resolves to the given claim outcome. */
 function makeSupa(insertOutcome: { data: unknown; error: unknown }) {
   const update = vi.fn(() => ({ eq: vi.fn(() => Promise.resolve({ error: null })) }));
-  const removeEq = vi.fn(() => Promise.resolve({ error: null }));
-  const remove = vi.fn(() => ({ eq: removeEq }));
+  // The delete chain must be fully chainable: claim()'s stale-pre-action
+  // reclaim now traverses .delete().eq()x7.lt().select() before resolving.
+  // Resolving zero rows models "the existing row is live/finalized" — the
+  // reclaim matches nothing and the claim stays skipped, which is exactly what
+  // this suite asserts.
+  const removeChain: any = {};
+  const removeEq = vi.fn(() => removeChain);
+  removeChain.eq = removeEq;
+  removeChain.lt = vi.fn(() => removeChain);
+  removeChain.select = vi.fn(() => removeChain);
+  removeChain.then = (resolve: (v: unknown) => void) => resolve({ data: [], error: null });
+  const remove = vi.fn(() => removeChain);
   const insert = vi.fn(() => ({ select: vi.fn(() => ({ single: vi.fn(() => Promise.resolve(insertOutcome)) })) }));
   return {
     _update: update,

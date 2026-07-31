@@ -303,18 +303,34 @@ describe('ticket orphan cleanup reconciliation', () => {
     expect(supabase.from).toHaveBeenCalledTimes(2);
   });
 
-  it('retains the cleanup job when Discord deletion is still failing', async () => {
+  it('retains a still-failing cleanup job and rotates it to the back of the batch', async () => {
     const channel = { id: 'tc-orphan', delete: vi.fn().mockRejectedValue(new Error('rate limited')) };
-    const chain = makeCreateSupa().from('tickets');
-    chain.then = (resolve: Function) => resolve({
-      data: [{
-        id: 'occurrence-orphan',
-        resource_id: 'tc-orphan',
-        result: { channelCleanupPending: true },
-      }],
-      error: null,
-    });
-    const supabase = { from: vi.fn(() => chain) } as any;
+    const orderCalls: Array<[string, unknown]> = [];
+    const touchPayloads: Array<Record<string, unknown>> = [];
+    const supabase = {
+      from: vi.fn(() => {
+        const chain = makeCreateSupa().from('tickets');
+        const baseOrder = chain.order;
+        chain.order = vi.fn((column: string, opts: unknown) => {
+          orderCalls.push([column, opts]);
+          return baseOrder ? chain : chain;
+        });
+        const baseUpdate = chain.update;
+        chain.update = vi.fn((payload: Record<string, unknown>) => {
+          touchPayloads.push(payload);
+          return baseUpdate ? chain : chain;
+        });
+        chain.then = (resolve: Function) => resolve({
+          data: [{
+            id: 'occurrence-orphan',
+            resource_id: 'tc-orphan',
+            result: { channelCleanupPending: true },
+          }],
+          error: null,
+        });
+        return chain;
+      }),
+    } as any;
     const guild = {
       id: 'g1',
       channels: {
@@ -324,7 +340,18 @@ describe('ticket orphan cleanup reconciliation', () => {
     } as any;
 
     await expect(reconcileTicketOrphanChannels(guild, supabase)).resolves.toBe(0);
-    expect(supabase.from).toHaveBeenCalledTimes(1);
+    // The scan is ORDERED so touched rows rotate: a permanently blocked cohort
+    // (bot lacks delete permission) can no longer occupy all 100 slots on
+    // every pass and starve newer, deletable jobs forever.
+    expect(orderCalls).toContainEqual(['updated_at', { ascending: true }]);
+    // The blocked row was touched to the back — updated_at bumped, error kept.
+    const touch = touchPayloads.find((payload) => 'updated_at' in payload);
+    expect(touch, 'a failed delete must rotate the job').toBeTruthy();
+    expect(String(touch!.last_error)).toContain('delete_failed');
+    // And it was NOT released or completed — the job survives for retry.
+    expect(touchPayloads.some((payload) => payload.status === 'released'
+      || payload.status === 'completed'
+      || payload.status === 'failed')).toBe(false);
   });
 
   it('completes an uncertain occurrence without deleting its committed ticket channel', async () => {

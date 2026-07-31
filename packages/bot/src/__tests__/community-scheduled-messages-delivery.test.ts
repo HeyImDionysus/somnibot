@@ -109,6 +109,13 @@ function schedSupa(
         return resolve({ data: null, error: options.counterError });
       }
       if (c._isUpdate) return resolve({ data: [{ id: 'sched1' }], error: null });
+      if (table === 'discord_operation_occurrences' && !c._insertRow) {
+        // The per-tick stale-claim scan; code re-verifies status + staleness.
+        return resolve({
+          data: options.existingOccurrence ? [options.existingOccurrence] : [],
+          error: null,
+        });
+      }
       return resolve({ data: table === 'scheduled_messages' ? schedules : [], error: null });
     };
     return c;
@@ -333,7 +340,7 @@ describe('ScheduledMessageRunner — stale crashed claims are reclaimed, not sup
     const { supabase } = schedSupa(
       [{ ...BASE_SCHEDULE, max_sends: 1, current_sends: 1, last_sent_at: crashedMinute }],
       {
-        existingOccurrence: staleOccurrence(crashedMinute),
+        existingOccurrence: { ...staleOccurrence(crashedMinute), occurrence_key: `sched1:${crashedMinute}` },
         reclaimResult: true,
         priorCounterRow: { current_sends: 1, last_sent_at: crashedMinute },
       },
@@ -396,7 +403,7 @@ describe('ScheduledMessageRunner — recovery is not gated on exhaustion', () =>
       {
         existingOccurrence: {
           id: 'occ-stale', guild_id: 'g1', operation_kind: 'scheduled_message',
-          occurrence_key: 'k', status: 'claimed',
+          occurrence_key: `sched1:${crashedMinute}`, status: 'claimed',
           claimed_at: STALE_AT, updated_at: STALE_AT,
           resource_id: null, result: {}, last_error: null,
         },
@@ -435,7 +442,7 @@ describe('ScheduledMessageRunner — recovery is not gated on exhaustion', () =>
       {
         existingOccurrence: {
           id: 'occ-stale', guild_id: 'g1', operation_kind: 'scheduled_message',
-          occurrence_key: 'k', status: 'claimed',
+          occurrence_key: `sched1:${crashedMinute}`, status: 'claimed',
           claimed_at: STALE_AT, updated_at: STALE_AT,
           resource_id: null, result: {}, last_error: null,
         },
@@ -479,7 +486,7 @@ describe('ScheduledMessageRunner — recovery outruns the date bounds', () => {
       {
         existingOccurrence: {
           id: 'occ-final', guild_id: 'g1', operation_kind: 'scheduled_message',
-          occurrence_key: 'k-final', status: 'claimed',
+          occurrence_key: `sched1:${crashedMinute}`, status: 'claimed',
           claimed_at: staleAt, updated_at: staleAt,
           resource_id: null, result: {}, last_error: null,
         },
@@ -533,6 +540,52 @@ describe('ScheduledMessageRunner — recovery outruns the date bounds', () => {
     expect(send).not.toHaveBeenCalled();
     const rpcNames = (supabase.rpc as any).mock.calls.map((c: any[]) => c[0]);
     expect(rpcNames).not.toContain('reclaim_stale_discord_occurrence');
+    expect(rpcNames).not.toContain('claim_scheduled_message_send');
+  });
+});
+
+describe('ScheduledMessageRunner — a crashed minute cannot hide behind a later delivery', () => {
+  it('recovers minute T even after T+1 delivered and advanced last_sent_at', async () => {
+    // The failure the occurrence-table scan exists for: worker A counts minute
+    // T and dies; worker B delivers T+1 before T turns stale. last_sent_at now
+    // names T+1, so any recovery keyed from the schedule row can only ever see
+    // the (completed) T+1 occurrence — T stayed claimed, undelivered, and
+    // still consuming a send count, forever.
+    const Runner = await loadRunner();
+    const minuteT = new Date(Math.floor((Date.now() - 20 * 60_000) / 60_000) * 60_000)
+      .toISOString();
+    const minuteT1 = new Date(Date.parse(minuteT) + 60_000).toISOString();
+    const staleAt = new Date(Date.now() - 20 * 60_000).toISOString();
+    const { supabase, updates } = schedSupa(
+      [{
+        ...BASE_SCHEDULE,
+        cron_expression: '0 0 1 1 *', // current minute is never due
+        max_sends: 10,
+        current_sends: 5,
+        last_sent_at: minuteT1, // T+1 delivered — T is invisible to the schedule row
+      }],
+      {
+        existingOccurrence: {
+          id: 'occ-t', guild_id: 'g1', operation_kind: 'scheduled_message',
+          occurrence_key: `sched1:${minuteT}`, status: 'claimed',
+          claimed_at: staleAt, updated_at: staleAt,
+          resource_id: null, result: {}, last_error: null,
+        },
+        reclaimResult: true,
+        // last_sent_at (T+1) is strictly LATER than T: T's own counted-ness is
+        // unknowable, so delivery proceeds WITHOUT claiming a fresh slot.
+        priorCounterRow: { current_sends: 5, last_sent_at: minuteT1 },
+      },
+    );
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+
+    await (runner as any).tick();
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(updates.some((u) => u.payload.status === 'completed')).toBe(true);
+    const rpcNames = (supabase.rpc as any).mock.calls.map((c: any[]) => c[0]);
+    expect(rpcNames).toContain('reclaim_stale_discord_occurrence');
     expect(rpcNames).not.toContain('claim_scheduled_message_send');
   });
 });

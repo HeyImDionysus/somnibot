@@ -31,11 +31,11 @@ const log = createLogger('ScheduledRunner');
 const STALE_SCHEDULE_CLAIM_MS = 5 * 60_000;
 
 /**
- * How far back the exhausted-schedule recovery probe looks. Crash recovery must
+ * How far back stale-claim recovery reaches. Crash recovery must
  * survive any realistic outage, but a schedule exhausted months ago with a
  * cleanly completed occurrence must not pay a probe query every minute forever.
  */
-const EXHAUSTED_RECOVERY_WINDOW_MS = 7 * 24 * 60 * 60_000;
+const RECOVERY_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
 interface ScheduledMessage {
   id: string;
@@ -229,28 +229,22 @@ export class ScheduledMessageRunner {
 
     const now = new Date();
 
+    // Recover EVERY stale claimed occurrence before the per-schedule guards
+    // can skip anything. Deriving a single key from last_sent_at was not
+    // enough: on a schedule firing faster than the stale threshold, a crashed
+    // minute T is hidden the moment T+1 delivers and advances last_sent_at —
+    // T stays claimed and undelivered forever while still consuming a send
+    // count. The scan reads the occurrence table itself, so no counted-but-
+    // unconfirmed minute can hide behind a later delivery, an exhausted
+    // max_sends, or a closed date window (recovering an already-counted
+    // minute is legitimate after the window closes; NEW sends stay bounded by
+    // the guards below).
+    await this.scanStaleScheduledClaims().catch((err) => {
+      log.error('Stale scheduled-claim scan failed:', { error: String(err) });
+    });
+
     for (const schedule of this.schedules) {
       try {
-        // Recover the last counted minute if its claim is stale — BEFORE any
-        // guard can `continue` past it. A holder that crashed after
-        // `claim_scheduled_message_send` advanced the counter but before the
-        // send leaves nothing that revisits the old occurrence key: later
-        // ticks construct new due minutes, and missed-run handling reads the
-        // advanced `last_sent_at` as a delivered baseline. The ordering
-        // matters for every guard below: an exhausted schedule skips at the
-        // max_sends check, and a schedule whose END DATE passed while its
-        // final claim sat stale skips at the date bounds — the claim only
-        // becomes reclaimable five minutes after the crash, and the window
-        // can close in the meantime. Recovering an ALREADY-COUNTED minute is
-        // legitimate regardless of the window having since closed; ordinary
-        // new sends remain fully bounded by the guards below. (An in-memory
-        // cache of confirmed-terminal keys keeps the steady-state cost zero.)
-        await this.recoverUnconfirmedLastSend(schedule).catch((err) => {
-          log.error(`Stale-claim recovery failed for schedule ${schedule.id}:`, {
-            error: String(err),
-          });
-        });
-
         // Check date bounds
         if (schedule.start_date && new Date(schedule.start_date) > now) continue;
         if (schedule.end_date && new Date(schedule.end_date) < now) continue;
@@ -280,63 +274,57 @@ export class ScheduledMessageRunner {
   }
 
   /**
-   * Occurrence keys whose terminal state (completed / failed / absent) has been
-   * confirmed, so the per-tick recovery probe never re-queries them. Bounded:
-   * cleared wholesale past 5000 entries — the cost of a clear is one extra
-   * probe round, not correctness.
+   * Find and recover every stale `claimed` scheduled-message occurrence for
+   * this guild. Bounded to 25 oldest per tick (a tick runs every minute, so a
+   * backlog drains quickly) and to the recovery window — a claim stranded for
+   * longer than a week is left for manual review rather than surprise-posting
+   * ancient announcements. Status and staleness are re-verified per row so a
+   * lagging read can never race a live holder; the actual reclaim is the CAS
+   * inside sendMessage().
    */
-  private readonly confirmedSendKeys = new Set<string>();
-
-  /**
-   * Recover the one occurrence that can strand a schedule: its LAST counted
-   * due minute, when that minute's claim is still `claimed` past the stale
-   * threshold — i.e. the holder crashed after committing the counter but
-   * before the send was confirmed. Everything funnels back through
-   * sendMessage(), whose reclaim path re-delivers without double-counting a
-   * minute that was already counted.
-   *
-   * Bounded on purpose: only the single occurrence named by `last_sent_at`,
-   * only within a 7-day window, and cached once confirmed terminal — so the
-   * steady-state cost for a healthy schedule is zero queries.
-   */
-  private async recoverUnconfirmedLastSend(schedule: ScheduledMessage): Promise<void> {
-    if (!schedule.last_sent_at) return;
-    const lastCounted = new Date(schedule.last_sent_at);
-    if (!Number.isFinite(lastCounted.getTime())) return;
-    if (Date.now() - lastCounted.getTime() > EXHAUSTED_RECOVERY_WINDOW_MS) return;
-
-    const occurrenceKey = `${schedule.id}:${lastCounted.toISOString()}`;
-    if (this.confirmedSendKeys.has(occurrenceKey)) return;
-
-    const { data: occurrence, error: probeError } = await this.supabase
+  private async scanStaleScheduledClaims(): Promise<void> {
+    const staleBefore = new Date(Date.now() - STALE_SCHEDULE_CLAIM_MS);
+    const windowFloor = new Date(Date.now() - RECOVERY_WINDOW_MS);
+    const { data, error } = await this.supabase
       .from('discord_operation_occurrences')
-      .select('id, status, claimed_at')
+      .select('id, occurrence_key, status, claimed_at')
       .eq('guild_id', this.guild.id)
       .eq('operation_kind', 'scheduled_message')
-      .eq('occurrence_key', occurrenceKey)
-      .maybeSingle();
-    if (probeError) {
-      // Inconclusive probe: retry next tick rather than caching a guess.
-      log.error(`Could not probe last-send occurrence for schedule ${schedule.id}:`, {
-        error: probeError.message,
+      .eq('status', 'claimed')
+      .lt('claimed_at', staleBefore.toISOString())
+      .gt('claimed_at', windowFloor.toISOString())
+      .order('claimed_at', { ascending: true })
+      .limit(25);
+    if (error) {
+      log.error('Could not scan stale scheduled-message claims:', { error: error.message });
+      return;
+    }
+    for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+      if (row.status !== 'claimed') continue;
+      const claimedAtMs = Date.parse(String(row.claimed_at ?? ''));
+      if (!Number.isFinite(claimedAtMs) || Date.now() - claimedAtMs < STALE_SCHEDULE_CLAIM_MS) {
+        continue;
+      }
+      // occurrence_key is `${schedule.id}:${dueMinuteISO}`; schedule ids are
+      // UUIDs (no colon), so the first colon splits identity from due minute.
+      const key = String(row.occurrence_key ?? '');
+      const sep = key.indexOf(':');
+      if (sep <= 0) continue;
+      const scheduleId = key.slice(0, sep);
+      const dueAtMs = Date.parse(key.slice(sep + 1));
+      if (!Number.isFinite(dueAtMs)) continue;
+      const schedule = this.schedules.find((candidate) => candidate.id === scheduleId);
+      if (!schedule) continue; // schedule deleted; leave the claim for audit
+      log.warn(
+        `Schedule "${schedule.name}" has an unconfirmed counted send `
+        + `(due ${new Date(dueAtMs).toISOString()}); attempting stale-claim recovery.`,
+      );
+      await this.sendMessage(schedule, new Date(dueAtMs)).catch((err) => {
+        log.error(`Stale-claim recovery failed for schedule ${schedule.id}:`, {
+          error: String(err),
+        });
       });
-      return;
     }
-    if (!occurrence || occurrence.status !== 'claimed') {
-      if (this.confirmedSendKeys.size >= 5000) this.confirmedSendKeys.clear();
-      this.confirmedSendKeys.add(occurrenceKey);
-      return;
-    }
-
-    const claimedAtMs = Date.parse(String(occurrence.claimed_at ?? ''));
-    if (!Number.isFinite(claimedAtMs) || Date.now() - claimedAtMs < STALE_SCHEDULE_CLAIM_MS) {
-      return;
-    }
-    log.warn(
-      `Schedule "${schedule.name}" has an unconfirmed counted send `
-      + `(due ${lastCounted.toISOString()}); attempting stale-claim recovery.`,
-    );
-    await this.sendMessage(schedule, lastCounted);
   }
 
   private async sendMessage(schedule: ScheduledMessage, occurrenceAt: Date): Promise<void> {

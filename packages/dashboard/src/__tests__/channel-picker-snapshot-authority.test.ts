@@ -74,3 +74,36 @@ describe('ChannelPicker snapshot authority', () => {
     expect(isAuthoritativeChannelSnapshot(payload, NOW)).toBe(false);
   });
 });
+
+describe('channelPermissionIssue — stale snapshots cannot vouch for permissions', () => {
+  const okChannel = { name: 'general', botPermissions: '3072', missing: false }; // View+Send
+
+  it('accepts a channel whose AUTHORITATIVE snapshot proves the bits', async () => {
+    const { channelPermissionIssue } = await import('@/components/shared/channel-picker');
+    expect(channelPermissionIssue(okChannel, ['ViewChannel', 'SendMessages'], true)).toBeNull();
+  });
+
+  it('refuses the SAME bits when the snapshot is not authoritative', async () => {
+    // The review-3689375357 scenario: an expired snapshot still carries old
+    // permission bits from before SomniBot lost access. Enabling from them
+    // queues an embed send that reports success and never delivers.
+    const { channelPermissionIssue } = await import('@/components/shared/channel-picker');
+    const issue = channelPermissionIssue(okChannel, ['ViewChannel', 'SendMessages'], false);
+    expect(issue).toContain('cannot be verified');
+  });
+
+  it('still allows permission-free pickers regardless of authority', async () => {
+    const { channelPermissionIssue } = await import('@/components/shared/channel-picker');
+    expect(channelPermissionIssue(okChannel, [], false)).toBeNull();
+  });
+
+  it('names genuinely missing bits under an authoritative snapshot', async () => {
+    const { channelPermissionIssue } = await import('@/components/shared/channel-picker');
+    const issue = channelPermissionIssue(
+      { name: 'general', botPermissions: '1024', missing: false }, // View only
+      ['ViewChannel', 'SendMessages'],
+      true,
+    );
+    expect(issue).toContain('SendMessages');
+  });
+});

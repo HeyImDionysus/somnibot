@@ -139,6 +139,20 @@ export class StatsChannelManager {
             .update({ channel_id: channel.id })
             .eq('id', config.id);
           if (channelIdError) {
+            // The Discord channel exists but its identity was never persisted:
+            // config.channel_id stays null, so every later update would create
+            // ANOTHER counter channel, and a restart has no id to recover the
+            // orphan with. Delete the channel we just created — it is seconds
+            // old, empty, and recreatable — rather than leaking one per retry.
+            // If the delete ALSO fails, log the id loudly so the orphan is at
+            // least findable by hand.
+            await channel.delete('Stats channel identity write failed').catch((deleteError) => {
+              log.error(
+                `Stats channel ${channel.id} could not be deleted after its identity write failed; `
+                + 'it is orphaned in Discord and must be removed manually:',
+                { error: String(deleteError) },
+              );
+            });
             throw new Error(`Failed to persist stats channel identity: ${channelIdError.message}`);
           }
           channelId = channel.id;
