@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 235 migration files in packages/supabase/migrations/
+ * Source: 236 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -989,6 +989,7 @@ export interface DbOrder {
   delivery_type_snapshot: string | null;
   checkout_approval_url: string | null;
   commerce_compatible_child_status: string | null;
+  download_required_snapshot: boolean | null;
 }
 
 // — Commerce — Licensing —
