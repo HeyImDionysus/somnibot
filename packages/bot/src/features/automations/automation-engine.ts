@@ -489,7 +489,7 @@ export class AutomationEngine {
         // The insert response can fail after commit. Re-read by the unique
         // occurrence identity before deciding whether the execution claim is
         // safe to release.
-        const recovered = await this.massActionHolds.findByOccurrence(
+        const recovered = await this.verifyAmbiguousMassActionHold(
           automation.id,
           ctx.occurrenceId,
         );
@@ -1039,10 +1039,23 @@ export class AutomationEngine {
         durationMs: Date.now() - startTime,
       };
       await this.executionLogger.finalize(hold.execution_id, executionResult);
-      await this.massActionHolds.complete(hold.id);
+      const automationName = await this.automationName(hold.automation_id);
+      if (result.failed > 0) {
+        const failureMessage = result.errors.join('; ') || `${result.failed} action(s) failed`;
+        await this.massActionHolds.fail(hold.id, failureMessage);
+        if (this.alertService) {
+          await this.alertService.recordFailure(
+            hold.automation_id,
+            automationName,
+            failureMessage,
+          );
+        }
+      } else {
+        await this.massActionHolds.complete(hold.id);
+      }
       this.eventBus.emit('automation.executed', this.guild.id, {
         automationId: hold.automation_id,
-        automationName: await this.automationName(hold.automation_id),
+        automationName,
         trigger: hold.trigger_event,
         actionsExecuted: result.executed,
         actionsFailed: result.failed,
@@ -1055,6 +1068,35 @@ export class AutomationEngine {
       throw err;
     } finally {
       clearInterval(leaseTimer);
+    }
+  }
+
+  /**
+   * An insert can commit even when its response is lost. Keep the execution
+   * claim and retry the unique occurrence read until the database gives an
+   * authoritative present/absent answer; otherwise a transient verification
+   * outage could strand a claim with no recoverable hold.
+   */
+  private async verifyAmbiguousMassActionHold(
+    automationId: string,
+    occurrenceId: string,
+  ): Promise<MassActionHoldRow | null> {
+    let attempt = 0;
+    for (;;) {
+      try {
+        return await this.massActionHolds.findByOccurrence(automationId, occurrenceId);
+      } catch (error) {
+        attempt += 1;
+        const delayMs = Math.min(250 * 2 ** Math.min(attempt - 1, 5), 5_000);
+        log.warn('Mass-action hold verification is unavailable; retaining claim and retrying', {
+          automationId,
+          occurrenceId,
+          attempt,
+          delayMs,
+          error: String(error),
+        });
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
     }
   }
 }

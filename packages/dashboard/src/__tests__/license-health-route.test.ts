@@ -220,4 +220,29 @@ describe('GET /api/license/health', () => {
       truncated: true,
     });
   });
+
+  it('chunks large license-key filters to bounded PostgREST URLs', async () => {
+    const keys = Array.from({ length: 205 }, (_, index) => ({
+      id: `key-${index}`,
+      product_id: '00000000-0000-0000-0000-000000000002',
+      status: 'active',
+      activated_at: '2026-07-30T00:00:00.000Z',
+      created_at: '2026-07-29T00:00:00.000Z',
+    }));
+    const supabase = setup({
+      license_keys: { data: keys, error: null, count: keys.length },
+    });
+
+    const response = await GET(buildRequest('/api/license/health') as never);
+
+    expect(response.status).toBe(200);
+    for (const table of ['license_sessions', 'license_validations']) {
+      const tableQueries = supabase.from.mock.calls
+        .map((call, index) => ({ table: call[0], query: supabase.from.mock.results[index].value }))
+        .filter((entry) => entry.table === table);
+      expect(tableQueries).toHaveLength(3);
+      expect(tableQueries.flatMap((entry) => entry.query.in.mock.calls)
+        .every((call: [string, string[]]) => call[1].length <= 100)).toBe(true);
+    }
+  });
 });

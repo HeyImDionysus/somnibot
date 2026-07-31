@@ -5,6 +5,35 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 
 type KeyStatus = 'pending_activation' | 'active' | 'expired' | 'revoked' | 'suspended';
+type HealthQueryResult<T> = {
+  data: T[] | null;
+  error: { message: string } | null;
+  count: number | null;
+};
+
+const LICENSE_KEY_FILTER_CHUNK = 100;
+
+async function queryKeyChunks<T>(
+  keyIds: string[],
+  query: (chunk: string[]) => PromiseLike<HealthQueryResult<T>>,
+): Promise<HealthQueryResult<T>> {
+  const rows: T[] = [];
+  let count = 0;
+  for (let offset = 0; offset < keyIds.length; offset += LICENSE_KEY_FILTER_CHUNK) {
+    const result = await query(keyIds.slice(offset, offset + LICENSE_KEY_FILTER_CHUNK));
+    if (result.error) return { data: null, error: result.error, count: null };
+    if (!Array.isArray(result.data)) {
+      return {
+        data: null,
+        error: { message: 'License health chunk returned malformed data' },
+        count: null,
+      };
+    }
+    rows.push(...result.data);
+    count += typeof result.count === 'number' ? result.count : result.data.length;
+  }
+  return { data: rows.slice(0, 5_000), error: null, count };
+}
 
 function countBy<T extends string>(values: T[], allowed: readonly T[]): Record<T, number> {
   return Object.fromEntries(allowed.map((value) => [
@@ -55,20 +84,20 @@ export async function GET(req: NextRequest) {
   const [sessionsResult, validationsResult, alertsResult] = await Promise.all([
     keyIds.length === 0
       ? Promise.resolve({ data: [], error: null, count: 0 })
-      : supabase
-          .from('license_sessions')
-          .select('id, license_key_id, active, last_seen_at', { count: 'exact' })
-          .in('license_key_id', keyIds)
-          .limit(5_000),
+      : queryKeyChunks(keyIds, (chunk) => supabase
+        .from('license_sessions')
+        .select('id, license_key_id, active, last_seen_at', { count: 'exact' })
+        .in('license_key_id', chunk)
+        .limit(5_000)),
     keyIds.length === 0
       ? Promise.resolve({ data: [], error: null, count: 0 })
-      : supabase
-          .from('license_validations')
-          .select('id, license_key_id, result, created_at', { count: 'exact' })
-          .in('license_key_id', keyIds)
-          .gte('created_at', since)
-          .order('created_at', { ascending: false })
-          .limit(5_000),
+      : queryKeyChunks(keyIds, (chunk) => supabase
+        .from('license_validations')
+        .select('id, license_key_id, result, created_at', { count: 'exact' })
+        .in('license_key_id', chunk)
+        .gte('created_at', since)
+        .order('created_at', { ascending: false })
+        .limit(5_000)),
     supabase
       .from('alerts')
       .select('id, alert_type, severity, title, created_at')

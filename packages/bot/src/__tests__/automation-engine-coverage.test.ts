@@ -368,6 +368,31 @@ describe('AutomationEngine', () => {
       expect(mockMassHoldNotice).not.toHaveBeenCalled();
     });
 
+    it('retains and retries an ambiguous hold claim until persistence is authoritative', async () => {
+      mockGetForTrigger.mockReturnValue([
+        makeAutomation({
+          actions: [{ type: 'give_role', config: { role_id: 'role1' } }],
+        }),
+      ]);
+      mockMassThreshold.mockResolvedValueOnce(1);
+      mockMassHoldCreate.mockRejectedValueOnce(new Error('insert response lost'));
+      mockMassFindByOccurrence
+        .mockRejectedValueOnce(new Error('verification unavailable'))
+        .mockResolvedValueOnce(null);
+      await engine.start();
+      eventBus.fire({
+        type: 'giveaway.ended',
+        guildId: 'g1',
+        data: { winnerIds: ['10000000000000000', '10000000000000001'] },
+      });
+
+      await vi.waitFor(() => expect(mockRelease).toHaveBeenCalledWith('exec-1'), {
+        timeout: 2_000,
+      });
+      expect(mockMassFindByOccurrence).toHaveBeenCalledTimes(2);
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+    });
+
     it('preserves configured action order while fanning member actions out', async () => {
       mockGetForTrigger.mockReturnValue([
         makeAutomation({
@@ -555,6 +580,48 @@ describe('AutomationEngine', () => {
         'automation.executed',
         'g1',
         expect.objectContaining({ actionsExecuted: 2, success: true }),
+      );
+    });
+
+    it('keeps an approved hold failed and alerts when released actions have failures', async () => {
+      const alertService = {
+        recordSuccess: vi.fn().mockResolvedValue(undefined),
+        recordFailure: vi.fn().mockResolvedValue(undefined),
+      };
+      engine.setAlertService(alertService as any);
+      mockMassClaimApproved.mockResolvedValue({
+        id: 'hold-failed',
+        automation_id: 'auto1',
+        execution_id: 'exec-1',
+        occurrence_id: '10000000-0000-8000-8000-000000000002',
+        member_ids: ['10000000000000000', 'missing-member'],
+        member_count: 2,
+        threshold: 1,
+        trigger_event: 'member.verified',
+        triggered_by: 'system',
+        action_snapshot: [{ type: 'give_role', config: { role_id: 'role1' } }],
+        context_snapshot: { channelId: null, messageId: null, variables: {} },
+      });
+      (engine as unknown as { automationName(id: string): Promise<string> }).automationName =
+        vi.fn().mockResolvedValue('Test Automation');
+
+      await (engine as unknown as { runApprovedHold(id: string): Promise<void> })
+        .runApprovedHold('hold-failed');
+
+      expect(mockMassFail).toHaveBeenCalledWith(
+        'hold-failed',
+        expect.stringContaining('missing-member'),
+      );
+      expect(mockMassComplete).not.toHaveBeenCalled();
+      expect(alertService.recordFailure).toHaveBeenCalledWith(
+        'auto1',
+        'Test Automation',
+        expect.stringContaining('missing-member'),
+      );
+      expect(eventBus.emit).toHaveBeenCalledWith(
+        'automation.executed',
+        'g1',
+        expect.objectContaining({ actionsFailed: 1, success: false }),
       );
     });
 

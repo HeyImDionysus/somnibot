@@ -271,6 +271,50 @@ describe('community-statistics-channels audit', () => {
     expect(supa.from).toHaveBeenCalledWith('alerts');
   });
 
+  it('does not resolve recovery alerts when the updated value is not durable', async () => {
+    const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
+    const eventBus = bus();
+    const cfg = {
+      id: 'sc-write-fail', guild_id: 'g1', channel_id: 'vc1', stat_type: 'custom_counter',
+      stat_config: { value: 42 }, name_format: 'Members: {value}', active: true, last_value: null,
+    };
+    let statsCalls = 0;
+    const supa = {
+      from: vi.fn((table: string) => {
+        if (table === 'stats_channels') {
+          statsCalls += 1;
+          return chain(statsCalls === 1
+            ? { data: [cfg], error: null }
+            : { data: null, error: { message: 'write unavailable' } });
+        }
+        return chain({ data: null, error: null });
+      }),
+    } as any;
+    const channel = { setName: vi.fn(async () => {}) };
+    const guild: any = {
+      id: 'g1', memberCount: 5, premiumSubscriptionCount: 0,
+      channels: { cache: new Map([['vc1', channel]]) },
+      roles: { cache: new Map() },
+      members: { fetch: vi.fn(async () => {}), cache: { filter: () => ({ size: 0 }) } },
+    };
+    const mgr = new StatsChannelManager(guild, supa, 10, eventBus);
+    const resolveUpdateAlerts = vi.spyOn(mgr as any, 'resolveUpdateAlerts');
+
+    await mgr.reload();
+
+    expect(resolveUpdateAlerts).not.toHaveBeenCalled();
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'stats_channel.update_failed',
+      'g1',
+      expect.objectContaining({ statChannelId: 'sc-write-fail' }),
+    );
+    expect(eventBus.emit).not.toHaveBeenCalledWith(
+      'stats_channel.updated',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it('emits a persistent stats failure only on the degraded transition', async () => {
     const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
     const eventBus = bus();

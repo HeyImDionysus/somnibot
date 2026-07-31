@@ -102,8 +102,10 @@ export class StatsChannelManager {
           continue;
         }
 
-        if (config.channel_id) {
-          const channel = this.guild.channels.cache.get(config.channel_id) as VoiceChannel | undefined;
+        let channelId = config.channel_id;
+        let created = false;
+        if (channelId) {
+          const channel = this.guild.channels.cache.get(channelId) as VoiceChannel | undefined;
           if (!channel) {
             // The counter channel was deleted. Raise an owner alert and do NOT
             // advance last_value — otherwise the deletion is silent and the
@@ -112,13 +114,6 @@ export class StatsChannelManager {
             continue;
           }
           await channel.setName(newName);
-          this.eventBus.emit('stats_channel.updated', this.guild.id, {
-            statChannelId: config.id,
-            channelId: config.channel_id,
-            statType: config.stat_type,
-            value,
-            created: false,
-          });
         } else {
           // Create the voice channel if it doesn't exist yet
           const configObj = config.stat_config ?? {};
@@ -139,28 +134,33 @@ export class StatsChannelManager {
             ],
           });
 
-          config.channel_id = channel.id;
-
-          await this.supabase
+          const { error: channelIdError } = await this.supabase
             .from('stats_channels')
             .update({ channel_id: channel.id })
             .eq('id', config.id);
-
-          this.eventBus.emit('stats_channel.updated', this.guild.id, {
-            statChannelId: config.id,
-            channelId: channel.id,
-            statType: config.stat_type,
-            value,
-            created: true,
-          });
+          if (channelIdError) {
+            throw new Error(`Failed to persist stats channel identity: ${channelIdError.message}`);
+          }
+          channelId = channel.id;
+          config.channel_id = channel.id;
+          created = true;
         }
 
-        // Update last value
-        config.last_value = value;
-        await this.supabase
+        const { error: lastValueError } = await this.supabase
           .from('stats_channels')
           .update({ last_value: value, last_updated_at: new Date().toISOString() })
           .eq('id', config.id);
+        if (lastValueError) {
+          throw new Error(`Failed to persist stats channel value: ${lastValueError.message}`);
+        }
+        config.last_value = value;
+        this.eventBus.emit('stats_channel.updated', this.guild.id, {
+          statChannelId: config.id,
+          channelId,
+          statType: config.stat_type,
+          value,
+          created,
+        });
       } catch (err) {
         log.error(`Failed to update ${config.stat_type}:`, err);
         await this.raiseUpdateFailedAlert(config, err);
