@@ -324,6 +324,41 @@ describe('GET /api/store/control-room', () => {
     );
   });
 
+  it('starts the 15-minute SLAs at the completed transition, not order creation (round 18)', async () => {
+    // Held in review for three days, approved ten minutes ago: fulfillment
+    // just became possible, so nothing is late yet.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-02T12:00:00.000Z'));
+    setup({
+      orders: {
+        data: [{
+          id: ORDER,
+          order_number: 'ORD-LATE-APPROVAL',
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'completed',
+          delivery_type_snapshot: 'mixed',
+          download_required_snapshot: true,
+          created_at: '2026-07-30T12:00:00.000Z',
+          updated_at: '2026-08-02T11:50:00.000Z',
+        }],
+        error: null,
+        count: 1,
+      },
+      license_keys: { data: [], error: null },
+      entitlements: { data: [], error: null },
+      commerce_download_deliveries: { data: [], error: null },
+    });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+    expect(body.data.customers[0].reasons).not.toContain(
+      'No entitlement was recorded within 15 minutes of payment.',
+    );
+    expect(body.data.customers[0].reasons).not.toContain(
+      'No license key was issued within 15 minutes of payment.',
+    );
+  });
+
   it('uses the persisted deployment cutover instead of the migration filename time', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-02T12:00:00.000Z'));

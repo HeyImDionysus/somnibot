@@ -1145,6 +1145,46 @@ describe('AutomationEngine', () => {
       expect(ctx?.variables['role']).toBe('<@&r1>');
     });
 
+    it('registers the hint BEFORE the Discord call so an early gateway event correlates (round 18 P1)', async () => {
+      // give/remove role sleep AFTER their REST operation: the gateway side
+      // effect can arrive while executeActions is still awaited. The hint
+      // must already be queued at that moment or the event enters as a root.
+      let observedDuringExecute: number | undefined;
+      mockExecuteActions.mockImplementation(async () => {
+        observedDuringExecute = (engine as unknown as {
+          _holdMemberDepthHints: Map<string, Array<{ depth: number }>>;
+        })._holdMemberDepthHints.get('10000000000000000')?.[0]?.depth;
+        return { executed: 1, failed: 0, errors: [] };
+      });
+      mockMassClaimApproved.mockResolvedValue({
+        id: 'hold-early-event',
+        automation_id: 'auto1',
+        execution_id: 'exec-1',
+        occurrence_id: '10000000-0000-8000-8000-000000000006',
+        member_ids: ['10000000000000000'],
+        member_count: 1,
+        threshold: 1,
+        trigger_event: 'member.verified',
+        triggered_by: 'system',
+        action_snapshot: [{ type: 'give_role', config: { role_id: 'role1' } }],
+        context_snapshot: { channelId: null, messageId: null, variables: {}, chainDepth: 3 },
+      });
+      (engine as unknown as { automationName(id: string): Promise<string> }).automationName =
+        vi.fn().mockResolvedValue('Test Automation');
+
+      await (engine as unknown as { runApprovedHold(id: string): Promise<void> })
+        .runApprovedHold('hold-early-event');
+
+      expect(observedDuringExecute).toBe(3);
+      // …and the successful action's hint remains for the (possibly later)
+      // gateway event.
+      expect(
+        (engine as unknown as {
+          _holdMemberDepthHints: Map<string, Array<{ depth: number }>>;
+        })._holdMemberDepthHints.get('10000000000000000')?.[0]?.depth,
+      ).toBe(3);
+    });
+
     it('records no depth hint when the held member action fails (round 17)', async () => {
       // A hint correlates the side effect of an action that RAN. A failed
       // Discord call produces no side effect — leaving the hint queued let a

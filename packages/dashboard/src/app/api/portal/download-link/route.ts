@@ -86,9 +86,35 @@ export async function POST(request: NextRequest) {
     // grant, the download for the current purchase could be recorded against
     // an older order (or an orderless grant), and the current paid order then
     // reported as missing its required download.
-    const selectedEntitlement = selectDownloadEntitlement(
-      (entitlements ?? []).filter((e) => isEntitlementAccessLive(e)),
-    );
+    // Which of the customer's paid orders already recorded a delivery? An
+    // undelivered purchase must be able to claim its evidence before a
+    // delivered one is re-served.
+    const liveCandidates = (entitlements ?? []).filter((e) => isEntitlementAccessLive(e));
+    const candidateOrderIds = [...new Set(
+      liveCandidates
+        .map((candidate) => candidate.order_id)
+        .filter((id): id is string => typeof id === 'string'),
+    )];
+    const deliveredOrderIds = new Set<string>();
+    if (candidateOrderIds.length > 0) {
+      const { data: deliveries, error: deliveriesError } = await admin
+        .from('commerce_download_deliveries')
+        .select('order_id')
+        .in('order_id', candidateOrderIds);
+      if (deliveriesError) {
+        return NextResponse.json(
+          {
+            error: 'Could not verify delivery history right now. This is a temporary server fault — please retry.',
+            retryable: true,
+          },
+          { status: 503, headers: { 'Retry-After': '30' } },
+        );
+      }
+      for (const delivery of deliveries ?? []) {
+        if (typeof delivery.order_id === 'string') deliveredOrderIds.add(delivery.order_id);
+      }
+    }
+    const selectedEntitlement = selectDownloadEntitlement(liveCandidates, deliveredOrderIds);
     if (!selectedEntitlement) {
       // Auditable refusal: buyer requested a download they are not entitled to.
       await writeCommerceAudit(admin, {

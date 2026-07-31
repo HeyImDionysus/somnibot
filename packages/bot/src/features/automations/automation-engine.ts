@@ -1065,7 +1065,7 @@ export class AutomationEngine {
       memberId: string,
       actionType: string,
       actionRoleId: string | null,
-    ) => void,
+    ) => (() => void) | undefined,
   ): Promise<{ executed: number; failed: number; errors: string[] }> {
     if (affectedMemberIds.length === 0) {
       return executeActions(actions, baseContext);
@@ -1098,6 +1098,19 @@ export class AutomationEngine {
           total.errors.push(`member ${memberId}: target no longer belongs to the guild`);
           continue;
         }
+        // PROVISIONAL hint, registered before the Discord call: give/remove
+        // role sleep AFTER their REST operation, so the gateway side effect
+        // can arrive before executeActions returns — a post-success recording
+        // would miss it and the event would enter as a root. The returned
+        // rollback removes the exact entry when the action fails, so no
+        // unrelated event can inherit a failed hold's depth either.
+        const rollbackHint = onMemberAction?.(
+          memberId,
+          action.type,
+          typeof (action.config as { role_id?: unknown } | undefined)?.role_id === 'string'
+            ? (action.config as { role_id: string }).role_id
+            : null,
+        );
         const memberResult = await executeActions([action], {
           ...baseContext,
           member,
@@ -1108,19 +1121,8 @@ export class AutomationEngine {
           },
         }, actionIndex);
         add(memberResult);
-        // A depth hint exists to correlate the SIDE EFFECT of an action that
-        // actually ran. Recording before the member fetch/execution left
-        // hints behind for missing members and failed Discord calls, where a
-        // matching-but-unrelated event within the window would inherit a
-        // failed hold's depth.
-        if (memberResult.executed > 0 && memberResult.failed === 0) {
-          onMemberAction?.(
-            memberId,
-            action.type,
-            typeof (action.config as { role_id?: unknown } | undefined)?.role_id === 'string'
-              ? (action.config as { role_id: string }).role_id
-              : null,
-          );
+        if (!(memberResult.executed > 0 && memberResult.failed === 0)) {
+          rollbackHint?.();
         }
       }
     }
@@ -1189,9 +1191,9 @@ export class AutomationEngine {
         memberId: string,
         actionType: string,
         actionRoleId: string | null,
-      ) => {
+      ): (() => void) | undefined => {
         const events = HOLD_ACTION_SIDE_EFFECT_EVENTS[actionType];
-        if (!events || events.length === 0) return;
+        if (!events || events.length === 0) return undefined;
         const roleId = actionType === 'give_role' || actionType === 'remove_role'
           ? actionRoleId
           : null;
@@ -1200,7 +1202,7 @@ export class AutomationEngine {
         // event inherit the depth, so record nothing and accept that the
         // side effect enters as a root.
         if ((actionType === 'give_role' || actionType === 'remove_role') && roleId === null) {
-          return;
+          return undefined;
         }
         const now = Date.now();
         for (const [key, queue] of this._holdMemberDepthHints) {
@@ -1210,8 +1212,18 @@ export class AutomationEngine {
           if (queue.length === 0) this._holdMemberDepthHints.delete(key);
         }
         const queue = this._holdMemberDepthHints.get(memberId) ?? [];
-        queue.push({ depth: holdDepth, events, roleId, expiresAt: now + 10_000 });
+        const entry = { depth: holdDepth, events, roleId, expiresAt: now + 10_000 };
+        queue.push(entry);
         this._holdMemberDepthHints.set(memberId, queue);
+        // Identity-based rollback: a consumed or already-rolled-back entry is
+        // simply absent, so this never removes another action's hint.
+        return () => {
+          const current = this._holdMemberDepthHints.get(memberId);
+          if (!current) return;
+          const index = current.indexOf(entry);
+          if (index !== -1) current.splice(index, 1);
+          if (current.length === 0) this._holdMemberDepthHints.delete(memberId);
+        };
       };
       // Rate limits are consumed when actions actually RUN: the hold stored
       // condition-matched targets without touching counters (a rejected hold

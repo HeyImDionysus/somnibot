@@ -40,7 +40,7 @@ export async function GET(req: NextRequest) {
   const { data: orderData, error: orderError, count } = await supabase
     .from('orders')
     .select(
-      'id, order_number, customer_id, product_id, status, delivery_type_snapshot, download_required_snapshot, created_at',
+      'id, order_number, customer_id, product_id, status, delivery_type_snapshot, download_required_snapshot, created_at, updated_at',
       { count: 'exact' },
     )
     .eq('guild_id', guildId)
@@ -261,10 +261,21 @@ export async function GET(req: NextRequest) {
     // pending_review order is expectedly unfulfilled (the branch above
     // already explains the hold) and must not read as a delivery failure.
     const paymentCompleted = order.status === 'completed';
-    if (paymentCompleted && !entitlement && age > 15 * 60 * 1_000) {
+    // The 15-minute clocks start at the COMPLETED transition, not order
+    // creation: an order held in review for an hour and then approved gets
+    // its full window. orders.updated_at is the durable upper bound of that
+    // transition (later updates can only restart the clock — conservative,
+    // never premature); creation time remains the fallback.
+    const paymentAge = elapsedMs(
+      paymentCompleted && typeof order.updated_at === 'string'
+        ? order.updated_at
+        : order.created_at,
+      now,
+    );
+    if (paymentCompleted && !entitlement && paymentAge > 15 * 60 * 1_000) {
       reasons.push('No entitlement was recorded within 15 minutes of payment.');
     }
-    if (paymentCompleted && licenseRequired && !key && age > 15 * 60 * 1_000) {
+    if (paymentCompleted && licenseRequired && !key && paymentAge > 15 * 60 * 1_000) {
       reasons.push('No license key was issued within 15 minutes of payment.');
     }
     // The 24-hour download window starts when the customer can actually

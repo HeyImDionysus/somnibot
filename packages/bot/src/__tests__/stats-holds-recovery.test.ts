@@ -143,6 +143,7 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     configRows?: Array<Record<string, unknown>>;
     scanRows?: Array<Record<string, unknown>>;
     identityWriteFails?: boolean;
+    identityReadBackFails?: boolean;
     adoptMatches?: boolean;
   }) {
     const updatePayloads: Array<Record<string, unknown>> = [];
@@ -178,6 +179,9 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
           }
           if (chain._payload && 'pending_cleanup_channel_ids' in chain._payload) {
             return { data: { id: 'sc-1' }, error: null };
+          }
+          if (options.identityReadBackFails) {
+            return { data: null, error: { message: 'db unavailable' } };
           }
           return { data: { pending_cleanup_channel_ids: [] }, error: null };
         });
@@ -371,6 +375,30 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
       rpcCalls.filter((call) => call.fn === 'remove_stats_pending_cleanup'),
     ).toEqual([]);
   });
+
+  it('keeps the channel when the identity write stays AMBIGUOUS (round 18)', async () => {
+    // Every claim attempt errored AND the final read-back failed: the first
+    // attempt may have committed with a lost acknowledgement. Deleting would
+    // risk killing a live counter whose durable pointer survives recovery —
+    // the channel stays, the reconciler pointer is attempted, nothing dies.
+    const StatsChannelManager = await load();
+    const created = { id: 'vc-maybe', delete: vi.fn(async () => ({})) };
+    const { supabase, rpcCalls } = survivorSupa({
+      configRows: [{ ...CONFIG_ROW }],
+      scanRows: [],
+      identityWriteFails: true,
+      identityReadBackFails: true,
+    });
+    const mgr = new StatsChannelManager(makeGuild({ created }), supabase, 60);
+    await mgr.start().catch(() => {});
+    mgr.stop?.();
+
+    expect(created.delete).not.toHaveBeenCalled();
+    expect(rpcCalls).toContainEqual({
+      fn: 'append_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_id: 'vc-maybe' },
+    });
+  }, 20_000);
 
   it('disposes of its own channel when another process wins the identity claim (round 12)', async () => {
     // Two overlapping processes both create a counter channel; the identity

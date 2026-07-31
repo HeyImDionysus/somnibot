@@ -163,6 +163,17 @@ export class StatsChannelManager {
             }
             continue;
           }
+          if (identity.outcome === 'ambiguous') {
+            // The identity write may have COMMITTED with a lost response and
+            // the read-back could not settle it. Deleting would risk killing
+            // a live counter whose durable pointer survives recovery — record
+            // the pointer for the reconciler if possible, keep the channel
+            // either way, and let the next tick converge.
+            await this.persistPendingCleanup(config, channel.id);
+            throw new Error(
+              `Failed to confirm stats channel identity: ${identity.message}`,
+            );
+          }
           if (identity.outcome === 'error') {
             // The Discord channel exists but its identity could not be
             // persisted even with retries: config.channel_id stays null, so
@@ -226,6 +237,7 @@ export class StatsChannelManager {
     | { outcome: 'persisted' }
     | { outcome: 'lost_race'; winnerChannelId: string | null }
     | { outcome: 'error'; message: string }
+    | { outcome: 'ambiguous'; message: string }
   > {
     let lastError = 'unknown error';
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -265,7 +277,24 @@ export class StatsChannelManager {
         await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
       }
     }
-    return { outcome: 'error', message: lastError };
+    // Final read-back: the FIRST conditional claim may have committed with a
+    // lost acknowledgement while the database then stayed down for every
+    // retry. If the durable row already points at this channel, reporting
+    // error would delete a LIVE counter the config can never recreate
+    // (channel_id is non-null after recovery).
+    const { data: finalRow, error: finalReadError } = await this.supabase
+      .from('stats_channels')
+      .select('channel_id')
+      .eq('id', config.id)
+      .maybeSingle();
+    if (!finalReadError) {
+      if (finalRow?.channel_id === channelId) {
+        config.channel_id = channelId;
+        return { outcome: 'persisted' };
+      }
+      return { outcome: 'error', message: lastError };
+    }
+    return { outcome: 'ambiguous', message: lastError };
   }
 
   /** Delete a just-created duplicate/abort channel; logs loudly on exhaustion. */

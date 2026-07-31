@@ -20,11 +20,20 @@ export interface SelectableEntitlement {
 
 export function selectDownloadEntitlement<T extends SelectableEntitlement>(
   liveEntitlements: readonly T[],
+  deliveredOrderIds: ReadonlySet<string> = new Set(),
 ): T | undefined {
   return [...liveEntitlements].sort((a, b) => {
     const aHasOrder = a.order_id ? 1 : 0;
     const bHasOrder = b.order_id ? 1 : 0;
     if (aHasOrder !== bHasOrder) return bHasOrder - aHasOrder;
+    // Round 18: with TWO live paid orders, always choosing the newest left
+    // the older purchase permanently unable to record its delivery evidence
+    // (the control room then flags it). An order-bearing entitlement whose
+    // order has NO recorded delivery outranks one already delivered; within
+    // each group the newest wins.
+    const aUndelivered = a.order_id && !deliveredOrderIds.has(a.order_id) ? 1 : 0;
+    const bUndelivered = b.order_id && !deliveredOrderIds.has(b.order_id) ? 1 : 0;
+    if (aUndelivered !== bUndelivered) return bUndelivered - aUndelivered;
     return Date.parse(String(b.created_at ?? 0)) - Date.parse(String(a.created_at ?? 0));
   })[0];
 }

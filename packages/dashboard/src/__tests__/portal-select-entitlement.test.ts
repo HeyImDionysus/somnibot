@@ -34,3 +34,28 @@ describe('selectDownloadEntitlement — downloads bind to the intended purchase'
     expect(selectDownloadEntitlement([])).toBeUndefined();
   });
 });
+
+describe('selectDownloadEntitlement — delivery-aware ranking (round 18)', () => {
+  it('prefers the order-bearing entitlement whose order has NO recorded delivery', async () => {
+    const { selectDownloadEntitlement } = await import('@/lib/portal/select-entitlement');
+    const older = { id: 'ent-old', order_id: 'order-old', created_at: '2026-07-20T10:00:00.000Z' };
+    const newer = { id: 'ent-new', order_id: 'order-new', created_at: '2026-07-28T10:00:00.000Z' };
+    // Newest already delivered: the older purchase must be able to claim its
+    // evidence — otherwise the control room flags it forever.
+    expect(
+      selectDownloadEntitlement([older, newer], new Set(['order-new']))?.id,
+    ).toBe('ent-old');
+    // Neither delivered: newest wins as before.
+    expect(selectDownloadEntitlement([older, newer], new Set())?.id).toBe('ent-new');
+    // Both delivered: newest wins (re-download of the current purchase).
+    expect(
+      selectDownloadEntitlement([older, newer], new Set(['order-new', 'order-old']))?.id,
+    ).toBe('ent-new');
+    // Undelivered PAID order still outranks an orderless grant.
+    const grant = { id: 'ent-grant', order_id: null, created_at: '2026-07-29T10:00:00.000Z' };
+    expect(
+      selectDownloadEntitlement([grant, older], new Set())?.id,
+    ).toBe('ent-old');
+  });
+});
+
