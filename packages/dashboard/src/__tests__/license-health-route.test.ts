@@ -199,4 +199,25 @@ describe('GET /api/license/health', () => {
       totalKeys: 5_001,
     });
   });
+
+  it('never declares health from a truncated validation sample', async () => {
+    setup({
+      license_validations: {
+        data: [{
+          id: 'v1',
+          license_key_id: '00000000-0000-0000-0000-000000000001',
+          result: 'valid',
+          created_at: '2026-07-30T00:00:00Z',
+        }],
+        error: null,
+        count: 5_001,
+      },
+    });
+    const body = await (await GET(buildRequest('/api/license/health') as never)).json();
+    expect(body.data).toMatchObject({
+      state: 'needs_attention',
+      validationCount: 5_001,
+      truncated: true,
+    });
+  });
 });

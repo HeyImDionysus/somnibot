@@ -63,6 +63,7 @@ function mockDownload(overrides: {
   entitlementError?: typeof DB_DOWN | null;
   file?: Record<string, unknown> | null;
   storageError?: typeof DB_DOWN | null;
+  deliveryError?: typeof DB_DOWN | null;
 } = {}) {
   const mock = createMockSupabase();
   const entitlements = registerTable(mock, 'entitlements');
@@ -80,6 +81,8 @@ function mockDownload(overrides: {
       : overrides.file,
     error: null,
   });
+  const deliveries = registerTable(mock, 'commerce_download_deliveries');
+  deliveries.insert.mockResolvedValue({ error: overrides.deliveryError ?? null });
 
   mock.rpc.mockResolvedValue({ error: null });
   Object.assign(mock, {
@@ -200,6 +203,17 @@ describe('GET /api/downloads — nonce delivery boundary', () => {
 
     const replay = await downloadGet(request() as never, params);
     expect(replay.status).toBe(410);
+    expect(after).not.toHaveBeenCalled();
+  });
+
+  it('does not redirect when durable delivery evidence cannot be recorded', async () => {
+    vi.mocked(createAdminSupabase).mockReturnValue(
+      mockDownload({ deliveryError: DB_DOWN }) as never,
+    );
+
+    const response = await downloadGet(request() as never, params);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ retryable: false });
     expect(after).not.toHaveBeenCalled();
   });
 

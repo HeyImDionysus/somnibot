@@ -30,11 +30,13 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
 // We need to mock the sub-modules that AutomationEngine imports
 const mockLoad = vi.fn().mockResolvedValue(undefined);
 const mockSubscribe = vi.fn();
+const mockUnsubscribe = vi.fn();
 const mockGetForTrigger = vi.fn().mockReturnValue([]);
 vi.mock('../features/automations/automation-loader.js', () => ({
   AutomationLoader: class {
     load = mockLoad;
     subscribe = mockSubscribe;
+    unsubscribe = mockUnsubscribe;
     getForTrigger = mockGetForTrigger;
   },
 }));
@@ -156,6 +158,7 @@ function makeEventBus() {
   return {
     onAny: vi.fn((cb: (event: unknown) => void) => { listeners.push(cb); }),
     on: vi.fn(),
+    off: vi.fn(),
     emit: vi.fn(),
     _listeners: listeners,
     fire: (event: unknown) => {
@@ -251,6 +254,26 @@ describe('AutomationEngine', () => {
 
       await expect(engine.start()).resolves.toBeUndefined();
       expect(eventBus.onAny).toHaveBeenCalledTimes(1);
+    });
+
+    it('periodically retries owner notices for newly persisted held rows', async () => {
+      vi.useFakeTimers();
+      (engine as unknown as { automationName(id: string): Promise<string> }).automationName =
+        vi.fn().mockResolvedValue('Test Automation');
+      await engine.start();
+      mockMassListHeld.mockResolvedValue([{
+        id: 'hold-after-start',
+        automation_id: 'auto1',
+      }]);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(mockMassHoldNotice).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'hold-after-start' }),
+        'Test Automation',
+      );
+      engine.stop();
+      vi.useRealTimers();
     });
   });
 
@@ -414,6 +437,27 @@ describe('AutomationEngine', () => {
       const targetIds = mockExecuteActions.mock.calls.map((call) => call[1].member?.id);
       expect(targetIds).toEqual(['10000000000000000']);
       expect(mockEvaluateConditions).toHaveBeenCalledTimes(3);
+    });
+
+    it('releases the occurrence instead of shrinking an indeterminate bulk target set', async () => {
+      mockGetForTrigger.mockReturnValue([
+        makeAutomation({
+          actions: [{ type: 'give_role', config: { role_id: 'role1' } }],
+          conditions: [{ type: 'user_is', config: { value: '10000000000000002' } }],
+        }),
+      ]);
+      guild.members.fetch.mockRejectedValueOnce(new Error('Discord temporarily unavailable'));
+      await engine.start();
+      eventBus.fire({
+        type: 'giveaway.ended',
+        guildId: 'g1',
+        data: { winnerIds: ['10000000000000000', '10000000000000002'] },
+      });
+
+      await vi.waitFor(() => expect(mockRelease).toHaveBeenCalledWith('exec-1'));
+      expect(mockMassHoldCreate).not.toHaveBeenCalled();
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+      expect(mockFinalize).not.toHaveBeenCalled();
     });
 
     it('atomically released hold fans member actions out once and finalizes the original claim', async () => {

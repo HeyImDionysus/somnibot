@@ -217,12 +217,7 @@ export async function GET(
     return null;
   }
 
-  /**
-   * Delivery must not turn into an error after nonce consumption merely
-   * because an analytics counter is unavailable. Keep the atomic RPC, retain
-   * the legacy fallback, and make both explicitly best-effort.
-   */
-  async function recordDeliveredDownload(): Promise<void> {
+  async function recordDeliveryEvidence(): Promise<boolean> {
     try {
       const { error: deliveryError } = await supabase
         .from('commerce_download_deliveries')
@@ -238,8 +233,21 @@ export async function GET(
         });
       if (deliveryError && deliveryError.code !== '23505') {
         console.error('[Downloads delivery evidence] insert failed:', deliveryError.message);
+        return false;
       }
+      return true;
+    } catch (error) {
+      console.error(
+        '[Downloads delivery evidence] insert failed:',
+        error instanceof Error ? error.message : 'unknown error',
+      );
+      return false;
+    }
+  }
 
+  /** The download counter is analytics; durable delivery evidence is not. */
+  async function incrementDownloadCounter(): Promise<void> {
+    try {
       const { error } = await supabase.rpc('increment_download_count', { p_file_id: fileId });
       if (!error) return;
 
@@ -259,20 +267,24 @@ export async function GET(
   }
 
   /**
-   * Hand delivery back to the caller as soon as the nonce is consumed.
-   * Analytics belongs to the route lifecycle, not the delivery critical path:
-   * Next.js keeps this callback alive after the response is sent, bounded by
-   * the route's platform max duration.
+   * A redirect is successful only after its durable delivery ledger row exists.
+   * The analytics counter stays outside the critical path.
    */
   async function deliver(response: NextResponse): Promise<NextResponse> {
     const replay = await consumeDeliveryNonce();
     if (replay) return replay;
 
+    if (!await recordDeliveryEvidence()) {
+      return deliveryNonce
+        ? deliveryStatusUncertain()
+        : serviceUnavailable('Downloads delivery evidence', {
+          message: 'Durable delivery evidence could not be written',
+        });
+    }
+
     try {
-      after(recordDeliveredDownload);
+      after(incrementDownloadCounter);
     } catch (error) {
-      // Scheduling is best-effort too. A missing lifecycle hook must not burn a
-      // nonce and replace a ready redirect with an error.
       console.error(
         '[Downloads counter] scheduling failed:',
         error instanceof Error ? error.message : 'unknown error',

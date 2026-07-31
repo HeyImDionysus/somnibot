@@ -66,10 +66,25 @@ async function fetchRoles(): Promise<DiscordRole[]> {
     return roleCache.data;
   }
   const res = await fetch('/api/roles');
+  if (!res.ok) {
+    throw new Error(`Role lookup failed (${res.status})`);
+  }
   const json = await res.json();
-  const roles = json.success ? (json.data ?? []) : [];
+  if (!json.success || !Array.isArray(json.data)) {
+    throw new Error('Role lookup returned a non-authoritative response');
+  }
+  const roles = json.data as DiscordRole[];
   roleCache = { data: roles, ts: Date.now() };
   return roles;
+}
+
+export function missingRoleIds(
+  selected: string[],
+  roles: DiscordRole[],
+  authoritative: boolean,
+): string[] {
+  if (!authoritative) return [];
+  return selected.filter((id) => !roles.some((role) => role.id === id));
 }
 
 /** Invalidate the role cache */
@@ -94,6 +109,8 @@ export function RolePicker({
 }: RolePickerProps) {
   const [roles, setRoles] = useState<DiscordRole[]>([]);
   const [loading, setLoading] = useState(true);
+  const [rolesAuthoritative, setRolesAuthoritative] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
@@ -106,8 +123,15 @@ export function RolePicker({
 
   useEffect(() => {
     fetchRoles()
-      .then(setRoles)
-      .catch(() => {})
+      .then((loadedRoles) => {
+        setRoles(loadedRoles);
+        setRolesAuthoritative(true);
+        setLoadFailed(false);
+      })
+      .catch(() => {
+        setRolesAuthoritative(false);
+        setLoadFailed(true);
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -176,9 +200,10 @@ export function RolePicker({
     [selected, roles],
   );
   const missingSelected = useMemo(
-    () => selected.filter((id) => !roles.some((role) => role.id === id)),
-    [selected, roles],
+    () => missingRoleIds(selected, roles, rolesAuthoritative),
+    [selected, roles, rolesAuthoritative],
   );
+  const unresolvedSelected = rolesAuthoritative ? [] : selected;
   const unreachableSelected = useMemo(
     () => requireAssignable
       ? selectedRoles.filter((role) => role.editableByBot === false)
@@ -222,8 +247,12 @@ export function RolePicker({
         )}
       >
         <div className="flex-1 min-w-0 flex flex-wrap gap-1">
-          {selectedRoles.length === 0 && missingSelected.length === 0 ? (
+          {selectedRoles.length === 0 && missingSelected.length === 0 && unresolvedSelected.length === 0 ? (
             <span className="text-discord-text-muted/60">{loading ? 'Loading…' : placeholder}</span>
+          ) : !multi && unresolvedSelected.length > 0 ? (
+            <span className="truncate text-discord-text-muted">
+              Configured role ({unresolvedSelected[0]})
+            </span>
           ) : !multi && selectedRoles.length === 0 ? (
             <span className="truncate text-discord-danger">
               Deleted role ({missingSelected[0]})
@@ -263,6 +292,22 @@ export function RolePicker({
                   <button
                     type="button"
                     aria-label={`Remove deleted role ${id}`}
+                    onClick={(e) => removeTag(id, e)}
+                    className="opacity-60 hover:opacity-100"
+                  >
+                    <X size={10} />
+                  </button>
+                </span>
+              ))}
+              {unresolvedSelected.map((id) => (
+                <span
+                  key={id}
+                  className="inline-flex items-center gap-1 rounded bg-discord-text-muted/10 px-1.5 py-0.5 text-xs text-discord-text-muted"
+                >
+                  Configured role ({id})
+                  <button
+                    type="button"
+                    aria-label={`Remove configured role ${id}`}
                     onClick={(e) => removeTag(id, e)}
                     className="opacity-60 hover:opacity-100"
                   >
@@ -394,6 +439,11 @@ export function RolePicker({
       {!error && missingSelected.length > 0 && (
         <p className="text-xs text-discord-danger">Remove the deleted role before saving.</p>
       )}
+      {!error && loadFailed && (
+        <p className="text-xs text-discord-warning">
+          Roles could not be refreshed. Existing role IDs are preserved until Discord data is available.
+        </p>
+      )}
       {!error && unreachableSelected.length > 0 && (
         <p className="text-xs text-discord-warning">
           Move SomniBot above {unreachableSelected.map((role) => role.name).join(', ')} before saving.
@@ -410,10 +460,19 @@ export function useRoleName(roleId: string | null | undefined): { name: string |
 
   useEffect(() => {
     if (!roleId) { setInfo({ name: null, color: '#99aab5' }); return; }
-    fetchRoles().then((roles) => {
-      const role = roles.find((r) => r.id === roleId);
-      setInfo(role ? { name: role.name, color: roleColor(role.color) } : { name: null, color: '#99aab5' });
-    });
+    let cancelled = false;
+    void fetchRoles()
+      .then((roles) => {
+        if (cancelled) return;
+        const role = roles.find((r) => r.id === roleId);
+        setInfo(role ? { name: role.name, color: roleColor(role.color) } : { name: null, color: '#99aab5' });
+      })
+      .catch(() => {
+        // Keep the last authoritative display value during a transient lookup failure.
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [roleId]);
 
   return info;

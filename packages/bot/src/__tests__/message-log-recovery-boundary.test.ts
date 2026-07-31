@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { raiseOwnerAlert, resolveOwnerAlert } = vi.hoisted(() => ({
+const { raiseOwnerAlert, resolveOwnerAlert, resolveOwnerAlertWithStatus } = vi.hoisted(() => ({
   raiseOwnerAlert: vi.fn().mockResolvedValue({ inserted: true, delivered: false }),
   resolveOwnerAlert: vi.fn(),
+  resolveOwnerAlertWithStatus: vi.fn(),
 }));
 
 vi.mock('../services/alert-service.js', () => ({
   raiseOwnerAlert,
   resolveOwnerAlert,
+  resolveOwnerAlertWithStatus,
 }));
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -54,6 +56,10 @@ describe('message-log recovery boundary', () => {
     vi.clearAllMocks();
     raiseOwnerAlert.mockReset().mockResolvedValue({ inserted: true, delivered: false });
     resolveOwnerAlert.mockReset().mockResolvedValue(undefined);
+    resolveOwnerAlertWithStatus.mockReset().mockResolvedValue({
+      resolvedCount: 1,
+      succeeded: true,
+    });
     invalidateMessageLogCache();
   });
 
@@ -61,7 +67,9 @@ describe('message-log recovery boundary', () => {
     const send = vi.fn()
       .mockRejectedValueOnce(Object.assign(new Error('forbidden'), { status: 403 }))
       .mockResolvedValue(undefined);
-    resolveOwnerAlert.mockRejectedValue(new Error('alerts unavailable'));
+    resolveOwnerAlertWithStatus
+      .mockResolvedValueOnce({ resolvedCount: 0, succeeded: false })
+      .mockResolvedValueOnce({ resolvedCount: 1, succeeded: true });
     const client = {
       supabase: {
         from: vi.fn(() => chain({
@@ -81,11 +89,12 @@ describe('message-log recovery boundary', () => {
 
     await logMessageDelete(client as any, message(send, 'failed'));
     await logMessageDelete(client as any, message(send, 'recovered'));
+    await logMessageDelete(client as any, message(send, 'recovery-retry'));
 
-    expect(send).toHaveBeenCalledTimes(2);
-    expect(resolveOwnerAlert.mock.calls.filter(
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(resolveOwnerAlertWithStatus.mock.calls.filter(
       (call) => call[2] === 'message_log_delivery_failed',
-    )).toHaveLength(1);
+    )).toHaveLength(2);
   });
 
   it('retries owner notification while emitting the degraded transition once', async () => {

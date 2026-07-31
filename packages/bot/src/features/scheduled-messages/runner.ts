@@ -17,7 +17,6 @@ import {
   claimDiscordOccurrence,
   completeDiscordOccurrence,
   failDiscordOccurrence,
-  releaseDiscordOccurrence,
 } from '../../services/occurrence-fence.js';
 
 const log = createLogger('ScheduledRunner');
@@ -273,7 +272,7 @@ export class ScheduledMessageRunner {
       return;
     }
 
-    const { data: claimedSendCount, error: counterError } = await this.supabase.rpc(
+    const { data: counterClaim, error: counterError } = await this.supabase.rpc(
       'claim_scheduled_message_send',
       {
         p_schedule_id: schedule.id,
@@ -281,12 +280,29 @@ export class ScheduledMessageRunner {
         p_occurrence_at: occurrenceAt.toISOString(),
       },
     );
+    let claimedSendCount = counterClaim;
     if (counterError) {
-      // Nothing reached Discord and no counter committed, so this occurrence
-      // is safe to retry. A failed fence would permanently drop the due minute.
-      await releaseDiscordOccurrence(this.supabase, occurrenceId).catch(() => {});
+      // The RPC may have committed before its response was lost. Reconcile the
+      // authoritative schedule row; never release an ambiguous occurrence and
+      // risk double-reserving or double-sending the due minute.
+      const { data: reconciled, error: reconcileError } = await this.supabase
+        .from('scheduled_messages')
+        .select('current_sends,last_sent_at')
+        .eq('id', schedule.id)
+        .eq('guild_id', this.guild.id)
+        .maybeSingle();
       log.error(`Failed to update schedule ${schedule.id} counters:`, counterError.message);
-      return;
+      if (
+        reconcileError
+        || !reconciled
+        || new Date(reconciled.last_sent_at ?? 0).getTime() !== occurrenceAt.getTime()
+      ) {
+        log.error(`Could not reconcile schedule ${schedule.id} counter claim; retaining occurrence fence`, {
+          error: reconcileError?.message ?? 'counter commit not confirmed',
+        });
+        return;
+      }
+      claimedSendCount = reconciled.current_sends;
     }
     if (typeof claimedSendCount !== 'number') {
       // Another occurrence consumed the final max_sends slot while this

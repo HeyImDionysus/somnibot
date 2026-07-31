@@ -130,6 +130,8 @@ export async function GET(req: NextRequest) {
     + alertsResult.data.length;
   const totalKeys = keyTotal ?? keys.length;
   const keySampleTruncated = totalKeys > keys.length;
+  const validationSampleTruncated =
+    (validationsResult.count ?? validationsResult.data.length) > validationsResult.data.length;
 
   return NextResponse.json({
     success: true,
@@ -138,7 +140,7 @@ export async function GET(req: NextRequest) {
       state:
         totalKeys === 0 && issueCount === 0
           ? 'empty'
-          : issueCount > 0 || keySampleTruncated
+          : issueCount > 0 || keySampleTruncated || validationSampleTruncated
             ? 'needs_attention'
             : 'healthy',
       keyCounts,
@@ -156,7 +158,7 @@ export async function GET(req: NextRequest) {
       truncated:
         keySampleTruncated
         || (sessionsResult.count ?? 0) > sessionsResult.data.length
-        || (validationsResult.count ?? 0) > validationsResult.data.length,
+        || validationSampleTruncated,
       checkedAt: new Date().toISOString(),
     },
   });

@@ -15,7 +15,11 @@ import {
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import { createLogger } from '@somnibot/shared';
-import { raiseOwnerAlert, resolveOwnerAlert } from '../../services/alert-service.js';
+import {
+  raiseOwnerAlert,
+  resolveOwnerAlert,
+  resolveOwnerAlertWithStatus,
+} from '../../services/alert-service.js';
 import {
   applyBrand,
   BRAND_KIT_COLUMNS,
@@ -265,7 +269,7 @@ async function notifyDeliveryFailure(
 async function noticeDeliveryRecovered(client: SomniClient, guildId: string): Promise<void> {
   const firstSuccessThisBoot = !_deliveryRecoveryChecked.has(guildId);
   if (!_deliveryDegraded.has(guildId) && !firstSuccessThisBoot) return;
-  await resolveOwnerAlert(
+  const resolution = await resolveOwnerAlertWithStatus(
     client.supabase,
     guildId,
     'message_log_delivery_failed',
@@ -275,6 +279,7 @@ async function noticeDeliveryRecovered(client: SomniClient, guildId: string): Pr
       notice: 'Message-log delivery recovered — edit/delete records are reaching the configured channel again.',
     },
   );
+  if (!resolution.succeeded) return;
   _deliveryRecoveryChecked.add(guildId);
   _deliveryDegraded.delete(guildId);
   _deliveryAlerted.delete(guildId);

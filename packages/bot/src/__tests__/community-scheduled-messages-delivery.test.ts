@@ -145,7 +145,7 @@ describe('ScheduledMessageRunner — transient send retry', () => {
     expect(inserts.alerts.length).toBe(0);
   });
 
-  it('releases a proven-unused occurrence when the atomic counter claim fails', async () => {
+  it('retains the occurrence when an atomic counter claim failure is ambiguous', async () => {
     const Runner = await loadRunner();
     const { supabase, deletes } = schedSupa(
       [{ ...BASE_SCHEDULE }],
@@ -157,7 +157,7 @@ describe('ScheduledMessageRunner — transient send retry', () => {
     await (runner as any).tick();
 
     expect(send).not.toHaveBeenCalled();
-    expect(deletes).toContain('discord_operation_occurrences');
+    expect(deletes).not.toContain('discord_operation_occurrences');
   });
 });
 

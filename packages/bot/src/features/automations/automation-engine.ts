@@ -90,6 +90,8 @@ export class AutomationEngine {
   private massActionHolds: MassActionHoldService;
   private alertService: AlertService | null;
   private eventHandler: ((event: PlatformEvent) => Promise<void>) | null = null;
+  private heldNoticeTimer: NodeJS.Timeout | null = null;
+  private heldNoticeRecoveryRunning = false;
   /**
    * V10 Audit §2: Per-execution chain depth tracking.
    *
@@ -214,6 +216,11 @@ export class AutomationEngine {
         log.error(`Failed to recover approved mass-action hold ${hold.id}:`, err);
       }
     }));
+    if (this.heldNoticeTimer) clearInterval(this.heldNoticeTimer);
+    this.heldNoticeTimer = setInterval(() => {
+      void this.recoverHeldNotices();
+    }, 30_000);
+    this.heldNoticeTimer.unref?.();
 
     log.info('Started and listening for events');
   }
@@ -226,6 +233,10 @@ export class AutomationEngine {
   stop(): void {
     this.loader.unsubscribe();
     this.massActionHolds.unsubscribe();
+    if (this.heldNoticeTimer) {
+      clearInterval(this.heldNoticeTimer);
+      this.heldNoticeTimer = null;
+    }
     if (this.eventHandler) {
       this.eventBus.off('*' as PlatformEventType, this.eventHandler);
       this.eventHandler = null;
@@ -368,8 +379,25 @@ export class AutomationEngine {
           conditionedBulkMemberIds = scopedBulkMemberIds ?? [];
         } else {
           for (const memberId of scopedBulkMemberIds ?? []) {
-            const member = this.guild.members.cache.get(memberId)
-              ?? await this.guild.members.fetch(memberId).catch(() => null);
+            let member = this.guild.members.cache.get(memberId);
+            if (!member) {
+              try {
+                member = await this.guild.members.fetch(memberId);
+              } catch (err) {
+                if ((err as { code?: number } | undefined)?.code === 10_007) {
+                  // Discord authoritatively says the member left the guild.
+                  continue;
+                }
+                // The target set is authorization-sensitive: treating an
+                // indeterminate fetch as "not a member" can silently shrink a
+                // mass action below its approval threshold.
+                await this.executionLogger.release(claimRowId);
+                throw new Error(
+                  `Unable to evaluate bulk member ${memberId}; occurrence claim released for retry`,
+                  { cause: err },
+                );
+              }
+            }
             if (!member) continue;
             const passed = await evaluateConditions(memberConditions, {
               ...conditionCtx,
@@ -814,6 +842,26 @@ export class AutomationEngine {
       .eq('guild_id', this.guild.id)
       .maybeSingle();
     return (data?.name as string | undefined) ?? automationId;
+  }
+
+  private async recoverHeldNotices(): Promise<void> {
+    if (this.heldNoticeRecoveryRunning) return;
+    this.heldNoticeRecoveryRunning = true;
+    try {
+      const held = await this.massActionHolds.listHeld();
+      await Promise.all(held.map(async (hold) => {
+        try {
+          const name = await this.automationName(hold.automation_id);
+          await this.massActionHolds.ensureOwnerNotice(hold, name);
+        } catch (err) {
+          log.error(`Failed to retry mass-action notice ${hold.id}:`, err);
+        }
+      }));
+    } catch (err) {
+      log.error('Failed to scan held mass actions for notice retry:', err);
+    } finally {
+      this.heldNoticeRecoveryRunning = false;
+    }
   }
 
   /**

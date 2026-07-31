@@ -307,6 +307,72 @@ describe('ScheduledMessageRunner', () => {
     expect(supabase.rpc).toHaveBeenCalledWith('claim_scheduled_message_send', expect.any(Object));
   });
 
+  it('reconciles an ambiguous counter RPC commit before sending', async () => {
+    const dueAt = new Date('2026-07-30T12:00:00.000Z');
+    const channel = makeChannel();
+    const guild = makeGuild({ ch1: channel });
+    const supabase = makeSupabase();
+    supabase.rpc.mockResolvedValue({
+      data: null,
+      error: { message: 'response lost after commit' },
+    });
+    const originalFrom = supabase.from;
+    supabase.from = vi.fn((table: string) => {
+      if (table === 'scheduled_messages') {
+        return chainBuilder({
+          data: { current_sends: 4, last_sent_at: dueAt.toISOString() },
+          error: null,
+        });
+      }
+      return originalFrom(table);
+    });
+    const runner = new ScheduledMessageRunner(guild as any, supabase as any);
+
+    await (runner as any).sendMessage({
+      id: 'sched-ambiguous',
+      guild_id: 'g1',
+      name: 'Ambiguous Commit',
+      channel_id: 'ch1',
+      message: 'Test',
+      embed_config_id: null,
+    }, dueAt);
+
+    expect(channel.send).toHaveBeenCalledOnce();
+  });
+
+  it('retains the occurrence fence when an ambiguous counter commit cannot be reconciled', async () => {
+    const dueAt = new Date('2026-07-30T12:00:00.000Z');
+    const channel = makeChannel();
+    const guild = makeGuild({ ch1: channel });
+    const supabase = makeSupabase();
+    supabase.rpc.mockResolvedValue({
+      data: null,
+      error: { message: 'response lost after dispatch' },
+    });
+    const originalFrom = supabase.from;
+    supabase.from = vi.fn((table: string) => {
+      if (table === 'scheduled_messages') {
+        return chainBuilder({ data: null, error: { message: 'read unavailable' } });
+      }
+      return originalFrom(table);
+    });
+    const runner = new ScheduledMessageRunner(guild as any, supabase as any);
+
+    await (runner as any).sendMessage({
+      id: 'sched-unreconciled',
+      guild_id: 'g1',
+      name: 'Unreconciled Commit',
+      channel_id: 'ch1',
+      message: 'Test',
+      embed_config_id: null,
+    }, dueAt);
+
+    expect(channel.send).not.toHaveBeenCalled();
+    expect(supabase.from.mock.calls.filter(
+      (call: unknown[]) => call[0] === 'discord_operation_occurrences',
+    )).toHaveLength(1);
+  });
+
   it('skips when channel not found', async () => {
     const now = new Date();
     const guild = makeGuild(); // no channels

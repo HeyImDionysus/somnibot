@@ -12,7 +12,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
-import { raiseOwnerAlert, resolveOwnerAlert } from '../../services/alert-service.js';
+import { raiseOwnerAlert, resolveOwnerAlertWithStatus } from '../../services/alert-service.js';
 
 const log = createLogger('StatsManager');
 
@@ -253,7 +253,7 @@ export class StatsChannelManager {
     const firstSuccessThisBoot = !this.recoveryChecked.has(config.id);
     if (!this.degradedChannels.has(config.id) && !firstSuccessThisBoot) return;
 
-    await resolveOwnerAlert(
+    const updateResolution = await resolveOwnerAlertWithStatus(
       this.supabase,
       this.guild.id,
       'stats_channel_update_failed',
@@ -263,14 +263,16 @@ export class StatsChannelManager {
         notice: `The "${config.stat_type}" stats counter is updating again.`,
       },
     );
+    if (!updateResolution.succeeded) return;
     if (config.channel_id) {
-      await resolveOwnerAlert(
+      const deletedResolution = await resolveOwnerAlertWithStatus(
         this.supabase,
         this.guild.id,
         'stats_channel_deleted',
         { stats_channel_id: config.id },
         { guild: this.guild },
       );
+      if (!deletedResolution.succeeded) return;
     }
     this.recoveryChecked.add(config.id);
     this.degradedChannels.delete(config.id);
