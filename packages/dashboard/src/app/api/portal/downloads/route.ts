@@ -137,6 +137,7 @@ export async function GET(request: NextRequest) {
             fileId: f.id,
             customerId: session.customer_id,
             guildId: session.guild_id,
+            entitlementId: e.id,
           }),
           size: f.file_size ?? undefined,
         })),

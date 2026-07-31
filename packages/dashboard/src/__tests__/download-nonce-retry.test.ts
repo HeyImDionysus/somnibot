@@ -26,6 +26,7 @@ vi.mock('@/lib/api/signed-url', () => ({
   verifySignedDownloadUrl: vi.fn(() => ({
     customerId: 'cust-1',
     guildId: 'guild-1',
+    entitlementId: 'ent-1',
     nonce: 'nonce-1',
   })),
 }));
@@ -52,6 +53,7 @@ function request() {
     exp: String(Math.floor(Date.now() / 1000) + 300),
     cid: 'cust-1',
     gid: 'guild-1',
+    eid: 'ent-1',
     nonce: 'nonce-1',
   });
   return new NextRequest(
@@ -114,6 +116,7 @@ beforeEach(() => {
   vi.mocked(verifySignedDownloadUrl).mockReturnValue({
     customerId: 'cust-1',
     guildId: 'guild-1',
+    entitlementId: 'ent-1',
     nonce: 'nonce-1',
   });
   let consumed = false;

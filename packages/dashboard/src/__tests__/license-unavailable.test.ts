@@ -32,7 +32,12 @@ vi.mock('@/lib/api/rate-limit', () => ({
   },
 }));
 vi.mock('@/lib/api/signed-url', () => ({
-  verifySignedDownloadUrl: vi.fn(() => ({ customerId: 'cust-1', guildId: 'guild-1', nonce: undefined })),
+  verifySignedDownloadUrl: vi.fn(() => ({
+    customerId: 'cust-1',
+    guildId: 'guild-1',
+    entitlementId: 'ent-1',
+    nonce: undefined,
+  })),
 }));
 vi.mock('@/lib/api/download-nonce', () => ({
   consumeDownloadNonce: vi.fn().mockResolvedValue('consumed'),
@@ -79,6 +84,7 @@ beforeEach(() => {
   vi.mocked(verifySignedDownloadUrl).mockReturnValue({
     customerId: 'cust-1',
     guildId: 'guild-1',
+    entitlementId: 'ent-1',
     nonce: null,
   });
   vi.mocked(consumeDownloadNonce).mockResolvedValue('consumed');
@@ -469,7 +475,8 @@ describe('GET /api/downloads/[productId]/[fileId] — a failed check is not a re
       sig: 's',
       exp: String(Math.floor(Date.now() / 1000) + 300),
       cid: 'cust-1',
-      gid: 'guild-1',
+    gid: 'guild-1',
+    eid: 'ent-1',
     });
     return new NextRequest(`http://localhost/api/downloads/${PRODUCT_ID}/${FILE_ID}?${sp.toString()}`);
   }

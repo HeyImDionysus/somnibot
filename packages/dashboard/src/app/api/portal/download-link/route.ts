@@ -73,13 +73,14 @@ export async function POST(request: NextRequest) {
     // that is active or in an unexpired grace window.
     const { data: entitlements } = await admin
       .from('entitlements')
-      .select('id, status, grace_period_ends_at')
+      .select('id, order_id, status, grace_period_ends_at')
       .eq('customer_id', session.customer_id)
       .eq('product_id', productId)
       .eq('guild_id', session.guild_id)
       .in('status', ['active', 'grace_period']);
 
-    if (!entitlements?.some((e) => isEntitlementAccessLive(e))) {
+    const selectedEntitlement = entitlements?.find((e) => isEntitlementAccessLive(e));
+    if (!selectedEntitlement) {
       // Auditable refusal: buyer requested a download they are not entitled to.
       await writeCommerceAudit(admin, {
         guildId: session.guild_id,
@@ -112,6 +113,7 @@ export async function POST(request: NextRequest) {
       fileId,
       customerId: session.customer_id,
       guildId: session.guild_id,
+      entitlementId: selectedEntitlement.id,
     });
 
     // Auditable state change: a signed download link was issued to the buyer.
@@ -122,7 +124,13 @@ export async function POST(request: NextRequest) {
       action: 'portal.download_link_issued',
       targetType: 'product_file',
       targetId: fileId,
-      details: { customerId: session.customer_id, productId, fileId },
+      details: {
+        customerId: session.customer_id,
+        productId,
+        fileId,
+        entitlementId: selectedEntitlement.id,
+        orderId: selectedEntitlement.order_id,
+      },
     });
 
     return NextResponse.json({ url });

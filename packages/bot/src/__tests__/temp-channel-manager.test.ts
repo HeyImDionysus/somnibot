@@ -1,7 +1,7 @@
 /**
  * Tests for ../features/temp-channels/temp-channel-manager.js — instantiation and lifecycle.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -128,6 +128,10 @@ function makeDiscordClient() {
 }
 
 describe('TempChannelManager', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('has required methods', () => {
     const manager = new TempChannelManager(makeGuild() as any, makeSupa() as any);
     expect(typeof manager.start).toBe('function');
@@ -215,6 +219,45 @@ describe('TempChannelManager', () => {
     expect((manager as any).activeChannels.get('room-1')).toBe(active);
     expect((manager as any).keepAliveTimers.get('room-1')).toBe(timer);
     clearTimeout(timer);
+  });
+
+  it('retries a failed empty-room retirement without waiting for a restart', async () => {
+    vi.useFakeTimers();
+    const guild = makeGuild();
+    const room = {
+      id: 'room-1',
+      members: { filter: vi.fn(() => new Map()) },
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+    guild.channels.cache.set('room-1', room);
+    const rpc = vi.fn()
+      .mockResolvedValueOnce({ data: null, error: { message: 'database unavailable' } })
+      .mockResolvedValueOnce({ data: true, error: null });
+    const manager = new TempChannelManager(guild as any, {
+      from: vi.fn(() => makeChain({ data: null, error: null })),
+      rpc,
+    } as any);
+    (manager as any).hubs.set('hub-voice', {
+      id: 'hub-1',
+      hub_channel_id: 'hub-voice',
+      empty_grace_seconds: 0,
+      keep_alive_minutes: 1,
+    });
+    (manager as any).activeChannels.set('room-1', {
+      channel_id: 'room-1',
+      text_channel_id: null,
+      guild_id: 'guild-1',
+      hub_id: 'hub-1',
+      owner_id: 'owner-1',
+      creation_occurrence_id: 'occurrence-1',
+    });
+
+    await manager.handleLeaveTemp('room-1');
+    await vi.runAllTimersAsync();
+
+    expect(rpc).toHaveBeenCalledTimes(2);
+    expect((manager as any).activeChannels.has('room-1')).toBe(false);
+    expect((manager as any).keepAliveTimers.has('room-1')).toBe(false);
   });
 
   it('retires the active row and creation fence before clearing local cleanup state', async () => {

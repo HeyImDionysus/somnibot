@@ -142,6 +142,16 @@ function hasValidChannelShape(value: unknown): value is DiscordChannel {
     && (value.botPermissions === null || typeof value.botPermissions === 'string');
 }
 
+function hasValidCategoryShape(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.name === 'string'
+    && typeof value.position === 'number'
+    && Number.isFinite(value.position)
+    && typeof value.manageableByBot === 'boolean'
+    && (value.botPermissions === null || typeof value.botPermissions === 'string');
+}
+
 export function isAuthoritativeChannelSnapshot(
   payload: unknown,
   nowMs = Date.now(),
@@ -156,7 +166,27 @@ export function isAuthoritativeChannelSnapshot(
     && nowMs - snapshotMs <= MAX_SNAPSHOT_AGE_MS
     && snapshotMs - nowMs <= MAX_SNAPSHOT_FUTURE_SKEW_MS
     && Array.isArray(payload.channels)
-    && payload.channels.every(hasValidChannelShape);
+    && payload.channels.every(hasValidChannelShape)
+    && Array.isArray(payload.categories)
+    && payload.categories.every(hasValidCategoryShape);
+}
+
+export function normalizeSnapshotChannels(payload: unknown): DiscordChannel[] {
+  if (!isRecord(payload)) {
+    throw new Error('Live Discord channel snapshot is malformed');
+  }
+  const channels = payload.channels ?? payload.data ?? [];
+  const categories = payload.categories ?? [];
+  if (!Array.isArray(channels) || !Array.isArray(categories)) {
+    throw new Error('Live Discord channel snapshot is malformed');
+  }
+  return [
+    ...channels,
+    ...categories.map((category) => ({
+      ...category,
+      type: CHANNEL_TYPE.GUILD_CATEGORY,
+    })),
+  ] as DiscordChannel[];
 }
 
 async function fetchChannels(): Promise<ChannelSnapshot> {
@@ -168,10 +198,7 @@ async function fetchChannels(): Promise<ChannelSnapshot> {
   if (!res.ok || !json.success) {
     throw new Error(json.error || 'Failed to load live Discord channels');
   }
-  const channels = json.channels ?? json.data ?? [];
-  if (!Array.isArray(channels)) {
-    throw new Error('Live Discord channel snapshot is malformed');
-  }
+  const channels = normalizeSnapshotChannels(json);
   const snapshot = {
     channels,
     authoritative: isAuthoritativeChannelSnapshot(json),

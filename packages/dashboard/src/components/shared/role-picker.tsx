@@ -23,6 +23,11 @@ interface DiscordRole {
   editableByBot?: boolean;
 }
 
+interface RoleSnapshot {
+  roles: DiscordRole[];
+  authoritative: boolean;
+}
+
 interface RolePickerProps {
   /** Currently selected role ID(s) */
   value: string | string[] | null;
@@ -58,10 +63,43 @@ function roleColor(color: number): string {
 }
 
 // Shared role cache
-let roleCache: { data: DiscordRole[]; ts: number } | null = null;
+let roleCache: { data: RoleSnapshot; ts: number } | null = null;
 const CACHE_TTL = 30_000;
+const MAX_SNAPSHOT_AGE_MS = 10 * 60 * 1_000;
+const MAX_SNAPSHOT_FUTURE_SKEW_MS = 60_000;
 
-async function fetchRoles(): Promise<DiscordRole[]> {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasValidRoleShape(value: unknown): value is DiscordRole {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.name === 'string'
+    && typeof value.color === 'number'
+    && Number.isFinite(value.color)
+    && typeof value.position === 'number'
+    && Number.isFinite(value.position)
+    && typeof value.editableByBot === 'boolean';
+}
+
+export function isAuthoritativeRoleSnapshot(
+  payload: unknown,
+  nowMs = Date.now(),
+): boolean {
+  if (!isRecord(payload) || payload.awaitingSnapshot === true) return false;
+  const snapshotMs = typeof payload.snapshotAt === 'string'
+    ? Date.parse(payload.snapshotAt)
+    : Number.NaN;
+  return payload.snapshotVersion === 2
+    && Number.isFinite(snapshotMs)
+    && nowMs - snapshotMs <= MAX_SNAPSHOT_AGE_MS
+    && snapshotMs - nowMs <= MAX_SNAPSHOT_FUTURE_SKEW_MS
+    && Array.isArray(payload.data)
+    && payload.data.every(hasValidRoleShape);
+}
+
+async function fetchRoles(): Promise<RoleSnapshot> {
   if (roleCache && Date.now() - roleCache.ts < CACHE_TTL) {
     return roleCache.data;
   }
@@ -73,9 +111,12 @@ async function fetchRoles(): Promise<DiscordRole[]> {
   if (!json.success || !Array.isArray(json.data)) {
     throw new Error('Role lookup returned a non-authoritative response');
   }
-  const roles = json.data as DiscordRole[];
-  roleCache = { data: roles, ts: Date.now() };
-  return roles;
+  const snapshot = {
+    roles: json.data as DiscordRole[],
+    authoritative: isAuthoritativeRoleSnapshot(json),
+  };
+  roleCache = { data: snapshot, ts: Date.now() };
+  return snapshot;
 }
 
 export function missingRoleIds(
@@ -123,9 +164,9 @@ export function RolePicker({
 
   useEffect(() => {
     fetchRoles()
-      .then((loadedRoles) => {
-        setRoles(loadedRoles);
-        setRolesAuthoritative(true);
+      .then((snapshot) => {
+        setRoles(snapshot.roles);
+        setRolesAuthoritative(snapshot.authoritative);
         setLoadFailed(false);
       })
       .catch(() => {
@@ -462,9 +503,9 @@ export function useRoleName(roleId: string | null | undefined): { name: string |
     if (!roleId) { setInfo({ name: null, color: '#99aab5' }); return; }
     let cancelled = false;
     void fetchRoles()
-      .then((roles) => {
+      .then((snapshot) => {
         if (cancelled) return;
-        const role = roles.find((r) => r.id === roleId);
+        const role = snapshot.roles.find((r) => r.id === roleId);
         setInfo(role ? { name: role.name, color: roleColor(role.color) } : { name: null, color: '#99aab5' });
       })
       .catch(() => {

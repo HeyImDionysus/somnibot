@@ -324,7 +324,7 @@ export async function createTicket(
   }
 
   // Save ticket record
-  const { data: ticket, error: dbError } = await supabase
+  const { data: insertedTicket, error: dbError } = await supabase
     .from('tickets')
     .insert({
       guild_id: guild.id,
@@ -340,10 +340,78 @@ export async function createTicket(
     .select()
     .single();
 
+  let ticket = insertedTicket as DbTicket | null;
   if (dbError || !ticket) {
     log.error('Failed to save ticket:', dbError?.message);
-    // Clean up the channel
-    await channel.delete().catch(() => { /* channel may already be deleted */ });
+
+    // An insert can commit even when its response is lost. The occurrence ID is
+    // the durable idempotency key, so reconcile it before deleting the Discord
+    // channel or retiring the claim.
+    if (occurrenceId) {
+      const { data: reconciledTicket, error: reconciliationError } = await supabase
+        .from('tickets')
+        .select('*')
+        .eq('creation_occurrence_id', occurrenceId)
+        .maybeSingle();
+      if (reconciledTicket) {
+        ticket = reconciledTicket as DbTicket;
+      } else if (reconciliationError) {
+        log.error('Could not reconcile uncertain ticket insert:', {
+          occurrenceId,
+          channelId: channel.id,
+          error: reconciliationError.message,
+        });
+        return {
+          error: 'Ticket creation could not be confirmed. The channel was preserved for automatic recovery.',
+        };
+      }
+    }
+
+    if (!ticket) {
+      let channelRemoved = false;
+      try {
+        await channel.delete();
+        channelRemoved = true;
+      } catch (deleteError) {
+        log.error('Failed to remove ticket channel after confirmed missing insert:', {
+          channelId: channel.id,
+          error: String(deleteError),
+        });
+      }
+
+      await reportTicketCreateFailure(supabase, eventBus, guild, {
+        userDiscordId: member.id,
+        panelId: panel.id,
+        ticketNumber,
+        stage: 'db_save',
+        error: dbError?.message ?? 'unknown',
+      });
+      if (occurrenceId) {
+        if (channelRemoved) {
+          await releaseDiscordOccurrence(supabase, occurrenceId).catch((releaseError) => {
+            log.error('Failed to release ticket occurrence after confirmed channel cleanup:', {
+              error: String(releaseError),
+            });
+          });
+        } else {
+          await failDiscordOccurrence(
+            supabase,
+            occurrenceId,
+            `db_save:${dbError?.message ?? 'unknown'}`,
+            channel.id,
+            { stage: 'db_save', channelCleanupFailed: true },
+          ).catch((failError) => {
+            log.error('Failed to record orphaned ticket channel occurrence:', {
+              error: String(failError),
+            });
+          });
+        }
+      }
+      return { error: 'Failed to save ticket to database.' };
+    }
+  }
+
+  if (!ticket) {
     await reportTicketCreateFailure(supabase, eventBus, guild, {
       userDiscordId: member.id,
       panelId: panel.id,
@@ -351,9 +419,6 @@ export async function createTicket(
       stage: 'db_save',
       error: dbError?.message ?? 'unknown',
     });
-    if (occurrenceId) {
-      await failDiscordOccurrence(supabase, occurrenceId, `db_save:${dbError?.message ?? 'unknown'}`).catch(() => {});
-    }
     return { error: 'Failed to save ticket to database.' };
   }
 

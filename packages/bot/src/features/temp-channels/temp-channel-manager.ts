@@ -24,6 +24,9 @@ import {
 } from '../../services/occurrence-fence.js';
 
 const log = createLogger('TempChannels');
+const CLEANUP_RETRY_BASE_MS = 5_000;
+const CLEANUP_RETRY_MAX_MS = 60_000;
+const CLEANUP_RETRY_LIMIT = 5;
 
 
 export interface HubConfig {
@@ -472,18 +475,36 @@ export class TempChannelManager {
     const existing = this.keepAliveTimers.get(channelId);
     if (existing) clearTimeout(existing);
 
+    this.scheduleEmptyCleanup(channelId, keepAliveMs);
+  }
+
+  private scheduleEmptyCleanup(channelId: string, delayMs: number, retryAttempt = 0): void {
+    const existing = this.keepAliveTimers.get(channelId);
+    if (existing) clearTimeout(existing);
+
     const timer = setTimeout(async () => {
+      if (this.keepAliveTimers.get(channelId) === timer) {
+        this.keepAliveTimers.delete(channelId);
+      }
       try {
-        // Double-check still empty
+        if (!this.activeChannels.has(channelId)) return;
         const freshVc = this.guild.channels.cache.get(channelId) as VoiceChannel | undefined;
-        if (freshVc && freshVc.members.filter((m) => !m.user.bot).size === 0) {
-          await this.deleteChannel(channelId);
+        if (freshVc && freshVc.members.filter((m) => !m.user.bot).size > 0) {
+          return;
         }
+        await this.deleteChannel(channelId);
       } catch (err) {
         log.error('Keep-alive cleanup error:', { error: String(err) });
+        const nextAttempt = retryAttempt + 1;
+        if (this.activeChannels.has(channelId) && nextAttempt <= CLEANUP_RETRY_LIMIT) {
+          const retryDelay = Math.min(
+            CLEANUP_RETRY_BASE_MS * (2 ** (nextAttempt - 1)),
+            CLEANUP_RETRY_MAX_MS,
+          );
+          this.scheduleEmptyCleanup(channelId, retryDelay, nextAttempt);
+        }
       }
-      this.keepAliveTimers.delete(channelId);
-    }, keepAliveMs);
+    }, delayMs);
 
     this.keepAliveTimers.set(channelId, timer);
   }

@@ -106,6 +106,82 @@ describe('ticket creation failure observability', () => {
       expect.objectContaining({ panelId: 'panel-1', stage: 'intro_send' }),
     );
   });
+
+  it('preserves a committed ticket when the insert response is lost', async () => {
+    const emit = vi.fn();
+    const channel = {
+      id: 'tc1',
+      send: vi.fn().mockResolvedValue({}),
+      delete: vi.fn().mockResolvedValue({}),
+    };
+    const committedTicket = {
+      id: 'ticket-1',
+      guild_id: 'g1',
+      panel_id: 'panel-1',
+      channel_id: 'tc1',
+      ticket_number: 1,
+      creator_id: 'u1',
+      status: 'open',
+      creation_occurrence_id: 'occurrence-1',
+    };
+    let ticketQuery = 0;
+    const occurrence = {
+      id: 'occurrence-1',
+      guild_id: 'g1',
+      operation_kind: 'ticket',
+      occurrence_key: 'interaction-1',
+      status: 'claimed',
+      resource_id: null,
+      result: {},
+      last_error: null,
+    };
+    const supa = {
+      from: vi.fn((table: string) => {
+        if (table === 'alerts') return { insert: vi.fn(async () => ({ error: null })) };
+        if (table === 'discord_operation_occurrences') {
+          const chain = makeCreateSupa().from('tickets');
+          chain.single = vi.fn(async () => ({ data: occurrence, error: null }));
+          return chain;
+        }
+        if (table === 'tickets') {
+          ticketQuery += 1;
+          const chain = makeCreateSupa().from('tickets');
+          if (ticketQuery === 1) {
+            chain.then = (resolve: Function) => resolve({ data: [], error: null, count: 0 });
+          } else if (ticketQuery === 2) {
+            chain.single = vi.fn(async () => ({
+              data: null,
+              error: { message: 'connection lost after commit' },
+            }));
+          } else {
+            chain.maybeSingle = vi.fn(async () => ({ data: committedTicket, error: null }));
+          }
+          return chain;
+        }
+        return makeCreateSupa().from('tickets');
+      }),
+      rpc: vi.fn(async () => ({ data: 1, error: null })),
+    } as any;
+    const guild = makeGuild(vi.fn().mockResolvedValue(channel));
+
+    const result = await createTicket(
+      guild,
+      member,
+      panel,
+      ticketType,
+      supa,
+      { emit } as any,
+      'interaction-1',
+    );
+
+    expect(result).toMatchObject({ ticket: committedTicket, channel });
+    expect(channel.delete).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith(
+      'ticket.opened',
+      'g1',
+      expect.objectContaining({ ticketId: 'ticket-1', channelId: 'tc1' }),
+    );
+  });
 });
 
 const ticket = {

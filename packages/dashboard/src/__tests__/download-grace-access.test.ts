@@ -24,7 +24,12 @@ vi.mock('@/lib/api/rate-limit', () => ({
 }));
 vi.mock('@/lib/api/signed-url', () => ({
   generateSignedDownloadUrl: vi.fn(() => 'https://signed.example/download'),
-  verifySignedDownloadUrl: vi.fn(() => ({ customerId: 'cust-1', guildId: 'guild-1', nonce: undefined })),
+  verifySignedDownloadUrl: vi.fn(() => ({
+    customerId: 'cust-1',
+    guildId: 'guild-1',
+    entitlementId: 'ent-1',
+    nonce: undefined,
+  })),
 }));
 vi.mock('@/lib/api/download-nonce', () => ({
   consumeDownloadNonce: vi.fn().mockResolvedValue('consumed'),
@@ -97,7 +102,7 @@ function linkReq() {
   });
 }
 
-function fileReq() {
+function fileReq(entitlementId = 'ent-1') {
   // The file-download route reads req.nextUrl.searchParams, so build a real
   // NextRequest (the plain Request from buildRequest has no .nextUrl).
   const sp = new URLSearchParams({
@@ -105,6 +110,7 @@ function fileReq() {
     exp: String(Math.floor(NOW.getTime() / 1000) + 300),
     cid: 'cust-1',
     gid: 'guild-1',
+    eid: entitlementId,
   });
   return new NextRequest(`http://localhost/api/downloads/${PRODUCT_ID}/${FILE_ID}?${sp.toString()}`);
 }
@@ -119,6 +125,7 @@ beforeEach(() => {
   vi.mocked(verifySignedDownloadUrl).mockReturnValue({
     customerId: 'cust-1',
     guildId: 'guild-1',
+    entitlementId: 'ent-1',
     nonce: null,
   });
   vi.mocked(consumeDownloadNonce).mockResolvedValue('consumed');
@@ -137,6 +144,9 @@ describe('POST /api/portal/download-link — grace deadline enforcement', () => 
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.url).toBe('https://signed.example/download');
+    expect(generateSignedDownloadUrl).toHaveBeenCalledWith(expect.objectContaining({
+      entitlementId: 'ent-1',
+    }));
   });
 
   it('mints a signed URL for a grace entitlement still inside its window', async () => {
@@ -214,8 +224,31 @@ describe('GET /api/downloads/[productId]/[fileId] — grace deadline enforcement
       { id: 'ent-lapsed', status: 'grace_period', grace_period_ends_at: PAST_DEADLINE },
       { id: 'ent-live', status: 'active', grace_period_ends_at: null },
     ]);
-    const res = await fileDownloadGet(fileReq() as never, fileParams);
+    vi.mocked(verifySignedDownloadUrl).mockReturnValueOnce({
+      customerId: 'cust-1',
+      guildId: 'guild-1',
+      entitlementId: 'ent-live',
+      nonce: null,
+    });
+    const res = await fileDownloadGet(fileReq('ent-live') as never, fileParams);
     expect(res.status).toBe(307);
+  });
+
+  it('rejects a valid customer link when its signed entitlement is not live', async () => {
+    setupMocks([
+      { id: 'ent-expired', status: 'grace_period', grace_period_ends_at: PAST_DEADLINE },
+      { id: 'ent-other', status: 'active', grace_period_ends_at: null },
+    ]);
+    vi.mocked(verifySignedDownloadUrl).mockReturnValueOnce({
+      customerId: 'cust-1',
+      guildId: 'guild-1',
+      entitlementId: 'ent-expired',
+      nonce: null,
+    });
+
+    const res = await fileDownloadGet(fileReq('ent-expired') as never, fileParams);
+
+    expect(res.status).toBe(403);
   });
 
   it('rejects when the customer holds no candidate entitlements', async () => {

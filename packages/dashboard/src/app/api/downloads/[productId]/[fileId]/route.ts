@@ -5,7 +5,8 @@
  * instead of raw portal tokens in query strings. Falls back to
  * x-portal-token header for backwards compatibility.
  *
- * Signed URL params: sig, exp, cid (customer ID), gid (guild ID)
+ * Signed URL params: sig, exp, cid (customer ID), gid (guild ID),
+ * eid (the exact entitlement whose delivery will be recorded), nonce
  */
 import { after, NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -64,18 +65,29 @@ export async function GET(
   // ── Auth: prefer signed URL, fall back to portal token header ──
   let customerId: string;
   let guildId: string;
+  let signedEntitlementId: string | null = null;
   let deliveryNonce: { value: string; expiresAtUnix: number } | null = null;
 
   const sig = req.nextUrl.searchParams.get('sig');
   const exp = req.nextUrl.searchParams.get('exp');
   const cid = req.nextUrl.searchParams.get('cid');
   const gid = req.nextUrl.searchParams.get('gid');
+  const eid = req.nextUrl.searchParams.get('eid');
 
   const nonce = req.nextUrl.searchParams.get('nonce');
 
-  if (sig && exp && cid && gid) {
+  if (sig && exp && cid && gid && eid) {
     // Signed URL authentication (preferred — no raw token in URL)
-    const verified = verifySignedDownloadUrl(productId, fileId, sig, exp, cid, gid, nonce ?? undefined);
+    const verified = verifySignedDownloadUrl(
+      productId,
+      fileId,
+      sig,
+      exp,
+      cid,
+      gid,
+      eid,
+      nonce ?? undefined,
+    );
     if (!verified) {
       return NextResponse.json({ error: 'Invalid or expired download link' }, { status: 401 });
     }
@@ -89,6 +101,7 @@ export async function GET(
 
     customerId = verified.customerId;
     guildId = verified.guildId;
+    signedEntitlementId = verified.entitlementId;
 
     // V5 Audit P2-1: Rate-limit downloads per customer to prevent abuse
     const rl = await rateLimits.portalDownload(customerId);
@@ -165,14 +178,17 @@ export async function GET(
     return serviceUnavailable('Downloads entitlement lookup', entitlementError);
   }
 
-  const liveEntitlement = entitlements
-    ?.filter((entitlement) => isEntitlementAccessLive(entitlement))
-    .sort((left, right) =>
+  const liveEntitlements = entitlements
+    ?.filter((entitlement) => isEntitlementAccessLive(entitlement)) ?? [];
+  const liveEntitlement = signedEntitlementId
+    ? liveEntitlements.find((entitlement) => entitlement.id === signedEntitlementId)
+    : liveEntitlements.sort((left, right) =>
       String(right.created_at ?? '').localeCompare(String(left.created_at ?? '')),
     )[0];
   if (!liveEntitlement) {
     return NextResponse.json({ error: 'No active entitlement for this product' }, { status: 403 });
   }
+  const deliveryEntitlement = liveEntitlement;
 
   // ── Get the file ──
   const { data: file, error: fileError } = await supabase
@@ -227,8 +243,8 @@ export async function GET(
           product_id: productId,
           file_id: fileId,
           file_name_snapshot: file.name,
-          entitlement_id: liveEntitlement.id,
-          order_id: liveEntitlement.order_id,
+          entitlement_id: deliveryEntitlement.id,
+          order_id: deliveryEntitlement.order_id,
           delivery_nonce_hash: deliveryNonce ? hashToken(deliveryNonce.value) : null,
         });
       if (deliveryError && deliveryError.code !== '23505') {

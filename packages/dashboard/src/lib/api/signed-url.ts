@@ -7,7 +7,7 @@
  * Flow:
  * 1. Portal page calls POST /api/portal/download-link with productId + fileId
  * 2. Server verifies portal token (from header), generates signed URL
- * 3. Signed URL encodes: productId, fileId, customerId, expiry, HMAC
+ * 3. Signed URL binds product, file, customer, guild, entitlement, expiry, and nonce
  * 4. GET /api/downloads/[productId]/[fileId] verifies HMAC instead of raw token
  */
 import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
@@ -36,6 +36,7 @@ export interface SignedDownloadParams {
   fileId: string;
   customerId: string;
   guildId: string;
+  entitlementId: string;
 }
 
 /**
@@ -49,7 +50,7 @@ export function generateSignedDownloadUrl(
 ): string {
   const expires = Math.floor(Date.now() / 1000) + expirySeconds;
   const nonce = randomUUID();
-  const payload = `${params.productId}:${params.fileId}:${params.customerId}:${params.guildId}:${expires}:${nonce}`;
+  const payload = `${params.productId}:${params.fileId}:${params.customerId}:${params.guildId}:${params.entitlementId}:${expires}:${nonce}`;
   const signature = createHmac('sha256', getDownloadSecret())
     .update(payload)
     .digest('hex');
@@ -59,6 +60,7 @@ export function generateSignedDownloadUrl(
     exp: String(expires),
     cid: params.customerId,
     gid: params.guildId,
+    eid: params.entitlementId,
     nonce,
   });
 
@@ -76,8 +78,9 @@ export function verifySignedDownloadUrl(
   exp: string,
   customerId: string,
   guildId: string,
+  entitlementId: string,
   nonce?: string,
-): { customerId: string; guildId: string; nonce: string | null } | null {
+): { customerId: string; guildId: string; entitlementId: string; nonce: string | null } | null {
   const expNum = parseInt(exp, 10);
   if (isNaN(expNum)) return null;
 
@@ -85,12 +88,8 @@ export function verifySignedDownloadUrl(
   const now = Math.floor(Date.now() / 1000);
   if (now > expNum) return null;
 
-  // Verify HMAC — nonce is included in the payload when present.
-  // Backwards-compatible: older links without a nonce still verify
-  // (they just can't be consumed via the single-use check).
-  const payload = nonce
-    ? `${productId}:${fileId}:${customerId}:${guildId}:${exp}:${nonce}`
-    : `${productId}:${fileId}:${customerId}:${guildId}:${exp}`;
+  if (!entitlementId || !nonce) return null;
+  const payload = `${productId}:${fileId}:${customerId}:${guildId}:${entitlementId}:${exp}:${nonce}`;
   const expected = createHmac('sha256', getDownloadSecret())
     .update(payload)
     .digest('hex');
@@ -99,5 +98,5 @@ export function verifySignedDownloadUrl(
   if (sig.length !== expected.length) return null;
   if (!timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
 
-  return { customerId, guildId, nonce: nonce ?? null };
+  return { customerId, guildId, entitlementId, nonce };
 }
