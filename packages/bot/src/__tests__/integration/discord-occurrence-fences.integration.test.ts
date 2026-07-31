@@ -107,6 +107,7 @@ describe('durable Discord occurrence fences', () => {
       p_guild_id: guildId,
       p_channel_id: `${guildId}:room`,
       p_new_owner_id: 'wrong-owner',
+      p_expected_owner_id: 'wrong-old-owner',
       p_expected_occurrence_id: '00000000-0000-0000-0000-000000000000',
     });
     expect(staleAttempt).toMatchObject({ data: false, error: null });
@@ -115,6 +116,7 @@ describe('durable Discord occurrence fences', () => {
       p_guild_id: guildId,
       p_channel_id: `${guildId}:room`,
       p_new_owner_id: 'new-owner',
+      p_expected_owner_id: 'old-owner',
       p_expected_occurrence_id: occurrence.data!.id,
     });
     expect(transferred).toMatchObject({ data: true, error: null });
@@ -136,6 +138,35 @@ describe('durable Discord occurrence fences', () => {
       creation_occurrence_id: null,
     });
     expect(retired).toMatchObject({ data: null, error: null });
+
+    const concurrentReplay = await supa.rpc('transfer_temp_channel_ownership', {
+      p_guild_id: guildId,
+      p_channel_id: `${guildId}:room`,
+      p_new_owner_id: 'second-new-owner',
+      p_expected_owner_id: 'old-owner',
+      p_expected_occurrence_id: null,
+    });
+    expect(concurrentReplay).toMatchObject({ data: false, error: null });
+
+    const staleRetirement = await supa.rpc('retire_temp_channel', {
+      p_guild_id: guildId,
+      p_channel_id: `${guildId}:room`,
+      p_expected_occurrence_id: '00000000-0000-0000-0000-000000000000',
+    });
+    expect(staleRetirement).toMatchObject({ data: false, error: null });
+
+    const retirement = await supa.rpc('retire_temp_channel', {
+      p_guild_id: guildId,
+      p_channel_id: `${guildId}:room`,
+      p_expected_occurrence_id: null,
+    });
+    expect(retirement).toMatchObject({ data: true, error: null });
+    const retiredActive = await supa
+      .from('active_temp_channels')
+      .select('channel_id')
+      .eq('channel_id', `${guildId}:room`)
+      .maybeSingle();
+    expect(retiredActive).toMatchObject({ data: null, error: null });
   });
 
   it('atomically grants only one final scheduled-message send slot across occurrences', async () => {

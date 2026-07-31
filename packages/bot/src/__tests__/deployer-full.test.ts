@@ -258,7 +258,7 @@ describe('deployServerState — role creation', () => {
     const result = await deployServerState(guild as any, supabase, desiredState as any, options);
 
     expect(result.success, JSON.stringify(result.errors)).toBe(true);
-    expect(guild.roles.fetch).toHaveBeenCalledTimes(1);
+    expect(guild.roles.fetch).toHaveBeenCalledTimes(2);
     expect(guild.roles.setPositions).toHaveBeenCalledWith([
       { role: 'new-role-Member', position: 1 },
       { role: 'new-role-Admin', position: 2 },
@@ -329,7 +329,41 @@ describe('deployServerState — role creation', () => {
       error.error.includes('managed role Integration Member')
       && error.error.includes('blocks placement directly below the bot'),
     )).toBe(true);
+    expect(result.actions).toEqual([]);
+    expect(guild.roles.everyone.setPermissions).not.toHaveBeenCalled();
+    expect(guild.roles.create).not.toHaveBeenCalled();
     expect(guild.roles.setPositions).not.toHaveBeenCalled();
+  });
+
+  it('rejects a managed-role barrier during dry run', async () => {
+    const guild = makeGuild();
+    guild.roles.cache.set('managed-member', {
+      id: 'managed-member',
+      name: 'Integration Member',
+      position: 5,
+      managed: true,
+      editable: false,
+    });
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: true, dryRun: true },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors[0].entityName).toBe('Role Hierarchy Preflight');
+    expect(result.actions).toEqual([]);
+    expect(guild.roles.everyone.setPermissions).not.toHaveBeenCalled();
+    expect(guild.roles.create).not.toHaveBeenCalled();
   });
 });
 

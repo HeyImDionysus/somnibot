@@ -364,7 +364,7 @@ describe('community-temporary-channels audit', () => {
     const supa = makeSupa({
       temp_channel_hubs: { data: [], error: null },
       active_temp_channels: { data: [{ channel_id: 'tc1', owner_id: 'o1', guild_id: 'g1', hub_id: 'h1', text_channel_id: null }], error: null },
-    });
+    }, vi.fn(async () => ({ data: true, error: null })));
     const guild: any = { id: 'g1', channels: { cache: new Map() } }; // tc1 no longer exists
     const mgr = new TempChannelManager(guild, supa, eventBus);
 

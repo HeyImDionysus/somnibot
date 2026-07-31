@@ -163,6 +163,7 @@ describe('TempChannelManager', () => {
       p_guild_id: 'guild-1',
       p_channel_id: 'room-1',
       p_new_owner_id: 'new-owner',
+      p_expected_owner_id: 'old-owner',
       p_expected_occurrence_id: 'occurrence-1',
     });
     expect(manager.getChannelOwner('room-1')).toBe('new-owner');
@@ -189,6 +190,56 @@ describe('TempChannelManager', () => {
     expect(manager.getChannelOwner('room-1')).toBe('old-owner');
     expect((manager as any).activeChannels.get('room-1').creation_occurrence_id)
       .toBe('occurrence-1');
+  });
+
+  it('keeps retryable cleanup state when atomic channel retirement fails', async () => {
+    const timer = setTimeout(() => undefined, 60_000);
+    const supabase = {
+      from: vi.fn(() => makeChain({ data: null, error: null })),
+      rpc: vi.fn(async () => ({ data: null, error: { message: 'database unavailable' } })),
+    };
+    const manager = new TempChannelManager(makeGuild() as any, supabase as any);
+    const active = {
+      channel_id: 'room-1',
+      text_channel_id: null,
+      guild_id: 'guild-1',
+      hub_id: 'hub-1',
+      owner_id: 'owner-1',
+      creation_occurrence_id: 'occurrence-1',
+    };
+    (manager as any).activeChannels.set('room-1', active);
+    (manager as any).keepAliveTimers.set('room-1', timer);
+
+    await expect((manager as any).removeChannel('room-1'))
+      .rejects.toThrow('database unavailable');
+    expect((manager as any).activeChannels.get('room-1')).toBe(active);
+    expect((manager as any).keepAliveTimers.get('room-1')).toBe(timer);
+    clearTimeout(timer);
+  });
+
+  it('retires the active row and creation fence before clearing local cleanup state', async () => {
+    const rpc = vi.fn(async () => ({ data: true, error: null }));
+    const manager = new TempChannelManager(makeGuild() as any, {
+      from: vi.fn(() => makeChain({ data: null, error: null })),
+      rpc,
+    } as any);
+    (manager as any).activeChannels.set('room-1', {
+      channel_id: 'room-1',
+      text_channel_id: null,
+      guild_id: 'guild-1',
+      hub_id: 'hub-1',
+      owner_id: 'owner-1',
+      creation_occurrence_id: 'occurrence-1',
+    });
+
+    await (manager as any).removeChannel('room-1');
+
+    expect(rpc).toHaveBeenCalledWith('retire_temp_channel', {
+      p_guild_id: 'guild-1',
+      p_channel_id: 'room-1',
+      p_expected_occurrence_id: 'occurrence-1',
+    });
+    expect((manager as any).activeChannels.has('room-1')).toBe(false);
   });
 
   it('removes a stale active-room record and continues replacement creation', async () => {

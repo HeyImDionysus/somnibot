@@ -123,6 +123,41 @@ interface ChannelSnapshot {
 // Shared channel cache to avoid re-fetching per picker instance
 let channelCache: { data: ChannelSnapshot; ts: number } | null = null;
 const CACHE_TTL = 30_000; // 30s
+const MAX_SNAPSHOT_AGE_MS = 10 * 60 * 1_000;
+const MAX_SNAPSHOT_FUTURE_SKEW_MS = 60_000;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasValidChannelShape(value: unknown): value is DiscordChannel {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.name === 'string'
+    && typeof value.type === 'number'
+    && Number.isFinite(value.type)
+    && typeof value.position === 'number'
+    && Number.isFinite(value.position)
+    && typeof value.manageableByBot === 'boolean'
+    && (value.botPermissions === null || typeof value.botPermissions === 'string');
+}
+
+export function isAuthoritativeChannelSnapshot(
+  payload: unknown,
+  nowMs = Date.now(),
+): boolean {
+  if (!isRecord(payload) || payload.awaitingSnapshot === true) return false;
+
+  const snapshotMs = typeof payload.snapshotAt === 'string'
+    ? Date.parse(payload.snapshotAt)
+    : Number.NaN;
+  return payload.snapshotVersion === 2
+    && Number.isFinite(snapshotMs)
+    && nowMs - snapshotMs <= MAX_SNAPSHOT_AGE_MS
+    && snapshotMs - nowMs <= MAX_SNAPSHOT_FUTURE_SKEW_MS
+    && Array.isArray(payload.channels)
+    && payload.channels.every(hasValidChannelShape);
+}
 
 async function fetchChannels(): Promise<ChannelSnapshot> {
   if (channelCache && Date.now() - channelCache.ts < CACHE_TTL) {
@@ -139,7 +174,7 @@ async function fetchChannels(): Promise<ChannelSnapshot> {
   }
   const snapshot = {
     channels,
-    authoritative: json.awaitingSnapshot !== true,
+    authoritative: isAuthoritativeChannelSnapshot(json),
   };
   channelCache = { data: snapshot, ts: Date.now() };
   return snapshot;

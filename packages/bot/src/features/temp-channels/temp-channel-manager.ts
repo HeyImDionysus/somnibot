@@ -541,6 +541,7 @@ export class TempChannelManager {
         p_guild_id: this.guild.id,
         p_channel_id: channelId,
         p_new_owner_id: newOwnerId,
+        p_expected_owner_id: oldOwnerId,
         p_expected_occurrence_id: oldOccurrenceId,
       },
     );
@@ -600,21 +601,31 @@ export class TempChannelManager {
 
   private async removeChannel(channelId: string): Promise<void> {
     const active = this.activeChannels.get(channelId);
+    if (!active) return;
+
+    // Retire the durable active row and its creation fence in one transaction.
+    // Keep the in-memory record and timer intact on failure so startup/orphan
+    // reconciliation can retry instead of permanently wedging this member+hub.
+    const { data: retired, error: retireError } = await this.supabase.rpc(
+      'retire_temp_channel',
+      {
+        p_guild_id: this.guild.id,
+        p_channel_id: channelId,
+        p_expected_occurrence_id: active.creation_occurrence_id ?? null,
+      },
+    );
+    if (retireError) {
+      throw new Error(`Failed to retire temp channel: ${retireError.message}`);
+    }
+    if (retired !== true) {
+      throw new Error('Failed to retire temp channel: active channel changed');
+    }
+
     this.activeChannels.delete(channelId);
     const timer = this.keepAliveTimers.get(channelId);
     if (timer) {
       clearTimeout(timer);
       this.keepAliveTimers.delete(channelId);
-    }
-    await this.supabase
-      .from('active_temp_channels')
-      .delete()
-      .eq('channel_id', channelId);
-    if (active?.creation_occurrence_id) {
-      await this.supabase
-        .from('discord_operation_occurrences')
-        .delete()
-        .eq('id', active.creation_occurrence_id);
     }
   }
 

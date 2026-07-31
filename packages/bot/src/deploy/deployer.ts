@@ -135,6 +135,42 @@ export async function deployServerState(
       };
     }
 
+    if (desiredState.roles.length > 0) {
+      // Refresh and reject immutable managed-role barriers before dry-run
+      // success or any destructive deployment step. A managed integration
+      // role below SomniBot cannot be displaced while placing the desired
+      // hierarchy directly beneath the bot.
+      await guild.roles.fetch();
+      const botHighest = guild.members.me?.roles.highest.position;
+      const managedBarrier = botHighest === undefined
+        ? undefined
+        : [...guild.roles.cache.values()].find((role) =>
+            role.managed
+            && role.id !== guild.id
+            && role.position > 0
+            && role.position < botHighest,
+          );
+      if (botHighest === undefined || managedBarrier) {
+        const error = managedBarrier
+          ? `Cannot preserve the requested hierarchy because managed role ${managedBarrier.name} `
+            + `at position ${managedBarrier.position} blocks placement directly below the bot`
+          : 'Bot member is unavailable while validating the role hierarchy';
+        return {
+          success: false,
+          deployId,
+          duration: Date.now() - start,
+          actions: [],
+          errors: [{
+            step: 0,
+            entityType: 'bot',
+            entityName: 'Role Hierarchy Preflight',
+            error,
+          }],
+          idMappings: [],
+        };
+      }
+    }
+
     if (options.dryRun) {
       return {
         success: true,
