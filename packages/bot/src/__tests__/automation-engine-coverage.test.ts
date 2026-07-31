@@ -87,6 +87,8 @@ const mockMassFail = vi.fn().mockResolvedValue(undefined);
 const mockMassListHeld = vi.fn().mockResolvedValue([]);
 const mockMassListApproved = vi.fn().mockResolvedValue([]);
 const mockFailInterruptedExecutions = vi.fn().mockResolvedValue(undefined);
+const mockMassPruneTerminal = vi.fn().mockResolvedValue(0);
+const mockMassRenewLease = vi.fn().mockResolvedValue(undefined);
 vi.mock('../features/automations/mass-action-hold.js', () => ({
   MassActionHoldService: class {
     subscribe = vi.fn();
@@ -94,11 +96,13 @@ vi.mock('../features/automations/mass-action-hold.js', () => ({
     listHeld = mockMassListHeld;
     listApproved = mockMassListApproved;
     failInterruptedExecutions = mockFailInterruptedExecutions;
+    pruneTerminal = mockMassPruneTerminal;
     threshold = mockMassThreshold;
     create = mockMassHoldCreate;
     findByOccurrence = mockMassFindByOccurrence;
     ensureOwnerNotice = mockMassHoldNotice;
     claimApproved = mockMassClaimApproved;
+    renewExecutionLease = mockMassRenewLease;
     complete = mockMassComplete;
     fail = mockMassFail;
   },
@@ -202,6 +206,8 @@ describe('AutomationEngine', () => {
     mockMassListHeld.mockResolvedValue([]);
     mockMassListApproved.mockResolvedValue([]);
     mockFailInterruptedExecutions.mockResolvedValue(undefined);
+    mockMassPruneTerminal.mockResolvedValue(0);
+    mockMassRenewLease.mockResolvedValue(undefined);
     guild = makeGuild();
     eventBus = makeEventBus();
     engine = new AutomationEngine(
@@ -460,6 +466,62 @@ describe('AutomationEngine', () => {
       expect(mockFinalize).not.toHaveBeenCalled();
     });
 
+    it('releases the occurrence when a bulk member condition read is unavailable', async () => {
+      mockGetForTrigger.mockReturnValue([
+        makeAutomation({
+          actions: [{ type: 'give_role', config: { role_id: 'role1' } }],
+          conditions: [{ type: 'min_level', config: { value: 5 } }],
+        }),
+      ]);
+      mockEvaluateConditions.mockImplementation(async (conditions) => {
+        if (conditions.length === 0) return true;
+        throw new Error('Condition data unavailable for min_level');
+      });
+      await engine.start();
+      eventBus.fire({
+        type: 'giveaway.ended',
+        guildId: 'g1',
+        data: { winnerIds: ['10000000000000000', '10000000000000001'] },
+      });
+
+      await vi.waitFor(() => expect(mockRelease).toHaveBeenCalledWith('exec-1'));
+      expect(mockMassHoldCreate).not.toHaveBeenCalled();
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+      expect(mockFinalize).not.toHaveBeenCalled();
+    });
+
+    it('applies built-in and configured rate limits to every bulk target', async () => {
+      mockGetForTrigger.mockReturnValue([
+        makeAutomation({
+          actions: [{ type: 'give_role', config: { role_id: 'role1' } }],
+          rateLimitPerUser: 2,
+          rateLimitWindowSeconds: 60,
+        }),
+      ]);
+      mockAllowFire
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
+      await engine.start();
+      eventBus.fire({
+        type: 'giveaway.ended',
+        guildId: 'g1',
+        data: { winnerIds: ['10000000000000000', '10000000000000001'] },
+      });
+
+      await vi.waitFor(() => expect(mockFinalize).toHaveBeenCalled());
+      expect(mockAllowFire).toHaveBeenNthCalledWith(1, 'g1', '10000000000000000');
+      expect(mockAllowFire).toHaveBeenNthCalledWith(2, 'g1', '10000000000000001');
+      expect(mockAllowCustom).toHaveBeenCalledWith(
+        'g1',
+        'auto1',
+        '10000000000000000',
+        2,
+        60,
+      );
+      expect(mockExecuteActions).toHaveBeenCalledTimes(1);
+      expect(mockExecuteActions.mock.calls[0][1].member.id).toBe('10000000000000000');
+    });
+
     it('atomically released hold fans member actions out once and finalizes the original claim', async () => {
       mockMassClaimApproved.mockResolvedValue({
         id: 'hold-1',
@@ -487,6 +549,7 @@ describe('AutomationEngine', () => {
         expect.objectContaining({ actionsExecuted: 2, actionsFailed: 0 }),
       );
       expect(mockMassComplete).toHaveBeenCalledWith('hold-1');
+      expect(mockMassRenewLease).toHaveBeenCalledWith('hold-1');
       expect(eventBus.emit).toHaveBeenCalledWith(
         'automation.executed',
         'g1',

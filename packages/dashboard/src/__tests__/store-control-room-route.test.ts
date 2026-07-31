@@ -96,7 +96,15 @@ function setup(overrides: Partial<Record<string, Result>> = {}) {
     },
     ...overrides,
   };
-  const supabase = { from: vi.fn((table: string) => query(results[table])) };
+  const supabase = {
+    from: vi.fn((table: string) => query(results[table])),
+    rpc: vi.fn((name: string) => {
+      if (name !== 'get_latest_commerce_download_deliveries') {
+        throw new Error(`Unexpected RPC ${name}`);
+      }
+      return Promise.resolve(results.commerce_download_deliveries);
+    }),
+  };
   vi.mocked(createAdminSupabase).mockReturnValue(supabase as never);
   return supabase;
 }
@@ -221,27 +229,14 @@ describe('GET /api/store/control-room', () => {
     expect((await response.json()).success).toBe(false);
   });
 
-  it('paginates download evidence instead of treating rows beyond 1,000 as missing', async () => {
-    const deliveries = Array.from({ length: 1_000 }, (_, index) => ({
-      id: `delivery-${String(index).padStart(4, '0')}`,
-      order_id: 'another-order',
-      customer_id: CUSTOMER,
-      product_id: PRODUCT,
-      delivered_at: '2026-07-28T12:02:00.000Z',
-    }));
-    deliveries.push({
-      id: 'delivery-1000',
-      order_id: ORDER,
-      customer_id: CUSTOMER,
-      product_id: PRODUCT,
-      delivered_at: '2026-07-28T12:03:00.000Z',
-    });
-    setup({ commerce_download_deliveries: { data: deliveries, error: null } });
-
+  it('uses the bounded latest-delivery RPC for the sampled order set', async () => {
+    const supabase = setup();
     const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
     expect(body.data.customers[0].stages.downloaded).toBe('complete');
-    expect(body.data.customers[0].reasons).not.toContain(
-      'No completed download was recorded within 24 hours.',
-    );
+    expect(supabase.rpc).toHaveBeenCalledWith('get_latest_commerce_download_deliveries', {
+      p_guild_id: 'guild-1',
+      p_order_ids: [ORDER],
+    });
+    expect(supabase.from).not.toHaveBeenCalledWith('commerce_download_deliveries');
   });
 });

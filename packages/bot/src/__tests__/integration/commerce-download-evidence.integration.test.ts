@@ -69,4 +69,64 @@ describe('commerce download evidence retention', () => {
       file_name_snapshot: 'somnibot.zip',
     });
   });
+
+  it('returns at most the newest delivery row for each sampled order', async () => {
+    const product = await supa.from('products').insert({
+      guild_id: guildId,
+      name: 'Bounded evidence product',
+      type: 'one_time',
+      delivery_type: 'file',
+      price_cents: 100,
+      currency: 'USD',
+    }).select('id').single();
+    expect(product.error).toBeNull();
+
+    const customer = await supa.from('customers').insert({
+      guild_id: guildId,
+      discord_id: '12345678901234569',
+      discord_username: 'BoundedEvidenceCustomer',
+    }).select('id').single();
+    expect(customer.error).toBeNull();
+
+    const order = await supa.from('orders').insert({
+      order_number: `ORD-DOWNLOAD-${Date.now()}`,
+      customer_id: customer.data!.id,
+      guild_id: guildId,
+      product_id: product.data!.id,
+      amount_cents: 100,
+      currency: 'USD',
+      source: 'purchase',
+      status: 'completed',
+    }).select('id').single();
+    expect(order.error).toBeNull();
+
+    const older = new Date(Date.now() - 60_000).toISOString();
+    const newer = new Date().toISOString();
+    const deliveries = await supa.from('commerce_download_deliveries').insert([
+      {
+        guild_id: guildId,
+        customer_id: customer.data!.id,
+        product_id: product.data!.id,
+        order_id: order.data!.id,
+        delivered_at: older,
+      },
+      {
+        guild_id: guildId,
+        customer_id: customer.data!.id,
+        product_id: product.data!.id,
+        order_id: order.data!.id,
+        delivered_at: newer,
+      },
+    ]);
+    expect(deliveries.error).toBeNull();
+
+    const latest = await supa.rpc('get_latest_commerce_download_deliveries', {
+      p_guild_id: guildId,
+      p_order_ids: [order.data!.id],
+    });
+    expect(latest.error).toBeNull();
+    expect(latest.data).toHaveLength(1);
+    expect(latest.data?.[0]?.order_id).toBe(order.data!.id);
+    expect(Date.parse(latest.data?.[0]?.delivered_at)).toBe(Date.parse(newer));
+  });
 });

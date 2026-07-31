@@ -178,6 +178,10 @@ describe('automation mass-action holds', () => {
       p_guild_id: guildId,
     });
     expect(claimed.data).toHaveLength(1);
+    const expired = await supa.from('automation_mass_action_holds').update({
+      execution_lease_expires_at: new Date(Date.now() - 60_000).toISOString(),
+    }).eq('id', inserted.data!.id);
+    expect(expired.error).toBeNull();
 
     const service = new MassActionHoldService(supa, { id: guildId } as never);
     await service.failInterruptedExecutions();
@@ -188,7 +192,99 @@ describe('automation mass-action holds', () => {
       .single();
     expect(reconciled.error).toBeNull();
     expect(reconciled.data?.status).toBe('failed');
-    expect(reconciled.data?.last_error).toContain('interrupted');
+    expect(reconciled.data?.last_error).toContain('lease expired');
+  });
+
+  it('does not fail another worker while its execution lease is live', async () => {
+    const inserted = await supa.from('automation_mass_action_holds').insert({
+      ...holdPayload(),
+      occurrence_id: randomUUID(),
+      status: 'approved',
+      approved_by: '12345678901234567',
+      approved_at: new Date().toISOString(),
+    }).select('id').single();
+    expect(inserted.error).toBeNull();
+    const claimed = await supa.rpc('claim_approved_automation_mass_action_hold', {
+      p_hold_id: inserted.data!.id,
+      p_guild_id: guildId,
+      p_owner_token: 'live-worker',
+    });
+    expect(claimed.data).toHaveLength(1);
+
+    const service = new MassActionHoldService(supa, { id: guildId } as never);
+    await service.failInterruptedExecutions();
+
+    const row = await supa.from('automation_mass_action_holds')
+      .select('status, execution_owner_token')
+      .eq('id', inserted.data!.id)
+      .single();
+    expect(row.data).toMatchObject({
+      status: 'executing',
+      execution_owner_token: 'live-worker',
+    });
+  });
+
+  it('renews a lease only for its exact execution owner', async () => {
+    const inserted = await supa.from('automation_mass_action_holds').insert({
+      ...holdPayload(),
+      occurrence_id: randomUUID(),
+      status: 'approved',
+      approved_by: '12345678901234567',
+      approved_at: new Date().toISOString(),
+    }).select('id').single();
+    expect(inserted.error).toBeNull();
+    const claimed = await supa.rpc('claim_approved_automation_mass_action_hold', {
+      p_hold_id: inserted.data!.id,
+      p_guild_id: guildId,
+      p_owner_token: 'lease-owner',
+    });
+    expect(claimed.data).toHaveLength(1);
+
+    const wrongOwner = await supa.rpc('renew_automation_mass_action_hold_lease', {
+      p_hold_id: inserted.data!.id,
+      p_guild_id: guildId,
+      p_owner_token: 'different-owner',
+    });
+    const exactOwner = await supa.rpc('renew_automation_mass_action_hold_lease', {
+      p_hold_id: inserted.data!.id,
+      p_guild_id: guildId,
+      p_owner_token: 'lease-owner',
+    });
+    expect(wrongOwner).toMatchObject({ data: false, error: null });
+    expect(exactOwner).toMatchObject({ data: true, error: null });
+  });
+
+  it('prunes only old terminal hold snapshots', async () => {
+    const oldId = randomUUID();
+    const recentId = randomUUID();
+    const inserted = await supa.from('automation_mass_action_holds').insert([
+      {
+        ...holdPayload(),
+        occurrence_id: randomUUID(),
+        id: oldId,
+        status: 'failed',
+        completed_at: new Date(Date.now() - 40 * 86_400_000).toISOString(),
+        updated_at: new Date(Date.now() - 40 * 86_400_000).toISOString(),
+      },
+      {
+        ...holdPayload(),
+        occurrence_id: randomUUID(),
+        id: recentId,
+        status: 'failed',
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ]);
+    expect(inserted.error).toBeNull();
+
+    const service = new MassActionHoldService(supa, { id: guildId } as never);
+    expect(await service.pruneTerminal(30)).toBeGreaterThanOrEqual(1);
+
+    const remaining = await supa.from('automation_mass_action_holds')
+      .select('id')
+      .in('id', [oldId, recentId]);
+    expect(remaining.error).toBeNull();
+    expect(remaining.data?.map((row) => row.id)).toEqual([recentId]);
   });
 
   it('keeps held target snapshots unavailable to anon and authenticated browser roles', async () => {

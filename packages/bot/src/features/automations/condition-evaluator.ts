@@ -85,6 +85,17 @@ export interface AutomationCondition {
   config: Record<string, unknown>;
 }
 
+function assertAvailable(
+  error: { message?: string } | null,
+  conditionType: string,
+): void {
+  if (error) {
+    throw new Error(
+      `Condition data unavailable for ${conditionType}: ${error.message ?? 'database read failed'}`,
+    );
+  }
+}
+
 /**
  * Evaluate all conditions (AND logic). Returns true if all pass.
  */
@@ -128,24 +139,26 @@ async function evaluateCondition(
     case 'min_level': {
       if (!ctx.member) return false;
       const minLevel = config.value as number;
-      const { data } = await ctx.supabase
+      const { data, error } = await ctx.supabase
         .from('member_levels')
         .select('level')
         .eq('guild_id', ctx.guildId)
         .eq('member_id', ctx.member.id)
         .maybeSingle();
+      assertAvailable(error, type);
       return (data?.level ?? 0) >= minLevel;
     }
 
     case 'max_level': {
       if (!ctx.member) return false;
       const maxLevel = config.value as number;
-      const { data } = await ctx.supabase
+      const { data, error } = await ctx.supabase
         .from('member_levels')
         .select('level')
         .eq('guild_id', ctx.guildId)
         .eq('member_id', ctx.member.id)
         .maybeSingle();
+      assertAvailable(error, type);
       return (data?.level ?? 0) < maxLevel;
     }
 
@@ -164,14 +177,15 @@ async function evaluateCondition(
       const productId = config.value as string;
       // Entitlements link via customer_id, not discord_id.
       // Look up the customer first, then check entitlements.
-      const { data: customer } = await ctx.supabase
+      const { data: customer, error: customerError } = await ctx.supabase
         .from('customers')
         .select('id')
         .eq('guild_id', ctx.guildId)
         .eq('discord_id', ctx.member.id)
         .maybeSingle();
+      assertAvailable(customerError, type);
       if (!customer) return false;
-      const { data } = await ctx.supabase
+      const { data, error } = await ctx.supabase
         .from('entitlements')
         .select('id')
         .eq('guild_id', ctx.guildId)
@@ -180,6 +194,7 @@ async function evaluateCondition(
         .eq('status', 'active')
         .limit(1)
         .maybeSingle();
+      assertAvailable(error, type);
       return !!data;
     }
 
@@ -187,14 +202,15 @@ async function evaluateCondition(
       if (!ctx.member) return false;
       const productId = config.value as string;
       // Entitlements link via customer_id, not discord_id.
-      const { data: customer } = await ctx.supabase
+      const { data: customer, error: customerError } = await ctx.supabase
         .from('customers')
         .select('id')
         .eq('guild_id', ctx.guildId)
         .eq('discord_id', ctx.member.id)
         .maybeSingle();
+      assertAvailable(customerError, type);
       if (!customer) return true; // No customer record → no entitlements
-      const { data } = await ctx.supabase
+      const { data, error } = await ctx.supabase
         .from('entitlements')
         .select('id')
         .eq('guild_id', ctx.guildId)
@@ -203,6 +219,7 @@ async function evaluateCondition(
         .eq('status', 'active')
         .limit(1)
         .maybeSingle();
+      assertAvailable(error, type);
       return !data;
     }
 
@@ -277,23 +294,25 @@ async function evaluateCondition(
 
     case 'is_returning_member': {
       if (!ctx.member) return false;
-      const { data } = await ctx.supabase
+      const { data, error } = await ctx.supabase
         .from('members')
         .select('is_returning')
         .eq('guild_id', ctx.guildId)
         .eq('discord_id', ctx.member.id)
         .maybeSingle();
+      assertAvailable(error, type);
       return data?.is_returning === true;
     }
 
     case 'is_new_member': {
       if (!ctx.member) return false;
-      const { data } = await ctx.supabase
+      const { data, error } = await ctx.supabase
         .from('members')
         .select('is_returning')
         .eq('guild_id', ctx.guildId)
         .eq('discord_id', ctx.member.id)
         .maybeSingle();
+      assertAvailable(error, type);
       return data?.is_returning === false;
     }
 

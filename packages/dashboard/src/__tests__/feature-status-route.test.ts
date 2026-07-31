@@ -54,4 +54,15 @@ describe('GET /api/dashboard/feature-status', () => {
       },
     });
   });
+
+  it('treats a heartbeat beyond the allowed future clock skew as unavailable', async () => {
+    const config = chain({ economy_enabled: true });
+    const heartbeat = chain({ snapshot_at: new Date(Date.now() + 5 * 60_000).toISOString() });
+    vi.mocked(createAdminSupabase).mockReturnValue({
+      from: vi.fn((table: string) => table === 'guild_config' ? config : heartbeat),
+    } as never);
+
+    const body = await (await GET()).json();
+    expect(body.data.bot).toEqual({ online: false, staleSecs: null });
+  });
 });

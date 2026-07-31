@@ -92,6 +92,7 @@ export class AutomationEngine {
   private eventHandler: ((event: PlatformEvent) => Promise<void>) | null = null;
   private heldNoticeTimer: NodeJS.Timeout | null = null;
   private heldNoticeRecoveryRunning = false;
+  private lastTerminalPruneAt = 0;
   /**
    * V10 Audit §2: Per-execution chain depth tracking.
    *
@@ -143,6 +144,12 @@ export class AutomationEngine {
     } catch (err) {
       // Recovery visibility must not take ordinary automations offline.
       log.error('Failed to reconcile interrupted mass actions:', err);
+    }
+    try {
+      await this.massActionHolds.pruneTerminal();
+      this.lastTerminalPruneAt = Date.now();
+    } catch (err) {
+      log.error('Failed to prune terminal mass-action holds:', err);
     }
     this.loader.subscribe();
 
@@ -364,52 +371,59 @@ export class AutomationEngine {
     let conditionedBulkMemberIds = scopedBulkMemberIds;
     let conditionsPassed: boolean;
 
-    if (bulkMemberIds) {
-      const eventConditions = conditions.filter((condition) =>
-        !MEMBER_CONDITION_TYPES.has(condition.type),
-      );
-      const memberConditions = conditions.filter((condition) =>
-        MEMBER_CONDITION_TYPES.has(condition.type),
-      );
-      const eventConditionsPassed = await evaluateConditions(eventConditions, conditionCtx);
-      conditionedBulkMemberIds = [];
+    try {
+      if (bulkMemberIds) {
+        const eventConditions = conditions.filter((condition) =>
+          !MEMBER_CONDITION_TYPES.has(condition.type),
+        );
+        const memberConditions = conditions.filter((condition) =>
+          MEMBER_CONDITION_TYPES.has(condition.type),
+        );
+        const eventConditionsPassed = await evaluateConditions(eventConditions, conditionCtx);
+        conditionedBulkMemberIds = [];
 
-      if (eventConditionsPassed) {
-        if (memberConditions.length === 0) {
-          conditionedBulkMemberIds = scopedBulkMemberIds ?? [];
-        } else {
-          for (const memberId of scopedBulkMemberIds ?? []) {
-            let member = this.guild.members.cache.get(memberId);
-            if (!member) {
-              try {
-                member = await this.guild.members.fetch(memberId);
-              } catch (err) {
-                if ((err as { code?: number } | undefined)?.code === 10_007) {
-                  // Discord authoritatively says the member left the guild.
-                  continue;
+        if (eventConditionsPassed) {
+          if (memberConditions.length === 0) {
+            conditionedBulkMemberIds = scopedBulkMemberIds ?? [];
+          } else {
+            for (const memberId of scopedBulkMemberIds ?? []) {
+              let member = this.guild.members.cache.get(memberId);
+              if (!member) {
+                try {
+                  member = await this.guild.members.fetch(memberId);
+                } catch (err) {
+                  if ((err as { code?: number } | undefined)?.code === 10_007) {
+                    // Discord authoritatively says the member left the guild.
+                    continue;
+                  }
+                  throw new Error(
+                    `Unable to evaluate bulk member ${memberId}; occurrence claim released for retry`,
+                    { cause: err },
+                  );
                 }
-                // The target set is authorization-sensitive: treating an
-                // indeterminate fetch as "not a member" can silently shrink a
-                // mass action below its approval threshold.
-                await this.executionLogger.release(claimRowId);
-                throw new Error(
-                  `Unable to evaluate bulk member ${memberId}; occurrence claim released for retry`,
-                  { cause: err },
-                );
               }
+              if (!member) continue;
+              const passed = await evaluateConditions(memberConditions, {
+                ...conditionCtx,
+                member,
+              });
+              if (passed) conditionedBulkMemberIds.push(memberId);
             }
-            if (!member) continue;
-            const passed = await evaluateConditions(memberConditions, {
-              ...conditionCtx,
-              member,
-            });
-            if (passed) conditionedBulkMemberIds.push(memberId);
           }
         }
+        if (hasMemberTargetedAction && conditionedBulkMemberIds.length > 0) {
+          conditionedBulkMemberIds = await this.filterBulkRateLimits(
+            automation,
+            conditionedBulkMemberIds,
+          );
+        }
+        conditionsPassed = eventConditionsPassed && conditionedBulkMemberIds.length > 0;
+      } else {
+        conditionsPassed = await evaluateConditions(conditions, conditionCtx);
       }
-      conditionsPassed = eventConditionsPassed && conditionedBulkMemberIds.length > 0;
-    } else {
-      conditionsPassed = await evaluateConditions(conditions, conditionCtx);
+    } catch (error) {
+      await this.executionLogger.release(claimRowId);
+      throw error;
     }
 
     if (!conditionsPassed) {
@@ -848,6 +862,10 @@ export class AutomationEngine {
     if (this.heldNoticeRecoveryRunning) return;
     this.heldNoticeRecoveryRunning = true;
     try {
+      if (Date.now() - this.lastTerminalPruneAt >= 6 * 60 * 60 * 1_000) {
+        await this.massActionHolds.pruneTerminal();
+        this.lastTerminalPruneAt = Date.now();
+      }
       const held = await this.massActionHolds.listHeld();
       await Promise.all(held.map(async (hold) => {
         try {
@@ -864,6 +882,32 @@ export class AutomationEngine {
     }
   }
 
+  private async filterBulkRateLimits(
+    automation: LoadedAutomation,
+    memberIds: string[],
+  ): Promise<string[]> {
+    const allowedIds: string[] = [];
+    for (const memberId of memberIds) {
+      const allowed = await this.rateLimiter.allowFire(this.guild.id, memberId);
+      if (!allowed) {
+        log.info(`Rate limited: ${automation.name} for bulk user ${memberId}`);
+        continue;
+      }
+      if (automation.rateLimitPerUser && automation.rateLimitWindowSeconds) {
+        const customAllowed = await this.rateLimiter.allowCustom(
+          this.guild.id,
+          automation.id,
+          memberId,
+          automation.rateLimitPerUser,
+          automation.rateLimitWindowSeconds,
+        );
+        if (!customAllowed) continue;
+      }
+      allowedIds.push(memberId);
+    }
+    return allowedIds;
+  }
+
   /**
    * Member-targeted actions are fanned out over the resolved target set while
    * channel/message actions execute once. The guard runs before this method, so
@@ -873,6 +917,7 @@ export class AutomationEngine {
     actions: AutomationAction[],
     baseContext: ActionContext,
     affectedMemberIds: string[],
+    assertLease?: () => void,
   ): Promise<{ executed: number; failed: number; errors: string[] }> {
     if (affectedMemberIds.length === 0) {
       return executeActions(actions, baseContext);
@@ -887,11 +932,13 @@ export class AutomationEngine {
     };
 
     for (const [actionIndex, action] of actions.entries()) {
+      assertLease?.();
       if (!MEMBER_TARGETED_ACTIONS.has(action.type)) {
         add(await executeActions([action], baseContext, actionIndex));
         continue;
       }
       for (const memberId of affectedMemberIds) {
+        assertLease?.();
         let member = memberCache.get(memberId);
         if (member === undefined) {
           member = this.guild.members.cache.get(memberId)
@@ -921,6 +968,26 @@ export class AutomationEngine {
     const hold = await this.massActionHolds.claimApproved(holdId);
     if (!hold) return;
     const startTime = Date.now();
+    let leaseError: Error | null = null;
+    let renewalInFlight = false;
+    const renewLease = async () => {
+      if (renewalInFlight || leaseError) return;
+      renewalInFlight = true;
+      try {
+        await this.massActionHolds.renewExecutionLease(hold.id);
+      } catch (error) {
+        leaseError = error instanceof Error ? error : new Error(String(error));
+      } finally {
+        renewalInFlight = false;
+      }
+    };
+    const leaseTimer = setInterval(() => {
+      void renewLease();
+    }, 30_000);
+    leaseTimer.unref?.();
+    const assertLease = () => {
+      if (leaseError) throw leaseError;
+    };
     try {
       const context: ActionContext = {
         guild: this.guild,
@@ -943,7 +1010,10 @@ export class AutomationEngine {
         hold.action_snapshot,
         context,
         hold.member_ids,
+        assertLease,
       );
+      await renewLease();
+      assertLease();
       const executionResult: ExecutionResult = {
         automationId: hold.automation_id,
         guildId: this.guild.id,
@@ -970,6 +1040,8 @@ export class AutomationEngine {
       const message = err instanceof Error ? err.message : String(err);
       await this.massActionHolds.fail(hold.id, message);
       throw err;
+    } finally {
+      clearInterval(leaseTimer);
     }
   }
 }

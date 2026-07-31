@@ -88,25 +88,10 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  const downloadsPromise = (async () => {
-    const data: unknown[] = [];
-    const pageSize = 1_000;
-    for (let from = 0; ; from += pageSize) {
-      const page = await supabase
-        .from('commerce_download_deliveries')
-        .select('id, order_id, customer_id, product_id, delivered_at')
-        .eq('guild_id', guildId)
-        .in('order_id', orderIds)
-        .order('id', { ascending: true })
-        .range(from, from + pageSize - 1);
-      if (page.error) return { data: null, error: page.error };
-      if (!Array.isArray(page.data)) {
-        return { data: page.data, error: null };
-      }
-      data.push(...page.data);
-      if (page.data.length < pageSize) return { data, error: null };
-    }
-  })();
+  const downloadsPromise = supabase.rpc('get_latest_commerce_download_deliveries', {
+    p_guild_id: guildId,
+    p_order_ids: orderIds,
+  });
 
   const liveKeysPromise = supabase
     .from('license_keys')

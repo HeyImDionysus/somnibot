@@ -2,6 +2,7 @@ import type { Guild, TextChannel } from 'discord.js';
 import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
 import type { AutomationAction } from './action-executor.js';
+import { randomUUID } from 'node:crypto';
 
 const log = createLogger('MassActionHold');
 
@@ -33,6 +34,8 @@ export interface MassActionHoldRow {
   rejected_by: string | null;
   rejected_at: string | null;
   execution_started_at: string | null;
+  execution_owner_token: string | null;
+  execution_lease_expires_at: string | null;
   completed_at: string | null;
   last_error: string | null;
   created_at: string;
@@ -65,6 +68,7 @@ export class MassActionHoldService {
   private approvedPoller: NodeJS.Timeout | null = null;
   private approvalHandler: ((holdId: string) => void) | null = null;
   private approvedScanInFlight = false;
+  private readonly executionOwnerToken = randomUUID();
 
   constructor(
     private readonly supabase: SupabaseClient,
@@ -169,22 +173,11 @@ export class MassActionHoldService {
     return (data ?? []) as MassActionHoldRow[];
   }
 
-  /**
-   * This guild's engine is single-owner. If it is starting, any row still in
-   * `executing` survived a prior process exit and cannot safely be replayed:
-   * some member actions may already have committed. Surface that uncertainty
-   * as a terminal failure instead of leaving an unactionable zombie row.
-   */
   async failInterruptedExecutions(): Promise<void> {
-    const { error } = await this.supabase
-      .from('automation_mass_action_holds')
-      .update({
-        status: 'failed',
-        last_error:
-          'Execution was interrupted after it started. Some member actions may have completed; inspect the audit log before retrying manually.',
-      })
-      .eq('guild_id', this.guild.id)
-      .eq('status', 'executing');
+    const { error } = await this.supabase.rpc(
+      'fail_stale_automation_mass_action_executions',
+      { p_guild_id: this.guild.id },
+    );
     if (error) {
       throw new Error(`Failed to reconcile interrupted mass actions: ${error.message}`);
     }
@@ -193,35 +186,89 @@ export class MassActionHoldService {
   async claimApproved(holdId: string): Promise<MassActionHoldRow | null> {
     const { data, error } = await this.supabase.rpc(
       'claim_approved_automation_mass_action_hold',
-      { p_hold_id: holdId, p_guild_id: this.guild.id },
+      {
+        p_hold_id: holdId,
+        p_guild_id: this.guild.id,
+        p_owner_token: this.executionOwnerToken,
+      },
     );
     if (error) throw new Error(`Failed to claim approved mass action: ${error.message}`);
     const rows = Array.isArray(data) ? data : [];
     return (rows[0] as MassActionHoldRow | undefined) ?? null;
   }
 
+  async renewExecutionLease(holdId: string): Promise<void> {
+    const { data, error } = await this.supabase.rpc(
+      'renew_automation_mass_action_hold_lease',
+      {
+        p_hold_id: holdId,
+        p_guild_id: this.guild.id,
+        p_owner_token: this.executionOwnerToken,
+      },
+    );
+    if (error) throw new Error(`Failed to renew mass-action execution lease: ${error.message}`);
+    if (data !== true) throw new Error('Mass-action execution lease is no longer owned by this worker');
+  }
+
   async complete(holdId: string): Promise<void> {
-    const { error } = await this.supabase
+    const { data, error } = await this.supabase
       .from('automation_mass_action_holds')
       .update({
         status: 'completed',
         completed_at: new Date().toISOString(),
         last_error: null,
+        execution_owner_token: null,
+        execution_lease_expires_at: null,
       })
       .eq('id', holdId)
       .eq('guild_id', this.guild.id)
-      .eq('status', 'executing');
+      .eq('status', 'executing')
+      .eq('execution_owner_token', this.executionOwnerToken)
+      .select('id')
+      .maybeSingle();
     if (error) throw new Error(`Failed to complete mass-action hold: ${error.message}`);
+    if (!data) throw new Error('Mass-action hold completion rejected because its lease was lost');
   }
 
   async fail(holdId: string, errorMessage: string): Promise<void> {
     const { error } = await this.supabase
       .from('automation_mass_action_holds')
-      .update({ status: 'failed', last_error: errorMessage })
+      .update({
+        status: 'failed',
+        completed_at: new Date().toISOString(),
+        last_error: errorMessage,
+        execution_owner_token: null,
+        execution_lease_expires_at: null,
+      })
       .eq('id', holdId)
       .eq('guild_id', this.guild.id)
-      .eq('status', 'executing');
+      .eq('status', 'executing')
+      .eq('execution_owner_token', this.executionOwnerToken);
     if (error) log.error('Failed to mark mass-action hold failed:', error.message);
+  }
+
+  async pruneTerminal(retentionDays = 30): Promise<number> {
+    const cutoff = new Date(Date.now() - retentionDays * 86_400_000).toISOString();
+    const { data: candidates, error: readError } = await this.supabase
+      .from('automation_mass_action_holds')
+      .select('id')
+      .eq('guild_id', this.guild.id)
+      .in('status', ['completed', 'rejected', 'failed'])
+      .lt('updated_at', cutoff)
+      .order('updated_at', { ascending: true })
+      .limit(500);
+    if (readError) throw new Error(`Failed to select terminal mass-action holds: ${readError.message}`);
+    const ids = (candidates ?? [])
+      .map((row) => row.id as string | undefined)
+      .filter((id): id is string => typeof id === 'string');
+    if (ids.length === 0) return 0;
+    const { error: deleteError } = await this.supabase
+      .from('automation_mass_action_holds')
+      .delete()
+      .eq('guild_id', this.guild.id)
+      .in('id', ids);
+    if (deleteError) throw new Error(`Failed to prune terminal mass-action holds: ${deleteError.message}`);
+    return ids.length;
   }
 
   /**

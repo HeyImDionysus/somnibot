@@ -45,8 +45,11 @@ export async function GET() {
     const snapshotAt = heartbeatResult.data?.snapshot_at
       ? Date.parse(heartbeatResult.data.snapshot_at)
       : Number.NaN;
-    const staleSecs = Number.isFinite(snapshotAt)
-      ? Math.max(0, Math.round((Date.now() - snapshotAt) / 1_000))
+    const ageMs = Number.isFinite(snapshotAt) ? Date.now() - snapshotAt : Number.NaN;
+    // A small negative age is normal clock skew. A heartbeat farther in the
+    // future is impossible evidence and must not keep a stopped bot "online".
+    const staleSecs = Number.isFinite(ageMs) && ageMs >= -30_000
+      ? Math.max(0, Math.round(ageMs / 1_000))
       : null;
 
     return NextResponse.json({
