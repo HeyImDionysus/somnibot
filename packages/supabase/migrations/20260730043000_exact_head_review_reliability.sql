@@ -41,7 +41,13 @@ ALTER TABLE public.commerce_download_deliveries
 CREATE OR REPLACE FUNCTION public.claim_scheduled_message_send(
   p_schedule_id UUID,
   p_guild_id TEXT,
-  p_occurrence_at TIMESTAMPTZ
+  p_occurrence_at TIMESTAMPTZ,
+  -- Review 3691834553: the counter reservation and its occurrence marker must
+  -- commit ATOMICALLY. A separate best-effort marker write could fail after
+  -- the counter committed; the crashed minute then looked unreserved to stale
+  -- recovery, which reserved a SECOND slot (inflating current_sends) or, on
+  -- an exhausted schedule, skipped a paid-but-undelivered occurrence.
+  p_occurrence_id UUID DEFAULT NULL
 )
 RETURNS INTEGER
 LANGUAGE plpgsql
@@ -64,13 +70,25 @@ BEGIN
      AND (max_sends IS NULL OR current_sends < max_sends)
   RETURNING current_sends INTO claimed_count;
 
+  IF claimed_count IS NOT NULL AND p_occurrence_id IS NOT NULL THEN
+    UPDATE public.discord_operation_occurrences
+       SET result = COALESCE(result, '{}'::jsonb)
+                    || pg_catalog.jsonb_build_object('counterReserved', true)
+     WHERE id = p_occurrence_id
+       AND status = 'claimed';
+  END IF;
+
   RETURN claimed_count;
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.claim_scheduled_message_send(UUID, TEXT, TIMESTAMPTZ)
+-- The 3-arg overload from the original definition must not linger: two
+-- resolvable signatures make PostgREST RPC dispatch ambiguous.
+DROP FUNCTION IF EXISTS public.claim_scheduled_message_send(UUID, TEXT, TIMESTAMPTZ);
+
+REVOKE ALL ON FUNCTION public.claim_scheduled_message_send(UUID, TEXT, TIMESTAMPTZ, UUID)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.claim_scheduled_message_send(UUID, TEXT, TIMESTAMPTZ)
+GRANT EXECUTE ON FUNCTION public.claim_scheduled_message_send(UUID, TEXT, TIMESTAMPTZ, UUID)
   TO service_role;
 
 COMMIT;

@@ -60,7 +60,12 @@ BEGIN
    WHERE id = p_hold_id
      AND guild_id = p_guild_id
      AND status = 'executing'
-     AND execution_owner_token = p_owner_token;
+     AND execution_owner_token = p_owner_token
+     -- Review 3691834558: never revive an already-expired lease. Once expiry
+     -- passes, the periodic recovery path may have failed the hold and another
+     -- worker may own the occurrence; renewing here would let the old worker
+     -- keep running a destructive bulk action it no longer owns.
+     AND execution_lease_expires_at > pg_catalog.now();
   renewed := FOUND;
   RETURN renewed;
 END;

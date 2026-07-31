@@ -12,6 +12,8 @@ export interface MassActionContextSnapshot {
   channelId: string | null;
   messageId: string | null;
   variables: Record<string, string>;
+  /** Chain depth the released execution resumes at (MAX_CHAIN_DEPTH guard). */
+  chainDepth?: number;
 }
 
 export interface MassActionHoldRow {

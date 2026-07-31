@@ -17,7 +17,6 @@ import {
   claimDiscordOccurrence,
   completeDiscordOccurrence,
   failDiscordOccurrence,
-  markDiscordOccurrenceCounterReserved,
 } from '../../services/occurrence-fence.js';
 
 const log = createLogger('ScheduledRunner');
@@ -498,6 +497,10 @@ export class ScheduledMessageRunner {
           p_schedule_id: schedule.id,
           p_guild_id: this.guild.id,
           p_occurrence_at: occurrenceAt.toISOString(),
+          // Atomic with the counter: the occurrence's counterReserved marker
+          // commits in the SAME transaction as the slot, so a crash between
+          // the two can no longer make a paid minute look unreserved.
+          p_occurrence_id: occurrenceId,
         },
       );
       claimedSendCount = counterResult.data;
@@ -526,18 +529,6 @@ export class ScheduledMessageRunner {
       }
       claimedSendCount = reconciled.current_sends;
     }
-    if (typeof claimedSendCount === 'number' && !counterAlreadyClaimed) {
-      // Durably mark that THIS occurrence paid a counter slot, so recovery can
-      // later distinguish "already counted" from "died before counting".
-      // Best-effort: a missed write only makes recovery claim a fresh slot,
-      // which errs toward respecting the cap.
-      await markDiscordOccurrenceCounterReserved(this.supabase, occurrenceId).catch((err) => {
-        log.warn(`Could not record counter reservation for schedule ${schedule.id}:`, {
-          error: String(err),
-        });
-      });
-    }
-
     if (typeof claimedSendCount !== 'number') {
       // Another occurrence consumed the final max_sends slot while this
       // occurrence was being claimed. Nothing reached Discord, but the fence

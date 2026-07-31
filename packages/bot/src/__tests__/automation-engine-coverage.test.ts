@@ -583,6 +583,96 @@ describe('AutomationEngine', () => {
       );
     });
 
+    it('resumes the persisted chain depth while executing an approved hold', async () => {
+      // Review 3691834561 (P1): approved bulk actions had NO _activeDepths
+      // entry, so their side-effect events (role.gained) counted as fresh
+      // roots — mutually-triggering automations released from holds bypassed
+      // MAX_CHAIN_DEPTH and cycled until rate limits intervened.
+      const observedDepths: number[][] = [];
+      mockExecuteActions.mockImplementation(async () => {
+        observedDepths.push([
+          ...(engine as unknown as { _activeDepths: Map<string, number> })._activeDepths.values(),
+        ]);
+        return { executed: 1, failed: 0, errors: [] };
+      });
+      mockMassClaimApproved.mockResolvedValue({
+        id: 'hold-depth',
+        automation_id: 'auto1',
+        execution_id: 'exec-1',
+        occurrence_id: '10000000-0000-8000-8000-000000000003',
+        member_ids: ['10000000000000000'],
+        member_count: 1,
+        threshold: 1,
+        trigger_event: 'member.verified',
+        triggered_by: 'system',
+        action_snapshot: [{ type: 'give_role', config: { role_id: 'role1' } }],
+        context_snapshot: { channelId: null, messageId: null, variables: {}, chainDepth: 4 },
+      });
+      (engine as unknown as { automationName(id: string): Promise<string> }).automationName =
+        vi.fn().mockResolvedValue('Test Automation');
+
+      await (engine as unknown as { runApprovedHold(id: string): Promise<void> })
+        .runApprovedHold('hold-depth');
+
+      // The persisted depth was ACTIVE during execution…
+      expect(observedDepths.some((depths) => depths.includes(4))).toBe(true);
+      // …and cleaned up afterwards.
+      expect(
+        (engine as unknown as { _activeDepths: Map<string, number> })._activeDepths.size,
+      ).toBe(0);
+    });
+
+    it('stops bulk execution when the lease deadline passes without an acknowledged renewal', async () => {
+      // Review 3691834558 (P1): a renewal that hangs leaves leaseError null,
+      // so error-only checking let the worker keep running member actions
+      // after recovery may have failed the hold and reassigned the work.
+      vi.useFakeTimers();
+      try {
+        mockMassRenewLease.mockImplementation(() => new Promise(() => {})); // hangs forever
+        let calls = 0;
+        mockExecuteActions.mockImplementation(async () => {
+          calls++;
+          if (calls === 1) {
+            // Past the 2-minute acknowledged deadline before the next member.
+            vi.advanceTimersByTime(3 * 60_000);
+          }
+          return { executed: 1, failed: 0, errors: [] };
+        });
+        mockMassClaimApproved.mockResolvedValue({
+          id: 'hold-lease',
+          automation_id: 'auto1',
+          execution_id: 'exec-1',
+          occurrence_id: '10000000-0000-8000-8000-000000000004',
+          member_ids: ['10000000000000000', '10000000000000001', '10000000000000002'],
+          member_count: 3,
+          threshold: 1,
+          trigger_event: 'member.verified',
+          triggered_by: 'system',
+          action_snapshot: [{ type: 'give_role', config: { role_id: 'role1' } }],
+          context_snapshot: { channelId: null, messageId: null, variables: {} },
+        });
+        (engine as unknown as { automationName(id: string): Promise<string> }).automationName =
+          vi.fn().mockResolvedValue('Test Automation');
+
+        // runApprovedHold fails the hold and RETHROWS by contract.
+        await expect(
+          (engine as unknown as { runApprovedHold(id: string): Promise<void> })
+            .runApprovedHold('hold-lease'),
+        ).rejects.toThrow('lease expired');
+
+        // Execution STOPPED at the deadline: only the first member ran, the
+        // hold was failed with the lease message, and nothing completed.
+        expect(calls).toBe(1);
+        expect(mockMassFail).toHaveBeenCalledWith(
+          'hold-lease',
+          expect.stringContaining('lease expired'),
+        );
+        expect(mockMassComplete).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('keeps an approved hold failed and alerts when released actions have failures', async () => {
       const alertService = {
         recordSuccess: vi.fn().mockResolvedValue(undefined),

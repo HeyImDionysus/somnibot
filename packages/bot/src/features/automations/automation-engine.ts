@@ -103,6 +103,8 @@ export class AutomationEngine {
    * a single shared field, while still guarding against infinite loops.
    */
   private _activeDepths = new Map<string, number>();
+  /** Mirrors the SQL lease interval in claim/renew RPCs. */
+  private static readonly HOLD_EXECUTION_LEASE_MS = 2 * 60_000;
   private _execCounter = 0;
   /**
    * Reaction handlers need the full Message object, so they enter through
@@ -480,6 +482,11 @@ export class AutomationEngine {
           channelId: ctx.channelId,
           messageId: ctx.messageId,
           variables: ctx.variables,
+          // The depth this execution WOULD have run at. An approved release
+          // must resume the chain here, not restart it at zero — otherwise
+          // mutually-triggering automations released from holds bypass
+          // MAX_CHAIN_DEPTH entirely.
+          chainDepth: (event._chainDepth ?? 0) + 1,
         },
       };
       let hold: MassActionHoldRow;
@@ -983,11 +990,18 @@ export class AutomationEngine {
     const startTime = Date.now();
     let leaseError: Error | null = null;
     let renewalInFlight = false;
+    // The deadline this worker has actually been ACKNOWLEDGED to hold. A
+    // renewal that hangs or stays in flight past expiry leaves leaseError
+    // null, so error-only checking let the worker keep running member actions
+    // while the periodic recovery path marked the same hold failed for its
+    // expired lease. The deadline only advances on a confirmed renewal.
+    let leaseDeadlineMs = startTime + AutomationEngine.HOLD_EXECUTION_LEASE_MS;
     const renewLease = async () => {
       if (renewalInFlight || leaseError) return;
       renewalInFlight = true;
       try {
         await this.massActionHolds.renewExecutionLease(hold.id);
+        leaseDeadlineMs = Date.now() + AutomationEngine.HOLD_EXECUTION_LEASE_MS;
       } catch (error) {
         leaseError = error instanceof Error ? error : new Error(String(error));
       } finally {
@@ -1000,6 +1014,9 @@ export class AutomationEngine {
     leaseTimer.unref?.();
     const assertLease = () => {
       if (leaseError) throw leaseError;
+      if (Date.now() >= leaseDeadlineMs) {
+        throw new Error('Mass-action execution lease expired before renewal was acknowledged');
+      }
     };
     try {
       const context: ActionContext = {
@@ -1019,12 +1036,27 @@ export class AutomationEngine {
         occurrenceId: hold.occurrence_id,
         variables: hold.context_snapshot.variables,
       };
-      const result = await this.executeResolvedActions(
-        hold.action_snapshot,
-        context,
-        hold.member_ids,
-        assertLease,
+      // Resume the persisted chain depth so side-effect events emitted by the
+      // approved actions (role.gained etc.) inherit it instead of counting as
+      // fresh roots — exactly like the normal action path at execution time.
+      const holdExecId = `hold:${hold.id}`;
+      this._activeDepths.set(
+        holdExecId,
+        typeof hold.context_snapshot.chainDepth === 'number'
+          ? hold.context_snapshot.chainDepth
+          : 1,
       );
+      let result: { executed: number; failed: number; errors: string[] };
+      try {
+        result = await this.executeResolvedActions(
+          hold.action_snapshot,
+          context,
+          hold.member_ids,
+          assertLease,
+        );
+      } finally {
+        this._activeDepths.delete(holdExecId);
+      }
       await renewLease();
       assertLease();
       const executionResult: ExecutionResult = {

@@ -145,6 +145,17 @@ export async function GET(req: NextRequest) {
     && Date.now() - Date.parse(key.created_at) > 24 * 60 * 60 * 1_000,
   ).length;
   const activeSessions = sessionsResult.data.filter((session) => session.active === true).length;
+  // An ACTIVE session attached to a revoked/expired key means a device is
+  // still validating against a licence the owner terminated -- reachable
+  // because admin revocation deactivates sessions in a separate write whose
+  // failure is tolerated before the key itself is revoked. Healthy must never
+  // paper over that.
+  const terminalKeyIds = new Set(
+    keys.filter((key) => key.status === 'revoked' || key.status === 'expired').map((key) => key.id),
+  );
+  const sessionsOnTerminalKeys = sessionsResult.data.filter(
+    (session) => session.active === true && terminalKeyIds.has(session.license_key_id),
+  ).length;
   const unavailable24h = validationResults.filter((result) => result === 'unavailable').length;
   const deviceLimit24h = validationResults.filter((result) => result === 'over_device_limit').length;
   const invalid24h = validationResults.filter((result) =>
@@ -156,6 +167,7 @@ export async function GET(req: NextRequest) {
     + unavailable24h
     + deviceLimit24h
     + invalid24h
+    + sessionsOnTerminalKeys
     + alertsResult.data.length;
   const totalKeys = keyTotal ?? keys.length;
   const keySampleTruncated = totalKeys > keys.length;
@@ -184,6 +196,7 @@ export async function GET(req: NextRequest) {
       sampledKeys: keys.length,
       totalKeys,
       activeSessions,
+      sessionsOnTerminalKeys,
       totalSessions: sessionsResult.count ?? sessionsResult.data.length,
       validationWindowHours: 24,
       validationCount: validationsResult.count ?? validationsResult.data.length,

@@ -24,7 +24,7 @@ import { generateTranscript } from '../features/tickets/transcript-generator.js'
 function makeCreateSupa({ ticketRow = null as any, ticketError = null as any } = {}) {
   const alertsInsert = vi.fn(async () => ({ error: null }));
   const tChain: any = {};
-  for (const m of ['select', 'eq', 'in', 'insert', 'update', 'delete', 'order', 'limit', 'contains']) {
+  for (const m of ['select', 'eq', 'in', 'insert', 'update', 'delete', 'order', 'limit', 'contains', 'lt', 'gt']) {
     tChain[m] = vi.fn(() => tChain);
   }
   tChain.single = vi.fn(async () => ({ data: ticketRow, error: ticketError }));
@@ -143,6 +143,12 @@ describe('ticket creation failure observability', () => {
         if (table === 'discord_operation_occurrences') {
           const chain = makeCreateSupa().from('tickets');
           chain.single = vi.fn(async () => ({ data: occurrence, error: null }));
+          // Serves BOTH the id-persist read (result) and conditional-update
+          // read-backs (id) — the claim is genuinely still claimed here.
+          chain.maybeSingle = vi.fn(async () => ({
+            data: { id: occurrence.id, result: {} },
+            error: null,
+          }));
           return chain;
         }
         if (table === 'tickets') {
@@ -203,9 +209,16 @@ describe('ticket creation failure observability', () => {
         if (table === 'alerts') return { insert: vi.fn(async () => ({ error: null })) };
         if (table === 'discord_operation_occurrences') {
           chain.single = vi.fn(async () => ({ data: occurrence, error: null }));
-          chain.update = vi.fn(() => chain);
+          let lastPayload: any = null;
+          chain.update = vi.fn((payload: any) => { lastPayload = payload; return chain; });
           chain.maybeSingle = vi.fn(async () => {
+            const isCleanupPending = lastPayload?.result?.channelCleanupPending === true;
+            if (!isCleanupPending) {
+              // id-persist read/write path: succeeds (claim still claimed).
+              return { data: { id: occurrence.id, result: {} }, error: null };
+            }
             persistAttempts++;
+            lastPayload = null;
             if (persistAttempts === 1) {
               return { data: null, error: { message: 'transient write failure' } };
             }
@@ -281,7 +294,7 @@ describe('ticket creation failure observability', () => {
           // matches exactly one row. Returning null here would model a
           // DIFFERENT scenario (fence already completed/released), which
           // the dedicated occurrence-fence suite covers fail-closed.
-          chain.maybeSingle = vi.fn(async () => ({ data: { id: occurrence.id }, error: null }));
+          chain.maybeSingle = vi.fn(async () => ({ data: { id: occurrence.id, result: {} }, error: null }));
           return chain;
         }
         if (table === 'tickets') {
@@ -367,7 +380,10 @@ describe('ticket orphan cleanup reconciliation', () => {
 
     await expect(reconcileTicketOrphanChannels(guild, supabase)).resolves.toBe(1);
     expect(channel.delete).toHaveBeenCalledTimes(1);
-    expect(supabase.from).toHaveBeenCalledTimes(2);
+    // Three touches now: the flagged scan, the release, and the UNFLAGGED
+    // stale-claim scan (review 3691834544) — which finds nothing here and
+    // must not delete or release anything further.
+    expect(supabase.from).toHaveBeenCalledTimes(3);
   });
 
   it('retains a still-failing cleanup job and rotates it to the back of the batch', async () => {

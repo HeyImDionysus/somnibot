@@ -24,16 +24,30 @@ UPDATE public.guild_config
         -- silently never fired. Normalize them to the default.
         OR NOT (
         pg_catalog.char_length(starboard_emoji) = 1
-        -- Joiner/modifier-glued clusters: ZWJ sequences, VS16 presentation,
-        -- keycaps, skin tones, tag sequences — many codepoints, ONE emoji.
+        -- ANCHORED single-cluster shapes (review 3691834557: a containment
+        -- test let star+VS16+star through because it CONTAINED a modifier).
+        -- base + optional VS16 (presentation): e.g. red heart.
+        OR starboard_emoji ~ ('^.' || pg_catalog.chr(65039) || '?$')
+        -- base + optional VS16 + skin tone: e.g. thumbs up medium.
         OR starboard_emoji ~ (
-          '[' || pg_catalog.chr(8205) || pg_catalog.chr(65039) || pg_catalog.chr(8419)
-              || pg_catalog.chr(127995) || '-' || pg_catalog.chr(127999)
-              || pg_catalog.chr(917536) || '-' || pg_catalog.chr(917631) || ']'
+          '^.' || pg_catalog.chr(65039) || '?['
+              || pg_catalog.chr(127995) || '-' || pg_catalog.chr(127999) || ']$'
+        )
+        -- ZWJ sequence: 2-7 segments of base(+VS16/skin) joined end to end.
+        OR starboard_emoji ~ (
+          '^.' || pg_catalog.chr(65039) || '?['
+              || pg_catalog.chr(127995) || '-' || pg_catalog.chr(127999) || ']?('
+              || pg_catalog.chr(8205) || '.'
+              || pg_catalog.chr(65039) || '?['
+              || pg_catalog.chr(127995) || '-' || pg_catalog.chr(127999) || ']?){1,6}$'
         )
         -- Flags: exactly two regional indicators.
         OR starboard_emoji ~ (
           '^[' || pg_catalog.chr(127462) || '-' || pg_catalog.chr(127487) || ']{2}$'
+        )
+        -- Tag sequences (subdivision flags): base + 1-14 tag chars.
+        OR starboard_emoji ~ (
+          '^.[' || pg_catalog.chr(917536) || '-' || pg_catalog.chr(917631) || ']{1,14}$'
         )
       )
       )
@@ -62,16 +76,30 @@ ALTER TABLE public.guild_config
         -- multi-emoji case.
         AND (
         pg_catalog.char_length(starboard_emoji) = 1
-        -- Joiner/modifier-glued clusters: ZWJ sequences, VS16 presentation,
-        -- keycaps, skin tones, tag sequences — many codepoints, ONE emoji.
+        -- ANCHORED single-cluster shapes (review 3691834557: a containment
+        -- test let star+VS16+star through because it CONTAINED a modifier).
+        -- base + optional VS16 (presentation): e.g. red heart.
+        OR starboard_emoji ~ ('^.' || pg_catalog.chr(65039) || '?$')
+        -- base + optional VS16 + skin tone: e.g. thumbs up medium.
         OR starboard_emoji ~ (
-          '[' || pg_catalog.chr(8205) || pg_catalog.chr(65039) || pg_catalog.chr(8419)
-              || pg_catalog.chr(127995) || '-' || pg_catalog.chr(127999)
-              || pg_catalog.chr(917536) || '-' || pg_catalog.chr(917631) || ']'
+          '^.' || pg_catalog.chr(65039) || '?['
+              || pg_catalog.chr(127995) || '-' || pg_catalog.chr(127999) || ']$'
+        )
+        -- ZWJ sequence: 2-7 segments of base(+VS16/skin) joined end to end.
+        OR starboard_emoji ~ (
+          '^.' || pg_catalog.chr(65039) || '?['
+              || pg_catalog.chr(127995) || '-' || pg_catalog.chr(127999) || ']?('
+              || pg_catalog.chr(8205) || '.'
+              || pg_catalog.chr(65039) || '?['
+              || pg_catalog.chr(127995) || '-' || pg_catalog.chr(127999) || ']?){1,6}$'
         )
         -- Flags: exactly two regional indicators.
         OR starboard_emoji ~ (
           '^[' || pg_catalog.chr(127462) || '-' || pg_catalog.chr(127487) || ']{2}$'
+        )
+        -- Tag sequences (subdivision flags): base + 1-14 tag chars.
+        OR starboard_emoji ~ (
+          '^.[' || pg_catalog.chr(917536) || '-' || pg_catalog.chr(917631) || ']{1,14}$'
         )
       )
       )

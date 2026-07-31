@@ -246,6 +246,41 @@ describe('GET /api/license/health', () => {
     }
   });
 
+  it('flags an ACTIVE session attached to a revoked key as needing attention', async () => {
+    // Review 3691834566: admin revocation deactivates sessions in a separate
+    // write whose failure is tolerated before the key is revoked — a device
+    // can keep an active session against a terminated licence. Healthy must
+    // never paper over that.
+    setup({
+      license_keys: {
+        data: [{
+          id: '00000000-0000-0000-0000-000000000001',
+          product_id: '00000000-0000-0000-0000-000000000002',
+          status: 'revoked',
+          activated_at: '2026-07-30T00:00:00.000Z',
+          created_at: '2026-07-29T00:00:00.000Z',
+        }],
+        error: null,
+        count: 1,
+      },
+      license_sessions: {
+        data: [{
+          id: '00000000-0000-0000-0000-000000000003',
+          license_key_id: '00000000-0000-0000-0000-000000000001',
+          active: true,
+          last_seen_at: '2026-07-30T00:00:00.000Z',
+        }],
+        error: null,
+        count: 1,
+      },
+    });
+    const body = await (await GET(buildRequest('/api/license/health') as never)).json();
+    expect(body.data).toMatchObject({
+      state: 'needs_attention',
+      sessionsOnTerminalKeys: 1,
+    });
+  });
+
   it('never declares health from a truncated SESSION sample', async () => {
     // The active-device count is computed from the session sample. When that
     // sample is cut off, the response already admitted `truncated: true` and

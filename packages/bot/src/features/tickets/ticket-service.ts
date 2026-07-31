@@ -31,6 +31,7 @@ import {
   completeDiscordOccurrence,
   failDiscordOccurrence,
   markDiscordOccurrenceCleanupPending,
+  recordDiscordOccurrenceChannels,
   releaseDiscordOccurrence,
 } from '../../services/occurrence-fence.js';
 
@@ -143,8 +144,101 @@ export async function reconcileTicketOrphanChannels(
       reconciled++;
     }
   }
+
+  // Second scan: stale claimed ticket occurrences carrying a durable channel
+  // id but NO cleanup flag -- the state left behind when every cleanup-pending
+  // write was exhausted during an outage. The id recorded at creation time is
+  // what makes these findable at all. Same verify-then-resolve contract as
+  // the flagged scan: a committed ticket completes the occurrence, a
+  // confirmed-missing channel releases it, anything blocked rotates.
+  const staleBefore = new Date(Date.now() - UNFLAGGED_TICKET_CLAIM_STALE_MS).toISOString();
+  const { data: unflagged, error: unflaggedError } = await supabase
+    .from('discord_operation_occurrences')
+    .select('id,result,claimed_at')
+    .eq('guild_id', guild.id)
+    .eq('operation_kind', 'ticket')
+    .eq('status', 'claimed')
+    .lt('claimed_at', staleBefore)
+    .order('updated_at', { ascending: true })
+    .limit(50);
+  if (unflaggedError) {
+    log.warn('Could not scan unflagged ticket claims', { error: unflaggedError.message });
+    return reconciled;
+  }
+  for (const row of unflagged ?? []) {
+    if (typeof row.id !== 'string') continue;
+    const result =
+      row.result && typeof row.result === 'object' && !Array.isArray(row.result)
+        ? row.result as Record<string, unknown>
+        : {};
+    if (result.channelCleanupPending === true) continue; // the flagged scan owns it
+    const createdIds = Array.isArray(result.createdChannelIds)
+      ? result.createdChannelIds.filter((value): value is string => typeof value === 'string')
+      : [];
+    if (createdIds.length === 0) continue; // pre-id-durability claim; nothing to resolve
+
+    const { data: committedTicket, error: verificationError } = await supabase
+      .from('tickets')
+      .select('id,channel_id')
+      .eq('creation_occurrence_id', row.id)
+      .maybeSingle();
+    if (verificationError) {
+      await touchBlockedCleanupJob(supabase, row.id, `unflagged_verify_failed:${verificationError.message}`);
+      continue;
+    }
+    if (committedTicket) {
+      const ticket = committedTicket as Pick<DbTicket, 'id' | 'channel_id'>;
+      await completeDiscordOccurrence(
+        supabase,
+        row.id,
+        ticket.channel_id || createdIds[0],
+        { ticketId: ticket.id, recovered: true },
+      );
+      reconciled++;
+      continue;
+    }
+
+    let channel = guild.channels.cache.get(createdIds[0]);
+    let confirmedMissing = false;
+    if (!channel) {
+      try {
+        channel = await guild.channels.fetch(createdIds[0]) ?? undefined;
+        confirmedMissing = !channel;
+      } catch (fetchError) {
+        const code =
+          typeof fetchError === 'object' && fetchError !== null && 'code' in fetchError
+            ? Number((fetchError as { code: unknown }).code)
+            : Number.NaN;
+        if (code === RESTJSONErrorCodes.UnknownChannel) {
+          confirmedMissing = true;
+        } else {
+          await touchBlockedCleanupJob(supabase, row.id, `unflagged_fetch_failed:${String(fetchError)}`);
+          continue;
+        }
+      }
+    }
+    if (channel) {
+      try {
+        await channel.delete('Removing orphaned ticket channel from an unflagged stale claim');
+        confirmedMissing = true;
+      } catch (deleteError) {
+        await touchBlockedCleanupJob(supabase, row.id, `unflagged_delete_failed:${String(deleteError)}`);
+        continue;
+      }
+    }
+    if (confirmedMissing) {
+      await releaseDiscordOccurrence(supabase, row.id);
+      reconciled++;
+    }
+  }
   return reconciled;
 }
+
+/**
+ * A creation flow completes in seconds; ten minutes cannot race a live one.
+ * Only claims older than this are eligible for the unflagged-claim scan.
+ */
+const UNFLAGGED_TICKET_CLAIM_STALE_MS = 10 * 60_000;
 
 /**
  * Send a blocked cleanup job to the back of the rotation. Best-effort and
@@ -408,6 +502,59 @@ export async function createTicket(
       await failDiscordOccurrence(supabase, occurrenceId, `channel_create:${String(err)}`).catch(() => {});
     }
     return { error: 'Failed to create ticket channel. Check bot permissions.' };
+  }
+
+  // Make the channel id DURABLE on the claim before any later step can fail.
+  // If every cleanup-pending write is later exhausted (review 3691834544),
+  // the claim used to carry NO channel pointer -- unfindable by any recovery
+  // scan, channel and ticket request both stranded. With the id recorded
+  // up-front, the reconciler's unflagged-claim scan can still resolve it. If
+  // even this write cannot land, abort while the channel is seconds old and
+  // cheap to delete.
+  if (occurrenceId) {
+    let idPersisted = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await recordDiscordOccurrenceChannels(supabase, occurrenceId, [channel.id]);
+        idPersisted = true;
+        break;
+      } catch (persistError) {
+        if (attempt < 3) {
+          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        } else {
+          log.error('Could not persist ticket channel id; aborting creation:', {
+            occurrenceId,
+            channelId: channel.id,
+            error: String(persistError),
+          });
+        }
+      }
+    }
+    if (!idPersisted) {
+      let channelRemoved = false;
+      try {
+        await channel.delete('Ticket channel id persistence failed');
+        channelRemoved = true;
+      } catch (deleteError) {
+        log.error('Orphaned ticket channel could not be deleted after id-persist failure:', {
+          channelId: channel.id,
+          error: String(deleteError),
+        });
+      }
+      await reportTicketCreateFailure(supabase, eventBus, guild, {
+        userDiscordId: member.id,
+        panelId: panel.id,
+        ticketNumber,
+        stage: 'id_persist',
+        error: 'claim metadata write failed',
+      });
+      if (channelRemoved) {
+        await releaseDiscordOccurrence(supabase, occurrenceId).catch(() => {});
+      }
+      // A surviving channel keeps the claim CLAIMED (not failed): the
+      // unflagged-claim scan can never see a failed row.
+      return { error: 'Failed to create ticket channel. Please try again.' };
+    }
   }
 
   try {

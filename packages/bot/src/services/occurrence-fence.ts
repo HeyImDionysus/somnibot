@@ -164,50 +164,6 @@ export async function recordDiscordOccurrenceChannels(
   }
 }
 
-/**
- * Record that a scheduled-message occurrence RESERVED a counter slot
- * (claim_scheduled_message_send committed for its due minute). Recovery reads
- * this to decide whether a reclaimed minute already paid its max_sends slot:
- * `last_sent_at > dueMinute` alone cannot prove it — the original worker may
- * have died BEFORE the counter call while later minutes advanced the counter,
- * and delivering on that guess bypasses the configured cap. Best-effort by
- * design (callers proceed on failure): a missing flag makes recovery claim a
- * fresh slot, which fails toward respecting the cap, never toward exceeding it.
- */
-export async function markDiscordOccurrenceCounterReserved(
-  supabase: SupabaseClient,
-  occurrenceId: string,
-): Promise<void> {
-  const { data: current, error: readError } = await supabase
-    .from('discord_operation_occurrences')
-    .select('result')
-    .eq('id', occurrenceId)
-    .eq('status', 'claimed')
-    .maybeSingle();
-  if (readError || !current) {
-    throw new Error(
-      `Unable to record counter reservation: ${readError?.message ?? 'occurrence no longer claimed'}`,
-    );
-  }
-  const result =
-    current.result && typeof current.result === 'object' && !Array.isArray(current.result)
-      ? { ...(current.result as Record<string, unknown>) }
-      : {};
-  result.counterReserved = true;
-  const { data: updated, error: updateError } = await supabase
-    .from('discord_operation_occurrences')
-    .update({ result })
-    .eq('id', occurrenceId)
-    .eq('status', 'claimed')
-    .select('id')
-    .maybeSingle();
-  if (updateError || !updated) {
-    throw new Error(
-      `Unable to record counter reservation: ${updateError?.message ?? 'occurrence no longer claimed'}`,
-    );
-  }
-}
-
 export async function completeDiscordOccurrence(
   supabase: SupabaseClient,
   occurrenceId: string,
