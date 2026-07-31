@@ -76,8 +76,11 @@ export async function GET(
 
   const nonce = req.nextUrl.searchParams.get('nonce');
 
-  if (sig && exp && cid && gid && eid) {
-    // Signed URL authentication (preferred — no raw token in URL)
+  if (sig && exp && cid && gid) {
+    // Signed URL authentication (preferred — no raw token in URL). eid may be
+    // absent on links minted by the previous release during a rolling
+    // deployment; those verify against the legacy payload for their remaining
+    // five-minute lifetime and select the entitlement at delivery time below.
     const verified = verifySignedDownloadUrl(
       productId,
       fileId,

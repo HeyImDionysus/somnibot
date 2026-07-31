@@ -70,6 +70,12 @@ const _bootRecoveryDone = new Set<string>();
 const _deliveryDegraded = new Set<string>();
 const _deliveryAlerted = new Set<string>();
 const _deliveryRecoveryChecked = new Set<string>();
+// Bounds the durable-row + ping retries while the owner notice remains
+// undelivered (e.g. alert channel briefly unavailable): one attempt per
+// guild per minute, with the alert-service's own 5-minute ping throttle on
+// top. The row insert itself dedupes on the partial unique index.
+const DELIVERY_ALERT_RETRY_MS = 60_000;
+const _deliveryAlertRetryAt = new Map<string, number>();
 
 /** Shallow value-equality for the audited config fields. */
 function configsEqual(a: MessageLogConfig, b: MessageLogConfig): boolean {
@@ -245,6 +251,13 @@ async function notifyDeliveryFailure(
   error: string,
 ): Promise<void> {
   if (_deliveryAlerted.has(guildId)) return;
+  if (
+    _deliveryDegraded.has(guildId)
+    && Date.now() < (_deliveryAlertRetryAt.get(guildId) ?? 0)
+  ) {
+    return;
+  }
+  _deliveryAlertRetryAt.set(guildId, Date.now() + DELIVERY_ALERT_RETRY_MS);
   if (!_deliveryDegraded.has(guildId)) {
     _deliveryDegraded.add(guildId);
     client.eventBus.emit('message_log.delivery_failed', guildId, { channelId, error });
@@ -261,7 +274,11 @@ async function notifyDeliveryFailure(
     metadata: { channel_id: channelId, error },
     client,
   });
-  if (result.inserted || result.insertErrorCode === '23505' || result.delivered) {
+  // Latch ONLY on a delivered owner notice. A durable row whose Discord ping
+  // failed (alert channel briefly unavailable) must keep retrying under the
+  // throttles above — latching on the row alone meant repairing the alert
+  // channel never produced a notice until message-log itself recovered.
+  if (result.delivered) {
     _deliveryAlerted.add(guildId);
   }
 }
@@ -283,6 +300,7 @@ async function noticeDeliveryRecovered(client: SomniClient, guildId: string): Pr
   _deliveryRecoveryChecked.add(guildId);
   _deliveryDegraded.delete(guildId);
   _deliveryAlerted.delete(guildId);
+  _deliveryAlertRetryAt.delete(guildId);
 }
 
 async function sendLogEmbed(

@@ -149,8 +149,21 @@ export class StatsChannelManager {
             ],
           });
 
-          const identityError = await this.persistChannelIdentity(config, channel.id);
-          if (identityError) {
+          const identity = await this.persistChannelIdentity(config, channel.id);
+          if (identity.outcome === 'lost_race') {
+            // Another process (rolling deploy, overlapping reload) created and
+            // registered its own counter first. The winner's pointer is
+            // durable; OUR channel is the duplicate. Adopt the winner in
+            // memory and dispose of ours through the same durable machinery
+            // as the abort path, so a crash here cannot orphan it.
+            config.channel_id = identity.winnerChannelId;
+            const survivorPersisted = await this.persistPendingCleanup(config, channel.id);
+            if (!survivorPersisted) {
+              await this.deleteChannelWithRetries(channel, 'Stats channel lost identity race');
+            }
+            continue;
+          }
+          if (identity.outcome === 'error') {
             // The Discord channel exists but its identity could not be
             // persisted even with retries: config.channel_id stays null, so
             // every later update would create ANOTHER counter channel. Record
@@ -161,26 +174,9 @@ export class StatsChannelManager {
             // the loud manual-cleanup log.
             const survivorPersisted = await this.persistPendingCleanup(config, channel.id);
             if (!survivorPersisted) {
-              let deleted = false;
-              for (let attempt = 1; attempt <= 3 && !deleted; attempt++) {
-                try {
-                  await channel.delete('Stats channel identity write failed');
-                  deleted = true;
-                } catch (deleteError) {
-                  if (attempt === 3) {
-                    log.error(
-                      `Stats channel ${channel.id} could not be deleted after its identity write `
-                      + 'failed and no durable cleanup state could be written; it is orphaned in '
-                      + 'Discord and must be removed manually:',
-                      { error: String(deleteError) },
-                    );
-                  } else {
-                    await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
-                  }
-                }
-              }
+              await this.deleteChannelWithRetries(channel, 'Stats channel identity write failed');
             }
-            throw new Error(`Failed to persist stats channel identity: ${identityError}`);
+            throw new Error(`Failed to persist stats channel identity: ${identity.message}`);
           }
           channelId = channel.id;
           created = true;
@@ -215,29 +211,86 @@ export class StatsChannelManager {
   }
 
   /**
-   * Persist a freshly created channel's identity with retries. Returns null
-   * on success (also updating the in-memory row) or the final error message.
+   * CLAIM the empty channel slot for a freshly created channel, with retries.
+   * The write is conditional on channel_id still being null: two overlapping
+   * processes (rolling deploy, reload) can both create a Discord channel for
+   * the same config, and an unconditional last-writer-wins update would leave
+   * the loser's channel durably unowned. 'persisted' also updates the
+   * in-memory row; 'lost_race' reports the winner's id (null when the config
+   * row itself vanished mid-flight).
    */
   private async persistChannelIdentity(
     config: StatsChannelConfig,
     channelId: string,
-  ): Promise<string | null> {
+  ): Promise<
+    | { outcome: 'persisted' }
+    | { outcome: 'lost_race'; winnerChannelId: string | null }
+    | { outcome: 'error'; message: string }
+  > {
     let lastError = 'unknown error';
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const { error } = await this.supabase
+      const { data: claimed, error } = await this.supabase
         .from('stats_channels')
         .update({ channel_id: channelId })
-        .eq('id', config.id);
-      if (!error) {
+        .eq('id', config.id)
+        .is('channel_id', null)
+        .select('id')
+        .maybeSingle();
+      if (!error && claimed) {
         config.channel_id = channelId;
-        return null;
+        return { outcome: 'persisted' };
       }
-      lastError = error.message;
+      if (!error) {
+        // Zero rows matched: someone else claimed the slot, the config row
+        // vanished — or OUR earlier attempt committed but its acknowledgement
+        // was lost. Read the current pointer to tell those apart.
+        const { data: row, error: readError } = await this.supabase
+          .from('stats_channels')
+          .select('channel_id')
+          .eq('id', config.id)
+          .maybeSingle();
+        if (!readError) {
+          const winner = typeof row?.channel_id === 'string' ? row.channel_id : null;
+          if (winner === channelId) {
+            config.channel_id = channelId;
+            return { outcome: 'persisted' };
+          }
+          return { outcome: 'lost_race', winnerChannelId: winner };
+        }
+        lastError = readError.message;
+      } else {
+        lastError = error.message;
+      }
       if (attempt < 3) {
         await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
       }
     }
-    return lastError;
+    return { outcome: 'error', message: lastError };
+  }
+
+  /** Delete a just-created duplicate/abort channel; logs loudly on exhaustion. */
+  private async deleteChannelWithRetries(
+    channel: { id: string; delete: (reason?: string) => Promise<unknown> },
+    reason: string,
+  ): Promise<boolean> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await channel.delete(reason);
+        return true;
+      } catch (deleteError) {
+        if (attempt === 3) {
+          log.error(
+            `Stats channel ${channel.id} could not be deleted (${reason}) and no durable `
+            + 'cleanup state could be written; it is orphaned in Discord and must be removed '
+            + 'manually:',
+            { error: String(deleteError) },
+          );
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        }
+      }
+    }
+    return false;
   }
 
   /**
@@ -469,7 +522,10 @@ export class StatsChannelManager {
       log.error('Failed to write stats-channel update alert:', { error: String(alertErr) });
       return { inserted: false, insertErrorCode: undefined, delivered: false };
     });
-    if (result.inserted || result.insertErrorCode === '23505' || result.delivered) {
+    // Latch ONLY on a delivered owner notice (same contract as message-log):
+    // a durable row whose ping failed keeps retrying — one attempt per update
+    // interval, deduped at the row by the partial unique index.
+    if (result.delivered) {
       this.alertedDegradedChannels.add(config.id);
     }
   }

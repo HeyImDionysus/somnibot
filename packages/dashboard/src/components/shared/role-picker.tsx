@@ -128,6 +128,28 @@ export function missingRoleIds(
   return selected.filter((id) => !roles.some((role) => role.id === id));
 }
 
+/**
+ * Why a role cannot be safely selected in a requireAssignable picker, or null
+ * when it can. A non-authoritative snapshot FAILS CLOSED: its editableByBot
+ * bits may predate the bot losing Manage Roles or being moved below the role,
+ * and active-product submission only fails later at server validation — the
+ * picker must not offer a choice it cannot verify.
+ */
+export function roleAssignmentIssue(
+  role: Pick<DiscordRole, 'editableByBot'>,
+  requireAssignable: boolean,
+  rolesAuthoritative: boolean,
+): string | null {
+  if (!requireAssignable) return null;
+  if (!rolesAuthoritative) {
+    return 'Live bot role authority cannot be verified right now — retry after the bot refreshes its snapshot.';
+  }
+  if (role.editableByBot === false) {
+    return 'Move SomniBot above this role and grant Manage Roles first';
+  }
+  return null;
+}
+
 /** Invalidate the role cache */
 export function invalidateRoleCache() {
   roleCache = null;
@@ -415,16 +437,19 @@ export function RolePicker({
 
               {filtered.map((role) => {
                 const isSelected = selected.includes(role.id);
-                const cannotAssign = requireAssignable && role.editableByBot === false;
+                const assignIssue = roleAssignmentIssue(
+                  role,
+                  requireAssignable,
+                  rolesAuthoritative,
+                );
+                const cannotAssign = assignIssue !== null;
                 return (
                   <button
                     key={role.id}
                     type="button"
                     disabled={cannotAssign}
                     onClick={() => toggle(role.id)}
-                    title={cannotAssign
-                      ? 'Move SomniBot above this role and grant Manage Roles first'
-                      : undefined}
+                    title={assignIssue ?? undefined}
                     className={cn(
                       'flex w-full items-center gap-2 px-3 py-1.5 text-sm transition-colors',
                       cannotAssign && 'cursor-not-allowed opacity-45',

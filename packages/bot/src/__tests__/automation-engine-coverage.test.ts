@@ -638,9 +638,10 @@ describe('AutomationEngine', () => {
       // budget, reopening the mutual-trigger loop the hint exists to close.
       await engine.start();
       (engine as unknown as {
-        _holdMemberDepthHints: Map<string, { depth: number; expiresAt: number }>;
+        _holdMemberDepthHints: Map<string, { depth: number; remaining: number; expiresAt: number }>;
       })._holdMemberDepthHints.set('20000000000000000', {
         depth: 3,
+        remaining: 1,
         expiresAt: Date.now() + 10_000,
       });
 
@@ -656,6 +657,78 @@ describe('AutomationEngine', () => {
         (engine as unknown as { _holdMemberDepthHints: Map<string, unknown> })
           ._holdMemberDepthHints.size,
       ).toBe(0);
+    });
+
+    it('keeps one hint per member-targeted action, not one per member (round 12 P1)', async () => {
+      // A hold running give_role AND remove_role for the same member emits two
+      // gateway events. Consuming the member's entire correlation state on the
+      // first meant the second entered handling as a fresh chain root.
+      await engine.start();
+      const hints = (engine as unknown as {
+        _holdMemberDepthHints: Map<
+          string,
+          { depth: number; remaining: number; expiresAt: number }
+        >;
+      })._holdMemberDepthHints;
+      hints.set('20000000000000000', {
+        depth: 3,
+        remaining: 2,
+        expiresAt: Date.now() + 10_000,
+      });
+
+      const fire = async () => {
+        const event = {
+          type: 'role.gained',
+          guildId: 'g1',
+          data: { discordId: '20000000000000000', roleId: 'role1', source: 'discord' },
+        } as { type: string; guildId: string; data: Record<string, unknown>; _chainDepth?: number };
+        await (eventBus._listeners[0] as (event: unknown) => Promise<void>)(event);
+        return event._chainDepth;
+      };
+
+      expect(await fire()).toBe(3);
+      expect(hints.get('20000000000000000')?.remaining).toBe(1);
+      expect(await fire()).toBe(3);
+      expect(hints.size).toBe(0);
+      // Correlation state spent: an unrelated third event is a fresh root.
+      expect(await fire()).toBeUndefined();
+    });
+
+    it('accumulates hint counts across recorded member actions (round 12 P1)', async () => {
+      const recordViaHold = async () => {
+        mockExecuteActions.mockResolvedValue({ executed: 1, failed: 0, errors: [] });
+        mockMassClaimApproved.mockResolvedValue({
+          id: 'hold-multi',
+          automation_id: 'auto1',
+          execution_id: 'exec-1',
+          occurrence_id: '10000000-0000-8000-8000-000000000004',
+          member_ids: ['10000000000000000'],
+          member_count: 1,
+          threshold: 1,
+          trigger_event: 'member.verified',
+          triggered_by: 'system',
+          action_snapshot: [
+            { type: 'give_role', config: { role_id: 'role1' } },
+            { type: 'remove_role', config: { role_id: 'role2' } },
+          ],
+          context_snapshot: { channelId: null, messageId: null, variables: {}, chainDepth: 2 },
+        });
+        (engine as unknown as { automationName(id: string): Promise<string> }).automationName =
+          vi.fn().mockResolvedValue('Test Automation');
+        await (engine as unknown as { runApprovedHold(id: string): Promise<void> })
+          .runApprovedHold('hold-multi');
+      };
+      await recordViaHold();
+
+      const hints = (engine as unknown as {
+        _holdMemberDepthHints: Map<
+          string,
+          { depth: number; remaining: number; expiresAt: number }
+        >;
+      })._holdMemberDepthHints;
+      // TWO member-targeted actions ran for the member → TWO consumable hints.
+      expect(hints.get('10000000000000000')?.remaining).toBe(2);
+      expect(hints.get('10000000000000000')?.depth).toBe(2);
     });
 
     it('stops bulk execution when the lease deadline passes without an acknowledged renewal', async () => {

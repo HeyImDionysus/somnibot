@@ -46,3 +46,26 @@ describe('RolePicker authoritative deletion state', () => {
     expect(isAuthoritativeRoleSnapshot(payload, NOW)).toBe(false);
   });
 });
+
+describe('roleAssignmentIssue — requireAssignable fails closed without authority (round 12)', () => {
+  it('blocks selection when the snapshot is not authoritative, regardless of stale bits', async () => {
+    const { roleAssignmentIssue } = await import('@/components/shared/role-picker');
+    // Stale editableByBot=true is exactly the dangerous case: the bot may
+    // have lost Manage Roles since, and submission only fails later at
+    // server validation.
+    expect(roleAssignmentIssue({ editableByBot: true }, true, false)).toContain('cannot be verified');
+    expect(roleAssignmentIssue({ editableByBot: false }, true, false)).toContain('cannot be verified');
+  });
+
+  it('names the hierarchy/permission repair under an authoritative snapshot', async () => {
+    const { roleAssignmentIssue } = await import('@/components/shared/role-picker');
+    expect(roleAssignmentIssue({ editableByBot: false }, true, true)).toContain('Manage Roles');
+    expect(roleAssignmentIssue({ editableByBot: true }, true, true)).toBeNull();
+  });
+
+  it('never blocks pickers that do not require assignability', async () => {
+    const { roleAssignmentIssue } = await import('@/components/shared/role-picker');
+    expect(roleAssignmentIssue({ editableByBot: false }, false, false)).toBeNull();
+    expect(roleAssignmentIssue({ editableByBot: false }, false, true)).toBeNull();
+  });
+});

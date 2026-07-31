@@ -26,15 +26,28 @@ describe('StatsChannelManager — failed identity write does not leak the channe
     return {
       from: vi.fn((table: string) => {
         const chain: any = {};
-        for (const m of ['select', 'eq', 'neq', 'in', 'order', 'limit']) chain[m] = vi.fn(() => chain);
+        for (const m of ['select', 'eq', 'neq', 'in', 'order', 'limit', 'is']) {
+          chain[m] = vi.fn(() => chain);
+        }
         chain.update = vi.fn((payload: Record<string, unknown>) => {
           chain._payload = payload;
           return chain;
         });
-        chain.maybeSingle = vi.fn(async () => ({
-          data: table === 'guild_config' ? { stats_channels_enabled: true } : null,
-          error: null,
-        }));
+        chain.maybeSingle = vi.fn(async () => {
+          if (table !== 'stats_channels') {
+            return {
+              data: table === 'guild_config' ? { stats_channels_enabled: true } : null,
+              error: null,
+            };
+          }
+          if (chain._payload && 'channel_id' in chain._payload) {
+            // Conditional identity claim read-back.
+            return channelIdWriteError
+              ? { data: null, error: channelIdWriteError }
+              : { data: { id: 'sc-new' }, error: null };
+          }
+          return { data: null, error: null };
+        });
         chain.single = vi.fn(async () => ({ data: null, error: null }));
         chain.then = (resolve: (v: unknown) => void) => {
           if (chain._payload && 'channel_id' in chain._payload) {
@@ -152,6 +165,9 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
             };
           }
           if (chain._payload && 'channel_id' in chain._payload) {
+            if (options.identityWriteFails) {
+              return { data: null, error: { message: 'db unavailable' } };
+            }
             return { data: options.adoptMatches === false ? null : { id: 'sc-1' }, error: null };
           }
           if (chain._payload && 'pending_cleanup_channel_ids' in chain._payload) {
@@ -336,6 +352,32 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     expect(
       updatePayloads.filter((payload) => 'pending_cleanup_channel_ids' in payload),
     ).toEqual([]);
+  });
+
+  it('disposes of its own channel when another process wins the identity claim (round 12)', async () => {
+    // Two overlapping processes both create a counter channel; the identity
+    // write is a CONDITIONAL claim on channel_id IS NULL. The loser must not
+    // overwrite the winner's durable pointer — its channel is the duplicate
+    // and goes through the same durable-disposal machinery as the abort path.
+    const StatsChannelManager = await load();
+    const created = { id: 'vc-dup', delete: vi.fn(async () => ({})) };
+    const { supabase, updatePayloads } = survivorSupa({
+      configRows: [{ ...CONFIG_ROW }],
+      scanRows: [],
+      adoptMatches: false,
+    });
+    const guild = makeGuild({ created });
+    const mgr = new StatsChannelManager(guild, supabase, 60);
+    await mgr.start().catch(() => {});
+    mgr.stop?.();
+
+    // The loser recorded its duplicate durably instead of deleting blind…
+    expect(updatePayloads).toContainEqual({ pending_cleanup_channel_ids: ['vc-dup'] });
+    expect(created.delete).not.toHaveBeenCalled();
+    // …and never force-wrote its own id over the winner's pointer.
+    expect(
+      updatePayloads.filter((payload) => payload.channel_id === 'vc-dup').length,
+    ).toBe(1); // the single conditional claim attempt, matched zero rows
   });
 
   it('never deletes a survivor that IS the live counter channel', async () => {

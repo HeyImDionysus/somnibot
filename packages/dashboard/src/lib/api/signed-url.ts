@@ -70,6 +70,13 @@ export function generateSignedDownloadUrl(
 /**
  * Verify a signed download URL's signature and expiry.
  * Returns the decoded customer/guild IDs + nonce on success, or null on failure.
+ *
+ * Links WITHOUT an entitlement id are the previous release's format: during a
+ * rolling deployment an old instance keeps minting them for up to the
+ * five-minute lifetime, and a freshly issued link must not 401 on a new
+ * instance. The legacy payload verifies for its remaining lifetime — still
+ * nonce-bound and single-use — and the caller selects the entitlement at
+ * delivery time instead.
  */
 export function verifySignedDownloadUrl(
   productId: string,
@@ -78,9 +85,14 @@ export function verifySignedDownloadUrl(
   exp: string,
   customerId: string,
   guildId: string,
-  entitlementId: string,
+  entitlementId?: string | null,
   nonce?: string,
-): { customerId: string; guildId: string; entitlementId: string; nonce: string | null } | null {
+): {
+  customerId: string;
+  guildId: string;
+  entitlementId: string | null;
+  nonce: string | null;
+} | null {
   const expNum = parseInt(exp, 10);
   if (isNaN(expNum)) return null;
 
@@ -88,8 +100,10 @@ export function verifySignedDownloadUrl(
   const now = Math.floor(Date.now() / 1000);
   if (now > expNum) return null;
 
-  if (!entitlementId || !nonce) return null;
-  const payload = `${productId}:${fileId}:${customerId}:${guildId}:${entitlementId}:${exp}:${nonce}`;
+  if (!nonce) return null;
+  const payload = entitlementId
+    ? `${productId}:${fileId}:${customerId}:${guildId}:${entitlementId}:${exp}:${nonce}`
+    : `${productId}:${fileId}:${customerId}:${guildId}:${exp}:${nonce}`;
   const expected = createHmac('sha256', getDownloadSecret())
     .update(payload)
     .digest('hex');
@@ -98,5 +112,5 @@ export function verifySignedDownloadUrl(
   if (sig.length !== expected.length) return null;
   if (!timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
 
-  return { customerId, guildId, entitlementId, nonce };
+  return { customerId, guildId, entitlementId: entitlementId ?? null, nonce };
 }

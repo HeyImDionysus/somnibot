@@ -34,13 +34,16 @@ export function FeatureStatusPanel() {
   // the next refresh. Only the most recent request may publish.
   const requestSeq = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (background?: unknown) => {
     if (!feature) return;
     const seq = ++requestSeq.current;
     const publish = (next: FeatureReadiness | null) => {
       if (seq === requestSeq.current) setStatus(next);
     };
-    publish(null);
+    // Background polls keep the last verdict visible while the new one loads;
+    // only user-driven refreshes blank to "Checking…". Strict === true because
+    // the button handler passes a MouseEvent here.
+    if (background !== true) publish(null);
     try {
       const response = await fetch('/api/dashboard/feature-status');
       const payload = await response.json();
@@ -68,6 +71,14 @@ export function FeatureStatusPanel() {
 
   useEffect(() => {
     refresh();
+    // A verdict derived from a fresh heartbeat goes stale while the page sits
+    // open: the two-minute cutoff can pass with the panel still reading
+    // "enabled and reachable" hours later. Re-derive on a cadence comfortably
+    // inside the cutoff instead of trusting one load-time snapshot.
+    const timer = setInterval(() => {
+      void refresh(true);
+    }, 60_000);
+    return () => clearInterval(timer);
   }, [refresh]);
 
   if (!feature) return null;

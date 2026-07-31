@@ -45,7 +45,7 @@ function makeAdmin(options: {
   const makeChain = (table: string) => {
     const chain: Record<string, unknown> = {};
     let statusFilter: unknown = null;
-    for (const method of ['select', 'eq', 'in', 'order', 'limit', 'update']) {
+    for (const method of ['select', 'eq', 'in', 'order', 'limit', 'update', 'upsert']) {
       chain[method] = vi.fn((...args: unknown[]) => {
         (calls[`${table}.${method}`] ??= []).push(args);
         if ((method === 'eq' || method === 'in') && args[0] === 'status') {
@@ -155,8 +155,12 @@ describe('/api/automations/holds', () => {
     expect((await PUT(request('PUT', { threshold: 501 }))).status).toBe(400);
     expect((await PUT(request('PUT', { threshold: 12.5 }))).status).toBe(400);
     expect((await PUT(request('PUT', { threshold: 40 }))).status).toBe(200);
-    expect(calls['guild_config.update'][0][0]).toEqual({
+    // Upsert, not update: carries guild_id so a missing guild_config row (a
+    // tolerated init state) is repairable from this control.
+    expect(calls['guild_config.upsert'][0][0]).toEqual({
+      guild_id: 'guild-1',
       automation_mass_action_threshold: 40,
     });
+    expect(calls['guild_config.update']).toBeUndefined();
   });
 });

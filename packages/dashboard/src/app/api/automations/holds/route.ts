@@ -134,10 +134,15 @@ export async function PUT(req: NextRequest) {
   }
 
   const supabase = createAdminSupabase();
+  // Upsert, not update: a guild whose guild_config row was never created (a
+  // tolerated init state — reads fall back to the default of 25) must still
+  // be able to SAVE a threshold. Same shape as the general config endpoint.
   const { data, error } = await supabase
     .from('guild_config')
-    .update({ automation_mass_action_threshold: threshold })
-    .eq('guild_id', auth.ctx.guildId)
+    .upsert(
+      { guild_id: auth.ctx.guildId, automation_mass_action_threshold: threshold },
+      { onConflict: 'guild_id' },
+    )
     .select('automation_mass_action_threshold')
     .single();
   if (error) return dbError(error, 'automations/holds/config');
