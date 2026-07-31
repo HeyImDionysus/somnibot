@@ -221,15 +221,16 @@ describe('TempChannelManager — cleanup-job persistence failures stay recoverab
    * Every occurrence-table update payload is recorded so the assertions can
    * distinguish cleanup-pending writes from a terminal status flip.
    */
-  function persistenceSupa(failUpdates: number) {
+  function persistenceSupa(failUpdates: number, failIdPersist = false) {
     const occurrenceUpdates: any[] = [];
+    const activeInserts: any[] = [];
     let updateAttempts = 0;
     function chainFor(table: string) {
       const c: any = { _insert: null, _update: null };
       for (const m of ['select', 'eq', 'neq', 'or', 'is', 'lt', 'gt', 'gte', 'lte', 'in', 'not', 'order', 'limit', 'range', 'match', 'contains', 'delete']) {
         c[m] = () => c;
       }
-      c.insert = (row: any) => { c._insert = row; return c; };
+      c.insert = (row: any) => { c._insert = row; if (table === 'active_temp_channels') activeInserts.push(row); return c; };
       c.update = (payload: any) => { c._update = payload; return c; };
       c.single = async () => {
         if (table === 'discord_operation_occurrences' && c._insert) {
@@ -247,12 +248,24 @@ describe('TempChannelManager — cleanup-job persistence failures stay recoverab
       };
       c.maybeSingle = async () => {
         if (table === 'discord_operation_occurrences' && c._update) {
-          updateAttempts++;
           occurrenceUpdates.push(c._update);
+          // The created-channel-id persist (result.createdChannelIds) succeeds
+          // unless this harness is told otherwise; the CLEANUP-PENDING write is
+          // the one whose failures are being counted.
+          const isIdPersist = Array.isArray((c._update as any)?.result?.createdChannelIds);
+          if (isIdPersist) {
+            if (failIdPersist) return { data: null, error: { message: 'id persist refused' } };
+            return { data: { id: 'occ-1' }, error: null };
+          }
+          updateAttempts++;
           if (updateAttempts <= failUpdates) {
             return { data: null, error: { message: 'transient write failure' } };
           }
           return { data: { id: 'occ-1' }, error: null };
+        }
+        if (table === 'discord_operation_occurrences' && !c._update) {
+          // recordDiscordOccurrenceChannels read-back of the claimed row.
+          return { data: { result: {} }, error: null };
         }
         if (table === 'temp_channel_hubs') return { data: HUB, error: null };
         return { data: null, error: null };
@@ -274,6 +287,7 @@ describe('TempChannelManager — cleanup-job persistence failures stay recoverab
     return {
       supabase: { from: (t: string) => chainFor(t) } as any,
       occurrenceUpdates,
+      activeInserts,
       attempts: () => updateAttempts,
     };
   }
@@ -316,6 +330,39 @@ describe('TempChannelManager — cleanup-job persistence failures stay recoverab
     expect(occurrenceUpdates.some((u) => u?.status === 'released')).toBe(false);
     expect(occurrenceUpdates.some((u) => u?.status === 'completed')).toBe(false);
   });
+  it('aborts creation and deletes both channels when the id persist cannot land', async () => {
+    // If the id write cannot land, ANY later failure could strand the channels
+    // with a claim that names no survivor — recovery would find nothing,
+    // reclaim, and spawn a duplicate room. Abort while deletion is cheap.
+    const TempChannelManager = await loadManager();
+    const { supabase, activeInserts } = persistenceSupa(0, true);
+    const created = {
+      id: 'vc-1', name: 'r', members: new Map(),
+      delete: vi.fn(async () => ({})),
+    };
+    const mgr = new TempChannelManager(guild(async () => created), supabase);
+    await mgr.start();
+
+    await mgr.handleJoinHub(member('u1', 'Alice'), 'hubvc', 'join-evt-persist');
+
+    expect(created.delete).toHaveBeenCalledTimes(1);
+    // The DB record is never attempted without durable ids.
+    expect(activeInserts).toHaveLength(0);
+  });
+
+  it('records the created ids on the claim before inserting the active row', async () => {
+    const TempChannelManager = await loadManager();
+    const { supabase, occurrenceUpdates } = persistenceSupa(1);
+    const mgr = new TempChannelManager(survivorGuild(), supabase);
+    await mgr.start();
+
+    await mgr.handleJoinHub(member('u1', 'Alice'), 'hubvc', 'join-evt-ids');
+
+    const idWrite = occurrenceUpdates.find((u) => Array.isArray(u?.result?.createdChannelIds));
+    expect(idWrite, 'the claim must durably name every created channel').toBeTruthy();
+    expect(idWrite.result.createdChannelIds).toEqual(['vc-1']);
+  });
+
 });
 
 describe('TempChannelManager — startup cleanup failures stay contained', () => {

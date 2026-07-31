@@ -115,6 +115,55 @@ export async function markDiscordOccurrenceCleanupPending(
   }
 }
 
+/**
+ * Durably record the Discord channel ids a claimed creation produced, BEFORE
+ * any later step can fail. Without this, a failure cascade (active-row insert
+ * fails, one deletion fails, all cleanup-pending writes fail) left a claimed
+ * occurrence whose metadata named NO surviving channel — stale recovery then
+ * found nothing to adopt or delete, reclaimed the occurrence, and created a
+ * fresh room while the survivor stayed orphaned forever.
+ *
+ * Conditional on the row still being `claimed` and proven by read-back, like
+ * markDiscordOccurrenceCleanupPending. Merges into the existing result so the
+ * claim's recovery metadata is preserved.
+ */
+export async function recordDiscordOccurrenceChannels(
+  supabase: SupabaseClient,
+  occurrenceId: string,
+  channelIds: string[],
+): Promise<void> {
+  const { data: current, error: readError } = await supabase
+    .from('discord_operation_occurrences')
+    .select('result')
+    .eq('id', occurrenceId)
+    .eq('status', 'claimed')
+    .maybeSingle();
+  if (readError) {
+    throw new Error(`Unable to read occurrence for channel-id record: ${readError.message}`);
+  }
+  if (!current) {
+    throw new Error(`Unable to record channel ids: occurrence ${occurrenceId} is no longer claimed`);
+  }
+  const result =
+    current.result && typeof current.result === 'object' && !Array.isArray(current.result)
+      ? { ...(current.result as Record<string, unknown>) }
+      : {};
+  result.createdChannelIds = channelIds;
+  const { data: updated, error: updateError } = await supabase
+    .from('discord_operation_occurrences')
+    .update({ result })
+    .eq('id', occurrenceId)
+    .eq('status', 'claimed')
+    .select('id')
+    .maybeSingle();
+  if (updateError) {
+    throw new Error(`Unable to record occurrence channel ids: ${updateError.message}`);
+  }
+  if (!updated) {
+    throw new Error(`Unable to record channel ids: occurrence ${occurrenceId} is no longer claimed`);
+  }
+}
+
 export async function completeDiscordOccurrence(
   supabase: SupabaseClient,
   occurrenceId: string,

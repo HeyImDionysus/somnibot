@@ -50,11 +50,17 @@ function makeSupa(insertOutcome: { data: unknown; error: unknown }) {
   removeChain.then = (resolve: (v: unknown) => void) => resolve({ data: [], error: null });
   const remove = vi.fn(() => removeChain);
   const insert = vi.fn(() => ({ select: vi.fn(() => ({ single: vi.fn(() => Promise.resolve(insertOutcome)) })) }));
+  const selectChain: any = {};
+  selectChain.eq = vi.fn(() => selectChain);
+  selectChain.maybeSingle = vi.fn(async () => ({ data: null, error: null }));
   return {
     _update: update,
     _remove: remove,
     _removeEq: removeEq,
-    from: vi.fn(() => ({ insert, update, delete: remove })),
+    // The reclaim guard's candidate/hold lookups: resolving no candidate row
+    // keeps the 23505 as a plain already-claimed skip, which is this suite's
+    // subject.
+    from: vi.fn(() => ({ insert, update, delete: remove, select: vi.fn(() => selectChain) })),
     rpc: vi.fn().mockResolvedValue({ error: null }),
   } as any;
 }

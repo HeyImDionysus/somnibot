@@ -80,6 +80,11 @@ export async function reconcileTicketOrphanChannels(
           channelId: row.resource_id,
           error: verificationError.message,
         });
+        // Verification failures rotate too. Without the touch, an old cohort
+        // of uncertain inserts whose reads keep failing occupies the front of
+        // the oldest-first batch on every pass — the same starvation the
+        // delete-failure branch already guards against.
+        await touchBlockedCleanupJob(supabase, row.id, `verify_read_failed:${verificationError.message}`);
         continue;
       }
       if (committedTicket) {

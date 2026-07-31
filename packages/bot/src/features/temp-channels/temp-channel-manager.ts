@@ -22,6 +22,7 @@ import {
   completeDiscordOccurrence,
   failDiscordOccurrence,
   markDiscordOccurrenceCleanupPending,
+  recordDiscordOccurrenceChannels,
   reclaimStaleDiscordOccurrence,
   releaseDiscordOccurrence,
   type DiscordOperationOccurrence,
@@ -329,6 +330,48 @@ export class TempChannelManager {
         }
       }
 
+      // Make the created channel ids DURABLE on the claim before anything else
+      // can fail. If the active-row insert, a deletion, and every
+      // cleanup-pending write all failed, the claim used to name no survivor:
+      // stale recovery found nothing, reclaimed the occurrence, and spawned a
+      // fresh room while the survivor stayed orphaned forever. If this write
+      // itself cannot land after retries, abort while the channels are seconds
+      // old and cheap to delete — never proceed into a state that cannot be
+      // recovered.
+      if (occurrenceId) {
+        let idsPersisted = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await recordDiscordOccurrenceChannels(
+              this.supabase,
+              occurrenceId,
+              [vc.id, ...(textChannelId ? [textChannelId] : [])],
+            );
+            idsPersisted = true;
+            break;
+          } catch (persistError) {
+            if (attempt < 3) {
+              await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+            } else {
+              log.error('Could not persist created channel ids; aborting room creation:', {
+                occurrenceId,
+                error: String(persistError),
+              });
+            }
+          }
+        }
+        if (!idsPersisted) {
+          const abortResults = await Promise.allSettled([
+            vc.delete('Temp channel id persistence failed'),
+            ...(textChannel ? [textChannel.delete('Temp channel id persistence failed')] : []),
+          ]);
+          if (abortResults.every((outcome) => outcome.status === 'fulfilled')) {
+            externalRoomExists = false;
+          }
+          throw new Error('Failed to persist created temp-channel identities');
+        }
+      }
+
       // Record in DB
       const record: ActiveTempChannel = {
         channel_id: vc.id,
@@ -503,6 +546,39 @@ export class TempChannelManager {
         error: String(error),
       });
       return 'blocked';
+    }
+
+    // Durable ids beat name heuristics. When the crashed attempt persisted
+    // createdChannelIds, resolve survivors BY ID: a text channel surviving
+    // alone (voice deleted, cleanup writes all failed) is invisible to the
+    // voice name-search below — recovery would reclaim the occurrence and
+    // spawn a fresh room while the text channel stayed orphaned forever.
+    // Delete lone non-voice survivors first; while any survivor resists
+    // deletion the claim stays blocked rather than reclaimed.
+    const createdChannelIds = Array.isArray(metadata.createdChannelIds)
+      ? metadata.createdChannelIds.filter((value): value is string => typeof value === 'string')
+      : [];
+    if (createdChannelIds.length > 0) {
+      const survivors = createdChannelIds
+        .map((channelId) => this.guild.channels.cache.get(channelId))
+        .filter((channel): channel is NonNullable<typeof channel> => Boolean(channel));
+      const hasVoiceSurvivor = survivors.some(
+        (channel) => channel.type === ChannelType.GuildVoice,
+      );
+      if (!hasVoiceSurvivor && survivors.length > 0) {
+        for (const survivor of survivors) {
+          try {
+            await survivor.delete('Removing orphaned temp-channel remnant before reclaim');
+          } catch (deleteError) {
+            log.warn('Orphaned temp-channel remnant resisted deletion; blocking reclaim', {
+              occurrenceId: occurrence.id,
+              channelId: survivor.id,
+              error: String(deleteError),
+            });
+            return 'blocked';
+          }
+        }
+      }
     }
 
     const voice = [...this.guild.channels.cache.values()].find((candidate) => {
@@ -942,6 +1018,10 @@ export class TempChannelManager {
       .eq('operation_kind', 'temp_channel')
       .eq('status', 'claimed')
       .contains('result', { channelCleanupPending: true })
+      // Oldest-touched first: failed rows are touched to the back below, so a
+      // blocked cohort (channels the bot cannot delete) rotates instead of
+      // occupying all 100 slots on every pass and starving newer jobs.
+      .order('updated_at', { ascending: true })
       .limit(100);
     if (error) {
       throw new Error(`Unable to load temp-channel cleanup jobs: ${error.message}`);
@@ -999,6 +1079,20 @@ export class TempChannelManager {
       if (allConfirmedMissing) {
         await releaseDiscordOccurrence(this.supabase, row.id);
         reconciled++;
+      } else {
+        // Best-effort rotation touch, conditional on the row staying claimed —
+        // bookkeeping must never turn a blocked job into a lost one.
+        const { error: touchError } = await this.supabase
+          .from('discord_operation_occurrences')
+          .update({ updated_at: new Date().toISOString() })
+          .eq('id', row.id)
+          .eq('status', 'claimed');
+        if (touchError) {
+          log.warn('Could not rotate blocked temp-channel cleanup job', {
+            occurrenceId: row.id,
+            error: touchError.message,
+          });
+        }
       }
     }
     return reconciled;

@@ -121,6 +121,37 @@ export class ExecutionLogger {
    */
   private async reclaimStalePreActionClaim(params: ClaimParams): Promise<boolean> {
     const staleBefore = new Date(Date.now() - STALE_PRE_ACTION_CLAIM_MS).toISOString();
+
+    // A HELD mass-action execution is pre-action by design — its row stays
+    // un-finalized until the owner approves, which can take hours. It matches
+    // every default-value predicate below, so without this check a redelivery
+    // would delete a perfectly valid held execution: the hold's ON DELETE SET
+    // NULL forgets its execution_id, approval falls back to a detached log,
+    // and the replacement claim strands. Uncertainty fails closed: if the
+    // linkage cannot be read, nothing is reclaimed.
+    const { data: candidate, error: candidateError } = await this.supabase
+      .from('automation_executions')
+      .select('id')
+      .eq('guild_id', params.guildId)
+      .eq('automation_id', params.automationId)
+      .eq('occurrence_id', params.occurrenceId)
+      .maybeSingle();
+    if (candidateError || !candidate) return false;
+    const { data: backingHold, error: holdError } = await this.supabase
+      .from('automation_mass_action_holds')
+      .select('id')
+      .eq('guild_id', params.guildId)
+      .eq('execution_id', (candidate as { id: string }).id)
+      .maybeSingle();
+    if (holdError) return false;
+    if (backingHold) {
+      log.info(
+        `Not reclaiming execution claim for occurrence ${params.occurrenceId}: `
+        + 'it backs a durable mass-action hold awaiting approval.',
+      );
+      return false;
+    }
+
     const { data, error } = await this.supabase
       .from('automation_executions')
       .delete()

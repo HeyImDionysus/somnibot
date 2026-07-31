@@ -32,15 +32,24 @@ function makeSupa(options: {
   reclaimRows?: Array<{ id: string }>;
   /** After a successful reclaim, the retried insert succeeds. */
   retryInsertSucceeds?: boolean;
+  /** The existing row backs a durable mass-action hold awaiting approval. */
+  backingHold?: boolean;
   releaseFailures?: number;
 }) {
   let inserts = 0;
   let releaseAttempts = 0;
   const deleteFilters: Record<string, unknown>[] = [];
-  const from = vi.fn(() => {
+  const from = vi.fn((table: string) => {
     const filters: Record<string, unknown> = {};
     const chain: any = {};
     for (const m of ['select', 'order', 'limit']) chain[m] = vi.fn(() => chain);
+    chain.maybeSingle = vi.fn(async () => {
+      if (table === 'automation_mass_action_holds') {
+        return { data: options.backingHold ? { id: 'hold-1' } : null, error: null };
+      }
+      // Candidate lookup for the reclaim guard: the conflicting row exists.
+      return { data: { id: 'existing-row' }, error: null };
+    });
     chain.eq = vi.fn((column: string, value: unknown) => { filters[column] = value; return chain; });
     chain.lt = vi.fn((column: string, value: unknown) => { filters[`lt:${column}`] = value; return chain; });
     chain.insert = vi.fn(() => {
@@ -150,5 +159,26 @@ describe('ExecutionLogger.release — transient failures retry before throwing',
     const logger = new ExecutionLogger(supabase);
 
     await expect(logger.release('row-1')).rejects.toThrow('Failed to release');
+  });
+});
+
+describe('ExecutionLogger.claim — held executions are never reclaimed', () => {
+  it('skips instead of deleting a claim that backs a mass-action hold', async () => {
+    // A held execution stays pre-action shaped for as long as approval takes —
+    // hours, legitimately. Reclaiming it would ON DELETE SET NULL the hold's
+    // execution_id, detach the approval log, and strand the replacement claim.
+    const { supabase, counts, deleteFilters } = makeSupa({
+      conflict: true,
+      reclaimRows: [{ id: 'stale-row' }],
+      retryInsertSucceeds: true,
+      backingHold: true,
+    });
+    const logger = new ExecutionLogger(supabase);
+
+    const result = await logger.claim(PARAMS);
+
+    expect(result.claimed).toBe(false);
+    expect(counts().inserts).toBe(1);
+    expect(deleteFilters, 'the CAS delete must never run for a held execution').toHaveLength(0);
   });
 });

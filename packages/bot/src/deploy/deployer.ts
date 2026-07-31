@@ -137,17 +137,25 @@ export async function deployServerState(
 
     if (desiredState.roles.length > 0) {
       // Refresh and reject immutable managed-role barriers before dry-run
-      // success or any destructive deployment step. A managed integration
-      // role below SomniBot cannot be displaced while placing the desired
-      // hierarchy directly beneath the bot.
+      // success or any destructive deployment step. Only roles inside the
+      // TARGET BAND matter: the desired hierarchy lands directly beneath the
+      // bot at positions [botHighest - N, botHighest), so a managed
+      // integration role parked far below (position 2 under a bot at 10,
+      // deploying 2 roles) cannot interfere and must not abort the whole
+      // deployment. This mirrors the narrower calculation the hierarchy step
+      // itself uses; the preflight previously treated ANY managed role below
+      // the bot as a barrier.
       await guild.roles.fetch();
       const botHighest = guild.members.me?.roles.highest.position;
-      const managedBarrier = botHighest === undefined
+      const bandFloor = botHighest === undefined
+        ? undefined
+        : botHighest - desiredState.roles.length;
+      const managedBarrier = botHighest === undefined || bandFloor === undefined
         ? undefined
         : [...guild.roles.cache.values()].find((role) =>
             role.managed
             && role.id !== guild.id
-            && role.position > 0
+            && role.position >= Math.max(bandFloor, 1)
             && role.position < botHighest,
           );
       if (botHighest === undefined || managedBarrier) {

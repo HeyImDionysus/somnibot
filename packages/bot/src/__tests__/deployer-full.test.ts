@@ -304,7 +304,7 @@ describe('deployServerState — role creation', () => {
     guild.roles.cache.set('managed-member', {
       id: 'managed-member',
       name: 'Integration Member',
-      position: 5,
+      position: 9,
       managed: true,
       editable: false,
     });
@@ -340,7 +340,7 @@ describe('deployServerState — role creation', () => {
     guild.roles.cache.set('managed-member', {
       id: 'managed-member',
       name: 'Integration Member',
-      position: 5,
+      position: 9,
       managed: true,
       editable: false,
     });
@@ -435,5 +435,40 @@ describe('deployServerState — result structure', () => {
     expect(Array.isArray(result.actions)).toBe(true);
     expect(Array.isArray(result.errors)).toBe(true);
     expect(Array.isArray(result.idMappings)).toBe(true);
+  });
+});
+
+describe('deployServerState — managed roles OUTSIDE the target band are not barriers', () => {
+  it('deploys despite a managed role parked far below the target positions', async () => {
+    // Review 3689700442 (P1): bot at 10 deploying 2 roles targets [8,10). A
+    // managed integration role at position 2 cannot interfere with that
+    // placement, but the preflight treated ANY managed role below the bot as
+    // a barrier and aborted the whole deployment — dry-run included.
+    const guild = makeGuild();
+    guild.roles.cache.set('managed-low', {
+      id: 'managed-low',
+      name: 'Music Bot',
+      position: 2,
+      managed: true,
+      editable: false,
+    });
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: false, dryRun: true },
+    );
+
+    expect(result.errors.some((error) => error.error.includes('managed role'))).toBe(false);
+    expect(result.success).toBe(true);
   });
 });
