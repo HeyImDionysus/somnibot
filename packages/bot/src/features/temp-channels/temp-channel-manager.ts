@@ -105,9 +105,21 @@ export class TempChannelManager {
       }
     }
 
-    // Clean up any orphaned channels
-    await this.cleanupOrphans();
-    await this.reconcilePendingChannelCleanup();
+    // Clean up any orphaned channels. Initial cleanup is best-effort and MUST
+    // NOT throw out of start(): guild-init awaits start() inside the single
+    // shared community-features try, so a transient database error here used to
+    // take down not just temp channels but stats channels, scheduled messages
+    // and giveaways for the lifetime of the guild context. The periodic timer
+    // below retries the same reconciliation every five minutes, so a failed
+    // first pass costs one interval, not the feature set.
+    try {
+      await this.cleanupOrphans();
+      await this.reconcilePendingChannelCleanup();
+    } catch (error) {
+      log.error('Initial temp-channel cleanup failed; periodic reconciliation will retry:', {
+        error: String(error),
+      });
+    }
     if (!this.pendingChannelCleanupTimer) {
       this.pendingChannelCleanupTimer = setInterval(() => {
         void this.reconcilePendingChannelCleanup().catch((error) => {
@@ -177,6 +189,13 @@ export class TempChannelManager {
     let externalRoomExists = false;
     let activeRecordCommitted = false;
     let cleanupJobCommitted = false;
+    // Set when the cleanup-pending write was attempted and exhausted its
+    // retries. The outer catch must then leave the occurrence CLAIMED: routing
+    // this through failDiscordOccurrence would terminalize the claim with the
+    // surviving channel ids recorded nowhere, and the periodic reconciler only
+    // scans claimed rows flagged channelCleanupPending — the survivors would be
+    // orphaned invisibly and forever.
+    let cleanupPersistExhausted = false;
 
     // Format channel name. The catalog's single documented variable is
     // {owner-name}; {username}/{user}/{tag}/{count} are supported aliases.
@@ -326,17 +345,43 @@ export class TempChannelManager {
         if (survivingChannelIds.length === 0) {
           externalRoomExists = false;
         } else if (occurrenceId) {
-          await markDiscordOccurrenceCleanupPending(
-            this.supabase,
-            occurrenceId,
-            survivingChannelIds[0],
-            `Temp-channel database record failed: ${recordError.message}`,
-            {
-              stage: 'active_row_insert',
-              channelIds: survivingChannelIds,
-            },
-          );
-          cleanupJobCommitted = true;
+          // The cleanup-pending write is the ONLY durable record of the
+          // surviving channel ids, so a transient database blip here must not
+          // surface as a throw: the outer catch cannot tell it apart from any
+          // other failure and would terminalize the claim. Retry in place;
+          // on exhaustion, record that fact so the outer catch preserves the
+          // claim instead of failing it.
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              await markDiscordOccurrenceCleanupPending(
+                this.supabase,
+                occurrenceId,
+                survivingChannelIds[0],
+                `Temp-channel database record failed: ${recordError.message}`,
+                {
+                  stage: 'active_row_insert',
+                  channelIds: survivingChannelIds,
+                },
+              );
+              cleanupJobCommitted = true;
+              break;
+            } catch (persistError) {
+              if (attempt === 3) {
+                cleanupPersistExhausted = true;
+                log.error(
+                  'Could not persist temp-channel cleanup job after retries; '
+                  + 'leaving the occurrence claimed so the survivors are not silently disowned:',
+                  {
+                    occurrenceId,
+                    survivingChannelIds,
+                    error: String(persistError),
+                  },
+                );
+              } else {
+                await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+              }
+            }
+          }
         }
         throw new Error(`Failed to record temp channel: ${recordError.message}`);
       }
@@ -385,6 +430,13 @@ export class TempChannelManager {
       if (occurrenceId) {
         if (cleanupJobCommitted) {
           // The durable cleanup job owns the surviving external channels.
+        } else if (cleanupPersistExhausted) {
+          // Survivors exist but recording them failed even after retries.
+          // Deliberately do NOTHING to the occurrence: `failed` is terminal
+          // and the reconciler would never look at it again, while a claimed
+          // row is still recoverable — a later attempt for the same key goes
+          // through the stale-claim reclaim path, and the ids were logged
+          // above for manual recovery in the worst case.
         } else if (!externalRoomExists && !activeRecordCommitted) {
           await releaseDiscordOccurrence(this.supabase, occurrenceId).catch(() => {});
         } else {

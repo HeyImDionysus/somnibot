@@ -294,3 +294,100 @@ describe('GET /api/store/control-room', () => {
     expect(supabase.from).not.toHaveBeenCalledWith('commerce_download_deliveries');
   });
 });
+
+describe('GET /api/store/control-room — rotation history cannot mask issuance', () => {
+  const ORDER_B = '00000000-0000-0000-0000-00000000000b';
+
+  it('reports issuance for an order whose only key sits beyond the first fetch page', async () => {
+    // Rotation keeps full key history — an order rotated many times can push
+    // ANOTHER order's only key past a flat row cap. The old `.limit(200)` query
+    // dropped it and the pipeline reported "never issued" for a licensed order.
+    const rotationFlood = Array.from({ length: 1200 }, (_, i) => ({
+      id: `key-a-${i}`,
+      order_id: ORDER,
+      customer_id: CUSTOMER,
+      product_id: PRODUCT,
+      status: i === 0 ? 'active' : 'revoked',
+      activated_at: null,
+      // Descending creation order, as the paged query returns per order.
+      created_at: new Date(Date.parse('2026-07-28T12:00:00.000Z') - i * 1000).toISOString(),
+    }));
+    const onlyKeyForB = {
+      id: 'key-b-only',
+      order_id: ORDER_B,
+      customer_id: CUSTOMER,
+      product_id: PRODUCT,
+      status: 'active',
+      activated_at: '2026-07-28T12:05:00.000Z',
+      created_at: '2026-07-28T12:01:00.000Z',
+    };
+    setup({
+      orders: {
+        data: [
+          {
+            id: ORDER,
+            order_number: 'ORD-1',
+            customer_id: CUSTOMER,
+            product_id: PRODUCT,
+            status: 'completed',
+            delivery_type_snapshot: 'mixed',
+            download_required_snapshot: false,
+            created_at: '2026-07-28T12:00:00.000Z',
+          },
+          {
+            id: ORDER_B,
+            order_number: 'ORD-2',
+            customer_id: CUSTOMER,
+            product_id: PRODUCT,
+            status: 'completed',
+            delivery_type_snapshot: 'mixed',
+            download_required_snapshot: false,
+            created_at: '2026-07-28T12:00:30.000Z',
+          },
+        ],
+        error: null,
+        count: 2,
+      },
+      // order_id asc, created_at desc — B's single key is the LAST row, past
+      // the first 1000-row page.
+      license_keys: { data: [...rotationFlood, onlyKeyForB], error: null },
+      entitlements: {
+        data: [
+          { id: 'ent-a', order_id: ORDER, customer_id: CUSTOMER, product_id: PRODUCT, status: 'active', created_at: '2026-07-28T12:01:00.000Z' },
+          { id: 'ent-b', order_id: ORDER_B, customer_id: CUSTOMER, product_id: PRODUCT, status: 'active', created_at: '2026-07-28T12:01:00.000Z' },
+        ],
+        error: null,
+      },
+      commerce_download_deliveries: { data: [], error: null },
+    });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+
+    const orderB = body.data.customers.find((c: any) => c.orderNumber === 'ORD-2');
+    expect(orderB, 'the second sampled order must be present').toBeTruthy();
+    expect(orderB.stages.licensed).toBe('complete');
+    expect(orderB.reasons ?? []).not.toContain(
+      'No license key was issued within 15 minutes of payment.',
+    );
+  });
+
+  it('surfaces the NEWEST key of a rotated order, not an arbitrary historical one', async () => {
+    setup({
+      license_keys: {
+        data: [
+          // created_at desc within the order: newest first, and newest is active.
+          { id: 'key-new', order_id: ORDER, customer_id: CUSTOMER, product_id: PRODUCT, status: 'active', activated_at: '2026-07-28T12:10:00.000Z', created_at: '2026-07-28T12:09:00.000Z' },
+          { id: 'key-old', order_id: ORDER, customer_id: CUSTOMER, product_id: PRODUCT, status: 'revoked', activated_at: null, created_at: '2026-07-28T12:01:00.000Z' },
+        ],
+        error: null,
+      },
+    });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+
+    // Licensed AND activated: only the newest key carries the activation, so a
+    // last-wins pick of the revoked historical row would break this.
+    expect(body.data.customers[0].stages.licensed).toBe('complete');
+    expect(body.data.customers[0].stages.activated).toBe('complete');
+  });
+});

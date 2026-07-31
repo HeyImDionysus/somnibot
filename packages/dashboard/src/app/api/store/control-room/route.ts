@@ -96,12 +96,40 @@ export async function GET(req: NextRequest) {
     p_order_ids: orderIds,
   });
 
-  const liveKeysPromise = supabase
-    .from('license_keys')
-    .select('id, order_id, customer_id, product_id, status, activated_at, created_at')
-    .eq('guild_id', guildId)
-    .in('order_id', orderIds)
-    .limit(200);
+  // Issuance evidence must cover EVERY sampled order. Key rotation keeps the
+  // full history — several license_keys rows per order — so a single flat query
+  // with a row cap sized to the ORDER sample (200) let rotated keys consume the
+  // cap and drop every key for some other sampled order, which the pipeline
+  // then reported as "never issued". Page until exhausted instead, ordered so
+  // the FIRST row seen per order is its newest key. The page bound is a
+  // runaway-data backstop far above any real rotation volume; hitting it is
+  // logged, never silent.
+  const KEY_PAGE_SIZE = 1000;
+  const KEY_MAX_PAGES = 20;
+  const liveKeysPromise = (async (): Promise<{
+    data: Record<string, unknown>[] | null;
+    error: { message: string } | null;
+  }> => {
+    const rows: Record<string, unknown>[] = [];
+    for (let page = 0; page < KEY_MAX_PAGES; page++) {
+      const { data, error } = await supabase
+        .from('license_keys')
+        .select('id, order_id, customer_id, product_id, status, activated_at, created_at')
+        .eq('guild_id', guildId)
+        .in('order_id', orderIds)
+        .order('order_id', { ascending: true })
+        .order('created_at', { ascending: false })
+        .range(page * KEY_PAGE_SIZE, (page + 1) * KEY_PAGE_SIZE - 1);
+      if (error) return { data: null, error };
+      rows.push(...((data ?? []) as Record<string, unknown>[]));
+      if (!data || data.length < KEY_PAGE_SIZE) return { data: rows, error: null };
+    }
+    console.warn(
+      `[control-room] license_keys pagination hit the ${KEY_MAX_PAGES * KEY_PAGE_SIZE}-row backstop `
+      + `for guild ${guildId}; issuance evidence beyond it is not loaded.`,
+    );
+    return { data: rows, error: null };
+  })();
 
   const [keys, entitlements, downloads, holds, customers, products, downloadCutover] = await Promise.all([
     liveKeysPromise,
@@ -179,7 +207,14 @@ export async function GET(req: NextRequest) {
     && typeof downloadCutover.data.value === 'string'
     ? Date.parse(downloadCutover.data.value)
     : Number.NaN;
-  const keyByOrder = new Map(keyRows.map((row) => [row.order_id, row]));
+  // First-wins on purpose: rows arrive ordered (order_id asc, created_at desc),
+  // so the first row per order is its NEWEST key — the one whose status should
+  // drive lifecycle/health display. A last-wins Map over rotation history would
+  // show the oldest rotated-away key instead.
+  const keyByOrder = new Map<unknown, Record<string, unknown>>();
+  for (const row of keyRows) {
+    if (!keyByOrder.has(row.order_id)) keyByOrder.set(row.order_id, row);
+  }
   const entitlementByOrder = new Map(entitlementRows.map((row) => [row.order_id, row]));
   const downloadByOrder = new Map(downloadRows.map((row) => [row.order_id, row]));
   const holdByOrder = new Map(holdRows.map((row) => [row.order_id, row]));

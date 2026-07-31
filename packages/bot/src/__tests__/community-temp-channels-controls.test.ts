@@ -210,3 +210,144 @@ describe('TempChannelManager — empty-grace-seconds window', () => {
     mgr.stop();
   });
 });
+
+describe('TempChannelManager — cleanup-job persistence failures stay recoverable', () => {
+  /**
+   * Purpose-built double for the active-row-insert failure branch:
+   *  - occurrence claim insert WINS (returns a claimed row);
+   *  - active_temp_channels insert FAILS (the branch under test);
+   *  - the created voice channel's delete REJECTS, leaving a survivor;
+   *  - the cleanup-pending update fails `failUpdates` times before succeeding.
+   * Every occurrence-table update payload is recorded so the assertions can
+   * distinguish cleanup-pending writes from a terminal status flip.
+   */
+  function persistenceSupa(failUpdates: number) {
+    const occurrenceUpdates: any[] = [];
+    let updateAttempts = 0;
+    function chainFor(table: string) {
+      const c: any = { _insert: null, _update: null };
+      for (const m of ['select', 'eq', 'neq', 'or', 'is', 'lt', 'gt', 'gte', 'lte', 'in', 'not', 'order', 'limit', 'range', 'match', 'contains', 'delete']) {
+        c[m] = () => c;
+      }
+      c.insert = (row: any) => { c._insert = row; return c; };
+      c.update = (payload: any) => { c._update = payload; return c; };
+      c.single = async () => {
+        if (table === 'discord_operation_occurrences' && c._insert) {
+          return {
+            data: {
+              id: 'occ-1', guild_id: 'g1', operation_kind: 'temp_channel',
+              occurrence_key: 'k', status: 'claimed', result: {},
+              resource_id: null, last_error: null,
+            },
+            error: null,
+          };
+        }
+        if (table === 'temp_channel_hubs') return { data: HUB, error: null };
+        return { data: null, error: null };
+      };
+      c.maybeSingle = async () => {
+        if (table === 'discord_operation_occurrences' && c._update) {
+          updateAttempts++;
+          occurrenceUpdates.push(c._update);
+          if (updateAttempts <= failUpdates) {
+            return { data: null, error: { message: 'transient write failure' } };
+          }
+          return { data: { id: 'occ-1' }, error: null };
+        }
+        if (table === 'temp_channel_hubs') return { data: HUB, error: null };
+        return { data: null, error: null };
+      };
+      c.then = (resolve: (v: any) => void) => {
+        if (table === 'active_temp_channels' && c._insert) {
+          return resolve({ data: null, error: { message: 'insert refused' } });
+        }
+        if (table === 'discord_operation_occurrences' && c._update) {
+          // Terminal fail/release writes await the chain directly.
+          occurrenceUpdates.push(c._update);
+          return resolve({ data: null, error: null });
+        }
+        if (table === 'temp_channel_hubs') return resolve({ data: [HUB], error: null });
+        return resolve({ data: [], error: null });
+      };
+      return c;
+    }
+    return {
+      supabase: { from: (t: string) => chainFor(t) } as any,
+      occurrenceUpdates,
+      attempts: () => updateAttempts,
+    };
+  }
+
+  function survivorGuild() {
+    return guild(async (opts) => ({
+      id: 'vc-1', name: opts.name, members: new Map(),
+      delete: vi.fn(async () => { throw new Error('50013 missing permissions'); }),
+    }));
+  }
+
+  it('retries a transient cleanup-pending write and never terminalizes the claim', async () => {
+    const TempChannelManager = await loadManager();
+    const { supabase, occurrenceUpdates, attempts } = persistenceSupa(1);
+    const mgr = new TempChannelManager(survivorGuild(), supabase);
+    await mgr.start();
+
+    await mgr.handleJoinHub(member('u1', 'Alice'), 'hubvc', 'join-evt-1');
+
+    expect(attempts()).toBe(2);
+    const pending = occurrenceUpdates.find((u) => u?.result?.channelCleanupPending === true);
+    expect(pending, 'the cleanup job must be durably recorded on retry').toBeTruthy();
+    expect(pending.result.channelIds).toEqual(['vc-1']);
+    // The claim must never be flipped terminal: the reconciler only scans
+    // claimed rows, so `failed` would orphan the surviving channel invisibly.
+    expect(occurrenceUpdates.some((u) => u?.status === 'failed')).toBe(false);
+  });
+
+  it('leaves the occurrence CLAIMED when persistence is exhausted — never failed', async () => {
+    const TempChannelManager = await loadManager();
+    const { supabase, occurrenceUpdates, attempts } = persistenceSupa(99);
+    const mgr = new TempChannelManager(survivorGuild(), supabase);
+    await mgr.start();
+
+    await mgr.handleJoinHub(member('u1', 'Alice'), 'hubvc', 'join-evt-2');
+
+    expect(attempts()).toBe(3);
+    // No terminal write of ANY kind: not failed, not released, not completed.
+    expect(occurrenceUpdates.some((u) => u?.status === 'failed')).toBe(false);
+    expect(occurrenceUpdates.some((u) => u?.status === 'released')).toBe(false);
+    expect(occurrenceUpdates.some((u) => u?.status === 'completed')).toBe(false);
+  });
+});
+
+describe('TempChannelManager — startup cleanup failures stay contained', () => {
+  it('start() resolves and installs the retry timer when the initial reconcile throws', async () => {
+    const TempChannelManager = await loadManager();
+    // Occurrence-table scans reject outright (network-style failure); hub and
+    // active-row loads still work.
+    function chainFor(table: string) {
+      const c: any = {};
+      for (const m of ['select', 'eq', 'neq', 'or', 'is', 'lt', 'gt', 'gte', 'lte', 'in', 'not', 'order', 'limit', 'range', 'match', 'contains', 'insert', 'update', 'delete']) {
+        c[m] = () => c;
+      }
+      c.maybeSingle = async () => ({ data: null, error: null });
+      c.single = async () => ({ data: null, error: null });
+      c.then = (resolve: (v: any) => void, reject?: (e: unknown) => void) => {
+        if (table === 'discord_operation_occurrences' && reject) {
+          return reject(new Error('database momentarily unreachable'));
+        }
+        return resolve({ data: table === 'temp_channel_hubs' ? [HUB] : [], error: null });
+      };
+      return c;
+    }
+    const supabase = { from: (t: string) => chainFor(t) } as any;
+    const g = guild(async () => ({ id: 'vc-1', members: new Map() }));
+    const mgr = new TempChannelManager(g, supabase);
+
+    // The whole point: this must not throw. guild-init awaits start() inside
+    // the shared community-features try, so a throw here used to take down
+    // stats channels, scheduled messages and giveaways with it.
+    await expect(mgr.start()).resolves.not.toThrow();
+    expect((mgr as any).pendingChannelCleanupTimer).toBeTruthy();
+    mgr.stop();
+    expect((mgr as any).pendingChannelCleanupTimer).toBeNull();
+  });
+});

@@ -21,6 +21,22 @@ import {
 
 const log = createLogger('ScheduledRunner');
 
+/**
+ * How old a `claimed` scheduled-message occurrence must be before a losing
+ * claimant may CAS-reclaim it as a crashed holder's leftovers. A healthy send
+ * completes in seconds (trySend's entire bounded backoff is under a minute), so
+ * five minutes cannot race a live holder — it can only recover a claim whose
+ * process died between the claim insert and the completion write.
+ */
+const STALE_SCHEDULE_CLAIM_MS = 5 * 60_000;
+
+/**
+ * How far back the exhausted-schedule recovery probe looks. Crash recovery must
+ * survive any realistic outage, but a schedule exhausted months ago with a
+ * cleanly completed occurrence must not pay a probe query every minute forever.
+ */
+const EXHAUSTED_RECOVERY_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
 interface ScheduledMessage {
   id: string;
   guild_id: string;
@@ -219,8 +235,20 @@ export class ScheduledMessageRunner {
         if (schedule.start_date && new Date(schedule.start_date) > now) continue;
         if (schedule.end_date && new Date(schedule.end_date) < now) continue;
 
-        // Check max sends
-        if (schedule.max_sends != null && schedule.current_sends >= schedule.max_sends) continue;
+        // Check max sends. An exhausted schedule is normally done — but if the
+        // slot that exhausted it belongs to a CRASHED holder (counter
+        // committed, send never confirmed), skipping here would strand the
+        // schedule forever having delivered nothing. Probe that one occurrence
+        // and route it back through sendMessage, whose stale-claim reclaim
+        // path recovers it without consuming another slot.
+        if (schedule.max_sends != null && schedule.current_sends >= schedule.max_sends) {
+          await this.recoverExhaustedUnsentClaim(schedule).catch((err) => {
+            log.error(`Exhausted-claim recovery failed for schedule ${schedule.id}:`, {
+              error: String(err),
+            });
+          });
+          continue;
+        }
 
         // Convert now to schedule's timezone
         const localNow = dateInTimezone(now, schedule.timezone || 'UTC');
@@ -243,6 +271,45 @@ export class ScheduledMessageRunner {
     }
   }
 
+  /**
+   * Recover the one occurrence that can strand an exhausted schedule: its LAST
+   * counted due minute, when that minute's claim is still `claimed` past the
+   * stale threshold — i.e. the holder crashed after committing the counter but
+   * before the send was confirmed. Everything funnels back through
+   * sendMessage(), whose reclaim path re-delivers WITHOUT claiming another
+   * counter slot (the prior-counter reconcile sees this exact minute already
+   * counted).
+   *
+   * Bounded on purpose: only the single occurrence named by `last_sent_at`,
+   * and only within a 7-day window — a schedule exhausted long ago with a
+   * completed occurrence must not cost a probe query every minute forever.
+   */
+  private async recoverExhaustedUnsentClaim(schedule: ScheduledMessage): Promise<void> {
+    if (!schedule.last_sent_at) return;
+    const lastCounted = new Date(schedule.last_sent_at);
+    if (!Number.isFinite(lastCounted.getTime())) return;
+    if (Date.now() - lastCounted.getTime() > EXHAUSTED_RECOVERY_WINDOW_MS) return;
+
+    const { data: occurrence } = await this.supabase
+      .from('discord_operation_occurrences')
+      .select('id, status, claimed_at')
+      .eq('guild_id', this.guild.id)
+      .eq('operation_kind', 'scheduled_message')
+      .eq('occurrence_key', `${schedule.id}:${lastCounted.toISOString()}`)
+      .maybeSingle();
+    if (!occurrence || occurrence.status !== 'claimed') return;
+
+    const claimedAtMs = Date.parse(String(occurrence.claimed_at ?? ''));
+    if (!Number.isFinite(claimedAtMs) || Date.now() - claimedAtMs < STALE_SCHEDULE_CLAIM_MS) {
+      return;
+    }
+    log.warn(
+      `Schedule "${schedule.name}" is exhausted by an unconfirmed send `
+      + `(due ${lastCounted.toISOString()}); attempting stale-claim recovery.`,
+    );
+    await this.sendMessage(schedule, lastCounted);
+  }
+
   private async sendMessage(schedule: ScheduledMessage, occurrenceAt: Date): Promise<void> {
     const channel = this.guild.channels.cache.get(schedule.channel_id) as TextChannel | undefined;
     if (!channel || !channel.isTextBased()) {
@@ -258,6 +325,7 @@ export class ScheduledMessageRunner {
     // fence across shards, restarts, tick replay, and the crash boundary around
     // Discord's send API.
     let occurrenceId: string;
+    let reclaimedStaleClaim = false;
     try {
       const claim = await claimDiscordOccurrence(
         this.supabase,
@@ -265,22 +333,98 @@ export class ScheduledMessageRunner {
         'scheduled_message',
         `${schedule.id}:${occurrenceAt.toISOString()}`,
       );
-      if (!claim.won) return;
-      occurrenceId = claim.occurrence.id;
+      if (!claim.won) {
+        // A lost claim usually means another shard/tick owns this due minute —
+        // but a claim whose holder CRASHED between the insert and the send
+        // stays `claimed` forever, and every retry used to return here
+        // silently. With max_sends the crashed claim may even have consumed
+        // the schedule's only send without anything reaching Discord. Reclaim
+        // via CAS when the claim is demonstrably stale: no healthy send holds
+        // a claim for minutes (trySend's whole backoff is seconds).
+        //
+        // Chosen trade-off, stated: re-sending after a reclaim is
+        // at-least-once. If the crash happened in the tiny window AFTER
+        // channel.send resolved but BEFORE the completion write, the reclaimed
+        // retry duplicates the message. A rare duplicate announcement beats a
+        // schedule that silently exhausted itself delivering nothing.
+        const existing = claim.occurrence;
+        const claimedAtMs = Date.parse(String(existing.claimed_at ?? ''));
+        const staleBefore = new Date(Date.now() - STALE_SCHEDULE_CLAIM_MS);
+        const isStale = existing.status === 'claimed'
+          && Number.isFinite(claimedAtMs)
+          && claimedAtMs < staleBefore.getTime();
+        if (!isStale) return;
+
+        const { data: reclaimed, error: reclaimError } = await this.supabase.rpc(
+          'reclaim_stale_discord_occurrence',
+          {
+            p_occurrence_id: existing.id,
+            p_guild_id: this.guild.id,
+            p_operation_kind: 'scheduled_message',
+            p_expected_updated_at: existing.updated_at,
+            p_stale_before: staleBefore.toISOString(),
+          },
+        );
+        if (reclaimError || reclaimed !== true) {
+          // Lost the CAS (a concurrent reclaimer won, or the row moved on).
+          // Whoever won owns the delivery; nothing to do here.
+          if (reclaimError) {
+            log.error(`Failed to reclaim stale claim for schedule ${schedule.id}:`, {
+              error: reclaimError.message,
+            });
+          }
+          return;
+        }
+        log.warn(
+          `Reclaimed stale scheduled-message claim for "${schedule.name}" `
+          + `(due ${occurrenceAt.toISOString()}); the previous holder crashed before completing.`,
+        );
+        reclaimedStaleClaim = true;
+        occurrenceId = existing.id;
+      } else {
+        occurrenceId = claim.occurrence.id;
+      }
     } catch (err) {
       log.error(`Failed to claim schedule ${schedule.id} occurrence:`, { error: String(err) });
       return;
     }
 
-    const { data: counterClaim, error: counterError } = await this.supabase.rpc(
-      'claim_scheduled_message_send',
-      {
-        p_schedule_id: schedule.id,
-        p_guild_id: this.guild.id,
-        p_occurrence_at: occurrenceAt.toISOString(),
-      },
-    );
-    let claimedSendCount = counterClaim;
+    // On a reclaimed stale claim, the crashed holder may have already committed
+    // its counter increment (`last_sent_at` = this exact due minute). Re-running
+    // the counter RPC would then consume a SECOND max_sends slot for one due
+    // minute, so reconcile from the authoritative row first and only claim a
+    // counter when this minute has not already been counted.
+    let claimedSendCount: number | null | undefined;
+    let counterAlreadyClaimed = false;
+    if (reclaimedStaleClaim) {
+      const { data: priorCounter } = await this.supabase
+        .from('scheduled_messages')
+        .select('current_sends,last_sent_at')
+        .eq('id', schedule.id)
+        .eq('guild_id', this.guild.id)
+        .maybeSingle();
+      if (
+        priorCounter
+        && new Date(priorCounter.last_sent_at ?? 0).getTime() === occurrenceAt.getTime()
+      ) {
+        counterAlreadyClaimed = true;
+        claimedSendCount = priorCounter.current_sends;
+      }
+    }
+
+    let counterError: { message: string } | null = null;
+    if (!counterAlreadyClaimed) {
+      const counterResult = await this.supabase.rpc(
+        'claim_scheduled_message_send',
+        {
+          p_schedule_id: schedule.id,
+          p_guild_id: this.guild.id,
+          p_occurrence_at: occurrenceAt.toISOString(),
+        },
+      );
+      claimedSendCount = counterResult.data;
+      counterError = counterResult.error;
+    }
     if (counterError) {
       // The RPC may have committed before its response was lost. Reconcile the
       // authoritative schedule row; never release an ambiguous occurrence and
