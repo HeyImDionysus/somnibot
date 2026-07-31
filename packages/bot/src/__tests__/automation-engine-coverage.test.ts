@@ -640,10 +640,10 @@ describe('AutomationEngine', () => {
       (engine as unknown as {
         _holdMemberDepthHints: Map<
           string,
-          Array<{ depth: number; events: readonly string[]; expiresAt: number }>
+          Array<{ depth: number; events: readonly string[]; roleId: string | null; expiresAt: number }>
         >;
       })._holdMemberDepthHints.set('20000000000000000', [
-        { depth: 3, events: ['role.gained'], expiresAt: Date.now() + 10_000 },
+        { depth: 3, events: ['role.gained'], roleId: 'role1', expiresAt: Date.now() + 10_000 },
       ]);
 
       const event = {
@@ -668,12 +668,12 @@ describe('AutomationEngine', () => {
       const hints = (engine as unknown as {
         _holdMemberDepthHints: Map<
           string,
-          Array<{ depth: number; events: readonly string[]; expiresAt: number }>
+          Array<{ depth: number; events: readonly string[]; roleId: string | null; expiresAt: number }>
         >;
       })._holdMemberDepthHints;
       hints.set('20000000000000000', [
-        { depth: 3, events: ['role.gained'], expiresAt: Date.now() + 10_000 },
-        { depth: 3, events: ['role.gained'], expiresAt: Date.now() + 10_000 },
+        { depth: 3, events: ['role.gained'], roleId: 'role1', expiresAt: Date.now() + 10_000 },
+        { depth: 3, events: ['role.gained'], roleId: 'role1', expiresAt: Date.now() + 10_000 },
       ]);
 
       const fire = async () => {
@@ -723,7 +723,7 @@ describe('AutomationEngine', () => {
       const hints = (engine as unknown as {
         _holdMemberDepthHints: Map<
           string,
-          Array<{ depth: number; events: readonly string[]; expiresAt: number }>
+          Array<{ depth: number; events: readonly string[]; roleId: string | null; expiresAt: number }>
         >;
       })._holdMemberDepthHints;
       // TWO member-targeted actions ran for the member → TWO consumable
@@ -731,7 +731,9 @@ describe('AutomationEngine', () => {
       expect(hints.get('10000000000000000')?.length).toBe(2);
       expect(hints.get('10000000000000000')?.[0]?.depth).toBe(2);
       expect(hints.get('10000000000000000')?.[0]?.events).toEqual(['role.gained']);
+      expect(hints.get('10000000000000000')?.[0]?.roleId).toBe('role1');
       expect(hints.get('10000000000000000')?.[1]?.events).toEqual(['role.lost']);
+      expect(hints.get('10000000000000000')?.[1]?.roleId).toBe('role2');
     });
 
     it('leaves hints untouched for unrelated events that merely name the member (round 14 P1)', async () => {
@@ -742,18 +744,22 @@ describe('AutomationEngine', () => {
       const hints = (engine as unknown as {
         _holdMemberDepthHints: Map<
           string,
-          Array<{ depth: number; events: readonly string[]; expiresAt: number }>
+          Array<{ depth: number; events: readonly string[]; roleId: string | null; expiresAt: number }>
         >;
       })._holdMemberDepthHints;
       hints.set('20000000000000000', [
-        { depth: 3, events: ['role.gained'], expiresAt: Date.now() + 10_000 },
+        { depth: 3, events: ['role.gained'], roleId: 'role1', expiresAt: Date.now() + 10_000 },
       ]);
 
-      const fire = async (type: string) => {
+      const fire = async (type: string, roleId?: string) => {
         const event = {
           type,
           guildId: 'g1',
-          data: { discordId: '20000000000000000', source: 'discord' },
+          data: {
+            discordId: '20000000000000000',
+            source: 'discord',
+            ...(roleId ? { roleId } : {}),
+          },
         } as { type: string; guildId: string; data: Record<string, unknown>; _chainDepth?: number };
         await (eventBus._listeners[0] as (event: unknown) => Promise<void>)(event);
         return event._chainDepth;
@@ -761,7 +767,10 @@ describe('AutomationEngine', () => {
 
       expect(await fire('member.verified')).toBeUndefined();
       expect(hints.get('20000000000000000')?.length).toBe(1);
-      expect(await fire('role.gained')).toBe(3);
+      // The right event type for the WRONG role must not consume either.
+      expect(await fire('role.gained', 'role-unrelated')).toBeUndefined();
+      expect(hints.get('20000000000000000')?.length).toBe(1);
+      expect(await fire('role.gained', 'role1')).toBe(3);
       expect(hints.size).toBe(0);
     });
 
@@ -774,12 +783,12 @@ describe('AutomationEngine', () => {
       const hints = (engine as unknown as {
         _holdMemberDepthHints: Map<
           string,
-          Array<{ depth: number; events: readonly string[]; expiresAt: number }>
+          Array<{ depth: number; events: readonly string[]; roleId: string | null; expiresAt: number }>
         >;
       })._holdMemberDepthHints;
       hints.set('20000000000000000', [
-        { depth: 2, events: ['role.gained'], expiresAt: Date.now() + 10_000 },
-        { depth: 4, events: ['role.gained'], expiresAt: Date.now() + 10_000 },
+        { depth: 2, events: ['role.gained'], roleId: 'role1', expiresAt: Date.now() + 10_000 },
+        { depth: 4, events: ['role.gained'], roleId: 'role1', expiresAt: Date.now() + 10_000 },
       ]);
 
       const fire = async () => {

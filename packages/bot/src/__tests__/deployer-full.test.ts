@@ -336,6 +336,58 @@ describe('deployServerState — role creation', () => {
     ]);
   });
 
+  it('rejects a clean-existing deploy whose cleanup would collapse a managed role into the band (round 15 P1)', async () => {
+    // Managed integration role at 2, deletable padding at 3..8, bot at 10,
+    // one desired role. TODAY the managed role is far below the band — but
+    // cleanExisting deletes the padding first, collapsing it to position 1
+    // directly beneath the bot, and creating the desired role then puts it
+    // inside the final band. The preflight must project that and reject
+    // BEFORE anything is deleted.
+    const guild = makeGuild();
+    guild.roles.cache.set('managed-low', {
+      id: 'managed-low',
+      name: 'Integration Low',
+      position: 2,
+      managed: true,
+      editable: false,
+    });
+    for (let position = 3; position <= 8; position++) {
+      guild.roles.cache.set(`old-role-${position}`, {
+        id: `old-role-${position}`,
+        name: `Old ${position}`,
+        position,
+        managed: false,
+        editable: true,
+        delete: vi.fn(async () => {}),
+      });
+    }
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 0 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: true, dryRun: false },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors[0].entityName).toBe('Role Hierarchy Preflight');
+    // Rejected BEFORE the destructive steps: nothing deleted, nothing created.
+    expect(guild.roles.create).not.toHaveBeenCalled();
+    for (let position = 3; position <= 8; position++) {
+      expect(
+        (guild.roles.cache.get(`old-role-${position}`) as { delete: ReturnType<typeof vi.fn> })
+          .delete,
+      ).not.toHaveBeenCalled();
+    }
+  });
+
   it('fails explicitly when a managed-role barrier blocks intended staff placement', async () => {
     const guild = makeGuild();
     guild.roles.cache.set('managed-member', {

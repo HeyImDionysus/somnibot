@@ -147,17 +147,30 @@ export async function deployServerState(
       // the bot as a barrier.
       await guild.roles.fetch();
       const botHighest = guild.members.me?.roles.highest.position;
-      const bandFloor = botHighest === undefined
-        ? undefined
-        : botHighest - desiredState.roles.length;
-      const managedBarrier = botHighest === undefined || bandFloor === undefined
-        ? undefined
-        : [...guild.roles.cache.values()].find((role) =>
+      let managedBarrier: (typeof guild.roles.cache extends Map<string, infer R> ? R : never) | undefined;
+      if (botHighest !== undefined) {
+        if (options.cleanExisting) {
+          // Step 2 deletes every non-managed role below the bot, so the
+          // managed survivors collapse to sit DIRECTLY beneath it with no
+          // padding left — the desired hierarchy can never be placed above
+          // them. Under cleanExisting, ANY managed role below the bot is a
+          // barrier no matter how low it is parked today; projecting the
+          // post-clean hierarchy here rejects the deployment BEFORE the
+          // destructive cleanup, where a current-position check only failed
+          // it afterwards.
+          managedBarrier = [...guild.roles.cache.values()].find((role) =>
+            role.managed && role.id !== guild.id && role.position < botHighest,
+          );
+        } else {
+          const bandFloor = botHighest - desiredState.roles.length;
+          managedBarrier = [...guild.roles.cache.values()].find((role) =>
             role.managed
             && role.id !== guild.id
             && role.position >= Math.max(bandFloor, 1)
             && role.position < botHighest,
           );
+        }
+      }
       if (botHighest === undefined || managedBarrier) {
         const error = managedBarrier
           ? `Cannot preserve the requested hierarchy because managed role ${managedBarrier.name} `

@@ -132,7 +132,13 @@ export class AutomationEngine {
    */
   private _holdMemberDepthHints = new Map<
     string,
-    Array<{ depth: number; events: readonly string[]; expiresAt: number }>
+    Array<{
+      depth: number;
+      events: readonly string[];
+      /** For role actions: the exact role the action touched. */
+      roleId: string | null;
+      expiresAt: number;
+    }>
   >();
   /** Mirrors the SQL lease interval in claim/renew RPCs. */
   private static readonly HOLD_EXECUTION_LEASE_MS = 2 * 60_000;
@@ -223,7 +229,17 @@ export class AutomationEngine {
             for (let index = queue.length - 1; index >= 0; index--) {
               if (queue[index]!.expiresAt < now) queue.splice(index, 1);
             }
-            const match = queue.findIndex((hint) => hint.events.includes(event.type));
+            const eventRoleId = typeof (data as { roleId?: unknown } | null)?.roleId === 'string'
+              ? (data as { roleId: string }).roleId
+              : null;
+            // A hint is consumable only by ITS action's event type AND, for
+            // role actions, the exact role it touched — role.gained for a
+            // DIFFERENT role during the window must neither inherit the depth
+            // nor spend the hint the real side effect still needs.
+            const match = queue.findIndex((hint) =>
+              hint.events.includes(event.type)
+              && (hint.roleId === null || hint.roleId === eventRoleId),
+            );
             if (match !== -1) {
               event._chainDepth = queue[match]!.depth;
               queue.splice(match, 1);
@@ -1004,7 +1020,11 @@ export class AutomationEngine {
     baseContext: ActionContext,
     affectedMemberIds: string[],
     assertLease?: () => void,
-    onMemberAction?: (memberId: string, actionType: string) => void,
+    onMemberAction?: (
+      memberId: string,
+      actionType: string,
+      actionRoleId: string | null,
+    ) => void,
   ): Promise<{ executed: number; failed: number; errors: string[] }> {
     if (affectedMemberIds.length === 0) {
       return executeActions(actions, baseContext);
@@ -1026,7 +1046,13 @@ export class AutomationEngine {
       }
       for (const memberId of affectedMemberIds) {
         assertLease?.();
-        onMemberAction?.(memberId, action.type);
+        onMemberAction?.(
+          memberId,
+          action.type,
+          typeof (action.config as { role_id?: unknown } | undefined)?.role_id === 'string'
+            ? (action.config as { role_id: string }).role_id
+            : null,
+        );
         let member = memberCache.get(memberId);
         if (member === undefined) {
           member = this.guild.members.cache.get(memberId)
@@ -1110,9 +1136,23 @@ export class AutomationEngine {
       const holdDepth = typeof hold.context_snapshot.chainDepth === 'number'
         ? hold.context_snapshot.chainDepth
         : 1;
-      const recordMemberDepthHint = (memberId: string, actionType: string) => {
+      const recordMemberDepthHint = (
+        memberId: string,
+        actionType: string,
+        actionRoleId: string | null,
+      ) => {
         const events = HOLD_ACTION_SIDE_EFFECT_EVENTS[actionType];
         if (!events || events.length === 0) return;
+        const roleId = actionType === 'give_role' || actionType === 'remove_role'
+          ? actionRoleId
+          : null;
+        // A role action whose target role is unknown cannot be correlated
+        // precisely; recording a wildcard hint would let an unrelated role
+        // event inherit the depth, so record nothing and accept that the
+        // side effect enters as a root.
+        if ((actionType === 'give_role' || actionType === 'remove_role') && roleId === null) {
+          return;
+        }
         const now = Date.now();
         for (const [key, queue] of this._holdMemberDepthHints) {
           for (let index = queue.length - 1; index >= 0; index--) {
@@ -1121,7 +1161,7 @@ export class AutomationEngine {
           if (queue.length === 0) this._holdMemberDepthHints.delete(key);
         }
         const queue = this._holdMemberDepthHints.get(memberId) ?? [];
-        queue.push({ depth: holdDepth, events, expiresAt: now + 10_000 });
+        queue.push({ depth: holdDepth, events, roleId, expiresAt: now + 10_000 });
         this._holdMemberDepthHints.set(memberId, queue);
       };
       let result: { executed: number; failed: number; errors: string[] };
