@@ -24,6 +24,7 @@ vi.mock('discord.js', () => ({
 describe('StatsChannelManager — failed identity write does not leak the channel', () => {
   function statsSupa(channelIdWriteError: { message: string } | null) {
     return {
+      rpc: vi.fn(async () => ({ data: null, error: { message: 'rpc unavailable' } })),
       from: vi.fn((table: string) => {
         const chain: any = {};
         for (const m of ['select', 'eq', 'neq', 'in', 'order', 'limit', 'is']) {
@@ -145,7 +146,12 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     adoptMatches?: boolean;
   }) {
     const updatePayloads: Array<Record<string, unknown>> = [];
+    const rpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
     const supabase = {
+      rpc: vi.fn(async (fn: string, args: Record<string, unknown>) => {
+        rpcCalls.push({ fn, args });
+        return { data: true, error: null };
+      }),
       from: vi.fn((table: string) => {
         const chain: any = {};
         let usedNeq = false;
@@ -194,7 +200,7 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
         return chain;
       }),
     } as any;
-    return { supabase, updatePayloads };
+    return { supabase, updatePayloads, rpcCalls };
   }
 
   function coll() {
@@ -243,7 +249,7 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
   it('persists the survivor pointer INSTEAD of deleting when the identity write fails', async () => {
     const StatsChannelManager = await load();
     const created = { id: 'vc-orphan', delete: vi.fn(async () => ({})) };
-    const { supabase, updatePayloads } = survivorSupa({
+    const { supabase, rpcCalls } = survivorSupa({
       configRows: [{ ...CONFIG_ROW }],
       scanRows: [],
       identityWriteFails: true,
@@ -255,13 +261,16 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     // The survivor became durable state, so the channel is NOT torn down —
     // the reconciler will adopt it as the counter on the next pass.
     expect(created.delete).not.toHaveBeenCalled();
-    expect(updatePayloads).toContainEqual({ pending_cleanup_channel_ids: ['vc-orphan'] });
+    expect(rpcCalls).toContainEqual({
+      fn: 'append_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_id: 'vc-orphan' },
+    });
   }, 20_000);
 
   it('adopts a survivor for an active config whose channel_id is still null', async () => {
     const StatsChannelManager = await load();
     const survivor = { id: 'vc-x', delete: vi.fn(async () => ({})) };
-    const { supabase, updatePayloads } = survivorSupa({
+    const { supabase, updatePayloads, rpcCalls } = survivorSupa({
       configRows: [],
       scanRows: [{
         id: 'sc-1', channel_id: null, active: true, pending_cleanup_channel_ids: ['vc-x'],
@@ -277,13 +286,16 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
 
     expect(survivor.delete).not.toHaveBeenCalled();
     expect(updatePayloads).toContainEqual({ channel_id: 'vc-x' });
-    expect(updatePayloads).toContainEqual({ pending_cleanup_channel_ids: [] });
+    expect(rpcCalls).toContainEqual({
+      fn: 'remove_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_ids: ['vc-x'] },
+    });
   });
 
   it('deletes a survivor owned by a deactivated config', async () => {
     const StatsChannelManager = await load();
     const survivor = { id: 'vc-x', delete: vi.fn(async () => ({})) };
-    const { supabase, updatePayloads } = survivorSupa({
+    const { supabase, rpcCalls } = survivorSupa({
       configRows: [],
       scanRows: [{
         id: 'sc-1', channel_id: null, active: false, pending_cleanup_channel_ids: ['vc-x'],
@@ -298,12 +310,15 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     mgr.stop?.();
 
     expect(survivor.delete).toHaveBeenCalledTimes(1);
-    expect(updatePayloads).toContainEqual({ pending_cleanup_channel_ids: [] });
+    expect(rpcCalls).toContainEqual({
+      fn: 'remove_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_ids: ['vc-x'] },
+    });
   });
 
   it('drops a survivor Discord confirms is already gone', async () => {
     const StatsChannelManager = await load();
-    const { supabase, updatePayloads } = survivorSupa({
+    const { supabase, rpcCalls } = survivorSupa({
       configRows: [],
       scanRows: [{
         id: 'sc-1', channel_id: null, active: false, pending_cleanup_channel_ids: ['vc-gone'],
@@ -321,7 +336,10 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     await mgr.start().catch(() => {});
     mgr.stop?.();
 
-    expect(updatePayloads).toContainEqual({ pending_cleanup_channel_ids: [] });
+    expect(rpcCalls).toContainEqual({
+      fn: 'remove_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_ids: ['vc-gone'] },
+    });
   });
 
   it('keeps a survivor whose deletion fails for the next pass', async () => {
@@ -332,7 +350,7 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
         throw new Error('missing permissions');
       }),
     };
-    const { supabase, updatePayloads } = survivorSupa({
+    const { supabase, rpcCalls } = survivorSupa({
       configRows: [],
       scanRows: [{
         id: 'sc-1', channel_id: null, active: false, pending_cleanup_channel_ids: ['vc-x'],
@@ -347,10 +365,10 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     mgr.stop?.();
 
     expect(survivor.delete).toHaveBeenCalledTimes(1);
-    // Nothing resolved, so the pointer list is NOT rewritten — the id stays
-    // durable for the next reconcile pass.
+    // Nothing resolved, so no removal is issued — the id stays durable for
+    // the next reconcile pass.
     expect(
-      updatePayloads.filter((payload) => 'pending_cleanup_channel_ids' in payload),
+      rpcCalls.filter((call) => call.fn === 'remove_stats_pending_cleanup'),
     ).toEqual([]);
   });
 
@@ -361,7 +379,7 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     // and goes through the same durable-disposal machinery as the abort path.
     const StatsChannelManager = await load();
     const created = { id: 'vc-dup', delete: vi.fn(async () => ({})) };
-    const { supabase, updatePayloads } = survivorSupa({
+    const { supabase, updatePayloads, rpcCalls } = survivorSupa({
       configRows: [{ ...CONFIG_ROW }],
       scanRows: [],
       adoptMatches: false,
@@ -372,7 +390,10 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     mgr.stop?.();
 
     // The loser recorded its duplicate durably instead of deleting blind…
-    expect(updatePayloads).toContainEqual({ pending_cleanup_channel_ids: ['vc-dup'] });
+    expect(rpcCalls).toContainEqual({
+      fn: 'append_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_id: 'vc-dup' },
+    });
     expect(created.delete).not.toHaveBeenCalled();
     // …and never force-wrote its own id over the winner's pointer.
     expect(
@@ -383,7 +404,7 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
   it('never deletes a survivor that IS the live counter channel', async () => {
     const StatsChannelManager = await load();
     const fetchChannel = vi.fn(async () => ({ id: 'vc-live', delete: vi.fn() }));
-    const { supabase, updatePayloads } = survivorSupa({
+    const { supabase, rpcCalls } = survivorSupa({
       configRows: [],
       scanRows: [{
         id: 'sc-1', channel_id: 'vc-live', active: true, pending_cleanup_channel_ids: ['vc-live'],
@@ -396,7 +417,10 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     // A prior pass adopted it but could not trim the list: the only work left
     // is dropping the id — touching Discord at all risks the live counter.
     expect(fetchChannel).not.toHaveBeenCalled();
-    expect(updatePayloads).toContainEqual({ pending_cleanup_channel_ids: [] });
+    expect(rpcCalls).toContainEqual({
+      fn: 'remove_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_ids: ['vc-live'] },
+    });
   });
 });
 

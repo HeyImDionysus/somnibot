@@ -299,6 +299,43 @@ describe('deployServerState — role creation', () => {
     ]);
   });
 
+  it('ignores a managed role far below the target band even after creation (round 13 P1)', async () => {
+    // Preflight scopes the barrier scan to the target band [botHighest - N,
+    // botHighest). The post-create check compared against the roles' initial
+    // bottom-of-list creation positions instead, so a low integration role
+    // that PASSED preflight failed the deployment after roles were already
+    // created (and, with cleanExisting, after deletions).
+    const guild = makeGuild();
+    guild.roles.cache.set('managed-low', {
+      id: 'managed-low',
+      name: 'Integration Low',
+      position: 2,
+      managed: true,
+      editable: false,
+    });
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: false, dryRun: false },
+    );
+
+    expect(result.success, JSON.stringify(result.errors)).toBe(true);
+    expect(guild.roles.setPositions).toHaveBeenCalledWith([
+      { role: 'new-role-Member', position: 8 },
+      { role: 'new-role-Admin', position: 9 },
+    ]);
+  });
+
   it('fails explicitly when a managed-role barrier blocks intended staff placement', async () => {
     const guild = makeGuild();
     guild.roles.cache.set('managed-member', {

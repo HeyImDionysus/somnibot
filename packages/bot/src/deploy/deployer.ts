@@ -354,14 +354,17 @@ export async function deployServerState(
         // bot so newly deployed moderators remain above surviving member roles.
         // Integration-managed roles form an immovable barrier; report that
         // explicitly instead of claiming success with an ineffective hierarchy.
+        // The barrier scan uses the TARGET band [lowestTargetPosition,
+        // botHighest) — the same bounds the preflight checked. Comparing
+        // against the roles' initial bottom-of-list creation positions treated
+        // every managed role in the guild as a barrier, so a deployment the
+        // preflight approved failed AFTER creation (and, with cleanExisting,
+        // after deletions).
         const lowestTargetPosition = botHighest - createdRoles.length;
-        const lowestCreatedPosition = Math.min(
-          ...createdRoleObjects.map((role) => role.position),
-        );
         const managedBarrier = [...guild.roles.cache.values()].find((role) =>
           role.managed
           && !createdRoles.some(({ discordId }) => discordId === role.id)
-          && role.position > lowestCreatedPosition
+          && role.position >= Math.max(lowestTargetPosition, 1)
           && role.position < botHighest,
         );
         if (managedBarrier) {

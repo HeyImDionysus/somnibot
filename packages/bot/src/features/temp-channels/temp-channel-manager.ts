@@ -176,6 +176,39 @@ export class TempChannelManager {
    * reconciler scans only claimed cleanup-pending rows, so terminalizing here
    * orphans the survivors invisibly and forever.
    */
+  /**
+   * Delete created channels with per-channel retries; returns the ids that
+   * still survive. A single rejected attempt must not demote a survivor to
+   * the durable-pointer path when a transient Discord fault would have
+   * cleared it on the next try — a TEXT survivor especially, which stale
+   * recovery's voice-channel heuristic can never find without its id.
+   */
+  private async deleteCreatedChannels(
+    targets: Array<{ channelId: string; remove: () => Promise<unknown> }>,
+  ): Promise<string[]> {
+    const survivors: string[] = [];
+    for (const target of targets) {
+      let deleted = false;
+      for (let attempt = 1; attempt <= 3 && !deleted; attempt++) {
+        try {
+          await target.remove();
+          deleted = true;
+        } catch (deleteError) {
+          if (attempt < 3) {
+            await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
+          } else {
+            log.warn('Created temp channel resisted deletion after retries:', {
+              channelId: target.channelId,
+              error: String(deleteError),
+            });
+          }
+        }
+      }
+      if (!deleted) survivors.push(target.channelId);
+    }
+    return survivors;
+  }
+
   private async persistCleanupJob(
     occurrenceId: string,
     survivingChannelIds: string[],
@@ -406,31 +439,45 @@ export class TempChannelManager {
         }
         if (!idsPersisted) {
           const abortTargets = [
-            { channelId: vc.id, promise: vc.delete('Temp channel id persistence failed') },
+            {
+              channelId: vc.id,
+              remove: () => vc.delete('Temp channel id persistence failed'),
+            },
             ...(textChannel
-              ? [{ channelId: textChannel.id, promise: textChannel.delete('Temp channel id persistence failed') }]
+              ? [{
+                  channelId: textChannel.id,
+                  remove: () => textChannel.delete('Temp channel id persistence failed'),
+                }]
               : []),
           ];
-          const abortResults = await Promise.allSettled(abortTargets.map((target) => target.promise));
-          const abortSurvivors = abortTargets
-            .filter((_, index) => abortResults[index]?.status === 'rejected')
-            .map((target) => target.channelId);
+          const abortSurvivors = await this.deleteCreatedChannels(abortTargets);
           if (abortSurvivors.length === 0) {
             externalRoomExists = false;
           } else {
-            // A rejected abort deletion leaves real survivors with NO ids on
+            // Retried abort deletions still left survivors with NO ids on
             // the claim (the id write is what just failed). Falling through to
             // the outer catch would terminalize the occurrence as `failed` —
             // and the reconciler scans only claimed cleanup-pending rows, so
             // the survivors would be orphaned permanently. Route them through
-            // the same durable cleanup machinery as the insert-failure branch;
-            // on exhaustion the claim stays claimed.
+            // the same durable cleanup machinery as the insert-failure branch.
             cleanupJobCommitted = await this.persistCleanupJob(
               occurrenceId,
               abortSurvivors,
               'Temp-channel id persistence failed and abort deletion was rejected',
             );
-            if (!cleanupJobCommitted) cleanupPersistExhausted = true;
+            if (!cleanupJobCommitted) {
+              // Neither Discord nor the database will take the survivors.
+              // A DELETED channel needs no pointer — try Discord once more
+              // before accepting the claimed-but-unidentifiable floor.
+              const finalSurvivors = await this.deleteCreatedChannels(
+                abortTargets.filter((target) => abortSurvivors.includes(target.channelId)),
+              );
+              if (finalSurvivors.length === 0) {
+                externalRoomExists = false;
+              } else {
+                cleanupPersistExhausted = true;
+              }
+            }
           }
           throw new Error('Failed to persist created temp-channel identities');
         }
@@ -448,22 +495,19 @@ export class TempChannelManager {
 
       const { error: recordError } = await this.supabase.from('active_temp_channels').insert(record);
       if (recordError) {
-        const cleanup: Array<{ channelId: string; promise: Promise<unknown> }> = [
+        const cleanup: Array<{ channelId: string; remove: () => Promise<unknown> }> = [
           {
             channelId: vc.id,
-            promise: vc.delete('Temp channel database record failed'),
+            remove: () => vc.delete('Temp channel database record failed'),
           },
         ];
         if (textChannel) {
           cleanup.push({
             channelId: textChannel.id,
-            promise: textChannel.delete('Temp channel database record failed'),
+            remove: () => textChannel.delete('Temp channel database record failed'),
           });
         }
-        const cleanupResults = await Promise.allSettled(cleanup.map((target) => target.promise));
-        const survivingChannelIds = cleanup
-          .filter((_, index) => cleanupResults[index]?.status === 'rejected')
-          .map((target) => target.channelId);
+        const survivingChannelIds = await this.deleteCreatedChannels(cleanup);
         if (survivingChannelIds.length === 0) {
           externalRoomExists = false;
         } else if (occurrenceId) {

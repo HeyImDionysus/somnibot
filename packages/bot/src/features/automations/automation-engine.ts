@@ -111,10 +111,14 @@ export class AutomationEngine {
    * hold released near MAX_CHAIN_DEPTH dropped them at the chain guard. A
    * hint is keyed by the member the action just touched, is one-shot, and
    * expires in seconds, so only genuinely correlated side effects inherit.
+   * Each member holds a QUEUE of per-action hints: several actions in one
+   * hold, or two concurrent holds at different depths, each contribute their
+   * own entry, consumed FIFO — a later hold must not replace an earlier
+   * hold's outstanding correlation state.
    */
   private _holdMemberDepthHints = new Map<
     string,
-    { depth: number; remaining: number; expiresAt: number }
+    Array<{ depth: number; expiresAt: number }>
   >();
   /** Mirrors the SQL lease interval in claim/renew RPCs. */
   private static readonly HOLD_EXECUTION_LEASE_MS = 2 * 60_000;
@@ -192,19 +196,17 @@ export class AutomationEngine {
             ? data.userId
             : typeof data?.discordId === 'string' ? data.discordId : null;
         if (candidate) {
-          const hint = this._holdMemberDepthHints.get(candidate);
-          if (hint) {
-            if (Date.now() <= hint.expiresAt) {
-              event._chainDepth = hint.depth;
-              // One hint per member-targeted ACTION: a hold that ran several
-              // event-producing actions for this member emits several gateway
-              // events, and the first must not consume the member's entire
-              // correlation state.
-              hint.remaining -= 1;
-              if (hint.remaining <= 0) this._holdMemberDepthHints.delete(candidate);
-            } else {
-              this._holdMemberDepthHints.delete(candidate);
-            }
+          const queue = this._holdMemberDepthHints.get(candidate);
+          if (queue) {
+            // One hint per member-targeted ACTION, consumed FIFO: a hold that
+            // ran several event-producing actions for this member emits
+            // several gateway events, and the first must not consume the
+            // member's entire correlation state.
+            const now = Date.now();
+            while (queue.length > 0 && queue[0]!.expiresAt < now) queue.shift();
+            const hint = queue.shift();
+            if (hint) event._chainDepth = hint.depth;
+            if (queue.length === 0) this._holdMemberDepthHints.delete(candidate);
           }
         }
       }
@@ -1088,20 +1090,13 @@ export class AutomationEngine {
         : 1;
       const recordMemberDepthHint = (memberId: string) => {
         const now = Date.now();
-        for (const [key, hint] of this._holdMemberDepthHints) {
-          if (hint.expiresAt < now) this._holdMemberDepthHints.delete(key);
+        for (const [key, queue] of this._holdMemberDepthHints) {
+          while (queue.length > 0 && queue[0]!.expiresAt < now) queue.shift();
+          if (queue.length === 0) this._holdMemberDepthHints.delete(key);
         }
-        const existing = this._holdMemberDepthHints.get(memberId);
-        if (existing && existing.depth === holdDepth) {
-          existing.remaining += 1;
-          existing.expiresAt = now + 10_000;
-        } else {
-          this._holdMemberDepthHints.set(memberId, {
-            depth: holdDepth,
-            remaining: 1,
-            expiresAt: now + 10_000,
-          });
-        }
+        const queue = this._holdMemberDepthHints.get(memberId) ?? [];
+        queue.push({ depth: holdDepth, expiresAt: now + 10_000 });
+        this._holdMemberDepthHints.set(memberId, queue);
       };
       let result: { executed: number; failed: number; errors: string[] };
       try {

@@ -26,6 +26,13 @@ interface DiscordRole {
 interface RoleSnapshot {
   roles: DiscordRole[];
   authoritative: boolean;
+  /**
+   * The snapshot's OWN timestamp (server snapshotAt), not the browser fetch
+   * time; authority EXPIRES past the age window while the picker stays
+   * mounted. Anchoring to fetch time would restart the ten-minute clock on an
+   * almost-expired snapshot.
+   */
+  snapshotAtMs: number;
 }
 
 interface RolePickerProps {
@@ -83,14 +90,18 @@ function hasValidRoleShape(value: unknown): value is DiscordRole {
     && typeof value.editableByBot === 'boolean';
 }
 
+export function roleSnapshotTimestampMs(payload: unknown): number | null {
+  if (!isRecord(payload) || typeof payload.snapshotAt !== 'string') return null;
+  const parsed = Date.parse(payload.snapshotAt);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export function isAuthoritativeRoleSnapshot(
   payload: unknown,
   nowMs = Date.now(),
 ): boolean {
   if (!isRecord(payload) || payload.awaitingSnapshot === true) return false;
-  const snapshotMs = typeof payload.snapshotAt === 'string'
-    ? Date.parse(payload.snapshotAt)
-    : Number.NaN;
+  const snapshotMs = roleSnapshotTimestampMs(payload) ?? Number.NaN;
   return payload.snapshotVersion === 2
     && Number.isFinite(snapshotMs)
     && nowMs - snapshotMs <= MAX_SNAPSHOT_AGE_MS
@@ -111,9 +122,12 @@ async function fetchRoles(): Promise<RoleSnapshot> {
   if (!json.success || !Array.isArray(json.data)) {
     throw new Error('Role lookup returned a non-authoritative response');
   }
+  // A non-authoritative payload may carry no snapshotAt; the fallback is
+  // inert because expiry is only consulted when authority already held.
   const snapshot = {
     roles: json.data as DiscordRole[],
     authoritative: isAuthoritativeRoleSnapshot(json),
+    snapshotAtMs: roleSnapshotTimestampMs(json) ?? Date.now(),
   };
   roleCache = { data: snapshot, ts: Date.now() };
   return snapshot;
@@ -173,6 +187,11 @@ export function RolePicker({
   const [roles, setRoles] = useState<DiscordRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [rolesAuthoritative, setRolesAuthoritative] = useState(false);
+  const [snapshotAtMs, setSnapshotAtMs] = useState(0);
+  // Ticks while mounted so authority can EXPIRE: a page left open past the
+  // snapshot's ten-minute validity must not keep enabling roles from stale
+  // editableByBot bits (same contract as the channel picker).
+  const [authorityNowMs, setAuthorityNowMs] = useState(() => Date.now());
   const [loadFailed, setLoadFailed] = useState(false);
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -189,6 +208,7 @@ export function RolePicker({
       .then((snapshot) => {
         setRoles(snapshot.roles);
         setRolesAuthoritative(snapshot.authoritative);
+        setSnapshotAtMs(snapshot.snapshotAtMs);
         setLoadFailed(false);
       })
       .catch(() => {
@@ -197,6 +217,18 @@ export function RolePicker({
       })
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    const tick = setInterval(() => setAuthorityNowMs(Date.now()), 30_000);
+    return () => clearInterval(tick);
+  }, []);
+
+  // Authority as of NOW, anchored to the snapshot's own timestamp. Once the
+  // snapshot outlives its validity window the picker treats assignability as
+  // unverifiable again — the same state a stale fetch would have produced.
+  const liveRolesAuthoritative = rolesAuthoritative
+    && snapshotAtMs > 0
+    && authorityNowMs - snapshotAtMs <= MAX_SNAPSHOT_AGE_MS;
 
   const filtered = useMemo(() => {
     let list = roles;
@@ -263,10 +295,10 @@ export function RolePicker({
     [selected, roles],
   );
   const missingSelected = useMemo(
-    () => missingRoleIds(selected, roles, rolesAuthoritative),
-    [selected, roles, rolesAuthoritative],
+    () => missingRoleIds(selected, roles, liveRolesAuthoritative),
+    [selected, roles, liveRolesAuthoritative],
   );
-  const unresolvedSelected = rolesAuthoritative ? [] : selected;
+  const unresolvedSelected = liveRolesAuthoritative ? [] : selected;
   const unreachableSelected = useMemo(
     () => requireAssignable
       ? selectedRoles.filter((role) => role.editableByBot === false)
@@ -440,7 +472,7 @@ export function RolePicker({
                 const assignIssue = roleAssignmentIssue(
                   role,
                   requireAssignable,
-                  rolesAuthoritative,
+                  liveRolesAuthoritative,
                 );
                 const cannotAssign = assignIssue !== null;
                 return (

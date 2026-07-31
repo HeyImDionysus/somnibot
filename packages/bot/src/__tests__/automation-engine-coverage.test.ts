@@ -594,9 +594,9 @@ describe('AutomationEngine', () => {
       const observedGlobalDepths: number[][] = [];
       mockExecuteActions.mockImplementation(async () => {
         const hints = (engine as unknown as {
-          _holdMemberDepthHints: Map<string, { depth: number }>;
+          _holdMemberDepthHints: Map<string, Array<{ depth: number }>>;
         })._holdMemberDepthHints;
-        observedHints.push(hints.get('10000000000000000')?.depth);
+        observedHints.push(hints.get('10000000000000000')?.[0]?.depth);
         observedGlobalDepths.push([
           ...(engine as unknown as { _activeDepths: Map<string, number> })._activeDepths.values(),
         ]);
@@ -638,12 +638,10 @@ describe('AutomationEngine', () => {
       // budget, reopening the mutual-trigger loop the hint exists to close.
       await engine.start();
       (engine as unknown as {
-        _holdMemberDepthHints: Map<string, { depth: number; remaining: number; expiresAt: number }>;
-      })._holdMemberDepthHints.set('20000000000000000', {
-        depth: 3,
-        remaining: 1,
-        expiresAt: Date.now() + 10_000,
-      });
+        _holdMemberDepthHints: Map<string, Array<{ depth: number; expiresAt: number }>>;
+      })._holdMemberDepthHints.set('20000000000000000', [
+        { depth: 3, expiresAt: Date.now() + 10_000 },
+      ]);
 
       const event = {
         type: 'role.gained',
@@ -665,16 +663,12 @@ describe('AutomationEngine', () => {
       // first meant the second entered handling as a fresh chain root.
       await engine.start();
       const hints = (engine as unknown as {
-        _holdMemberDepthHints: Map<
-          string,
-          { depth: number; remaining: number; expiresAt: number }
-        >;
+        _holdMemberDepthHints: Map<string, Array<{ depth: number; expiresAt: number }>>;
       })._holdMemberDepthHints;
-      hints.set('20000000000000000', {
-        depth: 3,
-        remaining: 2,
-        expiresAt: Date.now() + 10_000,
-      });
+      hints.set('20000000000000000', [
+        { depth: 3, expiresAt: Date.now() + 10_000 },
+        { depth: 3, expiresAt: Date.now() + 10_000 },
+      ]);
 
       const fire = async () => {
         const event = {
@@ -687,7 +681,7 @@ describe('AutomationEngine', () => {
       };
 
       expect(await fire()).toBe(3);
-      expect(hints.get('20000000000000000')?.remaining).toBe(1);
+      expect(hints.get('20000000000000000')?.length).toBe(1);
       expect(await fire()).toBe(3);
       expect(hints.size).toBe(0);
       // Correlation state spent: an unrelated third event is a fresh root.
@@ -721,14 +715,42 @@ describe('AutomationEngine', () => {
       await recordViaHold();
 
       const hints = (engine as unknown as {
-        _holdMemberDepthHints: Map<
-          string,
-          { depth: number; remaining: number; expiresAt: number }
-        >;
+        _holdMemberDepthHints: Map<string, Array<{ depth: number; expiresAt: number }>>;
       })._holdMemberDepthHints;
       // TWO member-targeted actions ran for the member → TWO consumable hints.
-      expect(hints.get('10000000000000000')?.remaining).toBe(2);
-      expect(hints.get('10000000000000000')?.depth).toBe(2);
+      expect(hints.get('10000000000000000')?.length).toBe(2);
+      expect(hints.get('10000000000000000')?.[0]?.depth).toBe(2);
+    });
+
+    it('preserves the hints of BOTH concurrent holds touching the same member (round 13 P1)', async () => {
+      // A second hold recording for the same member must APPEND, not replace:
+      // replacing dropped the first hold's outstanding correlation, so its
+      // gateway events consumed the second hold's depth and later side
+      // effects from either hold re-entered as fresh chain roots.
+      await engine.start();
+      const hints = (engine as unknown as {
+        _holdMemberDepthHints: Map<string, Array<{ depth: number; expiresAt: number }>>;
+      })._holdMemberDepthHints;
+      hints.set('20000000000000000', [
+        { depth: 2, expiresAt: Date.now() + 10_000 },
+        { depth: 4, expiresAt: Date.now() + 10_000 },
+      ]);
+
+      const fire = async () => {
+        const event = {
+          type: 'role.gained',
+          guildId: 'g1',
+          data: { discordId: '20000000000000000', roleId: 'role1', source: 'discord' },
+        } as { type: string; guildId: string; data: Record<string, unknown>; _chainDepth?: number };
+        await (eventBus._listeners[0] as (event: unknown) => Promise<void>)(event);
+        return event._chainDepth;
+      };
+
+      // FIFO: the first hold's event inherits ITS depth, then the second's.
+      expect(await fire()).toBe(2);
+      expect(await fire()).toBe(4);
+      expect(hints.size).toBe(0);
+      expect(await fire()).toBeUndefined();
     });
 
     it('stops bulk execution when the lease deadline passes without an acknowledged renewal', async () => {

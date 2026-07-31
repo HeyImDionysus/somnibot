@@ -69,3 +69,41 @@ describe('roleAssignmentIssue — requireAssignable fails closed without authori
     expect(roleAssignmentIssue({ editableByBot: false }, false, true)).toBeNull();
   });
 });
+
+describe('roleSnapshotTimestampMs — mounted expiry anchors to the SNAPSHOT time (round 13)', () => {
+  // Storing only the boolean verdict froze authority at fetch time: a page
+  // left open past the snapshot's ten-minute validity kept enabling stale
+  // editableByBot bits. The component seeds its expiry state from this parse
+  // of the server snapshotAt, mirroring the channel picker.
+  it('returns the parsed server timestamp', async () => {
+    const { roleSnapshotTimestampMs } = await import('@/components/shared/role-picker');
+    expect(roleSnapshotTimestampMs({ snapshotAt: '2026-07-31T03:51:00.000Z' }))
+      .toBe(Date.parse('2026-07-31T03:51:00.000Z'));
+  });
+
+  it('returns null when snapshotAt is missing or unparseable', async () => {
+    const { roleSnapshotTimestampMs } = await import('@/components/shared/role-picker');
+    expect(roleSnapshotTimestampMs({})).toBeNull();
+    expect(roleSnapshotTimestampMs({ snapshotAt: 'not-a-date' })).toBeNull();
+    expect(roleSnapshotTimestampMs(null)).toBeNull();
+  });
+
+  it('an almost-expired snapshot is authoritative at fetch but expires on ITS clock', async () => {
+    const { isAuthoritativeRoleSnapshot, roleSnapshotTimestampMs } =
+      await import('@/components/shared/role-picker');
+    const NOW = Date.parse('2026-07-31T04:00:00.000Z');
+    const payload = {
+      snapshotVersion: 2,
+      snapshotAt: new Date(NOW - (10 * 60_000 - 1_000)).toISOString(),
+      data: [{
+        id: 'role-1', name: 'Mod', color: 0, position: 3, editableByBot: true,
+      }],
+    };
+    expect(isAuthoritativeRoleSnapshot(payload, NOW)).toBe(true);
+    const anchor = roleSnapshotTimestampMs(payload);
+    expect(anchor).not.toBeNull();
+    // The same age math flips authority two seconds later, not in ten minutes.
+    expect(NOW + 2_000 - (anchor as number) > 10 * 60_000).toBe(true);
+  });
+});
+

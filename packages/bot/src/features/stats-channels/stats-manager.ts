@@ -295,9 +295,12 @@ export class StatsChannelManager {
 
   /**
    * Durably record an abort survivor on its stats_channels row so the
-   * reconciler owns it by id. Read-merge-write with a read-back: a write that
-   * matched no row (config deleted mid-flight) is a FAILED persist, because
-   * the pointer would not exist anywhere.
+   * reconciler owns it by id. The append is a single-statement RPC — two
+   * processes losing the same identity race must BOTH keep their pointer; a
+   * read-merge-write here let the last writer drop the other duplicate's
+   * only durable record. A call that matched no row (config deleted
+   * mid-flight) is a FAILED persist, because the pointer would not exist
+   * anywhere.
    */
   private async persistPendingCleanup(
     config: StatsChannelConfig,
@@ -305,27 +308,18 @@ export class StatsChannelManager {
   ): Promise<boolean> {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const { data: row, error: readError } = await this.supabase
-          .from('stats_channels')
-          .select('pending_cleanup_channel_ids')
-          .eq('id', config.id)
-          .maybeSingle();
-        if (readError) throw new Error(readError.message);
-        if (!row) throw new Error('stats channel row no longer exists');
-        const existing = Array.isArray(row.pending_cleanup_channel_ids)
-          ? (row.pending_cleanup_channel_ids as unknown[])
-            .filter((id): id is string => typeof id === 'string')
+        const { data, error } = await this.supabase.rpc('append_stats_pending_cleanup', {
+          p_config_id: config.id,
+          p_channel_id: channelId,
+        });
+        if (error) throw new Error(error.message);
+        if (data !== true) throw new Error('stats channel row no longer exists');
+        const known = Array.isArray(config.pending_cleanup_channel_ids)
+          ? config.pending_cleanup_channel_ids
           : [];
-        const merged = existing.includes(channelId) ? existing : [...existing, channelId];
-        const { data: updated, error: writeError } = await this.supabase
-          .from('stats_channels')
-          .update({ pending_cleanup_channel_ids: merged })
-          .eq('id', config.id)
-          .select('id')
-          .maybeSingle();
-        if (writeError) throw new Error(writeError.message);
-        if (!updated) throw new Error('stats channel row no longer exists');
-        config.pending_cleanup_channel_ids = merged;
+        if (!known.includes(channelId)) {
+          config.pending_cleanup_channel_ids = [...known, channelId];
+        }
         log.warn(
           `Stats channel ${channelId} recorded for recovery after its identity write failed`,
         );
@@ -434,11 +428,15 @@ export class StatsChannelManager {
           remaining.push(channelId);
         }
       }
-      if (remaining.length !== pending.length) {
-        const { error: trimError } = await this.supabase
-          .from('stats_channels')
-          .update({ pending_cleanup_channel_ids: remaining })
-          .eq('id', row.id);
+      const resolvedIds = pending.filter((channelId) => !remaining.includes(channelId));
+      if (resolvedIds.length > 0) {
+        // Remove exactly the RESOLVED ids in one statement so a concurrent
+        // append (another process recording its own survivor) is never
+        // overwritten by this trim.
+        const { error: trimError } = await this.supabase.rpc(
+          'remove_stats_pending_cleanup',
+          { p_config_id: row.id, p_channel_ids: resolvedIds },
+        );
         if (trimError) {
           log.error('Failed to trim stats-channel cleanup state:', {
             statsChannelId: row.id,
@@ -446,7 +444,10 @@ export class StatsChannelManager {
           });
         } else {
           const local = this.channels.find((config) => config.id === row.id);
-          if (local) local.pending_cleanup_channel_ids = remaining;
+          if (local) {
+            local.pending_cleanup_channel_ids = (local.pending_cleanup_channel_ids ?? [])
+              .filter((channelId) => !resolvedIds.includes(channelId));
+          }
         }
       }
     }
