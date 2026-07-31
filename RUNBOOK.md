@@ -238,12 +238,16 @@ fire when the bot is down. All are money-path; treat them as page-worthy.
 
 Runs inside the **dashboard** container (not the bot — that is the point: it
 must work when the bot is the broken thing). It self-schedules every 6h,
-starting 5 minutes after boot, and compares PayPal's Transaction Search ledger
-against `payments.paypal_payment_id` and
-`payment_refunds.paypal_refund_id` in both directions over a rolling 7-day
-window. Every partial refund/reversal sibling is compared independently,
-including exact amount and currency. The most recent 6h is excluded so
-PayPal's reporting lag does not produce false findings.
+starting 5 minutes after boot, and verifies the ledger **per object** over a
+rolling 7-day window: every `payments.paypal_payment_id` capture, every
+`payment_refunds.paypal_refund_id` refund, pending orders and settled orders
+with no payment write (by `orders.paypal_order_id`), and subscription billing
+(by `orders.paypal_subscription_id`) are each fetched directly from PayPal's
+commerce API — the same GETs the webhook handler and refund routes use. It
+detects money settled at PayPal with no local row, local rows PayPal cannot
+evidence, provider-side refunds that never landed locally, and exact
+amount/currency drift. The most recent 15 minutes are excluded so in-flight
+webhooks do not produce false findings.
 
 ```bash
 # Last pass summary (as the signed-in owner, or with the scheduler secret)
@@ -256,8 +260,10 @@ curl -fsS -X POST -H "X-Reconcile-Secret: $PAYPAL_RECONCILE_SECRET" \
 ```
 
 Requirements and knobs:
-- The PayPal REST app must have the **Transaction Search** permission, or every
-  pass fails with a 403 (reported as non-retriable).
+- A bare PayPal REST app (client id/secret from the setup wizard) is
+  sufficient: reconciliation uses only per-object commerce GETs. It does NOT
+  use PayPal's separately entitled reporting product (Transaction Search) —
+  operators never need to enable extra app features.
 - `PAYPAL_RECONCILE_SECRET` is optional and only opens the machine-triggered
   path; unset means only the signed-in owner can trigger a pass by hand.
 - `PAYPAL_RECONCILE_DISABLED=1` turns the in-dashboard scheduler off.
@@ -309,9 +315,10 @@ SELECT cleanup_old_records('webhook_events', 30);
 Before enabling live payments, run `pnpm paypal:sandbox-pass` with
 `PAYPAL_SANDBOX=true`, the exact sandbox API base, and sandbox application
 credentials supplied through the deployment secret channel. The pass refuses
-the live PayPal hostname. It verifies OAuth, Transaction Search permission and
-response shape, the disputes-list response shape, and `PayPal-Request-Id`
-idempotency by creating and replaying one unapproved USD 1.00 sandbox order.
+the live PayPal hostname. It verifies OAuth, the disputes-list response shape,
+`PayPal-Request-Id` idempotency by creating and replaying one unapproved
+USD 1.00 sandbox order, and the per-object read rail by fetching that exact
+order back — the same GET the webhook handler and reconciliation use.
 The order is never approved or captured, so it moves no money and expires at
 PayPal.
 

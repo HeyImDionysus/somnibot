@@ -104,7 +104,7 @@ does not read `.env`.
 | 42 | Temp channels | Live `/voice`; hub/template/control, cleanup, occurrence, audit, and permission tests. | Join a hub and judge room message/control UX. |
 | 43 | Stats channels | Stats lifecycle, throttling, alert, cleanup, and audit tests. | Inspect names and update cadence in Discord. |
 | 44 | Store/promotions | Live `/store`; products, promotions, control-room, tenant, entitlement, and PayPal-readiness tests. | Create a sandbox product/promotion and judge dashboard UX. |
-| 45 | PayPal sandbox checkout | Checkout/webhook/refund/reconcile/idempotency tests; live sandbox authentication passed, disputes shape passed, and request-ID replay returned the same unapproved order. **Transaction Search is externally blocked by PayPal `403 NOT_AUTHORIZED`.** | Enable Transaction Search permission, rerun `pnpm paypal:sandbox-pass`, then complete buyer approval and judge checkout/return UX. |
+| 45 | PayPal sandbox checkout | Checkout/webhook/refund/reconcile/idempotency tests; live sandbox authentication passed, disputes shape passed, and request-ID replay returned the same unapproved order. Reconciliation and the sandbox pass were rebuilt onto SomniBot's per-object PayPal model (direct order/capture/refund/subscription GETs — no reporting-product entitlement needed; the earlier `403 NOT_AUTHORIZED` came from probing Transaction Search, which the product does not use). | Rerun `pnpm paypal:sandbox-pass` (order readback replaces the retired reporting probe), then complete buyer approval and judge checkout/return UX. |
 | 46 | Orders/customers/licenses | Order, customer, entitlement, license lifecycle/session/heartbeat/tenancy tests and DB integration. | Inspect populated pages after the approved sandbox purchase. |
 | 47 | Receipt DM | Receipt builder/delivery, branding, license-key, and failure tests. | Inspect the real DM after the approved sandbox purchase. |
 | 48 | Customer portal | Portal auth/scope, device removal, key rotation, session reuse, and license tests. | Judge buyer sign-in and device/key controls. |
@@ -123,9 +123,12 @@ does not read `.env`.
 
 ## Current blockers and residual live work
 
-1. PayPal Transaction Search permission is denied by the sandbox account
-   (`403 NOT_AUTHORIZED`). Credentials and the other sandbox capabilities are
-   valid. This is an external account permission, not a missing-credential gate.
+1. ~~PayPal Transaction Search permission is denied by the sandbox account~~
+   Resolved: that probe exercised PayPal's separately entitled reporting
+   product, which SomniBot's per-object PayPal model never needed.
+   Reconciliation and the sandbox pass now verify the exact orders, captures,
+   refunds, and subscriptions the ledger stored, over the same commerce API
+   the webhook handler uses — available to every bare REST app.
 2. The remaining actions in the last column are the human aesthetic pass or
    deliberately controlled external-event checks. They do not replace the
    functional evidence above.

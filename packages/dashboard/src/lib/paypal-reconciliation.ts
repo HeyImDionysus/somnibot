@@ -26,12 +26,15 @@ type AdminSupabase = ReturnType<typeof createAdminSupabase>;
 // ── Tunables and durable identities ────────────────────────────────────────
 
 export const DEFAULT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-export const DEFAULT_SETTLEMENT_LAG_MS = 6 * 60 * 60 * 1000;
+// Per-object commerce GETs are live (unlike the retired reporting sweep,
+// which lagged by hours); the lag only needs to absorb webhook/capture
+// latency so an order completed seconds ago is not flagged mid-flight.
+export const DEFAULT_SETTLEMENT_LAG_MS = 15 * 60 * 1000;
 export const DEFAULT_LEASE_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
-const PROVIDER_PAGE_SIZE = 500;
-const PROVIDER_MAX_PAGES = 40;
+const PROVIDER_CONCURRENCY = 5;
+const PROVIDER_TIMEOUT_MS = 15_000;
 const LOCAL_PAGE_SIZE = 1000;
 const EXACT_LOOKUP_CHUNK_SIZE = 100;
 export const LOCAL_SCAN_MAX_ROWS = 20_000;
@@ -41,12 +44,6 @@ export const RECONCILE_LAST_RESULT_KEY = 'paypal_reconcile_last_result';
 export const RECONCILE_ALERT_TYPE = 'paypal_reconciliation_mismatch';
 export const RECONCILE_FAILURE_ALERT_TYPE = 'paypal_reconciliation_failure';
 
-const PAYMENT_EVENT_CODES = new Set(['T0006', 'T0002']);
-const REFUND_EVENT_CODES = new Set(['T1106', 'T1107']);
-const SUPPORTED_EVENT_CODES = new Set([
-  ...PAYMENT_EVENT_CODES,
-  ...REFUND_EVENT_CODES,
-]);
 const ORDER_SCAN_STATUSES = [
   'completed',
   'disputed',
@@ -65,29 +62,51 @@ export interface SomniBotTransactionIdentity {
   planId: string | null;
 }
 
-export interface ProviderTransaction {
-  kind: 'payment' | 'refund';
-  transactionId: string;
+export interface ProviderCaptureObject {
+  status: string;
   amountCents: number;
   currency: string;
-  status: 'S';
-  eventCode: 'T0006' | 'T0002' | 'T1106' | 'T1107';
-  initiatedAt: string | null;
-  referenceId: string | null;
-  referenceType: 'ODR' | 'SUB' | 'TXN' | null;
-  customIdentity: SomniBotTransactionIdentity | null;
+}
+
+export interface ProviderRefundObject {
+  status: string;
+  amountCents: number;
+  currency: string;
+}
+
+export interface ProviderOrderCapture {
+  id: string;
+  status: string;
+  amountCents: number;
+  currency: string;
+}
+
+export interface ProviderOrderObject {
+  status: string;
+  customId: string | null;
+  subscriptionId: string | null;
+  captures: ProviderOrderCapture[];
+}
+
+export interface ProviderSubscriptionObject {
+  status: string;
+  lastPaymentTime: string | null;
+  lastPaymentAmountCents: number | null;
+  lastPaymentCurrency: string | null;
 }
 
 export interface MissingLocalPayment {
   kind: 'payment' | 'refund';
+  /** The provider object id evidencing the money movement (capture/sale id). */
   transactionId: string;
   guildId: string;
   amountCents: number;
   currency: string;
   initiatedAt: string | null;
-  eventCode: ProviderTransaction['eventCode'];
+  /** Which per-object verification surfaced it. */
+  source: 'order' | 'capture' | 'subscription';
+  /** The parent provider object (order id, capture id, or subscription id). */
   referenceId: string | null;
-  referenceType: ProviderTransaction['referenceType'];
 }
 
 export interface MissingProviderPayment {
@@ -215,12 +234,6 @@ interface LocalPaymentIdentityRow {
   paypal_payment_id: string | null;
 }
 
-interface AttributedProviderTransaction {
-  transaction: ProviderTransaction;
-  guildId: string;
-  referencedOrderId: string | null;
-}
-
 type ScanResult<T> =
   | { ok: true; rows: T[] }
   | { ok: false; reason: string; retriable: boolean };
@@ -326,300 +339,245 @@ function parseCustomIdentity(value: unknown): SomniBotTransactionIdentity | null
 
 // ── PayPal Transaction Search ──────────────────────────────────────────────
 
-function toPayPalDate(ms: number): string {
-  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, '.000Z');
+// ── Per-object provider verification ───────────────────────────────────────────
+//
+// SomniBot does PayPal per-object: every order/capture/refund/subscription id
+// in the local ledger was stored when WE created or confirmed that object, so
+// reconciliation asks PayPal about exactly those objects over the same
+// commerce API the webhook handler and refund/cancel routes already use.
+// This works with a bare REST app (client id/secret) for every
+// wizard-onboarded operator. The previous implementation swept
+// /v1/reporting/transactions — PayPal's separately entitled reporting
+// product — which 403s for standard operator apps and lags settlement by
+// hours; it could never run in the white-label credential model.
+
+type ProviderFetch<T> =
+  | { ok: true; found: true; value: T }
+  | { ok: true; found: false }
+  | { ok: false; retriable: boolean; reason: string };
+
+async function providerGet(
+  apiBase: string,
+  token: string,
+  path: string,
+  label: string,
+): Promise<ProviderFetch<Record<string, unknown>>> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase}${path}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      retriable: true,
+      reason: `${label} request failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+  if (response.status === 404) return { ok: true, found: false };
+  if (!response.ok) {
+    return {
+      ok: false,
+      retriable: response.status >= 500 || response.status === 429,
+      reason: `${label} returned ${response.status}`,
+    };
+  }
+  try {
+    const parsed: unknown = await response.json();
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, retriable: false, reason: `${label} returned a malformed envelope` };
+    }
+    return { ok: true, found: true, value: parsed as Record<string, unknown> };
+  } catch {
+    return { ok: false, retriable: true, reason: `${label} returned malformed JSON` };
+  }
 }
 
-type ProviderTransactionParse =
-  | { kind: 'ignored' }
-  | { kind: 'malformed' }
-  | { kind: 'transaction'; transaction: ProviderTransaction };
-
-function readTransaction(entry: unknown): ProviderTransactionParse {
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-    return { kind: 'malformed' };
-  }
-  const info = (entry as { transaction_info?: unknown }).transaction_info;
-  if (!info || typeof info !== 'object' || Array.isArray(info)) {
-    return { kind: 'malformed' };
-  }
-  const record = info as Record<string, unknown>;
-
-  if (
-    typeof record.transaction_status !== 'string'
-    || !/^[A-Z]$/.test(record.transaction_status)
-    || typeof record.transaction_event_code !== 'string'
-    || !/^T\d{4}$/.test(record.transaction_event_code)
-  ) return { kind: 'malformed' };
-  if (record.transaction_status !== 'S') return { kind: 'ignored' };
-  if (!SUPPORTED_EVENT_CODES.has(record.transaction_event_code)) {
-    return { kind: 'ignored' };
-  }
-  if (!isProviderId(record.transaction_id)) return { kind: 'malformed' };
-
-  const amount = record.transaction_amount as
-    { value?: unknown; currency_code?: unknown } | undefined;
-  const parsedAmountCents = parseAmountToCents(amount?.value);
-  const currency = normalizeCurrency(amount?.currency_code);
-  const eventCode = record.transaction_event_code as ProviderTransaction['eventCode'];
-  const kind = REFUND_EVENT_CODES.has(eventCode) ? 'refund' : 'payment';
-  if (
-    parsedAmountCents === null
-    || currency === null
-    || (kind === 'payment' && parsedAmountCents <= 0)
-    || (kind === 'refund' && parsedAmountCents >= 0)
-  ) {
-    return { kind: 'malformed' };
-  }
-  const amountCents = kind === 'refund' ? -parsedAmountCents : parsedAmountCents;
-
-  const hasReferenceId = Object.prototype.hasOwnProperty.call(record, 'paypal_reference_id');
-  const hasReferenceType =
-    Object.prototype.hasOwnProperty.call(record, 'paypal_reference_id_type');
-  if (hasReferenceId !== hasReferenceType || (kind === 'refund' && !hasReferenceId)) {
-    return { kind: 'malformed' };
-  }
-  let referenceId: string | null = null;
-  let referenceType: ProviderTransaction['referenceType'] = null;
-  if (hasReferenceId) {
-    if (
-      !isProviderId(record.paypal_reference_id)
-      || !['ODR', 'SUB', 'TXN'].includes(String(record.paypal_reference_id_type))
-    ) {
-      return { kind: 'malformed' };
-    }
-    referenceId = record.paypal_reference_id;
-    referenceType = record.paypal_reference_id_type as 'ODR' | 'SUB' | 'TXN';
-    const referenceMatchesEvent =
-      (eventCode === 'T0006' && referenceType === 'ODR')
-      || (eventCode === 'T0002' && referenceType === 'SUB')
-      || (REFUND_EVENT_CODES.has(eventCode) && referenceType === 'TXN');
-    if (!referenceMatchesEvent) return { kind: 'malformed' };
-  }
-
-  const parsedIdentity = parseCustomIdentity(record.custom_field);
-  const customIdentity = kind === 'refund'
-    || (eventCode === 'T0002' && parsedIdentity?.planId === null)
-    ? null
-    : parsedIdentity;
-
+function readProviderAmount(
+  record: unknown,
+): { amountCents: number | null; currency: string | null } {
+  const amount = record as { value?: unknown; currency_code?: unknown } | null | undefined;
   return {
-    kind: 'transaction',
-    transaction: {
-      kind,
-      transactionId: record.transaction_id,
-      amountCents,
-      currency,
-      status: 'S',
-      eventCode,
-      initiatedAt: typeof record.transaction_initiation_date === 'string'
-        ? record.transaction_initiation_date
-        : null,
-      referenceId,
-      referenceType,
-      customIdentity,
+    amountCents: parseAmountToCents(amount?.value),
+    currency: normalizeCurrency(amount?.currency_code),
+  };
+}
+
+export async function fetchProviderCapture(
+  apiBase: string,
+  token: string,
+  captureId: string,
+): Promise<ProviderFetch<ProviderCaptureObject>> {
+  const result = await providerGet(
+    apiBase,
+    token,
+    `/v2/payments/captures/${encodeURIComponent(captureId)}`,
+    'capture lookup',
+  );
+  if (!result.ok || !result.found) return result;
+  const record = result.value;
+  const { amountCents, currency } = readProviderAmount(record.amount);
+  if (
+    typeof record.status !== 'string'
+    || record.status.length === 0
+    || amountCents === null
+    || currency === null
+  ) {
+    return { ok: false, retriable: false, reason: 'capture lookup returned a malformed record' };
+  }
+  return { ok: true, found: true, value: { status: record.status, amountCents, currency } };
+}
+
+export async function fetchProviderRefund(
+  apiBase: string,
+  token: string,
+  refundId: string,
+): Promise<ProviderFetch<ProviderRefundObject>> {
+  const result = await providerGet(
+    apiBase,
+    token,
+    `/v2/payments/refunds/${encodeURIComponent(refundId)}`,
+    'refund lookup',
+  );
+  if (!result.ok || !result.found) return result;
+  const record = result.value;
+  const { amountCents, currency } = readProviderAmount(record.amount);
+  if (
+    typeof record.status !== 'string'
+    || record.status.length === 0
+    || amountCents === null
+    || currency === null
+  ) {
+    return { ok: false, retriable: false, reason: 'refund lookup returned a malformed record' };
+  }
+  return { ok: true, found: true, value: { status: record.status, amountCents, currency } };
+}
+
+export async function fetchProviderOrder(
+  apiBase: string,
+  token: string,
+  orderId: string,
+): Promise<ProviderFetch<ProviderOrderObject>> {
+  const result = await providerGet(
+    apiBase,
+    token,
+    `/v2/checkout/orders/${encodeURIComponent(orderId)}`,
+    'order lookup',
+  );
+  if (!result.ok || !result.found) return result;
+  const record = result.value;
+  if (typeof record.status !== 'string' || record.status.length === 0) {
+    return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
+  }
+  const units = Array.isArray(record.purchase_units) ? record.purchase_units : [];
+  const captures: ProviderOrderCapture[] = [];
+  let customId: string | null = null;
+  for (const unit of units) {
+    if (!unit || typeof unit !== 'object' || Array.isArray(unit)) {
+      return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
+    }
+    const unitRecord = unit as Record<string, unknown>;
+    if (customId === null && typeof unitRecord.custom_id === 'string') {
+      customId = unitRecord.custom_id;
+    }
+    const payments = unitRecord.payments as { captures?: unknown } | undefined;
+    const unitCaptures = Array.isArray(payments?.captures) ? payments.captures : [];
+    for (const capture of unitCaptures) {
+      if (!capture || typeof capture !== 'object' || Array.isArray(capture)) {
+        return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
+      }
+      const captureRecord = capture as Record<string, unknown>;
+      const { amountCents, currency } = readProviderAmount(captureRecord.amount);
+      if (
+        !isProviderId(captureRecord.id)
+        || typeof captureRecord.status !== 'string'
+        || amountCents === null
+        || currency === null
+      ) {
+        return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
+      }
+      captures.push({
+        id: captureRecord.id,
+        status: captureRecord.status,
+        amountCents,
+        currency,
+      });
+    }
+  }
+  return {
+    ok: true,
+    found: true,
+    value: {
+      status: record.status,
+      customId,
+      subscriptionId: isProviderId(record.subscription_id) ? record.subscription_id : null,
+      captures,
     },
   };
 }
 
-export async function fetchProviderTransactions(
+export async function fetchProviderSubscription(
   apiBase: string,
   token: string,
-  windowStartMs: number,
-  windowEndMs: number,
-): Promise<
-  { ok: true; transactions: ProviderTransaction[] }
-  | { ok: false; retriable: boolean; reason: string }
-> {
-  const transactions: ProviderTransaction[] = [];
-  const seen = new Set<string>();
-  let expectedTotalPages: number | null = null;
-  let expectedTotalItems: number | null = null;
-  let rawItemsSeen = 0;
-
-  for (let page = 1; page <= PROVIDER_MAX_PAGES; page++) {
-    const params = new URLSearchParams({
-      start_date: toPayPalDate(windowStartMs),
-      end_date: toPayPalDate(windowEndMs),
-      fields: 'transaction_info',
-      transaction_status: 'S',
-      // PayPal documents transaction ids as unique only inside the
-      // balance-affecting result set. Pin the default explicitly.
-      balance_affecting_records_only: 'Y',
-      page_size: String(PROVIDER_PAGE_SIZE),
-      page: String(page),
-    });
-
-    let response: Response;
-    try {
-      response = await fetch(`${apiBase}/v1/reporting/transactions?${params}`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        signal: AbortSignal.timeout(30_000),
-      });
-    } catch (error) {
-      return {
-        ok: false,
-        retriable: true,
-        reason: `transaction search request failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      };
-    }
-
-    if (!response.ok) {
-      return {
-        ok: false,
-        retriable: response.status >= 500 || response.status === 429,
-        reason: response.status === 403
-          ? 'transaction search returned 403 — enable the "Transaction Search" permission on the PayPal REST app'
-          : `transaction search returned ${response.status}`,
-      };
-    }
-
-    let body: Record<string, unknown>;
-    try {
-      const parsed: unknown = await response.json();
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        return {
-          ok: false,
-          retriable: false,
-          reason: 'transaction search returned a malformed envelope',
-        };
-      }
-      body = parsed as Record<string, unknown>;
-    } catch {
-      return {
-        ok: false,
-        retriable: true,
-        reason: 'transaction search returned malformed JSON',
-      };
-    }
-
-    const details = body.transaction_details;
-    const responsePage = body.page;
-    const totalPages = body.total_pages;
-    const totalItems = body.total_items;
-    if (
-      !Array.isArray(details)
-      || typeof responsePage !== 'number'
-      || !Number.isSafeInteger(responsePage)
-      || responsePage < 1
-      || typeof totalPages !== 'number'
-      || !Number.isSafeInteger(totalPages)
-      || totalPages < 0
-      || typeof totalItems !== 'number'
-      || !Number.isSafeInteger(totalItems)
-      || totalItems < 0
-    ) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: 'transaction search returned a malformed envelope',
-      };
-    }
-    if (responsePage !== page) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: 'transaction search returned an unexpected page number',
-      };
-    }
-    if (totalItems === 0) {
-      return page === 1 && totalPages === 0 && details.length === 0
-        ? { ok: true, transactions: [] }
-        : {
-            ok: false,
-            retriable: false,
-            reason: 'transaction search returned incoherent zero-result pagination',
-          };
-    }
-    if (totalPages < 1 || page > totalPages) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: 'transaction search returned invalid pagination metadata',
-      };
-    }
-    if (totalPages > PROVIDER_MAX_PAGES) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: `transaction search exceeded ${PROVIDER_MAX_PAGES} pages — narrow the window`,
-      };
-    }
-    if (expectedTotalPages !== null && totalPages !== expectedTotalPages) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: 'transaction search returned inconsistent pagination metadata',
-      };
-    }
-    expectedTotalPages = totalPages;
-    if (expectedTotalItems !== null && totalItems !== expectedTotalItems) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: 'transaction search returned inconsistent total_items metadata',
-      };
-    }
-    expectedTotalItems = totalItems;
-    rawItemsSeen += details.length;
-    if (rawItemsSeen > totalItems) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: 'transaction search returned more items than total_items',
-      };
-    }
-
-    for (const entry of details) {
-      const parsed = readTransaction(entry);
-      if (parsed.kind === 'ignored') continue;
-      if (parsed.kind === 'malformed') {
-        return {
-          ok: false,
-          retriable: false,
-          reason: 'transaction search returned a malformed supported payment record',
-        };
-      }
-      const transaction = parsed.transaction;
-      if (seen.has(transaction.transactionId)) {
-        return {
-          ok: false,
-          retriable: false,
-          reason: 'transaction search returned duplicate transaction ids',
-        };
-      }
-      seen.add(transaction.transactionId);
-      transactions.push(transaction);
-    }
-
-    if (details.length === 0) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: 'transaction search returned an empty positive-result page',
-      };
-    }
-    if (page >= totalPages) {
-      return rawItemsSeen === totalItems
-        ? { ok: true, transactions }
-        : {
-            ok: false,
-            retriable: false,
-            reason: 'transaction search item count is incomplete',
-          };
-    }
+  subscriptionId: string,
+): Promise<ProviderFetch<ProviderSubscriptionObject>> {
+  const result = await providerGet(
+    apiBase,
+    token,
+    `/v1/billing/subscriptions/${encodeURIComponent(subscriptionId)}`,
+    'subscription lookup',
+  );
+  if (!result.ok || !result.found) return result;
+  const record = result.value;
+  if (typeof record.status !== 'string' || record.status.length === 0) {
+    return {
+      ok: false,
+      retriable: false,
+      reason: 'subscription lookup returned a malformed record',
+    };
   }
-
+  const billing = record.billing_info as
+    { last_payment?: { time?: unknown; amount?: unknown } } | undefined;
+  const lastPayment = billing?.last_payment;
+  const { amountCents, currency } = readProviderAmount(lastPayment?.amount);
   return {
-    ok: false,
-    retriable: false,
-    reason: `transaction search exceeded ${PROVIDER_MAX_PAGES} pages — narrow the window`,
+    ok: true,
+    found: true,
+    value: {
+      status: record.status,
+      lastPaymentTime: typeof lastPayment?.time === 'string' ? lastPayment.time : null,
+      lastPaymentAmountCents: amountCents,
+      lastPaymentCurrency: currency,
+    },
   };
+}
+
+/** Bounded-concurrency map preserving order; provider GETs are I/O-bound. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  handler: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(limit, items.length)) },
+    async () => {
+      while (true) {
+        const index = next++;
+        if (index >= items.length) return;
+        results[index] = await handler(items[index]);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
 }
 
 // ── Lease ownership ────────────────────────────────────────────────────────
@@ -1123,8 +1081,9 @@ async function lookupPaymentsByExactColumn(
   return { ok: true, rows: found };
 }
 
-async function lookupRefundsByProviderId(
+async function lookupRefundsByExactColumn(
   supabase: AdminSupabase,
+  column: 'paypal_refund_id' | 'payment_id',
   values: string[],
 ): Promise<ScanResult<LocalRefundRow>> {
   if (values.length === 0) return { ok: true, rows: [] };
@@ -1133,7 +1092,7 @@ async function lookupRefundsByProviderId(
     const { data, error } = await supabase
       .from('payment_refunds')
       .select(LOCAL_REFUND_SELECT)
-      .in('paypal_refund_id', group);
+      .in(column, group);
     if (error) {
       return {
         ok: false,
@@ -1179,55 +1138,6 @@ async function lookupOrdersByExactColumn(
     found.push(...validated.rows);
   }
   return { ok: true, rows: found };
-}
-
-async function loadDurableAttributionOrders(
-  supabase: AdminSupabase,
-  transactions: ProviderTransaction[],
-  payments: LocalPaymentRow[],
-  guildIds: Set<string>,
-): Promise<ScanResult<LocalOrderRow>> {
-  const orderReferences = transactions
-    .filter((transaction) => transaction.referenceType === 'ODR')
-    .map((transaction) => transaction.referenceId)
-    .filter((id): id is string => id !== null);
-  const subscriptionReferences = transactions
-    .filter((transaction) => transaction.referenceType === 'SUB')
-    .map((transaction) => transaction.referenceId)
-    .filter((id): id is string => id !== null);
-  const localOrderIds = payments
-    .map((payment) => payment.order_id)
-    .filter((id): id is string => typeof id === 'string');
-
-  const [byOrderReference, bySubscriptionReference, byLocalOrder] =
-    await Promise.all([
-      lookupOrdersByExactColumn(
-        supabase,
-        'paypal_order_id',
-        orderReferences,
-        guildIds,
-      ),
-      lookupOrdersByExactColumn(
-        supabase,
-        'paypal_subscription_id',
-        subscriptionReferences,
-        guildIds,
-      ),
-      lookupOrdersByExactColumn(supabase, 'id', localOrderIds, guildIds),
-    ]);
-  if (!byOrderReference.ok) return byOrderReference;
-  if (!bySubscriptionReference.ok) return bySubscriptionReference;
-  if (!byLocalOrder.ok) return byLocalOrder;
-
-  const deduped = new Map<string, LocalOrderRow>();
-  for (const row of [
-    ...byOrderReference.rows,
-    ...bySubscriptionReference.rows,
-    ...byLocalOrder.rows,
-  ]) {
-    deduped.set(row.id, row);
-  }
-  return { ok: true, rows: [...deduped.values()] };
 }
 
 /**
@@ -1364,7 +1274,7 @@ async function loadCustomerIdentities(
 function customIdentityMatchesOrder(
   identity: SomniBotTransactionIdentity,
   order: LocalOrderRow,
-  eventCode: ProviderTransaction['eventCode'],
+  subscriptionCommerce: boolean,
   customer: LocalCustomerIdentityRow | undefined,
 ): boolean {
   if (!customer) return false;
@@ -1378,7 +1288,7 @@ function customIdentityMatchesOrder(
   ) {
     return false;
   }
-  return eventCode === 'T0002'
+  return subscriptionCommerce
     ? identity.planId !== null && identity.planId === order.plan_id
     : order.plan_id === null;
 }
@@ -1392,22 +1302,6 @@ function isSettledPair(payment: LocalPaymentRow, order: LocalOrderRow | undefine
   }
   if (payment.status === 'refunded' || payment.status === 'reversed') {
     return order.status === 'refunded';
-  }
-  return false;
-}
-
-function localRefundMatchesProviderEvent(
-  refund: LocalRefundRow,
-  eventCode: ProviderTransaction['eventCode'],
-): boolean {
-  if (eventCode === 'T1106') {
-    return refund.event_type === 'PAYMENT.CAPTURE.REVERSED'
-      || refund.event_type === 'PAYMENT.SALE.REVERSED';
-  }
-  if (eventCode === 'T1107') {
-    return refund.event_type === 'ADMIN.REFUND'
-      || refund.event_type === 'PAYMENT.CAPTURE.REFUNDED'
-      || refund.event_type === 'PAYMENT.SALE.REFUNDED';
   }
   return false;
 }
@@ -1798,18 +1692,6 @@ async function runPass(
     return { status: 'failed', reason: token.reason, retriable: token.retriable };
   }
 
-  const provider = await fetchProviderTransactions(
-    config.apiBase,
-    token.token,
-    windowStartMs,
-    windowEndMs,
-  );
-  if (!provider.ok) {
-    return { status: 'failed', reason: provider.reason, retriable: provider.retriable };
-  }
-  const providerHeartbeatFailure = await heartbeat();
-  if (providerHeartbeatFailure) return providerHeartbeatFailure;
-
   const windowStart = new Date(windowStartMs).toISOString();
   const windowEnd = new Date(windowEndMs).toISOString();
 
@@ -1864,80 +1746,49 @@ async function runPass(
   const payments = validatedPayments.rows;
   const windowRefunds = validatedWindowRefunds.rows;
   const orders = validatedWindowOrders.rows;
-  const providerRefunds = provider.transactions.filter(
-    (transaction) => transaction.kind === 'refund',
-  );
-  const exactRefundScan = await lookupRefundsByProviderId(
-    supabase,
-    providerRefunds.map((transaction) => transaction.transactionId),
-  );
-  if (!exactRefundScan.ok) {
-    return {
-      status: 'failed',
-      reason: exactRefundScan.reason,
-      retriable: exactRefundScan.retriable,
-    };
+
+  // Parent orders of window payments/refunds may be older than the window.
+  const windowOrderIds = new Set(orders.map((order) => order.id));
+  const parentOrderIds = new Set<string>();
+  for (const payment of payments) {
+    if (typeof payment.order_id === 'string' && !windowOrderIds.has(payment.order_id)) {
+      parentOrderIds.add(payment.order_id);
+    }
   }
-  const validatedExactRefunds = validateLocalRefunds(
-    exactRefundScan.rows,
+  for (const refund of windowRefunds) {
+    if (typeof refund.order_id === 'string' && !windowOrderIds.has(refund.order_id)) {
+      parentOrderIds.add(refund.order_id);
+    }
+  }
+  const parentOrderScan = await lookupOrdersByExactColumn(
+    supabase,
+    'id',
+    [...parentOrderIds],
     configuredGuildIds,
   );
-  if (!validatedExactRefunds.ok) {
-    return {
-      status: 'failed',
-      reason: validatedExactRefunds.reason,
-      retriable: validatedExactRefunds.retriable,
-    };
+  if (!parentOrderScan.ok) {
+    return { status: 'failed', reason: parentOrderScan.reason, retriable: parentOrderScan.retriable };
   }
-  const refundsByProviderId = new Map<string, LocalRefundRow>();
-  const refundsById = new Map<string, LocalRefundRow>();
-  for (const refund of [...windowRefunds, ...validatedExactRefunds.rows]) {
-    const existingProvider = refundsByProviderId.get(refund.paypal_refund_id);
-    const existingId = refundsById.get(refund.id);
-    if (
-      (existingProvider && existingProvider.id !== refund.id)
-      || (existingId && existingId.paypal_refund_id !== refund.paypal_refund_id)
-    ) {
-      return {
-        status: 'failed',
-        reason: 'provider refund identity conflict',
-        retriable: false,
-      };
-    }
-    refundsByProviderId.set(refund.paypal_refund_id, refund);
-    refundsById.set(refund.id, refund);
+  const ordersById = new Map<string, LocalOrderRow>();
+  for (const order of [...orders, ...parentOrderScan.rows]) {
+    ordersById.set(order.id, order);
   }
 
-  const [refundPaymentsById, refundPaymentsByProviderId] = await Promise.all([
-    lookupPaymentsByExactColumn(
-      supabase,
-      'id',
-      [...refundsById.values()].map((refund) => refund.payment_id),
-    ),
-    lookupPaymentsByExactColumn(
-      supabase,
-      'paypal_payment_id',
-      providerRefunds
-        .map((transaction) => transaction.referenceId)
-        .filter((id): id is string => id !== null),
-    ),
-  ]);
-  if (!refundPaymentsById.ok) {
+  // Refund parents (payment rows) may also predate the window.
+  const refundPaymentScan = await lookupPaymentsByExactColumn(
+    supabase,
+    'id',
+    windowRefunds.map((refund) => refund.payment_id),
+  );
+  if (!refundPaymentScan.ok) {
     return {
       status: 'failed',
-      reason: refundPaymentsById.reason,
-      retriable: refundPaymentsById.retriable,
-    };
-  }
-  if (!refundPaymentsByProviderId.ok) {
-    return {
-      status: 'failed',
-      reason: refundPaymentsByProviderId.reason,
-      retriable: refundPaymentsByProviderId.retriable,
+      reason: refundPaymentScan.reason,
+      retriable: refundPaymentScan.retriable,
     };
   }
   const validatedRefundPayments = validateLocalPayments(
-    [...refundPaymentsById.rows, ...refundPaymentsByProviderId.rows],
+    refundPaymentScan.rows,
     configuredGuildIds,
   );
   if (!validatedRefundPayments.ok) {
@@ -1947,382 +1798,83 @@ async function runPass(
       retriable: validatedRefundPayments.retriable,
     };
   }
+
+  // Local identity maps + conflict checks. These are pure local-ledger
+  // consistency guards carried over from the previous implementation: a
+  // provider id claimed by two rows, or a refund pointing across guilds or
+  // orders, poisons every comparison built on top of it.
   const paymentEvidenceById = new Map<string, LocalPaymentRow>();
-  const paymentEvidenceByProviderId = new Map<string, LocalPaymentRow>();
-  for (const payment of [...payments, ...validatedRefundPayments.rows]) {
-    const existing = paymentEvidenceByProviderId.get(payment.paypal_payment_id as string);
-    if (existing && existing.id !== payment.id) {
-      return {
-        status: 'failed',
-        reason: 'provider payment identity conflict',
-        retriable: false,
-      };
-    }
-    paymentEvidenceById.set(payment.id, payment);
-    paymentEvidenceByProviderId.set(payment.paypal_payment_id as string, payment);
-  }
-  const durableOrderScan = await loadDurableAttributionOrders(
-    supabase,
-    provider.transactions,
-    payments,
-    configuredGuildIds,
-  );
-  if (!durableOrderScan.ok) {
-    return {
-      status: 'failed',
-      reason: durableOrderScan.reason,
-      retriable: durableOrderScan.retriable,
-    };
-  }
-
-  const ordersById = new Map<string, LocalOrderRow>();
-  for (const order of [...orders, ...durableOrderScan.rows]) {
-    ordersById.set(order.id, order);
-  }
-  const ordersByPayPalOrder = new Map(
-    [...ordersById.values()]
-      .filter((order) => isProviderId(order.paypal_order_id))
-      .map((order) => [order.paypal_order_id as string, order]),
-  );
-  const ordersBySubscription = new Map(
-    [...ordersById.values()]
-      .filter((order) => isProviderId(order.paypal_subscription_id))
-      .map((order) => [order.paypal_subscription_id as string, order]),
-  );
   const localByProviderId = new Map<string, LocalPaymentRow>();
-  const paymentsByOrder = new Map<string, string[]>();
+  for (const payment of [...payments, ...validatedRefundPayments.rows]) {
+    const providerId = payment.paypal_payment_id as string;
+    const existing = localByProviderId.get(providerId);
+    if (existing && existing.id !== payment.id) {
+      return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+    }
+    localByProviderId.set(providerId, payment);
+    paymentEvidenceById.set(payment.id, payment);
+  }
   for (const payment of payments) {
-    const existingPayment = localByProviderId.get(payment.paypal_payment_id as string);
-    if (existingPayment && existingPayment.id !== payment.id) {
-      return {
-        status: 'failed',
-        reason: 'provider identity conflict',
-        retriable: false,
-      };
-    }
-    localByProviderId.set(payment.paypal_payment_id as string, payment);
-    const existing = paymentsByOrder.get(payment.order_id as string) ?? [];
-    existing.push(payment.paypal_payment_id as string);
-    paymentsByOrder.set(payment.order_id as string, existing);
-  }
-
-  const customConsistencyCustomerIds = new Set<string>();
-  for (const transaction of provider.transactions) {
-    if (!transaction.customIdentity) continue;
-    const local = localByProviderId.get(transaction.transactionId);
-    const localOrder = local ? ordersById.get(local.order_id as string) : undefined;
-    const referencedOrder = transaction.referenceType === 'ODR' && transaction.referenceId
-      ? ordersByPayPalOrder.get(transaction.referenceId)
-      : transaction.referenceType === 'SUB' && transaction.referenceId
-        ? ordersBySubscription.get(transaction.referenceId)
-        : undefined;
-    for (const order of [localOrder, referencedOrder]) {
-      if (typeof order?.customer_id === 'string') {
-        customConsistencyCustomerIds.add(order.customer_id);
-      }
-    }
-  }
-  const customerIdentityScan = await loadCustomerIdentities(
-    supabase,
-    [...customConsistencyCustomerIds],
-    configuredGuildIds,
-  );
-  if (!customerIdentityScan.ok) {
-    return {
-      status: 'failed',
-      reason: customerIdentityScan.reason,
-      retriable: customerIdentityScan.retriable,
-    };
-  }
-  const customersById = new Map(
-    customerIdentityScan.rows.map((customer) => [customer.id, customer]),
-  );
-  const localHeartbeatFailure = await heartbeat();
-  if (localHeartbeatFailure) return localHeartbeatFailure;
-
-  const attributed: AttributedProviderTransaction[] = [];
-  for (const transaction of provider.transactions) {
-    if (transaction.kind === 'refund') {
-      const localRefund = refundsByProviderId.get(transaction.transactionId);
-      const referencedPayment = transaction.referenceId
-        ? paymentEvidenceByProviderId.get(transaction.referenceId)
-        : undefined;
-      const ledgerPayment = localRefund
-        ? paymentEvidenceById.get(localRefund.payment_id)
-        : undefined;
-      if (localRefund && !ledgerPayment) {
-        return {
-          status: 'failed',
-          reason: 'local PayPal refund payment relation is missing',
-          retriable: false,
-        };
-      }
-      if (
-        localRefund
-        && ledgerPayment
-        && (
-          localRefund.guild_id !== ledgerPayment.guild_id
-          || localRefund.order_id !== ledgerPayment.order_id
-          || transaction.referenceId !== ledgerPayment.paypal_payment_id
-          || !localRefundMatchesProviderEvent(localRefund, transaction.eventCode)
-        )
-      ) {
-        return {
-          status: 'failed',
-          reason: 'provider refund identity conflict',
-          retriable: false,
-        };
-      }
-      if (
-        ledgerPayment
-        && referencedPayment
-        && ledgerPayment.id !== referencedPayment.id
-      ) {
-        return {
-          status: 'failed',
-          reason: 'provider refund identity conflict',
-          retriable: false,
-        };
-      }
-      const guildId = localRefund?.guild_id ?? referencedPayment?.guild_id;
-      if (typeof guildId === 'string') {
-        attributed.push({
-          transaction,
-          guildId,
-          referencedOrderId: null,
-        });
-      }
-      continue;
-    }
-
-    const local = localByProviderId.get(transaction.transactionId);
-    const localOrder = local
-      ? ordersById.get(local.order_id as string)
+    const order = typeof payment.order_id === 'string'
+      ? ordersById.get(payment.order_id)
       : undefined;
-    if (local && !localOrder) {
+    if (!order) {
       return {
         status: 'failed',
         reason: 'local PayPal payment relation is missing',
         retriable: false,
       };
     }
-    if (local && localOrder && local.guild_id !== localOrder.guild_id) {
-      return {
-        status: 'failed',
-        reason: 'provider identity conflict',
-        retriable: false,
-      };
-    }
-
-    const referencedOrder = transaction.referenceType === 'ODR' && transaction.referenceId
-      ? ordersByPayPalOrder.get(transaction.referenceId)
-      : transaction.referenceType === 'SUB' && transaction.referenceId
-        ? ordersBySubscription.get(transaction.referenceId)
-        : undefined;
-    if (localOrder && referencedOrder && localOrder.id !== referencedOrder.id) {
-      return {
-        status: 'failed',
-        reason: 'provider identity conflict',
-        retriable: false,
-      };
-    }
-
-    const localProviderReference = localOrder
-      ? transaction.eventCode === 'T0002'
-        ? localOrder.paypal_subscription_id
-        : localOrder.paypal_order_id
-      : null;
-    if (
-      transaction.referenceId
-      && localProviderReference
-      && transaction.referenceId !== localProviderReference
-    ) {
-      return {
-        status: 'failed',
-        reason: 'provider identity conflict',
-        retriable: false,
-      };
-    }
-
-    const identity = transaction.customIdentity;
-    if (
-      identity
-      && (
-        (localOrder && !customIdentityMatchesOrder(
-          identity,
-          localOrder,
-          transaction.eventCode,
-          typeof localOrder.customer_id === 'string'
-            ? customersById.get(localOrder.customer_id)
-            : undefined,
-        ))
-        || (referencedOrder && !customIdentityMatchesOrder(
-          identity,
-          referencedOrder,
-          transaction.eventCode,
-          typeof referencedOrder.customer_id === 'string'
-            ? customersById.get(referencedOrder.customer_id)
-            : undefined,
-        ))
-      )
-    ) {
-      return {
-        status: 'failed',
-        reason: 'provider identity conflict',
-        retriable: false,
-      };
-    }
-
-    const authoritativeOrder = localOrder ?? referencedOrder;
-    if (authoritativeOrder?.guild_id) {
-      attributed.push({
-        transaction,
-        guildId: authoritativeOrder.guild_id,
-        referencedOrderId: referencedOrder?.id ?? null,
-      });
-      continue;
-    }
-
-    // custom_field is deliberately not a fallback authority. In a shared
-    // merchant account, a foreign application can supply a syntactically
-    // valid (even copied) value. Without an exact payment id or ODR/SUB
-    // reference this transaction remains unattributed.
-  }
-
-  const missingLocalPayments: MissingLocalPayment[] = [];
-  const amountMismatches: AmountMismatch[] = [];
-  const unsettledLocalPayments: UnsettledLocalPayment[] = [];
-  for (const item of attributed) {
-    const transaction = item.transaction;
-    if (transaction.kind === 'refund') {
-      const localRefund = refundsByProviderId.get(transaction.transactionId);
-      if (!localRefund) {
-        missingLocalPayments.push({
-          kind: 'refund',
-          transactionId: transaction.transactionId,
-          guildId: item.guildId,
-          amountCents: transaction.amountCents,
-          currency: transaction.currency,
-          initiatedAt: transaction.initiatedAt,
-          eventCode: transaction.eventCode,
-          referenceId: transaction.referenceId,
-          referenceType: transaction.referenceType,
-        });
-        continue;
-      }
-      const localCurrency = normalizeCurrency(localRefund.currency);
-      if (
-        localRefund.amount_cents !== transaction.amountCents
-        || localCurrency !== transaction.currency
-      ) {
-        amountMismatches.push({
-          transactionId: transaction.transactionId,
-          guildId: item.guildId,
-          providerAmountCents: transaction.amountCents,
-          localAmountCents: localRefund.amount_cents as number,
-          providerCurrency: transaction.currency,
-          localCurrency,
-        });
-      }
-      continue;
-    }
-
-    const local = localByProviderId.get(transaction.transactionId);
-    if (!local) {
-      missingLocalPayments.push({
-        kind: 'payment',
-        transactionId: transaction.transactionId,
-        guildId: item.guildId,
-        amountCents: transaction.amountCents,
-        currency: transaction.currency,
-        initiatedAt: transaction.initiatedAt,
-        eventCode: transaction.eventCode,
-        referenceId: transaction.referenceId,
-        referenceType: transaction.referenceType,
-      });
-      continue;
-    }
-
-    const order = typeof local.order_id === 'string'
-      ? ordersById.get(local.order_id)
-      : undefined;
-    if (!isSettledPair(local, order)) {
-      unsettledLocalPayments.push({
-        transactionId: transaction.transactionId,
-        guildId: item.guildId,
-        orderId: local.order_id,
-        paymentStatus: local.status,
-        orderStatus: order?.status ?? null,
-      });
-      continue;
-    }
-
-    const localCurrency = normalizeCurrency(local.currency);
-    if (
-      local.amount_cents !== transaction.amountCents
-      || localCurrency !== transaction.currency
-    ) {
-      amountMismatches.push({
-        transactionId: transaction.transactionId,
-        guildId: item.guildId,
-        providerAmountCents: transaction.amountCents,
-        localAmountCents: local.amount_cents,
-        providerCurrency: transaction.currency,
-        localCurrency,
-      });
+    if (payment.guild_id !== order.guild_id) {
+      return { status: 'failed', reason: 'provider identity conflict', retriable: false };
     }
   }
-
-  const providerPaymentIds = new Set(
-    attributed
-      .filter((item) => item.transaction.kind === 'payment')
-      .map((item) => item.transaction.transactionId),
-  );
-  const providerRefundIds = new Set(
-    attributed
-      .filter((item) => item.transaction.kind === 'refund')
-      .map((item) => item.transaction.transactionId),
-  );
-  const providerReferenceOrderIds = new Set(
-    attributed
-      .map((item) => item.referencedOrderId)
-      .filter((id): id is string => id !== null),
-  );
-  const rawWindowOrderIds = new Set(
-    orderScan.rows
-      .map((order) => order.id)
-      .filter((id): id is string => typeof id === 'string'),
-  );
-  const ordersForMissingProvider = new Map(orders.map((order) => [order.id, order]));
-  for (const order of durableOrderScan.rows) {
+  const refundsByProviderId = new Map<string, LocalRefundRow>();
+  for (const refund of windowRefunds) {
+    const existing = refundsByProviderId.get(refund.paypal_refund_id);
+    if (existing && existing.id !== refund.id) {
+      return { status: 'failed', reason: 'provider refund identity conflict', retriable: false };
+    }
+    refundsByProviderId.set(refund.paypal_refund_id, refund);
+    const ledgerPayment = paymentEvidenceById.get(refund.payment_id);
+    if (!ledgerPayment) {
+      return {
+        status: 'failed',
+        reason: 'local PayPal refund payment relation is missing',
+        retriable: false,
+      };
+    }
     if (
-      rawWindowOrderIds.has(order.id)
-      && paymentsByOrder.has(order.id)
+      refund.guild_id !== ledgerPayment.guild_id
+      || refund.order_id !== ledgerPayment.order_id
     ) {
-      // A nullable legacy source plus missing ODR/SUB write is still proven
-      // PayPal commerce when this window contains an exact linked PayPal
-      // payment. Do not lose that row merely because the window validator had
-      // to withhold it until the payment relation was loaded.
-      ordersForMissingProvider.set(order.id, order);
+      return { status: 'failed', reason: 'provider refund identity conflict', retriable: false };
     }
   }
-  const missingProviderPayments: MissingProviderPayment[] = [];
-  const durablePaymentIdentityScan = await loadOrderPaymentIdentities(
+  const localHeartbeatFailure = await heartbeat();
+  if (localHeartbeatFailure) return localHeartbeatFailure;
+
+  // ── Verification target selection ────────────────────────────────────────
+  //
+  // Orders get a direct GET when the capture path cannot already prove them:
+  //  A) window orders still pending/pending_review (did the buyer complete
+  //     approval while our webhook was lost?), and
+  //  B) settled window orders with NO local payment identity at all (the
+  //     payment write is wholly absent, so no capture id exists to verify).
+  const paymentIdentityScan = await loadOrderPaymentIdentities(
     supabase,
-    [...ordersForMissingProvider.keys()],
+    orders.map((order) => order.id),
   );
-  if (!durablePaymentIdentityScan.ok) {
+  if (!paymentIdentityScan.ok) {
     return {
       status: 'failed',
-      reason: durablePaymentIdentityScan.reason,
-      retriable: durablePaymentIdentityScan.retriable,
+      reason: paymentIdentityScan.reason,
+      retriable: paymentIdentityScan.retriable,
     };
   }
-  const durablePaymentIdentityOrderIds = new Set<string>();
-  for (const identity of durablePaymentIdentityScan.rows) {
-    const order = identity.order_id
-      ? ordersForMissingProvider.get(identity.order_id)
-      : undefined;
+  const orderIdsWithPaymentIdentity = new Set<string>();
+  for (const identity of paymentIdentityScan.rows) {
+    const order = identity.order_id ? ordersById.get(identity.order_id) : undefined;
     if (
       typeof identity.id !== 'string'
       || identity.id.length === 0
@@ -2336,78 +1888,417 @@ async function runPass(
         retriable: false,
       };
     }
-    durablePaymentIdentityOrderIds.add(order.id);
+    orderIdsWithPaymentIdentity.add(order.id);
   }
-  const identityHeartbeatFailure = await heartbeat();
-  if (identityHeartbeatFailure) return identityHeartbeatFailure;
+  const SETTLED_ORDER_STATUSES = ['completed', 'disputed', 'refunded'];
+  const orderGetTargets: LocalOrderRow[] = [];
+  for (const order of orders) {
+    if (!isProviderId(order.paypal_order_id)) continue;
+    const pendingish = order.status === 'pending' || order.status === 'pending_review';
+    const settled = SETTLED_ORDER_STATUSES.includes(order.status);
+    if (pendingish || (settled && !orderIdsWithPaymentIdentity.has(order.id))) {
+      orderGetTargets.push(order);
+    }
+  }
 
-  // Reverse-reconcile every settled local PayPal payment by its own provider
-  // identity. An ODR/SUB reference, or a matching sibling payment on the same
-  // order, cannot prove that this distinct capture/sale exists at PayPal.
+  // Customer identities back the custom_id tamper check on fetched orders.
+  const customerIdentityScan = await loadCustomerIdentities(
+    supabase,
+    [...new Set(
+      orderGetTargets
+        .map((order) => order.customer_id)
+        .filter((id): id is string => typeof id === 'string'),
+    )],
+    configuredGuildIds,
+  );
+  if (!customerIdentityScan.ok) {
+    return {
+      status: 'failed',
+      reason: customerIdentityScan.reason,
+      retriable: customerIdentityScan.retriable,
+    };
+  }
+  const customersById = new Map(
+    customerIdentityScan.rows.map((customer) => [customer.id, customer]),
+  );
+
+  // Subscriptions to verify: any window order or window payment's parent that
+  // carries a subscription identity.
+  const subscriptionTargets = new Map<string, LocalOrderRow>();
+  for (const order of orders) {
+    if (isProviderId(order.paypal_subscription_id)) {
+      subscriptionTargets.set(order.paypal_subscription_id, order);
+    }
+  }
   for (const payment of payments) {
     const order = ordersById.get(payment.order_id as string);
-    if (!isSettledPair(payment, order)) continue;
-    const paymentId = payment.paypal_payment_id as string;
-    if (providerPaymentIds.has(paymentId)) continue;
-    missingProviderPayments.push({
-      kind: 'payment',
-      orderId: payment.order_id as string,
-      orderNumber: order?.order_number ?? null,
-      guildId: payment.guild_id as string,
-      paypalPaymentIds: [paymentId],
-      amountCents: payment.amount_cents,
-      currency: normalizeCurrency(payment.currency) as string,
-      createdAt: payment.created_at,
-    });
+    if (order && isProviderId(order.paypal_subscription_id)) {
+      subscriptionTargets.set(order.paypal_subscription_id, order);
+    }
   }
 
-  // Refund rows are distinct provider money events. Reconcile every sibling by
-  // paypal_refund_id; a matching refund on the same payment cannot mask another.
-  for (const refund of windowRefunds) {
-    // PayPal's balance-affecting transaction search omits a zero-amount
-    // terminal reversal witness. Keep it in the local ledger count and exact
-    // provider lookup map, but do not require a provider-side transaction.
-    if (refund.amount_cents === 0) continue;
-    if (providerRefundIds.has(refund.paypal_refund_id)) continue;
-    const order = refund.order_id ? ordersById.get(refund.order_id) : undefined;
-    missingProviderPayments.push({
-      kind: 'refund',
-      orderId: refund.order_id as string,
-      orderNumber: order?.order_number ?? null,
-      guildId: refund.guild_id as string,
-      paypalPaymentIds: [refund.paypal_refund_id],
-      amountCents: refund.amount_cents as number,
-      currency: normalizeCurrency(refund.currency) as string,
-      createdAt: refund.created_at,
-    });
-  }
+  // ── Per-object provider verification ─────────────────────────────────────
+  const missingLocalPayments: MissingLocalPayment[] = [];
+  const amountMismatches: AmountMismatch[] = [];
+  const unsettledLocalPayments: UnsettledLocalPayment[] = [];
+  const missingProviderPayments: MissingProviderPayment[] = [];
+  let providerObjectsVerified = 0;
+  const verifiedByGuild = new Map<string, number>();
+  const bumpVerified = (guildId: string | null) => {
+    providerObjectsVerified += 1;
+    if (typeof guildId === 'string') {
+      verifiedByGuild.set(guildId, (verifiedByGuild.get(guildId) ?? 0) + 1);
+    }
+  };
+  const PROVIDER_SETTLED_CAPTURE_STATUSES = ['COMPLETED', 'REFUNDED', 'PARTIALLY_REFUNDED'];
 
-  // Keep a separate order-level detector only for completed commerce whose
-  // local provider-payment row/write is wholly absent. Once any local PayPal
-  // payment identity exists, the payment-level path above owns the comparison.
-  for (const order of ordersForMissingProvider.values()) {
-    if (!['completed', 'disputed', 'refunded'].includes(order.status)) continue;
+  // 1) Captures — every window payment by its own provider identity.
+  const captureResults = await mapWithConcurrency(
+    payments,
+    PROVIDER_CONCURRENCY,
+    async (payment) => ({
+      payment,
+      lookup: await fetchProviderCapture(
+        config.apiBase,
+        token.token,
+        payment.paypal_payment_id as string,
+      ),
+    }),
+  );
+  const refundedCapturePaymentRowIds: string[] = [];
+  for (const { lookup } of captureResults) {
+    if (!lookup.ok) {
+      return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
+    }
+  }
+  for (const { payment, lookup } of captureResults) {
+    if (!lookup.ok || !lookup.found) continue;
+    if (['REFUNDED', 'PARTIALLY_REFUNDED'].includes(lookup.value.status)) {
+      refundedCapturePaymentRowIds.push(payment.id);
+    }
+  }
+  // Local refunds for provider-refunded captures may sit outside the refund
+  // window; resolve them exactly before judging "refund missing locally".
+  const refundsForRefundedScan = await lookupRefundsByExactColumn(
+    supabase,
+    'payment_id',
+    refundedCapturePaymentRowIds,
+  );
+  if (!refundsForRefundedScan.ok) {
+    return {
+      status: 'failed',
+      reason: refundsForRefundedScan.reason,
+      retriable: refundsForRefundedScan.retriable,
+    };
+  }
+  const refundedPaymentRowsWithLocalRefund = new Set(
+    refundsForRefundedScan.rows.map((refund) => refund.payment_id),
+  );
+  for (const { payment, lookup } of captureResults) {
+    if (!lookup.ok) continue;
+    const order = ordersById.get(payment.order_id as string);
+    const guildId = payment.guild_id as string;
+    const providerId = payment.paypal_payment_id as string;
+    if (!lookup.found) {
+      // Subscription billing writes v1 sale ids, which the captures API does
+      // not serve; those rows are verified through their subscription below.
+      if (order && isProviderId(order.paypal_subscription_id)) continue;
+      if (isSettledPair(payment, order)) {
+        missingProviderPayments.push({
+          kind: 'payment',
+          orderId: payment.order_id as string,
+          orderNumber: order?.order_number ?? null,
+          guildId,
+          paypalPaymentIds: [providerId],
+          amountCents: payment.amount_cents,
+          currency: normalizeCurrency(payment.currency) as string,
+          createdAt: payment.created_at,
+        });
+      }
+      continue;
+    }
+    bumpVerified(guildId);
+    const capture = lookup.value;
+    const settledAtProvider = PROVIDER_SETTLED_CAPTURE_STATUSES.includes(capture.status);
+    if (settledAtProvider && !isSettledPair(payment, order)) {
+      unsettledLocalPayments.push({
+        transactionId: providerId,
+        guildId,
+        orderId: payment.order_id,
+        paymentStatus: payment.status,
+        orderStatus: order?.status ?? null,
+      });
+      continue;
+    }
     if (
-      durablePaymentIdentityOrderIds.has(order.id)
-      || providerReferenceOrderIds.has(order.id)
-    ) continue;
-    missingProviderPayments.push({
-      kind: 'order',
-      orderId: order.id,
-      orderNumber: order.order_number,
-      guildId: order.guild_id as string,
-      paypalPaymentIds: [],
-      amountCents: order.amount_cents,
-      currency: normalizeCurrency(order.currency) as string,
-      createdAt: order.created_at,
-    });
+      settledAtProvider
+      && (
+        capture.amountCents !== payment.amount_cents
+        || capture.currency !== normalizeCurrency(payment.currency)
+      )
+    ) {
+      amountMismatches.push({
+        transactionId: providerId,
+        guildId,
+        providerAmountCents: capture.amountCents,
+        localAmountCents: payment.amount_cents,
+        providerCurrency: capture.currency,
+        localCurrency: normalizeCurrency(payment.currency),
+      });
+    }
+    if (
+      ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(capture.status)
+      && !refundedPaymentRowsWithLocalRefund.has(payment.id)
+    ) {
+      // The operator refunded at PayPal (dashboard/app UI) and no webhook
+      // landed: entitlements would stay live for money that went back.
+      missingLocalPayments.push({
+        kind: 'refund',
+        transactionId: providerId,
+        guildId,
+        amountCents: payment.amount_cents,
+        currency: capture.currency,
+        initiatedAt: null,
+        source: 'capture',
+        referenceId: providerId,
+      });
+    }
+  }
+  const captureHeartbeatFailure = await heartbeat();
+  if (captureHeartbeatFailure) return captureHeartbeatFailure;
+
+  // 2) Refunds — every window refund by its provider identity.
+  const refundResults = await mapWithConcurrency(
+    windowRefunds,
+    PROVIDER_CONCURRENCY,
+    async (refund) => ({
+      refund,
+      lookup: await fetchProviderRefund(config.apiBase, token.token, refund.paypal_refund_id),
+    }),
+  );
+  for (const { refund, lookup } of refundResults) {
+    if (!lookup.ok) {
+      return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
+    }
+    const guildId = refund.guild_id as string;
+    if (!lookup.found) {
+      // A zero-amount row is a terminal reversal witness with no distinct
+      // provider refund object; its absence is expected.
+      if (refund.amount_cents === 0) continue;
+      const order = refund.order_id ? ordersById.get(refund.order_id) : undefined;
+      missingProviderPayments.push({
+        kind: 'refund',
+        orderId: refund.order_id as string,
+        orderNumber: order?.order_number ?? null,
+        guildId,
+        paypalPaymentIds: [refund.paypal_refund_id],
+        amountCents: refund.amount_cents as number,
+        currency: normalizeCurrency(refund.currency) as string,
+        createdAt: refund.created_at,
+      });
+      continue;
+    }
+    bumpVerified(guildId);
+    // Local refund rows and provider refund objects both carry positive
+    // amounts (the ledger validator rejects negatives).
+    const providerAmountCents = lookup.value.amountCents;
+    if (
+      refund.amount_cents !== providerAmountCents
+      || normalizeCurrency(refund.currency) !== lookup.value.currency
+    ) {
+      amountMismatches.push({
+        transactionId: refund.paypal_refund_id,
+        guildId,
+        providerAmountCents,
+        localAmountCents: refund.amount_cents as number,
+        providerCurrency: lookup.value.currency,
+        localCurrency: normalizeCurrency(refund.currency),
+      });
+    }
+  }
+
+  // 3) Orders — pending approval states and settled orders with no payment
+  //    identity.
+  const orderResults = await mapWithConcurrency(
+    orderGetTargets,
+    PROVIDER_CONCURRENCY,
+    async (order) => ({
+      order,
+      lookup: await fetchProviderOrder(
+        config.apiBase,
+        token.token,
+        order.paypal_order_id as string,
+      ),
+    }),
+  );
+  for (const { order, lookup } of orderResults) {
+    if (!lookup.ok) {
+      return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
+    }
+    const guildId = order.guild_id as string;
+    const pendingish = order.status === 'pending' || order.status === 'pending_review';
+    if (!lookup.found) {
+      // PayPal purges unapproved orders; a vanished PENDING order moved no
+      // money. A vanished order behind SETTLED local commerce with no payment
+      // identity means the settlement cannot be evidenced at the provider.
+      if (!pendingish) {
+        missingProviderPayments.push({
+          kind: 'order',
+          orderId: order.id,
+          orderNumber: order.order_number,
+          guildId,
+          paypalPaymentIds: [],
+          amountCents: order.amount_cents,
+          currency: normalizeCurrency(order.currency) as string,
+          createdAt: order.created_at,
+        });
+      }
+      continue;
+    }
+    bumpVerified(guildId);
+    const providerOrder = lookup.value;
+    const identity = parseCustomIdentity(providerOrder.customId);
+    if (
+      identity
+      && !customIdentityMatchesOrder(
+        identity,
+        order,
+        isProviderId(order.paypal_subscription_id),
+        typeof order.customer_id === 'string'
+          ? customersById.get(order.customer_id)
+          : undefined,
+      )
+    ) {
+      return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+    }
+    const settledCaptures = providerOrder.captures.filter((capture) =>
+      PROVIDER_SETTLED_CAPTURE_STATUSES.includes(capture.status),
+    );
+    for (const capture of settledCaptures) {
+      // A locally-known capture was already judged by the capture pass
+      // (settlement, amounts, refunds); reporting it again here would double
+      // count. Only captures with NO local row are this path's finding.
+      if (localByProviderId.has(capture.id)) continue;
+      // The buyer's money settled at PayPal and no local payment row
+      // exists — the customer may have paid and received nothing.
+      missingLocalPayments.push({
+        kind: 'payment',
+        transactionId: capture.id,
+        guildId,
+        amountCents: capture.amountCents,
+        currency: capture.currency,
+        initiatedAt: null,
+        source: 'order',
+        referenceId: order.paypal_order_id,
+      });
+    }
+    if (
+      !pendingish
+      && providerOrder.status === 'COMPLETED'
+      && settledCaptures.length === 0
+    ) {
+      // Locally settled, provider order exists but shows no settled capture.
+      missingProviderPayments.push({
+        kind: 'order',
+        orderId: order.id,
+        orderNumber: order.order_number,
+        guildId,
+        paypalPaymentIds: [],
+        amountCents: order.amount_cents,
+        currency: normalizeCurrency(order.currency) as string,
+        createdAt: order.created_at,
+      });
+    }
+  }
+
+  // 4) Subscriptions — recurring billing writes v1 sale objects the captures
+  //    API cannot serve, so subscription commerce is verified through the
+  //    subscription's own billing state. Boundary (documented in the
+  //    walkthrough): only the LATEST provider charge is individually
+  //    assertable without the reporting product.
+  const subscriptionResults = await mapWithConcurrency(
+    [...subscriptionTargets.entries()],
+    PROVIDER_CONCURRENCY,
+    async ([subscriptionId, order]) => ({
+      subscriptionId,
+      order,
+      lookup: await fetchProviderSubscription(config.apiBase, token.token, subscriptionId),
+    }),
+  );
+  for (const { subscriptionId, order, lookup } of subscriptionResults) {
+    if (!lookup.ok) {
+      return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
+    }
+    const guildId = order.guild_id as string;
+    if (!lookup.found) {
+      if (SETTLED_ORDER_STATUSES.includes(order.status)) {
+        missingProviderPayments.push({
+          kind: 'order',
+          orderId: order.id,
+          orderNumber: order.order_number,
+          guildId,
+          paypalPaymentIds: [subscriptionId],
+          amountCents: order.amount_cents,
+          currency: normalizeCurrency(order.currency) as string,
+          createdAt: order.created_at,
+        });
+      }
+      continue;
+    }
+    bumpVerified(guildId);
+    const subscription = lookup.value;
+    const lastPaymentMs = subscription.lastPaymentTime === null
+      ? Number.NaN
+      : Date.parse(subscription.lastPaymentTime);
+    const lastPaymentInWindow = Number.isFinite(lastPaymentMs)
+      && lastPaymentMs >= windowStartMs
+      && lastPaymentMs <= windowEndMs;
+    const orderWindowPayments = payments.filter(
+      (payment) => payment.order_id === order.id,
+    );
+    if (lastPaymentInWindow && orderWindowPayments.length === 0) {
+      missingLocalPayments.push({
+        kind: 'payment',
+        transactionId: subscriptionId,
+        guildId,
+        amountCents: subscription.lastPaymentAmountCents ?? order.amount_cents,
+        currency: subscription.lastPaymentCurrency
+          ?? (normalizeCurrency(order.currency) as string),
+        initiatedAt: subscription.lastPaymentTime,
+        source: 'subscription',
+        referenceId: subscriptionId,
+      });
+      continue;
+    }
+    if (
+      lastPaymentInWindow
+      && subscription.lastPaymentAmountCents !== null
+      && orderWindowPayments.length > 0
+    ) {
+      const latest = orderWindowPayments.reduce((best, candidate) =>
+        String(candidate.created_at ?? '') > String(best.created_at ?? '') ? candidate : best,
+      );
+      if (
+        latest.amount_cents !== subscription.lastPaymentAmountCents
+        || normalizeCurrency(latest.currency) !== subscription.lastPaymentCurrency
+      ) {
+        amountMismatches.push({
+          transactionId: subscriptionId,
+          guildId,
+          providerAmountCents: subscription.lastPaymentAmountCents,
+          localAmountCents: latest.amount_cents,
+          providerCurrency: subscription.lastPaymentCurrency ?? 'UNKNOWN',
+          localCurrency: normalizeCurrency(latest.currency),
+        });
+      }
+    }
   }
 
   const result: Extract<PayPalReconciliationResult, { status: 'completed' }> = {
     status: 'completed',
     windowStart,
     windowEnd,
-    providerTransactions: attributed.length,
+    providerTransactions: providerObjectsVerified,
     localPayments: payments.length,
     localRefunds: windowRefunds.length,
     missingLocalPayments,
@@ -2417,13 +2308,7 @@ async function runPass(
     alerted: false,
   };
 
-  const providerCountByGuild = new Map<string, number>();
-  for (const item of attributed) {
-    providerCountByGuild.set(
-      item.guildId,
-      (providerCountByGuild.get(item.guildId) ?? 0) + 1,
-    );
-  }
+  const providerCountByGuild = verifiedByGuild;
   const paymentCountByGuild = new Map<string, number>();
   for (const payment of payments) {
     const guildId = payment.guild_id as string;
@@ -2475,7 +2360,7 @@ async function runPass(
 
   console.log(
     `[PayPalReconcile] ${windowStart}..${windowEnd}: `
-    + `${attributed.length} attributable provider transaction(s), `
+    + `${providerObjectsVerified} provider object(s) verified, `
     + `${payments.length} local PayPal payment(s), `
     + `${windowRefunds.length} local PayPal refund(s), `
     + `${missingLocalPayments.length} missing locally, `

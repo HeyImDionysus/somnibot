@@ -6,15 +6,17 @@ function response(status, body) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
-test('sandbox pass verifies reporting, disputes, and PayPal request id replay', async () => {
+test('sandbox pass verifies order readback, disputes, and PayPal request id replay', async () => {
   const calls = [];
   const fetchImpl = async (url, init = {}) => {
     calls.push({ url, init });
     if (url.endsWith('/v1/oauth2/token')) return response(200, { access_token: 'token' });
-    if (url.includes('/v1/reporting/transactions?')) return response(200, { transaction_details: [] });
     if (url.includes('/v1/customer/disputes?')) return response(200, { items: [] });
     if (url.endsWith('/v2/checkout/orders')) {
       return response(201, { id: 'ORDER-1', status: 'CREATED', links: [{ rel: 'approve' }] });
+    }
+    if (url.endsWith('/v2/checkout/orders/ORDER-1')) {
+      return response(200, { id: 'ORDER-1', status: 'CREATED', purchase_units: [{}] });
     }
     return response(404, {});
   };
@@ -32,8 +34,11 @@ test('sandbox pass verifies reporting, disputes, and PayPal request id replay', 
   });
 
   assert.equal(result.idempotency.sameOrderOnReplay, true);
-  assert.equal(result.transactionSearch.permissionVerified, true);
+  assert.equal(result.orderReadback.verified, true);
+  assert.equal(result.orderReadback.status, 'CREATED');
   assert.equal(result.ok, true);
+  // The per-object model must never touch PayPal's reporting product.
+  assert.equal(calls.some((call) => call.url.includes('/v1/reporting/')), false);
   assert.equal(calls.filter((call) => call.url.endsWith('/v2/checkout/orders')).length, 2);
   assert.equal(
     calls.filter((call) => call.url.endsWith('/v2/checkout/orders'))
@@ -42,12 +47,9 @@ test('sandbox pass verifies reporting, disputes, and PayPal request id replay', 
   );
 });
 
-test('sandbox pass continues independent probes after Transaction Search is denied', async () => {
+test('sandbox pass continues independent probes after the order readback fails', async () => {
   const fetchImpl = async (url) => {
     if (url.endsWith('/v1/oauth2/token')) return response(200, { access_token: 'token' });
-    if (url.includes('/v1/reporting/transactions?')) {
-      return response(403, { name: 'NOT_AUTHORIZED' });
-    }
     if (url.includes('/v1/customer/disputes?')) return response(200, { items: [] });
     if (url.endsWith('/v2/checkout/orders')) {
       return response(201, { id: 'ORDER-1', status: 'CREATED', links: [{ rel: 'approve' }] });
@@ -67,7 +69,7 @@ test('sandbox pass continues independent probes after Transaction Search is deni
   });
 
   assert.equal(result.ok, false);
-  assert.equal(result.transactionSearch.permissionVerified, false);
+  assert.equal(result.orderReadback.verified, false);
   assert.equal(result.disputes.responseShapeVerified, true);
   assert.equal(result.idempotency.sameOrderOnReplay, true);
 });

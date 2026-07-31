@@ -32,7 +32,10 @@ import {
   heartbeatReconcileLease,
   finalizeReconcileLease,
   parseAmountToCents,
-  fetchProviderTransactions,
+  fetchProviderCapture,
+  fetchProviderRefund,
+  fetchProviderOrder,
+  fetchProviderSubscription,
   RECONCILE_ALERT_TYPE,
   RECONCILE_FAILURE_ALERT_TYPE,
   RECONCILE_LAST_RESULT_KEY,
@@ -147,96 +150,121 @@ function filterArgs(op: RecordedOp, method: string) {
 }
 
 // ── PayPal fetch scripting ──────────────────────────────────────────────────
+//
+// SomniBot does PayPal per-object: reconciliation asks the commerce API about
+// exactly the order/capture/refund/subscription ids the local ledger stored.
+// The router below serves those objects from per-test registries; an id with
+// no entry 404s like the live API.
 
 const mockFetch = vi.fn();
-let transactionSearchCalls: string[] = [];
+let providerCalls: string[] = [];
 
-interface TxnSpec {
-  id: string;
-  value: string;
-  currency?: string;
-  status?: string;
-  eventCode?: string;
-  customField?: string | null;
-  referenceId?: string | null;
-  referenceType?: string | null;
+const IDENTITY_CUSTOM_FIELD = JSON.stringify({
+  g: GUILD_ID,
+  p: PRODUCT_UUID,
+  c: CUSTOMER_UUID,
+  d: DISCORD_ID,
+});
+
+interface ProviderRegistry {
+  captures?: Record<string, unknown>;
+  refunds?: Record<string, unknown>;
+  orders?: Record<string, unknown>;
+  subscriptions?: Record<string, unknown>;
+  tokenStatus?: number;
 }
 
-function txn(spec: TxnSpec) {
-  const customField = spec.customField === undefined
-    ? JSON.stringify({
-        g: GUILD_ID,
-        p: PRODUCT_UUID,
-        c: CUSTOMER_UUID,
-        d: DISCORD_ID,
-      })
-    : spec.customField;
-  return {
-    transaction_info: {
-      transaction_id: spec.id,
-      transaction_status: spec.status ?? 'S',
-      transaction_event_code: spec.eventCode ?? 'T0006',
-      transaction_initiation_date: '2026-07-20T10:00:00+0000',
-      transaction_amount: {
-        currency_code: spec.currency ?? 'USD',
-        value: spec.value,
-      },
-      ...(customField === null ? {} : { custom_field: customField }),
-      ...(spec.referenceId == null ? {} : { paypal_reference_id: spec.referenceId }),
-      ...(spec.referenceType == null ? {} : { paypal_reference_id_type: spec.referenceType }),
-    },
-  };
-}
-
-function scriptPayPal(
-  pages: Array<{
-    transaction_details: unknown[];
-    page?: number;
-    total_pages?: number;
-    total_items?: number;
-  }>,
-  options: { tokenStatus?: number; searchStatus?: number } = {},
-) {
-  const defaultTotalItems = pages.reduce(
-    (total, page) => total + page.transaction_details.length,
-    0,
-  );
-  const quietZero = pages.length === 1 && defaultTotalItems === 0;
-  const envelopes = pages.map((page, index) => ({
-    transaction_details: page.transaction_details,
-    page: page.page ?? index + 1,
-    total_pages: quietZero ? 0 : page.total_pages ?? pages.length,
-    total_items: quietZero ? 0 : page.total_items ?? defaultTotalItems,
-  }));
-  scriptRawPayPal(envelopes, options);
-}
-
-function scriptRawPayPal(
-  envelopes: unknown[],
-  options: { tokenStatus?: number; searchStatus?: number } = {},
-) {
-  let pageIndex = 0;
+function scriptProviderObjects(objects: ProviderRegistry = {}) {
   mockFetch.mockImplementation(async (url: unknown) => {
     const target = String(url);
+    providerCalls.push(target);
     if (target.includes('/v1/oauth2/token')) {
-      if (options.tokenStatus && options.tokenStatus !== 200) {
-        return new Response('{}', { status: options.tokenStatus });
+      if (objects.tokenStatus && objects.tokenStatus !== 200) {
+        return new Response('{}', { status: objects.tokenStatus });
       }
       return new Response(JSON.stringify({ access_token: 'tok-1' }), { status: 200 });
     }
-    if (target.includes('/v1/reporting/transactions')) {
-      transactionSearchCalls.push(target);
-      if (options.searchStatus && options.searchStatus !== 200) {
-        return new Response('{}', { status: options.searchStatus });
+    const routes: Array<[RegExp, Record<string, unknown> | undefined]> = [
+      [/\/v2\/payments\/captures\/([^/?]+)$/, objects.captures],
+      [/\/v2\/payments\/refunds\/([^/?]+)$/, objects.refunds],
+      [/\/v2\/checkout\/orders\/([^/?]+)$/, objects.orders],
+      [/\/v1\/billing\/subscriptions\/([^/?]+)$/, objects.subscriptions],
+    ];
+    for (const [pattern, registry] of routes) {
+      const match = target.match(pattern);
+      if (!match) continue;
+      const id = decodeURIComponent(match[1]!);
+      const body = registry?.[id];
+      if (body === undefined) return new Response('{}', { status: 404 });
+      const record = body as Record<string, unknown>;
+      if (typeof record.__status === 'number') {
+        return new Response(String(record.__body ?? '{}'), {
+          status: record.__status as number,
+        });
       }
-      const page = envelopes[Math.min(pageIndex++, envelopes.length - 1)]!;
-      return new Response(
-        JSON.stringify(page),
-        { status: 200 },
-      );
+      return new Response(JSON.stringify(body), { status: 200 });
     }
     throw new Error(`Unexpected fetch: ${target}`);
   });
+}
+
+function captureObject(spec: { status?: string; value?: string; currency?: string } = {}) {
+  return {
+    status: spec.status ?? 'COMPLETED',
+    amount: { currency_code: spec.currency ?? 'USD', value: spec.value ?? '25.00' },
+  };
+}
+
+function refundObject(spec: { status?: string; value?: string; currency?: string } = {}) {
+  return {
+    status: spec.status ?? 'COMPLETED',
+    amount: { currency_code: spec.currency ?? 'USD', value: spec.value ?? '25.00' },
+  };
+}
+
+function orderObject(spec: {
+  status?: string;
+  customId?: string | null;
+  captures?: Array<{ id: string; status?: string; value?: string; currency?: string }>;
+} = {}) {
+  return {
+    status: spec.status ?? 'COMPLETED',
+    purchase_units: [{
+      ...(spec.customId === null ? {} : { custom_id: spec.customId ?? IDENTITY_CUSTOM_FIELD }),
+      payments: {
+        captures: (spec.captures ?? []).map((capture) => ({
+          id: capture.id,
+          status: capture.status ?? 'COMPLETED',
+          amount: {
+            currency_code: capture.currency ?? 'USD',
+            value: capture.value ?? '25.00',
+          },
+        })),
+      },
+    }],
+  };
+}
+
+function subscriptionObject(spec: {
+  status?: string;
+  lastPaymentTime?: string | null;
+  lastPaymentValue?: string;
+  lastPaymentCurrency?: string;
+} = {}) {
+  return {
+    status: spec.status ?? 'ACTIVE',
+    billing_info: spec.lastPaymentTime === null
+      ? {}
+      : {
+          last_payment: {
+            time: spec.lastPaymentTime ?? '2026-07-20T10:00:00Z',
+            amount: {
+              currency_code: spec.lastPaymentCurrency ?? 'USD',
+              value: spec.lastPaymentValue ?? '25.00',
+            },
+          },
+        },
+  };
 }
 
 const originalEnv = { ...process.env };
@@ -248,7 +276,7 @@ beforeEach(() => {
     vi.resetAllMocks();
   ops = [];
   rpcOps = [];
-  transactionSearchCalls = [];
+  providerCalls = [];
   resolvers = {};
   rpcResolvers = {};
   process.env = { ...originalEnv };
@@ -348,11 +376,15 @@ function withLedger(opts: {
   };
   resolvers['payments'] = (op) => ({ data: page(payments, op), error: null });
   resolvers['payment_refunds'] = (op) => {
-    const exactIds = filterArgs(op, 'in')
+    const byProviderId = filterArgs(op, 'in')
       .find((args) => args[0] === 'paypal_refund_id')?.[1] as string[] | undefined;
-    const selected = exactIds
-      ? refunds.filter((refund) => exactIds.includes(String(refund.paypal_refund_id)))
-      : refunds;
+    const byPaymentId = filterArgs(op, 'in')
+      .find((args) => args[0] === 'payment_id')?.[1] as string[] | undefined;
+    const selected = byProviderId
+      ? refunds.filter((refund) => byProviderId.includes(String(refund.paypal_refund_id)))
+      : byPaymentId
+        ? refunds.filter((refund) => byPaymentId.includes(String(refund.payment_id)))
+        : refunds;
     return { data: page(selected, op), error: null };
   };
   resolvers['orders'] = (op) => ({ data: page(orders, op), error: null });
@@ -400,1864 +432,725 @@ describe('parseAmountToCents', () => {
 
 // ── Provider fetch ──────────────────────────────────────────────────────────
 
-describe('fetchProviderTransactions', () => {
-  it('accepts PayPal quiet-zero only as page 1 / 0 pages / 0 items / empty details', async () => {
-    scriptRawPayPal([{
-      transaction_details: [],
-      page: 1,
-      total_pages: 0,
-      total_items: 0,
-    }]);
+describe('per-object provider fetchers', () => {
+  const BASE = 'https://api-m.sandbox.paypal.com';
 
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result).toEqual({ ok: true, transactions: [] });
-    expect(transactionSearchCalls).toHaveLength(1);
+  beforeEach(() => {
+    vi.stubGlobal('fetch', mockFetch);
+    providerCalls = [];
   });
 
-  it('paginates only when every envelope page and total is coherent', async () => {
-    scriptPayPal([
-      { transaction_details: [txn({ id: 'T1', value: '1.00' })], total_pages: 2 },
-      {
-        transaction_details: [txn({ id: 'T2', value: '2.00' })],
-        total_pages: 2,
-      },
-    ]);
-
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.transactions.map((t) => t.transactionId)).toEqual(['T1', 'T2']);
-    expect(transactionSearchCalls).toHaveLength(2);
-  });
-
-  it.each([
-    {
-      label: 'missing transaction_details',
-      envelope: { page: 1, total_pages: 0, total_items: 0 },
-    },
-    {
-      label: 'missing page',
-      envelope: { transaction_details: [], total_pages: 0, total_items: 0 },
-    },
-    {
-      label: 'missing total_pages',
-      envelope: { transaction_details: [], page: 1, total_items: 0 },
-    },
-    {
-      label: 'missing total_items',
-      envelope: { transaction_details: [], page: 1, total_pages: 0 },
-    },
-    {
-      label: 'non-numeric metadata',
-      envelope: {
-        transaction_details: [],
-        page: '1',
-        total_pages: 0,
-        total_items: 0,
-      },
-    },
-    {
-      label: 'incoherent quiet-zero metadata',
-      envelope: {
-        transaction_details: [],
-        page: 1,
-        total_pages: 1,
-        total_items: 0,
-      },
-    },
-  ])('fails closed on a provider envelope with $label', async ({ envelope }) => {
-    scriptRawPayPal([envelope]);
-
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result).toMatchObject({
-      ok: false,
-      retriable: false,
-      reason: expect.stringMatching(/envelope|pagination/i),
+  it('parses a capture and requires status, amount, and currency', async () => {
+    scriptProviderObjects({ captures: { 'CAP-1': captureObject({ value: '19.99' }) } });
+    const result = await fetchProviderCapture(BASE, 'tok', 'CAP-1');
+    expect(result).toEqual({
+      ok: true,
+      found: true,
+      value: { status: 'COMPLETED', amountCents: 1999, currency: 'USD' },
     });
   });
 
-  it('fails closed when PayPal repeats a page number', async () => {
-    scriptRawPayPal([
-      {
-        transaction_details: [txn({ id: 'PAGE-ONE', value: '1.00' })],
-        page: 1,
-        total_pages: 2,
-        total_items: 2,
-      },
-      {
-        transaction_details: [txn({ id: 'PAGE-TWO', value: '2.00' })],
-        page: 1,
-        total_pages: 2,
-        total_items: 2,
-      },
-    ]);
-
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result).toMatchObject({
-      ok: false,
-      retriable: false,
-      reason: expect.stringMatching(/page|pagination/i),
-    });
-  });
-
-  it('fails closed when totals change or the final item count is incomplete', async () => {
-    scriptRawPayPal([
-      {
-        transaction_details: [txn({ id: 'COUNT-ONE', value: '1.00' })],
-        page: 1,
-        total_pages: 2,
-        total_items: 3,
-      },
-      {
-        transaction_details: [txn({ id: 'COUNT-TWO', value: '2.00' })],
-        page: 2,
-        total_pages: 2,
-        total_items: 3,
-      },
-    ]);
-
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result).toMatchObject({
-      ok: false,
-      retriable: false,
-      reason: expect.stringMatching(/count|items|incomplete/i),
-    });
-  });
-
-  it('fails closed on an empty noninitial terminal provider page', async () => {
-    scriptRawPayPal([
-      {
-        transaction_details: [txn({ id: 'TERMINAL-EMPTY-ONE', value: '1.00' })],
-        page: 1,
-        total_pages: 2,
-        total_items: 1,
-      },
-      {
-        transaction_details: [],
-        page: 2,
-        total_pages: 2,
-        total_items: 1,
-      },
-    ]);
-
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result).toMatchObject({
-      ok: false,
-      retriable: false,
-      reason: expect.stringMatching(/empty|pagination|terminal/i),
+  it('reports a missing capture as found:false, not an error', async () => {
+    scriptProviderObjects({ captures: {} });
+    await expect(fetchProviderCapture(BASE, 'tok', 'CAP-GONE')).resolves.toEqual({
+      ok: true,
+      found: false,
     });
   });
 
   it.each([
-    {
-      label: 'total_pages',
-      second: { total_pages: 3, total_items: 2 },
-    },
-    {
-      label: 'total_items',
-      second: { total_pages: 2, total_items: 3 },
-    },
-  ])('fails closed when $label changes between pages', async ({ second }) => {
-    scriptRawPayPal([
-      {
-        transaction_details: [txn({ id: 'STABLE-ONE', value: '1.00' })],
-        page: 1,
-        total_pages: 2,
-        total_items: 2,
-      },
-      {
-        transaction_details: [txn({ id: 'STABLE-TWO', value: '2.00' })],
-        page: 2,
-        ...second,
-      },
-    ]);
-
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result).toMatchObject({
+    ['missing status', { amount: { currency_code: 'USD', value: '1.00' } }],
+    ['non-string status', { status: 5, amount: { currency_code: 'USD', value: '1.00' } }],
+    ['missing amount', { status: 'COMPLETED' }],
+    ['non-canonical money', { status: 'COMPLETED', amount: { currency_code: 'USD', value: '1.999' } }],
+    ['invalid currency', { status: 'COMPLETED', amount: { currency_code: 'usd!', value: '1.00' } }],
+  ])('fails closed on a capture with %s', async (_label, body) => {
+    scriptProviderObjects({ captures: { 'CAP-1': body } });
+    const result = await fetchProviderCapture(BASE, 'tok', 'CAP-1');
+    expect(result).toEqual({
       ok: false,
       retriable: false,
-      reason: expect.stringMatching(/inconsistent/i),
-    });
-  });
-
-  it('fails closed on an exact duplicate provider transaction id', async () => {
-    scriptRawPayPal([{
-      transaction_details: [
-        txn({ id: 'DUPLICATE-EXACT', value: '9.99' }),
-        txn({ id: 'DUPLICATE-EXACT', value: '9.99' }),
-      ],
-      page: 1,
-      total_pages: 1,
-      total_items: 2,
-    }]);
-
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result).toMatchObject({
-      ok: false,
-      retriable: false,
-      reason: expect.stringMatching(/duplicate transaction/i),
-    });
-  });
-
-  it('ignores fees and payouts outside the Checkout/subscription allowlist', async () => {
-    scriptPayPal([{
-      transaction_details: [
-        txn({ id: 'FEE', value: '-0.49', eventCode: 'T0013' }),
-        txn({ id: 'PAY', value: '9.99' }),
-      ],
-      total_pages: 1,
-    }]);
-
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.transactions.map((t) => t.transactionId)).toEqual(['PAY']);
-  });
-
-  it.each([
-    {
-      label: 'missing transaction id',
-      entry: () => {
-        const value = txn({ id: 'WILL-BE-REMOVED', value: '9.99' });
-        delete (value.transaction_info as Record<string, unknown>).transaction_id;
-        return value;
-      },
-    },
-    {
-      label: 'non-canonical positive money',
-      entry: () => txn({ id: 'BAD-MONEY', value: '9.999' }),
-    },
-    {
-      label: 'invalid currency',
-      entry: () => txn({ id: 'BAD-CURRENCY', value: '9.99', currency: 'US' }),
-    },
-  ])('fails closed on a supported successful record with $label', async ({ entry }) => {
-    scriptPayPal([{ transaction_details: [entry()], total_pages: 1 }]);
-
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result).toMatchObject({
-      ok: false,
-      retriable: false,
-      reason: expect.stringMatching(/malformed supported payment/i),
+      reason: 'capture lookup returned a malformed record',
     });
   });
 
   it.each([
-    {
-      label: 'missing status',
-      mutate: (record: Record<string, unknown>) => {
-        delete record.transaction_status;
-      },
-    },
-    {
-      label: 'non-string status',
-      mutate: (record: Record<string, unknown>) => {
-        record.transaction_status = 1;
-      },
-    },
-    {
-      label: 'missing event code',
-      mutate: (record: Record<string, unknown>) => {
-        delete record.transaction_event_code;
-      },
-    },
-    {
-      label: 'non-string event code',
-      mutate: (record: Record<string, unknown>) => {
-        record.transaction_event_code = 6;
-      },
-    },
-  ])('fails closed when a provider row has $label', async ({ mutate }) => {
-    const entry = txn({ id: 'MALFORMED-CLASSIFIER', value: '9.99' });
-    mutate(entry.transaction_info as Record<string, unknown>);
-    scriptPayPal([{ transaction_details: [entry] }]);
+    [500, true],
+    [429, true],
+    [403, false],
+  ])('maps capture HTTP %s to retriable=%s', async (status, retriable) => {
+    scriptProviderObjects({ captures: { 'CAP-1': { __status: status } } });
+    const result = await fetchProviderCapture(BASE, 'tok', 'CAP-1');
+    expect(result).toEqual({
+      ok: false,
+      retriable,
+      reason: `capture lookup returned ${status}`,
+    });
+  });
 
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
+  it('reports malformed capture JSON as retriable', async () => {
+    scriptProviderObjects({ captures: { 'CAP-1': { __status: 200, __body: '{nope' } } });
+    const result = await fetchProviderCapture(BASE, 'tok', 'CAP-1');
+    expect(result).toEqual({
+      ok: false,
+      retriable: true,
+      reason: 'capture lookup returned malformed JSON',
+    });
+  });
 
-    expect(result).toMatchObject({
+  it('reports a network fault as retriable', async () => {
+    mockFetch.mockImplementation(async () => {
+      throw new Error('socket hang up');
+    });
+    const result = await fetchProviderCapture(BASE, 'tok', 'CAP-1');
+    expect(result).toEqual({
+      ok: false,
+      retriable: true,
+      reason: 'capture lookup request failed: socket hang up',
+    });
+  });
+
+  it('parses a refund with the same strictness', async () => {
+    scriptProviderObjects({ refunds: { 'REF-1': refundObject({ value: '5.50' }) } });
+    await expect(fetchProviderRefund(BASE, 'tok', 'REF-1')).resolves.toEqual({
+      ok: true,
+      found: true,
+      value: { status: 'COMPLETED', amountCents: 550, currency: 'USD' },
+    });
+    scriptProviderObjects({ refunds: { 'REF-1': { status: 'COMPLETED' } } });
+    await expect(fetchProviderRefund(BASE, 'tok', 'REF-1')).resolves.toEqual({
       ok: false,
       retriable: false,
-      reason: expect.stringMatching(/malformed/i),
+      reason: 'refund lookup returned a malformed record',
     });
   });
 
-  it.each([
-    {
-      label: 'a reference id without its type',
-      entry: txn({
-        id: 'HALF-REFERENCE-ID',
-        value: '9.99',
-        referenceId: 'PAYPAL-ORDER-HALF',
-      }),
-    },
-    {
-      label: 'a reference type without its id',
-      entry: txn({
-        id: 'HALF-REFERENCE-TYPE',
-        value: '9.99',
-        referenceType: 'ODR',
-      }),
-    },
-    {
-      label: 'an invalid ODR reference id',
-      entry: txn({
-        id: 'INVALID-REFERENCE-ID',
-        value: '9.99',
-        referenceId: 'not valid!',
-        referenceType: 'ODR',
-      }),
-    },
-    {
-      label: 'an event-incompatible SUB reference',
-      entry: txn({
-        id: 'INCOMPATIBLE-REFERENCE-TYPE',
-        value: '9.99',
-        referenceId: 'I-SUBSCRIPTION',
-        referenceType: 'SUB',
-      }),
-    },
-  ])('fails closed on a supported payment with $label', async ({ entry }) => {
-    scriptPayPal([{ transaction_details: [entry], total_pages: 1 }]);
+  it('parses an order: status, custom_id, and settled captures', async () => {
+    scriptProviderObjects({
+      orders: {
+        'ORD-1': orderObject({
+          status: 'COMPLETED',
+          captures: [{ id: 'CAP-A', value: '25.00' }],
+        }),
+      },
+    });
+    const result = await fetchProviderOrder(BASE, 'tok', 'ORD-1');
+    expect(result).toEqual({
+      ok: true,
+      found: true,
+      value: {
+        status: 'COMPLETED',
+        customId: IDENTITY_CUSTOM_FIELD,
+        subscriptionId: null,
+        captures: [{ id: 'CAP-A', status: 'COMPLETED', amountCents: 2500, currency: 'USD' }],
+      },
+    });
+  });
 
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result).toMatchObject({
+  it('fails closed on an order capture without an id or amount', async () => {
+    scriptProviderObjects({
+      orders: {
+        'ORD-1': {
+          status: 'COMPLETED',
+          purchase_units: [{ payments: { captures: [{ status: 'COMPLETED' }] } }],
+        },
+      },
+    });
+    await expect(fetchProviderOrder(BASE, 'tok', 'ORD-1')).resolves.toEqual({
       ok: false,
       retriable: false,
-      reason: expect.stringMatching(/malformed|reference/i),
+      reason: 'order lookup returned a malformed record',
     });
   });
 
-  it('fails closed on conflicting duplicate provider transaction ids', async () => {
-    scriptPayPal([{
-      transaction_details: [
-        txn({ id: 'DUPLICATE-CONFLICT', value: '9.99' }),
-        txn({ id: 'DUPLICATE-CONFLICT', value: '19.99' }),
-      ],
-      total_pages: 1,
-    }]);
-
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result).toMatchObject({
-      ok: false,
-      retriable: false,
-      reason: expect.stringMatching(/duplicate transaction/i),
+  it('parses a subscription, tolerating absent billing info', async () => {
+    scriptProviderObjects({
+      subscriptions: { 'SUB-1': subscriptionObject({ lastPaymentValue: '9.99' }) },
     });
-  });
-
-  it('asks PayPal only for successful transactions', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
-    await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-    const query = new URL(transactionSearchCalls[0]!);
-    expect(query.searchParams.get('transaction_status')).toBe('S');
-    expect(query.searchParams.get('fields')).toBe('transaction_info');
-    expect(query.searchParams.get('balance_affecting_records_only')).toBe('Y');
-  });
-
-  it('parses only the documented SomniBot payment response shape', async () => {
-    const customField = JSON.stringify({
-      g: GUILD_ID,
-      p: PRODUCT_UUID,
-      c: CUSTOMER_UUID,
-      d: DISCORD_ID,
+    await expect(fetchProviderSubscription(BASE, 'tok', 'SUB-1')).resolves.toEqual({
+      ok: true,
+      found: true,
+      value: {
+        status: 'ACTIVE',
+        lastPaymentTime: '2026-07-20T10:00:00Z',
+        lastPaymentAmountCents: 999,
+        lastPaymentCurrency: 'USD',
+      },
     });
-    scriptPayPal([{
-      transaction_details: [txn({
-        id: 'CAPTURE-SHAPED',
-        value: '9.99',
-        currency: 'usd',
-        customField,
-        referenceId: 'PAYPAL-ORDER-1',
-        referenceType: 'ODR',
-      })],
-      total_pages: 1,
-    }]);
-
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.transactions).toEqual([expect.objectContaining({
-      transactionId: 'CAPTURE-SHAPED',
-      amountCents: 999,
-      currency: 'USD',
-      eventCode: 'T0006',
-      referenceId: 'PAYPAL-ORDER-1',
-      referenceType: 'ODR',
-      customIdentity: expect.objectContaining({
-        guildId: GUILD_ID,
-        productId: PRODUCT_UUID,
-        customerId: CUSTOMER_UUID,
-        discordId: DISCORD_ID,
-      }),
-    })]);
-  });
-
-  it('rejects successful positive transactions outside the Checkout/subscription allowlist', async () => {
-    scriptPayPal([{
-      transaction_details: [
-        txn({ id: 'FOREIGN-TXN', value: '9.99', eventCode: 'T0013' }),
-        txn({ id: 'PENDING-TXN', value: '9.99', status: 'P' }),
-        txn({ id: 'CHECKOUT-TXN', value: '9.99', eventCode: 'T0006' }),
-        txn({ id: 'SUB-TXN', value: '4.99', eventCode: 'T0002' }),
-      ],
-      total_pages: 1,
-    }]);
-
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.transactions.map((item) => item.transactionId))
-      .toEqual(['CHECKOUT-TXN', 'SUB-TXN']);
-  });
-
-  it('reports a missing Transaction Search permission as non-retriable', async () => {
-    scriptPayPal([], { searchStatus: 403 });
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-    expect(result).toMatchObject({ ok: false, retriable: false });
-    if (result.ok) return;
-    expect(result.reason).toMatch(/Transaction Search/i);
-  });
-
-  it('reports a provider outage as retriable', async () => {
-    scriptPayPal([], { searchStatus: 503 });
-    const result = await fetchProviderTransactions('https://api', 'tok', 0, 1000);
-    expect(result).toMatchObject({ ok: false, retriable: true });
+    scriptProviderObjects({
+      subscriptions: { 'SUB-1': subscriptionObject({ lastPaymentTime: null }) },
+    });
+    await expect(fetchProviderSubscription(BASE, 'tok', 'SUB-1')).resolves.toEqual({
+      ok: true,
+      found: true,
+      value: {
+        status: 'ACTIVE',
+        lastPaymentTime: null,
+        lastPaymentAmountCents: null,
+        lastPaymentCurrency: null,
+      },
+    });
   });
 });
 
-// ── The diff ────────────────────────────────────────────────────────────────
-
 describe('runPayPalReconciliation', () => {
-  it('ignores custom-only provider data even when it matches a durable local order', async () => {
-    const mimickedIdentity = JSON.stringify({
-      g: GUILD_ID,
-      p: PRODUCT_UUID,
-      c: CUSTOMER_UUID,
-      d: DISCORD_ID,
-    });
-    scriptPayPal([{
-      transaction_details: [txn({
-        id: 'FOREIGN-POSITIVE',
-        value: '49.99',
-        customField: mimickedIdentity,
-      })],
-      total_pages: 1,
-    }]);
-    withLedger({
-      orders: [{
-        id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        amount_cents: 4999,
-        status: 'pending',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-    });
+  const NOW = Date.parse('2026-07-27T12:00:00.000Z');
+  const IN_WINDOW = '2026-07-24T10:00:00.000Z';
+  const OPTS = { now: NOW, settlementLagMs: 0 } as const;
+  const PAY_UUID = '30000000-0000-4000-8000-000000000001';
+  const PAY2_UUID = '30000000-0000-4000-8000-000000000002';
+  const REF_UUID = '40000000-0000-4000-8000-000000000001';
+  const REF2_UUID = '40000000-0000-4000-8000-000000000002';
 
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.providerTransactions).toBe(0);
-    expect(result.missingLocalPayments).toEqual([]);
-    expect(opsFor('alerts', 'insert')).toHaveLength(0);
-  });
-
-  it('does not let matching custom-only data resolve a settled local finding', async () => {
-    scriptPayPal([{
-      transaction_details: [txn({
-        id: 'CUSTOM-ONLY-COPIED',
-        value: '9.99',
-      })],
-      total_pages: 1,
-    }]);
-    withLedger({
-      orders: [{
-        id: ORDER_UUID,
-        order_number: 'ORD-CUSTOM-ONLY',
-        guild_id: GUILD_ID,
-        amount_cents: 999,
-        paypal_order_id: null,
-        paypal_subscription_id: null,
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-    });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.providerTransactions).toBe(0);
-    expect(result.missingLocalPayments).toEqual([]);
-    expect(result.missingProviderPayments).toEqual([
-      expect.objectContaining({ orderId: ORDER_UUID }),
-    ]);
-    expect(opsFor('alerts', 'insert')).toHaveLength(1);
-  });
-
-  it.each([
-    {
-      label: 'old subscription',
-      eventCode: 'T0002',
-      referenceType: 'SUB',
-      referenceId: 'SUB-OLDER-THAN-WINDOW',
-      providerColumn: 'paypal_subscription_id',
-    },
-    {
-      label: 'checkout just before the local window',
-      eventCode: 'T0006',
-      referenceType: 'ODR',
-      referenceId: 'ORDER-BEFORE-WINDOW',
-      providerColumn: 'paypal_order_id',
-    },
-  ])('resolves an exact $label reference outside the creation window', async ({
-    eventCode,
-    referenceType,
-    referenceId,
-    providerColumn,
-  }) => {
-    scriptPayPal([{
-      transaction_details: [txn({
-        id: `CURRENT-${referenceType}`,
-        value: '9.99',
-        eventCode,
-        customField: null,
-        referenceId,
-        referenceType,
-      })],
-      total_pages: 1,
-    }]);
-    const oldOrder = {
-      id: ORDER_UUID,
-      order_number: 'ORD-OLD',
+  function paymentRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: PAY_UUID,
+      order_id: ORDER_UUID,
       guild_id: GUILD_ID,
-      customer_id: CUSTOMER_UUID,
-      product_id: PRODUCT_UUID,
-      plan_id: eventCode === 'T0002'
-        ? '30000000-0000-4000-8000-000000000001'
-        : null,
-      amount_cents: 999,
+      paypal_payment_id: 'CAP-1',
+      amount_cents: 2500,
       currency: 'USD',
       status: 'completed',
-      source: 'purchase',
-      paypal_order_id: providerColumn === 'paypal_order_id' ? referenceId : null,
-      paypal_subscription_id:
-        providerColumn === 'paypal_subscription_id' ? referenceId : null,
-      created_at: '2025-01-01T00:00:00.000Z',
+      created_at: IN_WINDOW,
+      ...overrides,
     };
-    resolvers['payments'] = () => ({ data: [], error: null });
-    resolvers['guild'] = () => ({ data: [{ id: GUILD_ID }], error: null });
-    resolvers['orders'] = (op) => {
-      const exactLookup = filterArgs(op, 'in')
-        .some((args) => args[0] === providerColumn && (args[1] as string[]).includes(referenceId));
-      return { data: exactLookup ? [oldOrder] : [], error: null };
-    };
-    resolvers['alerts.update'] = () => ({ data: [], error: null });
+  }
 
-    const result = await runPayPalReconciliation(supabase as never);
+  function completedResult(result: Awaited<ReturnType<typeof runPayPalReconciliation>>) {
+    if (result.status !== 'completed') {
+      throw new Error(`expected completed, got ${JSON.stringify(result)}`);
+    }
+    return result;
+  }
 
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.missingLocalPayments).toEqual([
-      expect.objectContaining({
-        transactionId: `CURRENT-${referenceType}`,
-        guildId: GUILD_ID,
-      }),
-    ]);
+  it('verifies a settled payment per-object and never touches the reporting API', async () => {
+    withLedger({ payments: [paymentRow()] });
+    scriptProviderObjects({ captures: { 'CAP-1': captureObject({ value: '25.00' }) } });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toEqual([]);
     expect(result.missingProviderPayments).toEqual([]);
-    expect(
-      opsFor('orders', 'select')
-        .some((op) => filterArgs(op, 'in').some((args) => args[0] === providerColumn)),
-    ).toBe(true);
+    expect(result.amountMismatches).toEqual([]);
+    expect(result.unsettledLocalPayments).toEqual([]);
+    expect(result.providerTransactions).toBe(1);
+    expect(result.localPayments).toBe(1);
+    // The white-label model: only per-object commerce GETs, which any bare
+    // REST app may call. The reporting product (Transaction Search) that
+    // 403'd for wizard-onboarded operators must never be requested again.
+    expect(providerCalls.some((url) => url.includes('/v1/reporting/'))).toBe(false);
+    expect(providerCalls.some((url) => url.includes('/v2/payments/captures/CAP-1'))).toBe(true);
+    // Clean pass resolves any standing mismatch alert and records the result.
+    expect(opsFor('alerts', 'update').length).toBeGreaterThan(0);
+    const upserts = opsFor('instance_settings', 'upsert');
+    expect(upserts.length).toBe(1);
+    expect(upserts[0]!.payload?.key).toBe(RECONCILE_LAST_RESULT_KEY);
   });
 
-  it('fails closed on conflicting local payment, reference, and custom tenant identity', async () => {
-    const secondOrderId = '00000000-0000-4000-8000-000000000002';
-    const conflictingCustom = JSON.stringify({
-      g: SECOND_GUILD_ID,
-      p: PRODUCT_UUID,
-      c: SECOND_CUSTOMER_UUID,
-      d: DISCORD_ID,
-    });
-    scriptPayPal([{
-      transaction_details: [txn({
-        id: 'CAPTURE-CONFLICT',
-        value: '9.99',
-        customField: conflictingCustom,
-        referenceId: 'PAYPAL-ORDER-GUILD-TWO',
-        referenceType: 'ODR',
-      })],
-      total_pages: 1,
+  it('flags a settled payment whose capture PayPal cannot produce', async () => {
+    withLedger({ payments: [paymentRow()] });
+    scriptProviderObjects({ captures: {} });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingProviderPayments).toEqual([{
+      kind: 'payment',
+      orderId: ORDER_UUID,
+      orderNumber: null,
+      guildId: GUILD_ID,
+      paypalPaymentIds: ['CAP-1'],
+      amountCents: 2500,
+      currency: 'USD',
+      createdAt: IN_WINDOW,
     }]);
-    withLedger({
-      guildIds: [GUILD_ID, SECOND_GUILD_ID],
-      payments: [{
-        id: 'payment-guild-one',
-        order_id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        paypal_payment_id: 'CAPTURE-CONFLICT',
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'completed',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-      orders: [
-        {
-          id: ORDER_UUID,
-          guild_id: GUILD_ID,
-          customer_id: CUSTOMER_UUID,
-          product_id: PRODUCT_UUID,
-          amount_cents: 999,
-          status: 'completed',
-          source: 'purchase',
-          paypal_order_id: 'PAYPAL-ORDER-GUILD-ONE',
-          created_at: '2026-07-20T10:00:00.000Z',
-        },
-        {
-          id: secondOrderId,
-          guild_id: SECOND_GUILD_ID,
-          customer_id: SECOND_CUSTOMER_UUID,
-          product_id: PRODUCT_UUID,
-          amount_cents: 999,
-          status: 'completed',
-          source: 'purchase',
-          paypal_order_id: 'PAYPAL-ORDER-GUILD-TWO',
-          created_at: '2026-07-20T10:00:00.000Z',
-        },
-      ],
-    });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result).toMatchObject({
-      status: 'failed',
-      retriable: false,
-      reason: expect.stringMatching(/identity conflict/i),
-    });
-    expect(opsFor('alerts', 'insert')).toHaveLength(0);
-  });
-
-  it('fails closed when exact attribution conflicts with custom discord identity', async () => {
-    const wrongDiscordCustom = JSON.stringify({
-      g: GUILD_ID,
-      p: PRODUCT_UUID,
-      c: CUSTOMER_UUID,
-      d: '444444444444444444',
-    });
-    scriptPayPal([{
-      transaction_details: [txn({
-        id: 'CAPTURE-WRONG-DISCORD',
-        value: '9.99',
-        customField: wrongDiscordCustom,
-      })],
-      total_pages: 1,
-    }]);
-    withLedger({
-      payments: [{
-        id: 'payment-wrong-discord',
-        order_id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        paypal_payment_id: 'CAPTURE-WRONG-DISCORD',
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'completed',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-    });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result).toMatchObject({
-      status: 'failed',
-      retriable: false,
-      reason: expect.stringMatching(/identity conflict/i),
-    });
-    expect(opsFor('customers', 'select')).toHaveLength(1);
-    expect(opsFor('alerts', 'insert')).toHaveLength(0);
-  });
-
-  it('attributes a missing local capture through an exact ODR reference', async () => {
-    scriptPayPal([{
-      transaction_details: [txn({
-        id: 'CAPTURE-LOST-BY-REFERENCE',
-        value: '9.99',
-        customField: null,
-        referenceId: 'PAYPAL-ORDER-EXACT',
-        referenceType: 'ODR',
-      })],
-      total_pages: 1,
-    }]);
-    withLedger({
-      orders: [{
-        id: ORDER_UUID,
-        order_number: 'ORD-REFERENCE',
-        guild_id: GUILD_ID,
-        customer_id: CUSTOMER_UUID,
-        product_id: PRODUCT_UUID,
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'completed',
-        source: 'purchase',
-        paypal_order_id: 'PAYPAL-ORDER-EXACT',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-    });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.missingLocalPayments).toEqual([
-      expect.objectContaining({
-        transactionId: 'CAPTURE-LOST-BY-REFERENCE',
-        guildId: GUILD_ID,
-      }),
-    ]);
-    // The provider reference proves this exact order exists at PayPal; do not
-    // simultaneously claim the same order is missing at the provider.
-    expect(result.missingProviderPayments).toEqual([]);
-  });
-
-  it('fails closed end-to-end on a half-present reference when no local payment exists', async () => {
-    scriptPayPal([{
-      transaction_details: [txn({
-        id: 'CAPTURE-HALF-REFERENCE',
-        value: '9.99',
-        customField: null,
-        referenceId: 'PAYPAL-ORDER-HALF',
-      })],
-      total_pages: 1,
-    }]);
-    withLedger({});
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result).toMatchObject({
-      status: 'failed',
-      retriable: false,
-      reason: expect.stringMatching(/malformed|reference/i),
-    });
-    expect(opsFor('alerts', 'insert')).toHaveLength(0);
-  });
-
-  it('flags a PayPal payment with no local row — the critical direction', async () => {
-    const lostOrderId = '00000000-0000-4000-8000-000000000002';
-    scriptPayPal([{
-      transaction_details: [
-        txn({ id: 'CAPTURE-RECORDED', value: '9.99' }),
-        txn({
-          id: 'CAPTURE-LOST',
-          value: '19.99',
-          referenceId: 'PAYPAL-ORDER-LOST',
-          referenceType: 'ODR',
-        }),
-      ],
-      total_pages: 1,
-    }]);
-    withLedger({
-      payments: [{
-        id: 'p1',
-        order_id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        paypal_payment_id: 'CAPTURE-RECORDED',
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'completed',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-      orders: [{
-        id: lostOrderId,
-        guild_id: GUILD_ID,
-        amount_cents: 1999,
-        paypal_order_id: 'PAYPAL-ORDER-LOST',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-    });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.missingLocalPayments).toEqual([
-      expect.objectContaining({ transactionId: 'CAPTURE-LOST', amountCents: 1999 }),
-    ]);
-    expect(result.alerted).toBe(true);
-
-    const alert = opsFor('alerts', 'insert')[0]!;
-    expect(alert.payload).toMatchObject({
+    const alertInserts = opsFor('alerts', 'insert');
+    expect(alertInserts.length).toBe(1);
+    expect(alertInserts[0]!.payload).toMatchObject({
       guild_id: GUILD_ID,
       alert_type: RECONCILE_ALERT_TYPE,
       severity: 'critical',
     });
-    expect(alert.payload!.message).toContain('CAPTURE-LOST');
-    expect(alert.payload!.message).toContain('received nothing');
   });
 
-  it('flags a completed local order PayPal has no record of', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+  it('reports a provider-settled capture backing an unsettled local pair', async () => {
     withLedger({
-      payments: [{
-        id: 'p1',
-        order_id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        paypal_payment_id: 'CAPTURE-PHANTOM',
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'completed',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
+      payments: [paymentRow({ status: 'pending' })],
       orders: [{
         id: ORDER_UUID,
-        order_number: 'ORD-1001',
         guild_id: GUILD_ID,
-        amount_cents: 999,
-        created_at: '2026-07-20T10:00:00.000Z',
+        amount_cents: 2500,
+        status: 'pending',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
       }],
     });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject() },
+      orders: { 'PP-ORDER-1': orderObject({ captures: [{ id: 'CAP-1' }] }) },
+    });
 
-    const result = await runPayPalReconciliation(supabase as never);
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.missingProviderPayments).toEqual([
-      expect.objectContaining({ orderId: ORDER_UUID, orderNumber: 'ORD-1001' }),
-    ]);
-    expect(opsFor('alerts', 'insert')[0]!.payload!.message).toContain('ORD-1001');
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'CAP-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'pending',
+      orderStatus: 'pending',
+    }]);
+    // The capture pass owns locally-known captures; the pending-order GET
+    // must not double-report the same capture.
+    expect(result.missingLocalPayments).toEqual([]);
   });
 
-  it('checks an in-window renewal payment even when its order predates the window', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
-    const oldOrder = {
-      id: ORDER_UUID,
-      order_number: 'ORD-OLD-SUBSCRIPTION',
-      guild_id: GUILD_ID,
-      customer_id: CUSTOMER_UUID,
-      product_id: PRODUCT_UUID,
-      plan_id: '30000000-0000-4000-8000-000000000001',
-      amount_cents: 999,
+  it('flags a provider-side refund that never landed locally', async () => {
+    withLedger({ payments: [paymentRow()] });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject({ status: 'REFUNDED', value: '25.00' }) },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toEqual([{
+      kind: 'refund',
+      transactionId: 'CAP-1',
+      guildId: GUILD_ID,
+      amountCents: 2500,
       currency: 'USD',
-      status: 'completed',
-      source: 'purchase',
-      paypal_order_id: null,
-      paypal_subscription_id: 'SUB-OLD-ORDER',
-      created_at: '2025-01-01T00:00:00.000Z',
-    };
-    withLedger({
-      payments: [{
-        id: 'renewal-payment',
-        order_id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        paypal_payment_id: 'SALE-RENEWAL-MISSING',
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'completed',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-      orders: [oldOrder],
-      inferOrders: false,
-    });
-    resolvers['orders'] = (op) => {
-      const exactOrderLookup = filterArgs(op, 'in')
-        .some((args) =>
-          args[0] === 'id'
-          && (args[1] as string[]).includes(ORDER_UUID),
-        );
-      return { data: exactOrderLookup ? [oldOrder] : [], error: null };
-    };
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.missingProviderPayments).toEqual([
-      expect.objectContaining({
-        orderId: ORDER_UUID,
-        paypalPaymentIds: ['SALE-RENEWAL-MISSING'],
-      }),
-    ]);
+      initiatedAt: null,
+      source: 'capture',
+      referenceId: 'CAP-1',
+    }]);
   });
 
-  it('does not let one matching sibling payment mask another missing provider id', async () => {
-    scriptPayPal([{
-      transaction_details: [txn({
-        id: 'CAPTURE-SIBLING-PRESENT',
-        value: '9.99',
-        customField: null,
-        referenceId: `PAYPAL-${ORDER_UUID}`,
-        referenceType: 'ODR',
-      })],
-      total_pages: 1,
-    }]);
+  it('accepts a provider-side refund that IS recorded locally', async () => {
     withLedger({
-      payments: [
-        {
-          id: 'sibling-present',
-          order_id: ORDER_UUID,
-          guild_id: GUILD_ID,
-          paypal_payment_id: 'CAPTURE-SIBLING-PRESENT',
-          amount_cents: 999,
-          currency: 'USD',
-          status: 'completed',
-          created_at: '2026-07-20T10:00:00.000Z',
-        },
-        {
-          id: 'sibling-missing',
-          order_id: ORDER_UUID,
-          guild_id: GUILD_ID,
-          paypal_payment_id: 'CAPTURE-SIBLING-MISSING',
-          amount_cents: 999,
-          currency: 'USD',
-          status: 'completed',
-          created_at: '2026-07-20T11:00:00.000Z',
-        },
-      ],
+      payments: [paymentRow({ status: 'refunded' })],
       orders: [{
         id: ORDER_UUID,
-        order_number: 'ORD-SIBLINGS',
         guild_id: GUILD_ID,
-        amount_cents: 999,
-        created_at: '2026-07-20T10:00:00.000Z',
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
       }],
-    });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.missingProviderPayments).toEqual([
-      expect.objectContaining({
-        orderId: ORDER_UUID,
-        paypalPaymentIds: ['CAPTURE-SIBLING-MISSING'],
-      }),
-    ]);
-  });
-
-  it('reconciles partial refund siblings independently by PayPal refund id in both directions', async () => {
-    const paymentId = '50000000-0000-4000-8000-000000000001';
-    scriptPayPal([{
-      transaction_details: [
-        txn({
-          id: 'CAPTURE-REFUND-PARENT',
-          value: '9.99',
-          customField: null,
-        }),
-        txn({
-          id: 'REFUND-PARTIAL-A',
-          value: '-3.00',
-          eventCode: 'T1107',
-          customField: null,
-          referenceId: 'CAPTURE-REFUND-PARENT',
-          referenceType: 'TXN',
-        }),
-        txn({
-          id: 'REFUND-PARTIAL-B',
-          value: '-2.00',
-          eventCode: 'T1107',
-          customField: null,
-          referenceId: 'CAPTURE-REFUND-PARENT',
-          referenceType: 'TXN',
-        }),
-        txn({
-          id: 'REFUND-PROVIDER-ONLY',
-          value: '-1.50',
-          eventCode: 'T1107',
-          customField: null,
-          referenceId: 'CAPTURE-REFUND-PARENT',
-          referenceType: 'TXN',
-        }),
-      ],
-      total_pages: 1,
-    }]);
-    withLedger({
-      payments: [{
-        id: paymentId,
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
         order_id: ORDER_UUID,
         guild_id: GUILD_ID,
-        paypal_payment_id: 'CAPTURE-REFUND-PARENT',
-        amount_cents: 999,
+        paypal_refund_id: 'REF-1',
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        amount_cents: 2500,
         currency: 'USD',
-        status: 'completed',
-        created_at: '2026-07-20T09:00:00.000Z',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject({ status: 'REFUNDED', value: '25.00' }) },
+      refunds: { 'REF-1': refundObject({ value: '25.00' }) },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toEqual([]);
+    expect(result.missingProviderPayments).toEqual([]);
+    expect(result.amountMismatches).toEqual([]);
+    expect(result.providerTransactions).toBe(2);
+  });
+
+  it('flags a local refund PayPal cannot produce, tolerating zero-amount reversal witnesses', async () => {
+    withLedger({
+      payments: [paymentRow({ status: 'refunded' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
       }],
       refunds: [
         {
-          id: '51000000-0000-4000-8000-000000000001',
-          payment_id: paymentId,
+          id: REF_UUID,
+          payment_id: PAY_UUID,
           order_id: ORDER_UUID,
           guild_id: GUILD_ID,
-          paypal_refund_id: 'REFUND-PARTIAL-A',
+          paypal_refund_id: 'REF-MISSING',
           event_type: 'PAYMENT.CAPTURE.REFUNDED',
-          amount_cents: 300,
+          amount_cents: 2500,
           currency: 'USD',
-          created_at: '2026-07-20T10:00:00.000Z',
+          created_at: IN_WINDOW,
         },
         {
-          id: '51000000-0000-4000-8000-000000000002',
-          payment_id: paymentId,
+          id: REF2_UUID,
+          payment_id: PAY_UUID,
           order_id: ORDER_UUID,
           guild_id: GUILD_ID,
-          paypal_refund_id: 'REFUND-PARTIAL-B',
-          event_type: 'PAYMENT.CAPTURE.REFUNDED',
-          amount_cents: 200,
+          paypal_refund_id: 'REF-WITNESS',
+          event_type: 'PAYMENT.CAPTURE.REVERSED',
+          amount_cents: 0,
           currency: 'USD',
-          created_at: '2026-07-20T11:00:00.000Z',
-        },
-        {
-          id: '51000000-0000-4000-8000-000000000003',
-          payment_id: paymentId,
-          order_id: ORDER_UUID,
-          guild_id: GUILD_ID,
-          paypal_refund_id: 'REFUND-LOCAL-ONLY',
-          event_type: 'PAYMENT.CAPTURE.REFUNDED',
-          amount_cents: 100,
-          currency: 'USD',
-          created_at: '2026-07-20T12:00:00.000Z',
+          created_at: IN_WINDOW,
         },
       ],
     });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject({ status: 'REFUNDED', value: '25.00' }) },
+      refunds: {},
+    });
 
-    const result = await runPayPalReconciliation(supabase as never);
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.localRefunds).toBe(3);
-    expect(result.missingLocalPayments).toEqual([
-      expect.objectContaining({
-        kind: 'refund',
-        transactionId: 'REFUND-PROVIDER-ONLY',
-        guildId: GUILD_ID,
-      }),
-    ]);
-    expect(result.missingProviderPayments).toEqual([
-      expect.objectContaining({
-        kind: 'refund',
-        paypalPaymentIds: ['REFUND-LOCAL-ONLY'],
-        guildId: GUILD_ID,
-      }),
-    ]);
-    expect(result.amountMismatches).toEqual([]);
+    expect(result.missingProviderPayments).toEqual([{
+      kind: 'refund',
+      orderId: ORDER_UUID,
+      orderNumber: null,
+      guildId: GUILD_ID,
+      paypalPaymentIds: ['REF-MISSING'],
+      amountCents: 2500,
+      currency: 'USD',
+      createdAt: IN_WINDOW,
+    }]);
   });
 
-  it('flags a refund amount and currency mismatch against the exact refund sibling', async () => {
-    const paymentId = '50000000-0000-4000-8000-000000000001';
-    scriptPayPal([{
-      transaction_details: [
-        txn({
-          id: 'CAPTURE-REFUND-PARENT',
-          value: '9.99',
-          customField: null,
-        }),
-        txn({
-          id: 'REFUND-MISMATCH',
-          value: '-3.00',
-          currency: 'USD',
-          eventCode: 'T1107',
-          customField: null,
-          referenceId: 'CAPTURE-REFUND-PARENT',
-          referenceType: 'TXN',
-        }),
-      ],
-      total_pages: 1,
-    }]);
+  it('reports amount and currency drift on captures and refunds in local sign convention', async () => {
     withLedger({
-      payments: [{
-        id: paymentId,
-        order_id: ORDER_UUID,
+      payments: [paymentRow({ status: 'refunded' })],
+      orders: [{
+        id: ORDER_UUID,
         guild_id: GUILD_ID,
-        paypal_payment_id: 'CAPTURE-REFUND-PARENT',
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'completed',
-        created_at: '2026-07-20T09:00:00.000Z',
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
       }],
       refunds: [{
-        id: '51000000-0000-4000-8000-000000000001',
-        payment_id: paymentId,
+        id: REF_UUID,
+        payment_id: PAY_UUID,
         order_id: ORDER_UUID,
         guild_id: GUILD_ID,
-        paypal_refund_id: 'REFUND-MISMATCH',
+        paypal_refund_id: 'REF-1',
         event_type: 'PAYMENT.CAPTURE.REFUNDED',
-        amount_cents: 400,
-        currency: 'EUR',
-        created_at: '2026-07-20T10:00:00.000Z',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: IN_WINDOW,
       }],
     });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject({ status: 'REFUNDED', value: '30.00' }) },
+      refunds: { 'REF-1': refundObject({ value: '20.00' }) },
+    });
 
-    const result = await runPayPalReconciliation(supabase as never);
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.amountMismatches).toEqual([
-      expect.objectContaining({
-        transactionId: 'REFUND-MISMATCH',
-        providerAmountCents: 300,
-        localAmountCents: 400,
+    expect(result.amountMismatches).toEqual(expect.arrayContaining([
+      {
+        transactionId: 'CAP-1',
+        guildId: GUILD_ID,
+        providerAmountCents: 3000,
+        localAmountCents: 2500,
         providerCurrency: 'USD',
-        localCurrency: 'EUR',
-      }),
-    ]);
-    expect(result.missingLocalPayments).toEqual([]);
-    expect(result.missingProviderPayments).toEqual([]);
+        localCurrency: 'USD',
+      },
+      {
+        transactionId: 'REF-1',
+        guildId: GUILD_ID,
+        providerAmountCents: 2000,
+        localAmountCents: 2500,
+        providerCurrency: 'USD',
+        localCurrency: 'USD',
+      },
+    ]));
+    expect(result.amountMismatches).toHaveLength(2);
   });
 
-  it('does not require a provider row for a zero-amount reversal witness', async () => {
-    const paymentId = '50000000-0000-4000-8000-000000000001';
-    scriptPayPal([{
-      transaction_details: [
-        txn({
-          id: 'CAPTURE-ZERO-REVERSAL-PARENT',
-          value: '9.99',
-          customField: null,
-        }),
-      ],
-      total_pages: 1,
-    }]);
-    withLedger({
-      payments: [{
-        id: paymentId,
-        order_id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        paypal_payment_id: 'CAPTURE-ZERO-REVERSAL-PARENT',
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'completed',
-        created_at: '2026-07-20T09:00:00.000Z',
-      }],
-      refunds: [{
-        id: '51000000-0000-4000-8000-000000000001',
-        payment_id: paymentId,
-        order_id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        paypal_refund_id: 'REVERSAL-ZERO-WITNESS',
-        event_type: 'PAYMENT.CAPTURE.REVERSED',
-        amount_cents: 0,
-        currency: 'USD',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-    });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.localRefunds).toBe(1);
-    expect(result.missingLocalPayments).toEqual([]);
-    expect(result.missingProviderPayments).toEqual([]);
-    expect(result.amountMismatches).toEqual([]);
-  });
-
-  it('does not use the order fallback when an older provider-payment identity exists', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+  it('surfaces settled provider captures on an order with no local payment write at all', async () => {
     withLedger({
       payments: [],
       orders: [{
         id: ORDER_UUID,
-        order_number: 'ORD-OLDER-PAYMENT',
         guild_id: GUILD_ID,
-        amount_cents: 999,
-        source: 'purchase',
-        paypal_order_id: null,
-        paypal_subscription_id: null,
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-    });
-    resolvers['payments'] = (op) => {
-      const isDurableIdentityLookup = filterArgs(op, 'in')
-        .some((args) =>
-          args[0] === 'order_id'
-          && (args[1] as string[]).includes(ORDER_UUID),
-        );
-      return {
-        data: isDurableIdentityLookup
-          ? [{
-              id: 'older-payment',
-              order_id: ORDER_UUID,
-              guild_id: GUILD_ID,
-              paypal_payment_id: 'CAPTURE-OLDER-IDENTITY',
-            }]
-          : [],
-        error: null,
-      };
-    };
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.localPayments).toBe(0);
-    expect(result.missingProviderPayments).toEqual([]);
-  });
-
-  it('flags a completed purchase whose local provider identity write was lost', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
-    withLedger({
-      orders: [{
-        id: ORDER_UUID,
-        order_number: 'ORD-NO-PROVIDER-ID',
-        guild_id: GUILD_ID,
-        customer_id: CUSTOMER_UUID,
-        product_id: PRODUCT_UUID,
-        amount_cents: 999,
-        currency: 'USD',
+        amount_cents: 2500,
         status: 'completed',
-        source: 'purchase',
-        paypal_order_id: null,
-        paypal_subscription_id: null,
-        created_at: '2026-07-20T10:00:00.000Z',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
       }],
     });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.missingProviderPayments).toEqual([
-      expect.objectContaining({
-        orderId: ORDER_UUID,
-        orderNumber: 'ORD-NO-PROVIDER-ID',
-        paypalPaymentIds: [],
-      }),
-    ]);
-  });
-
-  it('includes a legacy null-source order when a PayPal order id proves commerce', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
-    withLedger({
-      orders: [{
-        id: ORDER_UUID,
-        order_number: 'ORD-LEGACY-PAYPAL',
-        guild_id: GUILD_ID,
-        amount_cents: 999,
-        source: null,
-        paypal_order_id: 'LEGACY-PAYPAL-ORDER',
-        paypal_subscription_id: null,
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
+    scriptProviderObjects({
+      orders: {
+        'PP-ORDER-1': orderObject({ captures: [{ id: 'CAP-NEW', value: '25.00' }] }),
+      },
     });
 
-    const result = await runPayPalReconciliation(supabase as never);
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.missingProviderPayments).toEqual([
-      expect.objectContaining({ orderId: ORDER_UUID }),
-    ]);
-  });
-
-  it('includes a null-source order reached through an exact local PayPal payment', async () => {
-    scriptPayPal([{
-      transaction_details: [txn({ id: 'LEGACY-CAPTURE', value: '9.99' })],
-      total_pages: 1,
+    expect(result.missingLocalPayments).toEqual([{
+      kind: 'payment',
+      transactionId: 'CAP-NEW',
+      guildId: GUILD_ID,
+      amountCents: 2500,
+      currency: 'USD',
+      initiatedAt: null,
+      source: 'order',
+      referenceId: 'PP-ORDER-1',
     }]);
+  });
+
+  it('treats a vanished PENDING order as no money moved', async () => {
     withLedger({
-      payments: [{
-        id: 'legacy-payment',
-        order_id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        paypal_payment_id: 'LEGACY-CAPTURE',
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'completed',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
+      payments: [],
       orders: [{
         id: ORDER_UUID,
         guild_id: GUILD_ID,
-        amount_cents: 999,
-        source: null,
-        paypal_order_id: null,
-        paypal_subscription_id: null,
-        created_at: '2026-07-20T10:00:00.000Z',
+        amount_cents: 2500,
+        status: 'pending',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
       }],
     });
+    scriptProviderObjects({ orders: {} });
 
-    const result = await runPayPalReconciliation(supabase as never);
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.providerTransactions).toBe(1);
+    expect(result.missingProviderPayments).toEqual([]);
+    expect(result.missingLocalPayments).toEqual([]);
+  });
+
+  it('flags a SETTLED order whose provider evidence is wholly absent', async () => {
+    withLedger({
+      payments: [],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({ orders: {} });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingProviderPayments).toEqual([{
+      kind: 'order',
+      orderId: ORDER_UUID,
+      orderNumber: null,
+      guildId: GUILD_ID,
+      paypalPaymentIds: [],
+      amountCents: 2500,
+      currency: 'USD',
+      createdAt: IN_WINDOW,
+    }]);
+  });
+
+  it('fails closed when a fetched order carries a foreign SomniBot identity', async () => {
+    withLedger({
+      payments: [],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({
+      orders: {
+        'PP-ORDER-1': orderObject({
+          customId: JSON.stringify({
+            g: SECOND_GUILD_ID,
+            p: PRODUCT_UUID,
+            c: CUSTOMER_UUID,
+            d: DISCORD_ID,
+          }),
+        }),
+      },
+    });
+
+    await expect(runPayPalReconciliation(supabase as never, OPTS)).resolves.toEqual({
+      status: 'failed',
+      reason: 'provider identity conflict',
+      retriable: false,
+    });
+  });
+
+  it('verifies subscription commerce through the subscription, not the captures API', async () => {
+    withLedger({
+      payments: [paymentRow({ paypal_payment_id: 'SALE-1' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      captures: {},
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: IN_WINDOW, lastPaymentValue: '25.00' }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    // The sale id 404s on the captures API — that is expected for
+    // subscription billing and must not be reported as missing money.
+    expect(result.missingProviderPayments).toEqual([]);
     expect(result.missingLocalPayments).toEqual([]);
     expect(result.amountMismatches).toEqual([]);
-    expect(result.unsettledLocalPayments).toEqual([]);
+    expect(providerCalls.some((url) => url.includes('/v1/billing/subscriptions/SUB-1'))).toBe(true);
   });
 
-  it('flags an in-window null-source order proven only by a missing provider payment', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+  it('flags a provider subscription charge with no local payment in the window', async () => {
     withLedger({
-      payments: [{
-        id: 'legacy-payment-without-provider-match',
-        order_id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        paypal_payment_id: 'LEGACY-CAPTURE-MISSING',
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'completed',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-      orders: [{
-        id: ORDER_UUID,
-        order_number: 'ORD-LEGACY-MISSING',
-        guild_id: GUILD_ID,
-        amount_cents: 999,
-        source: null,
-        paypal_order_id: null,
-        paypal_subscription_id: null,
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-    });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.missingProviderPayments).toEqual([
-      expect.objectContaining({
-        orderId: ORDER_UUID,
-        paypalPaymentIds: ['LEGACY-CAPTURE-MISSING'],
-      }),
-    ]);
-  });
-
-  it('excludes a null-source order with no durable PayPal evidence', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
-    withLedger({
+      payments: [],
       orders: [{
         id: ORDER_UUID,
         guild_id: GUILD_ID,
-        amount_cents: 999,
-        source: null,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
         paypal_order_id: null,
-        paypal_subscription_id: null,
-        created_at: '2026-07-20T10:00:00.000Z',
+        paypal_subscription_id: 'SUB-1',
       }],
     });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: IN_WINDOW, lastPaymentValue: '25.00' }),
+      },
+    });
 
-    const result = await runPayPalReconciliation(supabase as never);
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.missingProviderPayments).toEqual([]);
+    expect(result.missingLocalPayments).toEqual([{
+      kind: 'payment',
+      transactionId: 'SUB-1',
+      guildId: GUILD_ID,
+      amountCents: 2500,
+      currency: 'USD',
+      initiatedAt: IN_WINDOW,
+      source: 'subscription',
+      referenceId: 'SUB-1',
+    }]);
   });
 
-  it('fails closed instead of resolving alerts over a malformed local PayPal row', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+  it('flags a settled subscription order whose subscription PayPal cannot produce', async () => {
     withLedger({
-      payments: [{
-        id: 'malformed-payment',
-        order_id: ORDER_UUID,
+      payments: [],
+      orders: [{
+        id: ORDER_UUID,
         guild_id: GUILD_ID,
-        paypal_payment_id: 'contains spaces',
-        amount_cents: 999,
-        currency: 'USD',
+        amount_cents: 2500,
         status: 'completed',
-        created_at: '2026-07-20T10:00:00.000Z',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-GONE',
       }],
     });
+    scriptProviderObjects({ subscriptions: {} });
 
-    const result = await runPayPalReconciliation(supabase as never);
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result).toMatchObject({
+    expect(result.missingProviderPayments).toEqual([{
+      kind: 'order',
+      orderId: ORDER_UUID,
+      orderNumber: null,
+      guildId: GUILD_ID,
+      paypalPaymentIds: ['SUB-GONE'],
+      amountCents: 2500,
+      currency: 'USD',
+      createdAt: IN_WINDOW,
+    }]);
+  });
+
+  it('propagates a retriable provider fault instead of inventing a verdict', async () => {
+    withLedger({ payments: [paymentRow()] });
+    scriptProviderObjects({ captures: { 'CAP-1': { __status: 503 } } });
+
+    await expect(runPayPalReconciliation(supabase as never, OPTS)).resolves.toEqual({
       status: 'failed',
-      retriable: false,
-      reason: expect.stringMatching(/malformed local PayPal payment/i),
+      reason: 'capture lookup returned 503',
+      retriable: true,
     });
-    expect(opsFor('alerts', 'update')).toHaveLength(0);
+    expect(opsFor('alerts', 'insert')).toEqual([]);
   });
 
-  it('scans only settled-capable purchase orders for the local->provider direction', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
-    withLedger({});
+  it('skips when PayPal credentials are not configured', async () => {
+    delete process.env.PAYPAL_CLIENT_ID;
+    delete process.env.PAYPAL_CLIENT_SECRET;
+    withLedger({ payments: [] });
+    // No saved wizard credentials either: the settings table exists and is
+    // simply empty, which must read as "not configured", not as a fault.
+    resolvers['instance_settings'] = () => ({ data: [], error: null });
+    scriptProviderObjects({});
 
-    await runPayPalReconciliation(supabase as never);
-
-    const orderScan = opsFor('orders', 'select')[0]!;
-    expect(filterArgs(orderScan, 'or'))
-      .toContainEqual(['source.eq.purchase,source.is.null']);
-    expect(filterArgs(orderScan, 'in')).toContainEqual([
-      'status',
-      ['completed', 'disputed', 'refunded', 'pending', 'pending_review'],
-    ]);
-  });
-
-  it('restricts local scans to PayPal commerce and excludes free/manual rows', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
-    withLedger({
-      payments: [{
-        id: 'stripe-payment',
-        order_id: '00000000-0000-4000-8000-000000000099',
-        guild_id: GUILD_ID,
-        paypal_payment_id: 'NOT-PAYPAL',
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'completed',
-        provider: 'stripe',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-      orders: [
-        {
-          id: '00000000-0000-4000-8000-000000000098',
-          guild_id: GUILD_ID,
-          amount_cents: 0,
-          source: 'manual',
-          status: 'completed',
-          paypal_order_id: null,
-          created_at: '2026-07-20T10:00:00.000Z',
-        },
-        {
-          id: '00000000-0000-4000-8000-000000000097',
-          guild_id: GUILD_ID,
-          amount_cents: 0,
-          source: 'giveaway',
-          status: 'completed',
-          paypal_order_id: null,
-          created_at: '2026-07-20T10:00:00.000Z',
-        },
-      ],
-      inferOrders: false,
+    await expect(runPayPalReconciliation(supabase as never, OPTS)).resolves.toEqual({
+      status: 'skipped',
+      reason: 'PayPal credentials are not configured',
     });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.localPayments).toBe(0);
-    expect(result.missingProviderPayments).toEqual([]);
-    const paymentScan = opsFor('payments', 'select')[0]!;
-    expect(filterArgs(paymentScan, 'eq')).toContainEqual(['provider', 'paypal']);
-    const orderScan = opsFor('orders', 'select')[0]!;
-    expect(filterArgs(orderScan, 'or'))
-      .toContainEqual(['source.eq.purchase,source.is.null']);
-    expect(filterArgs(orderScan, 'gt')).toContainEqual(['amount_cents', 0]);
   });
 
-  it('flags an amount mismatch on a matched pair, in integer cents', async () => {
-    scriptPayPal([{
-      transaction_details: [txn({ id: 'CAPTURE-1', value: '19.99' })],
-      total_pages: 1,
-    }]);
-    withLedger({
-      payments: [{
-        id: 'p1',
-        order_id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        paypal_payment_id: 'CAPTURE-1',
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'completed',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-    });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.amountMismatches).toEqual([
-      expect.objectContaining({
-        transactionId: 'CAPTURE-1',
-        providerAmountCents: 1999,
-        localAmountCents: 999,
-      }),
-    ]);
-    // No false "missing" finding — the pair matched, only the amount diverged.
-    expect(result.missingLocalPayments).toEqual([]);
-  });
-
-  it('normalizes ISO currency case and flags a currency-only mismatch', async () => {
-    scriptPayPal([{
-      transaction_details: [
-        txn({ id: 'CAPTURE-SAME-CURRENCY', value: '9.99', currency: 'usd' }),
-        txn({ id: 'CAPTURE-WRONG-CURRENCY', value: '9.99', currency: 'EUR' }),
-      ],
-      total_pages: 1,
-    }]);
+  it('alerts the divergent guild and resolves the clean one', async () => {
     withLedger({
       payments: [
-        {
-          id: 'p1',
-          order_id: ORDER_UUID,
-          guild_id: GUILD_ID,
-          paypal_payment_id: 'CAPTURE-SAME-CURRENCY',
-          amount_cents: 999,
-          currency: 'uSd',
-          status: 'completed',
-          created_at: '2026-07-20T10:00:00.000Z',
-        },
-        {
-          id: 'p2',
+        paymentRow(),
+        paymentRow({
+          id: PAY2_UUID,
           order_id: '00000000-0000-4000-8000-000000000002',
-          guild_id: GUILD_ID,
-          paypal_payment_id: 'CAPTURE-WRONG-CURRENCY',
-          amount_cents: 999,
-          currency: 'USD',
-          status: 'completed',
-          created_at: '2026-07-20T10:00:00.000Z',
-        },
-      ],
-    });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.amountMismatches).toEqual([
-      expect.objectContaining({
-        transactionId: 'CAPTURE-WRONG-CURRENCY',
-        providerCurrency: 'EUR',
-        localCurrency: 'USD',
-      }),
-    ]);
-  });
-
-  it('does not accept a provider transaction against an unsettled local payment/order', async () => {
-    scriptPayPal([{
-      transaction_details: [txn({ id: 'CAPTURE-PENDING', value: '9.99' })],
-      total_pages: 1,
-    }]);
-    withLedger({
-      payments: [{
-        id: 'p-pending',
-        order_id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        paypal_payment_id: 'CAPTURE-PENDING',
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'pending',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-      orders: [{
-        id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'pending_review',
-        source: 'purchase',
-        paypal_order_id: 'PAYPAL-ORDER-PENDING',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-    });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.unsettledLocalPayments).toEqual([
-      expect.objectContaining({
-        transactionId: 'CAPTURE-PENDING',
-        guildId: GUILD_ID,
-        paymentStatus: 'pending',
-        orderStatus: 'pending_review',
-      }),
-    ]);
-    expect(result.amountMismatches).toEqual([]);
-  });
-
-  it('partitions alerts by guild without leaking another guild findings', async () => {
-    const secondCustom = JSON.stringify({
-      g: SECOND_GUILD_ID,
-      p: PRODUCT_UUID,
-      c: SECOND_CUSTOMER_UUID,
-      d: DISCORD_ID,
-    });
-    scriptPayPal([{
-      transaction_details: [
-        txn({
-          id: 'LOST-GUILD-ONE',
-          value: '9.99',
-          referenceId: 'PAYPAL-ORDER-GUILD-ONE',
-          referenceType: 'ODR',
-        }),
-        txn({
-          id: 'LOST-GUILD-TWO',
-          value: '19.99',
-          customField: secondCustom,
-          referenceId: 'PAYPAL-ORDER-GUILD-TWO',
-          referenceType: 'ODR',
-        }),
-      ],
-      total_pages: 1,
-    }]);
-    withLedger({
-      guildIds: [GUILD_ID, SECOND_GUILD_ID],
-      orders: [
-        {
-          id: ORDER_UUID,
-          guild_id: GUILD_ID,
-          amount_cents: 999,
-          paypal_order_id: 'PAYPAL-ORDER-GUILD-ONE',
-          created_at: '2026-07-20T10:00:00.000Z',
-        },
-        {
-          id: '00000000-0000-4000-8000-000000000002',
           guild_id: SECOND_GUILD_ID,
-          customer_id: SECOND_CUSTOMER_UUID,
-          amount_cents: 1999,
-          paypal_order_id: 'PAYPAL-ORDER-GUILD-TWO',
-          created_at: '2026-07-20T10:00:00.000Z',
-        },
+          paypal_payment_id: 'CAP-2',
+        }),
       ],
+      guildIds: [GUILD_ID, SECOND_GUILD_ID],
     });
+    scriptProviderObjects({ captures: { 'CAP-2': captureObject({ value: '25.00' }) } });
 
-    const result = await runPayPalReconciliation(supabase as never);
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.alerted).toBe(true);
-    const inserts = opsFor('alerts', 'insert');
-    expect(inserts).toHaveLength(2);
-    const first = inserts.find((op) => op.payload?.guild_id === GUILD_ID)!;
-    const second = inserts.find((op) => op.payload?.guild_id === SECOND_GUILD_ID)!;
-    expect(first.payload?.message).toContain('LOST-GUILD-ONE');
-    expect(first.payload?.message).not.toContain('LOST-GUILD-TWO');
-    expect(second.payload?.message).toContain('LOST-GUILD-TWO');
-    expect(second.payload?.message).not.toContain('LOST-GUILD-ONE');
+    expect(result.missingProviderPayments).toHaveLength(1);
+    expect(result.missingProviderPayments[0]!.guildId).toBe(GUILD_ID);
+    const alertInserts = opsFor('alerts', 'insert');
+    expect(alertInserts).toHaveLength(1);
+    expect(alertInserts[0]!.payload?.guild_id).toBe(GUILD_ID);
+    const resolutions = opsFor('alerts', 'update').filter((op) =>
+      filterArgs(op, 'eq').some(
+        (args) => args[0] === 'guild_id' && args[1] === SECOND_GUILD_ID,
+      ),
+    );
+    expect(resolutions.length).toBeGreaterThan(0);
   });
 
-  it('reports failure rather than claiming an alert was written when Supabase returns an error', async () => {
-    scriptPayPal([{
-      transaction_details: [txn({
-        id: 'LOST-UNALERTED',
-        value: '9.99',
-        referenceId: 'PAYPAL-ORDER-UNALERTED',
-        referenceType: 'ODR',
-      })],
-      total_pages: 1,
-    }]);
+  it('scopes the returned findings to resultGuildId while alerting every guild', async () => {
     withLedger({
-      orders: [{
-        id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        amount_cents: 999,
-        paypal_order_id: 'PAYPAL-ORDER-UNALERTED',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
+      payments: [
+        paymentRow(),
+        paymentRow({
+          id: PAY2_UUID,
+          order_id: '00000000-0000-4000-8000-000000000002',
+          guild_id: SECOND_GUILD_ID,
+          paypal_payment_id: 'CAP-2',
+        }),
+      ],
+      guildIds: [GUILD_ID, SECOND_GUILD_ID],
     });
-    resolvers['alerts.update'] = () => ({ data: null, error: { message: 'alerts down' } });
+    scriptProviderObjects({ captures: {} });
 
-    const result = await runPayPalReconciliation(supabase as never);
+    const result = completedResult(await runPayPalReconciliation(
+      supabase as never,
+      { ...OPTS, resultGuildId: SECOND_GUILD_ID },
+    ));
 
-    expect(result).toMatchObject({
-      status: 'failed',
-      retriable: true,
-      reason: expect.stringMatching(/alert/i),
-    });
-    expect((result as { alerted?: boolean }).alerted).not.toBe(true);
-  });
-
-  it('fails closed when the local payment scan would be truncated', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
-    resolvers['payments'] = (op) => {
-      const [from] = (filterArgs(op, 'range').at(-1) ?? [0]) as [number, number];
-      const count = from < LOCAL_SCAN_MAX_ROWS ? 1000 : 1;
-      return {
-        data: Array.from({ length: count }, (_, index) => ({
-          id: `p-${from + index}`,
-          order_id: null,
-          guild_id: GUILD_ID,
-          paypal_payment_id: `CAPTURE-${from + index}`,
-          amount_cents: 100,
-          currency: 'USD',
-          status: 'completed',
-          provider: 'paypal',
-          created_at: '2026-07-20T10:00:00.000Z',
-        })),
-        error: null,
-      };
-    };
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result).toMatchObject({
-      status: 'failed',
-      retriable: false,
-      reason: expect.stringMatching(/payment scan exceeded/i),
-    });
-    const ranges = opsFor('payments', 'select').flatMap((op) => filterArgs(op, 'range'));
-    expect(ranges.at(-1)).toEqual([LOCAL_SCAN_MAX_ROWS, LOCAL_SCAN_MAX_ROWS]);
-  });
-
-  it('raises nothing and resolves the open alert when the ledgers agree', async () => {
-    scriptPayPal([{
-      transaction_details: [txn({ id: 'CAPTURE-1', value: '9.99' })],
-      total_pages: 1,
-    }]);
-    withLedger({
-      payments: [{
-        id: 'p1',
-        order_id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        paypal_payment_id: 'CAPTURE-1',
-        amount_cents: 999,
-        currency: 'USD',
-        status: 'completed',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-      orders: [{
-        id: ORDER_UUID,
-        order_number: 'ORD-1001',
-        guild_id: GUILD_ID,
-        amount_cents: 999,
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-    });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    expect(result.missingLocalPayments).toEqual([]);
-    expect(result.missingProviderPayments).toEqual([]);
-    expect(result.alerted).toBe(false);
-    expect(opsFor('alerts', 'insert')).toHaveLength(0);
-
-    // A clean pass clears any standing divergence alert.
-    const resolveOp = opsFor('alerts', 'update')
-      .find((o) => (o.payload as { resolved?: boolean })?.resolved === true);
-    expect(resolveOp).toBeDefined();
-  });
-
-  it('refreshes the standing alert in place rather than stacking rows', async () => {
-    scriptPayPal([{
-      transaction_details: [txn({
-        id: 'CAPTURE-LOST',
-        value: '9.99',
-        referenceId: 'PAYPAL-ORDER-LOST',
-        referenceType: 'ODR',
-      })],
-      total_pages: 1,
-    }]);
-    withLedger({
-      orders: [{
-        id: ORDER_UUID,
-        guild_id: GUILD_ID,
-        amount_cents: 999,
-        paypal_order_id: 'PAYPAL-ORDER-LOST',
-        created_at: '2026-07-20T10:00:00.000Z',
-      }],
-    });
-    resolvers['alerts.update'] = () => ({ data: [{ id: 'alert-1' }], error: null });
-
-    await runPayPalReconciliation(supabase as never);
-
-    expect(opsFor('alerts', 'insert')).toHaveLength(0);
-    expect(opsFor('alerts', 'update')).toHaveLength(1);
-  });
-
-  it('excludes the settlement lag window so it does not cry wolf', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
-    withLedger({});
-    const now = Date.parse('2026-07-27T12:00:00.000Z');
-
-    const result = await runPayPalReconciliation(supabase as never, {
-      now,
-      windowMs: 24 * 60 * 60 * 1000,
-      settlementLagMs: 6 * 60 * 60 * 1000,
-    });
-
-    expect(result.status).toBe('completed');
-    if (result.status !== 'completed') return;
-    // Window ends 6h before "now", not at "now": PayPal's reporting index lags
-    // and our own webhook may still be in flight.
-    expect(result.windowEnd).toBe('2026-07-27T06:00:00.000Z');
-    expect(result.windowStart).toBe('2026-07-26T06:00:00.000Z');
-
-    // Both sides are constrained to the same window.
-    const paymentScan = opsFor('payments', 'select')[0]!;
-    expect(filterArgs(paymentScan, 'gte')).toContainEqual(['created_at', result.windowStart]);
-    expect(filterArgs(paymentScan, 'lte')).toContainEqual(['created_at', result.windowEnd]);
-  });
-
-  it('reports a token failure without inventing a divergence', async () => {
-    scriptPayPal([], { tokenStatus: 503 });
-    withLedger({});
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result).toMatchObject({ status: 'failed', retriable: true });
-    expect(opsFor('alerts', 'insert')).toHaveLength(0);
-  });
-
-  it('skips cleanly when PayPal is not configured at all', async () => {
-    delete process.env.PAYPAL_CLIENT_ID;
-    delete process.env.PAYPAL_CLIENT_SECRET;
-    // Force the DB-backed config path to return nothing.
-    resolvers['instance_settings'] = () => ({ data: [], error: null });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result).toMatchObject({ status: 'skipped' });
-  });
-
-  it('reports a returned saved-settings database error as retriable, never skipped', async () => {
-    delete process.env.PAYPAL_CLIENT_ID;
-    delete process.env.PAYPAL_CLIENT_SECRET;
-    resolvers['instance_settings'] = () => ({
-      data: null,
-      error: { message: 'saved settings database unavailable' },
-    });
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result).toMatchObject({
-      status: 'failed',
-      retriable: true,
-      reason: expect.stringMatching(/saved.*settings|database unavailable/i),
-    });
-    expect(
-      rpcOps.find((op) => op.functionName === 'paypal_reconcile_finalize')?.args,
-    ).toMatchObject({ p_succeeded: false });
-  });
-
-  it('reports a thrown saved-settings database error as retriable, never skipped', async () => {
-    delete process.env.PAYPAL_CLIENT_ID;
-    delete process.env.PAYPAL_CLIENT_SECRET;
-    resolvers['instance_settings'] = () => {
-      throw new Error('saved settings transport exploded');
-    };
-
-    const result = await runPayPalReconciliation(supabase as never);
-
-    expect(result).toMatchObject({
-      status: 'failed',
-      retriable: true,
-      reason: expect.stringMatching(/saved.*settings|transport exploded/i),
-    });
-    expect(
-      rpcOps.find((op) => op.functionName === 'paypal_reconcile_finalize')?.args,
-    ).toMatchObject({ p_succeeded: false });
-  });
-
-  it('does not read or write the in-server coin economy', async () => {
-    scriptPayPal([{
-      transaction_details: [txn({ id: 'CAPTURE-LOST', value: '9.99' })],
-      total_pages: 1,
-    }]);
-    withLedger({});
-
-    await runPayPalReconciliation(supabase as never);
-
-    const touched = new Set(ops.map((o) => o.table));
-    for (const gameTable of [
-      'economy_balances', 'economy_transactions', 'shop_items', 'inventory',
-    ]) {
-      expect(touched.has(gameTable)).toBe(false);
-    }
+    expect(result.missingProviderPayments).toHaveLength(1);
+    expect(result.missingProviderPayments[0]!.guildId).toBe(SECOND_GUILD_ID);
+    expect(opsFor('alerts', 'insert')).toHaveLength(2);
   });
 });
-
-// ── Lease ───────────────────────────────────────────────────────────────────
 
 describe('acquireReconcileLease', () => {
   it.each(['acquired', 'busy', 'cooldown'] as const)(
@@ -2346,7 +1239,7 @@ describe('acquireReconcileLease', () => {
   });
 
   it('finalizes a provider failure as unsuccessful for immediate retry', async () => {
-    scriptPayPal([], { tokenStatus: 503 });
+    scriptProviderObjects({ tokenStatus: 503 });
 
     const result = await runPayPalReconciliation(supabase as never);
 
@@ -2357,7 +1250,7 @@ describe('acquireReconcileLease', () => {
   });
 
   it('treats a returned last-result upsert error as a failed pass and releases ownership', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    scriptProviderObjects({});
     withLedger({});
     resolvers['instance_settings.upsert'] = () => ({
       data: null,
@@ -2377,7 +1270,7 @@ describe('acquireReconcileLease', () => {
   });
 
   it('releases the exact owner when scheduled failure visibility rejects', async () => {
-    scriptPayPal([], { tokenStatus: 503 });
+    scriptProviderObjects({ tokenStatus: 503 });
     withLedger({ guildIds: [GUILD_ID, SECOND_GUILD_ID] });
     let activeOwner: string | null = null;
     rpcResolvers['paypal_reconcile_acquire'] = (args) => {
@@ -2452,7 +1345,7 @@ describe('POST /api/paypal/reconcile', () => {
   }
 
   it('runs a pass for the authenticated owner', async () => {
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    scriptProviderObjects({});
     withLedger({});
 
     const res = await POST(request());
@@ -2472,7 +1365,7 @@ describe('POST /api/paypal/reconcile', () => {
       data: 'busy',
       error: null,
     });
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    scriptProviderObjects({});
     withLedger({});
 
     const res = await POST(request());
@@ -2484,7 +1377,7 @@ describe('POST /api/paypal/reconcile', () => {
       status: 'skipped',
       reason: expect.stringMatching(/running|active/i),
     });
-    expect(transactionSearchCalls).toHaveLength(0);
+    expect(providerCalls).toHaveLength(0);
     expect(rpcOps).toEqual([
       expect.objectContaining({
         functionName: 'paypal_reconcile_acquire',
@@ -2499,7 +1392,7 @@ describe('POST /api/paypal/reconcile', () => {
       data: null,
       error: { message: 'lease database unavailable' },
     });
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    scriptProviderObjects({});
     withLedger({});
 
     const res = await POST(request());
@@ -2512,7 +1405,7 @@ describe('POST /api/paypal/reconcile', () => {
       retriable: true,
       reason: expect.stringMatching(/lease.*unavailable|acquire/i),
     });
-    expect(transactionSearchCalls).toHaveLength(0);
+    expect(providerCalls).toHaveLength(0);
   });
 
   it('returns only the authenticated owner guild findings', async () => {
@@ -2522,24 +1415,19 @@ describe('POST /api/paypal/reconcile', () => {
       c: SECOND_CUSTOMER_UUID,
       d: DISCORD_ID,
     });
-    scriptPayPal([{
-      transaction_details: [
-        txn({
-          id: 'OWNER-GUILD-FINDING',
-          value: '9.99',
-          referenceId: 'OWNER-GUILD-ORDER',
-          referenceType: 'ODR',
+    // Each guild's settled order carries a provider capture with no local
+    // payment row — one per-object finding per guild.
+    scriptProviderObjects({
+      orders: {
+        'OWNER-GUILD-ORDER': orderObject({
+          captures: [{ id: 'OWNER-GUILD-FINDING', value: '9.99' }],
         }),
-        txn({
-          id: 'OTHER-GUILD-FINDING',
-          value: '19.99',
-          customField: secondCustom,
-          referenceId: 'OTHER-GUILD-ORDER',
-          referenceType: 'ODR',
+        'OTHER-GUILD-ORDER': orderObject({
+          customId: secondCustom,
+          captures: [{ id: 'OTHER-GUILD-FINDING', value: '19.99' }],
         }),
-      ],
-      total_pages: 1,
-    }]);
+      },
+    });
     withLedger({
       guildIds: [GUILD_ID, SECOND_GUILD_ID],
       orders: [
@@ -2592,7 +1480,7 @@ describe('POST /api/paypal/reconcile', () => {
       ok: false,
       response: new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
     });
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    scriptProviderObjects({});
     withLedger({});
 
     const res = await POST(request({ 'x-reconcile-secret': 'super-secret-value' }));
@@ -2605,7 +1493,7 @@ describe('POST /api/paypal/reconcile', () => {
 
   it('lets owner run-now bypass completed cooldown but keeps the scheduler on cadence', async () => {
     process.env.PAYPAL_RECONCILE_SECRET = 'super-secret-value';
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    scriptProviderObjects({});
     withLedger({});
     rpcResolvers['paypal_reconcile_acquire'] = (args) => ({
       data: args.p_bypass_cooldown === true ? 'acquired' : 'cooldown',
@@ -2631,7 +1519,7 @@ describe('POST /api/paypal/reconcile', () => {
 
   it('records and alerts an external scheduler failure before returning it', async () => {
     process.env.PAYPAL_RECONCILE_SECRET = 'super-secret-value';
-    scriptPayPal([], { tokenStatus: 503 });
+    scriptProviderObjects({ tokenStatus: 503 });
     withLedger({ guildIds: [GUILD_ID, SECOND_GUILD_ID] });
 
     const res = await POST(request({
@@ -2651,7 +1539,7 @@ describe('POST /api/paypal/reconcile', () => {
 
   it('durably records an unexpected scheduled rejection and returns a retriable response', async () => {
     process.env.PAYPAL_RECONCILE_SECRET = 'super-secret-value';
-    scriptPayPal([], { tokenStatus: 503 });
+    scriptProviderObjects({ tokenStatus: 503 });
     withLedger({ guildIds: [GUILD_ID, SECOND_GUILD_ID] });
     let guildReads = 0;
     resolvers['guild'] = () => {
@@ -2683,7 +1571,7 @@ describe('POST /api/paypal/reconcile', () => {
 
   it('resolves scheduler-failure alerts after an external scheduler success', async () => {
     process.env.PAYPAL_RECONCILE_SECRET = 'super-secret-value';
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    scriptProviderObjects({});
     withLedger({ guildIds: [GUILD_ID, SECOND_GUILD_ID] });
 
     const res = await POST(request({
@@ -2708,7 +1596,7 @@ describe('POST /api/paypal/reconcile', () => {
       ok: false,
       response: new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
     });
-    scriptPayPal([{ transaction_details: [], total_pages: 1 }]);
+    scriptProviderObjects({});
     withLedger({});
     resolvers['instance_settings.select'] = () => ({ data: null, error: null });
 
@@ -2730,7 +1618,7 @@ describe('POST /api/paypal/reconcile', () => {
   });
 
   it('answers 503 with Retry-After for a transient provider failure', async () => {
-    scriptPayPal([], { tokenStatus: 503 });
+    scriptProviderObjects({ tokenStatus: 503 });
     withLedger({});
 
     const res = await POST(request());
@@ -2740,8 +1628,19 @@ describe('POST /api/paypal/reconcile', () => {
   });
 
   it('answers 500 for a configuration failure a retry cannot fix', async () => {
-    scriptPayPal([], { searchStatus: 403 });
-    withLedger({});
+    withLedger({
+      payments: [{
+        id: 'pay-1',
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_payment_id: 'CAP-1',
+        amount_cents: 999,
+        currency: 'USD',
+        status: 'completed',
+        created_at: '2026-07-20T10:00:00.000Z',
+      }],
+    });
+    scriptProviderObjects({ captures: { 'CAP-1': { __status: 403 } } });
 
     const res = await POST(request());
 
