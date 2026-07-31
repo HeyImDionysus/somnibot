@@ -15,8 +15,11 @@ function requiresLicense(delivery: unknown): boolean {
   return delivery === 'license_key' || delivery === 'mixed';
 }
 
-function requiresDownload(delivery: unknown): boolean {
-  return delivery === 'file' || delivery === 'link' || delivery === 'mixed';
+function requiresDownload(delivery: unknown, frozenRequirement: unknown): boolean {
+  if (typeof frozenRequirement === 'boolean') return frozenRequirement;
+  // Only legacy file/link contracts are unambiguous without the frozen flag.
+  // A legacy mixed bundle may contain only licence + Discord benefits.
+  return delivery === 'file' || delivery === 'link';
 }
 
 function elapsedMs(iso: unknown, now: number): number {
@@ -37,7 +40,7 @@ export async function GET(req: NextRequest) {
   const { data: orderData, error: orderError, count } = await supabase
     .from('orders')
     .select(
-      'id, order_number, customer_id, product_id, status, delivery_type_snapshot, created_at',
+      'id, order_number, customer_id, product_id, status, delivery_type_snapshot, download_required_snapshot, created_at',
       { count: 'exact' },
     )
     .eq('guild_id', guildId)
@@ -192,7 +195,10 @@ export async function GET(req: NextRequest) {
     const download = downloadByOrder.get(orderId);
     const hold = holdByOrder.get(orderId);
     const licenseRequired = requiresLicense(order.delivery_type_snapshot);
-    const downloadRequired = requiresDownload(order.delivery_type_snapshot);
+    const downloadRequired = requiresDownload(
+      order.delivery_type_snapshot,
+      order.download_required_snapshot,
+    );
     const age = elapsedMs(order.created_at, now);
     const orderCreatedAtMs =
       typeof order.created_at === 'string' ? Date.parse(order.created_at) : Number.NaN;

@@ -18,13 +18,15 @@ vi.mock('../features/branding/brand-kit.js', () => ({
   resolveBrandKit: vi.fn(async () => ({ primaryColor: 0x1, accentColor: 0x2, poweredByAttribution: null })),
 }));
 
-import { createTicket } from '../features/tickets/ticket-service.js';
+import { createTicket, reconcileTicketOrphanChannels } from '../features/tickets/ticket-service.js';
 import { generateTranscript } from '../features/tickets/transcript-generator.js';
 
 function makeCreateSupa({ ticketRow = null as any, ticketError = null as any } = {}) {
   const alertsInsert = vi.fn(async () => ({ error: null }));
   const tChain: any = {};
-  for (const m of ['select', 'eq', 'in', 'insert', 'update', 'order', 'limit']) tChain[m] = vi.fn(() => tChain);
+  for (const m of ['select', 'eq', 'in', 'insert', 'update', 'delete', 'order', 'limit', 'contains']) {
+    tChain[m] = vi.fn(() => tChain);
+  }
   tChain.single = vi.fn(async () => ({ data: ticketRow, error: ticketError }));
   tChain.maybeSingle = vi.fn(async () => ({ data: ticketRow, error: ticketError }));
   tChain.then = (res: Function) => res({ data: [], error: null, count: 0 });
@@ -181,6 +183,67 @@ describe('ticket creation failure observability', () => {
       'g1',
       expect.objectContaining({ ticketId: 'ticket-1', channelId: 'tc1' }),
     );
+  });
+});
+
+describe('ticket orphan cleanup reconciliation', () => {
+  it('deletes a durable orphan and releases its occurrence only after confirmation', async () => {
+    const channel = { id: 'tc-orphan', delete: vi.fn().mockResolvedValue(undefined) };
+    let occurrenceReads = 0;
+    const supabase = {
+      from: vi.fn(() => {
+        occurrenceReads += 1;
+        const chain = makeCreateSupa().from('tickets');
+        chain.then = (resolve: Function) => resolve(
+          occurrenceReads === 1
+            ? {
+                data: [{
+                  id: 'occurrence-orphan',
+                  resource_id: 'tc-orphan',
+                  result: { channelCleanupPending: true },
+                }],
+                error: null,
+              }
+            : { data: null, error: null },
+        );
+        return chain;
+      }),
+    } as any;
+    const guild = {
+      id: 'g1',
+      channels: {
+        cache: new Map([['tc-orphan', channel]]),
+        fetch: vi.fn(),
+      },
+    } as any;
+
+    await expect(reconcileTicketOrphanChannels(guild, supabase)).resolves.toBe(1);
+    expect(channel.delete).toHaveBeenCalledTimes(1);
+    expect(supabase.from).toHaveBeenCalledTimes(2);
+  });
+
+  it('retains the cleanup job when Discord deletion is still failing', async () => {
+    const channel = { id: 'tc-orphan', delete: vi.fn().mockRejectedValue(new Error('rate limited')) };
+    const chain = makeCreateSupa().from('tickets');
+    chain.then = (resolve: Function) => resolve({
+      data: [{
+        id: 'occurrence-orphan',
+        resource_id: 'tc-orphan',
+        result: { channelCleanupPending: true },
+      }],
+      error: null,
+    });
+    const supabase = { from: vi.fn(() => chain) } as any;
+    const guild = {
+      id: 'g1',
+      channels: {
+        cache: new Map([['tc-orphan', channel]]),
+        fetch: vi.fn(),
+      },
+    } as any;
+
+    await expect(reconcileTicketOrphanChannels(guild, supabase)).resolves.toBe(0);
+    expect(supabase.from).toHaveBeenCalledTimes(1);
   });
 });
 

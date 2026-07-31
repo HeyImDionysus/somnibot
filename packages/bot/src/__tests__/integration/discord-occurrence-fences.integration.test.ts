@@ -4,6 +4,7 @@ import { requireSupabase } from './helpers.js';
 import {
   claimDiscordOccurrence,
   completeDiscordOccurrence,
+  reclaimStaleDiscordOccurrence,
   releaseDiscordOccurrence,
   type DiscordOperationKind,
 } from '../../services/occurrence-fence.js';
@@ -75,6 +76,44 @@ describe('durable Discord occurrence fences', () => {
     const retry = await claimDiscordOccurrence(supa, guildId, 'temp_channel', key);
     expect(retry.won).toBe(true);
     expect(retry.occurrence.id).not.toBe(first.occurrence.id);
+  });
+
+  it('atomically renews only the exact stale unreferenced claim', async () => {
+    const key = `${guildId}:temp-channel:stale-recovery`;
+    const first = await claimDiscordOccurrence(
+      supa,
+      guildId,
+      'temp_channel',
+      key,
+      { recoveryKind: 'temp_channel_create', channelName: 'Recovery room' },
+    );
+    expect(first.won).toBe(true);
+    expect(first.occurrence.result).toMatchObject({ channelName: 'Recovery room' });
+
+    const oldTimestamp = new Date(Date.now() - 10 * 60_000).toISOString();
+    const aged = await supa
+      .from('discord_operation_occurrences')
+      .update({ claimed_at: oldTimestamp })
+      .eq('id', first.occurrence.id)
+      .select('*')
+      .single();
+    expect(aged.error).toBeNull();
+
+    const stale = aged.data as typeof first.occurrence;
+    await expect(
+      reclaimStaleDiscordOccurrence(
+        supa,
+        stale,
+        new Date(Date.now() - 2 * 60_000).toISOString(),
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      reclaimStaleDiscordOccurrence(
+        supa,
+        stale,
+        new Date(Date.now() - 2 * 60_000).toISOString(),
+      ),
+    ).resolves.toBe(false);
   });
 
   it('atomically transfers a temp-room owner before retiring its creation fence', async () => {

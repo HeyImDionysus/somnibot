@@ -20,13 +20,16 @@ import {
   claimDiscordOccurrence,
   completeDiscordOccurrence,
   failDiscordOccurrence,
+  reclaimStaleDiscordOccurrence,
   releaseDiscordOccurrence,
+  type DiscordOperationOccurrence,
 } from '../../services/occurrence-fence.js';
 
 const log = createLogger('TempChannels');
 const CLEANUP_RETRY_BASE_MS = 5_000;
 const CLEANUP_RETRY_MAX_MS = 60_000;
 const CLEANUP_RETRY_LIMIT = 5;
+const CREATION_CLAIM_LEASE_MS = 2 * 60_000;
 
 
 export interface HubConfig {
@@ -177,6 +180,15 @@ export class TempChannelManager {
           this.guild.id,
           'temp_channel',
           occurrenceKey,
+          {
+            recoveryKind: 'temp_channel_create',
+            hubId: hub.id,
+            hubChannelId,
+            categoryId: hub.category_id,
+            ownerId: member.id,
+            channelName,
+            pairedTextName: hub.allow_text_channel ? `${channelName}-chat` : null,
+          },
         );
         occurrenceId = claim.occurrence.id;
         if (!claim.won) {
@@ -191,10 +203,22 @@ export class TempChannelManager {
               this.activeChannels.set(existing.channel_id, existing as ActiveTempChannel);
               await member.voice.setChannel(existingChannel as VoiceChannel);
             }
+            return;
           }
-          // A claimed-but-not-completed row is an ambiguous crash boundary.
-          // Failing closed prevents a second external channel creation.
-          return;
+
+          const recovery = await this.recoverStaleCreationClaim(
+            claim.occurrence,
+            member,
+            hub,
+          );
+          if (recovery === 'recovered') {
+            return;
+          }
+          if (recovery !== 'reclaimed') {
+            // A fresh claim, terminal outcome, unverifiable Discord snapshot,
+            // or a lost CAS remains fail-closed.
+            return;
+          }
         }
       }
 
@@ -335,6 +359,125 @@ export class TempChannelManager {
     } finally {
       this.inFlightJoins.delete(joinKey);
     }
+  }
+
+  /**
+   * Recover the crash window between Discord channel creation and the
+   * active_temp_channels insert. The winning claim stores a deterministic room
+   * identity before any Discord side effect. A stale duplicate first refreshes
+   * the guild channel snapshot and adopts a matching survivor; only after
+   * proving that none exists may it renew the claim through a database CAS.
+   */
+  private async recoverStaleCreationClaim(
+    occurrence: DiscordOperationOccurrence,
+    member: GuildMember,
+    hub: HubConfig,
+  ): Promise<'recovered' | 'reclaimed' | 'blocked'> {
+    if (occurrence.status !== 'claimed') return 'blocked';
+    const metadata = occurrence.result;
+    if (
+      metadata.recoveryKind !== 'temp_channel_create'
+      || metadata.hubId !== hub.id
+      || metadata.hubChannelId !== hub.hub_channel_id
+      || metadata.categoryId !== hub.category_id
+      || metadata.ownerId !== member.id
+      || typeof metadata.channelName !== 'string'
+    ) {
+      return 'blocked';
+    }
+    const plannedChannelName = metadata.channelName;
+
+    const claimedAt = Date.parse(occurrence.claimed_at);
+    const staleBeforeMs = Date.now() - CREATION_CLAIM_LEASE_MS;
+    if (!Number.isFinite(claimedAt) || claimedAt >= staleBeforeMs) return 'blocked';
+
+    try {
+      await this.guild.channels.fetch();
+    } catch (error) {
+      log.warn('Could not refresh Discord channels for stale temp-room recovery', {
+        occurrenceId: occurrence.id,
+        error: String(error),
+      });
+      return 'blocked';
+    }
+
+    const voice = [...this.guild.channels.cache.values()].find((candidate) => {
+      if (candidate.type !== ChannelType.GuildVoice) return false;
+      const channel = candidate as VoiceChannel;
+      return channel.name === plannedChannelName
+        && channel.parentId === hub.category_id
+        && channel.createdTimestamp >= claimedAt - 5_000
+        && channel.permissionOverwrites.cache
+          .get(member.id)?.allow.has(PermissionFlagsBits.ManageChannels) === true;
+    }) as VoiceChannel | undefined;
+
+    if (voice) {
+      const pairedTextName =
+        typeof metadata.pairedTextName === 'string' ? metadata.pairedTextName : null;
+      const pairedText = pairedTextName
+        ? [...this.guild.channels.cache.values()].find((candidate) => {
+            if (candidate.type !== ChannelType.GuildText) return false;
+            const channel = candidate as TextChannel;
+            return channel.name === pairedTextName
+              && channel.parentId === hub.category_id
+              && channel.permissionOverwrites.cache.has(member.id);
+          }) as TextChannel | undefined
+        : undefined;
+      const recovered: ActiveTempChannel = {
+        channel_id: voice.id,
+        text_channel_id: pairedText?.id ?? null,
+        guild_id: this.guild.id,
+        hub_id: hub.id,
+        owner_id: member.id,
+        creation_occurrence_id: occurrence.id,
+      };
+      const { error: insertError } = await this.supabase
+        .from('active_temp_channels')
+        .insert(recovered);
+      if (insertError) {
+        const { data: concurrent, error: readError } = await this.supabase
+          .from('active_temp_channels')
+          .select('*')
+          .eq('creation_occurrence_id', occurrence.id)
+          .maybeSingle();
+        if (readError || !concurrent?.channel_id || concurrent.owner_id !== member.id) {
+          log.error('Could not adopt recovered temp room', {
+            occurrenceId: occurrence.id,
+            channelId: voice.id,
+            error: insertError.message,
+          });
+          return 'blocked';
+        }
+        this.activeChannels.set(concurrent.channel_id, concurrent as ActiveTempChannel);
+        const concurrentChannel = this.guild.channels.cache.get(concurrent.channel_id);
+        if (concurrentChannel?.type === ChannelType.GuildVoice) {
+          await member.voice.setChannel(concurrentChannel as VoiceChannel);
+        }
+        return 'recovered';
+      }
+
+      this.activeChannels.set(voice.id, recovered);
+      await completeDiscordOccurrence(
+        this.supabase,
+        occurrence.id,
+        voice.id,
+        { textChannelId: recovered.text_channel_id, recoveredAfterCrash: true },
+      ).catch((error) => {
+        log.error('Failed to complete recovered temp-room occurrence', {
+          occurrenceId: occurrence.id,
+          error: String(error),
+        });
+      });
+      await member.voice.setChannel(voice);
+      return 'recovered';
+    }
+
+    const reclaimed = await reclaimStaleDiscordOccurrence(
+      this.supabase,
+      occurrence,
+      new Date(staleBeforeMs).toISOString(),
+    );
+    return reclaimed ? 'reclaimed' : 'blocked';
   }
 
   /**

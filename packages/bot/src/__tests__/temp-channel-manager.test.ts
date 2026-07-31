@@ -335,5 +335,102 @@ describe('TempChannelManager', () => {
     expect(guild.channels.create).toHaveBeenCalledTimes(1);
     expect(member.voice.setChannel).toHaveBeenCalledWith(replacement);
   });
+
+  it('adopts a stale-claim Discord survivor before considering a new room', async () => {
+    const guild = makeGuild();
+    const survivor = {
+      id: 'survivor-room',
+      type: 2,
+      name: 'Tester room',
+      parentId: 'category-1',
+      createdTimestamp: Date.parse('2026-07-30T00:00:01.000Z'),
+      permissionOverwrites: {
+        cache: new Map([['user-1', { allow: { has: () => true } }]]),
+      },
+    };
+    guild.channels.cache.set(survivor.id, survivor);
+    const supabase = makeSupa();
+    const manager = new TempChannelManager(guild as any, supabase as any);
+    const member = {
+      id: 'user-1',
+      voice: { setChannel: vi.fn().mockResolvedValue(undefined) },
+    };
+    const hub = {
+      id: 'hub-1',
+      hub_channel_id: 'hub-voice',
+      category_id: 'category-1',
+    };
+
+    const outcome = await (manager as any).recoverStaleCreationClaim({
+      id: 'occurrence-1',
+      guild_id: 'guild-1',
+      operation_kind: 'temp_channel',
+      occurrence_key: 'join-1',
+      status: 'claimed',
+      resource_id: null,
+      result: {
+        recoveryKind: 'temp_channel_create',
+        hubId: 'hub-1',
+        hubChannelId: 'hub-voice',
+        categoryId: 'category-1',
+        ownerId: 'user-1',
+        channelName: 'Tester room',
+        pairedTextName: null,
+      },
+      last_error: null,
+      claimed_at: '2026-07-30T00:00:00.000Z',
+      updated_at: '2026-07-30T00:00:00.000Z',
+    }, member, hub, 'Tester room');
+
+    expect(outcome).toBe('recovered');
+    expect(guild.channels.create).not.toHaveBeenCalled();
+    expect(member.voice.setChannel).toHaveBeenCalledWith(survivor);
+    expect((manager as any).activeChannels.get('survivor-room')).toMatchObject({
+      creation_occurrence_id: 'occurrence-1',
+      owner_id: 'user-1',
+    });
+  });
+
+  it('renews a stale claim only after a fresh Discord snapshot proves no survivor', async () => {
+    const guild = makeGuild();
+    const supabase = makeSupa();
+    supabase.rpc.mockResolvedValue({ data: true, error: null } as any);
+    const manager = new TempChannelManager(guild as any, supabase as any);
+
+    const outcome = await (manager as any).recoverStaleCreationClaim({
+      id: 'occurrence-1',
+      guild_id: 'guild-1',
+      operation_kind: 'temp_channel',
+      occurrence_key: 'join-1',
+      status: 'claimed',
+      resource_id: null,
+      result: {
+        recoveryKind: 'temp_channel_create',
+        hubId: 'hub-1',
+        hubChannelId: 'hub-voice',
+        categoryId: 'category-1',
+        ownerId: 'user-1',
+        channelName: 'Tester room',
+        pairedTextName: null,
+      },
+      last_error: null,
+      claimed_at: '2026-07-30T00:00:00.000Z',
+      updated_at: '2026-07-30T00:00:00.000Z',
+    }, { id: 'user-1' }, {
+      id: 'hub-1',
+      hub_channel_id: 'hub-voice',
+      category_id: 'category-1',
+    }, 'Tester room');
+
+    expect(outcome).toBe('reclaimed');
+    expect(guild.channels.fetch).toHaveBeenCalled();
+    expect(supabase.rpc).toHaveBeenCalledWith(
+      'reclaim_stale_discord_occurrence',
+      expect.objectContaining({
+        p_occurrence_id: 'occurrence-1',
+        p_expected_updated_at: '2026-07-30T00:00:00.000Z',
+      }),
+    );
+  });
   
 });

@@ -156,6 +156,8 @@ export async function validateAssignableDiscordTargets(
       }
       if (permissions === null || (permissions & VIEW_CHANNEL) !== VIEW_CHANNEL) {
         issues.push(`Grant SomniBot View Channel in "#${channel.name}" before selling this benefit.`);
+      } else if (!channel.manageableByBot) {
+        issues.push(`Grant SomniBot Manage Channels in "#${channel.name}" before selling this benefit.`);
       }
     }
   }

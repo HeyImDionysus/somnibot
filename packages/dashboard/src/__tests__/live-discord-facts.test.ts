@@ -76,6 +76,24 @@ describe('live Discord benefit validation', () => {
     });
   });
 
+  it('rejects a visible channel benefit the bot cannot manage', async () => {
+    const result = await validateAssignableDiscordTargets(
+      client({
+        ...valid,
+        channels: [{ ...valid.channels[0], manageableByBot: false }],
+      }) as never,
+      'guild',
+      [],
+      ['20000000000000001'],
+      now,
+    );
+    expect(result).toEqual({
+      ok: false,
+      kind: 'conflict',
+      issues: ['Grant SomniBot Manage Channels in "#customer-lounge" before selling this benefit.'],
+    });
+  });
+
   it.each([
     ['missing', null],
     ['legacy', { ...valid, snapshot_version: 1 }],

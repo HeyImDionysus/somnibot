@@ -62,6 +62,7 @@ import { buildSetupCommand } from './features/setup-wizard/index.js';
 import { startSyncScheduler, type SyncConfig } from './sync/sync-engine.js';
 import { checkBotRolePosition } from './guards/bot-role-guard.js';
 import { ticketCommand } from './features/tickets/ticket-commands.js';
+import { reconcileTicketOrphanChannels } from './features/tickets/ticket-service.js';
 import { EconomyManager, buildEconomyCommands, registerEconomyManager, unregisterEconomyManager, buildTimersCommand } from './features/economy/index.js';
 import { GatheringManager, buildGatheringCommands, registerGatheringManager, unregisterGatheringManager } from './features/gathering/index.js';
 import { CraftingManager, buildCraftingCommands, registerCraftingManager, unregisterCraftingManager } from './features/crafting/index.js';
@@ -123,6 +124,7 @@ interface GuildServices {
     reconfigure: (intervalMinutes?: number, runImmediately?: boolean) => void;
   };
   reconTimer?: ReturnType<typeof setInterval>;
+  ticketCleanupTimer?: ReturnType<typeof setInterval>;
   automationEngine?: AutomationEngine;
   configWatcher?: ConfigWatcher;
   presenceManager?: BotPresenceManager;
@@ -623,6 +625,27 @@ export async function initGuildFeatures(
     guildLog.error('Reconciliation scheduler failed', { error: String(err) });
   }
 
+  // ── Durable orphaned ticket-channel cleanup ──
+  const retryTicketOrphanCleanup = () => {
+    void reconcileTicketOrphanChannels(guild, supabase).catch((error) => {
+      guildLog.warn('Ticket orphan reconciliation failed; cleanup remains queued', {
+        error: String(error),
+      });
+    });
+  };
+  services.ticketCleanupTimer = setInterval(retryTicketOrphanCleanup, 5 * 60_000);
+  services.ticketCleanupTimer.unref?.();
+  try {
+    const reconciled = await reconcileTicketOrphanChannels(guild, supabase);
+    if (reconciled > 0) {
+      guildLog.warn('Recovered orphaned ticket channels after restart', { count: reconciled });
+    }
+  } catch (err) {
+    // The durable occurrence rows remain claimed and the timer above retries
+    // even when the initial startup query itself is unavailable.
+    guildLog.error('Ticket orphan reconciliation startup failed', { error: String(err) });
+  }
+
   // ── Audit & Diagnostics ──
   try {
     services.auditService = new AuditService(guildId, supabase, eventBus, valkey);
@@ -772,6 +795,7 @@ export async function destroyGuildServices(ctx: GuildContext): Promise<void> {
     }
   }
   if (services.reconTimer) clearInterval(services.reconTimer);
+  if (services.ticketCleanupTimer) clearInterval(services.ticketCleanupTimer);
   if (services.syncHandle) {
     try {
       pendingProducerStops.push({

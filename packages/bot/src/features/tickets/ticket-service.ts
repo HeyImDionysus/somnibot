@@ -18,6 +18,7 @@ import {
   ActionRowBuilder,
   type MessageActionRowComponentBuilder,
   EmbedBuilder,
+  RESTJSONErrorCodes,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbTicketPanel, DbTicket, TicketTypeConfig } from '@somnibot/shared';
@@ -29,10 +30,77 @@ import {
   claimDiscordOccurrence,
   completeDiscordOccurrence,
   failDiscordOccurrence,
+  markDiscordOccurrenceCleanupPending,
   releaseDiscordOccurrence,
 } from '../../services/occurrence-fence.js';
 
 const log = createLogger('Tickets');
+
+/**
+ * Retry durable ticket-channel cleanup jobs. Failed deletions remain claimed
+ * occurrence rows, so they survive process restarts and terminal-row retention.
+ * A job is released only after Discord confirms the channel is gone.
+ */
+export async function reconcileTicketOrphanChannels(
+  guild: Guild,
+  supabase: SupabaseClient,
+): Promise<number> {
+  const { data, error } = await supabase
+    .from('discord_operation_occurrences')
+    .select('id,resource_id,result')
+    .eq('guild_id', guild.id)
+    .eq('operation_kind', 'ticket')
+    .eq('status', 'claimed')
+    .contains('result', { channelCleanupPending: true })
+    .limit(100);
+  if (error) throw new Error(`Unable to load ticket cleanup jobs: ${error.message}`);
+
+  let reconciled = 0;
+  for (const row of data ?? []) {
+    if (typeof row.id !== 'string' || typeof row.resource_id !== 'string') continue;
+    let channel = guild.channels.cache.get(row.resource_id);
+    let confirmedMissing = false;
+    if (!channel) {
+      try {
+        channel = await guild.channels.fetch(row.resource_id) ?? undefined;
+        confirmedMissing = !channel;
+      } catch (fetchError) {
+        const code =
+          typeof fetchError === 'object' && fetchError !== null && 'code' in fetchError
+            ? Number((fetchError as { code: unknown }).code)
+            : Number.NaN;
+        if (code === RESTJSONErrorCodes.UnknownChannel) {
+          confirmedMissing = true;
+        } else {
+          log.warn('Could not verify orphaned ticket channel', {
+            channelId: row.resource_id,
+            error: String(fetchError),
+          });
+          continue;
+        }
+      }
+    }
+
+    if (channel) {
+      try {
+        await channel.delete('Retrying cleanup after failed ticket creation');
+        confirmedMissing = true;
+      } catch (deleteError) {
+        log.warn('Ticket orphan cleanup will be retried', {
+          channelId: row.resource_id,
+          error: String(deleteError),
+        });
+        continue;
+      }
+    }
+
+    if (confirmedMissing) {
+      await releaseDiscordOccurrence(supabase, row.id);
+      reconciled++;
+    }
+  }
+  return reconciled;
+}
 
 // ── Failure observability ────────────────────────────────
 
@@ -307,12 +375,12 @@ export async function createTicket(
           });
         });
       } else {
-        await failDiscordOccurrence(
+        await markDiscordOccurrenceCleanupPending(
           supabase,
           occurrenceId,
-          `intro_send:${String(err)}`,
           channel.id,
-          { stage: 'intro_send', channelCleanupFailed: true },
+          `intro_send:${String(err)}`,
+          { stage: 'intro_send' },
         ).catch((failErr) => {
           log.error('Failed to record orphaned ticket channel occurrence:', {
             error: String(failErr),
@@ -394,12 +462,12 @@ export async function createTicket(
             });
           });
         } else {
-          await failDiscordOccurrence(
+          await markDiscordOccurrenceCleanupPending(
             supabase,
             occurrenceId,
-            `db_save:${dbError?.message ?? 'unknown'}`,
             channel.id,
-            { stage: 'db_save', channelCleanupFailed: true },
+            `db_save:${dbError?.message ?? 'unknown'}`,
+            { stage: 'db_save' },
           ).catch((failError) => {
             log.error('Failed to record orphaned ticket channel occurrence:', {
               error: String(failError),

@@ -284,12 +284,14 @@ export default function LicensesPage() {
               || health.keyCounts.suspended > 0
               || health.unavailable24h > 0
               || health.deviceLimit24h > 0
+              || health.invalid24h > 0
               || health.unresolvedAlerts.length > 0) && (
               <ul className="space-y-1 text-sm text-discord-text-secondary">
                 {health.pendingOlderThanDay > 0 && <li>{health.pendingOlderThanDay} key(s) have waited over 24 hours for activation.</li>}
                 {health.keyCounts.suspended > 0 && <li>{health.keyCounts.suspended} key(s) are suspended.</li>}
                 {health.unavailable24h > 0 && <li>{health.unavailable24h} validation(s) reported a service outage in the last 24 hours.</li>}
                 {health.deviceLimit24h > 0 && <li>{health.deviceLimit24h} validation(s) hit a device limit in the last 24 hours.</li>}
+                {health.invalid24h > 0 && <li>{health.invalid24h} validation(s) were rejected as invalid in the last 24 hours.</li>}
                 {health.unresolvedAlerts.map((alert) => <li key={alert.id}>{alert.title}</li>)}
               </ul>
             )}

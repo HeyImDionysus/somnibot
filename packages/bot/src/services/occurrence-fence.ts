@@ -11,6 +11,8 @@ export interface DiscordOperationOccurrence {
   resource_id: string | null;
   result: Record<string, unknown>;
   last_error: string | null;
+  claimed_at: string;
+  updated_at: string;
 }
 
 export type OccurrenceClaim =
@@ -26,6 +28,7 @@ export async function claimDiscordOccurrence(
   guildId: string,
   operationKind: DiscordOperationKind,
   occurrenceKey: string,
+  initialResult: Record<string, unknown> = {},
 ): Promise<OccurrenceClaim> {
   const { data, error } = await supabase
     .from('discord_operation_occurrences')
@@ -33,6 +36,7 @@ export async function claimDiscordOccurrence(
       guild_id: guildId,
       operation_kind: operationKind,
       occurrence_key: occurrenceKey,
+      result: initialResult,
     })
     .select('*')
     .single();
@@ -54,6 +58,54 @@ export async function claimDiscordOccurrence(
     throw new Error(`Unable to read claimed ${operationKind} occurrence: ${readError?.message ?? 'missing row'}`);
   }
   return { won: false, occurrence: existing as DiscordOperationOccurrence };
+}
+
+/**
+ * Atomically renew a stale claim after the caller has reconciled the external
+ * system and proved that no resource matching the claim's recovery metadata
+ * survived. The database CAS elects one recovery worker and refuses claims
+ * already referenced by a durable resource row.
+ */
+export async function reclaimStaleDiscordOccurrence(
+  supabase: SupabaseClient,
+  occurrence: DiscordOperationOccurrence,
+  staleBefore: string,
+): Promise<boolean> {
+  const { data, error } = await supabase.rpc('reclaim_stale_discord_occurrence', {
+    p_occurrence_id: occurrence.id,
+    p_guild_id: occurrence.guild_id,
+    p_operation_kind: occurrence.operation_kind,
+    p_expected_updated_at: occurrence.updated_at,
+    p_stale_before: staleBefore,
+  });
+  if (error) throw new Error(`Unable to reclaim stale Discord occurrence: ${error.message}`);
+  return data === true;
+}
+
+/**
+ * Preserve an occurrence as a durable cleanup job. It intentionally remains
+ * claimed so retention cannot erase the only pointer to an orphaned Discord
+ * resource before a reconciler has confirmed deletion.
+ */
+export async function markDiscordOccurrenceCleanupPending(
+  supabase: SupabaseClient,
+  occurrenceId: string,
+  resourceId: string,
+  error: string,
+  result: Record<string, unknown>,
+): Promise<void> {
+  const { error: updateError } = await supabase
+    .from('discord_operation_occurrences')
+    .update({
+      resource_id: resourceId,
+      result: { ...result, channelCleanupPending: true },
+      last_error: error,
+    })
+    .eq('id', occurrenceId)
+    .eq('status', 'claimed');
+  if (updateError) {
+    throw new Error(`Unable to preserve Discord occurrence cleanup job: ${updateError.message}`);
+  }
 }
 
 export async function completeDiscordOccurrence(
