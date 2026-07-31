@@ -495,12 +495,12 @@ export class AutomationEngine {
             }
           }
         }
-        if (hasMemberTargetedAction && conditionedBulkMemberIds.length > 0) {
-          conditionedBulkMemberIds = await this.filterBulkRateLimits(
-            automation,
-            conditionedBulkMemberIds,
-          );
-        }
+        // Rate limits are NOT consumed here. The hold decision below must
+        // see the condition-matched set without burning capacity: rejecting
+        // a hold would otherwise waste the counters, and approving one later
+        // would execute without rechecking them. Limits are applied at the
+        // moment actions actually run — below for immediate execution, in
+        // runApprovedHold for released holds.
         conditionsPassed = eventConditionsPassed && conditionedBulkMemberIds.length > 0;
       } else {
         conditionsPassed = await evaluateConditions(conditions, conditionCtx);
@@ -618,7 +618,30 @@ export class AutomationEngine {
 
     let actionResult: { executed: number; failed: number; errors: string[] };
     try {
-      actionResult = await this.executeResolvedActions(actions, actionCtx, affectedMemberIds);
+      const rateLimitedMemberIds = affectedMemberIds.length > 0
+        ? await this.filterBulkRateLimits(automation, affectedMemberIds)
+        : affectedMemberIds;
+      if (affectedMemberIds.length > 0 && rateLimitedMemberIds.length === 0) {
+        // Every target is rate-limited: the same outcome the old
+        // pre-decision filter produced — nothing runs.
+        await this.executionLogger.finalize(claimRowId, {
+          automationId: automation.id,
+          guildId: this.guild.id,
+          triggeredBy: userId,
+          triggerEvent: event.type,
+          conditionsPassed: false,
+          actionsExecuted: 0,
+          actionsFailed: 0,
+          errors: [],
+          durationMs: Date.now() - startTime,
+        });
+        return;
+      }
+      actionResult = await this.executeResolvedActions(
+        actions,
+        actionCtx,
+        rateLimitedMemberIds,
+      );
     } finally {
       this._activeDepths.delete(execId);
     }
@@ -1164,12 +1187,35 @@ export class AutomationEngine {
         queue.push({ depth: holdDepth, events, roleId, expiresAt: now + 10_000 });
         this._holdMemberDepthHints.set(memberId, queue);
       };
+      // Rate limits are consumed when actions actually RUN: the hold stored
+      // condition-matched targets without touching counters (a rejected hold
+      // must not burn capacity), so an approval landing later still honours
+      // limits filled by newer activity in the meantime.
+      const loadedAutomation = this.loader
+        .getForTrigger(hold.trigger_event)
+        .find((candidate) => candidate.id === hold.automation_id);
+      const heldTargets = await this.filterBulkRateLimits(
+        loadedAutomation ?? ({
+          id: hold.automation_id,
+          name: 'approved mass action',
+          rateLimitPerUser: 0,
+          rateLimitWindowSeconds: 0,
+        } as LoadedAutomation),
+        hold.member_ids,
+      );
       let result: { executed: number; failed: number; errors: string[] };
       try {
         result = await this.executeResolvedActions(
-          hold.action_snapshot,
+          heldTargets.length === 0
+            // Every held target is rate-limited at release time: member
+            // actions are skipped entirely; the approved non-member actions
+            // still run once.
+            ? hold.action_snapshot.filter(
+                (action) => !MEMBER_TARGETED_ACTIONS.has(action.type),
+              )
+            : hold.action_snapshot,
           context,
-          hold.member_ids,
+          heldTargets,
           assertLease,
           recordMemberDepthHint,
         );

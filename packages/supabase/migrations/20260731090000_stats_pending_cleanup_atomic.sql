@@ -64,3 +64,55 @@ REVOKE ALL ON FUNCTION public.remove_stats_pending_cleanup(UUID, TEXT[])
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.remove_stats_pending_cleanup(UUID, TEXT[])
   TO service_role;
+
+-- ── Round 15 additions ──────────────────────────────────────────────────────
+
+-- One ENABLED velocity rule per guild. The bot's loadFraudThresholds reduces
+-- every enabled velocity_limit row to a single threshold/window pair, so a
+-- second enabled row silently picked an arbitrary winner while the dashboard
+-- showed all of them active. Keep the newest enabled row, disable the rest,
+-- then enforce at the database so racing creates cannot reintroduce it.
+UPDATE fraud_rules AS rule
+   SET enabled = false
+  FROM (
+    SELECT id,
+           row_number() OVER (
+             PARTITION BY guild_id
+             ORDER BY created_at DESC, id DESC
+           ) AS rn
+      FROM fraud_rules
+     WHERE rule_type = 'velocity_limit'
+       AND enabled = true
+  ) ranked
+ WHERE rule.id = ranked.id
+   AND ranked.rn > 1;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_fraud_rules_enabled_velocity
+  ON fraud_rules (guild_id)
+  WHERE rule_type = 'velocity_limit' AND enabled = true;
+
+-- ticket_create_failed alerts flooded one row per member click on a broken
+-- panel. Dedupe unresolved rows per (guild, panel) — the per-attempt audit
+-- events already preserve each failure — following the round-11 pattern
+-- (keep newest, NULLS NOT DISTINCT for keyless twins).
+WITH ranked AS (
+  SELECT id,
+         row_number() OVER (
+           PARTITION BY guild_id, (metadata->>'panel_id')
+           ORDER BY created_at DESC, id DESC
+         ) AS rn
+  FROM alerts
+  WHERE alert_type = 'ticket_create_failed'
+    AND resolved = false
+)
+UPDATE alerts a
+   SET resolved    = true,
+       resolved_at = now(),
+       updated_at  = now()
+  FROM ranked r
+ WHERE a.id = r.id
+   AND r.rn > 1;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_alerts_unresolved_ticket_create_failed
+  ON alerts (guild_id, (metadata->>'panel_id')) NULLS NOT DISTINCT
+  WHERE alert_type = 'ticket_create_failed' AND resolved = false;
