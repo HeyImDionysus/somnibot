@@ -243,6 +243,48 @@ describe('GET /api/store/control-room', () => {
     expect(body.data.customers[0].stuck).toBe(false);
   });
 
+  it('flags a pre-cutover order FULFILLED after the cutover when its download never happened (round 14)', async () => {
+    // Coverage is decided at fulfillment time: this order predates the
+    // deliveries ledger, but its entitlement (the fulfillment transition)
+    // landed after the cutover, so the whole delivery ran in the
+    // evidence-recording era. Classifying by created_at exempted it forever.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-01T12:00:00.000Z'));
+    setup({
+      orders: {
+        data: [{
+          id: ORDER,
+          order_number: 'ORD-PRE-CUTOVER-LATE-FULFILL',
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'completed',
+          delivery_type_snapshot: 'file',
+          created_at: '2026-07-30T02:00:00.000Z',
+        }],
+        error: null,
+        count: 1,
+      },
+      entitlements: {
+        data: [{
+          id: 'ent-late',
+          order_id: ORDER,
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'active',
+          created_at: '2026-07-30T04:00:00.000Z',
+        }],
+        error: null,
+      },
+      commerce_download_deliveries: { data: [], error: null },
+    });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+    expect(body.data.customers[0].reasons).toContain(
+      'No completed download was recorded within 24 hours.',
+    );
+    expect(body.data.customers[0].stuck).toBe(true);
+  });
+
   it('uses the persisted deployment cutover instead of the migration filename time', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-02T12:00:00.000Z'));

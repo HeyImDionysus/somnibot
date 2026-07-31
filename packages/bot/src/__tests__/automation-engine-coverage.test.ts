@@ -638,9 +638,12 @@ describe('AutomationEngine', () => {
       // budget, reopening the mutual-trigger loop the hint exists to close.
       await engine.start();
       (engine as unknown as {
-        _holdMemberDepthHints: Map<string, Array<{ depth: number; expiresAt: number }>>;
+        _holdMemberDepthHints: Map<
+          string,
+          Array<{ depth: number; events: readonly string[]; expiresAt: number }>
+        >;
       })._holdMemberDepthHints.set('20000000000000000', [
-        { depth: 3, expiresAt: Date.now() + 10_000 },
+        { depth: 3, events: ['role.gained'], expiresAt: Date.now() + 10_000 },
       ]);
 
       const event = {
@@ -663,11 +666,14 @@ describe('AutomationEngine', () => {
       // first meant the second entered handling as a fresh chain root.
       await engine.start();
       const hints = (engine as unknown as {
-        _holdMemberDepthHints: Map<string, Array<{ depth: number; expiresAt: number }>>;
+        _holdMemberDepthHints: Map<
+          string,
+          Array<{ depth: number; events: readonly string[]; expiresAt: number }>
+        >;
       })._holdMemberDepthHints;
       hints.set('20000000000000000', [
-        { depth: 3, expiresAt: Date.now() + 10_000 },
-        { depth: 3, expiresAt: Date.now() + 10_000 },
+        { depth: 3, events: ['role.gained'], expiresAt: Date.now() + 10_000 },
+        { depth: 3, events: ['role.gained'], expiresAt: Date.now() + 10_000 },
       ]);
 
       const fire = async () => {
@@ -715,11 +721,48 @@ describe('AutomationEngine', () => {
       await recordViaHold();
 
       const hints = (engine as unknown as {
-        _holdMemberDepthHints: Map<string, Array<{ depth: number; expiresAt: number }>>;
+        _holdMemberDepthHints: Map<
+          string,
+          Array<{ depth: number; events: readonly string[]; expiresAt: number }>
+        >;
       })._holdMemberDepthHints;
-      // TWO member-targeted actions ran for the member → TWO consumable hints.
+      // TWO member-targeted actions ran for the member → TWO consumable
+      // hints, each bound to ITS action's side-effect events.
       expect(hints.get('10000000000000000')?.length).toBe(2);
       expect(hints.get('10000000000000000')?.[0]?.depth).toBe(2);
+      expect(hints.get('10000000000000000')?.[0]?.events).toEqual(['role.gained']);
+      expect(hints.get('10000000000000000')?.[1]?.events).toEqual(['role.lost']);
+    });
+
+    it('leaves hints untouched for unrelated events that merely name the member (round 14 P1)', async () => {
+      // A moderation/temp-channel/level event naming the member must neither
+      // inherit the hold depth nor spend the hint the REAL side effect still
+      // needs — otherwise the actual role.gained re-enters as a fresh root.
+      await engine.start();
+      const hints = (engine as unknown as {
+        _holdMemberDepthHints: Map<
+          string,
+          Array<{ depth: number; events: readonly string[]; expiresAt: number }>
+        >;
+      })._holdMemberDepthHints;
+      hints.set('20000000000000000', [
+        { depth: 3, events: ['role.gained'], expiresAt: Date.now() + 10_000 },
+      ]);
+
+      const fire = async (type: string) => {
+        const event = {
+          type,
+          guildId: 'g1',
+          data: { discordId: '20000000000000000', source: 'discord' },
+        } as { type: string; guildId: string; data: Record<string, unknown>; _chainDepth?: number };
+        await (eventBus._listeners[0] as (event: unknown) => Promise<void>)(event);
+        return event._chainDepth;
+      };
+
+      expect(await fire('member.verified')).toBeUndefined();
+      expect(hints.get('20000000000000000')?.length).toBe(1);
+      expect(await fire('role.gained')).toBe(3);
+      expect(hints.size).toBe(0);
     });
 
     it('preserves the hints of BOTH concurrent holds touching the same member (round 13 P1)', async () => {
@@ -729,11 +772,14 @@ describe('AutomationEngine', () => {
       // effects from either hold re-entered as fresh chain roots.
       await engine.start();
       const hints = (engine as unknown as {
-        _holdMemberDepthHints: Map<string, Array<{ depth: number; expiresAt: number }>>;
+        _holdMemberDepthHints: Map<
+          string,
+          Array<{ depth: number; events: readonly string[]; expiresAt: number }>
+        >;
       })._holdMemberDepthHints;
       hints.set('20000000000000000', [
-        { depth: 2, expiresAt: Date.now() + 10_000 },
-        { depth: 4, expiresAt: Date.now() + 10_000 },
+        { depth: 2, events: ['role.gained'], expiresAt: Date.now() + 10_000 },
+        { depth: 4, events: ['role.gained'], expiresAt: Date.now() + 10_000 },
       ]);
 
       const fire = async () => {

@@ -236,10 +236,23 @@ export async function GET(req: NextRequest) {
     const age = elapsedMs(order.created_at, now);
     const orderCreatedAtMs =
       typeof order.created_at === 'string' ? Date.parse(order.created_at) : Number.NaN;
+    // Ledger coverage is decided at FULFILLMENT time, not order creation: an
+    // order created before the deliveries cutover but completed after it
+    // delivers entirely in the evidence-recording era, so a missing download
+    // must still flag. The entitlement write IS the fulfillment transition;
+    // an order with no entitlement falls back to creation time and is
+    // already flagged by the no-entitlement rule above.
+    const entitlementCreatedAtMs =
+      typeof entitlement?.created_at === 'string'
+        ? Date.parse(entitlement.created_at)
+        : Number.NaN;
+    const fulfillmentAnchorMs = Number.isFinite(entitlementCreatedAtMs)
+      ? entitlementCreatedAtMs
+      : orderCreatedAtMs;
     const downloadEvidenceAvailable =
-      Number.isFinite(orderCreatedAtMs)
+      Number.isFinite(fulfillmentAnchorMs)
       && Number.isFinite(downloadCutoverAtMs)
-      && orderCreatedAtMs >= downloadCutoverAtMs;
+      && fulfillmentAnchorMs >= downloadCutoverAtMs;
     const reasons: string[] = [];
 
     if (order.status === 'pending_review') reasons.push('Payment is held for operator review.');

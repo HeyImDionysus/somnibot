@@ -48,6 +48,20 @@ const MEMBER_TARGETED_ACTIONS = new Set([
   'kick_member',
   'mute_member',
 ]);
+/**
+ * The gateway side-effect events each member-targeted hold action produces,
+ * keyed by action type. A depth hint is only consumable by ITS action's
+ * events — an unrelated event that merely names the member must neither
+ * inherit the hold depth nor spend the hint. Actions with no member-keyed
+ * gateway side effect record no hint at all.
+ */
+const HOLD_ACTION_SIDE_EFFECT_EVENTS: Record<string, readonly string[]> = {
+  give_role: ['role.gained'],
+  remove_role: ['role.lost'],
+  kick_member: ['member.left', 'member.kicked'],
+  ban_member: ['member.left', 'member.banned'],
+};
+
 const MEMBER_CONDITION_TYPES = new Set([
   'has_role',
   'missing_role',
@@ -118,7 +132,7 @@ export class AutomationEngine {
    */
   private _holdMemberDepthHints = new Map<
     string,
-    Array<{ depth: number; expiresAt: number }>
+    Array<{ depth: number; events: readonly string[]; expiresAt: number }>
   >();
   /** Mirrors the SQL lease interval in claim/renew RPCs. */
   private static readonly HOLD_EXECUTION_LEASE_MS = 2 * 60_000;
@@ -198,14 +212,22 @@ export class AutomationEngine {
         if (candidate) {
           const queue = this._holdMemberDepthHints.get(candidate);
           if (queue) {
-            // One hint per member-targeted ACTION, consumed FIFO: a hold that
-            // ran several event-producing actions for this member emits
-            // several gateway events, and the first must not consume the
-            // member's entire correlation state.
+            // One hint per member-targeted ACTION, consumable only by that
+            // action's own side-effect events: a hold that ran several
+            // event-producing actions emits several gateway events, and the
+            // first must not spend the member's entire correlation state —
+            // while an unrelated event naming the member (moderation, temp
+            // channels, levels) must neither inherit the depth nor spend a
+            // hint the real side effect still needs.
             const now = Date.now();
-            while (queue.length > 0 && queue[0]!.expiresAt < now) queue.shift();
-            const hint = queue.shift();
-            if (hint) event._chainDepth = hint.depth;
+            for (let index = queue.length - 1; index >= 0; index--) {
+              if (queue[index]!.expiresAt < now) queue.splice(index, 1);
+            }
+            const match = queue.findIndex((hint) => hint.events.includes(event.type));
+            if (match !== -1) {
+              event._chainDepth = queue[match]!.depth;
+              queue.splice(match, 1);
+            }
             if (queue.length === 0) this._holdMemberDepthHints.delete(candidate);
           }
         }
@@ -982,7 +1004,7 @@ export class AutomationEngine {
     baseContext: ActionContext,
     affectedMemberIds: string[],
     assertLease?: () => void,
-    onMemberAction?: (memberId: string) => void,
+    onMemberAction?: (memberId: string, actionType: string) => void,
   ): Promise<{ executed: number; failed: number; errors: string[] }> {
     if (affectedMemberIds.length === 0) {
       return executeActions(actions, baseContext);
@@ -1004,7 +1026,7 @@ export class AutomationEngine {
       }
       for (const memberId of affectedMemberIds) {
         assertLease?.();
-        onMemberAction?.(memberId);
+        onMemberAction?.(memberId, action.type);
         let member = memberCache.get(memberId);
         if (member === undefined) {
           member = this.guild.members.cache.get(memberId)
@@ -1088,14 +1110,18 @@ export class AutomationEngine {
       const holdDepth = typeof hold.context_snapshot.chainDepth === 'number'
         ? hold.context_snapshot.chainDepth
         : 1;
-      const recordMemberDepthHint = (memberId: string) => {
+      const recordMemberDepthHint = (memberId: string, actionType: string) => {
+        const events = HOLD_ACTION_SIDE_EFFECT_EVENTS[actionType];
+        if (!events || events.length === 0) return;
         const now = Date.now();
         for (const [key, queue] of this._holdMemberDepthHints) {
-          while (queue.length > 0 && queue[0]!.expiresAt < now) queue.shift();
+          for (let index = queue.length - 1; index >= 0; index--) {
+            if (queue[index]!.expiresAt < now) queue.splice(index, 1);
+          }
           if (queue.length === 0) this._holdMemberDepthHints.delete(key);
         }
         const queue = this._holdMemberDepthHints.get(memberId) ?? [];
-        queue.push({ depth: holdDepth, expiresAt: now + 10_000 });
+        queue.push({ depth: holdDepth, events, expiresAt: now + 10_000 });
         this._holdMemberDepthHints.set(memberId, queue);
       };
       let result: { executed: number; failed: number; errors: string[] };
