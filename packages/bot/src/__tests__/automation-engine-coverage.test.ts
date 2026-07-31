@@ -93,7 +93,7 @@ vi.mock('../features/automations/mass-action-hold.js', () => ({
   MassActionHoldService: class {
     subscribe = vi.fn();
     unsubscribe = vi.fn();
-    listHeld = mockMassListHeld;
+    listHeldNeedingNotice = mockMassListHeld;
     listApproved = mockMassListApproved;
     failInterruptedExecutions = mockFailInterruptedExecutions;
     pruneTerminal = mockMassPruneTerminal;
@@ -627,6 +627,34 @@ describe('AutomationEngine', () => {
       expect(observedGlobalDepths.every((depths) => depths.length === 0)).toBe(true);
       expect(
         (engine as unknown as { _activeDepths: Map<string, number> })._activeDepths.size,
+      ).toBe(0);
+    });
+
+    it('consumes a member depth hint from events that carry discordId (round 11 P1)', async () => {
+      // role.gained / role.lost — the events give_role/remove_role actually
+      // produce — name the member as data.discordId. Accepting only
+      // memberId/userId left the hint unconsumed, so a hold's role side
+      // effect entered handling as a fresh root with a full chain-depth
+      // budget, reopening the mutual-trigger loop the hint exists to close.
+      await engine.start();
+      (engine as unknown as {
+        _holdMemberDepthHints: Map<string, { depth: number; expiresAt: number }>;
+      })._holdMemberDepthHints.set('20000000000000000', {
+        depth: 3,
+        expiresAt: Date.now() + 10_000,
+      });
+
+      const event = {
+        type: 'role.gained',
+        guildId: 'g1',
+        data: { discordId: '20000000000000000', roleId: 'role1', source: 'discord' },
+      } as { type: string; guildId: string; data: Record<string, unknown>; _chainDepth?: number };
+      await (eventBus._listeners[0] as (event: unknown) => Promise<void>)(event);
+
+      expect(event._chainDepth).toBe(3);
+      expect(
+        (engine as unknown as { _holdMemberDepthHints: Map<string, unknown> })
+          ._holdMemberDepthHints.size,
       ).toBe(0);
     });
 

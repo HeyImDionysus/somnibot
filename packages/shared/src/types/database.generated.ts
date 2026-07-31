@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 237 migration files in packages/supabase/migrations/
+ * Source: 238 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -839,6 +839,7 @@ export interface DbStatsChannel {
   last_updated_at: string | null;
   created_at: string;
   updated_at: string;
+  pending_cleanup_channel_ids: Json;
 }
 
 // — Scheduled Messages —

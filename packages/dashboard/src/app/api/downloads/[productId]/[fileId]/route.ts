@@ -233,7 +233,7 @@ export async function GET(
     return null;
   }
 
-  async function recordDeliveryEvidence(): Promise<boolean> {
+  async function recordDeliveryEvidence(): Promise<'recorded' | 'replay' | 'failed'> {
     try {
       const { error: deliveryError } = await supabase
         .from('commerce_download_deliveries')
@@ -247,17 +247,27 @@ export async function GET(
           order_id: deliveryEntitlement.order_id,
           delivery_nonce_hash: deliveryNonce ? hashToken(deliveryNonce.value) : null,
         });
-      if (deliveryError && deliveryError.code !== '23505') {
-        console.error('[Downloads delivery evidence] insert failed:', deliveryError.message);
-        return false;
+      if (deliveryError && deliveryError.code === '23505') {
+        // The table's only unique index is the partial nonce-hash index, so a
+        // conflict on a nonce-bearing insert means this exact link already has
+        // a durable delivery row. That happens precisely when the volatile
+        // nonce store lost the consumed marker (eviction/restart) and the
+        // replay passed consumeDownloadNonce as fresh — the durable ledger is
+        // the last line of the single-use guarantee, not benign dedupe.
+        if (deliveryNonce) return 'replay';
+        return 'recorded';
       }
-      return true;
+      if (deliveryError) {
+        console.error('[Downloads delivery evidence] insert failed:', deliveryError.message);
+        return 'failed';
+      }
+      return 'recorded';
     } catch (error) {
       console.error(
         '[Downloads delivery evidence] insert failed:',
         error instanceof Error ? error.message : 'unknown error',
       );
-      return false;
+      return 'failed';
     }
   }
 
@@ -290,7 +300,14 @@ export async function GET(
     const replay = await consumeDeliveryNonce();
     if (replay) return replay;
 
-    if (!await recordDeliveryEvidence()) {
+    const evidence = await recordDeliveryEvidence();
+    if (evidence === 'replay') {
+      return NextResponse.json(
+        { error: 'Download link has already been used' },
+        { status: 410 },
+      );
+    }
+    if (evidence === 'failed') {
       return deliveryNonce
         ? deliveryStatusUncertain()
         : serviceUnavailable('Downloads delivery evidence', {

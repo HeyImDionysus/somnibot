@@ -157,12 +157,18 @@ export class MassActionHoldService {
     return (data as MassActionHoldRow | null) ?? null;
   }
 
-  async listHeld(): Promise<MassActionHoldRow[]> {
+  async listHeldNeedingNotice(): Promise<MassActionHoldRow[]> {
+    // Notice recovery only. Delivered cards (a real notification_message_id)
+    // need no work, and a bounded oldest-first scan that includes them starves:
+    // 500 old delivered holds would hide a newer hold whose notice failed.
+    // Undelivered (null) and claim sentinels (pending:*, fresh or stale) are
+    // exactly the rows ensureOwnerNotice can act on.
     const { data, error } = await this.supabase
       .from('automation_mass_action_holds')
       .select('*')
       .eq('guild_id', this.guild.id)
       .eq('status', 'held')
+      .or('notification_message_id.is.null,notification_message_id.like.pending:*')
       .order('created_at', { ascending: true })
       .limit(500);
     if (error) throw new Error(`Failed to load held mass actions: ${error.message}`);

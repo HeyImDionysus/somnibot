@@ -250,4 +250,30 @@ describe('GET /api/downloads — nonce delivery boundary', () => {
     }
     expect(after).toHaveBeenCalledOnce();
   });
+
+  it('rejects a durable nonce conflict as a replay instead of redirecting (round 11)', async () => {
+    // Valkey lost the consumed marker while the signed link was still valid:
+    // the replay passes consumeDownloadNonce as fresh, and the durable
+    // delivery insert then hits the partial unique nonce index with 23505.
+    // That conflict IS the single-use guarantee firing — treating it as
+    // benign dedupe re-served the file exactly when the volatile store
+    // forgot.
+    const mock = mockDownload({
+      deliveryError: {
+        message: 'duplicate key value violates unique constraint '
+          + '"idx_commerce_download_deliveries_nonce"',
+        code: '23505',
+      } as never,
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue(mock as never);
+
+    const response = await downloadGet(request() as never, params);
+
+    expect(response.status).toBe(410);
+    await expect(response.json()).resolves.toEqual({
+      error: 'Download link has already been used',
+    });
+    // No delivery happened, so analytics must not have been scheduled.
+    expect(after).not.toHaveBeenCalled();
+  });
 });

@@ -3,6 +3,7 @@ import {
   isAuthoritativeChannelSnapshot,
   normalizeSnapshotChannels,
   resolveSelectedChannels,
+  snapshotTimestampMs,
 } from '@/components/shared/channel-picker';
 
 const NOW = Date.parse('2026-07-31T04:00:00.000Z');
@@ -105,5 +106,40 @@ describe('channelPermissionIssue — stale snapshots cannot vouch for permission
       true,
     );
     expect(issue).toContain('SendMessages');
+  });
+});
+
+describe('snapshotTimestampMs — mounted expiry anchors to the SNAPSHOT time (round 11)', () => {
+  // Anchoring expiry to the browser fetch time restarted the ten-minute
+  // clock: a snapshot 9m59s old at fetch passed the authority check and then
+  // stayed trusted for almost another ten minutes. The component seeds its
+  // expiry state from this parse of the server's snapshotAt instead.
+  it('returns the parsed server timestamp', () => {
+    expect(snapshotTimestampMs({ snapshotAt: '2026-07-31T03:51:00.000Z' }))
+      .toBe(Date.parse('2026-07-31T03:51:00.000Z'));
+  });
+
+  it('returns null when snapshotAt is missing or unparseable', () => {
+    expect(snapshotTimestampMs({})).toBeNull();
+    expect(snapshotTimestampMs({ snapshotAt: 'not-a-date' })).toBeNull();
+    expect(snapshotTimestampMs(null)).toBeNull();
+    expect(snapshotTimestampMs([{ snapshotAt: '2026-07-31T03:51:00.000Z' }])).toBeNull();
+  });
+
+  it('an almost-expired snapshot is authoritative at fetch but expires on ITS clock', () => {
+    const payload = {
+      snapshotVersion: 2,
+      snapshotAt: new Date(NOW - (10 * 60_000 - 1_000)).toISOString(),
+      channels: [channel],
+      categories: [category],
+    };
+    // Authoritative when fetched with one second of validity left…
+    expect(isAuthoritativeChannelSnapshot(payload, NOW)).toBe(true);
+    // …and the timestamp the component anchors expiry to is the SERVER one,
+    // so the same age math flips authority two seconds later, not in ten
+    // minutes.
+    const anchor = snapshotTimestampMs(payload);
+    expect(anchor).not.toBeNull();
+    expect(NOW + 2_000 - (anchor as number) > 10 * 60_000).toBe(true);
   });
 });

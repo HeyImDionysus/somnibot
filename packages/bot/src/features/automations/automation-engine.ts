@@ -178,11 +178,16 @@ export class AutomationEngine {
       }
       if (event._chainDepth === undefined && this._holdMemberDepthHints.size > 0) {
         // Hold side effects are correlated by the member the action touched —
-        // never by "a hold happens to be running".
-        const data = event.data as { memberId?: unknown; userId?: unknown } | null;
+        // never by "a hold happens to be running". Platform events name that
+        // member inconsistently: role/welcome events use discordId, temp
+        // channels use memberId, most features use userId.
+        const data = event.data as
+          { memberId?: unknown; userId?: unknown; discordId?: unknown } | null;
         const candidate = typeof data?.memberId === 'string'
           ? data.memberId
-          : typeof data?.userId === 'string' ? data.userId : null;
+          : typeof data?.userId === 'string'
+            ? data.userId
+            : typeof data?.discordId === 'string' ? data.discordId : null;
         if (candidate) {
           const hint = this._holdMemberDepthHints.get(candidate);
           if (hint) {
@@ -221,7 +226,7 @@ export class AutomationEngine {
     // their stable footer; approved rows are atomically claimed so multiple
     // bot instances or reconnects cannot execute the same release twice.
     const [heldResult, approvedResult] = await Promise.allSettled([
-      this.massActionHolds.listHeld(),
+      this.massActionHolds.listHeldNeedingNotice(),
       this.massActionHolds.listApproved(),
     ]);
     const held = heldResult.status === 'fulfilled' ? heldResult.value : [];
@@ -913,7 +918,7 @@ export class AutomationEngine {
           log.error('Failed to prune terminal mass-action holds:', err);
         }
       }
-      const held = await this.massActionHolds.listHeld();
+      const held = await this.massActionHolds.listHeldNeedingNotice();
       await Promise.all(held.map(async (hold) => {
         try {
           const name = await this.automationName(hold.automation_id);

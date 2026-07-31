@@ -6,6 +6,7 @@
  */
 import {
   ChannelType,
+  RESTJSONErrorCodes,
   type Guild,
   type VoiceChannel,
 } from 'discord.js';
@@ -25,6 +26,12 @@ export interface StatsChannelConfig {
   name_format: string;
   active: boolean;
   last_value: string | null;
+  /**
+   * Discord channel ids created for this counter whose identity write failed:
+   * durable pointers so an abort survivor is recovered (adopted or deleted)
+   * instead of orphaned behind a log line.
+   */
+  pending_cleanup_channel_ids: string[] | null;
 }
 
 export class StatsChannelManager {
@@ -46,6 +53,9 @@ export class StatsChannelManager {
 
   async start(): Promise<void> {
     await this.loadChannels();
+    // Runs BEFORE the zero-config early return: a deactivated config can
+    // still own an abort survivor, and this boot is its recovery chance.
+    await this.reconcilePendingCleanup();
 
     if (this.channels.length === 0) {
       log.info('No stats channels configured');
@@ -89,6 +99,11 @@ export class StatsChannelManager {
   }
 
   private async updateAll(): Promise<void> {
+    // Recover abort survivors FIRST: an adoptable survivor must become the
+    // counter before the create branch below can mint a duplicate for the
+    // same config.
+    await this.reconcilePendingCleanup();
+
     // Fetch all needed stats once
     const stats = await this.gatherStats();
 
@@ -134,29 +149,40 @@ export class StatsChannelManager {
             ],
           });
 
-          const { error: channelIdError } = await this.supabase
-            .from('stats_channels')
-            .update({ channel_id: channel.id })
-            .eq('id', config.id);
-          if (channelIdError) {
-            // The Discord channel exists but its identity was never persisted:
-            // config.channel_id stays null, so every later update would create
-            // ANOTHER counter channel, and a restart has no id to recover the
-            // orphan with. Delete the channel we just created — it is seconds
-            // old, empty, and recreatable — rather than leaking one per retry.
-            // If the delete ALSO fails, log the id loudly so the orphan is at
-            // least findable by hand.
-            await channel.delete('Stats channel identity write failed').catch((deleteError) => {
-              log.error(
-                `Stats channel ${channel.id} could not be deleted after its identity write failed; `
-                + 'it is orphaned in Discord and must be removed manually:',
-                { error: String(deleteError) },
-              );
-            });
-            throw new Error(`Failed to persist stats channel identity: ${channelIdError.message}`);
+          const identityError = await this.persistChannelIdentity(config, channel.id);
+          if (identityError) {
+            // The Discord channel exists but its identity could not be
+            // persisted even with retries: config.channel_id stays null, so
+            // every later update would create ANOTHER counter channel. Record
+            // the survivor DURABLY first — the reconciler then adopts it as
+            // the counter (channel_id is still null) or deletes it, so a
+            // restart cannot orphan it. Only when the pointer itself cannot
+            // be written do we fall back to delete-now, and only past THAT to
+            // the loud manual-cleanup log.
+            const survivorPersisted = await this.persistPendingCleanup(config, channel.id);
+            if (!survivorPersisted) {
+              let deleted = false;
+              for (let attempt = 1; attempt <= 3 && !deleted; attempt++) {
+                try {
+                  await channel.delete('Stats channel identity write failed');
+                  deleted = true;
+                } catch (deleteError) {
+                  if (attempt === 3) {
+                    log.error(
+                      `Stats channel ${channel.id} could not be deleted after its identity write `
+                      + 'failed and no durable cleanup state could be written; it is orphaned in '
+                      + 'Discord and must be removed manually:',
+                      { error: String(deleteError) },
+                    );
+                  } else {
+                    await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+                  }
+                }
+              }
+            }
+            throw new Error(`Failed to persist stats channel identity: ${identityError}`);
           }
           channelId = channel.id;
-          config.channel_id = channel.id;
           created = true;
         }
 
@@ -184,6 +210,191 @@ export class StatsChannelManager {
         await this.resolveUpdateAlerts(config);
       } catch (recoveryError) {
         log.error(`Failed to reconcile recovered ${config.stat_type} alert:`, recoveryError);
+      }
+    }
+  }
+
+  /**
+   * Persist a freshly created channel's identity with retries. Returns null
+   * on success (also updating the in-memory row) or the final error message.
+   */
+  private async persistChannelIdentity(
+    config: StatsChannelConfig,
+    channelId: string,
+  ): Promise<string | null> {
+    let lastError = 'unknown error';
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const { error } = await this.supabase
+        .from('stats_channels')
+        .update({ channel_id: channelId })
+        .eq('id', config.id);
+      if (!error) {
+        config.channel_id = channelId;
+        return null;
+      }
+      lastError = error.message;
+      if (attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+      }
+    }
+    return lastError;
+  }
+
+  /**
+   * Durably record an abort survivor on its stats_channels row so the
+   * reconciler owns it by id. Read-merge-write with a read-back: a write that
+   * matched no row (config deleted mid-flight) is a FAILED persist, because
+   * the pointer would not exist anywhere.
+   */
+  private async persistPendingCleanup(
+    config: StatsChannelConfig,
+    channelId: string,
+  ): Promise<boolean> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const { data: row, error: readError } = await this.supabase
+          .from('stats_channels')
+          .select('pending_cleanup_channel_ids')
+          .eq('id', config.id)
+          .maybeSingle();
+        if (readError) throw new Error(readError.message);
+        if (!row) throw new Error('stats channel row no longer exists');
+        const existing = Array.isArray(row.pending_cleanup_channel_ids)
+          ? (row.pending_cleanup_channel_ids as unknown[])
+            .filter((id): id is string => typeof id === 'string')
+          : [];
+        const merged = existing.includes(channelId) ? existing : [...existing, channelId];
+        const { data: updated, error: writeError } = await this.supabase
+          .from('stats_channels')
+          .update({ pending_cleanup_channel_ids: merged })
+          .eq('id', config.id)
+          .select('id')
+          .maybeSingle();
+        if (writeError) throw new Error(writeError.message);
+        if (!updated) throw new Error('stats channel row no longer exists');
+        config.pending_cleanup_channel_ids = merged;
+        log.warn(
+          `Stats channel ${channelId} recorded for recovery after its identity write failed`,
+        );
+        return true;
+      } catch (persistError) {
+        if (attempt === 3) {
+          log.error('Could not persist stats-channel cleanup state after retries:', {
+            statsChannelId: config.id,
+            channelId,
+            error: String(persistError),
+          });
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Recover abort survivors recorded in pending_cleanup_channel_ids. An
+   * ACTIVE config whose channel_id is still null ADOPTS its survivor — the
+   * channel was created correctly, only the identity write failed — anything
+   * else is deleted. Ids leave the list only on proof (adopted, deleted, or
+   * confirmed gone); failures stay listed for the next pass. Scans the table
+   * directly, not this.channels: deactivated configs can own survivors too.
+   */
+  private async reconcilePendingCleanup(): Promise<void> {
+    const { data, error } = await this.supabase
+      .from('stats_channels')
+      .select('id, channel_id, active, pending_cleanup_channel_ids')
+      .eq('guild_id', this.guild.id)
+      .neq('pending_cleanup_channel_ids', '[]')
+      .limit(200);
+    if (error) {
+      log.error('Failed to scan stats-channel cleanup state:', { error: error.message });
+      return;
+    }
+    for (const row of data ?? []) {
+      const pending = Array.isArray(row.pending_cleanup_channel_ids)
+        ? (row.pending_cleanup_channel_ids as unknown[])
+          .filter((id): id is string => typeof id === 'string')
+        : [];
+      if (pending.length === 0) continue;
+      const remaining: string[] = [];
+      let liveChannelId = typeof row.channel_id === 'string' ? row.channel_id : null;
+      for (const channelId of pending) {
+        if (channelId === liveChannelId) {
+          // Already the live counter (a prior pass adopted it but could not
+          // trim the list). Dropping the id is the only work left.
+          continue;
+        }
+        let channel;
+        let missing = false;
+        try {
+          channel = await this.guild.channels.fetch(channelId);
+          missing = !channel;
+        } catch (fetchError) {
+          const code =
+            typeof fetchError === 'object' && fetchError !== null && 'code' in fetchError
+              ? Number((fetchError as { code: unknown }).code)
+              : Number.NaN;
+          if (code === RESTJSONErrorCodes.UnknownChannel) {
+            missing = true;
+          } else {
+            log.warn('Could not verify stats-channel abort survivor; will retry:', {
+              statsChannelId: row.id,
+              channelId,
+              error: String(fetchError),
+            });
+            remaining.push(channelId);
+            continue;
+          }
+        }
+        if (missing) continue;
+        if (row.active === true && liveChannelId === null) {
+          // Adoption is conditional on channel_id still being null so a
+          // racing instance's create/adopt is never overwritten.
+          const { data: adopted, error: adoptError } = await this.supabase
+            .from('stats_channels')
+            .update({ channel_id: channelId })
+            .eq('id', row.id)
+            .is('channel_id', null)
+            .select('id')
+            .maybeSingle();
+          if (!adoptError && adopted) {
+            liveChannelId = channelId;
+            const local = this.channels.find((config) => config.id === row.id);
+            if (local) local.channel_id = channelId;
+            continue;
+          }
+          // Lost the race or the write failed: keep the pointer and let the
+          // next pass see fresh state rather than deleting a channel that may
+          // have just become the live counter.
+          remaining.push(channelId);
+          continue;
+        }
+        try {
+          await channel?.delete('Stats counter abort survivor cleanup');
+        } catch (deleteError) {
+          log.warn('Stats-channel abort survivor could not be deleted; will retry:', {
+            statsChannelId: row.id,
+            channelId,
+            error: String(deleteError),
+          });
+          remaining.push(channelId);
+        }
+      }
+      if (remaining.length !== pending.length) {
+        const { error: trimError } = await this.supabase
+          .from('stats_channels')
+          .update({ pending_cleanup_channel_ids: remaining })
+          .eq('id', row.id);
+        if (trimError) {
+          log.error('Failed to trim stats-channel cleanup state:', {
+            statsChannelId: row.id,
+            error: trimError.message,
+          });
+        } else {
+          const local = this.channels.find((config) => config.id === row.id);
+          if (local) local.pending_cleanup_channel_ids = remaining;
+        }
       }
     }
   }

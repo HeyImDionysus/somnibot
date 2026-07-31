@@ -153,8 +153,12 @@ function ChannelIcon({ type, className }: { type: number; className?: string }) 
 interface ChannelSnapshot {
   channels: DiscordChannel[];
   authoritative: boolean;
-  /** When the snapshot was accepted; authority EXPIRES past the age window. */
-  fetchedAtMs: number;
+  /**
+   * The snapshot's OWN timestamp (server snapshotAt), not the browser fetch
+   * time; authority EXPIRES past the age window. Anchoring to fetch time
+   * would restart the ten-minute clock on an almost-expired snapshot.
+   */
+  snapshotAtMs: number;
 }
 
 // Shared channel cache to avoid re-fetching per picker instance
@@ -189,15 +193,19 @@ function hasValidCategoryShape(value: unknown): boolean {
     && (value.botPermissions === null || typeof value.botPermissions === 'string');
 }
 
+export function snapshotTimestampMs(payload: unknown): number | null {
+  if (!isRecord(payload) || typeof payload.snapshotAt !== 'string') return null;
+  const parsed = Date.parse(payload.snapshotAt);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export function isAuthoritativeChannelSnapshot(
   payload: unknown,
   nowMs = Date.now(),
 ): boolean {
   if (!isRecord(payload) || payload.awaitingSnapshot === true) return false;
 
-  const snapshotMs = typeof payload.snapshotAt === 'string'
-    ? Date.parse(payload.snapshotAt)
-    : Number.NaN;
+  const snapshotMs = snapshotTimestampMs(payload) ?? Number.NaN;
   return payload.snapshotVersion === 2
     && Number.isFinite(snapshotMs)
     && nowMs - snapshotMs <= MAX_SNAPSHOT_AGE_MS
@@ -236,10 +244,12 @@ async function fetchChannels(): Promise<ChannelSnapshot> {
     throw new Error(json.error || 'Failed to load live Discord channels');
   }
   const channels = normalizeSnapshotChannels(json);
+  // A non-authoritative payload may carry no snapshotAt; the fallback is
+  // inert because expiry is only consulted when authority already held.
   const snapshot = {
     channels,
     authoritative: isAuthoritativeChannelSnapshot(json),
-    fetchedAtMs: Date.now(),
+    snapshotAtMs: snapshotTimestampMs(json) ?? Date.now(),
   };
   channelCache = { data: snapshot, ts: Date.now() };
   return snapshot;
@@ -282,7 +292,7 @@ export function ChannelPicker({
 }: ChannelPickerProps) {
   const [channels, setChannels] = useState<DiscordChannel[]>([]);
   const [snapshotAuthoritative, setSnapshotAuthoritative] = useState(false);
-  const [snapshotFetchedAtMs, setSnapshotFetchedAtMs] = useState(0);
+  const [snapshotAtMs, setSnapshotAtMs] = useState(0);
   // Ticks while mounted so authority can EXPIRE. Authority was previously
   // computed once at mount and stored forever: a page left open past the
   // snapshot's ten-minute validity kept enabling channels from obsolete
@@ -308,7 +318,7 @@ export function ChannelPicker({
       .then((snapshot) => {
         setChannels(snapshot.channels);
         setSnapshotAuthoritative(snapshot.authoritative);
-        setSnapshotFetchedAtMs(snapshot.fetchedAtMs);
+        setSnapshotAtMs(snapshot.snapshotAtMs);
       })
       .catch(() => setLoadError('Live Discord channels are unavailable. Retry after the bot refreshes its snapshot.'))
       .finally(() => setLoading(false));
@@ -323,8 +333,8 @@ export function ChannelPicker({
   // validity window the picker treats permissions as unverifiable again —
   // the same state a stale fetch would have produced.
   const liveAuthoritative = snapshotAuthoritative
-    && snapshotFetchedAtMs > 0
-    && authorityNowMs - snapshotFetchedAtMs <= MAX_SNAPSHOT_AGE_MS;
+    && snapshotAtMs > 0
+    && authorityNowMs - snapshotAtMs <= MAX_SNAPSHOT_AGE_MS;
 
   const permissionIssue = useCallback(
     (channel: DiscordChannel): string | null =>
