@@ -122,60 +122,35 @@ export class ExecutionLogger {
   private async reclaimStalePreActionClaim(params: ClaimParams): Promise<boolean> {
     const staleBefore = new Date(Date.now() - STALE_PRE_ACTION_CLAIM_MS).toISOString();
 
-    // A HELD mass-action execution is pre-action by design — its row stays
-    // un-finalized until the owner approves, which can take hours. It matches
-    // every default-value predicate below, so without this check a redelivery
-    // would delete a perfectly valid held execution: the hold's ON DELETE SET
-    // NULL forgets its execution_id, approval falls back to a detached log,
-    // and the replacement claim strands. Uncertainty fails closed: if the
-    // linkage cannot be read, nothing is reclaimed.
-    const { data: candidate, error: candidateError } = await this.supabase
-      .from('automation_executions')
-      .select('id')
-      .eq('guild_id', params.guildId)
-      .eq('automation_id', params.automationId)
-      .eq('occurrence_id', params.occurrenceId)
-      .maybeSingle();
-    if (candidateError || !candidate) return false;
-    const { data: backingHold, error: holdError } = await this.supabase
-      .from('automation_mass_action_holds')
-      .select('id')
-      .eq('guild_id', params.guildId)
-      .eq('execution_id', (candidate as { id: string }).id)
-      .maybeSingle();
-    if (holdError) return false;
-    if (backingHold) {
-      log.info(
-        `Not reclaiming execution claim for occurrence ${params.occurrenceId}: `
-        + 'it backs a durable mass-action hold awaiting approval.',
-      );
-      return false;
-    }
-
-    const { data, error } = await this.supabase
-      .from('automation_executions')
-      .delete()
-      .eq('guild_id', params.guildId)
-      .eq('automation_id', params.automationId)
-      .eq('occurrence_id', params.occurrenceId)
-      .eq('conditions_passed', false)
-      .eq('actions_executed', 0)
-      .eq('actions_failed', 0)
-      .eq('duration_ms', 0)
-      .lt('created_at', staleBefore)
-      .select('id');
+    // One atomic statement (reclaim_stale_automation_execution): the DELETE
+    // pins every pre-action insert default, the age floor, AND a NOT EXISTS
+    // over automation_mass_action_holds.execution_id — all evaluated by the
+    // statement that removes the row. A HELD execution stays pre-action shaped
+    // for as long as approval takes, and the earlier separate-statement
+    // version raced hold creation: a redelivery could observe no hold, the
+    // original worker could insert one, and the delete still removed the
+    // now-held execution (ON DELETE SET NULL detaching the hold). Any error
+    // fails closed: nothing reclaimed.
+    const { data: removed, error } = await this.supabase.rpc(
+      'reclaim_stale_automation_execution',
+      {
+        p_guild_id: params.guildId,
+        p_automation_id: params.automationId,
+        p_occurrence_id: params.occurrenceId,
+        p_stale_before: staleBefore,
+      },
+    );
     if (error) {
       log.error('Failed to reclaim stale pre-action claim:', error.message);
       return false;
     }
-    const removed = Array.isArray(data) && data.length > 0;
-    if (removed) {
+    if (removed === true) {
       log.warn(
         `Reclaimed stranded pre-action execution claim for automation ${params.automationId} `
         + `occurrence ${params.occurrenceId}; the previous run released nothing durable.`,
       );
     }
-    return removed;
+    return removed === true;
   }
 
   /**

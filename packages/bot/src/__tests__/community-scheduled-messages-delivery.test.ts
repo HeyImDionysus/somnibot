@@ -43,6 +43,8 @@ function schedSupa(
     priorCounterRow?: { current_sends: number; last_sent_at: string | null };
     /** When set, the reclaimed-counter reconcile read FAILS with this error. */
     priorCounterError?: { message: string };
+    /** When set, the scheduled_messages LIST load fails (non-authoritative). */
+    schedulesLoadError?: { message: string };
   } = {},
 ) {
   const inserts: Record<string, any[]> = { alerts: [] };
@@ -115,6 +117,9 @@ function schedSupa(
           data: options.existingOccurrence ? [options.existingOccurrence] : [],
           error: null,
         });
+      }
+      if (table === 'scheduled_messages' && options.schedulesLoadError) {
+        return resolve({ data: null, error: options.schedulesLoadError });
       }
       return resolve({ data: table === 'scheduled_messages' ? schedules : [], error: null });
     };
@@ -587,5 +592,56 @@ describe('ScheduledMessageRunner — a crashed minute cannot hide behind a later
     const rpcNames = (supabase.rpc as any).mock.calls.map((c: any[]) => c[0]);
     expect(rpcNames).toContain('reclaim_stale_discord_occurrence');
     expect(rpcNames).not.toContain('claim_scheduled_message_send');
+  });
+});
+
+describe('ScheduledMessageRunner — dead-schedule claims cannot pin the scan', () => {
+  const STALE_AT = new Date(Date.now() - 20 * 60_000).toISOString();
+  const CRASHED_MINUTE = new Date(Math.floor((Date.now() - 20 * 60_000) / 60_000) * 60_000)
+    .toISOString();
+
+  function deadScheduleClaim() {
+    return {
+      id: 'occ-dead', guild_id: 'g1', operation_kind: 'scheduled_message',
+      // A schedule id that is NOT in the active list.
+      occurrence_key: `deleted-sched:${CRASHED_MINUTE}`, status: 'claimed',
+      claimed_at: STALE_AT, updated_at: STALE_AT,
+      resource_id: null, result: {}, last_error: null,
+    };
+  }
+
+  it('terminalizes a stale claim whose schedule is deleted or disabled', async () => {
+    // Enough of these at the front of the 25-oldest batch and newer stale
+    // claims for ACTIVE schedules were never reached until the blockers aged
+    // past the 7-day window — days of undelivered counted sends.
+    const Runner = await loadRunner();
+    const { supabase, updates } = schedSupa([{ ...BASE_SCHEDULE, cron_expression: '0 0 1 1 *' }], {
+      existingOccurrence: deadScheduleClaim(),
+    });
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+
+    await (runner as any).tick();
+
+    expect(send).not.toHaveBeenCalled();
+    const terminal = updates.find((u) => u.payload.status === 'failed');
+    expect(terminal, 'the dead-schedule claim must be terminalized').toBeTruthy();
+  });
+
+  it('NEVER terminalizes on a failed schedule load — empty is not authoritative', async () => {
+    // A transient load failure leaves `schedules` empty, indistinguishable
+    // from "everything was deleted". Executing claims on that ambiguity would
+    // destroy valid recovery work during any database blip.
+    const Runner = await loadRunner();
+    const { supabase, updates } = schedSupa([], {
+      existingOccurrence: deadScheduleClaim(),
+      schedulesLoadError: { message: 'db unavailable' },
+    });
+    const { guild: g } = guild();
+    const runner = new Runner(g, supabase);
+
+    await (runner as any).tick();
+
+    expect(updates.some((u) => u.payload.status === 'failed')).toBe(false);
   });
 });

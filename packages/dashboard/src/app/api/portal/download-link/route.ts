@@ -8,6 +8,7 @@
  * Request body: { productId: string, fileId: string }
  * Response:     { url: string }
  */
+import { selectDownloadEntitlement } from '@/lib/portal/select-entitlement';
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
@@ -73,13 +74,21 @@ export async function POST(request: NextRequest) {
     // that is active or in an unexpired grace window.
     const { data: entitlements } = await admin
       .from('entitlements')
-      .select('id, order_id, status, grace_period_ends_at')
+      .select('id, order_id, status, grace_period_ends_at, created_at')
       .eq('customer_id', session.customer_id)
       .eq('product_id', productId)
       .eq('guild_id', session.guild_id)
       .in('status', ['active', 'grace_period']);
 
-    const selectedEntitlement = entitlements?.find((e) => isEntitlementAccessLive(e));
+    // Deterministic selection, newest-paid first. An unordered find() bound
+    // the signed URL — and therefore the delivery evidence the control room
+    // reads — to an ARBITRARY live row; with a re-buy or an overlapping manual
+    // grant, the download for the current purchase could be recorded against
+    // an older order (or an orderless grant), and the current paid order then
+    // reported as missing its required download.
+    const selectedEntitlement = selectDownloadEntitlement(
+      (entitlements ?? []).filter((e) => isEntitlementAccessLive(e)),
+    );
     if (!selectedEntitlement) {
       // Auditable refusal: buyer requested a download they are not entitled to.
       await writeCommerceAudit(admin, {

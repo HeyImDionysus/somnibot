@@ -55,6 +55,22 @@ describe('GET /api/dashboard/feature-status', () => {
     });
   });
 
+  it('reports a MISSING guild_config row as null, never as everything-disabled', async () => {
+    // Review 3689865706: new-guild init tolerates a failed config insert, and
+    // the bot then runs defaults like `temp_channels_enabled !== false`.
+    // Coercing the missing row to {} made every configured flag read false —
+    // the panel said "disabled" for features the bot was actually running.
+    // null renders as 'status unavailable', which is the truth.
+    const config = chain(null);
+    const heartbeat = chain({ snapshot_at: new Date().toISOString() });
+    vi.mocked(createAdminSupabase).mockReturnValue({
+      from: vi.fn((table: string) => table === 'guild_config' ? config : heartbeat),
+    } as never);
+
+    const body = await (await GET()).json();
+    expect(body.data.config).toBeNull();
+  });
+
   it('treats a heartbeat beyond the allowed future clock skew as unavailable', async () => {
     const config = chain({ economy_enabled: true });
     const heartbeat = chain({ snapshot_at: new Date(Date.now() + 5 * 60_000).toISOString() });

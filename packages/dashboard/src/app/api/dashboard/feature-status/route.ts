@@ -55,7 +55,13 @@ export async function GET() {
     return NextResponse.json({
       success: true,
       data: {
-        config: configResult.data ?? {},
+        // A MISSING guild_config row is not the same as everything-disabled:
+        // new-guild init tolerates a failed config insert, and the bot then
+        // runs defaults like `temp_channels_enabled !== false`. Coercing null
+        // to {} told operators features were disabled while the bot was
+        // actually running them; deriveFeatureReadiness renders null as
+        // 'status unavailable', which is the truth.
+        config: configResult.data ?? null,
         bot: {
           online: staleSecs !== null && staleSecs < 120,
           staleSecs,

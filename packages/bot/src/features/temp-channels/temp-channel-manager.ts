@@ -170,6 +170,50 @@ export class TempChannelManager {
   }
 
   /**
+   * Durably record surviving channel ids as a cleanup-pending job, with
+   * bounded retries. Returns true when the job landed. Callers that receive
+   * false must leave the occurrence CLAIMED — `failed` is terminal and the
+   * reconciler scans only claimed cleanup-pending rows, so terminalizing here
+   * orphans the survivors invisibly and forever.
+   */
+  private async persistCleanupJob(
+    occurrenceId: string,
+    survivingChannelIds: string[],
+    cause: string,
+  ): Promise<boolean> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await markDiscordOccurrenceCleanupPending(
+          this.supabase,
+          occurrenceId,
+          survivingChannelIds[0],
+          cause,
+          {
+            stage: 'active_row_insert',
+            channelIds: survivingChannelIds,
+          },
+        );
+        return true;
+      } catch (persistError) {
+        if (attempt === 3) {
+          log.error(
+            'Could not persist temp-channel cleanup job after retries; '
+            + 'leaving the occurrence claimed so the survivors are not silently disowned:',
+            {
+              occurrenceId,
+              survivingChannelIds,
+              error: String(persistError),
+            },
+          );
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
    * Handle a user joining a hub voice channel.
    */
   async handleJoinHub(
@@ -361,12 +405,32 @@ export class TempChannelManager {
           }
         }
         if (!idsPersisted) {
-          const abortResults = await Promise.allSettled([
-            vc.delete('Temp channel id persistence failed'),
-            ...(textChannel ? [textChannel.delete('Temp channel id persistence failed')] : []),
-          ]);
-          if (abortResults.every((outcome) => outcome.status === 'fulfilled')) {
+          const abortTargets = [
+            { channelId: vc.id, promise: vc.delete('Temp channel id persistence failed') },
+            ...(textChannel
+              ? [{ channelId: textChannel.id, promise: textChannel.delete('Temp channel id persistence failed') }]
+              : []),
+          ];
+          const abortResults = await Promise.allSettled(abortTargets.map((target) => target.promise));
+          const abortSurvivors = abortTargets
+            .filter((_, index) => abortResults[index]?.status === 'rejected')
+            .map((target) => target.channelId);
+          if (abortSurvivors.length === 0) {
             externalRoomExists = false;
+          } else {
+            // A rejected abort deletion leaves real survivors with NO ids on
+            // the claim (the id write is what just failed). Falling through to
+            // the outer catch would terminalize the occurrence as `failed` —
+            // and the reconciler scans only claimed cleanup-pending rows, so
+            // the survivors would be orphaned permanently. Route them through
+            // the same durable cleanup machinery as the insert-failure branch;
+            // on exhaustion the claim stays claimed.
+            cleanupJobCommitted = await this.persistCleanupJob(
+              occurrenceId,
+              abortSurvivors,
+              'Temp-channel id persistence failed and abort deletion was rejected',
+            );
+            if (!cleanupJobCommitted) cleanupPersistExhausted = true;
           }
           throw new Error('Failed to persist created temp-channel identities');
         }
@@ -409,37 +473,12 @@ export class TempChannelManager {
           // other failure and would terminalize the claim. Retry in place;
           // on exhaustion, record that fact so the outer catch preserves the
           // claim instead of failing it.
-          for (let attempt = 1; attempt <= 3; attempt++) {
-            try {
-              await markDiscordOccurrenceCleanupPending(
-                this.supabase,
-                occurrenceId,
-                survivingChannelIds[0],
-                `Temp-channel database record failed: ${recordError.message}`,
-                {
-                  stage: 'active_row_insert',
-                  channelIds: survivingChannelIds,
-                },
-              );
-              cleanupJobCommitted = true;
-              break;
-            } catch (persistError) {
-              if (attempt === 3) {
-                cleanupPersistExhausted = true;
-                log.error(
-                  'Could not persist temp-channel cleanup job after retries; '
-                  + 'leaving the occurrence claimed so the survivors are not silently disowned:',
-                  {
-                    occurrenceId,
-                    survivingChannelIds,
-                    error: String(persistError),
-                  },
-                );
-              } else {
-                await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
-              }
-            }
-          }
+          cleanupJobCommitted = await this.persistCleanupJob(
+            occurrenceId,
+            survivingChannelIds,
+            `Temp-channel database record failed: ${recordError.message}`,
+          );
+          if (!cleanupJobCommitted) cleanupPersistExhausted = true;
         }
         throw new Error(`Failed to record temp channel: ${recordError.message}`);
       }

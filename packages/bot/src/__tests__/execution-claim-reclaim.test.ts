@@ -39,6 +39,7 @@ function makeSupa(options: {
   let inserts = 0;
   let releaseAttempts = 0;
   const deleteFilters: Record<string, unknown>[] = [];
+  const reclaimCalls: Array<Record<string, unknown>> = [];
   const from = vi.fn((table: string) => {
     const filters: Record<string, unknown> = {};
     const chain: any = {};
@@ -86,16 +87,27 @@ function makeSupa(options: {
     };
     return chain;
   });
+  const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    if (name !== 'reclaim_stale_automation_execution') {
+      throw new Error(`Unexpected RPC ${name}`);
+    }
+    reclaimCalls.push(args);
+    // The atomic statement's verdict: hold-backed or live/finalized rows match
+    // nothing; only a genuinely stranded pre-action row is removed.
+    const removed = !options.backingHold && (options.reclaimRows ?? []).length > 0;
+    return { data: removed, error: null };
+  });
   return {
-    supabase: { from } as any,
+    supabase: { from, rpc } as any,
     counts: () => ({ inserts, releaseAttempts }),
     deleteFilters,
+    reclaimCalls,
   };
 }
 
 describe('ExecutionLogger.claim — stale pre-action reclaim', () => {
   it('reclaims a stranded pre-action row and wins the retried insert', async () => {
-    const { supabase, counts, deleteFilters } = makeSupa({
+    const { supabase, counts, reclaimCalls } = makeSupa({
       conflict: true,
       reclaimRows: [{ id: 'stale-row' }],
       retryInsertSucceeds: true,
@@ -106,19 +118,14 @@ describe('ExecutionLogger.claim — stale pre-action reclaim', () => {
 
     expect(result.claimed).toBe(true);
     expect(counts().inserts).toBe(2);
-    // The CAS delete must pin every pre-action default AND the age floor, so a
-    // finalized or live row can never match.
-    const cas = deleteFilters[0]!;
-    expect(cas).toMatchObject({
-      guild_id: 'g1',
-      automation_id: 'auto-1',
-      occurrence_id: 'occ-1',
-      conditions_passed: false,
-      actions_executed: 0,
-      actions_failed: 0,
-      duration_ms: 0,
+    // The atomic reclaim carries the full claim identity plus the age floor;
+    // the defaults + hold NOT EXISTS live inside the SQL statement itself.
+    expect(reclaimCalls[0]).toMatchObject({
+      p_guild_id: 'g1',
+      p_automation_id: 'auto-1',
+      p_occurrence_id: 'occ-1',
     });
-    expect(String(Object.keys(cas))).toContain('lt:created_at');
+    expect(typeof reclaimCalls[0]!.p_stale_before).toBe('string');
   });
 
   it('stays skipped when the existing row is live or finalized (CAS matches nothing)', async () => {
@@ -179,6 +186,8 @@ describe('ExecutionLogger.claim — held executions are never reclaimed', () => 
 
     expect(result.claimed).toBe(false);
     expect(counts().inserts).toBe(1);
-    expect(deleteFilters, 'the CAS delete must never run for a held execution').toHaveLength(0);
+    // The hold guard is INSIDE the atomic statement (NOT EXISTS evaluated by
+    // the same DELETE), so the RPC runs but removes nothing — no blind retry.
+    expect(deleteFilters).toHaveLength(0);
   });
 });

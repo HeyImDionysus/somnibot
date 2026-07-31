@@ -350,6 +350,29 @@ describe('TempChannelManager — cleanup-job persistence failures stay recoverab
     expect(activeInserts).toHaveLength(0);
   });
 
+  it('routes abort-deletion survivors into the cleanup machinery, never the terminal path', async () => {
+    // Review 3689865689: id persist exhausted AND the abort deletion rejects.
+    // The old flow fell to the outer catch, which terminalized the occurrence
+    // as `failed` — with the survivor recorded nowhere and the reconciler
+    // scanning only claimed cleanup-pending rows, the channel was orphaned
+    // permanently. The survivor must instead land as a cleanup-pending job.
+    const TempChannelManager = await loadManager();
+    const { supabase, occurrenceUpdates } = persistenceSupa(0, true);
+    const created = {
+      id: 'vc-stuck', name: 'r', members: new Map(),
+      delete: vi.fn(async () => { throw new Error('50013 missing permissions'); }),
+    };
+    const mgr = new TempChannelManager(guild(async () => created), supabase);
+    await mgr.start();
+
+    await mgr.handleJoinHub(member('u1', 'Alice'), 'hubvc', 'join-evt-abort-survivor');
+
+    const pending = occurrenceUpdates.find((u) => u?.result?.channelCleanupPending === true);
+    expect(pending, 'the abort survivor must be durably recorded').toBeTruthy();
+    expect(pending.result.channelIds).toEqual(['vc-stuck']);
+    expect(occurrenceUpdates.some((u) => u?.status === 'failed')).toBe(false);
+  });
+
   it('records the created ids on the claim before inserting the active row', async () => {
     const TempChannelManager = await loadManager();
     const { supabase, occurrenceUpdates } = persistenceSupa(1);

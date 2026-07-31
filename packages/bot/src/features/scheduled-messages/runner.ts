@@ -211,8 +211,16 @@ export class ScheduledMessageRunner {
     }
   }
 
+  /**
+   * Whether the last schedule load actually answered. A failed load leaves
+   * `schedules` empty, which is indistinguishable from "every schedule was
+   * deleted" — and the stale-claim scan must never terminalize claims on that
+   * ambiguity.
+   */
+  private schedulesLoadAuthoritative = false;
+
   private async loadSchedules(): Promise<void> {
-    const { data } = await this.supabase
+    const { data, error } = await this.supabase
       .from('scheduled_messages')
       .select('*')
       .eq('guild_id', this.guild.id)
@@ -220,6 +228,7 @@ export class ScheduledMessageRunner {
       .eq('status', 'active')
       .limit(1000);
 
+    this.schedulesLoadAuthoritative = !error;
     this.schedules = (data ?? []) as ScheduledMessage[];
   }
 
@@ -314,7 +323,27 @@ export class ScheduledMessageRunner {
       const dueAtMs = Date.parse(key.slice(sep + 1));
       if (!Number.isFinite(dueAtMs)) continue;
       const schedule = this.schedules.find((candidate) => candidate.id === scheduleId);
-      if (!schedule) continue; // schedule deleted; leave the claim for audit
+      if (!schedule) {
+        // A claim whose schedule is deleted/disabled/failed can never be
+        // delivered — sendMessage needs live schedule config, and a days-old
+        // announcement resurrecting on re-enable would be wrong anyway. But
+        // silently skipping PINNED the 25-oldest batch: enough dead-schedule
+        // claims and newer stale claims for ACTIVE schedules were never
+        // reached until the blockers aged past the 7-day window. Terminalize
+        // them — with one guard: only when the schedule load actually
+        // answered, because a failed load leaves `schedules` empty and every
+        // valid claim would be executed on that ambiguity.
+        if (this.schedulesLoadAuthoritative) {
+          await failDiscordOccurrence(
+            this.supabase,
+            String(row.id),
+            'schedule inactive or deleted; counted send cannot be delivered',
+          ).catch((err) => {
+            log.error('Could not terminalize dead-schedule claim:', { error: String(err) });
+          });
+        }
+        continue;
+      }
       log.warn(
         `Schedule "${schedule.name}" has an unconfirmed counted send `
         + `(due ${new Date(dueAtMs).toISOString()}); attempting stale-claim recovery.`,
