@@ -584,13 +584,20 @@ describe('AutomationEngine', () => {
     });
 
     it('resumes the persisted chain depth while executing an approved hold', async () => {
-      // Review 3691834561 (P1): approved bulk actions had NO _activeDepths
-      // entry, so their side-effect events (role.gained) counted as fresh
-      // roots — mutually-triggering automations released from holds bypassed
-      // MAX_CHAIN_DEPTH and cycled until rate limits intervened.
-      const observedDepths: number[][] = [];
+      // Review 3691834561 (P1): approved bulk actions had NO depth tracking,
+      // so their side-effect events counted as fresh roots. Review 3692048891
+      // then sharpened the SHAPE of the fix: the depth must be correlated per
+      // MEMBER (one-shot hints), never published through the guild-wide
+      // _activeDepths map — a long bulk run would otherwise tax every
+      // unrelated event with the hold's depth.
+      const observedHints: Array<number | undefined> = [];
+      const observedGlobalDepths: number[][] = [];
       mockExecuteActions.mockImplementation(async () => {
-        observedDepths.push([
+        const hints = (engine as unknown as {
+          _holdMemberDepthHints: Map<string, { depth: number }>;
+        })._holdMemberDepthHints;
+        observedHints.push(hints.get('10000000000000000')?.depth);
+        observedGlobalDepths.push([
           ...(engine as unknown as { _activeDepths: Map<string, number> })._activeDepths.values(),
         ]);
         return { executed: 1, failed: 0, errors: [] };
@@ -614,9 +621,10 @@ describe('AutomationEngine', () => {
       await (engine as unknown as { runApprovedHold(id: string): Promise<void> })
         .runApprovedHold('hold-depth');
 
-      // The persisted depth was ACTIVE during execution…
-      expect(observedDepths.some((depths) => depths.includes(4))).toBe(true);
-      // …and cleaned up afterwards.
+      // The persisted depth was hinted for the MEMBER being acted on…
+      expect(observedHints).toContain(4);
+      // …and never published guild-wide, where it would tax unrelated events.
+      expect(observedGlobalDepths.every((depths) => depths.length === 0)).toBe(true);
       expect(
         (engine as unknown as { _activeDepths: Map<string, number> })._activeDepths.size,
       ).toBe(0);

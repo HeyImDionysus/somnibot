@@ -158,6 +158,10 @@ export async function reconcileTicketOrphanChannels(
     .eq('guild_id', guild.id)
     .eq('operation_kind', 'ticket')
     .eq('status', 'claimed')
+    // Pre-ID-durability claims carry no channel pointer and are unresolvable
+    // here; without this filter, 50 of them pin the ordered batch on every
+    // pass and newer recoverable claims are never inspected.
+    .not('result->createdChannelIds', 'is', null)
     .lt('claimed_at', staleBefore)
     .order('updated_at', { ascending: true })
     .limit(50);
@@ -532,14 +536,34 @@ export async function createTicket(
     }
     if (!idPersisted) {
       let channelRemoved = false;
-      try {
-        await channel.delete('Ticket channel id persistence failed');
-        channelRemoved = true;
-      } catch (deleteError) {
-        log.error('Orphaned ticket channel could not be deleted after id-persist failure:', {
-          channelId: channel.id,
-          error: String(deleteError),
-        });
+      for (let attempt = 1; attempt <= 3 && !channelRemoved; attempt++) {
+        try {
+          await channel.delete('Ticket channel id persistence failed');
+          channelRemoved = true;
+        } catch (deleteError) {
+          if (attempt < 3) {
+            await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
+          } else {
+            log.error('Orphaned ticket channel could not be deleted after id-persist failure:', {
+              channelId: channel.id,
+              error: String(deleteError),
+            });
+          }
+        }
+      }
+      if (!channelRemoved) {
+        // Discord refused the deletion three times and the id write already
+        // failed — but those hit DIFFERENT systems, and seconds have passed:
+        // the database may be back. A cleanup-pending job is the last durable
+        // pointer this channel can get; without it the survivor exists only
+        // in a log line, invisible to every recovery scan.
+        await persistTicketCleanupJob(
+          supabase,
+          occurrenceId,
+          channel.id,
+          'id_persist_failed_and_abort_delete_rejected',
+          { stage: 'id_persist' },
+        );
       }
       await reportTicketCreateFailure(supabase, eventBus, guild, {
         userDiscordId: member.id,

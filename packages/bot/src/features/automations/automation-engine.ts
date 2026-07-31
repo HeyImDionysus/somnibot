@@ -103,6 +103,16 @@ export class AutomationEngine {
    * a single shared field, while still guarding against infinite loops.
    */
   private _activeDepths = new Map<string, number>();
+  /**
+   * Member-correlated depth hints for APPROVED-HOLD side effects. A bulk hold
+   * can run for minutes; publishing its depth through the guild-wide
+   * _activeDepths map made EVERY undepthed event arriving during the run —
+   * unrelated joins, purchases, moderation — inherit the hold's depth, and a
+   * hold released near MAX_CHAIN_DEPTH dropped them at the chain guard. A
+   * hint is keyed by the member the action just touched, is one-shot, and
+   * expires in seconds, so only genuinely correlated side effects inherit.
+   */
+  private _holdMemberDepthHints = new Map<string, { depth: number; expiresAt: number }>();
   /** Mirrors the SQL lease interval in claim/renew RPCs. */
   private static readonly HOLD_EXECUTION_LEASE_MS = 2 * 60_000;
   private _execCounter = 0;
@@ -165,6 +175,23 @@ export class AutomationEngine {
         && this._specializedEventData.delete(event.data as object)
       ) {
         return;
+      }
+      if (event._chainDepth === undefined && this._holdMemberDepthHints.size > 0) {
+        // Hold side effects are correlated by the member the action touched —
+        // never by "a hold happens to be running".
+        const data = event.data as { memberId?: unknown; userId?: unknown } | null;
+        const candidate = typeof data?.memberId === 'string'
+          ? data.memberId
+          : typeof data?.userId === 'string' ? data.userId : null;
+        if (candidate) {
+          const hint = this._holdMemberDepthHints.get(candidate);
+          if (hint) {
+            if (Date.now() <= hint.expiresAt) {
+              event._chainDepth = hint.depth;
+            }
+            this._holdMemberDepthHints.delete(candidate);
+          }
+        }
       }
       if (event._chainDepth === undefined && this._activeDepths.size > 0) {
         let maxDepth = 0;
@@ -938,6 +965,7 @@ export class AutomationEngine {
     baseContext: ActionContext,
     affectedMemberIds: string[],
     assertLease?: () => void,
+    onMemberAction?: (memberId: string) => void,
   ): Promise<{ executed: number; failed: number; errors: string[] }> {
     if (affectedMemberIds.length === 0) {
       return executeActions(actions, baseContext);
@@ -959,6 +987,7 @@ export class AutomationEngine {
       }
       for (const memberId of affectedMemberIds) {
         assertLease?.();
+        onMemberAction?.(memberId);
         let member = memberCache.get(memberId);
         if (member === undefined) {
           member = this.guild.members.cache.get(memberId)
@@ -1036,16 +1065,19 @@ export class AutomationEngine {
         occurrenceId: hold.occurrence_id,
         variables: hold.context_snapshot.variables,
       };
-      // Resume the persisted chain depth so side-effect events emitted by the
-      // approved actions (role.gained etc.) inherit it instead of counting as
-      // fresh roots — exactly like the normal action path at execution time.
-      const holdExecId = `hold:${hold.id}`;
-      this._activeDepths.set(
-        holdExecId,
-        typeof hold.context_snapshot.chainDepth === 'number'
-          ? hold.context_snapshot.chainDepth
-          : 1,
-      );
+      // Resume the persisted chain depth for side effects of the approved
+      // actions — correlated per MEMBER, not published guild-wide: a long bulk
+      // run must never tax unrelated events with the hold's depth.
+      const holdDepth = typeof hold.context_snapshot.chainDepth === 'number'
+        ? hold.context_snapshot.chainDepth
+        : 1;
+      const recordMemberDepthHint = (memberId: string) => {
+        const now = Date.now();
+        for (const [key, hint] of this._holdMemberDepthHints) {
+          if (hint.expiresAt < now) this._holdMemberDepthHints.delete(key);
+        }
+        this._holdMemberDepthHints.set(memberId, { depth: holdDepth, expiresAt: now + 10_000 });
+      };
       let result: { executed: number; failed: number; errors: string[] };
       try {
         result = await this.executeResolvedActions(
@@ -1053,9 +1085,10 @@ export class AutomationEngine {
           context,
           hold.member_ids,
           assertLease,
+          recordMemberDepthHint,
         );
       } finally {
-        this._activeDepths.delete(holdExecId);
+        // One-shot hints expire on their own; nothing guild-wide to unwind.
       }
       await renewLease();
       assertLease();

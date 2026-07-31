@@ -24,7 +24,7 @@ import { generateTranscript } from '../features/tickets/transcript-generator.js'
 function makeCreateSupa({ ticketRow = null as any, ticketError = null as any } = {}) {
   const alertsInsert = vi.fn(async () => ({ error: null }));
   const tChain: any = {};
-  for (const m of ['select', 'eq', 'in', 'insert', 'update', 'delete', 'order', 'limit', 'contains', 'lt', 'gt']) {
+  for (const m of ['select', 'eq', 'in', 'insert', 'update', 'delete', 'order', 'limit', 'contains', 'lt', 'gt', 'not']) {
     tChain[m] = vi.fn(() => tChain);
   }
   tChain.single = vi.fn(async () => ({ data: ticketRow, error: ticketError }));

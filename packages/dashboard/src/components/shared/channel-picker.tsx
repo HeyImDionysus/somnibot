@@ -153,6 +153,8 @@ function ChannelIcon({ type, className }: { type: number; className?: string }) 
 interface ChannelSnapshot {
   channels: DiscordChannel[];
   authoritative: boolean;
+  /** When the snapshot was accepted; authority EXPIRES past the age window. */
+  fetchedAtMs: number;
 }
 
 // Shared channel cache to avoid re-fetching per picker instance
@@ -237,6 +239,7 @@ async function fetchChannels(): Promise<ChannelSnapshot> {
   const snapshot = {
     channels,
     authoritative: isAuthoritativeChannelSnapshot(json),
+    fetchedAtMs: Date.now(),
   };
   channelCache = { data: snapshot, ts: Date.now() };
   return snapshot;
@@ -279,6 +282,13 @@ export function ChannelPicker({
 }: ChannelPickerProps) {
   const [channels, setChannels] = useState<DiscordChannel[]>([]);
   const [snapshotAuthoritative, setSnapshotAuthoritative] = useState(false);
+  const [snapshotFetchedAtMs, setSnapshotFetchedAtMs] = useState(0);
+  // Ticks while mounted so authority can EXPIRE. Authority was previously
+  // computed once at mount and stored forever: a page left open past the
+  // snapshot's ten-minute validity kept enabling channels from obsolete
+  // permission bits, and the send action does no live re-validation
+  // (review 3692048889).
+  const [authorityNowMs, setAuthorityNowMs] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -298,15 +308,28 @@ export function ChannelPicker({
       .then((snapshot) => {
         setChannels(snapshot.channels);
         setSnapshotAuthoritative(snapshot.authoritative);
+        setSnapshotFetchedAtMs(snapshot.fetchedAtMs);
       })
       .catch(() => setLoadError('Live Discord channels are unavailable. Retry after the bot refreshes its snapshot.'))
       .finally(() => setLoading(false));
   }, []);
 
+  useEffect(() => {
+    const tick = setInterval(() => setAuthorityNowMs(Date.now()), 30_000);
+    return () => clearInterval(tick);
+  }, []);
+
+  // Authority as of NOW, not as of mount. Once the snapshot outlives its
+  // validity window the picker treats permissions as unverifiable again —
+  // the same state a stale fetch would have produced.
+  const liveAuthoritative = snapshotAuthoritative
+    && snapshotFetchedAtMs > 0
+    && authorityNowMs - snapshotFetchedAtMs <= MAX_SNAPSHOT_AGE_MS;
+
   const permissionIssue = useCallback(
     (channel: DiscordChannel): string | null =>
-      channelPermissionIssue(channel, requiredBotPermissions, snapshotAuthoritative),
-    [requiredBotPermissions, snapshotAuthoritative],
+      channelPermissionIssue(channel, requiredBotPermissions, liveAuthoritative),
+    [requiredBotPermissions, liveAuthoritative],
   );
 
   // Resolve string aliases to numeric channel types
@@ -395,8 +418,8 @@ export function ChannelPicker({
 
   // Resolve selected channel names
   const selectedChannels = useMemo(
-    () => resolveSelectedChannels(selected, channels, snapshotAuthoritative),
-    [selected, channels, snapshotAuthoritative],
+    () => resolveSelectedChannels(selected, channels, liveAuthoritative),
+    [selected, channels, liveAuthoritative],
   );
   const selectedIssues = selectedChannels
     .map(permissionIssue)
