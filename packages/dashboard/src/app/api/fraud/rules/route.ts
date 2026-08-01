@@ -12,31 +12,32 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
+import { velocityRuleConfigSchema } from '@/lib/fraud-rule-config';
+
+// Only expose detectors that production actually evaluates. Historical rows
+// of other constrained types remain readable but cannot be presented as live
+// controls until their runtime detector exists.
+const fraudRuleType = z.literal('velocity_limit');
 
 const fraudRuleCreate = z.object({
   name: z.string().min(1).max(100).trim(),
   description: z.string().max(500).optional().nullable(),
   // MUST mirror the fraud_rules CHECK constraint (20260518200000). A free
   // string accepted here died later as a raw 23514 the owner could not act on.
-  rule_type: z.enum([
-    'velocity_limit',
-    'device_limit',
-    'ip_block',
-    'amount_threshold',
-    'pattern_match',
-  ]),
+  rule_type: fraudRuleType,
   enabled: z.boolean().default(true),
-  config: z.record(z.unknown()).default({}),
-  auto_action: z.string().max(32).default('flag'),
+  config: velocityRuleConfigSchema,
+  auto_action: z.literal('flag').default('flag'),
 });
 
 const fraudRuleUpdate = z.object({
   id: z.string().uuid(),
   name: z.string().min(1).max(100).trim().optional(),
   description: z.string().max(500).optional().nullable(),
+  rule_type: fraudRuleType.optional(),
   enabled: z.boolean().optional(),
-  config: z.record(z.unknown()).optional(),
-  auto_action: z.string().max(32).optional(),
+  config: velocityRuleConfigSchema.optional(),
+  auto_action: z.literal('flag').optional(),
 });
 
 export async function GET() {
@@ -84,6 +85,19 @@ export async function POST(request: NextRequest) {
       .select()
       .single();
 
+    if (error && error.code === '23505' && error.message.includes('velocity')) {
+      // The partial unique index allows ONE enabled velocity rule per guild:
+      // the bot enforces a single velocityThreshold/velocityWindowMs pair, so
+      // several enabled rows would silently reduce to an arbitrary winner
+      // while all appearing active in the dashboard.
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Only one enabled velocity rule is allowed — disable the existing velocity rule first.',
+        },
+        { status: 409 },
+      );
+    }
     if (error) return dbError(error, 'fraud/rules');
 
     await recordCrudChange({
@@ -120,6 +134,7 @@ export async function PATCH(request: NextRequest) {
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (body.name !== undefined) updates.name = body.name;
     if (body.description !== undefined) updates.description = body.description;
+    if (body.rule_type !== undefined) updates.rule_type = body.rule_type;
     if (body.enabled !== undefined) updates.enabled = body.enabled;
     if (body.config !== undefined) updates.config = body.config;
     if (body.auto_action !== undefined) updates.auto_action = body.auto_action;
@@ -134,6 +149,15 @@ export async function PATCH(request: NextRequest) {
       .select()
       .single();
 
+    if (error && error.code === '23505' && error.message.includes('velocity')) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Only one enabled velocity rule is allowed — disable the existing velocity rule first.',
+        },
+        { status: 409 },
+      );
+    }
     if (error) return dbError(error, 'fraud/rules');
 
     await recordCrudChange({

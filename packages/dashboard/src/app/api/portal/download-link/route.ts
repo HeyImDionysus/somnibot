@@ -8,6 +8,7 @@
  * Request body: { productId: string, fileId: string }
  * Response:     { url: string }
  */
+import { selectDownloadEntitlement } from '@/lib/portal/select-entitlement';
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
@@ -73,13 +74,48 @@ export async function POST(request: NextRequest) {
     // that is active or in an unexpired grace window.
     const { data: entitlements } = await admin
       .from('entitlements')
-      .select('id, status, grace_period_ends_at')
+      .select('id, order_id, status, grace_period_ends_at, created_at')
       .eq('customer_id', session.customer_id)
       .eq('product_id', productId)
       .eq('guild_id', session.guild_id)
       .in('status', ['active', 'grace_period']);
 
-    if (!entitlements?.some((e) => isEntitlementAccessLive(e))) {
+    // Deterministic selection, newest-paid first. An unordered find() bound
+    // the signed URL — and therefore the delivery evidence the control room
+    // reads — to an ARBITRARY live row; with a re-buy or an overlapping manual
+    // grant, the download for the current purchase could be recorded against
+    // an older order (or an orderless grant), and the current paid order then
+    // reported as missing its required download.
+    // Which of the customer's paid orders already recorded a delivery? An
+    // undelivered purchase must be able to claim its evidence before a
+    // delivered one is re-served.
+    const liveCandidates = (entitlements ?? []).filter((e) => isEntitlementAccessLive(e));
+    const candidateOrderIds = [...new Set(
+      liveCandidates
+        .map((candidate) => candidate.order_id)
+        .filter((id): id is string => typeof id === 'string'),
+    )];
+    const deliveredOrderIds = new Set<string>();
+    if (candidateOrderIds.length > 0) {
+      const { data: deliveries, error: deliveriesError } = await admin
+        .from('commerce_download_deliveries')
+        .select('order_id')
+        .in('order_id', candidateOrderIds);
+      if (deliveriesError) {
+        return NextResponse.json(
+          {
+            error: 'Could not verify delivery history right now. This is a temporary server fault — please retry.',
+            retryable: true,
+          },
+          { status: 503, headers: { 'Retry-After': '30' } },
+        );
+      }
+      for (const delivery of deliveries ?? []) {
+        if (typeof delivery.order_id === 'string') deliveredOrderIds.add(delivery.order_id);
+      }
+    }
+    const selectedEntitlement = selectDownloadEntitlement(liveCandidates, deliveredOrderIds);
+    if (!selectedEntitlement) {
       // Auditable refusal: buyer requested a download they are not entitled to.
       await writeCommerceAudit(admin, {
         guildId: session.guild_id,
@@ -112,6 +148,7 @@ export async function POST(request: NextRequest) {
       fileId,
       customerId: session.customer_id,
       guildId: session.guild_id,
+      entitlementId: selectedEntitlement.id,
     });
 
     // Auditable state change: a signed download link was issued to the buyer.
@@ -122,7 +159,13 @@ export async function POST(request: NextRequest) {
       action: 'portal.download_link_issued',
       targetType: 'product_file',
       targetId: fileId,
-      details: { customerId: session.customer_id, productId, fileId },
+      details: {
+        customerId: session.customer_id,
+        productId,
+        fileId,
+        entitlementId: selectedEntitlement.id,
+        orderId: selectedEntitlement.order_id,
+      },
     });
 
     return NextResponse.json({ url });

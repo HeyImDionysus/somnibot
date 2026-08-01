@@ -55,7 +55,10 @@ function chain(data: any = null, error: any = null) {
     c[m] = vi.fn((..._: any[]) => c);
   c.maybeSingle = vi.fn(async () => ({ data, error }));
   c.single = vi.fn(async () => ({ data, error }));
-  c.subscribe = vi.fn(() => ({ unsubscribe: vi.fn() }));
+  c.subscribe = vi.fn((onStatus?: (status: string) => void) => {
+    onStatus?.('SUBSCRIBED');
+    return c;
+  });
   c.then = undefined;
   return c;
 }
@@ -95,6 +98,7 @@ function makeSupabase(data: any = null) {
     from: vi.fn(() => chain(data)),
     rpc: vi.fn(async () => ({ data: 1, error: null })),
     channel: vi.fn(() => chain()),
+    removeChannel: vi.fn(),
   } as any;
 }
 

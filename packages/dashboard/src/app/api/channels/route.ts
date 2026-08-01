@@ -118,11 +118,13 @@ export async function GET() {
 
   const admin = createAdminSupabase();
 
-  const { data: liveState } = await admin
+  const { data: liveState, error } = await admin
     .from('guild_live_state')
-    .select('channels, categories, snapshot_at')
+    .select('channels, categories, bot_permissions, snapshot_version, snapshot_at')
     .eq('guild_id', guildId)
-    .single();
+    .maybeSingle();
+
+  if (error) return dbError(error, 'channels/live-state');
 
   if (!liveState) {
     return NextResponse.json({
@@ -138,6 +140,8 @@ export async function GET() {
     success: true,
     channels: liveState.channels ?? [],
     categories: liveState.categories ?? [],
+    botPermissions: liveState.bot_permissions,
+    snapshotVersion: liveState.snapshot_version,
     snapshotAt: liveState.snapshot_at,
     awaitingSnapshot: false,
   });

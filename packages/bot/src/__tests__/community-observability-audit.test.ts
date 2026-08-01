@@ -243,6 +243,160 @@ describe('community-statistics-channels audit', () => {
     expect(eventBus.emit).toHaveBeenCalledWith('stats_channel.updated', 'g1',
       expect.objectContaining({ statChannelId: 'sc1', value: '42', created: false }));
   });
+
+  it('emits an update failure and writes an owner alert when Discord rejects a rename', async () => {
+    const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
+    const eventBus = bus();
+    const cfg = {
+      id: 'sc-fail', guild_id: 'g1', channel_id: 'vc1', stat_type: 'custom_counter',
+      stat_config: { value: 42 }, name_format: 'Members: {value}', active: true, last_value: null,
+    };
+    const supa = makeSupa({ stats_channels: { data: [cfg], error: null } });
+    const channel = { setName: vi.fn(async () => { throw new Error('Missing Permissions'); }) };
+    const guild: any = {
+      id: 'g1', memberCount: 5, premiumSubscriptionCount: 0,
+      channels: { cache: new Map([['vc1', channel]]) },
+      roles: { cache: new Map() },
+      members: { fetch: vi.fn(async () => {}), cache: { filter: () => ({ size: 0 }) } },
+    };
+    const mgr = new StatsChannelManager(guild, supa, 10, eventBus);
+
+    await mgr.reload();
+
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'stats_channel.update_failed',
+      'g1',
+      expect.objectContaining({ statChannelId: 'sc-fail', error: 'Missing Permissions' }),
+    );
+    expect(supa.from).toHaveBeenCalledWith('alerts');
+  });
+
+  it('does not resolve recovery alerts when the updated value is not durable', async () => {
+    const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
+    const eventBus = bus();
+    const cfg = {
+      id: 'sc-write-fail', guild_id: 'g1', channel_id: 'vc1', stat_type: 'custom_counter',
+      stat_config: { value: 42 }, name_format: 'Members: {value}', active: true, last_value: null,
+    };
+    let statsCalls = 0;
+    const supa = {
+      from: vi.fn((table: string) => {
+        if (table === 'stats_channels') {
+          statsCalls += 1;
+          return chain(statsCalls === 1
+            ? { data: [cfg], error: null }
+            : { data: null, error: { message: 'write unavailable' } });
+        }
+        return chain({ data: null, error: null });
+      }),
+    } as any;
+    const channel = { setName: vi.fn(async () => {}) };
+    const guild: any = {
+      id: 'g1', memberCount: 5, premiumSubscriptionCount: 0,
+      channels: { cache: new Map([['vc1', channel]]) },
+      roles: { cache: new Map() },
+      members: { fetch: vi.fn(async () => {}), cache: { filter: () => ({ size: 0 }) } },
+    };
+    const mgr = new StatsChannelManager(guild, supa, 10, eventBus);
+    const resolveUpdateAlerts = vi.spyOn(mgr as any, 'resolveUpdateAlerts');
+
+    await mgr.reload();
+
+    expect(resolveUpdateAlerts).not.toHaveBeenCalled();
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'stats_channel.update_failed',
+      'g1',
+      expect.objectContaining({ statChannelId: 'sc-write-fail' }),
+    );
+    expect(eventBus.emit).not.toHaveBeenCalledWith(
+      'stats_channel.updated',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('emits a persistent stats failure only on the degraded transition', async () => {
+    const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
+    const eventBus = bus();
+    const cfg = {
+      id: 'sc-fail', guild_id: 'g1', channel_id: 'vc1', stat_type: 'custom_counter',
+      stat_config: { value: 42 }, name_format: 'Members: {value}', active: true, last_value: null,
+    };
+    const supa = makeSupa({ stats_channels: { data: [cfg], error: null } });
+    const channel = { setName: vi.fn(async () => { throw new Error('Missing Permissions'); }) };
+    const guild: any = {
+      id: 'g1', memberCount: 5, premiumSubscriptionCount: 0,
+      channels: { cache: new Map([['vc1', channel]]) },
+      roles: { cache: new Map() },
+      members: { fetch: vi.fn(async () => {}), cache: { filter: () => ({ size: 0 }) } },
+    };
+    const mgr = new StatsChannelManager(guild, supa, 10, eventBus);
+
+    await mgr.reload();
+    await mgr.reload();
+
+    const failures = eventBus.emit.mock.calls.filter(
+      (call: unknown[]) => call[0] === 'stats_channel.update_failed',
+    );
+    expect(failures).toHaveLength(1);
+  });
+
+  it('retries an undelivered stats owner alert without duplicating the transition event', async () => {
+    const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
+    const eventBus = bus();
+    const cfg = {
+      id: 'sc-fail', guild_id: 'g1', channel_id: 'vc1', stat_type: 'custom_counter',
+      stat_config: { value: 42 }, name_format: 'Members: {value}', active: true, last_value: null,
+    };
+    const supa = makeSupa({
+      stats_channels: { data: [cfg], error: null },
+      alerts: { data: null, error: { message: 'alerts unavailable' } },
+      guild_config: { data: null, error: null },
+    });
+    const channel = { setName: vi.fn(async () => { throw new Error('Missing Permissions'); }) };
+    const guild: any = {
+      id: 'g1', memberCount: 5, premiumSubscriptionCount: 0,
+      channels: { cache: new Map([['vc1', channel]]) },
+      roles: { cache: new Map() },
+      members: { fetch: vi.fn(async () => {}), cache: { filter: () => ({ size: 0 }) } },
+    };
+    const mgr = new StatsChannelManager(guild, supa, 10, eventBus);
+
+    await mgr.reload();
+    await mgr.reload();
+
+    expect(supa.from.mock.calls.filter((call: unknown[]) => call[0] === 'alerts')).toHaveLength(2);
+    expect(eventBus.emit.mock.calls.filter(
+      (call: unknown[]) => call[0] === 'stats_channel.update_failed',
+    )).toHaveLength(1);
+  });
+
+  it('does not classify alert-recovery failure as a counter update failure', async () => {
+    const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
+    const eventBus = bus();
+    const cfg = {
+      id: 'sc-ok', guild_id: 'g1', channel_id: 'vc1', stat_type: 'custom_counter',
+      stat_config: { value: 42 }, name_format: 'Members: {value}', active: true, last_value: null,
+    };
+    const supa = makeSupa({ stats_channels: { data: [cfg], error: null } });
+    const channel = { setName: vi.fn(async () => {}) };
+    const guild: any = {
+      id: 'g1', memberCount: 5, premiumSubscriptionCount: 0,
+      channels: { cache: new Map([['vc1', channel]]) },
+      roles: { cache: new Map() },
+      members: { fetch: vi.fn(async () => {}), cache: { filter: () => ({ size: 0 }) } },
+    };
+    const mgr = new StatsChannelManager(guild, supa, 10, eventBus);
+    (mgr as any).resolveUpdateAlerts = vi.fn().mockRejectedValue(new Error('alerts unavailable'));
+
+    await mgr.reload();
+
+    expect(eventBus.emit).not.toHaveBeenCalledWith(
+      'stats_channel.update_failed',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
 });
 
 // ── community-temporary-channels ────────────────────────────
@@ -254,7 +408,7 @@ describe('community-temporary-channels audit', () => {
     const supa = makeSupa({
       temp_channel_hubs: { data: [], error: null },
       active_temp_channels: { data: [{ channel_id: 'tc1', owner_id: 'o1', guild_id: 'g1', hub_id: 'h1', text_channel_id: null }], error: null },
-    });
+    }, vi.fn(async () => ({ data: true, error: null })));
     const guild: any = { id: 'g1', channels: { cache: new Map() } }; // tc1 no longer exists
     const mgr = new TempChannelManager(guild, supa, eventBus);
 
@@ -297,13 +451,23 @@ describe('community-scheduled-messages audit', () => {
     const eventBus = bus();
     const channel = { isTextBased: () => true, name: 'general', send: vi.fn(async () => ({ id: 'm1' })) };
     const guild: any = { id: 'g1', name: 'Test', memberCount: 5, channels: { cache: new Map([['ch1', channel]]) } };
-    const supa = makeSupa({ scheduled_messages: { data: [{ id: 's1' }], error: null } });
+    const supa = makeSupa({
+      scheduled_messages: { data: [{ id: 's1' }], error: null },
+      discord_operation_occurrences: {
+        data: {
+          id: 'occ1', guild_id: 'g1', operation_kind: 'scheduled_message',
+          occurrence_key: 's1:due', status: 'claimed', updated_at: '2026-07-30T12:00:00.000Z',
+          resource_id: null, result: {}, last_error: null,
+        },
+        error: null,
+      },
+    }, vi.fn(async () => ({ data: 1, error: null })));
     const runner = new ScheduledMessageRunner(guild, supa, eventBus);
 
     await (runner as any).sendMessage({
       id: 's1', guild_id: 'g1', name: 'Daily', channel_id: 'ch1', message: 'hi',
       embed_config_id: null, current_sends: 0,
-    });
+    }, new Date('2026-07-30T12:00:00.000Z'));
 
     expect(eventBus.emit).toHaveBeenCalledWith('scheduled_message.sent', 'g1',
       expect.objectContaining({ scheduleId: 's1', name: 'Daily' }));

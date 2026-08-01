@@ -291,12 +291,20 @@ function makeSupa(opts: {
   chain.single = vi.fn(async () => ({ data: opts.singleData ?? FULL_CONFIG, error: null }));
   chain.maybeSingle = vi.fn(async () => ({ data: opts.maybeData ?? FULL_CONFIG, error: null }));
   chain.then = (resolve: any) => resolve({ data: opts.rows ?? [], error: null, count: 0 });
+  const realtimeChannel: any = {
+    on: vi.fn(() => realtimeChannel),
+    subscribe: vi.fn((onStatus?: (status: string) => void) => {
+      onStatus?.('SUBSCRIBED');
+      return realtimeChannel;
+    }),
+  };
 
   return {
     from: vi.fn(() => chain),
     rpc: vi.fn(async () => ({ data: opts.rpcData ?? 100, error: null })),
     auth: { getUser: vi.fn(async () => ({ data: null, error: null })) },
-    channel: vi.fn(() => ({ on: vi.fn(() => ({ subscribe: vi.fn() })) })),
+    channel: vi.fn(() => realtimeChannel),
+    removeChannel: vi.fn(),
     _chain: chain,
   };
 }

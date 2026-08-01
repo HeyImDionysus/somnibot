@@ -588,12 +588,26 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     details: (d) => ({ error: d.error, reason: d.reason }),
     success: false,
   },
+  'message_log.delivery_failed': {
+    action: 'message_log.delivery_failed',
+    category: 'moderation',
+    targetType: 'channel',
+    actorType: 'system',
+    targetId: (d) => d.channelId as string,
+    details: (d) => ({ error: d.error }),
+    success: false,
+  },
   'ticket.create_failed': {
     action: 'ticket.create_failed',
     category: 'tickets',
     targetType: 'ticket',
     actorType: 'user',
-    details: (d) => ({ userDiscordId: d.userDiscordId, panelId: d.panelId, ticketNumber: d.ticketNumber, stage: d.stage, error: d.error }),
+    // The requesting member IS the actor: without this the row fell back to
+    // actor_id 'bot', misattributing the event and hiding it from
+    // purge_member_data's (actor_type='user' AND actor_id=...) predicate —
+    // /forgetme left the member id behind in the details payload.
+    actorId: (d) => d.userDiscordId as string,
+    details: (d) => ({ panelId: d.panelId, ticketNumber: d.ticketNumber, stage: d.stage, error: d.error }),
     success: false,
   },
   'ticket.transcript_failed': {
@@ -1157,6 +1171,15 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'system',
     targetId: (d) => d.channelId as string,
     details: (d) => ({ statChannelId: d.statChannelId, statType: d.statType, value: d.value, created: d.created }),
+  },
+  'stats_channel.update_failed': {
+    action: 'stats_channel.update_failed',
+    category: 'stats_channels',
+    targetType: 'channel',
+    actorType: 'system',
+    targetId: (d) => (d.channelId ?? d.statChannelId) as string,
+    details: (d) => ({ statChannelId: d.statChannelId, statType: d.statType, error: d.error }),
+    success: false,
   },
   'temp_channel.created': {
     action: 'temp_channel.created',

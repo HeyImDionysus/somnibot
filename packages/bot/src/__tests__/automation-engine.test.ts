@@ -43,11 +43,26 @@ vi.mock('../features/automations/rate-limiter.js', () => ({
 vi.mock('../features/automations/execution-logger.js', () => ({
   ExecutionLogger: class {
     log = vi.fn(async () => {});
+      markActionsStarted = vi.fn(async () => undefined);
+    finalizeStrict = vi.fn(async () => undefined);
+    finalizeStaleStartedSweep = vi.fn(async () => 0);
+    isOccurrenceConsumed = vi.fn(async () => false);
   },
 }));
 vi.mock('../services/alert-service.js', () => ({
   AlertService: class {
     send = vi.fn();
+  },
+}));
+vi.mock('../features/automations/mass-action-hold.js', () => ({
+  MassActionHoldService: class {
+    subscribe = vi.fn();
+    unsubscribe = vi.fn();
+    listHeldNeedingNotice = vi.fn(async () => []);
+    listApproved = vi.fn(async () => []);
+    failInterruptedExecutions = vi.fn(async () => {});
+    threshold = vi.fn(async () => 25);
+    claimApproved = vi.fn(async () => null);
   },
 }));
 

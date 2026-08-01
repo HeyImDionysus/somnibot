@@ -278,16 +278,21 @@ export async function raiseOwnerAlert(
  * subset match) and post a short recovery notice to the alert channel — the
  * #51 fix: feature degradations used to clear their throttles silently while
  * the alerts rows stayed resolved=false forever and the owner never heard the
- * all-clear. Returns the number of rows resolved (0 = nothing was open, no
- * notice posted). Never throws.
+ * all-clear. The status result distinguishes a successful no-op from a DB
+ * failure so recovery latches are not cleared on an indeterminate write.
  */
-export async function resolveOwnerAlert(
+export interface OwnerAlertResolutionResult {
+  resolvedCount: number;
+  succeeded: boolean;
+}
+
+export async function resolveOwnerAlertWithStatus(
   supabase: SupabaseClient,
   guildId: string,
   alertType: string,
   metadataMatch?: Record<string, unknown>,
   delivery?: OwnerAlertDelivery & { notice?: string },
-): Promise<number> {
+): Promise<OwnerAlertResolutionResult> {
   let resolvedCount = 0;
   try {
     const now = new Date().toISOString();
@@ -303,7 +308,7 @@ export async function resolveOwnerAlert(
     const { data, error } = await query.select('id');
     if (error) {
       log.error(`Failed to resolve ${alertType} alert(s):`, error.message);
-      return 0;
+      return { resolvedCount: 0, succeeded: false };
     }
     resolvedCount = data?.length ?? 0;
   } catch (err) {
@@ -311,10 +316,10 @@ export async function resolveOwnerAlert(
       `Failed to resolve ${alertType} alert(s):`,
       err instanceof Error ? err.message : err,
     );
-    return 0;
+    return { resolvedCount: 0, succeeded: false };
   }
 
-  if (resolvedCount === 0) return 0;
+  if (resolvedCount === 0) return { resolvedCount: 0, succeeded: true };
 
   // The alert is closed — drop its ping-throttle entry so a NEW occurrence
   // after recovery pings immediately instead of waiting out the window.
@@ -334,7 +339,24 @@ export async function resolveOwnerAlert(
       `No Discord context for ${alertType} recovery notice in guild ${guildId} — rows resolved only`,
     );
   }
-  return resolvedCount;
+  return { resolvedCount, succeeded: true };
+}
+
+export async function resolveOwnerAlert(
+  supabase: SupabaseClient,
+  guildId: string,
+  alertType: string,
+  metadataMatch?: Record<string, unknown>,
+  delivery?: OwnerAlertDelivery & { notice?: string },
+): Promise<number> {
+  const result = await resolveOwnerAlertWithStatus(
+    supabase,
+    guildId,
+    alertType,
+    metadataMatch,
+    delivery,
+  );
+  return result.resolvedCount;
 }
 
 export interface AlertServiceConfig {

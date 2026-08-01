@@ -121,7 +121,7 @@ export async function GET() {
   // Get live state (written by the bot)
   const { data: liveState } = await admin
     .from('guild_live_state')
-    .select('roles, bot_role_id, snapshot_at')
+    .select('roles, bot_role_id, bot_role_position, bot_permissions, snapshot_version, snapshot_at')
     .eq('guild_id', guildId)
     .single();
 
@@ -139,6 +139,9 @@ export async function GET() {
     success: true,
     data: liveState.roles,
     botRoleId: liveState.bot_role_id,
+    botRolePosition: liveState.bot_role_position,
+    botPermissions: liveState.bot_permissions,
+    snapshotVersion: liveState.snapshot_version,
     snapshotAt: liveState.snapshot_at,
     awaitingSnapshot: false,
   });

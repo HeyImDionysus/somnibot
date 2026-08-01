@@ -253,6 +253,7 @@ async function openTicketFromPanel(
     ticketType,
     client.supabase,
     client.eventBus,
+    interaction.id,
   );
 
   if ('error' in result) {
@@ -593,6 +594,7 @@ async function handleIntakeModalSubmit(
     ticketType,
     client.supabase,
     client.eventBus,
+    interaction.id,
   );
 
   if ('error' in result) {

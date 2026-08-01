@@ -1,0 +1,202 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { NextRequest } from 'next/server';
+
+vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
+vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
+vi.mock('@/lib/api/admin-rate-limit', () => ({
+  checkAdminRateLimit: vi.fn().mockResolvedValue(null),
+}));
+vi.mock('@/lib/admin-changes', () => ({
+  recordCrudChange: vi.fn().mockResolvedValue(undefined),
+}));
+
+import { GET, PATCH, PUT } from '@/app/api/automations/holds/route';
+import { requireGuildOwner } from '@/lib/api/require-owner';
+import { createAdminSupabase } from '@/lib/supabase/admin';
+import { recordCrudChange } from '@/lib/admin-changes';
+import { mockAuthSuccess } from './helpers/mock-auth';
+
+const HOLD_ID = '10000000-0000-8000-8000-000000000001';
+const HOLD = {
+  id: HOLD_ID,
+  guild_id: 'guild-1',
+  automation_id: '20000000-0000-8000-8000-000000000001',
+  status: 'held',
+  member_count: 26,
+  threshold: 25,
+};
+
+function request(method: string, body: unknown) {
+  return new NextRequest('http://localhost/api/automations/holds', {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+function makeAdmin(options: {
+  holds?: unknown[];
+  failedHolds?: unknown[];
+  threshold?: number;
+  decided?: unknown;
+  configUpdated?: unknown;
+} = {}) {
+  const calls: Record<string, unknown[][]> = {};
+  const rpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
+  const makeChain = (table: string) => {
+    const chain: Record<string, unknown> = {};
+    let statusFilter: unknown = null;
+    for (const method of ['select', 'eq', 'in', 'order', 'limit', 'update', 'upsert']) {
+      chain[method] = vi.fn((...args: unknown[]) => {
+        (calls[`${table}.${method}`] ??= []).push(args);
+        if ((method === 'eq' || method === 'in') && args[0] === 'status') {
+          statusFilter = args[1];
+        }
+        return chain;
+      });
+    }
+    chain.maybeSingle = vi.fn(() => Promise.resolve(
+      table === 'guild_config'
+        ? { data: { automation_mass_action_threshold: options.threshold ?? 25 }, error: null }
+        : { data: options.decided ?? null, error: null },
+    ));
+    chain.single = vi.fn(() => Promise.resolve({
+      data: options.configUpdated ?? { automation_mass_action_threshold: options.threshold ?? 25 },
+      error: null,
+    }));
+    chain.then = (resolve: (value: unknown) => unknown) => resolve({
+      data: table === 'automation_mass_action_holds'
+        ? statusFilter === 'failed' ? options.failedHolds ?? [] : options.holds ?? []
+        : null,
+      error: null,
+    });
+    return chain;
+  };
+  return {
+    admin: {
+      from: vi.fn((table: string) => makeChain(table)),
+      rpc: vi.fn(async (fn: string, args: Record<string, unknown>) => {
+        rpcCalls.push({ fn, args });
+        // Mirrors reject_automation_mass_action_hold: zero rows when the
+        // hold was already decided.
+        return { data: options.decided ? [options.decided] : [], error: null };
+      }),
+    },
+    rpcCalls,
+    calls,
+  };
+}
+
+beforeEach(() => {
+  vi.resetAllMocks();
+  mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>, {
+    guildId: 'guild-1',
+    discordId: 'owner-1',
+  });
+});
+
+describe('/api/automations/holds', () => {
+  it('lists only the active guild holds and returns its configurable threshold', async () => {
+    const { admin, calls } = makeAdmin({ holds: [HOLD], threshold: 30 });
+    vi.mocked(createAdminSupabase).mockReturnValue(admin as never);
+
+    const response = await GET();
+    const json = await response.json();
+
+    expect(json).toMatchObject({ success: true, data: [HOLD], threshold: 30 });
+    expect(calls['automation_mass_action_holds.eq']).toContainEqual(['guild_id', 'guild-1']);
+  });
+
+  it('keeps unresolved holds visible even when the failure history is full', async () => {
+    const failedHolds = Array.from({ length: 200 }, (_, index) => ({
+      ...HOLD,
+      id: `failed-${index}`,
+      status: 'failed',
+    }));
+    const { admin } = makeAdmin({ holds: [HOLD], failedHolds });
+    vi.mocked(createAdminSupabase).mockReturnValue(admin as never);
+
+    const json = await (await GET()).json();
+
+    expect(json.data[0]).toEqual(HOLD);
+    expect(json.data).toHaveLength(201);
+  });
+
+  it('approves only a still-held occurrence with the authenticated owner identity', async () => {
+    const { admin, calls } = makeAdmin({
+      decided: { ...HOLD, status: 'approved', approved_by: 'owner-1' },
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue(admin as never);
+
+    const response = await PATCH(request('PATCH', { id: HOLD_ID, decision: 'approve' }));
+    expect(response.status).toBe(200);
+    expect(calls['automation_mass_action_holds.eq']).toEqual(expect.arrayContaining([
+      ['id', HOLD_ID],
+      ['guild_id', 'guild-1'],
+      ['status', 'held'],
+    ]));
+    const update = calls['automation_mass_action_holds.update'][0][0] as Record<string, unknown>;
+    expect(update).toMatchObject({ status: 'approved', approved_by: 'owner-1' });
+    expect(recordCrudChange).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'automations.mass_action_approved', blastRadius: 'high' }),
+      admin,
+    );
+  });
+
+  it('rejects a hold and finalizes its execution through ONE transactional RPC (round 21)', async () => {
+    // Two separate writes let a transient fault after the hold update leave
+    // history reading 'Conditions not met' forever — the RPC carries both
+    // transitions in one transaction.
+    const { admin, calls, rpcCalls } = makeAdmin({
+      decided: {
+        ...HOLD,
+        status: 'rejected',
+        rejected_by: 'owner-1',
+        execution_id: 'e0000000-0000-4000-8000-00000000000e',
+      },
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue(admin as never);
+
+    const res = await PATCH(request('PATCH', { id: HOLD.id, decision: 'reject' }));
+
+    expect(res.status).toBe(200);
+    expect(rpcCalls).toContainEqual({
+      fn: 'reject_automation_mass_action_hold',
+      args: { p_hold_id: HOLD.id, p_guild_id: 'guild-1', p_actor: 'owner-1' },
+    });
+    // No separate table writes for the rejection path.
+    expect(calls['automation_mass_action_holds.update']).toBeUndefined();
+    expect(calls['automation_executions.update']).toBeUndefined();
+  });
+
+  it('returns conflict when another owner or worker already decided the hold', async () => {
+    const { admin } = makeAdmin({ decided: null });
+    vi.mocked(createAdminSupabase).mockReturnValue(admin as never);
+    const response = await PATCH(request('PATCH', { id: HOLD_ID, decision: 'reject' }));
+    expect(response.status).toBe(409);
+  });
+
+  it('rejects malformed identities and decisions before writing', async () => {
+    const { admin, calls } = makeAdmin();
+    vi.mocked(createAdminSupabase).mockReturnValue(admin as never);
+    expect((await PATCH(request('PATCH', { id: 'not-a-uuid', decision: 'approve' }))).status).toBe(400);
+    expect((await PATCH(request('PATCH', { id: HOLD_ID, decision: 'execute-all' }))).status).toBe(400);
+    expect(calls['automation_mass_action_holds.update']).toBeUndefined();
+  });
+
+  it('enforces the documented 1..500 threshold range', async () => {
+    const { admin, calls } = makeAdmin({ threshold: 40 });
+    vi.mocked(createAdminSupabase).mockReturnValue(admin as never);
+    expect((await PUT(request('PUT', { threshold: 0 }))).status).toBe(400);
+    expect((await PUT(request('PUT', { threshold: 501 }))).status).toBe(400);
+    expect((await PUT(request('PUT', { threshold: 12.5 }))).status).toBe(400);
+    expect((await PUT(request('PUT', { threshold: 40 }))).status).toBe(200);
+    // Upsert, not update: carries guild_id so a missing guild_config row (a
+    // tolerated init state) is repairable from this control.
+    expect(calls['guild_config.upsert'][0][0]).toEqual({
+      guild_id: 'guild-1',
+      automation_mass_action_threshold: 40,
+    });
+    expect(calls['guild_config.update']).toBeUndefined();
+  });
+});

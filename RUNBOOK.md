@@ -290,7 +290,8 @@ the moment the setting is saved — no retroactive recovery.
 Defaults if the guild hasn't configured a custom value:
 - Audit logs: uses guild's `data_retention_days` (default 180)
 - Economy transactions: uses guild's `data_retention_days` (default 180)
-- License validations: 90 days
+- License validations: IP/device/app details scrubbed after 60 days; forensic
+  outcome/timestamp and anonymized key/product linkage retained permanently
 - Portal sessions: on expiry
 - Webhook events: 30 days (processed only)
 
@@ -299,9 +300,40 @@ Defaults if the guild hasn't configured a custom value:
 -- Use the guild's configured retention, or override:
 SELECT cleanup_old_records('economy_transactions', 180);
 SELECT cleanup_old_records('audit_logs', 90);
-SELECT cleanup_old_records('license_validations', 90);
+SELECT scrub_expired_license_validations(60);
 SELECT cleanup_old_records('webhook_events', 30);
 ```
+
+### Pre-production PayPal sandbox pass
+
+Before enabling live payments, run `pnpm paypal:sandbox-pass` with
+`PAYPAL_SANDBOX=true`, the exact sandbox API base, and sandbox application
+credentials supplied through the deployment secret channel. The pass refuses
+the live PayPal hostname. It verifies OAuth, Transaction Search permission and
+response shape, the disputes-list response shape, and `PayPal-Request-Id`
+idempotency by creating and replaying one unapproved USD 1.00 sandbox order.
+The order is never approved or captured, so it moves no money and expires at
+PayPal.
+
+Do not treat unit mocks as this gate. Save the command's sanitized JSON result
+with the release evidence; it never prints credentials or access tokens.
+
+### Licence trust and device-policy trade-offs
+
+Licence validation responses are transported over TLS and authenticated by the
+licence key, but the response body is not cryptographically signed. A client
+that must defend against a compromised TLS endpoint or locally intercepted
+response needs an application-level signature that SomniBot does not currently
+provide. This is a deliberate compatibility trade-off, not a claim of
+tamper-proof offline licensing.
+
+`evict_oldest` remains the default device policy. It avoids permanently locking
+an honest buyer out after a reinstall or machine replacement; excess devices
+continually displace one another, and owners can switch a specific product to
+`reject` when the evidence supports it. The abuse signal's rolling seven-day
+threshold is a reasoned initial operating value covered by regression tests,
+not a production-calibrated fraud boundary. Recalibrate it from real owner
+outcomes rather than silently treating the current number as universal.
 
 ### User Data Deletion
 

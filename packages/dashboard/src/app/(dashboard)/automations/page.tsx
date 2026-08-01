@@ -56,6 +56,18 @@ interface Execution {
   created_at: string;
 }
 
+interface MassActionHold {
+  id: string;
+  automation_id: string;
+  status: 'held' | 'approved' | 'executing' | 'failed';
+  member_count: number;
+  threshold: number;
+  trigger_event: string;
+  approved_by: string | null;
+  last_error: string | null;
+  created_at: string;
+}
+
 interface AutomationTemplate {
   id: string;
   name: string;
@@ -163,14 +175,17 @@ export default function AutomationsPage() {
   const [automations, setAutomations] = useState<Automation[]>([]);
   const [templates, setTemplates] = useState<AutomationTemplate[]>([]);
   const [executions, setExecutions] = useState<Execution[]>([]);
+  const [holds, setHolds] = useState<MassActionHold[]>([]);
+  const [massActionThreshold, setMassActionThreshold] = useState(25);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const [activeTab, setActiveTab] = useState<'automations' | 'templates' | 'logs'>('automations');
+  const [activeTab, setActiveTab] = useState<'automations' | 'holds' | 'templates' | 'logs'>('automations');
   const [showEditor, setShowEditor] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<{ id: string; name: string } | null>(null);
+  const [holdDecision, setHoldDecision] = useState<{ hold: MassActionHold; decision: 'approve' | 'reject' } | null>(null);
   const [draft, setDraft] = useState(emptyAutomation());
 
   // Selected automation for execution log
@@ -200,10 +215,21 @@ export default function AutomationsPage() {
     if (json.success) setExecutions(json.data);
   }, []);
 
+  const fetchHolds = useCallback(async () => {
+    const res = await fetch('/api/automations/holds');
+    const json = await res.json();
+    if (json.success) {
+      setHolds(json.data);
+      setMassActionThreshold(json.threshold);
+    } else {
+      setError(json.error);
+    }
+  }, []);
+
   useEffect(() => {
-    Promise.all([fetchAutomations(), fetchTemplates()])
+    Promise.all([fetchAutomations(), fetchTemplates(), fetchHolds()])
       .finally(() => setLoading(false));
-  }, [fetchAutomations, fetchTemplates]);
+  }, [fetchAutomations, fetchTemplates, fetchHolds]);
 
   useAutoRefresh('automations', undefined, fetchAutomations);
 
@@ -212,6 +238,10 @@ export default function AutomationsPage() {
       fetchExecutions(selectedAutomationId ?? undefined);
     }
   }, [activeTab, selectedAutomationId, fetchExecutions]);
+
+  useEffect(() => {
+    if (activeTab === 'holds') fetchHolds();
+  }, [activeTab, fetchHolds]);
 
   // ── CRUD ───────────────────────────────────────────────
 
@@ -269,6 +299,50 @@ export default function AutomationsPage() {
     const json = await res.json();
     if (json.success) {
       await fetchAutomations();
+    }
+  };
+
+  const decideHold = async (hold: MassActionHold, decision: 'approve' | 'reject') => {
+    setSaving(true);
+    try {
+      const res = await fetch('/api/automations/holds', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: hold.id, decision }),
+      });
+      const json = await res.json();
+      if (!json.success) {
+        setError(json.error);
+        return;
+      }
+      toast({
+        title: decision === 'approve'
+          ? 'Held occurrence approved for one-time execution'
+          : 'Held occurrence rejected',
+        variant: 'success',
+      });
+      await fetchHolds();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveMassActionThreshold = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch('/api/automations/holds', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ threshold: massActionThreshold }),
+      });
+      const json = await res.json();
+      if (!json.success) {
+        setError(json.error);
+        return;
+      }
+      toast({ title: 'Mass-action guardrail updated', variant: 'success' });
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -353,7 +427,7 @@ export default function AutomationsPage() {
       {/* Tabs */}
       {!showEditor && (
         <div className="mb-6 flex gap-1 rounded-lg bg-discord-bg-secondary p-1">
-          {(['automations', 'templates', 'logs'] as const).map((tab) => (
+          {(['automations', 'holds', 'templates', 'logs'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -363,7 +437,13 @@ export default function AutomationsPage() {
                   : 'text-discord-text-muted hover:text-discord-text-secondary'
               }`}
             >
-              {tab === 'automations' ? `Automations (${automations.length})` : tab === 'templates' ? 'Templates' : 'Execution Log'}
+              {tab === 'automations'
+                ? `Automations (${automations.length})`
+                : tab === 'holds'
+                  ? `Held (${holds.filter((hold) => hold.status === 'held').length})`
+                  : tab === 'templates'
+                    ? 'Templates'
+                    : 'Execution Log'}
             </button>
           ))}
         </div>
@@ -488,6 +568,94 @@ export default function AutomationsPage() {
               );
             })
           )}
+        </div>
+      )}
+
+      {/* Mass-action approvals */}
+      {!showEditor && activeTab === 'holds' && (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4">
+            <h2 className="font-semibold text-discord-text-primary">Mass-action guardrail</h2>
+            <p className="mt-1 text-sm text-discord-text-muted">
+              Hold any single automation occurrence that would affect more than this many members.
+            </p>
+            <div className="mt-3 flex items-center gap-3">
+              <input
+                aria-label="Mass-action member threshold"
+                type="number"
+                min={1}
+                max={500}
+                value={massActionThreshold}
+                onChange={(event) => setMassActionThreshold(Number(event.target.value))}
+                className="w-28 rounded-md border border-discord-border-subtle bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary"
+              />
+              <button
+                onClick={saveMassActionThreshold}
+                disabled={saving || !Number.isInteger(massActionThreshold) || massActionThreshold < 1 || massActionThreshold > 500}
+                className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                Save guardrail
+              </button>
+            </div>
+          </div>
+
+          {holds.length === 0 ? (
+            <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-8 text-center">
+              <p className="text-sm text-discord-text-muted">No held mass-action occurrences.</p>
+            </div>
+          ) : holds.map((hold) => {
+            const automation = automations.find((item) => item.id === hold.automation_id);
+            return (
+              <div key={hold.id} className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-semibold text-discord-text-primary">
+                        {automation?.name ?? hold.automation_id.slice(0, 8)}
+                      </h3>
+                      <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-300">
+                        {hold.status.toUpperCase()}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-sm text-discord-text-secondary">
+                      {hold.member_count} members from {hold.trigger_event}; guardrail was {hold.threshold}.
+                    </p>
+                    <p className="mt-1 text-xs text-discord-text-muted">
+                      Held {timeAgo(hold.created_at)}.{' '}
+                      {hold.status === 'held' || hold.status === 'approved'
+                        ? 'No member-targeted action ran before approval.'
+                        : hold.status === 'executing'
+                          ? 'Execution is in progress.'
+                          : 'Execution did not finish cleanly; inspect the audit log before applying corrective actions manually.'}
+                    </p>
+                    {hold.last_error && (
+                      <p className="mt-2 rounded bg-red-500/10 px-3 py-2 text-xs text-red-400">
+                        {hold.last_error}
+                      </p>
+                    )}
+                  </div>
+                  {hold.status === 'held' && (
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setHoldDecision({ hold, decision: 'reject' })}
+                        disabled={saving}
+                        className="rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-red-400 disabled:opacity-50"
+                      >
+                        Reject
+                      </button>
+                      <button
+                        onClick={() => setHoldDecision({ hold, decision: 'approve' })}
+                        disabled={saving}
+                        className="rounded-md bg-amber-500 px-3 py-2 text-sm font-semibold text-black disabled:opacity-50"
+                      >
+                        Approve once
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -644,6 +812,22 @@ export default function AutomationsPage() {
           }
         }}
         onCancel={() => setConfirmAction(null)}
+      />
+      <ConfirmDialog
+        open={!!holdDecision}
+        title={holdDecision?.decision === 'approve' ? 'Approve mass action' : 'Reject mass action'}
+        description={holdDecision?.decision === 'approve'
+          ? `Execute this occurrence once across ${holdDecision.hold.member_count} members? The guardrail stopped every member-targeted action so far.`
+          : 'Reject this held occurrence permanently? It will not execute.'}
+        confirmLabel={holdDecision?.decision === 'approve' ? 'Approve once' : 'Reject'}
+        variant={holdDecision?.decision === 'approve' ? 'warning' : 'danger'}
+        onConfirm={async () => {
+          if (holdDecision) {
+            await decideHold(holdDecision.hold, holdDecision.decision);
+            setHoldDecision(null);
+          }
+        }}
+        onCancel={() => setHoldDecision(null)}
       />
     </div>
   );

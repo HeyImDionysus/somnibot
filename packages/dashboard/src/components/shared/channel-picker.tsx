@@ -40,13 +40,72 @@ const CHANNEL_TYPE_ALIAS: Record<string, ChannelType> = {
 
 type ChannelTypeInput = ChannelType | keyof typeof CHANNEL_TYPE_ALIAS;
 
-interface DiscordChannel {
+export interface DiscordChannel {
   id: string;
   name: string;
   type: number;
   position: number;
   parent_id?: string | null;
   parent_name?: string;
+  botPermissions?: string | null;
+  manageableByBot?: boolean;
+  missing?: boolean;
+}
+
+export type RequiredChannelPermission =
+  | 'ViewChannel'
+  | 'SendMessages'
+  | 'EmbedLinks'
+  | 'AttachFiles'
+  | 'ReadMessageHistory'
+  | 'Connect'
+  | 'Speak'
+  | 'ManageChannels';
+
+const PERMISSION_BITS: Record<RequiredChannelPermission, bigint> = {
+  ManageChannels: BigInt(1) << BigInt(4),
+  ViewChannel: BigInt(1) << BigInt(10),
+  SendMessages: BigInt(1) << BigInt(11),
+  EmbedLinks: BigInt(1) << BigInt(14),
+  AttachFiles: BigInt(1) << BigInt(15),
+  ReadMessageHistory: BigInt(1) << BigInt(16),
+  Connect: BigInt(1) << BigInt(20),
+  Speak: BigInt(1) << BigInt(21),
+};
+
+/**
+ * Why a channel cannot be safely enabled, or null when it can.
+ *
+ * The snapshot-authority gate is the review-3689375357 repair: a
+ * non-authoritative snapshot (stale cache, legacy shape) may carry permission
+ * bits from BEFORE the bot lost View Channel / Send Messages / Embed Links.
+ * Trusting them let a channel be enabled whose delivery was guaranteed to
+ * fail — and /api/embeds/send does no live re-validation, so the queued
+ * request still reported success. Required permissions are therefore treated
+ * as unavailable until the snapshot is authoritative.
+ */
+export function channelPermissionIssue(
+  channel: Pick<DiscordChannel, 'missing' | 'botPermissions' | 'name'>,
+  requiredBotPermissions: readonly RequiredChannelPermission[],
+  snapshotAuthoritative: boolean,
+): string | null {
+  if (channel.missing) return 'This channel was deleted or is no longer in this server.';
+  if (requiredBotPermissions.length === 0) return null;
+  if (!snapshotAuthoritative) {
+    return 'Live bot permissions cannot be verified right now — retry after the bot refreshes its snapshot.';
+  }
+  if (channel.botPermissions == null) return 'Live bot permissions are unavailable for this channel.';
+  try {
+    const available = BigInt(channel.botPermissions);
+    const missing = requiredBotPermissions.filter(
+      (permission) => (available & PERMISSION_BITS[permission]) !== PERMISSION_BITS[permission],
+    );
+    return missing.length > 0
+      ? `SomniBot is missing ${missing.join(', ')} in #${channel.name}.`
+      : null;
+  } catch {
+    return 'Live bot permissions are malformed for this channel.';
+  }
 }
 
 interface ChannelPickerProps {
@@ -72,6 +131,15 @@ interface ChannelPickerProps {
   allowNone?: boolean;
   /** CSS class for the container */
   className?: string;
+  /** Bot permissions that must be proven by the live snapshot before selection. */
+  requiredBotPermissions?: RequiredChannelPermission[];
+  /**
+   * Fires with the CURRENT snapshot authority, including the flip to false
+   * when the validity window lapses while a dialog stays open. A selection
+   * made from a fresh snapshot stays set after expiry, so pages must gate
+   * irreversible sends on this instead of the mere presence of an id.
+   */
+  onAuthorityChange?: (authoritative: boolean) => void;
 }
 
 // Channel type icon mapping
@@ -89,24 +157,146 @@ function ChannelIcon({ type, className }: { type: number; className?: string }) 
   }
 }
 
-// Shared channel cache to avoid re-fetching per picker instance
-let channelCache: { data: DiscordChannel[]; ts: number } | null = null;
-const CACHE_TTL = 30_000; // 30s
+interface ChannelSnapshot {
+  channels: DiscordChannel[];
+  authoritative: boolean;
+  /**
+   * The snapshot's OWN timestamp (server snapshotAt), not the browser fetch
+   * time; authority EXPIRES past the age window. Anchoring to fetch time
+   * would restart the ten-minute clock on an almost-expired snapshot.
+   */
+  snapshotAtMs: number;
+}
 
-async function fetchChannels(): Promise<DiscordChannel[]> {
+// Shared channel cache to avoid re-fetching per picker instance
+let channelCache: { data: ChannelSnapshot; ts: number } | null = null;
+const CACHE_TTL = 30_000; // 30s
+const MAX_SNAPSHOT_AGE_MS = 10 * 60 * 1_000;
+const MAX_SNAPSHOT_FUTURE_SKEW_MS = 60_000;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasValidChannelShape(value: unknown): value is DiscordChannel {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.name === 'string'
+    && typeof value.type === 'number'
+    && Number.isFinite(value.type)
+    && typeof value.position === 'number'
+    && Number.isFinite(value.position)
+    && typeof value.manageableByBot === 'boolean'
+    && (value.botPermissions === null || typeof value.botPermissions === 'string');
+}
+
+function hasValidCategoryShape(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.name === 'string'
+    && typeof value.position === 'number'
+    && Number.isFinite(value.position)
+    && typeof value.manageableByBot === 'boolean'
+    && (value.botPermissions === null || typeof value.botPermissions === 'string');
+}
+
+export function snapshotTimestampMs(payload: unknown): number | null {
+  if (!isRecord(payload) || typeof payload.snapshotAt !== 'string') return null;
+  const parsed = Date.parse(payload.snapshotAt);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function isAuthoritativeChannelSnapshot(
+  payload: unknown,
+  nowMs = Date.now(),
+): boolean {
+  if (!isRecord(payload) || payload.awaitingSnapshot === true) return false;
+
+  const snapshotMs = snapshotTimestampMs(payload) ?? Number.NaN;
+  return payload.snapshotVersion === 2
+    && Number.isFinite(snapshotMs)
+    && nowMs - snapshotMs <= MAX_SNAPSHOT_AGE_MS
+    && snapshotMs - nowMs <= MAX_SNAPSHOT_FUTURE_SKEW_MS
+    && Array.isArray(payload.channels)
+    && payload.channels.every(hasValidChannelShape)
+    && Array.isArray(payload.categories)
+    && payload.categories.every(hasValidCategoryShape);
+}
+
+export function normalizeSnapshotChannels(payload: unknown): DiscordChannel[] {
+  if (!isRecord(payload)) {
+    throw new Error('Live Discord channel snapshot is malformed');
+  }
+  const channels = payload.channels ?? payload.data ?? [];
+  const categories = payload.categories ?? [];
+  if (!Array.isArray(channels) || !Array.isArray(categories)) {
+    throw new Error('Live Discord channel snapshot is malformed');
+  }
+  return [
+    ...channels,
+    ...categories.map((category) => ({
+      ...category,
+      type: CHANNEL_TYPE.GUILD_CATEGORY,
+    })),
+  ] as DiscordChannel[];
+}
+
+/**
+ * Authority of a loaded snapshot AS OF nowMs. The component derives its
+ * permission gating AND the value surfaced through onAuthorityChange from
+ * this single definition, so page-level send gates and tests share exactly
+ * what the picker means by "still verifiable".
+ */
+export function snapshotAuthorityAsOf(
+  snapshotAuthoritative: boolean,
+  snapshotAtMs: number,
+  nowMs: number,
+): boolean {
+  return snapshotAuthoritative
+    && snapshotAtMs > 0
+    && nowMs - snapshotAtMs <= MAX_SNAPSHOT_AGE_MS;
+}
+
+async function fetchChannels(): Promise<ChannelSnapshot> {
   if (channelCache && Date.now() - channelCache.ts < CACHE_TTL) {
     return channelCache.data;
   }
   const res = await fetch('/api/channels');
   const json = await res.json();
-  const channels = json.success ? (json.channels ?? json.data ?? []) : [];
-  channelCache = { data: channels, ts: Date.now() };
-  return channels;
+  if (!res.ok || !json.success) {
+    throw new Error(json.error || 'Failed to load live Discord channels');
+  }
+  const channels = normalizeSnapshotChannels(json);
+  // A non-authoritative payload may carry no snapshotAt; the fallback is
+  // inert because expiry is only consulted when authority already held.
+  const snapshot = {
+    channels,
+    authoritative: isAuthoritativeChannelSnapshot(json),
+    snapshotAtMs: snapshotTimestampMs(json) ?? Date.now(),
+  };
+  channelCache = { data: snapshot, ts: Date.now() };
+  return snapshot;
 }
 
 /** Invalidate the channel cache (call after creating/deleting channels) */
 export function invalidateChannelCache() {
   channelCache = null;
+}
+
+export function resolveSelectedChannels(
+  selected: string[],
+  channels: DiscordChannel[],
+  snapshotAuthoritative: boolean,
+): DiscordChannel[] {
+  return selected.map((id) => channels.find((channel) => channel.id === id) ?? {
+    id,
+    name: snapshotAuthoritative
+      ? `Deleted channel (${id})`
+      : `Configured channel (${id}) — awaiting live snapshot`,
+    type: CHANNEL_TYPE.GUILD_TEXT,
+    position: Number.MAX_SAFE_INTEGER,
+    missing: snapshotAuthoritative,
+  });
 }
 
 export function ChannelPicker({
@@ -121,11 +311,22 @@ export function ChannelPicker({
   disabled = false,
   allowNone = false,
   className,
+  requiredBotPermissions = [],
+  onAuthorityChange,
 }: ChannelPickerProps) {
   const [channels, setChannels] = useState<DiscordChannel[]>([]);
+  const [snapshotAuthoritative, setSnapshotAuthoritative] = useState(false);
+  const [snapshotAtMs, setSnapshotAtMs] = useState(0);
+  // Ticks while mounted so authority can EXPIRE. Authority was previously
+  // computed once at mount and stored forever: a page left open past the
+  // snapshot's ten-minute validity kept enabling channels from obsolete
+  // permission bits, and the send action does no live re-validation
+  // (review 3692048889).
+  const [authorityNowMs, setAuthorityNowMs] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
+  const [loadError, setLoadError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -138,10 +339,42 @@ export function ChannelPicker({
   // Load channels
   useEffect(() => {
     fetchChannels()
-      .then(setChannels)
-      .catch(() => {})
+      .then((snapshot) => {
+        setChannels(snapshot.channels);
+        setSnapshotAuthoritative(snapshot.authoritative);
+        setSnapshotAtMs(snapshot.snapshotAtMs);
+      })
+      .catch(() => setLoadError('Live Discord channels are unavailable. Retry after the bot refreshes its snapshot.'))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    const tick = setInterval(() => setAuthorityNowMs(Date.now()), 30_000);
+    return () => clearInterval(tick);
+  }, []);
+
+  // Authority as of NOW, not as of mount. Once the snapshot outlives its
+  // validity window the picker treats permissions as unverifiable again —
+  // the same state a stale fetch would have produced.
+  const liveAuthoritative = snapshotAuthorityAsOf(
+    snapshotAuthoritative,
+    snapshotAtMs,
+    authorityNowMs,
+  );
+
+  // Surface authority OUTWARD, including the flip to false when the window
+  // lapses with the dialog still open: the selected id survives expiry, so a
+  // consumer gating only on the id would happily send into a channel whose
+  // required permissions are no longer verifiable.
+  useEffect(() => {
+    onAuthorityChange?.(liveAuthoritative);
+  }, [liveAuthoritative, onAuthorityChange]);
+
+  const permissionIssue = useCallback(
+    (channel: DiscordChannel): string | null =>
+      channelPermissionIssue(channel, requiredBotPermissions, liveAuthoritative),
+    [requiredBotPermissions, liveAuthoritative],
+  );
 
   // Resolve string aliases to numeric channel types
   const resolvedTypes = useMemo(() => {
@@ -194,6 +427,8 @@ export function ChannelPicker({
 
   const toggle = useCallback(
     (id: string) => {
+      const channel = channels.find((item) => item.id === id);
+      if (id && (!channel || permissionIssue(channel))) return;
       if (multi) {
         const next = selected.includes(id)
           ? selected.filter((s) => s !== id)
@@ -205,7 +440,7 @@ export function ChannelPicker({
         setSearch('');
       }
     },
-    [multi, selected, onChange],
+    [multi, selected, onChange, channels, permissionIssue],
   );
 
   const clear = useCallback(
@@ -227,9 +462,12 @@ export function ChannelPicker({
 
   // Resolve selected channel names
   const selectedChannels = useMemo(
-    () => selected.map((id) => channels.find((c) => c.id === id)).filter(Boolean) as DiscordChannel[],
-    [selected, channels],
+    () => resolveSelectedChannels(selected, channels, liveAuthoritative),
+    [selected, channels, liveAuthoritative],
   );
+  const selectedIssues = selectedChannels
+    .map(permissionIssue)
+    .filter((issue): issue is string => issue !== null);
 
   return (
     <div className={cn('space-y-1', className)} ref={containerRef}>
@@ -243,10 +481,19 @@ export function ChannelPicker({
       )}
 
       {/* Trigger */}
-      <button
-        type="button"
+      <div
+        role="button"
+        aria-label={label ?? placeholder}
+        tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled}
+        aria-expanded={open}
         onClick={() => !disabled && setOpen(!open)}
-        disabled={disabled}
+        onKeyDown={(event) => {
+          if (!disabled && (event.key === 'Enter' || event.key === ' ')) {
+            event.preventDefault();
+            setOpen(!open);
+          }
+        }}
         className={cn(
           'flex w-full items-center gap-2 rounded-input border px-3 py-2 text-sm text-left transition-colors',
           'bg-discord-bg-tertiary',
@@ -271,6 +518,8 @@ export function ChannelPicker({
                 {ch.name}
                 <button
                   onClick={(e) => removeTag(ch.id, e)}
+                  onKeyDown={(event) => event.stopPropagation()}
+                  aria-label={`Remove ${ch.name}`}
                   className="text-discord-text-muted hover:text-discord-text-primary ml-0.5"
                 >
                   <X size={10} />
@@ -287,6 +536,8 @@ export function ChannelPicker({
         {selected.length > 0 && (
           <button
             onClick={clear}
+            onKeyDown={(event) => event.stopPropagation()}
+            aria-label="Clear channel selection"
             className="shrink-0 text-discord-text-muted hover:text-discord-text-primary"
           >
             <X size={14} />
@@ -296,7 +547,7 @@ export function ChannelPicker({
           size={14}
           className={cn('shrink-0 text-discord-text-muted transition-transform', open && 'rotate-180')}
         />
-      </button>
+      </div>
 
       {/* Dropdown */}
       {open && (
@@ -341,12 +592,16 @@ export function ChannelPicker({
                     )}
                     {chans.map((ch) => {
                       const isSelected = selected.includes(ch.id);
+                      const issue = permissionIssue(ch);
                       return (
                         <button
                           key={ch.id}
                           onClick={() => toggle(ch.id)}
+                          disabled={issue !== null}
+                          title={issue ?? undefined}
                           className={cn(
                             'flex w-full items-center gap-2 px-3 py-1.5 text-sm transition-colors',
+                            issue && 'cursor-not-allowed opacity-50',
                             isSelected
                               ? 'bg-discord-accent/10 text-discord-text-primary'
                               : 'text-discord-text-secondary hover:bg-discord-bg-tertiary hover:text-discord-text-primary',
@@ -370,6 +625,7 @@ export function ChannelPicker({
                           )}
                           <ChannelIcon type={ch.type} className="text-discord-text-muted shrink-0" />
                           <span className="truncate">{ch.name}</span>
+                          {issue && <span className="ml-auto text-[10px] text-discord-danger">Unavailable</span>}
                         </button>
                       );
                     })}
@@ -387,7 +643,10 @@ export function ChannelPicker({
         </div>
       )}
 
-      {error && <p className="text-xs text-discord-danger">{error}</p>}
+      {(error || loadError) && <p className="text-xs text-discord-danger">{error || loadError}</p>}
+      {selectedIssues.map((issue) => (
+        <p key={issue} className="text-xs text-discord-danger">{issue}</p>
+      ))}
     </div>
   );
 }
@@ -399,8 +658,8 @@ export function useChannelName(channelId: string | null | undefined): string | n
 
   useEffect(() => {
     if (!channelId) { setName(null); return; }
-    fetchChannels().then((channels) => {
-      const ch = channels.find((c) => c.id === channelId);
+    fetchChannels().then((snapshot) => {
+      const ch = snapshot.channels.find((channel) => channel.id === channelId);
       setName(ch ? `#${ch.name}` : null);
     });
   }, [channelId]);

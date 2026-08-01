@@ -93,7 +93,7 @@ describe('/forgetme two-phase commerce cleanup', () => {
 
     expect(finalDescription(interaction)).toContain('still removing Discord roles');
     expect(finalDescription(interaction)).toContain('Pending cleanup work:** 2');
-    expect(finalDescription(interaction)).not.toContain('All of your personal data has been permanently deleted');
+    expect(finalDescription(interaction)).not.toContain('Your account data has been permanently erased or anonymized');
     expect(writeAuditLog).not.toHaveBeenCalled();
   });
 
@@ -114,7 +114,8 @@ describe('/forgetme two-phase commerce cleanup', () => {
 
     await handleForgetMeCommand(interaction as any, supabase as any, 'guild-1');
 
-    expect(finalDescription(interaction)).toContain('All of your personal data has been permanently deleted');
+    expect(finalDescription(interaction)).toContain('Your account data has been permanently erased or anonymized');
+    expect(finalDescription(interaction)).toContain('license-validation outcomes and timestamps stay as a forensic ledger');
     expect(writeAuditLog).toHaveBeenCalledWith(
       supabase,
       expect.objectContaining({

@@ -36,7 +36,17 @@ vi.mock('../features/adventures/index.js', () => ({ unregisterAdventureManager: 
 vi.mock('../features/polls/index.js', () => ({ unregisterPollsManager: vi.fn() }));
 vi.mock('../features/heist/index.js', () => ({ unregisterHeistManager: vi.fn() }));
 vi.mock('../features/farming/index.js', () => ({ unregisterFarmingManager: vi.fn() }));
-vi.mock('../features/market/index.js', () => ({ unregisterMarketManager: vi.fn() }));
+const marketRegistration = vi.hoisted(() => ({
+  register: vi.fn(),
+}));
+vi.mock('../features/market/index.js', () => ({
+  MarketManager: class {},
+  buildMarketCommands: () => ({
+    market: { toJSON: () => ({ name: 'market', description: 'Player marketplace' }) },
+  }),
+  registerMarketManager: marketRegistration.register,
+  unregisterMarketManager: vi.fn(),
+}));
 vi.mock('../features/crafting/index.js', () => ({ unregisterCraftingManager: vi.fn() }));
 vi.mock('../features/gathering/index.js', () => ({ unregisterGatheringManager: vi.fn() }));
 vi.mock('../features/giveaways/index.js', () => ({}));
@@ -82,12 +92,31 @@ vi.mock('../services/alert-service.js', () => ({
   AlertService: class { send = vi.fn(); },
 }));
 
-import { destroyGuildServices } from '../guild-init.js';
+import { destroyGuildServices, initializeMarketFeature } from '../guild-init.js';
 import { unregisterEconomyManager } from '../features/economy/index.js';
 
 describe('guild-init', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('registers /market and its manager even when the feature flag is off', () => {
+    const managers = new Map<string, unknown>();
+    const ctx = {
+      guildId: 'guild-1',
+      guild: { id: 'guild-1' },
+      supabase: {},
+      valkey: {},
+      config: { economy_market_enabled: false },
+      setManager: vi.fn((name: string, value: unknown) => managers.set(name, value)),
+    };
+    const commands: Array<{ name: string }> = [];
+
+    initializeMarketFeature(ctx as any, commands as any);
+
+    expect(marketRegistration.register).toHaveBeenCalledOnce();
+    expect(ctx.setManager).toHaveBeenCalledWith('market', expect.anything());
+    expect(commands).toContainEqual(expect.objectContaining({ name: 'market' }));
   });
 
   it('destroyGuildServices works on empty context (no services)', async () => {

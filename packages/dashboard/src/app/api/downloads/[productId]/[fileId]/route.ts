@@ -5,7 +5,8 @@
  * instead of raw portal tokens in query strings. Falls back to
  * x-portal-token header for backwards compatibility.
  *
- * Signed URL params: sig, exp, cid (customer ID), gid (guild ID)
+ * Signed URL params: sig, exp, cid (customer ID), gid (guild ID),
+ * eid (the exact entitlement whose delivery will be recorded), nonce
  */
 import { after, NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -14,6 +15,7 @@ import { verifySignedDownloadUrl } from '@/lib/api/signed-url';
 import { consumeDownloadNonce } from '@/lib/api/download-nonce';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { isEntitlementAccessLive } from '@somnibot/shared';
+import { selectDownloadEntitlement } from '@/lib/portal/select-entitlement';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -64,18 +66,32 @@ export async function GET(
   // ── Auth: prefer signed URL, fall back to portal token header ──
   let customerId: string;
   let guildId: string;
+  let signedEntitlementId: string | null = null;
   let deliveryNonce: { value: string; expiresAtUnix: number } | null = null;
 
   const sig = req.nextUrl.searchParams.get('sig');
   const exp = req.nextUrl.searchParams.get('exp');
   const cid = req.nextUrl.searchParams.get('cid');
   const gid = req.nextUrl.searchParams.get('gid');
+  const eid = req.nextUrl.searchParams.get('eid');
 
   const nonce = req.nextUrl.searchParams.get('nonce');
 
   if (sig && exp && cid && gid) {
-    // Signed URL authentication (preferred — no raw token in URL)
-    const verified = verifySignedDownloadUrl(productId, fileId, sig, exp, cid, gid, nonce ?? undefined);
+    // Signed URL authentication (preferred — no raw token in URL). eid may be
+    // absent on links minted by the previous release during a rolling
+    // deployment; those verify against the legacy payload for their remaining
+    // five-minute lifetime and select the entitlement at delivery time below.
+    const verified = verifySignedDownloadUrl(
+      productId,
+      fileId,
+      sig,
+      exp,
+      cid,
+      gid,
+      eid,
+      nonce ?? undefined,
+    );
     if (!verified) {
       return NextResponse.json({ error: 'Invalid or expired download link' }, { status: 401 });
     }
@@ -89,6 +105,7 @@ export async function GET(
 
     customerId = verified.customerId;
     guildId = verified.guildId;
+    signedEntitlementId = verified.entitlementId;
 
     // V5 Audit P2-1: Rate-limit downloads per customer to prevent abuse
     const rl = await rateLimits.portalDownload(customerId);
@@ -151,7 +168,7 @@ export async function GET(
   // active or in an unexpired grace window. ──
   const { data: entitlements, error: entitlementError } = await supabase
     .from('entitlements')
-    .select('id, status, grace_period_ends_at')
+    .select('id, order_id, status, grace_period_ends_at, created_at')
     .eq('customer_id', customerId)
     .eq('product_id', productId)
     .eq('guild_id', guildId)
@@ -165,9 +182,45 @@ export async function GET(
     return serviceUnavailable('Downloads entitlement lookup', entitlementError);
   }
 
-  if (!entitlements?.some((e) => isEntitlementAccessLive(e))) {
+  const liveEntitlements = entitlements
+    ?.filter((entitlement) => isEntitlementAccessLive(entitlement)) ?? [];
+  let liveEntitlement: (typeof liveEntitlements)[number] | undefined;
+  if (signedEntitlementId) {
+    liveEntitlement = liveEntitlements.find(
+      (entitlement) => entitlement.id === signedEntitlementId,
+    );
+  } else {
+    // The fallback paths (portal-token API clients, legacy no-eid links) use
+    // the SAME delivery-aware ranking as link minting: an undelivered repeat
+    // purchase must be able to claim its evidence before a delivered newer
+    // order is re-served — otherwise every fallback download records against
+    // the newest order and the older one is flagged forever.
+    const candidateOrderIds = [...new Set(
+      liveEntitlements
+        .map((candidate) => candidate.order_id)
+        .filter((id): id is string => typeof id === 'string'),
+    )];
+    const deliveredOrderIds = new Set<string>();
+    if (candidateOrderIds.length > 0) {
+      const { data: deliveries, error: deliveriesError } = await supabase
+        .from('commerce_download_deliveries')
+        .select('order_id')
+        .in('order_id', candidateOrderIds);
+      if (deliveriesError) {
+        return serviceUnavailable('Downloads delivery history', deliveriesError);
+      }
+      for (const delivery of deliveries ?? []) {
+        if (typeof delivery.order_id === 'string') {
+          deliveredOrderIds.add(delivery.order_id);
+        }
+      }
+    }
+    liveEntitlement = selectDownloadEntitlement(liveEntitlements, deliveredOrderIds);
+  }
+  if (!liveEntitlement) {
     return NextResponse.json({ error: 'No active entitlement for this product' }, { status: 403 });
   }
+  const deliveryEntitlement = liveEntitlement;
 
   // ── Get the file ──
   const { data: file, error: fileError } = await supabase
@@ -212,12 +265,46 @@ export async function GET(
     return null;
   }
 
-  /**
-   * Delivery must not turn into an error after nonce consumption merely
-   * because an analytics counter is unavailable. Keep the atomic RPC, retain
-   * the legacy fallback, and make both explicitly best-effort.
-   */
-  async function recordDeliveredDownload(): Promise<void> {
+  async function recordDeliveryEvidence(): Promise<'recorded' | 'replay' | 'failed'> {
+    try {
+      const { error: deliveryError } = await supabase
+        .from('commerce_download_deliveries')
+        .insert({
+          guild_id: guildId,
+          customer_id: customerId,
+          product_id: productId,
+          file_id: fileId,
+          file_name_snapshot: file.name,
+          entitlement_id: deliveryEntitlement.id,
+          order_id: deliveryEntitlement.order_id,
+          delivery_nonce_hash: deliveryNonce ? hashToken(deliveryNonce.value) : null,
+        });
+      if (deliveryError && deliveryError.code === '23505') {
+        // The table's only unique index is the partial nonce-hash index, so a
+        // conflict on a nonce-bearing insert means this exact link already has
+        // a durable delivery row. That happens precisely when the volatile
+        // nonce store lost the consumed marker (eviction/restart) and the
+        // replay passed consumeDownloadNonce as fresh — the durable ledger is
+        // the last line of the single-use guarantee, not benign dedupe.
+        if (deliveryNonce) return 'replay';
+        return 'recorded';
+      }
+      if (deliveryError) {
+        console.error('[Downloads delivery evidence] insert failed:', deliveryError.message);
+        return 'failed';
+      }
+      return 'recorded';
+    } catch (error) {
+      console.error(
+        '[Downloads delivery evidence] insert failed:',
+        error instanceof Error ? error.message : 'unknown error',
+      );
+      return 'failed';
+    }
+  }
+
+  /** The download counter is analytics; durable delivery evidence is not. */
+  async function incrementDownloadCounter(): Promise<void> {
     try {
       const { error } = await supabase.rpc('increment_download_count', { p_file_id: fileId });
       if (!error) return;
@@ -238,20 +325,31 @@ export async function GET(
   }
 
   /**
-   * Hand delivery back to the caller as soon as the nonce is consumed.
-   * Analytics belongs to the route lifecycle, not the delivery critical path:
-   * Next.js keeps this callback alive after the response is sent, bounded by
-   * the route's platform max duration.
+   * A redirect is successful only after its durable delivery ledger row exists.
+   * The analytics counter stays outside the critical path.
    */
   async function deliver(response: NextResponse): Promise<NextResponse> {
     const replay = await consumeDeliveryNonce();
     if (replay) return replay;
 
+    const evidence = await recordDeliveryEvidence();
+    if (evidence === 'replay') {
+      return NextResponse.json(
+        { error: 'Download link has already been used' },
+        { status: 410 },
+      );
+    }
+    if (evidence === 'failed') {
+      return deliveryNonce
+        ? deliveryStatusUncertain()
+        : serviceUnavailable('Downloads delivery evidence', {
+          message: 'Durable delivery evidence could not be written',
+        });
+    }
+
     try {
-      after(recordDeliveredDownload);
+      after(incrementDownloadCounter);
     } catch (error) {
-      // Scheduling is best-effort too. A missing lifecycle hook must not burn a
-      // nonce and replace a ready redirect with an error.
       console.error(
         '[Downloads counter] scheduling failed:',
         error instanceof Error ? error.message : 'unknown error',

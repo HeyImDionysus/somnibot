@@ -247,7 +247,23 @@ function uuidAt(index: number): string {
 }
 
 function useFake(tables: Record<string, TableConfig>) {
-  const fake = createFakeSupabase(tables);
+  const fake = createFakeSupabase({
+    guild_live_state: {
+      rows: [{
+        guild_id: GUILD,
+        snapshot_version: 2,
+        snapshot_at: new Date().toISOString(),
+        roles: [{
+          id: ROLE,
+          name: 'Customer',
+          managed: false,
+          editableByBot: true,
+        }],
+        channels: [],
+      }],
+    },
+    ...tables,
+  });
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(fake);
   return fake;
 }
@@ -465,6 +481,37 @@ describe('product mutations', () => {
       method: 'PUT',
       body: { id: PRODUCT_ID, active: true },
     }) as never);
+    expect(res.status).toBe(409);
+    expect(fake._writes.products ?? []).toHaveLength(0);
+  });
+
+  it('revalidates persisted Discord targets before reactivating a product', async () => {
+    const fake = useFake({
+      products: {
+        rows: [product({
+          type: 'one_time',
+          active: false,
+          price_cents: 0,
+          granted_role_ids: [ROLE],
+          granted_channel_ids: [],
+        })],
+      },
+      guild_live_state: {
+        rows: [{
+          guild_id: GUILD,
+          snapshot_version: 2,
+          snapshot_at: new Date().toISOString(),
+          roles: [],
+          channels: [],
+        }],
+      },
+    });
+
+    const res = await productsPUT(buildRequest('/api/store/products', {
+      method: 'PUT',
+      body: { id: PRODUCT_ID, active: true },
+    }) as never);
+
     expect(res.status).toBe(409);
     expect(fake._writes.products ?? []).toHaveLength(0);
   });

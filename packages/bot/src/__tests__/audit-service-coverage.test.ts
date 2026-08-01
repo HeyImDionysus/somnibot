@@ -96,6 +96,32 @@ describe('AuditService', () => {
   });
 
   describe('event handling via onAny', () => {
+    it('attributes ticket-creation failures to the requesting member (round 33)', async () => {
+      service.start();
+      await eventBus._emit({
+        type: 'ticket.create_failed',
+        guildId: 'g1',
+        data: {
+          userDiscordId: 'u-77',
+          panelId: 'p1',
+          ticketNumber: null,
+          stage: 'channel_create',
+          error: 'Missing Permissions',
+        },
+      });
+
+      const internals = service as unknown as { queue: Array<Record<string, unknown>> };
+      expect(internals.queue).toHaveLength(1);
+      const entry = internals.queue[0]!;
+      // The requesting member IS the actor: anything else fell back to
+      // actor_id 'bot', misattributing the event and hiding it from
+      // purge_member_data's (actor_type='user' AND actor_id=...) predicate —
+      // /forgetme left the member id behind in the details payload.
+      expect(entry.actor_type).toBe('user');
+      expect(entry.actor_id).toBe('u-77');
+      expect(JSON.stringify(entry.details)).not.toContain('u-77');
+    });
+
     it('bounds the exempt audit buffer under a sustained event burst', async () => {
       service.start();
 

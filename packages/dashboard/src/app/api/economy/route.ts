@@ -13,6 +13,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
 import { dbError, apiServerError} from '@/lib/api/response';
 import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
+import { discordSnowflakeSchema } from '@/lib/api/discord-values';
 
 const ECONOMY_COLUMNS = [
   'economy_enabled',
@@ -96,7 +97,7 @@ const economyPatchSchema = z.object({
   // V5 Audit §5.P3a — cap at PG INT max to prevent overflow
   economy_max_wallet: z.number().int().min(0).max(2_147_483_647).optional(),
   economy_max_bank: z.number().int().min(0).max(2_147_483_647).optional(),
-  economy_log_channel_id: z.string().nullable().optional(),
+  economy_log_channel_id: discordSnowflakeSchema.nullable().optional(),
   // Member-profile controls (catalog: community.json profiles).
   profiles_enabled: z.boolean().optional(),
   title_max_length: z.number().int().min(1).max(64).optional(),

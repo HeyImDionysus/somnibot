@@ -45,6 +45,29 @@ interface Session {
   deactivation_reason: string | null;
 }
 
+interface LicenseHealth {
+  state: 'empty' | 'healthy' | 'needs_attention';
+  keyCounts: Record<'pending_activation' | 'active' | 'expired' | 'revoked' | 'suspended', number>;
+  sampledKeys: number;
+  totalKeys: number;
+  activeSessions: number;
+  totalSessions: number;
+  validationWindowHours: number;
+  validationCount: number;
+  unavailable24h: number;
+  sessionsOnTerminalKeys: number;
+  deviceLimit24h: number;
+  invalid24h: number;
+  pendingOlderThanDay: number;
+  unresolvedAlerts: Array<{
+    id: string;
+    severity: string;
+    title: string;
+    created_at: string;
+  }>;
+  truncated: boolean;
+}
+
 // ── Helpers ───────────────────────────────────────────────
 
 function statusBadge(status: string) {
@@ -98,6 +121,27 @@ export default function LicensesPage() {
   // Session management
   const [sessions, setSessions] = useState<{ sessions: Session[]; max_devices: number; active_count: number } | null>(null);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [health, setHealth] = useState<LicenseHealth | null>(null);
+  const [healthLoading, setHealthLoading] = useState(true);
+  const [healthError, setHealthError] = useState(false);
+
+  const loadHealth = useCallback(async () => {
+    setHealthLoading(true);
+    setHealthError(false);
+    try {
+      const response = await fetch('/api/license/health');
+      const payload = await response.json();
+      if (!response.ok || payload.success !== true) throw new Error('health unavailable');
+      setHealth(payload.data);
+    } catch {
+      setHealth(null);
+      setHealthError(true);
+    } finally {
+      setHealthLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadHealth(); }, [loadHealth]);
 
   const lookupKey = useCallback(async () => {
     if (!search.trim()) return;
@@ -173,6 +217,97 @@ export default function LicensesPage() {
           Look up, manage, and revoke license keys
         </p>
       </div>
+
+      <section
+        aria-labelledby="license-health-heading"
+        className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-5"
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 id="license-health-heading" className="text-base font-semibold text-discord-text-primary">
+              License health
+            </h2>
+            <p className="text-xs text-discord-text-muted">
+              Real key, device, validation, and unresolved-alert records for this server.
+            </p>
+          </div>
+          {!healthLoading && (
+            <button
+              type="button"
+              onClick={() => void loadHealth()}
+              className="rounded-input border border-discord-border-subtle px-3 py-1.5 text-xs text-discord-text-secondary hover:border-discord-border-strong"
+            >
+              Refresh
+            </button>
+          )}
+        </div>
+
+        {healthLoading ? (
+          <p className="mt-4 text-sm text-discord-text-muted" role="status">Checking license health…</p>
+        ) : healthError ? (
+          <div className="mt-4 rounded-input border border-discord-danger/40 bg-discord-danger/10 p-3">
+            <p className="text-sm font-medium text-discord-danger">License health is unavailable</p>
+            <p className="mt-1 text-xs text-discord-text-muted">
+              SomniBot could not verify every required license record. This is not reported as healthy.
+            </p>
+          </div>
+        ) : health?.state === 'empty' ? (
+          <p className="mt-4 text-sm text-discord-text-muted">
+            No license keys have been issued for this server yet.
+          </p>
+        ) : health ? (
+          <div className="mt-4 space-y-4">
+            <div className={`rounded-input border p-3 ${
+              health.state === 'healthy'
+                ? 'border-discord-success/40 bg-discord-success/10'
+                : 'border-discord-warning/40 bg-discord-warning/10'
+            }`}>
+              <p className={`text-sm font-semibold ${
+                health.state === 'healthy' ? 'text-discord-success' : 'text-discord-warning'
+              }`}>
+                {health.state === 'healthy' ? 'No current license issue detected' : 'License delivery needs attention'}
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {[
+                ['Active keys', health.keyCounts.active],
+                ['Pending keys', health.keyCounts.pending_activation],
+                ['Active devices', health.activeSessions],
+                [`Validations (${health.validationWindowHours}h)`, health.validationCount],
+              ].map(([label, value]) => (
+                <div key={String(label)} className="rounded-input bg-discord-bg-tertiary p-3">
+                  <p className="text-xl font-bold text-discord-text-primary">{value}</p>
+                  <p className="text-xs text-discord-text-muted">{label}</p>
+                </div>
+              ))}
+            </div>
+            {(health.pendingOlderThanDay > 0
+              || health.keyCounts.suspended > 0
+              || health.sessionsOnTerminalKeys > 0
+              || health.unavailable24h > 0
+              || health.deviceLimit24h > 0
+              || health.invalid24h > 0
+              || health.unresolvedAlerts.length > 0) && (
+              <ul className="space-y-1 text-sm text-discord-text-secondary">
+                {health.pendingOlderThanDay > 0 && <li>{health.pendingOlderThanDay} key(s) have waited over 24 hours for activation.</li>}
+                {health.keyCounts.suspended > 0 && <li>{health.keyCounts.suspended} key(s) are suspended.</li>}
+                {health.sessionsOnTerminalKeys > 0 && <li>{health.sessionsOnTerminalKeys} device session(s) are still active on revoked or expired keys.</li>}
+                {health.unavailable24h > 0 && <li>{health.unavailable24h} validation(s) reported a service outage in the last 24 hours.</li>}
+                {health.deviceLimit24h > 0 && <li>{health.deviceLimit24h} validation(s) hit a device limit in the last 24 hours.</li>}
+                {health.invalid24h > 0 && <li>{health.invalid24h} validation(s) were rejected as invalid in the last 24 hours.</li>}
+                {health.unresolvedAlerts.map((alert) => <li key={alert.id}>{alert.title}</li>)}
+              </ul>
+            )}
+            {health.truncated && (
+              <p className="text-xs text-discord-warning">
+                This server exceeded a live-panel row limit. The visible counts
+                cover {health.sampledKeys} of {health.totalKeys} keys and must not
+                be treated as whole-server health.
+              </p>
+            )}
+          </div>
+        ) : null}
+      </section>
 
       {/* Search */}
       <div className="flex gap-2">

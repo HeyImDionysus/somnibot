@@ -15,7 +15,11 @@ import {
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import { createLogger } from '@somnibot/shared';
-import { raiseOwnerAlert, resolveOwnerAlert } from '../../services/alert-service.js';
+import {
+  raiseOwnerAlert,
+  resolveOwnerAlert,
+  resolveOwnerAlertWithStatus,
+} from '../../services/alert-service.js';
 import {
   applyBrand,
   BRAND_KIT_COLUMNS,
@@ -63,6 +67,15 @@ const _degradedNotified = new Map<string, number>();
 // wipes it. One cheap resolveOwnerAlert (usually 0 open rows) per guild per
 // process lifetime closes rows raised before a restart.
 const _bootRecoveryDone = new Set<string>();
+const _deliveryDegraded = new Set<string>();
+const _deliveryAlerted = new Set<string>();
+const _deliveryRecoveryChecked = new Set<string>();
+// Bounds the durable-row + ping retries while the owner notice remains
+// undelivered (e.g. alert channel briefly unavailable): one attempt per
+// guild per minute, with the alert-service's own 5-minute ping throttle on
+// top. The row insert itself dedupes on the partial unique index.
+const DELIVERY_ALERT_RETRY_MS = 60_000;
+const _deliveryAlertRetryAt = new Map<string, number>();
 
 /** Shallow value-equality for the audited config fields. */
 function configsEqual(a: MessageLogConfig, b: MessageLogConfig): boolean {
@@ -231,10 +244,82 @@ function alreadyPosted(key: string): boolean {
 // permissions) since retrying cannot succeed.
 const SEND_RETRY_DELAYS_MS = [250, 500, 1000];
 
-async function sendLogEmbed(logChannel: TextChannel, embed: EmbedBuilder): Promise<boolean> {
+async function notifyDeliveryFailure(
+  client: SomniClient,
+  guildId: string,
+  channelId: string,
+  error: string,
+): Promise<void> {
+  if (_deliveryAlerted.has(guildId)) return;
+  if (
+    _deliveryDegraded.has(guildId)
+    && Date.now() < (_deliveryAlertRetryAt.get(guildId) ?? 0)
+  ) {
+    return;
+  }
+  _deliveryAlertRetryAt.set(guildId, Date.now() + DELIVERY_ALERT_RETRY_MS);
+  if (!_deliveryDegraded.has(guildId)) {
+    _deliveryDegraded.add(guildId);
+    client.eventBus.emit('message_log.delivery_failed', guildId, { channelId, error });
+  }
+  const result = await raiseOwnerAlert(client.supabase, guildId, {
+    alertType: 'message_log_delivery_failed',
+    severity: 'warning',
+    title: 'Message-log delivery failed',
+    message:
+      `SomniBot could not deliver edit/delete records to channel ${channelId} (${error}). ` +
+      'The configured log channel and bot permissions need attention.',
+    channelMessage:
+      'Message-log delivery is failing. Check the configured log channel and the bot permissions; details are on the dashboard Alerts page.',
+    metadata: { channel_id: channelId, error },
+    client,
+  });
+  // Latch only when BOTH halves are durable: the notice was delivered AND
+  // the alert row exists (fresh insert or 23505 dedupe). A delivered ping
+  // whose row insert transiently failed used to latch, leaving the outage
+  // with no durable dashboard alert forever; a durable row whose ping failed
+  // equally keeps retrying under the throttles above.
+  if (result.delivered && (result.inserted || result.insertErrorCode === '23505')) {
+    _deliveryAlerted.add(guildId);
+  }
+}
+
+async function noticeDeliveryRecovered(client: SomniClient, guildId: string): Promise<void> {
+  const firstSuccessThisBoot = !_deliveryRecoveryChecked.has(guildId);
+  if (!_deliveryDegraded.has(guildId) && !firstSuccessThisBoot) return;
+  const resolution = await resolveOwnerAlertWithStatus(
+    client.supabase,
+    guildId,
+    'message_log_delivery_failed',
+    undefined,
+    {
+      client,
+      notice: 'Message-log delivery recovered — edit/delete records are reaching the configured channel again.',
+    },
+  );
+  if (!resolution.succeeded) return;
+  _deliveryRecoveryChecked.add(guildId);
+  _deliveryDegraded.delete(guildId);
+  _deliveryAlerted.delete(guildId);
+  _deliveryAlertRetryAt.delete(guildId);
+}
+
+async function sendLogEmbed(
+  client: SomniClient,
+  guildId: string,
+  logChannel: TextChannel,
+  embed: EmbedBuilder,
+): Promise<boolean> {
   for (let attempt = 0; attempt <= SEND_RETRY_DELAYS_MS.length; attempt++) {
     try {
       await logChannel.send({ embeds: [embed] });
+      try {
+        await noticeDeliveryRecovered(client, guildId);
+      } catch (recoveryError) {
+        log.error('Failed to reconcile recovered message-log delivery:', {
+          error: String(recoveryError),
+        });
+      }
       return true;
     } catch (err) {
       const status = (err as { status?: number } | undefined)?.status;
@@ -242,6 +327,7 @@ async function sendLogEmbed(logChannel: TextChannel, embed: EmbedBuilder): Promi
       const transient = status === undefined || status === 429 || status >= 500;
       if (!transient || attempt === SEND_RETRY_DELAYS_MS.length) {
         log.error('Failed to post message-log embed:', { error: String(err), status, attempt });
+        await notifyDeliveryFailure(client, guildId, logChannel.id, String(err));
         return false;
       }
       await new Promise((resolve) => setTimeout(resolve, SEND_RETRY_DELAYS_MS[attempt]));
@@ -270,7 +356,15 @@ export async function logMessageEdit(
   if (config.message_log_ignored_channel_ids.includes(newMessage.channel.id)) return;
 
   const logChannel = newMessage.guild.channels.cache.get(config.message_log_channel_id) as TextChannel | undefined;
-  if (!logChannel) return;
+  if (!logChannel) {
+    await notifyDeliveryFailure(
+      client,
+      newMessage.guild.id,
+      config.message_log_channel_id,
+      'configured channel is missing or unavailable',
+    );
+    return;
+  }
 
   const oldContent = oldMessage.content || '*[Empty or uncached]*';
   const newContent = newMessage.content || '*[Empty]*';
@@ -300,7 +394,7 @@ export async function logMessageEdit(
 
   // Staff surface: brand colors, no powered-by attribution.
   applyBrand(embed, config.brandKit, { intent: 'warning', attribution: false });
-  await sendLogEmbed(logChannel, embed);
+  await sendLogEmbed(client, newMessage.guild.id, logChannel, embed);
 }
 
 /**
@@ -324,7 +418,15 @@ export async function logMessageDelete(
   if (message.channel.id === config.message_log_channel_id) return;
 
   const logChannel = message.guild.channels.cache.get(config.message_log_channel_id) as TextChannel | undefined;
-  if (!logChannel) return;
+  if (!logChannel) {
+    await notifyDeliveryFailure(
+      client,
+      message.guild.id,
+      config.message_log_channel_id,
+      'configured channel is missing or unavailable',
+    );
+    return;
+  }
 
   const content = message.content || '*[Uncached or empty message]*';
 
@@ -349,7 +451,7 @@ export async function logMessageDelete(
 
   // Staff surface: brand colors, no powered-by attribution.
   applyBrand(embed, config.brandKit, { intent: 'danger', attribution: false });
-  await sendLogEmbed(logChannel, embed);
+  await sendLogEmbed(client, message.guild.id, logChannel, embed);
 }
 
 /**
@@ -367,5 +469,8 @@ export function invalidateMessageLogCache(guildId?: string): void {
     _lastAuditedConfig.clear();
     _degradedNotified.clear();
     _bootRecoveryDone.clear();
+    _deliveryDegraded.clear();
+    _deliveryAlerted.clear();
+    _deliveryRecoveryChecked.clear();
   }
 }

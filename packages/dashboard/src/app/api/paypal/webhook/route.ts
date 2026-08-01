@@ -19,6 +19,7 @@ import { z } from 'zod';
 import { randomBytes } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { rateLimits } from '@/lib/api/rate-limit';
+import { getClientIp } from '@/lib/api/client-ip';
 import {
   SETUP_WEBHOOK_PROBE_HEADER,
   buildSetupWebhookProbeEcho,
@@ -296,7 +297,7 @@ async function resolveWebhookGuildId(
 
 export async function POST(req: NextRequest) {
   // V5 Audit P3-1: IP-level rate limit to prevent signature-verification abuse
-  const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+  const clientIp = getClientIp(req);
   const rl = await rateLimits.paypalWebhook(clientIp);
   if (rl.limited) {
     return NextResponse.json({ error: 'Too many requests' }, { status: 429 });

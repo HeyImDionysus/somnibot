@@ -37,15 +37,20 @@ import { ScheduledMessageRunner } from '../features/scheduled-messages/runner.js
 
 function chainBuilder(resolveValue: any = { data: null, error: null }) {
   const chain: any = {};
-  for (const m of ['select', 'eq', 'in', 'limit', 'order', 'maybeSingle', 'single', 'update', 'or']) {
+  for (const m of ['select', 'eq', 'in', 'limit', 'order', 'maybeSingle', 'single', 'insert', 'update', 'or']) {
     chain[m] = vi.fn().mockReturnValue(chain);
   }
   chain.then = (res: any, rej?: any) => Promise.resolve(resolveValue).then(res, rej);
   return chain;
 }
 
-function makeSupabase(schedules: any[] = [], embedConfig: any = null) {
+function makeSupabase(
+  schedules: any[] = [],
+  embedConfig: any = null,
+  claimedSendCount: number | null = (schedules[0]?.current_sends ?? 0) + 1,
+) {
   return {
+    rpc: vi.fn().mockResolvedValue({ data: claimedSendCount, error: null }),
     from: vi.fn().mockImplementation((table: string) => {
       if (table === 'scheduled_messages') {
         if (schedules.length > 0) return chainBuilder({ data: schedules, error: null });
@@ -53,6 +58,22 @@ function makeSupabase(schedules: any[] = [], embedConfig: any = null) {
       }
       if (table === 'embed_configs') {
         return chainBuilder({ data: embedConfig, error: null });
+      }
+      if (table === 'discord_operation_occurrences') {
+        return chainBuilder({
+          data: {
+            id: `occ-${Date.now()}`,
+            guild_id: 'g1',
+            operation_kind: 'scheduled_message',
+            occurrence_key: 'test',
+            status: 'claimed',
+            updated_at: '2026-07-30T12:00:00.000Z',
+            resource_id: null,
+            result: {},
+            last_error: null,
+          },
+          error: null,
+        });
       }
       return chainBuilder();
     }),
@@ -255,6 +276,102 @@ describe('ScheduledMessageRunner', () => {
 
     expect(channel.send).not.toHaveBeenCalled();
     runner.stop();
+  });
+
+  it('does not send when another occurrence consumes the final max_sends slot', async () => {
+    const channel = makeChannel();
+    const guild = makeGuild({ ch1: channel });
+    const supabase = makeSupabase([{
+      id: 'sched-race',
+      guild_id: 'g1',
+      name: 'Final Slot Race',
+      channel_id: 'ch1',
+      message: 'Test',
+      embed_config_id: null,
+      cron_expression: '* * * * *',
+      timezone: 'UTC',
+      start_date: null,
+      end_date: null,
+      max_sends: 1,
+      current_sends: 0,
+      active: true,
+      last_sent_at: null,
+    }], null, null);
+
+    const runner = new ScheduledMessageRunner(guild as any, supabase as any);
+    await (runner as any).sendMessage(
+      (await (supabase.from('scheduled_messages') as any)).data[0],
+      new Date('2026-07-30T12:00:00.000Z'),
+    );
+
+    expect(channel.send).not.toHaveBeenCalled();
+    expect(supabase.rpc).toHaveBeenCalledWith('claim_scheduled_message_send', expect.any(Object));
+  });
+
+  it('reconciles an ambiguous counter RPC commit before sending', async () => {
+    const dueAt = new Date('2026-07-30T12:00:00.000Z');
+    const channel = makeChannel();
+    const guild = makeGuild({ ch1: channel });
+    const supabase = makeSupabase();
+    supabase.rpc.mockResolvedValue({
+      data: null,
+      error: { message: 'response lost after commit' },
+    });
+    const originalFrom = supabase.from;
+    supabase.from = vi.fn((table: string) => {
+      if (table === 'scheduled_messages') {
+        return chainBuilder({
+          data: { current_sends: 4, last_sent_at: dueAt.toISOString() },
+          error: null,
+        });
+      }
+      return originalFrom(table);
+    });
+    const runner = new ScheduledMessageRunner(guild as any, supabase as any);
+
+    await (runner as any).sendMessage({
+      id: 'sched-ambiguous',
+      guild_id: 'g1',
+      name: 'Ambiguous Commit',
+      channel_id: 'ch1',
+      message: 'Test',
+      embed_config_id: null,
+    }, dueAt);
+
+    expect(channel.send).toHaveBeenCalledOnce();
+  });
+
+  it('retains the occurrence fence when an ambiguous counter commit cannot be reconciled', async () => {
+    const dueAt = new Date('2026-07-30T12:00:00.000Z');
+    const channel = makeChannel();
+    const guild = makeGuild({ ch1: channel });
+    const supabase = makeSupabase();
+    supabase.rpc.mockResolvedValue({
+      data: null,
+      error: { message: 'response lost after dispatch' },
+    });
+    const originalFrom = supabase.from;
+    supabase.from = vi.fn((table: string) => {
+      if (table === 'scheduled_messages') {
+        return chainBuilder({ data: null, error: { message: 'read unavailable' } });
+      }
+      return originalFrom(table);
+    });
+    const runner = new ScheduledMessageRunner(guild as any, supabase as any);
+
+    await (runner as any).sendMessage({
+      id: 'sched-unreconciled',
+      guild_id: 'g1',
+      name: 'Unreconciled Commit',
+      channel_id: 'ch1',
+      message: 'Test',
+      embed_config_id: null,
+    }, dueAt);
+
+    expect(channel.send).not.toHaveBeenCalled();
+    expect(supabase.from.mock.calls.filter(
+      (call: unknown[]) => call[0] === 'discord_operation_occurrences',
+    )).toHaveLength(1);
   });
 
   it('skips when channel not found', async () => {

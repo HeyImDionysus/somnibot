@@ -48,6 +48,10 @@ class MockCollection extends Map {
     for (const v of arr) result.set(v.id, v);
     return result;
   }
+  find(fn: (v: any, k: string) => boolean): any {
+    for (const [k, v] of this) if (fn(v, k)) return v;
+    return undefined;
+  }
 }
 
 function makeGuild(overrides: Record<string, any> = {}) {
@@ -59,13 +63,40 @@ function makeGuild(overrides: Record<string, any> = {}) {
   roles.set('g1', everyone);
 
   const channels = new MockCollection();
+  const createRole = vi.fn(async (opts: any) => {
+    for (const role of roles.values()) {
+      if (role.id !== 'g1' && typeof role.position === 'number') {
+        role.position += 1;
+      }
+    }
+    const role = {
+      id: `new-role-${opts.name}`,
+      name: opts.name,
+      position: 1,
+      editable: true,
+      managed: false,
+      ...opts,
+    };
+    roles.set(role.id, role);
+    return role;
+  });
 
   return {
     id: 'g1',
     roles: {
       cache: roles,
       everyone,
-      create: vi.fn(async (opts: any) => ({ id: `new-role-${opts.name}`, name: opts.name, ...opts })),
+      create: createRole,
+      fetch: vi.fn(async () => roles),
+      setPositions: vi.fn(async (updates: Array<{ role: string; position: number }>) => {
+        // Simulate Discord: apply the requested positions; unlisted roles
+        // (managed ones included) are displaced implicitly by the reorder.
+        for (const { role: id, position } of updates) {
+          const role = roles.get(id);
+          if (role) role.position = position;
+        }
+        return undefined;
+      }),
     },
     channels: {
       cache: channels,
@@ -209,9 +240,263 @@ describe('deployServerState — role creation', () => {
     expect(guild.roles.create).toHaveBeenCalledTimes(2);
     expect(guild.roles.create).toHaveBeenCalledWith(expect.objectContaining({
       name: 'Moderator',
-      color: 0x00FF00,
+      colors: { primaryColor: 0x00FF00 },
       hoist: true,
     }));
+  });
+
+  it('refreshes role positions and keeps every created role below the bot', async () => {
+    const guild = makeGuild();
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const options: DeployOptions = { cleanExisting: false, dryRun: false };
+
+    guild.roles.fetch.mockImplementationOnce(async () => {
+      guild.members.me.roles.highest.position = 3;
+      return guild.roles.cache;
+    });
+
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(guild as any, supabase, desiredState as any, options);
+
+    expect(result.success, JSON.stringify(result.errors)).toBe(true);
+    // Preflight + pre-placement + post-placement outcome verification.
+    expect(guild.roles.fetch).toHaveBeenCalledTimes(3);
+    expect(guild.roles.setPositions).toHaveBeenCalledWith([
+      { role: 'new-role-Member', position: 1 },
+      { role: 'new-role-Admin', position: 2 },
+    ]);
+    expect(guild.roles.fetch.mock.invocationCallOrder[0])
+      .toBeLessThan(guild.roles.setPositions.mock.invocationCallOrder[0]);
+  });
+
+  it('places newly deployed staff above surviving ordinary member roles', async () => {
+    const guild = makeGuild();
+    guild.roles.cache.set('surviving-member', {
+      id: 'surviving-member',
+      name: 'Existing Member',
+      position: 5,
+      managed: false,
+      editable: true,
+    });
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: false, dryRun: false },
+    );
+
+    expect(result.success, JSON.stringify(result.errors)).toBe(true);
+    expect(guild.roles.setPositions).toHaveBeenCalledWith([
+      { role: 'new-role-Member', position: 8 },
+      { role: 'new-role-Admin', position: 9 },
+    ]);
+  });
+
+  it('ignores a managed role far below the target band even after creation (round 13 P1)', async () => {
+    // Preflight scopes the barrier scan to the target band [botHighest - N,
+    // botHighest). The post-create check compared against the roles' initial
+    // bottom-of-list creation positions instead, so a low integration role
+    // that PASSED preflight failed the deployment after roles were already
+    // created (and, with cleanExisting, after deletions).
+    const guild = makeGuild();
+    guild.roles.cache.set('managed-low', {
+      id: 'managed-low',
+      name: 'Integration Low',
+      position: 2,
+      managed: true,
+      editable: false,
+    });
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: false, dryRun: false },
+    );
+
+    expect(result.success, JSON.stringify(result.errors)).toBe(true);
+    expect(guild.roles.setPositions).toHaveBeenCalledWith([
+      { role: 'new-role-Member', position: 8 },
+      { role: 'new-role-Admin', position: 9 },
+    ]);
+  });
+
+  it('clean-existing deploy proceeds past a managed survivor and raises the created role above it (round 26 P1)', async () => {
+    // Managed integration role at 2, deletable padding at 3..8, bot at 10,
+    // one desired role. Round 15 projected the post-clean collapse and
+    // REJECTED this deploy up front — but managed roles are not immovable:
+    // raising the created role displaces the survivor implicitly, so the
+    // hierarchy lands and the preflight rejection only broke deployments in
+    // guilds that contain any other bot's role.
+    const guild = makeGuild();
+    guild.roles.cache.set('managed-low', {
+      id: 'managed-low',
+      name: 'Integration Low',
+      position: 2,
+      managed: true,
+      editable: false,
+    });
+    for (let position = 3; position <= 8; position++) {
+      const id = `old-role-${position}`;
+      guild.roles.cache.set(id, {
+        id,
+        name: `Old ${position}`,
+        position,
+        managed: false,
+        editable: true,
+        delete: vi.fn(async () => {
+          guild.roles.cache.delete(id);
+        }),
+      });
+    }
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 0 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: true, dryRun: false },
+    );
+
+    expect(result.success, JSON.stringify(result.errors)).toBe(true);
+    expect(guild.roles.create).toHaveBeenCalledTimes(1);
+    expect(guild.roles.setPositions).toHaveBeenCalledWith([
+      { role: 'new-role-Admin', position: 9 },
+    ]);
+    // The managed survivor was displaced beneath the deployed role, not
+    // treated as a barrier.
+    expect(
+      (guild.roles.cache.get('new-role-Admin') as { position: number }).position,
+    ).toBe(9);
+  });
+
+  it('raises created roles above an in-band managed role instead of aborting (round 26 P1)', async () => {
+    const guild = makeGuild();
+    guild.roles.cache.set('managed-member', {
+      id: 'managed-member',
+      name: 'Integration Member',
+      position: 9,
+      managed: true,
+      editable: false,
+    });
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: false, dryRun: false },
+    );
+
+    expect(result.success, JSON.stringify(result.errors)).toBe(true);
+    expect(guild.roles.setPositions).toHaveBeenCalledWith([
+      { role: 'new-role-Member', position: 8 },
+      { role: 'new-role-Admin', position: 9 },
+    ]);
+  });
+
+  it('reports honestly when a role Discord did not displace remains inside the band', async () => {
+    // Outcome verification: if the reorder does NOT actually raise the
+    // created roles above an interloper, step 4 must fail loudly instead of
+    // claiming success with an ineffective hierarchy.
+    const guild = makeGuild();
+    guild.roles.cache.set('managed-member', {
+      id: 'managed-member',
+      name: 'Integration Member',
+      position: 8,
+      managed: true,
+      editable: false,
+    });
+    (guild.roles as { setPositions: unknown }).setPositions =
+      vi.fn(async () => undefined);
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 0 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: false, dryRun: false },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors.some((error) =>
+      error.error.includes('remains between the bot and the deployed roles'),
+    )).toBe(true);
+  });
+
+  it('dry run succeeds with an in-band managed role and mutates nothing (round 26 P1)', async () => {
+    // Managed roles are displaced by the reorder, not barriers — a dry run
+    // must not reject the very deployments the live path can complete.
+    const guild = makeGuild();
+    guild.roles.cache.set('managed-member', {
+      id: 'managed-member',
+      name: 'Integration Member',
+      position: 9,
+      managed: true,
+      editable: false,
+    });
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: true, dryRun: true },
+    );
+
+    expect(result.success, JSON.stringify(result.errors)).toBe(true);
+    expect(guild.roles.everyone.setPermissions).not.toHaveBeenCalled();
+    expect(guild.roles.create).not.toHaveBeenCalled();
+    expect(guild.roles.setPositions).not.toHaveBeenCalled();
   });
 });
 
@@ -283,5 +568,40 @@ describe('deployServerState — result structure', () => {
     expect(Array.isArray(result.actions)).toBe(true);
     expect(Array.isArray(result.errors)).toBe(true);
     expect(Array.isArray(result.idMappings)).toBe(true);
+  });
+});
+
+describe('deployServerState — managed roles OUTSIDE the target band are not barriers', () => {
+  it('deploys despite a managed role parked far below the target positions', async () => {
+    // Review 3689700442 (P1): bot at 10 deploying 2 roles targets [8,10). A
+    // managed integration role at position 2 cannot interfere with that
+    // placement, but the preflight treated ANY managed role below the bot as
+    // a barrier and aborted the whole deployment — dry-run included.
+    const guild = makeGuild();
+    guild.roles.cache.set('managed-low', {
+      id: 'managed-low',
+      name: 'Music Bot',
+      position: 2,
+      managed: true,
+      editable: false,
+    });
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: false, dryRun: true },
+    );
+
+    expect(result.errors.some((error) => error.error.includes('managed role'))).toBe(false);
+    expect(result.success).toBe(true);
   });
 });

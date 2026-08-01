@@ -11,6 +11,7 @@
  * After each snapshot, evaluates alert thresholds via AlertManager.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { BOOT_ID } from '../../services/boot-identity.js';
 import { randomInt } from 'node:crypto';
 import type { SomniClient } from '../../client.js';
 import { AlertManager, type AlertThresholds } from './alert-manager.js';
@@ -158,6 +159,10 @@ export class DiagnosticsService {
         automation_count: automationCount,
         discord_ws_ping: this.client.ws.ping,
         snapshot_at: new Date().toISOString(),
+        // Pairs with guild_runtime_features.boot_id: health rows are written
+        // per guild (heartbeats only for the primary), so THIS writer must
+        // also identify its boot or every non-primary guild fails open.
+        boot_id: BOOT_ID,
       };
 
       // Upsert by (guild_id, type) — composite PK supports multiple diagnostic types

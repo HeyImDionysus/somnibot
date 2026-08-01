@@ -16,7 +16,7 @@ export default function PrivacyPolicyPage() {
   return (
     <main className="mx-auto max-w-3xl px-6 py-16 text-gray-200">
       <h1 className="mb-2 text-3xl font-bold text-white">Privacy Policy</h1>
-      <p className="mb-10 text-sm text-gray-400">Last updated: May 2026</p>
+      <p className="mb-10 text-sm text-gray-400">Last updated: July 2026</p>
 
       <Section title="Who We Are">
         <p>
@@ -99,8 +99,15 @@ export default function PrivacyPolicyPage() {
             configurable period (default 30 days). Permanent bans are retained for server safety.
           </li>
           <li>
-            <strong className="text-white">Audit logs</strong> — retained for 90 days, then
-            automatically pruned.
+            <strong className="text-white">Audit logs</strong> — never hard-deleted. Identity and
+            payload details are anonymized after the guild&apos;s configured retention period
+            (with a 30-day minimum), while the action, timestamp, and outcome remain for security
+            forensics.
+          </li>
+          <li>
+            <strong className="text-white">License validations</strong> — validation outcomes,
+            timestamps, and anonymized key/product linkage remain as a permanent forensic ledger.
+            IP address, device fingerprint, and app version are scrubbed after 60 days.
           </li>
           <li>
             <strong className="text-white">Portal sessions</strong> — automatically deleted after
@@ -122,8 +129,11 @@ export default function PrivacyPolicyPage() {
           </li>
           <li>
             <strong className="text-white">Delete your data</strong> — use the{' '}
-            <Code>/forgetme</Code> command to permanently and irreversibly delete all your personal
-            data from a server. Tickets and audit logs are anonymized to preserve server integrity.
+            <Code>/forgetme</Code> command to permanently erase or anonymize your account data from
+            a server. Tickets and audit logs are anonymized to preserve server integrity.
+            License-validation outcomes and timestamps remain as a forensic ledger; associated
+            IP/device/app details are scrubbed after 60 days. The command shows these limits before
+            you confirm.
           </li>
           <li>
             <strong className="text-white">Contact us</strong> — email{' '}

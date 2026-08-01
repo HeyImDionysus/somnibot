@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 225 migration files in packages/supabase/migrations/
+ * Source: 244 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -427,6 +427,7 @@ export interface DbGuildConfig {
   ws_ping_alert_threshold_ms: number;
   webhook_error_rate_threshold: number;
   diagnostics_guided_mode: boolean;
+  automation_mass_action_threshold: number;
 }
 
 export interface DbInstanceSettings {
@@ -514,6 +515,8 @@ export interface DbGuildLiveState {
   onboarding_prompts: Record<string, unknown>[];
   snapshot_at: string;
   members: Json | null;
+  snapshot_version: number;
+  bot_permissions: string | null;
 }
 
 // — Reaction Roles —
@@ -642,6 +645,7 @@ export interface DbTicket {
   updated_at: string;
   feedback_rating: number | null;
   feedback_comment: string | null;
+  creation_occurrence_id: string | null;
 }
 
 export interface DbTicketTranscript {
@@ -701,6 +705,7 @@ export interface DbAutomationExecution {
   duration_ms: number | null;
   created_at: string;
   occurrence_id: string | null;
+  actions_started: boolean;
 }
 
 export interface DbCustomCommand {
@@ -820,6 +825,7 @@ export interface DbActiveTempChannel {
   hub_id: string | null;
   owner_id: string;
   created_at: string;
+  creation_occurrence_id: string | null;
 }
 
 export interface DbStatsChannel {
@@ -834,6 +840,7 @@ export interface DbStatsChannel {
   last_updated_at: string | null;
   created_at: string;
   updated_at: string;
+  pending_cleanup_channel_ids: Json;
 }
 
 // — Scheduled Messages —
@@ -984,6 +991,7 @@ export interface DbOrder {
   delivery_type_snapshot: string | null;
   checkout_approval_url: string | null;
   commerce_compatible_child_status: string | null;
+  download_required_snapshot: boolean | null;
 }
 
 // — Commerce — Licensing —
@@ -1167,6 +1175,7 @@ export interface DbBotDiagnostics {
   snapshot_at: string;
   type: string;
   data: Record<string, unknown> | null;
+  boot_id: string | null;
 }
 
 export interface DbBotActionQueue {
@@ -1471,6 +1480,37 @@ export interface DbAppeals {
   expires_at: string | null;
 }
 
+export interface DbAutomationMassActionHolds {
+  id: string;
+  guild_id: string;
+  automation_id: string;
+  execution_id: string | null;
+  occurrence_id: string;
+  status: 'held' | 'approved' | 'executing' | 'completed' | 'rejected' | 'failed';
+  member_ids: string[];
+  member_count: number;
+  threshold: number;
+  trigger_event: string;
+  triggered_by: string;
+  action_snapshot: Json;
+  context_snapshot: Json;
+  notification_message_id: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  rejected_by: string | null;
+  rejected_at: string | null;
+  execution_started_at: string | null;
+  completed_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+  execution_owner_token: string | null;
+  execution_lease_expires_at: string | null;
+  progress_executed: number;
+  progress_failed: number;
+  progress_errors: Json;
+}
+
 export interface DbButtonRoles {
   id: string;
   guild_id: string | null;
@@ -1531,6 +1571,19 @@ export interface DbCommerceCheckoutDeactivationProofs {
   proof_kind: 'provider_cancelled' | 'provider_expired' | 'approval_link_not_exposed' | 'operator_verified_unpayable';
   proof_reference: string;
   proved_at: string;
+}
+
+export interface DbCommerceDownloadDeliveries {
+  id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  file_id: string | null;
+  file_name_snapshot: string | null;
+  entitlement_id: string | null;
+  order_id: string | null;
+  delivery_nonce_hash: string | null;
+  delivered_at: string;
 }
 
 export interface DbCommerceFulfillmentClaims {
@@ -1771,6 +1824,20 @@ export interface DbCommerceTempRoleMigrationIssues {
   issue_type: string;
   resolved_at: string | null;
   created_at: string;
+}
+
+export interface DbDiscordOperationOccurrences {
+  id: string;
+  guild_id: string;
+  operation_kind: 'scheduled_message' | 'temp_channel' | 'ticket';
+  occurrence_key: string;
+  status: 'claimed' | 'completed' | 'failed';
+  resource_id: string | null;
+  result: Json;
+  last_error: string | null;
+  claimed_at: string;
+  completed_at: string | null;
+  updated_at: string;
 }
 
 export interface DbEconomyAchievementDefs {
@@ -2222,6 +2289,13 @@ export interface DbFeatureEmbedOverrides {
   thumbnail_url: string | null;
   author_name: string | null;
   updated_at: string;
+}
+
+export interface DbGuildRuntimeFeatures {
+  guild_id: string;
+  feature: string;
+  boot_id: string;
+  started_at: string;
 }
 
 export interface DbGuildTicketCounters {

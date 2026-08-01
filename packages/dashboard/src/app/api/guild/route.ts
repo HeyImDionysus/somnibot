@@ -16,15 +16,16 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { dbError } from '@/lib/api/response';
 import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
+import { discordEmojiSchema, discordSnowflakeSchema } from '@/lib/api/discord-values';
 
 const guildConfigPatchSchema = z.object({
-  mod_log_channel_id: z.string().nullable().optional(),
-  welcome_channel_id: z.string().nullable().optional(),
-  goodbye_channel_id: z.string().nullable().optional(),
-  level_up_channel_id: z.string().nullable().optional(),
+  mod_log_channel_id: discordSnowflakeSchema.nullable().optional(),
+  welcome_channel_id: discordSnowflakeSchema.nullable().optional(),
+  goodbye_channel_id: discordSnowflakeSchema.nullable().optional(),
+  level_up_channel_id: discordSnowflakeSchema.nullable().optional(),
   music_enabled: z.boolean().optional(),
   music_default_volume: z.number().int().min(0).max(150).optional(),
-  dj_role_id: z.string().nullable().optional(),
+  dj_role_id: discordSnowflakeSchema.nullable().optional(),
   stats_enabled: z.boolean().optional(),
   temp_channels_enabled: z.boolean().optional(),
   scheduled_messages_enabled: z.boolean().optional(),
@@ -40,27 +41,27 @@ const guildConfigPatchSchema = z.object({
   team_invitation_expiry_ms: z.number().int().min(3_600_000).max(2_592_000_000).optional(),
   // Fraud notification routing (migration 20260723120100). The bot mirrors
   // critical fraud signals to this channel and optionally DMs the owner.
-  fraud_staff_alert_channel_id: z.string().nullable().optional(),
+  fraud_staff_alert_channel_id: discordSnowflakeSchema.nullable().optional(),
   fraud_owner_dm_on_critical: z.boolean().optional(),
   diagnostics_guided_mode: z.boolean().optional(),
   memory_alert_threshold_mb: z.number().int().min(64).max(16384).optional(),
   ws_ping_alert_threshold_ms: z.number().int().min(50).max(10000).optional(),
   webhook_error_rate_threshold: z.number().min(0).max(1).optional(),
   // V17: New fields
-  no_xp_role_id: z.string().nullable().optional(),
+  no_xp_role_id: discordSnowflakeSchema.nullable().optional(),
   anti_raid_enabled: z.boolean().optional(),
   anti_raid_join_threshold: z.number().int().min(2).max(100).optional(),
   anti_raid_join_window_seconds: z.number().int().min(5).max(120).optional(),
   anti_raid_account_age_days: z.number().int().min(0).max(365).optional(),
   anti_raid_action: z.enum(['kick', 'ban', 'lockdown']).optional(),
-  anti_raid_log_channel_id: z.string().nullable().optional(),
+  anti_raid_log_channel_id: discordSnowflakeSchema.nullable().optional(),
   starboard_enabled: z.boolean().optional(),
-  starboard_channel_id: z.string().nullable().optional(),
+  starboard_channel_id: discordSnowflakeSchema.nullable().optional(),
   starboard_threshold: z.number().int().min(1).max(100).optional(),
-  starboard_emoji: z.string().max(64).optional(),
+  starboard_emoji: discordEmojiSchema.optional(),
   starboard_self_star: z.boolean().optional(),
   message_log_enabled: z.boolean().optional(),
-  message_log_channel_id: z.string().nullable().optional(),
+  message_log_channel_id: discordSnowflakeSchema.nullable().optional(),
   // V26: Commerce toggles
   store_enabled: z.boolean().optional(),
   paypal_enabled: z.boolean().optional(),
@@ -110,7 +111,7 @@ const guildConfigPatchSchema = z.object({
   economy_pay_tax_pct: z.number().int().min(0).max(50).optional(),
   economy_max_wallet: z.number().int().min(0).optional(),
   economy_max_bank: z.number().int().min(0).optional(),
-  economy_log_channel_id: z.string().nullable().optional(),
+  economy_log_channel_id: discordSnowflakeSchema.nullable().optional(),
 
   // V31 PR #43 — Gathering, Crafting, Farming
   economy_gathering_enabled: z.boolean().optional(),
@@ -145,7 +146,7 @@ const guildConfigPatchSchema = z.object({
   // Scheduled / hosted trivia cadence
   economy_trivia_schedule_enabled: z.boolean().optional(),
   economy_trivia_schedule_interval_minutes: z.number().int().min(5).max(10080).optional(),
-  economy_trivia_schedule_channel_id: z.string().nullable().optional(),
+  economy_trivia_schedule_channel_id: discordSnowflakeSchema.nullable().optional(),
   economy_trivia_schedule_category: z.string().max(64).nullable().optional(),
   economy_trivia_schedule_difficulty: z.enum(['easy', 'medium', 'hard']).nullable().optional(),
   // PR #45 — Mini-Games

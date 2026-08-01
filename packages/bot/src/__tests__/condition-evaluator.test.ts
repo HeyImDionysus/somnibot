@@ -27,8 +27,14 @@ function makeSupabase(mockData: Record<string, any> = {}) {
   chainable.select = () => chainable;
   chainable.eq = () => chainable;
   chainable.limit = () => chainable;
-  chainable.maybeSingle = async () => ({ data: mockData.data ?? null, error: null });
-  chainable.single = async () => ({ data: mockData.data ?? null, error: null });
+  chainable.maybeSingle = async () => ({
+    data: mockData.data ?? null,
+    error: mockData.error ?? null,
+  });
+  chainable.single = async () => ({
+    data: mockData.data ?? null,
+    error: mockData.error ?? null,
+  });
   return chainable;
 }
 
@@ -73,6 +79,22 @@ describe('evaluateConditions (AND logic)', () => {
       { type: 'has_role', config: { value: 'role-a' } },
     ];
     expect(await evaluateConditions(conditions, makeCtx())).toBe(false);
+  });
+});
+
+describe('database-backed conditions', () => {
+  it('throws instead of treating an unavailable level read as level zero', async () => {
+    await expect(evaluateConditions(
+      [{ type: 'min_level', config: { value: 5 } }],
+      makeCtx({ supabase: makeSupabase({ error: { message: 'levels unavailable' } }) }),
+    )).rejects.toThrow('Condition data unavailable for min_level');
+  });
+
+  it('throws instead of treating an unavailable customer read as missing entitlement', async () => {
+    await expect(evaluateConditions(
+      [{ type: 'missing_entitlement', config: { value: 'product-1' } }],
+      makeCtx({ supabase: makeSupabase({ error: { message: 'customers unavailable' } }) }),
+    )).rejects.toThrow('Condition data unavailable for missing_entitlement');
   });
 });
 

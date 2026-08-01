@@ -9,6 +9,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import Link from 'next/link';
 // Subpath import: the shared BARREL (and even ./constants) transitively pulls
 // node:crypto (constants/levels.ts), which the Next client bundle rejects.
 // constants/brand is dependency-free and exported as its own entry.
@@ -16,6 +17,11 @@ import { colorToHex, SOMNI_PALETTE } from '@somnibot/shared/constants/brand';
 import { useToast } from '@/components/shared/toast';
 import { useUnsavedWarning } from '@/hooks/use-unsaved-warning';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
+import { fetchOptionalJsonArray } from '@/lib/optional-json';
+import {
+  DiscordEmbedPreview,
+  type DiscordEmbedPreviewField,
+} from '@/components/discord/discord-embed-preview';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -45,13 +51,20 @@ const VOICE_PRESETS: Array<{ value: VoicePreset; label: string; description: str
   { value: 'playful', label: 'Playful', description: 'Cheeky, emoji-forward, and fun.' },
 ];
 
-/** Sample member-facing line per preset for the live preview. */
-const VOICE_SAMPLES: Record<VoicePreset, (brand: string) => string> = {
-  default: (brand) => `⚠️ ${brand}'s store is temporarily unavailable — please try again in a moment.`,
-  professional: (brand) => `${brand}'s store is temporarily unavailable. Please try again shortly.`,
-  friendly: (brand) => `⚠️ Oops — ${brand}'s store is taking a quick break. Please try again in a moment!`,
-  playful: (brand) => `😴 ${brand}'s store is napping — poke it again in a moment!`,
-};
+interface SavedEmbed {
+  id: string;
+  name: string;
+  title: string | null;
+  description: string | null;
+  color: number | null;
+  fields: DiscordEmbedPreviewField[];
+  image_url: string | null;
+  thumbnail_url: string | null;
+  footer_text: string | null;
+  author_name: string | null;
+  author_icon_url: string | null;
+  include_timestamp: boolean;
+}
 
 /** Parse a '#rrggbb' hex string to a 24-bit int. */
 function hexToInt(hex: string): number {
@@ -68,18 +81,32 @@ export default function BrandingPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [savedEmbeds, setSavedEmbeds] = useState<SavedEmbed[]>([]);
+  const [selectedEmbedId, setSelectedEmbedId] = useState<string>('');
   useUnsavedWarning(dirty);
 
   const fetchConfig = useCallback(async () => {
     try {
-      const res = await fetch('/api/branding');
-      const json = await res.json();
-      if (json.success) {
-        setConfig({ ...DEFAULT_CONFIG, ...json.data });
+      const brandingRes = await fetch('/api/branding');
+      const brandingJson = await brandingRes.json();
+      if (brandingRes.ok && brandingJson.success) {
+        setConfig({ ...DEFAULT_CONFIG, ...brandingJson.data });
       } else {
-        setError(json.error || 'Failed to load branding');
-        toast({ title: json.error || 'Failed to load branding', variant: 'error' });
+        const message = brandingJson.error || 'Failed to load branding';
+        setError(message);
+        toast({ title: message, variant: 'error' });
+        return;
       }
+
+      // Saved embeds are optional preview material. Fetch and parse them only
+      // after the authoritative branding config has been applied so a proxy or
+      // malformed optional response can never leave an editable defaults form.
+      // Release the editor before awaiting this secondary request: an optional
+      // preview endpoint that stalls must not block authoritative branding.
+      setLoading(false);
+      const embeds = await fetchOptionalJsonArray<SavedEmbed>('/api/embeds');
+      setSavedEmbeds(embeds);
+      setSelectedEmbedId((current) => current || embeds[0]?.id || '');
     } catch {
       setError('Failed to load branding');
     } finally {
@@ -137,6 +164,7 @@ export default function BrandingPage() {
   const primaryHex = colorToHex(config.brand_primary_color ?? SOMNI_PALETTE.HOT_PINK);
   const accentHex = colorToHex(config.brand_accent_color ?? SOMNI_PALETTE.CYAN);
   const previewName = config.store_brand_name?.trim() || 'Your Server';
+  const selectedEmbed = savedEmbeds.find((embed) => embed.id === selectedEmbedId) ?? savedEmbeds[0];
 
   return (
     <div className="mx-auto max-w-3xl space-y-6 p-6">
@@ -295,32 +323,51 @@ export default function BrandingPage() {
       <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
         <h2 className="text-lg font-semibold text-discord-text-primary">Live Preview</h2>
         <p className="mt-1 text-sm text-discord-text-muted">
-          How a branded embed will look in Discord.
+          An actual saved member-facing embed with the unsaved brand color and attribution applied.
         </p>
 
-        {/* Embed mock */}
-        <div className="mt-4 flex overflow-hidden rounded-md bg-discord-bg-tertiary">
-          <div className="w-1 shrink-0" style={{ backgroundColor: primaryHex }} />
-          <div className="min-w-0 flex-1 p-3">
-            <p className="text-sm font-semibold text-discord-text-primary">{previewName}</p>
-            <p className="mt-1 text-sm text-discord-text-secondary">
-              Browse our products below. Click &quot;Buy&quot; to purchase!
+        {savedEmbeds.length > 0 && selectedEmbed ? (
+          <>
+            <label className="mt-4 block text-xs font-medium text-discord-text-muted" htmlFor="preview-embed">
+              Saved embed
+            </label>
+            <select
+              id="preview-embed"
+              value={selectedEmbed.id}
+              onChange={(event) => setSelectedEmbedId(event.target.value)}
+              className="mb-3 mt-1 w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
+            >
+              {savedEmbeds.map((embed) => (
+                <option key={embed.id} value={embed.id}>{embed.name}</option>
+              ))}
+            </select>
+            <DiscordEmbedPreview
+              embed={{
+                title: selectedEmbed.title,
+                description: selectedEmbed.description,
+                color: primaryHex,
+                fields: selectedEmbed.fields,
+                imageUrl: selectedEmbed.image_url,
+                thumbnailUrl: selectedEmbed.thumbnail_url,
+                footerText: selectedEmbed.footer_text,
+                authorName: selectedEmbed.author_name || previewName,
+                authorIconUrl: selectedEmbed.author_icon_url,
+                includeTimestamp: selectedEmbed.include_timestamp,
+              }}
+              footerSuffix={config.store_show_powered_by ? 'Powered by SomniBot' : null}
+            />
+          </>
+        ) : (
+          <div className="mt-4 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary p-4">
+            <p className="text-sm font-medium text-discord-text-primary">No saved embed to preview</p>
+            <p className="mt-1 text-sm text-discord-text-muted">
+              Create the member-facing message first; this page will preview its real content.
             </p>
-            {config.store_show_powered_by && (
-              <p className="mt-2 text-xs text-discord-text-muted">Powered by SomniBot</p>
-            )}
+            <Link href="/embeds" className="mt-3 inline-block text-sm font-medium text-discord-accent hover:underline">
+              Create an embed
+            </Link>
           </div>
-        </div>
-
-        {/* Accent embed mock */}
-        <div className="mt-2 flex overflow-hidden rounded-md bg-discord-bg-tertiary">
-          <div className="w-1 shrink-0" style={{ backgroundColor: accentHex }} />
-          <div className="min-w-0 flex-1 p-3">
-            <p className="text-sm text-discord-text-secondary">
-              {VOICE_SAMPLES[config.brand_voice_preset](previewName)}
-            </p>
-          </div>
-        </div>
+        )}
 
         {/* Swatches */}
         <div className="mt-4 flex items-center gap-4">

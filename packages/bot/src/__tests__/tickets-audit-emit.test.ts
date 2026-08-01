@@ -18,13 +18,15 @@ vi.mock('../features/branding/brand-kit.js', () => ({
   resolveBrandKit: vi.fn(async () => ({ primaryColor: 0x1, accentColor: 0x2, poweredByAttribution: null })),
 }));
 
-import { createTicket } from '../features/tickets/ticket-service.js';
+import { createTicket, reconcileTicketOrphanChannels } from '../features/tickets/ticket-service.js';
 import { generateTranscript } from '../features/tickets/transcript-generator.js';
 
 function makeCreateSupa({ ticketRow = null as any, ticketError = null as any } = {}) {
   const alertsInsert = vi.fn(async () => ({ error: null }));
   const tChain: any = {};
-  for (const m of ['select', 'eq', 'in', 'insert', 'update', 'order', 'limit']) tChain[m] = vi.fn(() => tChain);
+  for (const m of ['select', 'eq', 'in', 'insert', 'update', 'delete', 'order', 'limit', 'contains', 'lt', 'gt', 'not']) {
+    tChain[m] = vi.fn(() => tChain);
+  }
   tChain.single = vi.fn(async () => ({ data: ticketRow, error: ticketError }));
   tChain.maybeSingle = vi.fn(async () => ({ data: ticketRow, error: ticketError }));
   tChain.then = (res: Function) => res({ data: [], error: null, count: 0 });
@@ -84,6 +86,422 @@ describe('ticket creation failure observability', () => {
     expect(supa._alertsInsert).toHaveBeenCalledWith(
       expect.objectContaining({ alert_type: 'ticket_create_failed' }),
     );
+  });
+
+  it('deletes the channel and reports failure when the intro message cannot be sent', async () => {
+    const emit = vi.fn();
+    const supa = makeCreateSupa();
+    const channel = {
+      id: 'tc1',
+      send: vi.fn().mockRejectedValue(new Error('Missing Permissions')),
+      delete: vi.fn().mockResolvedValue({}),
+    };
+    const guild = makeGuild(vi.fn().mockResolvedValue(channel));
+
+    const result = await createTicket(guild, member, panel, ticketType, supa, { emit } as any);
+
+    expect(result).toEqual({ error: 'Failed to initialize ticket channel. Please try again.' });
+    expect(channel.delete).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith(
+      'ticket.create_failed',
+      'g1',
+      expect.objectContaining({ panelId: 'panel-1', stage: 'intro_send' }),
+    );
+  });
+
+  it('preserves a committed ticket when the insert response is lost', async () => {
+    const emit = vi.fn();
+    const channel = {
+      id: 'tc1',
+      send: vi.fn().mockResolvedValue({}),
+      delete: vi.fn().mockResolvedValue({}),
+    };
+    const committedTicket = {
+      id: 'ticket-1',
+      guild_id: 'g1',
+      panel_id: 'panel-1',
+      channel_id: 'tc1',
+      ticket_number: 1,
+      creator_id: 'u1',
+      status: 'open',
+      creation_occurrence_id: 'occurrence-1',
+    };
+    let ticketQuery = 0;
+    const occurrence = {
+      id: 'occurrence-1',
+      guild_id: 'g1',
+      operation_kind: 'ticket',
+      occurrence_key: 'interaction-1',
+      status: 'claimed',
+      resource_id: null,
+      result: {},
+      last_error: null,
+    };
+    const supa = {
+      from: vi.fn((table: string) => {
+        if (table === 'alerts') return { insert: vi.fn(async () => ({ error: null })) };
+        if (table === 'discord_operation_occurrences') {
+          const chain = makeCreateSupa().from('tickets');
+          chain.single = vi.fn(async () => ({ data: occurrence, error: null }));
+          // Serves BOTH the id-persist read (result) and conditional-update
+          // read-backs (id) — the claim is genuinely still claimed here.
+          chain.maybeSingle = vi.fn(async () => ({
+            data: { id: occurrence.id, result: {} },
+            error: null,
+          }));
+          return chain;
+        }
+        if (table === 'tickets') {
+          ticketQuery += 1;
+          const chain = makeCreateSupa().from('tickets');
+          if (ticketQuery === 1) {
+            chain.then = (resolve: Function) => resolve({ data: [], error: null, count: 0 });
+          } else if (ticketQuery === 2) {
+            chain.single = vi.fn(async () => ({
+              data: null,
+              error: { message: 'connection lost after commit' },
+            }));
+          } else {
+            chain.maybeSingle = vi.fn(async () => ({ data: committedTicket, error: null }));
+          }
+          return chain;
+        }
+        return makeCreateSupa().from('tickets');
+      }),
+      rpc: vi.fn(async () => ({ data: 1, error: null })),
+    } as any;
+    const guild = makeGuild(vi.fn().mockResolvedValue(channel));
+
+    const result = await createTicket(
+      guild,
+      member,
+      panel,
+      ticketType,
+      supa,
+      { emit } as any,
+      'interaction-1',
+    );
+
+    expect(result).toMatchObject({ ticket: committedTicket, channel });
+    expect(channel.delete).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith(
+      'ticket.opened',
+      'g1',
+      expect.objectContaining({ ticketId: 'ticket-1', channelId: 'tc1' }),
+    );
+  });
+
+  it('retries a transient cleanup-persist failure instead of stranding the channel', async () => {
+    // Review 3691625803: one transient DB error on the cleanup-pending write
+    // used to be swallowed — the claim stayed WITHOUT channelCleanupPending,
+    // invisible to reconcileTicketOrphanChannels forever. The write now
+    // retries; the first attempt fails here and the second must land.
+    let persistAttempts = 0;
+    let ticketQuery = 0;
+    const occurrence = {
+      id: 'occurrence-retry', guild_id: 'g1', operation_kind: 'ticket',
+      occurrence_key: 'interaction-retry', status: 'claimed',
+      resource_id: null, result: {}, last_error: null,
+    };
+    const supa = {
+      from: vi.fn((table: string) => {
+        const chain = makeCreateSupa().from('tickets');
+        if (table === 'alerts') return { insert: vi.fn(async () => ({ error: null })) };
+        if (table === 'discord_operation_occurrences') {
+          chain.single = vi.fn(async () => ({ data: occurrence, error: null }));
+          let lastPayload: any = null;
+          chain.update = vi.fn((payload: any) => { lastPayload = payload; return chain; });
+          chain.maybeSingle = vi.fn(async () => {
+            const isCleanupPending = lastPayload?.result?.channelCleanupPending === true;
+            if (!isCleanupPending) {
+              // id-persist read/write path: succeeds (claim still claimed).
+              return { data: { id: occurrence.id, result: {} }, error: null };
+            }
+            persistAttempts++;
+            lastPayload = null;
+            if (persistAttempts === 1) {
+              return { data: null, error: { message: 'transient write failure' } };
+            }
+            return { data: { id: occurrence.id }, error: null };
+          });
+          return chain;
+        }
+        if (table === 'tickets') {
+          ticketQuery++;
+          if (ticketQuery === 1) {
+            chain.then = (resolve: Function) => resolve({ data: [], error: null, count: 0 });
+          } else if (ticketQuery === 2) {
+            chain.single = vi.fn(async () => ({
+              data: null, error: { message: 'connection lost after commit' },
+            }));
+          } else {
+            chain.maybeSingle = vi.fn(async () => ({
+              data: null, error: { message: 'read replica unavailable' },
+            }));
+          }
+        }
+        return chain;
+      }),
+      rpc: vi.fn(async () => ({ data: 1, error: null })),
+    } as any;
+    const channel = {
+      id: 'tc-retry',
+      send: vi.fn().mockResolvedValue({}),
+      delete: vi.fn().mockResolvedValue({}),
+    };
+
+    const result = await createTicket(
+      makeGuild(vi.fn().mockResolvedValue(channel)),
+      member, panel, ticketType, supa, { emit: vi.fn() } as any,
+      'interaction-retry',
+    );
+
+    // The retry landed: the member still gets the honest recovery answer, and
+    // the channel is preserved for the reconciler rather than stranded.
+    expect(result).toEqual({
+      error: 'Ticket creation could not be confirmed. The channel was preserved for automatic recovery.',
+    });
+    expect(persistAttempts).toBe(2);
+    expect(channel.delete).not.toHaveBeenCalled();
+  });
+
+  it('queues durable verification when an uncertain ticket insert cannot be read back', async () => {
+    const occurrenceUpdates = vi.fn();
+    let ticketQuery = 0;
+    const occurrence = {
+      id: 'occurrence-uncertain',
+      guild_id: 'g1',
+      operation_kind: 'ticket',
+      occurrence_key: 'interaction-uncertain',
+      status: 'claimed',
+      resource_id: null,
+      result: {},
+      last_error: null,
+    };
+    const supa = {
+      from: vi.fn((table: string) => {
+        const chain = makeCreateSupa().from('tickets');
+        if (table === 'alerts') return { insert: vi.fn(async () => ({ error: null })) };
+        if (table === 'discord_operation_occurrences') {
+          chain.single = vi.fn(async () => ({ data: occurrence, error: null }));
+          chain.update = vi.fn((payload: unknown) => {
+            occurrenceUpdates(payload);
+            return chain;
+          });
+          // The occurrence in this scenario IS still `claimed`, so the
+          // hardened cleanup-pending write's conditional
+          // `.update().eq('status','claimed').select('id').maybeSingle()`
+          // matches exactly one row. Returning null here would model a
+          // DIFFERENT scenario (fence already completed/released), which
+          // the dedicated occurrence-fence suite covers fail-closed.
+          chain.maybeSingle = vi.fn(async () => ({ data: { id: occurrence.id, result: {} }, error: null }));
+          return chain;
+        }
+        if (table === 'tickets') {
+          ticketQuery++;
+          if (ticketQuery === 1) {
+            chain.then = (resolve: Function) => resolve({ data: [], error: null, count: 0 });
+          } else if (ticketQuery === 2) {
+            chain.single = vi.fn(async () => ({
+              data: null,
+              error: { message: 'connection lost after commit' },
+            }));
+          } else {
+            chain.maybeSingle = vi.fn(async () => ({
+              data: null,
+              error: { message: 'read replica unavailable' },
+            }));
+          }
+        }
+        return chain;
+      }),
+      rpc: vi.fn(async () => ({ data: 1, error: null })),
+    } as any;
+    const channel = {
+      id: 'tc-uncertain',
+      send: vi.fn().mockResolvedValue({}),
+      delete: vi.fn().mockResolvedValue({}),
+    };
+
+    const result = await createTicket(
+      makeGuild(vi.fn().mockResolvedValue(channel)),
+      member,
+      panel,
+      ticketType,
+      supa,
+      { emit: vi.fn() } as any,
+      'interaction-uncertain',
+    );
+
+    expect(result).toEqual({
+      error: 'Ticket creation could not be confirmed. The channel was preserved for automatic recovery.',
+    });
+    expect(channel.delete).not.toHaveBeenCalled();
+    expect(occurrenceUpdates).toHaveBeenCalledWith(expect.objectContaining({
+      resource_id: 'tc-uncertain',
+      result: expect.objectContaining({
+        channelCleanupPending: true,
+        verifyTicketBeforeCleanup: true,
+      }),
+    }));
+  });
+});
+
+describe('ticket orphan cleanup reconciliation', () => {
+  it('deletes a durable orphan and releases its occurrence only after confirmation', async () => {
+    const channel = { id: 'tc-orphan', delete: vi.fn().mockResolvedValue(undefined) };
+    let occurrenceReads = 0;
+    const supabase = {
+      from: vi.fn(() => {
+        occurrenceReads += 1;
+        const chain = makeCreateSupa().from('tickets');
+        chain.then = (resolve: Function) => resolve(
+          occurrenceReads === 1
+            ? {
+                data: [{
+                  id: 'occurrence-orphan',
+                  resource_id: 'tc-orphan',
+                  result: { channelCleanupPending: true },
+                }],
+                error: null,
+              }
+            : { data: null, error: null },
+        );
+        return chain;
+      }),
+    } as any;
+    const guild = {
+      id: 'g1',
+      channels: {
+        cache: new Map([['tc-orphan', channel]]),
+        fetch: vi.fn(),
+      },
+    } as any;
+
+    await expect(reconcileTicketOrphanChannels(guild, supabase)).resolves.toBe(1);
+    expect(channel.delete).toHaveBeenCalledTimes(1);
+    // Three touches now: the flagged scan, the release, and the UNFLAGGED
+    // stale-claim scan (review 3691834544) — which finds nothing here and
+    // must not delete or release anything further.
+    expect(supabase.from).toHaveBeenCalledTimes(3);
+  });
+
+  it('retains a still-failing cleanup job and rotates it to the back of the batch', async () => {
+    const channel = { id: 'tc-orphan', delete: vi.fn().mockRejectedValue(new Error('rate limited')) };
+    const orderCalls: Array<[string, unknown]> = [];
+    const touchPayloads: Array<Record<string, unknown>> = [];
+    const supabase = {
+      from: vi.fn(() => {
+        const chain = makeCreateSupa().from('tickets');
+        const baseOrder = chain.order;
+        chain.order = vi.fn((column: string, opts: unknown) => {
+          orderCalls.push([column, opts]);
+          return baseOrder ? chain : chain;
+        });
+        const baseUpdate = chain.update;
+        chain.update = vi.fn((payload: Record<string, unknown>) => {
+          touchPayloads.push(payload);
+          return baseUpdate ? chain : chain;
+        });
+        chain.then = (resolve: Function) => resolve({
+          data: [{
+            id: 'occurrence-orphan',
+            resource_id: 'tc-orphan',
+            result: { channelCleanupPending: true },
+          }],
+          error: null,
+        });
+        return chain;
+      }),
+    } as any;
+    const guild = {
+      id: 'g1',
+      channels: {
+        cache: new Map([['tc-orphan', channel]]),
+        fetch: vi.fn(),
+      },
+    } as any;
+
+    await expect(reconcileTicketOrphanChannels(guild, supabase)).resolves.toBe(0);
+    // The scan is ORDERED so touched rows rotate: a permanently blocked cohort
+    // (bot lacks delete permission) can no longer occupy all 100 slots on
+    // every pass and starve newer, deletable jobs forever.
+    expect(orderCalls).toContainEqual(['updated_at', { ascending: true }]);
+    // The blocked row was touched to the back — updated_at bumped, error kept.
+    const touch = touchPayloads.find((payload) => 'updated_at' in payload);
+    expect(touch, 'a failed delete must rotate the job').toBeTruthy();
+    expect(String(touch!.last_error)).toContain('delete_failed');
+    // And it was NOT released or completed — the job survives for retry.
+    expect(touchPayloads.some((payload) => payload.status === 'released'
+      || payload.status === 'completed'
+      || payload.status === 'failed')).toBe(false);
+  });
+
+  it('completes an uncertain occurrence without deleting its committed ticket channel', async () => {
+    const channel = { id: 'tc-committed', delete: vi.fn() };
+    const occurrenceUpdates = vi.fn();
+    const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
+      if (name === 'settle_discord_occurrence') {
+        occurrenceUpdates({
+          status: args?.p_status,
+          resource_id: args?.p_resource_id ?? null,
+          result: args?.p_result ?? {},
+          last_error: args?.p_last_error ?? null,
+        });
+      }
+      return { data: true, error: null };
+    });
+    const supabase = {
+      rpc,
+      from: vi.fn((table: string) => {
+        const chain = makeCreateSupa().from('tickets');
+        if (table === 'tickets') {
+          chain.maybeSingle = vi.fn(async () => ({
+            data: { id: 'ticket-committed', channel_id: 'tc-committed' },
+            error: null,
+          }));
+        } else {
+          let selected = false;
+          chain.select = vi.fn(() => {
+            selected = true;
+            return chain;
+          });
+          chain.update = vi.fn((payload: unknown) => {
+            selected = false;
+            occurrenceUpdates(payload);
+            return chain;
+          });
+          chain.then = (resolve: Function) => resolve(selected
+            ? {
+                data: [{
+                  id: 'occurrence-committed',
+                  resource_id: 'tc-committed',
+                  result: {
+                    channelCleanupPending: true,
+                    verifyTicketBeforeCleanup: true,
+                  },
+                }],
+                error: null,
+              }
+            : { data: null, error: null });
+        }
+        return chain;
+      }),
+    } as any;
+    const guild = {
+      id: 'g1',
+      channels: {
+        cache: new Map([['tc-committed', channel]]),
+        fetch: vi.fn(),
+      },
+    } as any;
+
+    await expect(reconcileTicketOrphanChannels(guild, supabase)).resolves.toBe(1);
+    expect(channel.delete).not.toHaveBeenCalled();
+    expect(occurrenceUpdates).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'completed',
+      result: { ticketId: 'ticket-committed', recovered: true },
+    }));
   });
 });
 

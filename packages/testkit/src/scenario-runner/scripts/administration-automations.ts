@@ -40,6 +40,7 @@
  * after redelivery" still needs a live gateway and is gated.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
+import { randomUUID } from 'node:crypto';
 
 import type { LiveClientHandle } from '../../live-runner.js';
 import type { DomainProof, ScenarioContext } from '../types.js';
@@ -282,7 +283,7 @@ async function anonReadCount(
 async function proveRlsIsolation(
   ctx: ScenarioContext,
   handle: LiveClientHandle,
-  table: 'automations' | 'automation_executions',
+  table: 'automations' | 'automation_executions' | 'automation_mass_action_holds',
   serviceRowsSeen: number,
 ): Promise<void> {
   const anonKey = ctx.capabilities.anonKey;
@@ -352,11 +353,14 @@ function gateEngineExecution(ctx: ScenarioContext, promise: string): void {
 /** A guard enforced atomically in Valkey (fire-limit INCR / custom-rate-limit /
  *  DM-cooldown SET NX) — cannot run without a reachable Redis. */
 function gateValkeyGuard(ctx: ScenarioContext, promise: string): void {
+  const valkeyReachable = ctx.capabilities.redis;
   ctx.gate(
     'replay-safety',
-    'redis-dependency',
+    valkeyReachable ? 'discord-readback' : 'redis-dependency',
     promise,
-    'no Valkey/Redis reachable — the atomic per-user fire-limit (INCR), custom per-automation rate limit, and DM-cooldown (SET NX) guards cannot run, so the rate-limited / single-claim behavior is not exercisable',
+    valkeyReachable
+      ? 'Valkey/Redis is reachable, but the atomic fire-limit and cooldown guards are entered only while processing live Discord gateway events; this harness has no live gateway event lane, so the guarded behavior cannot be exercised here'
+      : 'no Valkey/Redis reachable — the atomic per-user fire-limit (INCR), custom per-automation rate limit, and DM-cooldown (SET NX) guards cannot run, so the rate-limited / single-claim behavior is not exercisable',
   );
 }
 
@@ -814,15 +818,14 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
   // clean restart" — assert zero alerts (the contracted behavior).
   await proveNoOwnerAlert(ctx, second);
 
-  // The "durable occurrence recorded just before the restart completes exactly once
-  // afterwards" facet is NOT backed by any persisted occurrence record (see REPLAY):
-  // an in-flight occurrence is in-memory and does not survive a reboot. Gate it, with
-  // the root cause pointed at the same durable-occurrence gap.
+  // Ordinary execution claims dedupe replay, but they still do not persist a
+  // resumable action/context snapshot. (Mass-action holds do; their release path
+  // is proven in RACE.) Keep the generic in-flight restart facet honestly gated.
   ctx.gate(
     'replay-safety',
     'db-observable',
     'A durable occurrence recorded just before the restart completes exactly once afterwards — not zero times and not twice.',
-    'there is no durable occurrence/held table (the engine’s occurrenceId is in-memory only, see the REPLAY finding), so an in-flight occurrence cannot survive a reboot to be completed exactly once — the durable-occurrence pipeline is not yet wired',
+    'ordinary automation_executions claims dedupe redelivery but do not persist the action/context snapshot needed to resume a generic in-flight non-held execution after a process crash; mass-action held releases are resumable, but the generic crash-resume path remains unproved',
   );
   gateEngineExecution(ctx, 'The pre-restart occurrence’s action lands exactly once post-restart; new triggers fire normally.');
   gateAuditEngine(ctx, 'The execution audit rows show no gap-induced duplicates.');
@@ -848,24 +851,123 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     ctx,
     `Six qualifying triggers from one member within a minute yield at most ${String(fireLimit)} executions; the atomic Valkey INCR never lets two concurrent fires share one budget slot.`,
   );
-  // Guardrail 2 — the mass-action hold: needs the engine's guard + a durable held state.
+  // Guardrail 2 — the engine branch itself needs a live gateway, but the durable
+  // held state, unique occurrence claim, RLS boundary, and exactly-once audit are
+  // directly provable against the same local Postgres schema production uses.
   gateEngineExecution(
     ctx,
     `A rule whose one occurrence resolves to more than the mass-action threshold (${String(massThreshold)}) members halts in HELD before any member past the guardrail is touched.`,
   );
-  ctx.gate(
-    'database-RLS',
-    'db-rls',
-    'The held occurrence is recorded in the held state with no completed action rows past the threshold, scoped to the run guild.',
-    'there is no durable occurrence/held table to record a held occurrence (see the REPLAY finding); the mass-action hold state is not persisted, so this is not DB-observable — the durable/held pipeline is not yet wired',
+  const massRule = await insertAutomation(ctx, handle, {
+    suffix: 'mass-hold',
+    triggerType: 'member.verified',
+    actions: [{ type: 'give_role', config: { role_id: '99999999999999999' } }],
+  });
+  const occurrenceId = randomUUID();
+  const memberIds = Array.from(
+    { length: Number(massThreshold) + 1 },
+    (_, index) => String(10000000000000000n + BigInt(index)),
+  );
+  let executionId: string | null = null;
+  let firstHoldError: string | null = 'automation seed failed';
+  let replayHoldError: string | null = null;
+  let heldRows: Record<string, unknown>[] = [];
+  let heldAudits: Record<string, unknown>[] = [];
+  if (massRule.id) {
+    const execution = await handle.supabase.from('automation_executions').insert({
+      automation_id: massRule.id,
+      guild_id: handle.guildId,
+      triggered_by: 'system',
+      trigger_event: 'member.verified',
+      occurrence_id: occurrenceId,
+      conditions_passed: false,
+      actions_executed: 0,
+      actions_failed: 0,
+      errors: [],
+      duration_ms: 0,
+    }).select('id').maybeSingle();
+    executionId = (execution.data as { id?: string } | null)?.id ?? null;
+    const payload = {
+      guild_id: handle.guildId,
+      automation_id: massRule.id,
+      execution_id: executionId,
+      occurrence_id: occurrenceId,
+      member_ids: memberIds,
+      member_count: memberIds.length,
+      threshold: Number(massThreshold),
+      trigger_event: 'member.verified',
+      triggered_by: 'system',
+      action_snapshot: [{ type: 'give_role', config: { role_id: '99999999999999999' } }],
+      context_snapshot: { channelId: null, messageId: null, variables: {} },
+    };
+    const first = await handle.supabase.from('automation_mass_action_holds').insert(payload);
+    const replay = await handle.supabase.from('automation_mass_action_holds').insert(payload);
+    firstHoldError = first.error?.message ?? null;
+    replayHoldError = replay.error?.message ?? null;
+    const held = await handle.supabase
+      .from('automation_mass_action_holds')
+      .select('id, status, member_count, threshold, execution_id')
+      .eq('guild_id', handle.guildId)
+      .eq('automation_id', massRule.id)
+      .eq('occurrence_id', occurrenceId);
+    heldRows = (held.data ?? []) as Record<string, unknown>[];
+    const audits = await handle.supabase
+      .from('audit_logs')
+      .select('action, details, occurrence_key')
+      .eq('guild_id', handle.guildId)
+      .eq('action', 'automation.mass_action_held')
+      .contains('details', { occurrenceId });
+    heldAudits = (audits.data ?? []) as Record<string, unknown>[];
+  }
+  ctx.expect(
+    firstHoldError === null
+      && replayHoldError !== null
+      && heldRows.length === 1
+      && heldRows[0]?.status === 'held'
+      && heldRows[0]?.member_count === memberIds.length
+      && heldRows[0]?.threshold === Number(massThreshold)
+      && heldRows[0]?.execution_id === executionId,
+    {
+      assertionClass: 'database-RLS',
+      channel: 'db-observable',
+      promise:
+        'The held occurrence is recorded once in HELD with zero completed actions, linked to its execution claim and scoped to the run guild.',
+      observation:
+        `first insert=${firstHoldError ?? 'ok'}, replay=${replayHoldError ?? 'unexpectedly accepted'}, ` +
+        `held rows=${heldRows.length}, state=${String(heldRows[0]?.status)}, ` +
+        `members=${String(heldRows[0]?.member_count)}/${String(massThreshold)} threshold.`,
+      impact:
+        'The mass-action guard has no unique durable HELD record, so approval could be lost, duplicated, or detached from the original execution claim.',
+    },
+  );
+  await proveRlsIsolation(
+    ctx,
+    handle,
+    'automation_mass_action_holds',
+    heldRows.length,
   );
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'Exactly one mass-action approval card is delivered to the owner for the held occurrence — never one per affected member.',
-    'the approval card is delivered by the engine mass-action guard to the owner channel — requires DISCORD_TOKEN + a live guild + the (unpersisted) held-occurrence path',
+    'the durable held occurrence and dashboard approval card are present, but Discord channel readback still requires DISCORD_TOKEN + a live guild to prove the one mirrored owner message',
   );
-  gateAuditEngine(ctx, 'Exactly one automation.mass_action_held audit row records the held occurrence with its member-count and threshold.');
+  ctx.expect(
+    heldAudits.length === 1
+      && heldAudits[0]?.action === 'automation.mass_action_held'
+      && (heldAudits[0]?.details as Record<string, unknown> | undefined)?.memberCount === memberIds.length
+      && (heldAudits[0]?.details as Record<string, unknown> | undefined)?.threshold === Number(massThreshold),
+    {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise:
+        'Exactly one automation.mass_action_held audit row records the held occurrence with its member-count and threshold.',
+      observation:
+        `audit rows=${heldAudits.length}, details=${JSON.stringify(heldAudits[0]?.details ?? null)}.`,
+      impact:
+        'A held destructive occurrence is missing its exact-once forensic audit or carries the wrong blast-radius evidence.',
+    },
+  );
   gateBrandingNoReply(ctx);
 }
 
