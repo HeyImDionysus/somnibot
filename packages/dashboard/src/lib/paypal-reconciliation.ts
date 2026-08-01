@@ -63,6 +63,11 @@ const ORDER_SCAN_STATUSES = [
   'refunded',
   'pending',
   'pending_review',
+  // Capture-denied checkouts move to cancelled — but a LATER capture can
+  // still succeed (or its webhook be lost), leaving PayPal holding settled
+  // money behind a customer the ledger says was never charged. Cancelled
+  // orders with a provider identity stay in the recheck set.
+  'cancelled',
 ] as const;
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -2269,7 +2274,11 @@ async function runPass(
       }
       continue;
     }
-    if (pendingish || (settled && !orderIdsWithPaymentIdentity.has(order.id))) {
+    if (
+      pendingish
+      || order.status === 'cancelled'
+      || (settled && !orderIdsWithPaymentIdentity.has(order.id))
+    ) {
       orderGetTargets.push(order);
     }
   }
@@ -3284,7 +3293,63 @@ async function runPass(
       const isDirectSaleWitness = Boolean(
         witnessParent && refund.paypal_refund_id === witnessParent.paypal_payment_id,
       );
-      if (refund.amount_cents === 0 && !isDirectSaleWitness) continue;
+      if (refund.amount_cents === 0 && !isDirectSaleWitness) {
+        // The witness's own refund object is EXPECTED to be absent — but
+        // only when the PARENT shows the fully terminal state the witness
+        // claims. An unreversed parent behind a 404 witness is missing
+        // provider evidence, not an expected gap; a parent whose state
+        // changed inside the settlement lag defers to the next pass.
+        if (witnessParent && isProviderId(witnessParent.paypal_payment_id)) {
+          if (isSaleRefundRow(refund)) {
+            const parentLookup = await fetchProviderSale(
+              config.apiBase,
+              token.token,
+              witnessParent.paypal_payment_id,
+            );
+            if (!parentLookup.ok) {
+              return {
+                status: 'failed',
+                reason: parentLookup.reason,
+                retriable: parentLookup.retriable,
+              };
+            }
+            if (parentLookup.found) {
+              if (
+                parentLookup.value.updateTimeMs !== null
+                && parentLookup.value.updateTimeMs > windowEndMs
+              ) {
+                continue;
+              }
+              if (['reversed', 'refunded'].includes(parentLookup.value.state)) continue;
+            }
+          } else {
+            const parentLookup = await fetchProviderCapture(
+              config.apiBase,
+              token.token,
+              witnessParent.paypal_payment_id,
+            );
+            if (!parentLookup.ok) {
+              return {
+                status: 'failed',
+                reason: parentLookup.reason,
+                retriable: parentLookup.retriable,
+              };
+            }
+            if (parentLookup.found) {
+              if (
+                parentLookup.value.updateTimeMs !== null
+                && parentLookup.value.updateTimeMs > windowEndMs
+              ) {
+                continue;
+              }
+              // Only a FULLY refunded capture evidences a zero-remaining
+              // reversal witness; PARTIALLY_REFUNDED means PayPal still
+              // holds money the terminal local claim says is gone.
+              if (parentLookup.value.status === 'REFUNDED') continue;
+            }
+          }
+        }
+      }
       const order = refund.order_id ? ordersById.get(refund.order_id) : undefined;
       missingProviderPayments.push({
         kind: 'refund',
@@ -3371,10 +3436,11 @@ async function runPass(
     const guildId = order.guild_id as string;
     const pendingish = order.status === 'pending' || order.status === 'pending_review';
     if (!lookup.found) {
-      // PayPal purges unapproved orders; a vanished PENDING order moved no
-      // money. A vanished order behind SETTLED local commerce with no payment
-      // identity means the settlement cannot be evidenced at the provider.
-      if (!pendingish) {
+      // PayPal purges unapproved orders; a vanished PENDING or CANCELLED
+      // order moved no money. A vanished order behind SETTLED local
+      // commerce with no payment identity means the settlement cannot be
+      // evidenced at the provider.
+      if (SETTLED_ORDER_STATUSES.includes(order.status)) {
         missingProviderPayments.push({
           kind: 'order',
           orderId: order.id,
@@ -3462,7 +3528,7 @@ async function runPass(
         orderStatus: order.status,
       });
     }
-    if (!pendingish && settledCaptures.length === 0) {
+    if (SETTLED_ORDER_STATUSES.includes(order.status) && settledCaptures.length === 0) {
       // Locally settled with NO settled provider capture — regardless of the
       // provider order's own status: a CREATED/APPROVED/VOIDED order with no
       // completed capture is PayPal explicitly saying no money settled.
@@ -3657,6 +3723,7 @@ async function runPass(
     // means never released, failed means released and lost — either way an
     // ACTIVE subscription's buyer received nothing.
     const activationCarrierStatusBySubscription = new Map<string, string>();
+    const activationCarrierCreatedAtMsBySubscription = new Map<string, number>();
     const activationKeys = fresh.map(([subscriptionId]) =>
       `paypal:subscription:${subscriptionId}:fulfill_subscription`,
     );
@@ -3664,7 +3731,7 @@ async function runPass(
       const chunk = activationKeys.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
       const { data, error } = await supabase
         .from('bot_action_queue')
-        .select('idempotency_key, payload, status')
+        .select('idempotency_key, payload, status, created_at')
         .in('idempotency_key', chunk);
       if (error) {
         return {
@@ -3686,6 +3753,12 @@ async function runPass(
         }
         if (typeof row.status === 'string') {
           activationCarrierStatusBySubscription.set(subscriptionId, row.status);
+        }
+        const carrierCreatedAtMs = typeof row.created_at === 'string'
+          ? Date.parse(row.created_at)
+          : Number.NaN;
+        if (Number.isFinite(carrierCreatedAtMs)) {
+          activationCarrierCreatedAtMsBySubscription.set(subscriptionId, carrierCreatedAtMs);
         }
       }
     }
@@ -3832,12 +3905,22 @@ async function runPass(
           orderStatus: order.status,
         });
       }
+      const activationCarrierStatus =
+        activationCarrierStatusBySubscription.get(subscriptionId) ?? '';
+      // In-progress only means "still working" while the carrier is younger
+      // than the settlement lag — the same age gate the terminal lifecycle
+      // carriers use. A released activation stuck pending/processing past
+      // the lag left the buyer unfulfilled behind healthy-looking rows.
+      const activationCarrierCreatedAtMs =
+        activationCarrierCreatedAtMsBySubscription.get(subscriptionId) ?? null;
+      const activationCarrierStalled =
+        ['pending', 'processing'].includes(activationCarrierStatus)
+        && !(activationCarrierCreatedAtMs !== null
+          && activationCarrierCreatedAtMs > windowEndMs);
       if (
         subscription.status === 'ACTIVE'
         && order.status === 'completed'
-        && ['staged', 'failed'].includes(
-          activationCarrierStatusBySubscription.get(subscriptionId) ?? '',
-        )
+        && (['staged', 'failed'].includes(activationCarrierStatus) || activationCarrierStalled)
         && activationSettled
       ) {
         // The activation handler completes the order BEFORE releasing the
