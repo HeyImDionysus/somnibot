@@ -3177,8 +3177,18 @@ async function runPass(
     for (const capture of settledCaptures) {
       // A locally-known capture was already judged by the capture pass
       // (settlement, amounts, refunds); reporting it again here would double
-      // count. Only captures with NO local row are this path's finding.
-      if (localByProviderId.has(capture.id)) continue;
+      // count. Only captures with NO local row are this path's finding —
+      // and "known" must mean known ON THIS ORDER: historical refund
+      // parents enter the map without ever crossing the capture pass, so a
+      // capture id attached to another order/guild is an identity conflict,
+      // not a reason to skip.
+      const knownRow = localByProviderId.get(capture.id);
+      if (knownRow) {
+        if (knownRow.order_id !== order.id) {
+          return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+        }
+        continue;
+      }
       // A capture created inside the settlement lag has its payment webhook
       // legitimately in flight — the next pass owns it.
       if (capture.createTimeMs !== null && capture.createTimeMs > windowEndMs) continue;
@@ -3324,6 +3334,53 @@ async function runPass(
     const batchCustomersById = new Map(
       batchCustomerScan.rows.map((customer) => [customer.id, customer]),
     );
+    // The head only proves the transition was OBSERVED; the fulfillment
+    // ACTION that actually revokes/suspends access is a separate write that
+    // can fail or stay held. Load both signals for the batch: the terminal
+    // lifecycle actions and any still-staged fulfillment rows.
+    const batchOrderIds = [...new Set(fresh.map(([, order]) => order.id))];
+    const healthyLifecycleActionOrderIds = new Set<string>();
+    const stagedFulfillmentOrderIds = new Set<string>();
+    for (let from = 0; from < batchOrderIds.length; from += EXACT_LOOKUP_CHUNK_SIZE) {
+      const chunk = batchOrderIds.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
+      const { data: actionRows, error: actionError } = await supabase
+        .from('bot_action_queue')
+        .select('payload, status, action')
+        .in('action', ['fulfill_cancellation', 'fulfill_suspension'])
+        .in('payload->>order_id', chunk);
+      if (actionError) {
+        return {
+          status: 'failed',
+          reason: `lifecycle action scan failed: ${actionError.message}`,
+          retriable: true,
+        };
+      }
+      for (const row of (actionRows ?? []) as Array<Record<string, unknown>>) {
+        const orderId = (row.payload as Record<string, unknown> | null)?.order_id;
+        if (
+          typeof orderId === 'string'
+          && ['pending', 'processing', 'completed'].includes(String(row.status))
+        ) {
+          healthyLifecycleActionOrderIds.add(orderId);
+        }
+      }
+      const { data: stagedRows, error: stagedError } = await supabase
+        .from('bot_action_queue')
+        .select('payload')
+        .eq('status', 'staged')
+        .in('payload->>order_id', chunk);
+      if (stagedError) {
+        return {
+          status: 'failed',
+          reason: `staged fulfillment scan failed: ${stagedError.message}`,
+          retriable: true,
+        };
+      }
+      for (const row of (stagedRows ?? []) as Array<Record<string, unknown>>) {
+        const orderId = (row.payload as Record<string, unknown> | null)?.order_id;
+        if (typeof orderId === 'string') stagedFulfillmentOrderIds.add(orderId);
+      }
+    }
     const batchPlanIds = [...new Set(
       fresh
         .map(([, order]) => order.plan_id)
@@ -3429,10 +3486,17 @@ async function runPass(
       const transitionSettled = subscription.statusUpdateTimeMs === null
         || subscription.statusUpdateTimeMs <= windowEndMs;
       const expectedPriority = TERMINAL_PRIORITY_BY_STATUS[subscription.status];
+      // Divergent when the transition was never OBSERVED (head below the
+      // priority) OR observed but its fulfillment ACTION is missing, failed,
+      // or operator-held — the head is committed BEFORE the action write,
+      // so head-parity alone cannot prove access was revoked.
       if (
         expectedPriority !== undefined
         && transitionSettled
-        && (lifecycleHeads.get(subscriptionId)?.priority ?? 0) < expectedPriority
+        && (
+          (lifecycleHeads.get(subscriptionId)?.priority ?? 0) < expectedPriority
+          || !healthyLifecycleActionOrderIds.has(order.id)
+        )
       ) {
         // PayPal reports a terminal state the durable lifecycle head never
         // observed: the revoke/suspend fulfillment action was lost. A head
@@ -3452,6 +3516,24 @@ async function runPass(
       const activationSettled = subscription.statusUpdateTimeMs !== null
         ? subscription.statusUpdateTimeMs <= windowEndMs
         : String(order.created_at ?? '') <= windowEnd;
+      if (
+        subscription.status === 'ACTIVE'
+        && order.status === 'completed'
+        && stagedFulfillmentOrderIds.has(order.id)
+        && activationSettled
+      ) {
+        // The activation handler completes the order BEFORE releasing the
+        // staged fulfillment: a crash in that gap leaves an ACTIVE
+        // subscription, a completed order, and a paying buyer with nothing
+        // delivered — invisible to the pending-order check below.
+        unsettledLocalPayments.push({
+          transactionId: subscriptionId,
+          guildId,
+          orderId: order.id,
+          paymentStatus: 'subscription_activation_unreleased',
+          orderStatus: order.status,
+        });
+      }
       if (
         subscription.status === 'ACTIVE'
         && (order.status === 'pending' || order.status === 'pending_review')
@@ -3577,7 +3659,17 @@ async function runPass(
       if (!lookup.ok) {
         return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
       }
-      if (!lookup.found) continue;
+      if (!lookup.found) {
+        // The subscription GET just succeeded; a vanished transactions
+        // subresource would silently remove the only discovery surface for
+        // non-latest charges. That is a provider anomaly, never "zero
+        // transactions".
+        return {
+          status: 'failed',
+          reason: `subscription transactions unavailable for ${subscriptionId}`,
+          retriable: true,
+        };
+      }
       for (const txn of lookup.value) {
         if (!MONEY_TXN_STATUSES.includes(txn.status)) continue;
         // In-flight charges (newer than the window end) get the settlement

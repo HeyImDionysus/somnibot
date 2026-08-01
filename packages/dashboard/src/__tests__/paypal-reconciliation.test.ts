@@ -191,8 +191,11 @@ function scriptProviderObjects(objects: ProviderRegistry = {}) {
     const txnMatch = target.match(/\/v1\/billing\/subscriptions\/([^/?]+)\/transactions(?:\?|$)/);
     if (txnMatch) {
       const id = decodeURIComponent(txnMatch[1]!);
-      const body = objects.subscriptionTransactions?.[id]
-        ?? (objects.subscriptions?.[id] !== undefined ? { transactions: [] } : undefined);
+      // An EXPLICIT registry (even empty) opts out of the live-subscription
+      // default, so 404 behavior is testable.
+      const body = objects.subscriptionTransactions !== undefined
+        ? objects.subscriptionTransactions[id]
+        : (objects.subscriptions?.[id] !== undefined ? { transactions: [] } : undefined);
       if (body === undefined) return new Response('{}', { status: 404 });
       return new Response(JSON.stringify(body), { status: 200 });
     }
@@ -1905,6 +1908,16 @@ describe('runPayPalReconciliation', () => {
       data: [{ paypal_subscription_id: 'SUB-1', last_event_priority: 60 }],
       error: null,
     });
+    // Round 8: the head alone is not enough — the fulfillment ACTION that
+    // revoked access must exist in a healthy state too.
+    resolvers['bot_action_queue'] = () => ({
+      data: [{
+        action: 'fulfill_cancellation',
+        status: 'completed',
+        payload: { order_id: ORDER_UUID },
+      }],
+      error: null,
+    });
     scriptProviderObjects({
       subscriptions: {
         'SUB-1': subscriptionObject({ status: 'CANCELLED', lastPaymentTime: null }),
@@ -2882,6 +2895,176 @@ describe('runPayPalReconciliation', () => {
     ));
 
     expect(result.unsettledLocalPayments).toEqual([]);
+  });
+
+  // ── PR #409 review round 8 repairs ────────────────────────────────────────
+
+  it('flags an observed cancellation whose fulfillment action never queued healthily', async () => {
+    // The head records the observation BEFORE the action write: head parity
+    // alone cannot prove access was revoked.
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    resolvers['commerce_subscription_lifecycle_heads'] = () => ({
+      data: [{ paypal_subscription_id: 'SUB-1', last_event_priority: 60 }],
+      error: null,
+    });
+    resolvers['bot_action_queue'] = () => ({ data: [], error: null });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'CANCELLED', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'SUB-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'subscription_cancelled',
+      orderStatus: 'completed',
+    }]);
+  });
+
+  it('flags an ACTIVE completed order whose fulfillment is still STAGED', async () => {
+    // The activation handler completes the order BEFORE releasing the staged
+    // fulfillment: a crash in the gap leaves a paying buyer with nothing.
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    resolvers['bot_action_queue'] = (op) => {
+      const wantsStaged = op.filters.some(
+        (f) => f.method === 'eq' && f.args[0] === 'status' && f.args[1] === 'staged',
+      );
+      return {
+        data: wantsStaged
+          ? [{ payload: { order_id: ORDER_UUID } }]
+          : [],
+        error: null,
+      };
+    };
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'ACTIVE', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'SUB-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'subscription_activation_unreleased',
+      orderStatus: 'completed',
+    }]);
+  });
+
+  it('fails closed when a discovered capture is known on a DIFFERENT order', async () => {
+    // Historical refund parents enter the provider-id map without crossing
+    // the capture pass — membership alone must not suppress discovery.
+    const OTHER_ORDER = '00000000-0000-4000-8000-000000000003';
+    const OLD = '2026-06-15T10:00:00.000Z';
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'CAP-FOREIGN',
+        order_id: OTHER_ORDER,
+        created_at: OLD,
+        status: 'refunded',
+      })],
+      orders: [
+        {
+          id: OTHER_ORDER,
+          guild_id: GUILD_ID,
+          amount_cents: 2500,
+          status: 'refunded',
+          created_at: OLD,
+          paypal_order_id: 'PP-ORDER-OTHER',
+        },
+        {
+          id: ORDER_UUID,
+          guild_id: GUILD_ID,
+          amount_cents: 2500,
+          status: 'completed',
+          created_at: IN_WINDOW,
+          paypal_order_id: 'PP-ORDER-1',
+        },
+      ],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: OTHER_ORDER,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'REF-1',
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      captures: { 'CAP-FOREIGN': captureObject({ status: 'REFUNDED', value: '25.00' }) },
+      refunds: { 'REF-1': refundObject({ value: '25.00', parentCaptureId: 'CAP-FOREIGN' }) },
+      orders: {
+        'PP-ORDER-1': orderObject({
+          captures: [{ id: 'CAP-FOREIGN', value: '25.00' }],
+        }),
+      },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'provider identity conflict',
+      retriable: false,
+    });
+  });
+
+  it('fails the pass when a live subscription has no transactions collection', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: null }),
+      },
+      // Explicitly deny the transactions subresource for a live sub.
+      subscriptionTransactions: {},
+    });
+    // The harness default would synthesize an empty list; forcing an entry
+    // registry without SUB-1 makes the subresource 404.
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      retriable: true,
+    });
   });
 
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {
