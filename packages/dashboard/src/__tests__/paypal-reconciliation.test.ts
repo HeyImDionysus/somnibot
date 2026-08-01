@@ -5413,6 +5413,47 @@ describe('runPayPalReconciliation', () => {
     expect(result.unsettledLocalPayments).toEqual([]);
   });
 
+  it('fails closed on a historical refund parent attached to a foreign-guild order', async () => {
+    // Payment and refund consistently claim guild B while the ORDER belongs
+    // to guild A: the refund-to-payment guard alone cannot see it, and the
+    // parent predates the window so only the extended relation guard can.
+    withLedger({
+      payments: [paymentRow({
+        guild_id: '222222222222222222',
+        created_at: '2026-07-10T10:00:00.000Z',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: '222222222222222222',
+        paypal_refund_id: 'REF-1',
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+      guildIds: [GUILD_ID, '222222222222222222'],
+    });
+    scriptProviderObjects({});
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'provider identity conflict',
+      retriable: false,
+    });
+  });
+
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {
     withLedger({ payments: [paymentRow()] });
     scriptProviderObjects({ captures: { 'CAP-1': { __status: 503 } } });

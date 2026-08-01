@@ -2165,7 +2165,31 @@ async function runPass(
     localByProviderId.set(providerId, payment);
     paymentEvidenceById.set(payment.id, payment);
   }
-  for (const payment of payments) {
+  // Historical refund parents live outside the window scan, so their orders
+  // may not be loaded yet — load them before the relation guard below, or a
+  // cross-tenant parent (payment and refund consistently claiming guild B
+  // while the ORDER belongs to guild A) sails through every later check.
+  {
+    const historicalParentOrderScan = await lookupOrdersByExactColumn(
+      supabase,
+      'id',
+      [...new Set(
+        validatedRefundPayments.rows
+          .map((payment) => payment.order_id)
+          .filter((id): id is string => typeof id === 'string' && !ordersById.has(id)),
+      )],
+      configuredGuildIds,
+    );
+    if (!historicalParentOrderScan.ok) {
+      return {
+        status: 'failed',
+        reason: historicalParentOrderScan.reason,
+        retriable: historicalParentOrderScan.retriable,
+      };
+    }
+    for (const order of historicalParentOrderScan.rows) ordersById.set(order.id, order);
+  }
+  for (const payment of [...payments, ...validatedRefundPayments.rows]) {
     const order = typeof payment.order_id === 'string'
       ? ordersById.get(payment.order_id)
       : undefined;
@@ -2423,6 +2447,16 @@ async function runPass(
   //    Subscription billing writes v1 SALE ids — those rows are verified
   //    through /v1/payments/sale instead of being skipped blind.
   const windowPaymentIds = new Set(payments.map((payment) => payment.id));
+  // The established-subscription sweep is unbounded by design; a per-
+  // subscription full scan of up to 20k window payments multiplies into
+  // the billions. Index once, look up in constant time.
+  const windowPaymentsByOrderId = new Map<string, LocalPaymentRow[]>();
+  for (const payment of payments) {
+    const key = payment.order_id as string;
+    const list = windowPaymentsByOrderId.get(key);
+    if (list) list.push(payment);
+    else windowPaymentsByOrderId.set(key, [payment]);
+  }
 
   const isSubscriptionSaleRow = (payment: LocalPaymentRow): boolean => {
     const order = ordersById.get(payment.order_id as string);
@@ -4271,9 +4305,7 @@ async function runPass(
       const lastPaymentInWindow = Number.isFinite(lastPaymentMs)
         && lastPaymentMs >= windowStartMs
         && lastPaymentMs <= windowEndMs;
-      const orderWindowPayments = payments.filter(
-        (payment) => payment.order_id === order.id,
-      );
+      const orderWindowPayments = windowPaymentsByOrderId.get(order.id) ?? [];
       // Only a COMPLETED local row can represent the provider's charge — a
       // pending/failed row matching on amount is exactly the divergence this
       // pass exists to catch (fulfillment may never have run). And the row
