@@ -15,6 +15,7 @@ import { verifySignedDownloadUrl } from '@/lib/api/signed-url';
 import { consumeDownloadNonce } from '@/lib/api/download-nonce';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { isEntitlementAccessLive } from '@somnibot/shared';
+import { selectDownloadEntitlement } from '@/lib/portal/select-entitlement';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -76,8 +77,11 @@ export async function GET(
 
   const nonce = req.nextUrl.searchParams.get('nonce');
 
-  if (sig && exp && cid && gid && eid) {
-    // Signed URL authentication (preferred — no raw token in URL)
+  if (sig && exp && cid && gid) {
+    // Signed URL authentication (preferred — no raw token in URL). eid may be
+    // absent on links minted by the previous release during a rolling
+    // deployment; those verify against the legacy payload for their remaining
+    // five-minute lifetime and select the entitlement at delivery time below.
     const verified = verifySignedDownloadUrl(
       productId,
       fileId,
@@ -180,11 +184,39 @@ export async function GET(
 
   const liveEntitlements = entitlements
     ?.filter((entitlement) => isEntitlementAccessLive(entitlement)) ?? [];
-  const liveEntitlement = signedEntitlementId
-    ? liveEntitlements.find((entitlement) => entitlement.id === signedEntitlementId)
-    : liveEntitlements.sort((left, right) =>
-      String(right.created_at ?? '').localeCompare(String(left.created_at ?? '')),
-    )[0];
+  let liveEntitlement: (typeof liveEntitlements)[number] | undefined;
+  if (signedEntitlementId) {
+    liveEntitlement = liveEntitlements.find(
+      (entitlement) => entitlement.id === signedEntitlementId,
+    );
+  } else {
+    // The fallback paths (portal-token API clients, legacy no-eid links) use
+    // the SAME delivery-aware ranking as link minting: an undelivered repeat
+    // purchase must be able to claim its evidence before a delivered newer
+    // order is re-served — otherwise every fallback download records against
+    // the newest order and the older one is flagged forever.
+    const candidateOrderIds = [...new Set(
+      liveEntitlements
+        .map((candidate) => candidate.order_id)
+        .filter((id): id is string => typeof id === 'string'),
+    )];
+    const deliveredOrderIds = new Set<string>();
+    if (candidateOrderIds.length > 0) {
+      const { data: deliveries, error: deliveriesError } = await supabase
+        .from('commerce_download_deliveries')
+        .select('order_id')
+        .in('order_id', candidateOrderIds);
+      if (deliveriesError) {
+        return serviceUnavailable('Downloads delivery history', deliveriesError);
+      }
+      for (const delivery of deliveries ?? []) {
+        if (typeof delivery.order_id === 'string') {
+          deliveredOrderIds.add(delivery.order_id);
+        }
+      }
+    }
+    liveEntitlement = selectDownloadEntitlement(liveEntitlements, deliveredOrderIds);
+  }
   if (!liveEntitlement) {
     return NextResponse.json({ error: 'No active entitlement for this product' }, { status: 403 });
   }

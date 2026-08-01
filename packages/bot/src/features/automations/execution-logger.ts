@@ -103,6 +103,13 @@ export class ExecutionLogger {
               return { claimed: true, rowId: (retry.data as { id: string } | null)?.id ?? null };
             }
             // Lost the re-insert race to another shard: genuinely claimed.
+          } else {
+            // The row may instead be a STARTED claim whose worker died
+            // between the actions marker and finalize. It must never re-run
+            // — the reclaim above refuses marked rows by design — but no
+            // later writer exists either, so without this it reads
+            // 'Conditions not met' forever.
+            await this.finalizeStaleStartedClaim(params);
           }
         }
         return { claimed: false, rowId: null };
@@ -154,10 +161,208 @@ export class ExecutionLogger {
   }
 
   /**
+   * Cheap read: has this occurrence already been claimed? Used BEFORE the
+   * per-member rate limiters so gateway replays cannot burn quotas; the
+   * claim INSERT stays authoritative for races. Fails open on read errors.
+   */
+  async isOccurrenceConsumed(
+    automationId: string,
+    guildId: string,
+    occurrenceId: string,
+  ): Promise<boolean> {
+    const { data, error } = await this.supabase
+      .from('automation_executions')
+      .select('id, actions_started, conditions_passed, actions_executed, actions_failed, duration_ms, created_at')
+      .eq('automation_id', automationId)
+      .eq('guild_id', guildId)
+      .eq('occurrence_id', occurrenceId)
+      .limit(1)
+      .maybeSingle();
+    if (error || !data) return false;
+    const preActionShaped = data.actions_started === false
+      && data.conditions_passed === false
+      && data.actions_executed === 0
+      && data.actions_failed === 0
+      && data.duration_ms === 0;
+    if (!preActionShaped) return true;
+    // A pre-action row PAST the stale floor is a STRANDED claim: report it
+    // unconsumed so claim()'s 23505 path can reclaim and re-run it — the
+    // startup sweep repairs only STARTED rows, so this redelivery is the
+    // stranded occurrence's only path back to execution. A FRESH pre-action
+    // row is another worker mid-run: skip without spending quota.
+    const createdMs = Date.parse(String(data.created_at ?? ''));
+    if (!Number.isFinite(createdMs)) return true;
+    if (Date.now() - createdMs < STALE_PRE_ACTION_CLAIM_MS) return true;
+    // Old pre-action rows split two ways: a STRANDED claim (reclaimable —
+    // report unconsumed) versus a HELD mass action, which keeps this shape
+    // for as long as approval takes and is intentionally unreclaimable — its
+    // redeliveries must not burn quota round-tripping to a refusing claim().
+    const { data: hold, error: holdError } = await this.supabase
+      .from('automation_mass_action_holds')
+      .select('id')
+      .eq('execution_id', data.id)
+      .limit(1)
+      .maybeSingle();
+    if (holdError) return false;
+    return hold !== null;
+  }
+
+  /**
+   * Guild-wide sweep of the same interrupted shape, for STARTUP: gateway
+   * events never replay across restarts, so the claim-time terminalizer
+   * alone cannot reach rows stranded by a crashed worker. Returns how many
+   * rows turned truthful.
+   */
+  async finalizeStaleStartedSweep(guildId: string): Promise<number> {
+    const staleBefore = new Date(Date.now() - STALE_PRE_ACTION_CLAIM_MS).toISOString();
+    const { data, error } = await this.supabase.rpc(
+      'finalize_stale_started_automation_executions',
+      { p_guild_id: guildId, p_stale_before: staleBefore },
+    );
+    if (error) {
+      throw new Error(`Failed to sweep stale started executions: ${error.message}`);
+    }
+    const count = typeof data === 'number' ? data : 0;
+    if (count > 0) {
+      log.warn(
+        `Terminalized ${count} interrupted automation execution(s) left by an earlier run.`,
+      );
+    }
+    return count;
+  }
+
+  /**
+   * Terminalize a stale STARTED claim as interrupted (Definer-rights RPC,
+   * lock-then-check, age floor, no linked hold). Actions may have reached
+   * Discord, so the occurrence is never re-executed; only the history row
+   * turns truthful. True when this call terminalized the row.
+   */
+  private async finalizeStaleStartedClaim(params: ClaimParams): Promise<boolean> {
+    const staleBefore = new Date(Date.now() - STALE_PRE_ACTION_CLAIM_MS).toISOString();
+    const { data, error } = await this.supabase.rpc(
+      'finalize_stale_started_automation_execution',
+      {
+        p_guild_id: params.guildId,
+        p_automation_id: params.automationId,
+        p_occurrence_id: params.occurrenceId,
+        p_stale_before: staleBefore,
+      },
+    );
+    if (error) {
+      log.error('Failed to finalize a stale started claim:', error.message);
+      return false;
+    }
+    if (data === true) {
+      log.warn(
+        `Terminalized an interrupted execution for automation ${params.automationId} `
+        + `occurrence ${params.occurrenceId}; its worker died after the actions marker was set.`,
+      );
+    }
+    return data === true;
+  }
+
+  /**
    * Finalize a claimed execution row with the run's results (UPDATE by id). When
    * there is no claim row (the claim insert errored), fall back to a plain insert
    * so the execution is still logged.
    */
+  /**
+   * Durably mark that this claim is about to execute its first action. The
+   * stale-claim reclaim refuses marked rows: after this point a crash before
+   * finalize must NOT let a redelivery repeat external side effects. Throws
+   * when the write fails or matches no row — callers must not execute.
+   */
+  async markActionsStarted(rowId: string | null): Promise<void> {
+    if (!rowId) {
+      throw new Error('Cannot mark actions started without a durable claim row');
+    }
+    const { data, error } = await this.supabase
+      .from('automation_executions')
+      .update({ actions_started: true })
+      .eq('id', rowId)
+      .select('id')
+      .maybeSingle();
+    if (error) {
+      throw new Error(`Failed to mark automation actions started: ${error.message}`);
+    }
+    if (!data) {
+      throw new Error('Automation claim disappeared before actions could start');
+    }
+  }
+
+  /**
+   * finalize that THROWS on a failed row update. The interrupted-hold path
+   * must know the truth landed before terminalizing the hold — a swallowed
+   * error there left a terminal hold with pre-action history forever.
+   */
+  async finalizeStrict(
+    rowId: string | null,
+    result: ExecutionResult,
+    opts?: { skipCountBump?: boolean },
+  ): Promise<void> {
+    if (!rowId) {
+      await this.log(result);
+      return;
+    }
+    const { data, error } = await this.supabase
+      .from('automation_executions')
+      .update({
+        conditions_passed: result.conditionsPassed,
+        actions_executed: result.actionsExecuted,
+        actions_failed: result.actionsFailed,
+        errors: result.errors,
+        duration_ms: result.durationMs,
+      })
+      .eq('id', rowId)
+      .select('id')
+      .maybeSingle();
+    if (error) {
+      throw new Error(`Failed to finalize execution: ${error.message}`);
+    }
+    if (!data) {
+      throw new Error('Execution row disappeared before finalization');
+    }
+    // History is truthfully written; retain the same fired-counter
+    // bookkeeping finalize()/log() perform so approved holds advance
+    // execution_count / last_executed_at. The counter stays ADVISORY:
+    // its failure must not throw an already-recorded history row back
+    // into the retry path. skipCountBump lets a caller that already
+    // counted this run (a landed success finalize being overwritten
+    // with interruption details) avoid counting it twice.
+    if (!opts?.skipCountBump) {
+      try {
+        await this.bumpCount(result);
+      } catch (bumpError) {
+        log.error('Failed to bump automation execution count:', bumpError);
+      }
+    }
+  }
+
+  /**
+   * Revert the actions-started marker when it is PROVEN nothing ran (the
+   * failure happened strictly between marking and the first action). Guarded
+   * on the pre-action counters so a row with real progress is never
+   * un-marked. Throws when the revert cannot be confirmed.
+   */
+  async revertActionsStarted(rowId: string | null): Promise<void> {
+    if (!rowId) return;
+    const { data, error } = await this.supabase
+      .from('automation_executions')
+      .update({ actions_started: false })
+      .eq('id', rowId)
+      .eq('actions_started', true)
+      .eq('actions_executed', 0)
+      .eq('actions_failed', 0)
+      .select('id')
+      .maybeSingle();
+    if (error) {
+      throw new Error(`Failed to revert actions-started marker: ${error.message}`);
+    }
+    if (!data) {
+      throw new Error('Actions-started marker could not be reverted');
+    }
+  }
+
   async finalize(rowId: string | null, result: ExecutionResult): Promise<void> {
     if (rowId) {
       const { error } = await this.supabase

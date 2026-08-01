@@ -155,13 +155,21 @@ export default function FraudPage() {
   };
 
   const toggleRule = async (id: string, enabled: boolean) => {
-    await fetch('/api/fraud/rules', {
+    const res = await fetch('/api/fraud/rules', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, enabled }),
     });
     invalidateFraudCache('/api/fraud/rules');
-    loadRules(true);
+    await loadRules(true);
+    if (!res.ok) {
+      // The reload above snapped the toggle back to reality; now say WHY —
+      // e.g. the one-enabled-velocity-rule 409 — instead of a silent snap.
+      // Set AFTER the reload because a successful reload clears rulesError.
+      const body = await res.json().catch(() => null);
+      const message = (body as { error?: unknown } | null)?.error;
+      setRulesError(typeof message === 'string' ? message : 'Rule update failed.');
+    }
   };
 
   useEffect(() => {

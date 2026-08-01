@@ -18,6 +18,7 @@
  *   - On reconnect: banner auto-clears
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { BOOT_ID } from './boot-identity.js';
 import type Valkey from 'iovalkey';
 import type { Client } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
@@ -124,6 +125,9 @@ export class HeartbeatService {
             type: 'heartbeat',
             snapshot_at: new Date().toISOString(),
             uptime_seconds: Math.floor((Date.now() - this.startedAt) / 1000),
+            // Pairs with guild_runtime_features.boot_id: the dashboard
+            // rejects runtime rows whose boot does not match the heartbeat's.
+            boot_id: BOOT_ID,
           },
           { onConflict: 'guild_id,type' },
         );

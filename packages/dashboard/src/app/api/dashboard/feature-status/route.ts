@@ -24,7 +24,7 @@ export async function GET() {
     // minimal status projection. It contains no owner-only configuration.
     const ctx = await requirePermission(null);
     const supabase = createAdminSupabase();
-    const [configResult, heartbeatResult] = await Promise.all([
+    const [configResult, heartbeatResult, runtimeResult] = await Promise.all([
       supabase
         .from('guild_config')
         .select(FEATURE_CONFIG_COLUMNS)
@@ -32,15 +32,21 @@ export async function GET() {
         .maybeSingle(),
       supabase
         .from('bot_diagnostics')
-        .select('snapshot_at')
+        .select('snapshot_at, boot_id')
         .eq('guild_id', ctx.guildId)
         .in('type', ['heartbeat', 'health'])
         .order('snapshot_at', { ascending: false })
         .limit(1)
         .maybeSingle(),
+      supabase
+        .from('guild_runtime_features')
+        .select('feature, boot_id')
+        .eq('guild_id', ctx.guildId)
+        .limit(100),
     ]);
     if (configResult.error) return dbError(configResult.error, 'dashboard/feature-status/config');
     if (heartbeatResult.error) return dbError(heartbeatResult.error, 'dashboard/feature-status/heartbeat');
+    if (runtimeResult.error) return dbError(runtimeResult.error, 'dashboard/feature-status/runtime');
 
     const snapshotAt = heartbeatResult.data?.snapshot_at
       ? Date.parse(heartbeatResult.data.snapshot_at)
@@ -66,6 +72,28 @@ export async function GET() {
           online: staleSecs !== null && staleSecs < 120,
           staleSecs,
         },
+        runtimeFeatures: Array.isArray(runtimeResult.data)
+          ? runtimeResult.data
+            // Rows stranded by an EARLIER boot must not let a recovered
+            // heartbeat vouch for managers this process never constructed.
+            // Only a LEGACY row (no id) fails open; an identified row
+            // requires a MATCHING identified diagnostics row — health rows
+            // are per-guild and identified too, so an unidentified newest
+            // row means an older writer, not this boot.
+            .filter((row) => {
+              const rowBootId = typeof row.boot_id === 'string' && row.boot_id !== ''
+                ? row.boot_id
+                : null;
+              if (rowBootId === null) return true;
+              const heartbeatBootId = typeof heartbeatResult.data?.boot_id === 'string'
+                && heartbeatResult.data.boot_id !== ''
+                ? heartbeatResult.data.boot_id
+                : null;
+              return heartbeatBootId !== null && rowBootId === heartbeatBootId;
+            })
+            .map((row) => row.feature)
+            .filter((feature): feature is string => typeof feature === 'string')
+          : null,
       },
     });
   } catch (error) {

@@ -39,6 +39,13 @@ export class StatsChannelManager {
   private timer: NodeJS.Timeout | null = null;
   private intervalMs: number;
   private degradedChannels = new Set<string>();
+  /**
+   * configId → channelId for counters whose identity write stayed AMBIGUOUS
+   * (every attempt errored and the read-back failed too). While listed, the
+   * create branch retries THIS channel's identity instead of minting another
+   * counter every interval during a database outage.
+   */
+  private ambiguousChannels = new Map<string, string>();
   private alertedDegradedChannels = new Set<string>();
   private recoveryChecked = new Set<string>();
 
@@ -114,6 +121,14 @@ export class StatsChannelManager {
 
         // Only update if value changed
         if (config.last_value === value && config.channel_id) {
+          // A transiently failed alert resolution must stay retryable even
+          // when the value never moves again (role/boost counts can sit
+          // stable for weeks). The counter itself is healthy — a previous
+          // tick proved that by persisting last_value — only the resolution
+          // write is outstanding, so retry it before shortcutting.
+          if (this.degradedChannels.has(config.id) || !this.recoveryChecked.has(config.id)) {
+            await this.resolveUpdateAlerts(config);
+          }
           continue;
         }
 
@@ -130,6 +145,71 @@ export class StatsChannelManager {
           }
           await channel.setName(newName);
         } else {
+          const ambiguousId = this.ambiguousChannels.get(config.id);
+          if (ambiguousId) {
+            // Resolve the ambiguous channel before ever creating another.
+            const retry = await this.persistChannelIdentity(config, ambiguousId);
+            if (retry.outcome === 'persisted') {
+              // Fall THROUGH to the normal success bookkeeping (value write,
+              // event, resolveUpdateAlerts) — an unconditional continue left
+              // the update-failed alert standing forever once last_value
+              // matched and later ticks took the unchanged-value shortcut.
+              this.ambiguousChannels.delete(config.id);
+              channelId = ambiguousId;
+              const resolvedChannel =
+                this.guild.channels.cache.get(ambiguousId) as VoiceChannel | undefined;
+              if (!resolvedChannel) {
+                // The identity persisted but the channel was DELETED during
+                // the outage. Falling through would write last_value and
+                // resolve the failure alert, and the unchanged-value shortcut
+                // would then hide the deletion forever — raise the
+                // deleted-counter alert instead and skip this tick's
+                // bookkeeping.
+                await this.raiseChannelDeletedAlert(config);
+                continue;
+              }
+              // A rename failure must reach the SAME outer failure path the
+              // ordinary update uses: swallowing it here persisted the new
+              // last_value, resolved the failure alert, and the
+              // unchanged-value shortcut then hid the stale name forever.
+              await resolvedChannel.setName(newName);
+            } else if (retry.outcome === 'lost_race') {
+              // Another process registered its own counter meanwhile; ours is
+              // a duplicate — dispose durably, never blind-delete.
+              this.ambiguousChannels.delete(config.id);
+              config.channel_id = retry.winnerChannelId;
+              const pended = await this.persistPendingCleanup(config, ambiguousId);
+              if (!pended) {
+                const channel = this.guild.channels.cache.get(ambiguousId);
+                if (channel) {
+                  await this.deleteChannelWithRetries(
+                    channel as VoiceChannel,
+                    'Stats channel lost identity race',
+                  );
+                }
+              }
+            } else if (retry.outcome === 'error') {
+              // The read-back worked and the row does NOT point at our
+              // channel: the original write never committed. Hand the channel
+              // to the reconciler (adopt-or-delete) and stop tracking it.
+              this.ambiguousChannels.delete(config.id);
+              const pended = await this.persistPendingCleanup(config, ambiguousId);
+              if (!pended) {
+                const channel = this.guild.channels.cache.get(ambiguousId);
+                if (channel) {
+                  await this.deleteChannelWithRetries(
+                    channel as VoiceChannel,
+                    'Stats channel identity write failed',
+                  );
+                }
+              }
+            }
+            if (!channelId) {
+              // Still ambiguous or disposed: never create this tick.
+              continue;
+            }
+          }
+          if (!channelId) {
           // Create the voice channel if it doesn't exist yet
           const configObj = config.stat_config ?? {};
           const categoryId = typeof configObj === 'object' && 'category_id' in configObj
@@ -149,8 +229,34 @@ export class StatsChannelManager {
             ],
           });
 
-          const identityError = await this.persistChannelIdentity(config, channel.id);
-          if (identityError) {
+          const identity = await this.persistChannelIdentity(config, channel.id);
+          if (identity.outcome === 'lost_race') {
+            // Another process (rolling deploy, overlapping reload) created and
+            // registered its own counter first. The winner's pointer is
+            // durable; OUR channel is the duplicate. Adopt the winner in
+            // memory and dispose of ours through the same durable machinery
+            // as the abort path, so a crash here cannot orphan it.
+            config.channel_id = identity.winnerChannelId;
+            const survivorPersisted = await this.persistPendingCleanup(config, channel.id);
+            if (!survivorPersisted) {
+              await this.deleteChannelWithRetries(channel, 'Stats channel lost identity race');
+            }
+            continue;
+          }
+          if (identity.outcome === 'ambiguous') {
+            // The identity write may have COMMITTED with a lost response and
+            // the read-back could not settle it. Deleting would risk killing
+            // a live counter whose durable pointer survives recovery — keep
+            // the channel, remember it locally so later ticks RETRY its
+            // identity instead of creating another counter per interval, and
+            // best-effort record the reconciler pointer too.
+            this.ambiguousChannels.set(config.id, channel.id);
+            await this.persistPendingCleanup(config, channel.id);
+            throw new Error(
+              `Failed to confirm stats channel identity: ${identity.message}`,
+            );
+          }
+          if (identity.outcome === 'error') {
             // The Discord channel exists but its identity could not be
             // persisted even with retries: config.channel_id stays null, so
             // every later update would create ANOTHER counter channel. Record
@@ -161,29 +267,13 @@ export class StatsChannelManager {
             // the loud manual-cleanup log.
             const survivorPersisted = await this.persistPendingCleanup(config, channel.id);
             if (!survivorPersisted) {
-              let deleted = false;
-              for (let attempt = 1; attempt <= 3 && !deleted; attempt++) {
-                try {
-                  await channel.delete('Stats channel identity write failed');
-                  deleted = true;
-                } catch (deleteError) {
-                  if (attempt === 3) {
-                    log.error(
-                      `Stats channel ${channel.id} could not be deleted after its identity write `
-                      + 'failed and no durable cleanup state could be written; it is orphaned in '
-                      + 'Discord and must be removed manually:',
-                      { error: String(deleteError) },
-                    );
-                  } else {
-                    await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
-                  }
-                }
-              }
+              await this.deleteChannelWithRetries(channel, 'Stats channel identity write failed');
             }
-            throw new Error(`Failed to persist stats channel identity: ${identityError}`);
+            throw new Error(`Failed to persist stats channel identity: ${identity.message}`);
           }
           channelId = channel.id;
           created = true;
+          }
         }
 
         const { error: lastValueError } = await this.supabase
@@ -215,36 +305,114 @@ export class StatsChannelManager {
   }
 
   /**
-   * Persist a freshly created channel's identity with retries. Returns null
-   * on success (also updating the in-memory row) or the final error message.
+   * CLAIM the empty channel slot for a freshly created channel, with retries.
+   * The write is conditional on channel_id still being null: two overlapping
+   * processes (rolling deploy, reload) can both create a Discord channel for
+   * the same config, and an unconditional last-writer-wins update would leave
+   * the loser's channel durably unowned. 'persisted' also updates the
+   * in-memory row; 'lost_race' reports the winner's id (null when the config
+   * row itself vanished mid-flight).
    */
   private async persistChannelIdentity(
     config: StatsChannelConfig,
     channelId: string,
-  ): Promise<string | null> {
+  ): Promise<
+    | { outcome: 'persisted' }
+    | { outcome: 'lost_race'; winnerChannelId: string | null }
+    | { outcome: 'error'; message: string }
+    | { outcome: 'ambiguous'; message: string }
+  > {
     let lastError = 'unknown error';
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const { error } = await this.supabase
+      const { data: claimed, error } = await this.supabase
         .from('stats_channels')
         .update({ channel_id: channelId })
-        .eq('id', config.id);
-      if (!error) {
+        .eq('id', config.id)
+        .is('channel_id', null)
+        .select('id')
+        .maybeSingle();
+      if (!error && claimed) {
         config.channel_id = channelId;
-        return null;
+        return { outcome: 'persisted' };
       }
-      lastError = error.message;
+      if (!error) {
+        // Zero rows matched: someone else claimed the slot, the config row
+        // vanished — or OUR earlier attempt committed but its acknowledgement
+        // was lost. Read the current pointer to tell those apart.
+        const { data: row, error: readError } = await this.supabase
+          .from('stats_channels')
+          .select('channel_id')
+          .eq('id', config.id)
+          .maybeSingle();
+        if (!readError) {
+          const winner = typeof row?.channel_id === 'string' ? row.channel_id : null;
+          if (winner === channelId) {
+            config.channel_id = channelId;
+            return { outcome: 'persisted' };
+          }
+          return { outcome: 'lost_race', winnerChannelId: winner };
+        }
+        lastError = readError.message;
+      } else {
+        lastError = error.message;
+      }
       if (attempt < 3) {
         await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
       }
     }
-    return lastError;
+    // Final read-back: the FIRST conditional claim may have committed with a
+    // lost acknowledgement while the database then stayed down for every
+    // retry. If the durable row already points at this channel, reporting
+    // error would delete a LIVE counter the config can never recreate
+    // (channel_id is non-null after recovery).
+    const { data: finalRow, error: finalReadError } = await this.supabase
+      .from('stats_channels')
+      .select('channel_id')
+      .eq('id', config.id)
+      .maybeSingle();
+    if (!finalReadError) {
+      if (finalRow?.channel_id === channelId) {
+        config.channel_id = channelId;
+        return { outcome: 'persisted' };
+      }
+      return { outcome: 'error', message: lastError };
+    }
+    return { outcome: 'ambiguous', message: lastError };
+  }
+
+  /** Delete a just-created duplicate/abort channel; logs loudly on exhaustion. */
+  private async deleteChannelWithRetries(
+    channel: { id: string; delete: (reason?: string) => Promise<unknown> },
+    reason: string,
+  ): Promise<boolean> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await channel.delete(reason);
+        return true;
+      } catch (deleteError) {
+        if (attempt === 3) {
+          log.error(
+            `Stats channel ${channel.id} could not be deleted (${reason}) and no durable `
+            + 'cleanup state could be written; it is orphaned in Discord and must be removed '
+            + 'manually:',
+            { error: String(deleteError) },
+          );
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        }
+      }
+    }
+    return false;
   }
 
   /**
    * Durably record an abort survivor on its stats_channels row so the
-   * reconciler owns it by id. Read-merge-write with a read-back: a write that
-   * matched no row (config deleted mid-flight) is a FAILED persist, because
-   * the pointer would not exist anywhere.
+   * reconciler owns it by id. The append is a single-statement RPC — two
+   * processes losing the same identity race must BOTH keep their pointer; a
+   * read-merge-write here let the last writer drop the other duplicate's
+   * only durable record. A call that matched no row (config deleted
+   * mid-flight) is a FAILED persist, because the pointer would not exist
+   * anywhere.
    */
   private async persistPendingCleanup(
     config: StatsChannelConfig,
@@ -252,27 +420,18 @@ export class StatsChannelManager {
   ): Promise<boolean> {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const { data: row, error: readError } = await this.supabase
-          .from('stats_channels')
-          .select('pending_cleanup_channel_ids')
-          .eq('id', config.id)
-          .maybeSingle();
-        if (readError) throw new Error(readError.message);
-        if (!row) throw new Error('stats channel row no longer exists');
-        const existing = Array.isArray(row.pending_cleanup_channel_ids)
-          ? (row.pending_cleanup_channel_ids as unknown[])
-            .filter((id): id is string => typeof id === 'string')
+        const { data, error } = await this.supabase.rpc('append_stats_pending_cleanup', {
+          p_config_id: config.id,
+          p_channel_id: channelId,
+        });
+        if (error) throw new Error(error.message);
+        if (data !== true) throw new Error('stats channel row no longer exists');
+        const known = Array.isArray(config.pending_cleanup_channel_ids)
+          ? config.pending_cleanup_channel_ids
           : [];
-        const merged = existing.includes(channelId) ? existing : [...existing, channelId];
-        const { data: updated, error: writeError } = await this.supabase
-          .from('stats_channels')
-          .update({ pending_cleanup_channel_ids: merged })
-          .eq('id', config.id)
-          .select('id')
-          .maybeSingle();
-        if (writeError) throw new Error(writeError.message);
-        if (!updated) throw new Error('stats channel row no longer exists');
-        config.pending_cleanup_channel_ids = merged;
+        if (!known.includes(channelId)) {
+          config.pending_cleanup_channel_ids = [...known, channelId];
+        }
         log.warn(
           `Stats channel ${channelId} recorded for recovery after its identity write failed`,
         );
@@ -381,11 +540,15 @@ export class StatsChannelManager {
           remaining.push(channelId);
         }
       }
-      if (remaining.length !== pending.length) {
-        const { error: trimError } = await this.supabase
-          .from('stats_channels')
-          .update({ pending_cleanup_channel_ids: remaining })
-          .eq('id', row.id);
+      const resolvedIds = pending.filter((channelId) => !remaining.includes(channelId));
+      if (resolvedIds.length > 0) {
+        // Remove exactly the RESOLVED ids in one statement so a concurrent
+        // append (another process recording its own survivor) is never
+        // overwritten by this trim.
+        const { error: trimError } = await this.supabase.rpc(
+          'remove_stats_pending_cleanup',
+          { p_config_id: row.id, p_channel_ids: resolvedIds },
+        );
         if (trimError) {
           log.error('Failed to trim stats-channel cleanup state:', {
             statsChannelId: row.id,
@@ -393,7 +556,10 @@ export class StatsChannelManager {
           });
         } else {
           const local = this.channels.find((config) => config.id === row.id);
-          if (local) local.pending_cleanup_channel_ids = remaining;
+          if (local) {
+            local.pending_cleanup_channel_ids = (local.pending_cleanup_channel_ids ?? [])
+              .filter((channelId) => !resolvedIds.includes(channelId));
+          }
         }
       }
     }
@@ -469,7 +635,14 @@ export class StatsChannelManager {
       log.error('Failed to write stats-channel update alert:', { error: String(alertErr) });
       return { inserted: false, insertErrorCode: undefined, delivered: false };
     });
-    if (result.inserted || result.insertErrorCode === '23505' || result.delivered) {
+    // Latch only when BOTH halves are durable (same contract as message-log
+    // after round 33): the notice was delivered AND the alert row exists
+    // (fresh insert or 23505 dedupe). A delivered ping whose row insert
+    // transiently failed must keep retrying the write, or the degradation
+    // never gains its durable dashboard alert; a durable row whose ping
+    // failed equally keeps retrying — one attempt per update interval,
+    // deduped at the row by the partial unique index.
+    if (result.delivered && (result.inserted || result.insertErrorCode === '23505')) {
       this.alertedDegradedChannels.add(config.id);
     }
   }

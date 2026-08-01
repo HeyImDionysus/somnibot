@@ -47,7 +47,15 @@ CREATE OR REPLACE FUNCTION public.claim_scheduled_message_send(
   -- the counter committed; the crashed minute then looked unreserved to stale
   -- recovery, which reserved a SECOND slot (inflating current_sends) or, on
   -- an exhausted schedule, skipped a paid-but-undelivered occurrence.
-  p_occurrence_id UUID DEFAULT NULL
+  p_occurrence_id UUID DEFAULT NULL,
+  -- Round 30: the caller's claim-generation snapshot. A worker that stalled
+  -- past the stale threshold can resume AFTER recovery reclaimed, reserved,
+  -- sent, and settled this very occurrence; the idempotent marker fast-path
+  -- then told it "your slot is paid" and it posted the SAME due minute a
+  -- second time. When provided, the occurrence must still be 'claimed' with
+  -- a MATCHING updated_at or the call returns -1: you no longer own this
+  -- minute; do not send.
+  p_expected_updated_at TIMESTAMPTZ DEFAULT NULL
 )
 RETURNS INTEGER
 LANGUAGE plpgsql
@@ -56,7 +64,39 @@ SET search_path = ''
 AS $$
 DECLARE
   claimed_count INTEGER;
+  occ_result JSONB;
+  occ_status TEXT;
+  occ_updated_at TIMESTAMPTZ;
 BEGIN
+  IF p_occurrence_id IS NOT NULL THEN
+    -- Serialize per occurrence: a sender that stalls past the stale
+    -- threshold can resume AFTER recovery reclaimed this same occurrence and
+    -- reserved its slot. Lock the occurrence row first; the marker check is
+    -- then race-free with the marker write below, so one occurrence can
+    -- never pay for two slots however many workers ask.
+    SELECT o.result, o.status, o.updated_at
+      INTO occ_result, occ_status, occ_updated_at
+      FROM public.discord_operation_occurrences o
+     WHERE o.id = p_occurrence_id
+       FOR UPDATE;
+    IF p_expected_updated_at IS NOT NULL
+       AND (NOT FOUND
+            OR occ_status IS DISTINCT FROM 'claimed'
+            OR occ_updated_at IS DISTINCT FROM p_expected_updated_at) THEN
+      -- Ownership check FIRST — before the marker fast-path can bless a
+      -- stalled worker whose minute was reclaimed and already delivered.
+      RETURN -1;
+    END IF;
+    IF FOUND AND COALESCE(occ_result->>'counterReserved', 'false') = 'true' THEN
+      -- Idempotent success: THIS occurrence already owns a counter slot.
+      SELECT s.current_sends INTO claimed_count
+        FROM public.scheduled_messages s
+       WHERE s.id = p_schedule_id
+         AND s.guild_id = p_guild_id;
+      RETURN claimed_count;
+    END IF;
+  END IF;
+
   UPDATE public.scheduled_messages
      SET current_sends = current_sends + 1,
          last_sent_at = GREATEST(
@@ -71,24 +111,27 @@ BEGIN
   RETURNING current_sends INTO claimed_count;
 
   IF claimed_count IS NOT NULL AND p_occurrence_id IS NOT NULL THEN
+    -- Stamp unconditionally (the row is locked above): gating on
+    -- status = 'claimed' could skip the marker after the counter committed,
+    -- recreating the unmarked-slot corner this function exists to close.
     UPDATE public.discord_operation_occurrences
        SET result = COALESCE(result, '{}'::jsonb)
                     || pg_catalog.jsonb_build_object('counterReserved', true)
-     WHERE id = p_occurrence_id
-       AND status = 'claimed';
+     WHERE id = p_occurrence_id;
   END IF;
 
   RETURN claimed_count;
 END;
 $$;
 
--- The 3-arg overload from the original definition must not linger: two
--- resolvable signatures make PostgREST RPC dispatch ambiguous.
+-- Older overloads must not linger: two resolvable signatures make
+-- PostgREST RPC dispatch ambiguous.
 DROP FUNCTION IF EXISTS public.claim_scheduled_message_send(UUID, TEXT, TIMESTAMPTZ);
+DROP FUNCTION IF EXISTS public.claim_scheduled_message_send(UUID, TEXT, TIMESTAMPTZ, UUID);
 
-REVOKE ALL ON FUNCTION public.claim_scheduled_message_send(UUID, TEXT, TIMESTAMPTZ, UUID)
+REVOKE ALL ON FUNCTION public.claim_scheduled_message_send(UUID, TEXT, TIMESTAMPTZ, UUID, TIMESTAMPTZ)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.claim_scheduled_message_send(UUID, TEXT, TIMESTAMPTZ, UUID)
+GRANT EXECUTE ON FUNCTION public.claim_scheduled_message_send(UUID, TEXT, TIMESTAMPTZ, UUID, TIMESTAMPTZ)
   TO service_role;
 
 COMMIT;

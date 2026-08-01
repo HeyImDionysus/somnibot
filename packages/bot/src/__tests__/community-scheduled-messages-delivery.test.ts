@@ -47,10 +47,13 @@ function schedSupa(
     schedulesLoadError?: { message: string };
     /** When set, claim_scheduled_message_send returns null (max_sends reached). */
     counterExhausted?: boolean;
+  counterOwnershipLost?: boolean;
+  gateGenerationMoves?: boolean;
   } = {},
 ) {
   const inserts: Record<string, any[]> = { alerts: [] };
   const updates: Array<{ payload: any }> = [];
+  let occurrenceOwnershipReads = 0;
   const deletes: string[] = [];
   function chainFor(table: string) {
     const c: any = { _isUpdate: false, _insertRow: null, _updatePayload: null };
@@ -73,6 +76,16 @@ function schedSupa(
       // The claim-loss read-back of the existing occurrence row.
       if (table === 'discord_operation_occurrences' && !c._insertRow && options.existingOccurrence) {
         return { data: options.existingOccurrence, error: null };
+      }
+      if (table === 'discord_operation_occurrences' && !c._insertRow) {
+        occurrenceOwnershipReads += 1;
+        // Round 32: the post-reserve baseline and the send-boundary gate. A
+        // healthy claimed occurrence with a stable generation by default;
+        // gateGenerationMoves simulates recovery reclaiming between them.
+        if (options.gateGenerationMoves && occurrenceOwnershipReads >= 2) {
+          return { data: { status: 'claimed', updated_at: '2026-07-27T12:09:00.000Z' }, error: null };
+        }
+        return { data: { status: 'claimed', updated_at: '2026-07-27T12:00:00.000Z' }, error: null };
       }
       // The reclaimed-counter reconcile read against the authoritative row.
       if (table === 'scheduled_messages' && options.priorCounterError) {
@@ -127,11 +140,30 @@ function schedSupa(
     };
     return c;
   }
-  const rpc = vi.fn(async (name: string) => {
+  const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
+    if (name === 'settle_discord_occurrence') {
+      // Settlement moved to a merge RPC (round 28): record it like the old
+      // occurrence table update so completion/failure assertions stay
+      // anchored to the same collector.
+      updates.push({
+        payload: {
+          status: args?.p_status,
+          resource_id: args?.p_resource_id ?? null,
+          result: args?.p_result ?? {},
+          last_error: args?.p_last_error ?? null,
+        },
+      });
+      return { data: true, error: null };
+    }
     if (name === 'reclaim_stale_discord_occurrence') {
       const r = options.reclaimResult;
       if (r && typeof r === 'object' && 'error' in r) return { data: null, error: r.error };
       return { data: r === true, error: null };
+    }
+    if (options.counterOwnershipLost && name === 'claim_scheduled_message_send') {
+      // Round 30: the generation check says another worker reclaimed and
+      // delivered this minute while we stalled.
+      return { data: -1, error: null };
     }
     if (options.counterError) return { data: null, error: options.counterError };
     if (options.counterExhausted) return { data: null, error: null };
@@ -244,6 +276,56 @@ describe('ScheduledMessageRunner — missed-run policy', () => {
     expect(inserts.alerts[0].alert_type).toBe('scheduled_message_missed_occurrence');
   });
 
+  it('skip-missed advances last_sent_at to the last MISSED occurrence, not the recovery time (round 16)', async () => {
+    // Stamping "now" made the next legitimate tick look like a duplicate to
+    // the ordinary send guard: a minutely schedule recovered at :30 lost the
+    // following :00.
+    const Runner = await loadRunner();
+    const sched = { ...BASE_SCHEDULE, missed_run_policy: 'skip-missed' };
+    const { supabase, updates } = schedSupa([sched]);
+    const { guild: g } = guild();
+    const runner = new Runner(g, supabase);
+    const baseline = new Date('2026-07-27T11:00:00.000Z');
+    const lastOcc = new Date('2026-07-27T11:59:00.000Z');
+    const now = new Date('2026-07-27T11:59:30.000Z');
+
+    await (runner as any).noticeMissed(sched, baseline, lastOcc, now);
+
+    const stamped = updates.find((u) => u.payload?.last_sent_at);
+    expect(stamped?.payload.last_sent_at).toBe(lastOcc.toISOString());
+  });
+
+  it('rolls the baseline back when the missed-run notice cannot be made durable (round 22)', async () => {
+    // raiseOwnerAlert reports failure instead of throwing; consuming the
+    // missed occurrence anyway meant a transient alert outage silenced the
+    // owner forever. The advance is rolled back so the next restart retries.
+    const Runner = await loadRunner();
+    const sched = { ...BASE_SCHEDULE, missed_run_policy: 'skip-missed' };
+    const { supabase, updates } = schedSupa([sched]);
+    const alertModule = await import('../services/alert-service.js');
+    const raiseSpy = vi.spyOn(alertModule, 'raiseOwnerAlert').mockResolvedValue({
+      inserted: false,
+      delivered: false,
+    } as never);
+    try {
+      const { guild: g } = guild();
+      const runner = new Runner(g, supabase);
+      const baseline = new Date('2026-07-27T11:00:00.000Z');
+      const lastOcc = new Date('2026-07-27T11:59:00.000Z');
+      const now = new Date('2026-07-27T11:59:30.000Z');
+
+      await (runner as any).noticeMissed(sched, baseline, lastOcc, now);
+
+      const stamps = updates
+        .map((u) => u.payload?.last_sent_at)
+        .filter((v): v is string => typeof v === 'string');
+      // Advance won the single-winner race, then rolled back to the baseline.
+      expect(stamps).toEqual([lastOcc.toISOString(), baseline.toISOString()]);
+    } finally {
+      raiseSpy.mockRestore();
+    }
+  });
+
   it('a brand-new schedule (no baseline) never triggers a spurious catch-up', async () => {
     const Runner = await loadRunner();
     const sched = { ...BASE_SCHEDULE, missed_run_policy: 'send-latest', last_sent_at: null, start_date: null };
@@ -255,6 +337,43 @@ describe('ScheduledMessageRunner — missed-run policy', () => {
 
     expect(send).not.toHaveBeenCalled();
     expect(inserts.alerts.length).toBe(0);
+  });
+});
+
+describe('ScheduledMessageRunner — a stalled worker cannot double-send a reclaimed minute (round 30)', () => {
+  it('refuses to send when the generation moves between reserving and sending', async () => {
+    // Round 32: the worker stalls AFTER reserving (embed query, event-loop
+    // pause); recovery reclaims and delivers the minute. The send-boundary
+    // gate sees the generation moved and walks away.
+    const Runner = await loadRunner();
+    const sched = { ...BASE_SCHEDULE };
+    const { supabase, updates } = schedSupa([sched], { gateGenerationMoves: true });
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+
+    await (runner as any).tick(new Date('2026-07-27T12:00:30.000Z'));
+
+    expect(send).not.toHaveBeenCalled();
+    expect(updates.some((u) => u.payload?.status === 'completed')).toBe(false);
+  });
+
+  it('refuses to send when the counter RPC reports lost ownership (-1)', async () => {
+    // The stalled original resumes AFTER recovery reclaimed, reserved, sent,
+    // and settled the occurrence. The marker fast-path used to bless it with
+    // idempotent success and it posted the SAME due minute again — the
+    // generation check now returns -1 and the worker walks away without
+    // sending or settling anything.
+    const Runner = await loadRunner();
+    const sched = { ...BASE_SCHEDULE };
+    const { supabase, updates } = schedSupa([sched], { counterOwnershipLost: true });
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+
+    await (runner as any).tick(new Date('2026-07-27T12:00:30.000Z'));
+
+    expect(send).not.toHaveBeenCalled();
+    // No settlement either: whoever owns the claim settles it.
+    expect(updates.some((u) => u.payload?.status === 'completed')).toBe(false);
   });
 });
 

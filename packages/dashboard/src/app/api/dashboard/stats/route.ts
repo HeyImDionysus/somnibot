@@ -88,7 +88,7 @@ export async function GET(request: NextRequest) {
       // Recent audit log events for activity feed
       admin
         .from('audit_logs')
-        .select('action, details, timestamp, success')
+        .select('action, details, timestamp, success, target_type, target_id')
         .eq('guild_id', guildId)
         .order('timestamp', { ascending: false })
         .limit(15),

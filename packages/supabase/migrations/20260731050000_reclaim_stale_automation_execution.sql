@@ -8,12 +8,30 @@
 -- matches every pre-action default — removing a now-held execution, whose
 -- hold then loses execution_id via ON DELETE SET NULL.
 --
--- One statement closes the race: the NOT EXISTS is evaluated by the same
--- DELETE that removes the row, so a concurrently inserted hold either commits
--- first (its execution row no longer matches) or blocks on the row lock and
--- the linkage check sees it.
+-- Round 15: a single DELETE with NOT EXISTS is still not enough. The
+-- subquery is evaluated against the statement snapshot; a concurrent hold
+-- INSERT that commits while the DELETE waits on the row's FK lock is never
+-- seen, because EvalPlanQual re-checks reuse the original snapshot. The
+-- reclaim therefore locks the candidate row FIRST — FOR UPDATE conflicts
+-- with the KEY SHARE a referencing hold insert must take — and only then
+-- checks linkage in a NEW statement whose snapshot postdates any insert
+-- that won the lock race:
+--   * hold insert commits first  -> our lock acquires afterwards, the fresh
+--     EXISTS sees the hold, the reclaim refuses;
+--   * we lock first              -> the insert waits on the FK lock, our
+--     delete removes the parent, and the insert fails its FK check — the
+--     worker's hold creation errors visibly instead of silently detaching.
 
 BEGIN;
+
+-- Round 21: the pre-action DEFAULTS are not proof that no action ran — an
+-- immediate automation keeps them until finalize, so a crash after
+-- send_message/send_dm/create_ticket reached Discord let a stale redelivery
+-- reclaim the claim and repeat the external side effect. actions_started is
+-- flipped durably BEFORE the first action executes; the reclaim refuses any
+-- claim that reached it.
+ALTER TABLE public.automation_executions
+  ADD COLUMN IF NOT EXISTS actions_started BOOLEAN NOT NULL DEFAULT false;
 
 CREATE OR REPLACE FUNCTION public.reclaim_stale_automation_execution(
   p_guild_id TEXT,
@@ -27,7 +45,7 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_removed UUID;
+  v_candidate UUID;
 BEGIN
   IF p_guild_id IS NULL
      OR pg_catalog.btrim(p_guild_id) = ''
@@ -40,7 +58,8 @@ BEGIN
       MESSAGE = 'reclaim_stale_automation_execution: complete claim identity is required';
   END IF;
 
-  DELETE FROM public.automation_executions AS execution
+  SELECT execution.id INTO v_candidate
+    FROM public.automation_executions AS execution
    WHERE execution.guild_id = p_guild_id
      AND execution.automation_id = p_automation_id
      AND execution.occurrence_id = p_occurrence_id
@@ -49,18 +68,30 @@ BEGIN
      AND execution.actions_executed = 0
      AND execution.actions_failed = 0
      AND execution.duration_ms = 0
+     -- Never reclaim a claim whose actions may have reached Discord.
+     AND execution.actions_started = false
      -- Age floor: a live run finishes in seconds; ten minutes cannot race one.
      AND execution.created_at < p_stale_before
-     -- The atomic hold guard. Evaluated by the same statement that deletes,
-     -- so a concurrent hold insert cannot slip between check and delete.
-     AND NOT EXISTS (
-       SELECT 1
-         FROM public.automation_mass_action_holds AS hold
-        WHERE hold.execution_id = execution.id
-     )
-  RETURNING execution.id INTO v_removed;
+   FOR UPDATE;
 
-  RETURN v_removed IS NOT NULL;
+  IF v_candidate IS NULL THEN
+    RETURN FALSE;
+  END IF;
+
+  -- A NEW statement, snapshot taken AFTER the row lock: a hold insert that
+  -- committed before we acquired the lock is visible here.
+  IF EXISTS (
+    SELECT 1
+      FROM public.automation_mass_action_holds AS hold
+     WHERE hold.execution_id = v_candidate
+  ) THEN
+    RETURN FALSE;
+  END IF;
+
+  DELETE FROM public.automation_executions
+   WHERE id = v_candidate;
+
+  RETURN TRUE;
 END;
 $$;
 

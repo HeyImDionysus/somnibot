@@ -3,6 +3,7 @@ import {
   isAuthoritativeChannelSnapshot,
   normalizeSnapshotChannels,
   resolveSelectedChannels,
+  snapshotAuthorityAsOf,
   snapshotTimestampMs,
 } from '@/components/shared/channel-picker';
 
@@ -22,6 +23,26 @@ const category = {
   manageableByBot: true,
   botPermissions: '16',
 };
+
+describe('snapshotAuthorityAsOf (round 27: gates Send Now via onAuthorityChange)', () => {
+  const MOUNT = Date.parse('2026-07-31T04:00:00.000Z');
+
+  it('holds while the snapshot is inside its validity window', () => {
+    expect(snapshotAuthorityAsOf(true, MOUNT, MOUNT + 9 * 60_000)).toBe(true);
+  });
+
+  it('flips to false once the window lapses with the dialog still open', () => {
+    // The selected channel id SURVIVES this flip — the embed page's Send Now
+    // gate consumes exactly this value through onAuthorityChange, so a
+    // send into a no-longer-verifiable channel fails closed.
+    expect(snapshotAuthorityAsOf(true, MOUNT, MOUNT + 10 * 60_000 + 1)).toBe(false);
+  });
+
+  it('never grants authority to an unloaded or non-authoritative snapshot', () => {
+    expect(snapshotAuthorityAsOf(false, MOUNT, MOUNT)).toBe(false);
+    expect(snapshotAuthorityAsOf(true, 0, MOUNT)).toBe(false);
+  });
+});
 
 describe('ChannelPicker snapshot authority', () => {
   it('does not label a configured channel deleted while the live snapshot is pending', () => {

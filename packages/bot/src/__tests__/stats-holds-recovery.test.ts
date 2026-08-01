@@ -24,17 +24,31 @@ vi.mock('discord.js', () => ({
 describe('StatsChannelManager — failed identity write does not leak the channel', () => {
   function statsSupa(channelIdWriteError: { message: string } | null) {
     return {
+      rpc: vi.fn(async () => ({ data: null, error: { message: 'rpc unavailable' } })),
       from: vi.fn((table: string) => {
         const chain: any = {};
-        for (const m of ['select', 'eq', 'neq', 'in', 'order', 'limit']) chain[m] = vi.fn(() => chain);
+        for (const m of ['select', 'eq', 'neq', 'in', 'order', 'limit', 'is']) {
+          chain[m] = vi.fn(() => chain);
+        }
         chain.update = vi.fn((payload: Record<string, unknown>) => {
           chain._payload = payload;
           return chain;
         });
-        chain.maybeSingle = vi.fn(async () => ({
-          data: table === 'guild_config' ? { stats_channels_enabled: true } : null,
-          error: null,
-        }));
+        chain.maybeSingle = vi.fn(async () => {
+          if (table !== 'stats_channels') {
+            return {
+              data: table === 'guild_config' ? { stats_channels_enabled: true } : null,
+              error: null,
+            };
+          }
+          if (chain._payload && 'channel_id' in chain._payload) {
+            // Conditional identity claim read-back.
+            return channelIdWriteError
+              ? { data: null, error: channelIdWriteError }
+              : { data: { id: 'sc-new' }, error: null };
+          }
+          return { data: null, error: null };
+        });
         chain.single = vi.fn(async () => ({ data: null, error: null }));
         chain.then = (resolve: (v: unknown) => void) => {
           if (chain._payload && 'channel_id' in chain._payload) {
@@ -129,10 +143,16 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     configRows?: Array<Record<string, unknown>>;
     scanRows?: Array<Record<string, unknown>>;
     identityWriteFails?: boolean;
+    identityReadBackFails?: boolean;
     adoptMatches?: boolean;
   }) {
     const updatePayloads: Array<Record<string, unknown>> = [];
+    const rpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
     const supabase = {
+      rpc: vi.fn(async (fn: string, args: Record<string, unknown>) => {
+        rpcCalls.push({ fn, args });
+        return { data: true, error: null };
+      }),
       from: vi.fn((table: string) => {
         const chain: any = {};
         let usedNeq = false;
@@ -152,10 +172,16 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
             };
           }
           if (chain._payload && 'channel_id' in chain._payload) {
+            if (options.identityWriteFails) {
+              return { data: null, error: { message: 'db unavailable' } };
+            }
             return { data: options.adoptMatches === false ? null : { id: 'sc-1' }, error: null };
           }
           if (chain._payload && 'pending_cleanup_channel_ids' in chain._payload) {
             return { data: { id: 'sc-1' }, error: null };
+          }
+          if (options.identityReadBackFails) {
+            return { data: null, error: { message: 'db unavailable' } };
           }
           return { data: { pending_cleanup_channel_ids: [] }, error: null };
         });
@@ -178,7 +204,7 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
         return chain;
       }),
     } as any;
-    return { supabase, updatePayloads };
+    return { supabase, updatePayloads, rpcCalls };
   }
 
   function coll() {
@@ -227,7 +253,7 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
   it('persists the survivor pointer INSTEAD of deleting when the identity write fails', async () => {
     const StatsChannelManager = await load();
     const created = { id: 'vc-orphan', delete: vi.fn(async () => ({})) };
-    const { supabase, updatePayloads } = survivorSupa({
+    const { supabase, rpcCalls } = survivorSupa({
       configRows: [{ ...CONFIG_ROW }],
       scanRows: [],
       identityWriteFails: true,
@@ -239,13 +265,16 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     // The survivor became durable state, so the channel is NOT torn down —
     // the reconciler will adopt it as the counter on the next pass.
     expect(created.delete).not.toHaveBeenCalled();
-    expect(updatePayloads).toContainEqual({ pending_cleanup_channel_ids: ['vc-orphan'] });
+    expect(rpcCalls).toContainEqual({
+      fn: 'append_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_id: 'vc-orphan' },
+    });
   }, 20_000);
 
   it('adopts a survivor for an active config whose channel_id is still null', async () => {
     const StatsChannelManager = await load();
     const survivor = { id: 'vc-x', delete: vi.fn(async () => ({})) };
-    const { supabase, updatePayloads } = survivorSupa({
+    const { supabase, updatePayloads, rpcCalls } = survivorSupa({
       configRows: [],
       scanRows: [{
         id: 'sc-1', channel_id: null, active: true, pending_cleanup_channel_ids: ['vc-x'],
@@ -261,13 +290,16 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
 
     expect(survivor.delete).not.toHaveBeenCalled();
     expect(updatePayloads).toContainEqual({ channel_id: 'vc-x' });
-    expect(updatePayloads).toContainEqual({ pending_cleanup_channel_ids: [] });
+    expect(rpcCalls).toContainEqual({
+      fn: 'remove_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_ids: ['vc-x'] },
+    });
   });
 
   it('deletes a survivor owned by a deactivated config', async () => {
     const StatsChannelManager = await load();
     const survivor = { id: 'vc-x', delete: vi.fn(async () => ({})) };
-    const { supabase, updatePayloads } = survivorSupa({
+    const { supabase, rpcCalls } = survivorSupa({
       configRows: [],
       scanRows: [{
         id: 'sc-1', channel_id: null, active: false, pending_cleanup_channel_ids: ['vc-x'],
@@ -282,12 +314,15 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     mgr.stop?.();
 
     expect(survivor.delete).toHaveBeenCalledTimes(1);
-    expect(updatePayloads).toContainEqual({ pending_cleanup_channel_ids: [] });
+    expect(rpcCalls).toContainEqual({
+      fn: 'remove_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_ids: ['vc-x'] },
+    });
   });
 
   it('drops a survivor Discord confirms is already gone', async () => {
     const StatsChannelManager = await load();
-    const { supabase, updatePayloads } = survivorSupa({
+    const { supabase, rpcCalls } = survivorSupa({
       configRows: [],
       scanRows: [{
         id: 'sc-1', channel_id: null, active: false, pending_cleanup_channel_ids: ['vc-gone'],
@@ -305,7 +340,10 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     await mgr.start().catch(() => {});
     mgr.stop?.();
 
-    expect(updatePayloads).toContainEqual({ pending_cleanup_channel_ids: [] });
+    expect(rpcCalls).toContainEqual({
+      fn: 'remove_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_ids: ['vc-gone'] },
+    });
   });
 
   it('keeps a survivor whose deletion fails for the next pass', async () => {
@@ -316,7 +354,7 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
         throw new Error('missing permissions');
       }),
     };
-    const { supabase, updatePayloads } = survivorSupa({
+    const { supabase, rpcCalls } = survivorSupa({
       configRows: [],
       scanRows: [{
         id: 'sc-1', channel_id: null, active: false, pending_cleanup_channel_ids: ['vc-x'],
@@ -331,17 +369,190 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     mgr.stop?.();
 
     expect(survivor.delete).toHaveBeenCalledTimes(1);
-    // Nothing resolved, so the pointer list is NOT rewritten — the id stays
-    // durable for the next reconcile pass.
+    // Nothing resolved, so no removal is issued — the id stays durable for
+    // the next reconcile pass.
     expect(
-      updatePayloads.filter((payload) => 'pending_cleanup_channel_ids' in payload),
+      rpcCalls.filter((call) => call.fn === 'remove_stats_pending_cleanup'),
     ).toEqual([]);
+  });
+
+  it('keeps the channel when the identity write stays AMBIGUOUS (round 18)', async () => {
+    // Every claim attempt errored AND the final read-back failed: the first
+    // attempt may have committed with a lost acknowledgement. Deleting would
+    // risk killing a live counter whose durable pointer survives recovery —
+    // the channel stays, the reconciler pointer is attempted, nothing dies.
+    const StatsChannelManager = await load();
+    const created = { id: 'vc-maybe', delete: vi.fn(async () => ({})) };
+    const { supabase, rpcCalls } = survivorSupa({
+      configRows: [{ ...CONFIG_ROW }],
+      scanRows: [],
+      identityWriteFails: true,
+      identityReadBackFails: true,
+    });
+    const mgr = new StatsChannelManager(makeGuild({ created }), supabase, 60);
+    await mgr.start().catch(() => {});
+    mgr.stop?.();
+
+    expect(created.delete).not.toHaveBeenCalled();
+    expect(rpcCalls).toContainEqual({
+      fn: 'append_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_id: 'vc-maybe' },
+    });
+  }, 20_000);
+
+  it('resumes normal bookkeeping once an ambiguous identity resolves (round 20)', async () => {
+    // Tick 1: database down → ambiguous, one channel. Tick 2: database back →
+    // the retry confirms identity and the tick must fall through to the
+    // value write (and alert resolution) instead of skipping forever.
+    const StatsChannelManager = await load();
+    const created = {
+      id: 'vc-maybe',
+      delete: vi.fn(async () => ({})),
+      setName: vi.fn(async () => ({})),
+    };
+    const options = {
+      configRows: [{ ...CONFIG_ROW }],
+      scanRows: [] as Array<Record<string, unknown>>,
+      identityWriteFails: true,
+      identityReadBackFails: true,
+    };
+    const { supabase, updatePayloads } = survivorSupa(options);
+    const guild = makeGuild({ created });
+    const mgr = new StatsChannelManager(guild, supabase, 60);
+    await mgr.start().catch(() => {});
+    // Recovery: the database is reachable again, and the created channel is
+    // visible in the guild cache (round 24: a VANISHED channel must raise the
+    // deleted-counter alert instead of resuming bookkeeping).
+    (guild.channels.cache as Map<string, unknown>).set('vc-maybe', created);
+    options.identityWriteFails = false;
+    options.identityReadBackFails = false;
+    await (mgr as unknown as { updateAll(): Promise<void> }).updateAll().catch(() => {});
+    mgr.stop?.();
+
+    expect(guild.channels.create).toHaveBeenCalledTimes(1);
+    expect(created.delete).not.toHaveBeenCalled();
+    // The resolved tick performed the normal success bookkeeping.
+    expect(
+      updatePayloads.some((payload) => 'last_value' in payload),
+    ).toBe(true);
+  }, 30_000);
+
+  it('retries alert resolution behind the unchanged-value shortcut (round 32)', async () => {
+    // The counter is healthy (last_value already persisted) but a previous
+    // tick's alert resolution transiently failed. Stable statistics (role or
+    // boost counts) may never change again — the shortcut must retry the
+    // resolution instead of leaving the failure alert standing forever.
+    const StatsChannelManager = await load();
+    const { supabase } = survivorSupa({
+      configRows: [{ ...CONFIG_ROW, stat_type: 'total_members', channel_id: 'vc-live', last_value: '10' }],
+      scanRows: [],
+    });
+    const guild = makeGuild({});
+    const mgr = new StatsChannelManager(guild, supabase, 60);
+    const resolveSpy = vi.fn(async () => {});
+    (mgr as unknown as { resolveUpdateAlerts: unknown }).resolveUpdateAlerts = resolveSpy;
+    (mgr as unknown as { degradedChannels: Set<string> }).degradedChannels.add('sc-1');
+    await mgr.start().catch(() => {});
+    await (mgr as unknown as { updateAll(): Promise<void> }).updateAll().catch(() => {});
+    mgr.stop?.();
+
+    // The unchanged-value shortcut still ran the resolution retry.
+    expect(resolveSpy).toHaveBeenCalled();
+  }, 30_000);
+
+  it('propagates a recovered-tick rename failure instead of resuming bookkeeping (round 28)', async () => {
+    // Same recovery shape as round 20, but the confirmed channel's rename
+    // fails (Discord outage / permissions revoked). Swallowing it persisted
+    // last_value, resolved the failure alert, and the unchanged-value
+    // shortcut then hid the stale name forever — the failure must reach the
+    // outer failure path, leaving last_value unwritten so the next tick
+    // retries the rename.
+    const StatsChannelManager = await load();
+    const created = {
+      id: 'vc-maybe',
+      delete: vi.fn(async () => ({})),
+      setName: vi.fn(async () => {
+        throw new Error('Missing Permissions');
+      }),
+    };
+    const options = {
+      configRows: [{ ...CONFIG_ROW }],
+      scanRows: [] as Array<Record<string, unknown>>,
+      identityWriteFails: true,
+      identityReadBackFails: true,
+    };
+    const { supabase, updatePayloads } = survivorSupa(options);
+    const guild = makeGuild({ created });
+    const mgr = new StatsChannelManager(guild, supabase, 60);
+    await mgr.start().catch(() => {});
+    (guild.channels.cache as Map<string, unknown>).set('vc-maybe', created);
+    options.identityWriteFails = false;
+    options.identityReadBackFails = false;
+    await (mgr as unknown as { updateAll(): Promise<void> }).updateAll().catch(() => {});
+    mgr.stop?.();
+
+    expect(created.delete).not.toHaveBeenCalled();
+    // No success bookkeeping: last_value stays unwritten, so the stale name
+    // cannot hide behind the unchanged-value shortcut.
+    expect(updatePayloads.every((payload) => !('last_value' in payload))).toBe(true);
+  }, 30_000);
+
+  it('does not mint another counter each tick while the identity stays ambiguous (round 19)', async () => {
+    // Database fully down but Discord reachable: the first tick creates ONE
+    // channel and its identity stays ambiguous. Every later tick must retry
+    // THAT channel's identity, never create another untracked counter.
+    const StatsChannelManager = await load();
+    const created = { id: 'vc-maybe', delete: vi.fn(async () => ({})) };
+    const { supabase } = survivorSupa({
+      configRows: [{ ...CONFIG_ROW }],
+      scanRows: [],
+      identityWriteFails: true,
+      identityReadBackFails: true,
+    });
+    const guild = makeGuild({ created });
+    const mgr = new StatsChannelManager(guild, supabase, 60);
+    await mgr.start().catch(() => {});
+    await (mgr as unknown as { updateAll(): Promise<void> }).updateAll().catch(() => {});
+    await (mgr as unknown as { updateAll(): Promise<void> }).updateAll().catch(() => {});
+    mgr.stop?.();
+
+    expect(guild.channels.create).toHaveBeenCalledTimes(1);
+    expect(created.delete).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it('disposes of its own channel when another process wins the identity claim (round 12)', async () => {
+    // Two overlapping processes both create a counter channel; the identity
+    // write is a CONDITIONAL claim on channel_id IS NULL. The loser must not
+    // overwrite the winner's durable pointer — its channel is the duplicate
+    // and goes through the same durable-disposal machinery as the abort path.
+    const StatsChannelManager = await load();
+    const created = { id: 'vc-dup', delete: vi.fn(async () => ({})) };
+    const { supabase, updatePayloads, rpcCalls } = survivorSupa({
+      configRows: [{ ...CONFIG_ROW }],
+      scanRows: [],
+      adoptMatches: false,
+    });
+    const guild = makeGuild({ created });
+    const mgr = new StatsChannelManager(guild, supabase, 60);
+    await mgr.start().catch(() => {});
+    mgr.stop?.();
+
+    // The loser recorded its duplicate durably instead of deleting blind…
+    expect(rpcCalls).toContainEqual({
+      fn: 'append_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_id: 'vc-dup' },
+    });
+    expect(created.delete).not.toHaveBeenCalled();
+    // …and never force-wrote its own id over the winner's pointer.
+    expect(
+      updatePayloads.filter((payload) => payload.channel_id === 'vc-dup').length,
+    ).toBe(1); // the single conditional claim attempt, matched zero rows
   });
 
   it('never deletes a survivor that IS the live counter channel', async () => {
     const StatsChannelManager = await load();
     const fetchChannel = vi.fn(async () => ({ id: 'vc-live', delete: vi.fn() }));
-    const { supabase, updatePayloads } = survivorSupa({
+    const { supabase, rpcCalls } = survivorSupa({
       configRows: [],
       scanRows: [{
         id: 'sc-1', channel_id: 'vc-live', active: true, pending_cleanup_channel_ids: ['vc-live'],
@@ -354,7 +565,10 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     // A prior pass adopted it but could not trim the list: the only work left
     // is dropping the id — touching Discord at all risks the live counter.
     expect(fetchChannel).not.toHaveBeenCalled();
-    expect(updatePayloads).toContainEqual({ pending_cleanup_channel_ids: [] });
+    expect(rpcCalls).toContainEqual({
+      fn: 'remove_stats_pending_cleanup',
+      args: { p_config_id: 'sc-1', p_channel_ids: ['vc-live'] },
+    });
   });
 });
 

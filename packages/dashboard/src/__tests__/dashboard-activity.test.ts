@@ -21,10 +21,12 @@ describe('dashboard activity projection', () => {
       success: true,
     });
 
+    // Round 26: the audit row names the exact affected object — the generic
+    // description must carry it instead of flattening to a bare label.
     expect(event).toMatchObject({
       type: 'rbac',
       action: 'rbac.role_updated',
-      description: 'Rbac Role Updated',
+      description: 'Rbac Role Updated · role staff',
     });
     expect(event).not.toHaveProperty('targetType');
     expect(event).not.toHaveProperty('targetId');

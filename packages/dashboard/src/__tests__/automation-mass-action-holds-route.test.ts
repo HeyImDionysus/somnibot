@@ -42,10 +42,11 @@ function makeAdmin(options: {
   configUpdated?: unknown;
 } = {}) {
   const calls: Record<string, unknown[][]> = {};
+  const rpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
   const makeChain = (table: string) => {
     const chain: Record<string, unknown> = {};
     let statusFilter: unknown = null;
-    for (const method of ['select', 'eq', 'in', 'order', 'limit', 'update']) {
+    for (const method of ['select', 'eq', 'in', 'order', 'limit', 'update', 'upsert']) {
       chain[method] = vi.fn((...args: unknown[]) => {
         (calls[`${table}.${method}`] ??= []).push(args);
         if ((method === 'eq' || method === 'in') && args[0] === 'status') {
@@ -72,7 +73,16 @@ function makeAdmin(options: {
     return chain;
   };
   return {
-    admin: { from: vi.fn((table: string) => makeChain(table)) },
+    admin: {
+      from: vi.fn((table: string) => makeChain(table)),
+      rpc: vi.fn(async (fn: string, args: Record<string, unknown>) => {
+        rpcCalls.push({ fn, args });
+        // Mirrors reject_automation_mass_action_hold: zero rows when the
+        // hold was already decided.
+        return { data: options.decided ? [options.decided] : [], error: null };
+      }),
+    },
+    rpcCalls,
     calls,
   };
 }
@@ -133,6 +143,32 @@ describe('/api/automations/holds', () => {
     );
   });
 
+  it('rejects a hold and finalizes its execution through ONE transactional RPC (round 21)', async () => {
+    // Two separate writes let a transient fault after the hold update leave
+    // history reading 'Conditions not met' forever — the RPC carries both
+    // transitions in one transaction.
+    const { admin, calls, rpcCalls } = makeAdmin({
+      decided: {
+        ...HOLD,
+        status: 'rejected',
+        rejected_by: 'owner-1',
+        execution_id: 'e0000000-0000-4000-8000-00000000000e',
+      },
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue(admin as never);
+
+    const res = await PATCH(request('PATCH', { id: HOLD.id, decision: 'reject' }));
+
+    expect(res.status).toBe(200);
+    expect(rpcCalls).toContainEqual({
+      fn: 'reject_automation_mass_action_hold',
+      args: { p_hold_id: HOLD.id, p_guild_id: 'guild-1', p_actor: 'owner-1' },
+    });
+    // No separate table writes for the rejection path.
+    expect(calls['automation_mass_action_holds.update']).toBeUndefined();
+    expect(calls['automation_executions.update']).toBeUndefined();
+  });
+
   it('returns conflict when another owner or worker already decided the hold', async () => {
     const { admin } = makeAdmin({ decided: null });
     vi.mocked(createAdminSupabase).mockReturnValue(admin as never);
@@ -155,8 +191,12 @@ describe('/api/automations/holds', () => {
     expect((await PUT(request('PUT', { threshold: 501 }))).status).toBe(400);
     expect((await PUT(request('PUT', { threshold: 12.5 }))).status).toBe(400);
     expect((await PUT(request('PUT', { threshold: 40 }))).status).toBe(200);
-    expect(calls['guild_config.update'][0][0]).toEqual({
+    // Upsert, not update: carries guild_id so a missing guild_config row (a
+    // tolerated init state) is repairable from this control.
+    expect(calls['guild_config.upsert'][0][0]).toEqual({
+      guild_id: 'guild-1',
       automation_mass_action_threshold: 40,
     });
+    expect(calls['guild_config.update']).toBeUndefined();
   });
 });

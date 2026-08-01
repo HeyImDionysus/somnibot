@@ -18,6 +18,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
 import { brandedEmbed, resolveBrandKit } from '../branding/index.js';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('PaymentHandler');
 
@@ -461,6 +462,105 @@ export async function handleBuyButton(
             description:
               'This product is not ready to be delivered yet, so it cannot be purchased right now. '
               + 'You have not been charged — please contact the server owner.',
+          }),
+        ],
+      });
+      return;
+    }
+  }
+
+  // BENEFIT-DELIVERABILITY guard — save-time validation runs only when the
+  // product is EDITED. A granted role deleted, raised to/above the bot, or a
+  // granted channel deleted AFTER activation would let a buyer PAY for a
+  // benefit the bot provably cannot deliver. The bot holds the live guild,
+  // so validate at the point of sale: refuse the checkout and alert the
+  // owner instead of taking money for an undeliverable grant.
+  const liveGuild = interaction.guild;
+  const grantedRoleIds: string[] = Array.isArray(product.granted_role_ids)
+    ? product.granted_role_ids.filter((id: unknown): id is string => typeof id === 'string')
+    : [];
+  const grantedChannelIds: string[] = Array.isArray(product.granted_channel_ids)
+    ? product.granted_channel_ids.filter((id: unknown): id is string => typeof id === 'string')
+    : [];
+  // Temporary roles are benefits too — they live in their own config table
+  // (frozen into temporary_role_grants_snapshot at order time), so the guard
+  // must load them or a deleted temp role still takes money. A read error is
+  // a money-guard failure: degrade honestly.
+  const { data: tempRoleRows, error: tempRoleError } = await supabase
+    .from('commerce_product_temp_role_config')
+    .select('role_id')
+    .eq('product_id', productId)
+    .eq('guild_id', guildId);
+  if (tempRoleError) {
+    await replyCheckoutUnavailable(interaction, supabase, guildId);
+    return;
+  }
+  const temporaryRoleIds: string[] = (Array.isArray(tempRoleRows) ? tempRoleRows : [])
+    .map((row) => row.role_id)
+    .filter((id): id is string => typeof id === 'string');
+  if (liveGuild
+    && (grantedRoleIds.length > 0 || grantedChannelIds.length > 0 || temporaryRoleIds.length > 0)) {
+    const problems: string[] = [];
+    const me = liveGuild.members.me;
+    const botHighest = me?.roles.highest.position ?? 0;
+    const canManageRoles = me?.permissions.has('ManageRoles') ?? false;
+    for (const roleId of grantedRoleIds) {
+      const role = liveGuild.roles.cache.get(roleId);
+      if (!role) {
+        problems.push(`granted role ${roleId} no longer exists`);
+      } else if (role.managed) {
+        problems.push(`granted role ${role.name} is integration-managed and cannot be assigned`);
+      } else if (role.position >= botHighest) {
+        problems.push(`granted role ${role.name} sits at or above the bot's highest role`);
+      } else if (!canManageRoles) {
+        problems.push('the bot is missing the Manage Roles permission needed to assign roles');
+      }
+    }
+    for (const roleId of temporaryRoleIds) {
+      const role = liveGuild.roles.cache.get(roleId);
+      if (!role) {
+        problems.push(`temporary role ${roleId} no longer exists`);
+      } else if (role.managed) {
+        problems.push(`temporary role ${role.name} is integration-managed and cannot be assigned`);
+      } else if (role.position >= botHighest) {
+        problems.push(`temporary role ${role.name} sits at or above the bot's highest role`);
+      } else if (!canManageRoles) {
+        problems.push('the bot is missing the Manage Roles permission needed to assign roles');
+      }
+    }
+    for (const channelId of grantedChannelIds) {
+      const grantedChannel = liveGuild.channels.cache.get(channelId);
+      if (!grantedChannel) {
+        problems.push(`granted channel ${channelId} no longer exists`);
+      } else if (!canManageRoles) {
+        // Channel access is granted through permission overwrites, which
+        // require Manage Roles.
+        problems.push('the bot is missing the Manage Roles permission needed to grant channel access');
+      }
+    }
+    if (problems.length > 0) {
+      log.error('Refusing checkout: product benefits are undeliverable', {
+        productId,
+        problems,
+      });
+      await raiseOwnerAlert(supabase, guildId, {
+        alertType: 'commerce_undeliverable_benefit',
+        severity: 'critical',
+        title: 'Product benefits are undeliverable',
+        message:
+          `A buyer tried to purchase "${product.name}" but its Discord benefits cannot be `
+          + `delivered right now: ${problems.join('; ')}. The checkout was refused before `
+          + 'any payment. Fix the granted roles/channels or deactivate the product.',
+        metadata: { product_id: productId, problems },
+      });
+      await interaction.editReply({
+        embeds: [
+          brandedEmbed(brandKit, {
+            intent: 'warning',
+            title: '⚠️ Temporarily Unavailable',
+            description:
+              'This product cannot be delivered right now, so it cannot be purchased. '
+              + 'You have not been charged — the server owner has been notified.',
           }),
         ],
       });

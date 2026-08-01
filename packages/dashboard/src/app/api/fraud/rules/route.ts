@@ -85,6 +85,19 @@ export async function POST(request: NextRequest) {
       .select()
       .single();
 
+    if (error && error.code === '23505' && error.message.includes('velocity')) {
+      // The partial unique index allows ONE enabled velocity rule per guild:
+      // the bot enforces a single velocityThreshold/velocityWindowMs pair, so
+      // several enabled rows would silently reduce to an arbitrary winner
+      // while all appearing active in the dashboard.
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Only one enabled velocity rule is allowed — disable the existing velocity rule first.',
+        },
+        { status: 409 },
+      );
+    }
     if (error) return dbError(error, 'fraud/rules');
 
     await recordCrudChange({
@@ -136,6 +149,15 @@ export async function PATCH(request: NextRequest) {
       .select()
       .single();
 
+    if (error && error.code === '23505' && error.message.includes('velocity')) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Only one enabled velocity rule is allowed — disable the existing velocity rule first.',
+        },
+        { status: 409 },
+      );
+    }
     if (error) return dbError(error, 'fraud/rules');
 
     await recordCrudChange({

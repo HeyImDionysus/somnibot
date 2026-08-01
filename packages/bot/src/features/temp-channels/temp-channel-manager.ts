@@ -176,6 +176,39 @@ export class TempChannelManager {
    * reconciler scans only claimed cleanup-pending rows, so terminalizing here
    * orphans the survivors invisibly and forever.
    */
+  /**
+   * Delete created channels with per-channel retries; returns the ids that
+   * still survive. A single rejected attempt must not demote a survivor to
+   * the durable-pointer path when a transient Discord fault would have
+   * cleared it on the next try — a TEXT survivor especially, which stale
+   * recovery's voice-channel heuristic can never find without its id.
+   */
+  private async deleteCreatedChannels(
+    targets: Array<{ channelId: string; remove: () => Promise<unknown> }>,
+  ): Promise<string[]> {
+    const survivors: string[] = [];
+    for (const target of targets) {
+      let deleted = false;
+      for (let attempt = 1; attempt <= 3 && !deleted; attempt++) {
+        try {
+          await target.remove();
+          deleted = true;
+        } catch (deleteError) {
+          if (attempt < 3) {
+            await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
+          } else {
+            log.warn('Created temp channel resisted deletion after retries:', {
+              channelId: target.channelId,
+              error: String(deleteError),
+            });
+          }
+        }
+      }
+      if (!deleted) survivors.push(target.channelId);
+    }
+    return survivors;
+  }
+
   private async persistCleanupJob(
     occurrenceId: string,
     survivingChannelIds: string[],
@@ -221,6 +254,7 @@ export class TempChannelManager {
     hubChannelId: string,
     occurrenceKey?: string,
   ): Promise<void> {
+    let occurrenceClaimUpdatedAt: string | null = null;
     const hub = this.hubs.get(hubChannelId);
     if (!hub) return;
 
@@ -284,6 +318,7 @@ export class TempChannelManager {
           },
         );
         occurrenceId = claim.occurrence.id;
+        occurrenceClaimUpdatedAt = claim.occurrence.updated_at ?? null;
         if (!claim.won) {
           const { data: existing } = await this.supabase
             .from('active_temp_channels')
@@ -386,11 +421,17 @@ export class TempChannelManager {
         let idsPersisted = false;
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
-            await recordDiscordOccurrenceChannels(
+            const channelRecord = await recordDiscordOccurrenceChannels(
               this.supabase,
               occurrenceId,
               [vc.id, ...(textChannelId ? [textChannelId] : [])],
+              occurrenceClaimUpdatedAt,
             );
+            // Refresh the claim snapshot: the record write bumped updated_at
+            // and a stale snapshot would make the ownership insert refuse.
+            if (channelRecord.updatedAt) {
+              occurrenceClaimUpdatedAt = channelRecord.updatedAt;
+            }
             idsPersisted = true;
             break;
           } catch (persistError) {
@@ -406,31 +447,45 @@ export class TempChannelManager {
         }
         if (!idsPersisted) {
           const abortTargets = [
-            { channelId: vc.id, promise: vc.delete('Temp channel id persistence failed') },
+            {
+              channelId: vc.id,
+              remove: () => vc.delete('Temp channel id persistence failed'),
+            },
             ...(textChannel
-              ? [{ channelId: textChannel.id, promise: textChannel.delete('Temp channel id persistence failed') }]
+              ? [{
+                  channelId: textChannel.id,
+                  remove: () => textChannel.delete('Temp channel id persistence failed'),
+                }]
               : []),
           ];
-          const abortResults = await Promise.allSettled(abortTargets.map((target) => target.promise));
-          const abortSurvivors = abortTargets
-            .filter((_, index) => abortResults[index]?.status === 'rejected')
-            .map((target) => target.channelId);
+          const abortSurvivors = await this.deleteCreatedChannels(abortTargets);
           if (abortSurvivors.length === 0) {
             externalRoomExists = false;
           } else {
-            // A rejected abort deletion leaves real survivors with NO ids on
+            // Retried abort deletions still left survivors with NO ids on
             // the claim (the id write is what just failed). Falling through to
             // the outer catch would terminalize the occurrence as `failed` —
             // and the reconciler scans only claimed cleanup-pending rows, so
             // the survivors would be orphaned permanently. Route them through
-            // the same durable cleanup machinery as the insert-failure branch;
-            // on exhaustion the claim stays claimed.
+            // the same durable cleanup machinery as the insert-failure branch.
             cleanupJobCommitted = await this.persistCleanupJob(
               occurrenceId,
               abortSurvivors,
               'Temp-channel id persistence failed and abort deletion was rejected',
             );
-            if (!cleanupJobCommitted) cleanupPersistExhausted = true;
+            if (!cleanupJobCommitted) {
+              // Neither Discord nor the database will take the survivors.
+              // A DELETED channel needs no pointer — try Discord once more
+              // before accepting the claimed-but-unidentifiable floor.
+              const finalSurvivors = await this.deleteCreatedChannels(
+                abortTargets.filter((target) => abortSurvivors.includes(target.channelId)),
+              );
+              if (finalSurvivors.length === 0) {
+                externalRoomExists = false;
+              } else {
+                cleanupPersistExhausted = true;
+              }
+            }
           }
           throw new Error('Failed to persist created temp-channel identities');
         }
@@ -446,24 +501,127 @@ export class TempChannelManager {
         creation_occurrence_id: occurrenceId,
       };
 
-      const { error: recordError } = await this.supabase.from('active_temp_channels').insert(record);
+      // The ownership insert is SERIALIZED against stale reclaim: the RPC
+      // locks the occurrence row and verifies this worker's claim identity
+      // (updated_at snapshot) before inserting. A reclaim that won the race
+      // returns ownershipLost instead of silently inserting a row recovery
+      // will never see.
+      let recordError: { message: string } | null = null;
+      let ownershipLost = false;
+      if (occurrenceId && occurrenceClaimUpdatedAt) {
+        const { data: inserted, error: rpcError } = await this.supabase.rpc(
+          'insert_owned_temp_channel',
+          {
+            p_occurrence_id: occurrenceId,
+            p_expected_updated_at: occurrenceClaimUpdatedAt,
+            p_channel_id: record.channel_id,
+            p_text_channel_id: record.text_channel_id,
+            p_guild_id: record.guild_id,
+            p_hub_id: record.hub_id,
+            p_owner_id: record.owner_id,
+          },
+        );
+        if (rpcError) {
+          recordError = { message: rpcError.message };
+        } else if (inserted !== true) {
+          ownershipLost = true;
+        }
+      } else {
+        const { error: plainError } = await this.supabase
+          .from('active_temp_channels')
+          .insert(record);
+        recordError = plainError ? { message: plainError.message } : null;
+      }
+      if (ownershipLost) {
+        // Stale recovery reclaimed this occurrence while we were creating
+        // channels. Recovery may have created its OWN replacement — but it
+        // can equally have ADOPTED our exact channels through the durable
+        // createdChannelIds. Deleting blindly disconnected the adopted
+        // room's users and left the committed active row pointing at
+        // nothing. Read back before deleting; only a CONFIRMED
+        // different-or-absent adoption makes ours the duplicates.
+        const { data: adopted, error: adoptionReadError } = await this.supabase
+          .from('active_temp_channels')
+          .select('channel_id')
+          .eq('guild_id', this.guild.id)
+          .eq('creation_occurrence_id', occurrenceId)
+          .maybeSingle();
+        if (adoptionReadError) {
+          // Unresolved: deleting could destroy an adopted live room, and the
+          // durable createdChannelIds let the reconciler adopt or dispose
+          // once the database answers. Preserve.
+          log.error('Could not verify temp-room adoption after a lost claim; preserving channels', {
+            occurrenceId,
+            channelId: vc.id,
+            error: adoptionReadError.message,
+          });
+          return;
+        }
+        if (adopted?.channel_id === vc.id) {
+          // Recovery adopted OUR room: it is the live counter of record.
+          // Walk away without deleting anything.
+          log.warn('Temp-room claim was reclaimed but recovery adopted our channels; preserving', {
+            occurrenceId,
+            channelId: vc.id,
+          });
+          return;
+        }
+        log.warn('Temp-room creation lost its claim to stale recovery; removing duplicates', {
+          occurrenceId,
+          channelId: vc.id,
+        });
+        const targets = [
+          { channelId: vc.id, remove: () => vc.delete('Temp channel claim was reclaimed') },
+          ...(textChannel
+            ? [{
+                channelId: textChannel.id,
+                remove: () => textChannel.delete('Temp channel claim was reclaimed'),
+              }]
+            : []),
+        ];
+        await this.deleteCreatedChannels(targets);
+        return;
+      }
+      if (recordError && occurrenceId) {
+        // The insert response can be lost AFTER commit. If a durable row now
+        // owns these channels, deleting them would leave that committed row
+        // pointing at nothing — and it never entered activeChannels, so the
+        // periodic orphan cleanup would not retire it either. Read back by
+        // the creation occurrence before treating the insert as absent.
+        const { data: committed, error: readBackError } = await this.supabase
+          .from('active_temp_channels')
+          .select('channel_id')
+          .eq('guild_id', this.guild.id)
+          .eq('creation_occurrence_id', occurrenceId)
+          .maybeSingle();
+        if (!readBackError && committed?.channel_id === vc.id) {
+          recordError = null;
+        } else if (readBackError) {
+          // The insert outcome is UNRESOLVED: a transient read failure is not
+          // confirmed absence, and deleting could destroy channels a
+          // committed row already owns. Preserve everything — the claim stays
+          // CLAIMED and the durable createdChannelIds let stale recovery
+          // adopt or dispose once the database answers authoritatively.
+          cleanupPersistExhausted = true;
+          throw new Error(
+            `Temp-channel record outcome unresolved: ${recordError.message}`,
+          );
+        }
+      }
       if (recordError) {
-        const cleanup: Array<{ channelId: string; promise: Promise<unknown> }> = [
+        const cleanup: Array<{ channelId: string; remove: () => Promise<unknown> }> = [
           {
             channelId: vc.id,
-            promise: vc.delete('Temp channel database record failed'),
+            remove: () => vc.delete('Temp channel database record failed'),
           },
         ];
         if (textChannel) {
           cleanup.push({
             channelId: textChannel.id,
-            promise: textChannel.delete('Temp channel database record failed'),
+            remove: () => textChannel.delete('Temp channel database record failed'),
           });
         }
-        const cleanupResults = await Promise.allSettled(cleanup.map((target) => target.promise));
-        const survivingChannelIds = cleanup
-          .filter((_, index) => cleanupResults[index]?.status === 'rejected')
-          .map((target) => target.channelId);
+        const survivingChannelIds = await this.deleteCreatedChannels(cleanup);
         if (survivingChannelIds.length === 0) {
           externalRoomExists = false;
         } else if (occurrenceId) {
@@ -620,7 +778,17 @@ export class TempChannelManager {
       }
     }
 
-    const voice = [...this.guild.channels.cache.values()].find((candidate) => {
+    // The durable createdChannelIds are the AUTHORITATIVE room identity: a
+    // survivor renamed or moved during the stale window would slip past the
+    // name/category/timestamp heuristic, get reclaimed, and be recreated
+    // while the known room orphans. The heuristic remains only for claims
+    // that predate the id write.
+    const voiceById = createdChannelIds
+      .map((channelId) => this.guild.channels.cache.get(channelId))
+      .find((channel): channel is VoiceChannel =>
+        channel?.type === ChannelType.GuildVoice,
+      );
+    const voice = voiceById ?? [...this.guild.channels.cache.values()].find((candidate) => {
       if (candidate.type !== ChannelType.GuildVoice) return false;
       const channel = candidate as VoiceChannel;
       return channel.name === plannedChannelName
@@ -633,7 +801,15 @@ export class TempChannelManager {
     if (voice) {
       const pairedTextName =
         typeof metadata.pairedTextName === 'string' ? metadata.pairedTextName : null;
-      const pairedText = pairedTextName
+      // Same durable-id preference as the voice member of the pair: a text
+      // channel renamed or moved during the stale window must not be dropped
+      // to text_channel_id null and orphaned outside every cleanup path.
+      const pairedTextById = createdChannelIds
+        .map((channelId) => this.guild.channels.cache.get(channelId))
+        .find((channel): channel is TextChannel =>
+          channel?.type === ChannelType.GuildText,
+        );
+      const pairedText = pairedTextById ?? (pairedTextName
         ? [...this.guild.channels.cache.values()].find((candidate) => {
             if (candidate.type !== ChannelType.GuildText) return false;
             const channel = candidate as TextChannel;
@@ -649,7 +825,7 @@ export class TempChannelManager {
               && channel.permissionOverwrites.cache
                 .get(this.guild.id)?.deny.has(PermissionFlagsBits.ViewChannel) === true;
           }) as TextChannel | undefined
-        : undefined;
+        : undefined);
       const recovered: ActiveTempChannel = {
         channel_id: voice.id,
         text_channel_id: pairedText?.id ?? null,

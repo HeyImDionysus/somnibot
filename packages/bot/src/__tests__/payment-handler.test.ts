@@ -58,6 +58,176 @@ describe('payment-handler', () => {
     await handleBuyButton(interaction, makeSupa(), 'guild-1', 'https://api.paypal.com', 'client-id', 'secret', 'https://dashboard.com');
     expect(interaction.editReply).toHaveBeenCalled();
   });
+
+  it('refuses checkout and alerts the owner when a granted role is undeliverable (round 28 P1)', async () => {
+    // Save-time validation runs only on product EDITS: a granted role
+    // deleted (or raised above the bot) after activation would let a buyer
+    // PAY for a benefit the bot provably cannot deliver.
+    const product = {
+      id: 'prod-1',
+      guild_id: 'guild-1',
+      active: true,
+      type: 'one_time',
+      price_cents: 500,
+      name: 'VIP Access',
+      delivery_type: 'role',
+      granted_role_ids: ['role-gone'],
+      granted_channel_ids: [],
+    };
+    const alertsInserted: Array<Record<string, unknown>> = [];
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'products') return makeChain(product);
+        if (table === 'alerts') {
+          const c = makeChain();
+          c.insert = vi.fn((row: Record<string, unknown>) => {
+            alertsInserted.push(row);
+            return makeChain();
+          });
+          return c;
+        }
+        return makeChain();
+      }),
+      rpc: vi.fn(async () => ({ data: null, error: null })),
+    } as any;
+    const guild = {
+      id: 'guild-1',
+      name: 'Cool Server',
+      members: {
+        me: {
+          roles: { highest: { position: 5 } },
+          permissions: { has: vi.fn(() => true) },
+        },
+      },
+      roles: { cache: new Map() },
+      channels: { cache: new Map() },
+    };
+    const interaction = { ...makeInteraction(), guild } as any;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    await handleBuyButton(interaction, supabase, 'guild-1', 'https://api.paypal.com', 'client-id', 'secret', 'https://dashboard.com');
+
+    // Refused BEFORE any PayPal call, with the owner alerted.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+    expect(alertsInserted.some((row) => row.alert_type === 'commerce_undeliverable_benefit')).toBe(true);
+    const reply = interaction.editReply.mock.calls.at(-1)?.[0];
+    expect(JSON.stringify(reply)).toContain('Temporarily Unavailable');
+  });
+
+  it('refuses checkout when a TEMPORARY role benefit is undeliverable (round 30 P1)', async () => {
+    // Temporary roles live in commerce_product_temp_role_config, not
+    // granted_role_ids — the round-28 guard missed them entirely.
+    const product = {
+      id: 'prod-1',
+      guild_id: 'guild-1',
+      active: true,
+      type: 'one_time',
+      price_cents: 500,
+      name: 'Weekend VIP',
+      delivery_type: 'role',
+      granted_role_ids: [],
+      granted_channel_ids: [],
+    };
+    const alertsInserted: Array<Record<string, unknown>> = [];
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'products') return makeChain(product);
+        if (table === 'commerce_product_temp_role_config') {
+          const c = makeChain();
+          c.then = (resolve: Function) => resolve({
+            data: [{ role_id: 'temp-role-gone' }],
+            error: null,
+          });
+          return c;
+        }
+        if (table === 'alerts') {
+          const c = makeChain();
+          c.insert = vi.fn((row: Record<string, unknown>) => {
+            alertsInserted.push(row);
+            return makeChain();
+          });
+          return c;
+        }
+        return makeChain();
+      }),
+      rpc: vi.fn(async () => ({ data: null, error: null })),
+    } as any;
+    const guild = {
+      id: 'guild-1',
+      name: 'Cool Server',
+      members: {
+        me: {
+          roles: { highest: { position: 5 } },
+          permissions: { has: vi.fn(() => true) },
+        },
+      },
+      roles: { cache: new Map() },
+      channels: { cache: new Map() },
+    };
+    const interaction = { ...makeInteraction(), guild } as any;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    await handleBuyButton(interaction, supabase, 'guild-1', 'https://api.paypal.com', 'client-id', 'secret', 'https://dashboard.com');
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+    expect(alertsInserted.some((row) =>
+      row.alert_type === 'commerce_undeliverable_benefit'
+      && JSON.stringify(row).includes('temporary role'))).toBe(true);
+    const reply = interaction.editReply.mock.calls.at(-1)?.[0];
+    expect(JSON.stringify(reply)).toContain('Temporarily Unavailable');
+  });
+
+  it('lets checkout proceed past the guard when granted benefits are deliverable (round 28 P1)', async () => {
+    const product = {
+      id: 'prod-1',
+      guild_id: 'guild-1',
+      active: true,
+      type: 'one_time',
+      price_cents: 500,
+      name: 'VIP Access',
+      delivery_type: 'role',
+      granted_role_ids: ['role-ok'],
+      granted_channel_ids: [],
+    };
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'products') return makeChain(product);
+        // Terminate cleanly right after the guard: the buyer already owns an
+        // active entitlement, so the handler replies and stops pre-PayPal.
+        if (table === 'customers') return makeChain({ id: 'cust-1' });
+        if (table === 'entitlements') return makeChain({ id: 'ent-1' });
+        return makeChain();
+      }),
+      rpc: vi.fn(async () => ({ data: null, error: null })),
+    } as any;
+    const guild = {
+      id: 'guild-1',
+      name: 'Cool Server',
+      members: {
+        me: {
+          roles: { highest: { position: 5 } },
+          permissions: { has: vi.fn(() => true) },
+        },
+      },
+      roles: {
+        cache: new Map([
+          ['role-ok', { id: 'role-ok', name: 'VIP', position: 2, managed: false }],
+        ]),
+      },
+      channels: { cache: new Map() },
+    };
+    const interaction = { ...makeInteraction(), guild } as any;
+
+    await handleBuyButton(interaction, supabase, 'guild-1', 'https://api.paypal.com', 'client-id', 'secret', 'https://dashboard.com');
+
+    const reply = interaction.editReply.mock.calls.at(-1)?.[0];
+    // The guard passed — the flow reached the already-purchased fence, not
+    // the undeliverable refusal.
+    expect(JSON.stringify(reply)).toContain('Already Purchased');
+    expect(JSON.stringify(reply)).not.toContain('Temporarily Unavailable');
+  });
 });
 
 /**

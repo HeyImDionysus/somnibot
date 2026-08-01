@@ -87,18 +87,38 @@ AS $$
 DECLARE
   affected INTEGER;
 BEGIN
-  UPDATE public.automation_mass_action_holds
-     SET status = 'failed',
-         completed_at = pg_catalog.now(),
-         last_error =
-           'Execution lease expired after work started. Some member actions may have completed; inspect the audit log before retrying manually.',
-         execution_owner_token = NULL,
-         execution_lease_expires_at = NULL
-   WHERE guild_id = p_guild_id
-     AND status = 'executing'
-     AND execution_lease_expires_at IS NOT NULL
-     AND execution_lease_expires_at < pg_catalog.now();
-  GET DIAGNOSTICS affected = ROW_COUNT;
+  -- Round 20: fail the expired holds AND finalize their linked execution
+  -- rows in the SAME statement. The engine only finalizes an execution after
+  -- every held action completes, so a crash mid-run left the pre-action
+  -- defaults and history read 'Conditions not met' for an approved hold that
+  -- may already have changed members. The finalize is conditional on those
+  -- exact defaults, so an execution finalized before the lease expired is
+  -- preserved untouched.
+  WITH failed_holds AS (
+    UPDATE public.automation_mass_action_holds
+       SET status = 'failed',
+           completed_at = pg_catalog.now(),
+           last_error =
+             'Execution lease expired after work started. Some member actions may have completed; inspect the audit log before retrying manually.',
+           execution_owner_token = NULL,
+           execution_lease_expires_at = NULL
+     WHERE guild_id = p_guild_id
+       AND status = 'executing'
+       AND execution_lease_expires_at IS NOT NULL
+       AND execution_lease_expires_at < pg_catalog.now()
+    RETURNING id, execution_id
+  ), finalized AS (
+    UPDATE public.automation_executions AS execution
+       SET conditions_passed = TRUE,
+           errors =
+             '["Execution lease expired after work started; recovery failed the hold. Some member actions may have completed."]'::jsonb
+      FROM failed_holds
+     WHERE execution.id = failed_holds.execution_id
+       AND execution.conditions_passed = FALSE
+       AND execution.actions_executed = 0
+       AND execution.actions_failed = 0
+  )
+  SELECT pg_catalog.count(*) INTO affected FROM failed_holds;
   RETURN affected;
 END;
 $$;

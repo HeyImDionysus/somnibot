@@ -48,6 +48,20 @@ const MEMBER_TARGETED_ACTIONS = new Set([
   'kick_member',
   'mute_member',
 ]);
+/**
+ * The gateway side-effect events each member-targeted hold action produces,
+ * keyed by action type. A depth hint is only consumable by ITS action's
+ * events — an unrelated event that merely names the member must neither
+ * inherit the hold depth nor spend the hint. Actions with no member-keyed
+ * gateway side effect record no hint at all.
+ */
+const HOLD_ACTION_SIDE_EFFECT_EVENTS: Record<string, readonly string[]> = {
+  give_role: ['role.gained'],
+  remove_role: ['role.lost'],
+  kick_member: ['member.left', 'member.kicked'],
+  ban_member: ['member.left', 'member.banned'],
+};
+
 const MEMBER_CONDITION_TYPES = new Set([
   'has_role',
   'missing_role',
@@ -111,8 +125,21 @@ export class AutomationEngine {
    * hold released near MAX_CHAIN_DEPTH dropped them at the chain guard. A
    * hint is keyed by the member the action just touched, is one-shot, and
    * expires in seconds, so only genuinely correlated side effects inherit.
+   * Each member holds a QUEUE of per-action hints: several actions in one
+   * hold, or two concurrent holds at different depths, each contribute their
+   * own entry, consumed FIFO — a later hold must not replace an earlier
+   * hold's outstanding correlation state.
    */
-  private _holdMemberDepthHints = new Map<string, { depth: number; expiresAt: number }>();
+  private _holdMemberDepthHints = new Map<
+    string,
+    Array<{
+      depth: number;
+      events: readonly string[];
+      /** For role actions: the exact role the action touched. */
+      roleId: string | null;
+      expiresAt: number;
+    }>
+  >();
   /** Mirrors the SQL lease interval in claim/renew RPCs. */
   private static readonly HOLD_EXECUTION_LEASE_MS = 2 * 60_000;
   private _execCounter = 0;
@@ -158,6 +185,13 @@ export class AutomationEngine {
       log.error('Failed to reconcile interrupted mass actions:', err);
     }
     try {
+      // Immediate-path twin of the hold recovery above: rows stranded
+      // between the actions marker and finalize turn truthful at boot.
+      await this.executionLogger.finalizeStaleStartedSweep(this.guild.id);
+    } catch (err) {
+      log.error('Failed to sweep interrupted immediate executions:', err);
+    }
+    try {
       await this.massActionHolds.pruneTerminal();
       this.lastTerminalPruneAt = Date.now();
     } catch (err) {
@@ -189,12 +223,35 @@ export class AutomationEngine {
             ? data.userId
             : typeof data?.discordId === 'string' ? data.discordId : null;
         if (candidate) {
-          const hint = this._holdMemberDepthHints.get(candidate);
-          if (hint) {
-            if (Date.now() <= hint.expiresAt) {
-              event._chainDepth = hint.depth;
+          const queue = this._holdMemberDepthHints.get(candidate);
+          if (queue) {
+            // One hint per member-targeted ACTION, consumable only by that
+            // action's own side-effect events: a hold that ran several
+            // event-producing actions emits several gateway events, and the
+            // first must not spend the member's entire correlation state —
+            // while an unrelated event naming the member (moderation, temp
+            // channels, levels) must neither inherit the depth nor spend a
+            // hint the real side effect still needs.
+            const now = Date.now();
+            for (let index = queue.length - 1; index >= 0; index--) {
+              if (queue[index]!.expiresAt < now) queue.splice(index, 1);
             }
-            this._holdMemberDepthHints.delete(candidate);
+            const eventRoleId = typeof (data as { roleId?: unknown } | null)?.roleId === 'string'
+              ? (data as { roleId: string }).roleId
+              : null;
+            // A hint is consumable only by ITS action's event type AND, for
+            // role actions, the exact role it touched — role.gained for a
+            // DIFFERENT role during the window must neither inherit the depth
+            // nor spend the hint the real side effect still needs.
+            const match = queue.findIndex((hint) =>
+              hint.events.includes(event.type)
+              && (hint.roleId === null || hint.roleId === eventRoleId),
+            );
+            if (match !== -1) {
+              event._chainDepth = queue[match]!.depth;
+              queue.splice(match, 1);
+            }
+            if (queue.length === 0) this._holdMemberDepthHints.delete(candidate);
           }
         }
       }
@@ -348,7 +405,24 @@ export class AutomationEngine {
       return; // Silently skip — scope filters are lightweight pre-checks
     }
 
-    // 2. Rate limit check
+    // 2. Rate limit check. A REPLAY must never spend quota: a redelivered
+    // durable occurrence that already claimed (executed or held) is skipped
+    // by 2b anyway, but by then allowFire/allowCustom had already
+    // incremented — enough gateway RESUME duplicates suppressed unrelated
+    // legitimate events for the rest of those windows. The cheap read here
+    // fails open on error; 2b's INSERT remains the authoritative dedupe for
+    // two racing first deliveries.
+    if (ctx.member && ctx.occurrenceId && await this.executionLogger.isOccurrenceConsumed(
+      automation.id,
+      this.guild.id,
+      ctx.occurrenceId,
+    )) {
+      log.info(
+        `Duplicate occurrence for "${automation.name}" (occurrence ${ctx.occurrenceId}) — `
+        + 'skipping before any rate-limit spend',
+      );
+      return;
+    }
     if (ctx.member) {
       const allowed = await this.rateLimiter.allowFire(this.guild.id, ctx.member.id);
       if (!allowed) {
@@ -445,12 +519,12 @@ export class AutomationEngine {
             }
           }
         }
-        if (hasMemberTargetedAction && conditionedBulkMemberIds.length > 0) {
-          conditionedBulkMemberIds = await this.filterBulkRateLimits(
-            automation,
-            conditionedBulkMemberIds,
-          );
-        }
+        // Rate limits are NOT consumed here. The hold decision below must
+        // see the condition-matched set without burning capacity: rejecting
+        // a hold would otherwise waste the counters, and approving one later
+        // would execute without rechecking them. Limits are applied at the
+        // moment actions actually run — below for immediate execution, in
+        // runApprovedHold for released holds.
         conditionsPassed = eventConditionsPassed && conditionedBulkMemberIds.length > 0;
       } else {
         conditionsPassed = await evaluateConditions(conditions, conditionCtx);
@@ -568,7 +642,91 @@ export class AutomationEngine {
 
     let actionResult: { executed: number; failed: number; errors: string[] };
     try {
-      actionResult = await this.executeResolvedActions(actions, actionCtx, affectedMemberIds);
+      // Durable point of no return FIRST: rate-limit counters are consumed by
+      // filterBulkRateLimits, so a marker failure after them would release
+      // the claim with the counters already burned and the redelivery would
+      // reject every target. Marker fails -> release with counters untouched.
+      if (claimRowId) {
+        try {
+          await this.executionLogger.markActionsStarted(claimRowId);
+        } catch (markError) {
+          await this.executionLogger.release(claimRowId);
+          throw markError;
+        }
+      } else {
+        // The claim deliberately failed OPEN (transient logging outage →
+        // claimed true, rowId null). There is no durable row to mark, and
+        // refusing to run here would permanently drop a real automation for
+        // ordinary events that are never replayed — after its member quota
+        // was already spent. Run without the marker; occurrence dedupe is
+        // degraded exactly as the fail-open contract already accepts.
+        log.warn(
+          `Automation "${automation.name}" runs without a durable claim row; `
+          + 'the execution-log insert failed open',
+        );
+      }
+      let rateLimitedMemberIds: string[];
+      try {
+        rateLimitedMemberIds = affectedMemberIds.length > 0
+          ? await this.filterBulkRateLimits(automation, affectedMemberIds)
+          : affectedMemberIds;
+      } catch (limitError) {
+        // Valkey failed strictly between the marker and the first action:
+        // nothing external ran, so revert the marker and RELEASE — the stable
+        // occurrence retries instead of being permanently suppressed by the
+        // started-row reclaim guard. (Partially consumed counters may skip
+        // some members on the retry; losing the whole occurrence silently
+        // would be worse.) If even the revert cannot be confirmed, the claim
+        // stays marked — safe, visible in history, never double-run.
+        try {
+          await this.executionLogger.revertActionsStarted(claimRowId);
+          await this.executionLogger.release(claimRowId);
+        } catch (revertError) {
+          log.error('Could not revert a pre-action marker after a rate-limit fault:', revertError);
+        }
+        throw limitError;
+      }
+      if (affectedMemberIds.length > 0 && rateLimitedMemberIds.length === 0) {
+        const oneShotActions = actions.filter(
+          (action) => !MEMBER_TARGETED_ACTIONS.has(action.type),
+        );
+        if (oneShotActions.length === 0) {
+          // Every target is rate-limited: nothing runs, but the conditions
+          // DID match — history must say why nothing happened, not fabricate
+          // a failed evaluation (approved holds record the same truth when
+          // release-time limits empty their target set).
+          await this.executionLogger.finalize(claimRowId, {
+            automationId: automation.id,
+            guildId: this.guild.id,
+            triggeredBy: userId,
+            triggerEvent: event.type,
+            conditionsPassed: true,
+            actionsExecuted: 0,
+            actionsFailed: 0,
+            errors: ['Every matched member was rate-limited; no action ran'],
+            durationMs: Date.now() - startTime,
+          });
+          return;
+        }
+        // Mixed automation: the member-targeted actions are skipped, but the
+        // one-shot actions (channel message, …) still run once for the
+        // occurrence — the approved-hold path behaves the same way when
+        // release-time limits empty its target set.
+        const oneShotResult = await this.executeResolvedActions(oneShotActions, actionCtx, []);
+        actionResult = {
+          ...oneShotResult,
+          errors: [
+            ...oneShotResult.errors,
+            'Every matched member was rate-limited; member-targeted actions skipped',
+          ],
+        };
+      } else {
+        actionResult = await this.executeResolvedActions(
+          actions,
+          actionCtx,
+          rateLimitedMemberIds,
+        );
+      }
     } finally {
       this._activeDepths.delete(execId);
     }
@@ -703,11 +861,13 @@ export class AutomationEngine {
         const k = s(data.giveawayId) ?? s(data.messageId);
         return k ? `${t}:${g}:${k}` : null;
       }
-      case 'level.up': {
-        const u = s(data.discordId);
-        const lvl = s(data.newLevel);
-        return u && lvl ? `${t}:${g}:${u}:${lvl}` : null;
-      }
+      // level.up deliberately has NO durable identity: user+level is not a
+      // lifetime-unique occurrence — /xp reset|remove|set can lower a member
+      // below a milestone they then legitimately re-cross, and a finalized
+      // executions row behind the permanent unique index would suppress every
+      // automation for that milestone forever. The producer only emits on an
+      // actual stored-level transition, so gateway redelivery cannot re-emit
+      // it; the in-memory occurrence id is the correct dedupe scope.
       case 'member.verified': {
         const u = s(data.discordId);
         return u ? `${t}:${g}:${u}` : null;
@@ -910,6 +1070,11 @@ export class AutomationEngine {
       } catch (err) {
         log.error('Failed to reconcile expired mass-action leases:', err);
       }
+      try {
+        await this.executionLogger.finalizeStaleStartedSweep(this.guild.id);
+      } catch (err) {
+        log.error('Failed to sweep interrupted immediate executions:', err);
+      }
       if (Date.now() - this.lastTerminalPruneAt >= 6 * 60 * 60 * 1_000) {
         try {
           await this.massActionHolds.pruneTerminal();
@@ -918,6 +1083,7 @@ export class AutomationEngine {
           log.error('Failed to prune terminal mass-action holds:', err);
         }
       }
+      this.pruneExpiredDepthHints();
       const held = await this.massActionHolds.listHeldNeedingNotice();
       await Promise.all(held.map(async (hold) => {
         try {
@@ -931,6 +1097,21 @@ export class AutomationEngine {
       log.error('Failed to scan held mass actions for notice retry:', err);
     } finally {
       this.heldNoticeRecoveryRunning = false;
+    }
+  }
+
+  /**
+   * Drop expired depth-hint entries. Recording and consumption both prune
+   * lazily, but a large FAILED hold whose members never emit another event
+   * would otherwise retain its entire target set until the next hold runs.
+   */
+  private pruneExpiredDepthHints(): void {
+    const now = Date.now();
+    for (const [key, queue] of this._holdMemberDepthHints) {
+      for (let index = queue.length - 1; index >= 0; index--) {
+        if (queue[index]!.expiresAt < now) queue.splice(index, 1);
+      }
+      if (queue.length === 0) this._holdMemberDepthHints.delete(key);
     }
   }
 
@@ -970,7 +1151,12 @@ export class AutomationEngine {
     baseContext: ActionContext,
     affectedMemberIds: string[],
     assertLease?: () => void,
-    onMemberAction?: (memberId: string) => void,
+    onMemberAction?: (
+      memberId: string,
+      actionType: string,
+      actionRoleId: string | null,
+    ) => (() => void) | undefined,
+    progress?: { executed: number; failed: number; errors: string[] },
   ): Promise<{ executed: number; failed: number; errors: string[] }> {
     if (affectedMemberIds.length === 0) {
       return executeActions(actions, baseContext);
@@ -982,6 +1168,14 @@ export class AutomationEngine {
       total.executed += result.executed;
       total.failed += result.failed;
       total.errors.push(...result.errors);
+      if (progress) {
+        // Mirror progress OUTWARD as it happens: a mid-run throw (lease
+        // expiry between members) must not erase how much of a destructive
+        // bulk action already reached Discord.
+        progress.executed = total.executed;
+        progress.failed = total.failed;
+        progress.errors = [...total.errors];
+      }
     };
 
     for (const [actionIndex, action] of actions.entries()) {
@@ -992,7 +1186,6 @@ export class AutomationEngine {
       }
       for (const memberId of affectedMemberIds) {
         assertLease?.();
-        onMemberAction?.(memberId);
         let member = memberCache.get(memberId);
         if (member === undefined) {
           member = this.guild.members.cache.get(memberId)
@@ -1000,11 +1193,30 @@ export class AutomationEngine {
           memberCache.set(memberId, member);
         }
         if (!member) {
-          total.failed += 1;
-          total.errors.push(`member ${memberId}: target no longer belongs to the guild`);
+          // Through add() so the failure and its explanation reach the
+          // OUTWARD progress mirror — an interruption later in the run must
+          // not omit this action from execution history.
+          add({
+            executed: 0,
+            failed: 1,
+            errors: [`member ${memberId}: target no longer belongs to the guild`],
+          });
           continue;
         }
-        add(await executeActions([action], {
+        // PROVISIONAL hint, registered before the Discord call: give/remove
+        // role sleep AFTER their REST operation, so the gateway side effect
+        // can arrive before executeActions returns — a post-success recording
+        // would miss it and the event would enter as a root. The returned
+        // rollback removes the exact entry when the action fails, so no
+        // unrelated event can inherit a failed hold's depth either.
+        const rollbackHint = onMemberAction?.(
+          memberId,
+          action.type,
+          typeof (action.config as { role_id?: unknown } | undefined)?.role_id === 'string'
+            ? (action.config as { role_id: string }).role_id
+            : null,
+        );
+        const memberResult = await executeActions([action], {
           ...baseContext,
           member,
           variables: {
@@ -1012,7 +1224,11 @@ export class AutomationEngine {
             user: `<@${member.id}>`,
             'user.name': member.displayName,
           },
-        }, actionIndex));
+        }, actionIndex);
+        add(memberResult);
+        if (!(memberResult.executed > 0 && memberResult.failed === 0)) {
+          rollbackHint?.();
+        }
       }
     }
     return total;
@@ -1024,6 +1240,13 @@ export class AutomationEngine {
     const startTime = Date.now();
     let leaseError: Error | null = null;
     let renewalInFlight = false;
+    // Mirrors bulk progress OUTWARD so the interruption path can report how
+    // much of a destructive run already reached Discord instead of zeros.
+    const heldProgress = { executed: 0, failed: 0, errors: [] as string[] };
+    // True once a strict finalize has landed (and therefore bumped the
+    // fired-counter). A later failure (e.g. the hold-release write) re-
+    // finalizes with interruption details, which must not double-count.
+    let historyCounted = false;
     // The deadline this worker has actually been ACKNOWLEDGED to hold. A
     // renewal that hangs or stays in flight past expiry leaves leaseError
     // null, so error-only checking let the worker keep running member actions
@@ -1034,7 +1257,7 @@ export class AutomationEngine {
       if (renewalInFlight || leaseError) return;
       renewalInFlight = true;
       try {
-        await this.massActionHolds.renewExecutionLease(hold.id);
+        await this.massActionHolds.renewExecutionLease(hold.id, heldProgress);
         leaseDeadlineMs = Date.now() + AutomationEngine.HOLD_EXECUTION_LEASE_MS;
       } catch (error) {
         leaseError = error instanceof Error ? error : new Error(String(error));
@@ -1076,21 +1299,81 @@ export class AutomationEngine {
       const holdDepth = typeof hold.context_snapshot.chainDepth === 'number'
         ? hold.context_snapshot.chainDepth
         : 1;
-      const recordMemberDepthHint = (memberId: string) => {
-        const now = Date.now();
-        for (const [key, hint] of this._holdMemberDepthHints) {
-          if (hint.expiresAt < now) this._holdMemberDepthHints.delete(key);
+      const recordMemberDepthHint = (
+        memberId: string,
+        actionType: string,
+        actionRoleId: string | null,
+      ): (() => void) | undefined => {
+        const events = HOLD_ACTION_SIDE_EFFECT_EVENTS[actionType];
+        if (!events || events.length === 0) return undefined;
+        const roleId = actionType === 'give_role' || actionType === 'remove_role'
+          ? actionRoleId
+          : null;
+        // A role action whose target role is unknown cannot be correlated
+        // precisely; recording a wildcard hint would let an unrelated role
+        // event inherit the depth, so record nothing and accept that the
+        // side effect enters as a root.
+        if ((actionType === 'give_role' || actionType === 'remove_role') && roleId === null) {
+          return undefined;
         }
-        this._holdMemberDepthHints.set(memberId, { depth: holdDepth, expiresAt: now + 10_000 });
+        const now = Date.now();
+        for (const [key, queue] of this._holdMemberDepthHints) {
+          for (let index = queue.length - 1; index >= 0; index--) {
+            if (queue[index]!.expiresAt < now) queue.splice(index, 1);
+          }
+          if (queue.length === 0) this._holdMemberDepthHints.delete(key);
+        }
+        const queue = this._holdMemberDepthHints.get(memberId) ?? [];
+        const entry = { depth: holdDepth, events, roleId, expiresAt: now + 10_000 };
+        queue.push(entry);
+        this._holdMemberDepthHints.set(memberId, queue);
+        // Identity-based rollback: a consumed or already-rolled-back entry is
+        // simply absent, so this never removes another action's hint.
+        return () => {
+          const current = this._holdMemberDepthHints.get(memberId);
+          if (!current) return;
+          const index = current.indexOf(entry);
+          if (index !== -1) current.splice(index, 1);
+          if (current.length === 0) this._holdMemberDepthHints.delete(memberId);
+        };
       };
+      // Rate limits are consumed when actions actually RUN: the hold stored
+      // condition-matched targets without touching counters (a rejected hold
+      // must not burn capacity), so an approval landing later still honours
+      // limits filled by newer activity in the meantime.
+      // Durable point of no return FIRST — mirroring the immediate path: a
+      // marker failure must reach the catch with the Valkey counters still
+      // untouched, not after the filter consumed one-per-window budgets for
+      // an occurrence that then terminalizes without running anything.
+      await this.executionLogger.markActionsStarted(hold.execution_id);
+      const loadedAutomation = this.loader
+        .getForTrigger(hold.trigger_event)
+        .find((candidate) => candidate.id === hold.automation_id);
+      const heldTargets = await this.filterBulkRateLimits(
+        loadedAutomation ?? ({
+          id: hold.automation_id,
+          name: 'approved mass action',
+          rateLimitPerUser: 0,
+          rateLimitWindowSeconds: 0,
+        } as LoadedAutomation),
+        hold.member_ids,
+      );
       let result: { executed: number; failed: number; errors: string[] };
       try {
         result = await this.executeResolvedActions(
-          hold.action_snapshot,
+          heldTargets.length === 0
+            // Every held target is rate-limited at release time: member
+            // actions are skipped entirely; the approved non-member actions
+            // still run once.
+            ? hold.action_snapshot.filter(
+                (action) => !MEMBER_TARGETED_ACTIONS.has(action.type),
+              )
+            : hold.action_snapshot,
           context,
-          hold.member_ids,
+          heldTargets,
           assertLease,
           recordMemberDepthHint,
+          heldProgress,
         );
       } finally {
         // One-shot hints expire on their own; nothing guild-wide to unwind.
@@ -1108,7 +1391,12 @@ export class AutomationEngine {
         errors: result.errors,
         durationMs: Date.now() - startTime,
       };
-      await this.executionLogger.finalize(hold.execution_id, executionResult);
+      // Strict: a hold may only turn terminal with its history truthfully
+      // written. A transient failure here lands in the catch, which either
+      // finalizes with progress or leaves the hold executing for the
+      // lease-expiry RPC to finalize transactionally.
+      await this.executionLogger.finalizeStrict(hold.execution_id, executionResult);
+      historyCounted = true;
       const automationName = await this.automationName(hold.automation_id);
       if (result.failed > 0) {
         const failureMessage = result.errors.join('; ') || `${result.failed} action(s) failed`;
@@ -1134,7 +1422,40 @@ export class AutomationEngine {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await this.massActionHolds.fail(hold.id, message);
+      // History must not read 'Conditions not met' for an APPROVED hold that
+      // failed mid-flight — and it must show the PROGRESS that reached
+      // Discord, not zeros. STRICT ordering: finalize first; only a
+      // successful finalize may terminalize the hold. If finalization fails,
+      // the hold stays 'executing' so the expired-lease recovery RPC later
+      // fails it AND finalizes the execution in one transaction — a terminal
+      // hold with defaulted history can never exist.
+      let interruptedFinalized = false;
+      try {
+        await this.executionLogger.finalizeStrict(hold.execution_id, {
+          automationId: hold.automation_id,
+          guildId: this.guild.id,
+          triggeredBy: hold.triggered_by,
+          triggerEvent: hold.trigger_event,
+          conditionsPassed: true,
+          actionsExecuted: heldProgress.executed,
+          actionsFailed: heldProgress.failed,
+          errors: [
+            ...heldProgress.errors,
+            `Approved mass action was interrupted: ${message}`,
+          ],
+          durationMs: Date.now() - startTime,
+        }, { skipCountBump: historyCounted });
+        interruptedFinalized = true;
+      } catch (finalizeError) {
+        log.error(
+          `Failed to finalize interrupted execution for hold ${hold.id}; `
+          + 'leaving it executing for lease-expiry recovery:',
+          finalizeError,
+        );
+      }
+      if (interruptedFinalized) {
+        await this.massActionHolds.fail(hold.id, message);
+      }
       throw err;
     } finally {
       clearInterval(leaseTimer);

@@ -80,8 +80,24 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // Keyless validation rows (invalid key, lookup unavailable) deliberately
+  // carry license_key_id NULL, so key-scoped loading can never see them —
+  // and a guild with no keys used to skip validation loading entirely.
+  // Scope them through the guild's products instead: an outage or a
+  // key-guessing attack must move the health verdict even when no attempt
+  // ever matches a real key.
+  const { data: productRows, error: productError } = await supabase
+    .from('products')
+    .select('id')
+    .eq('guild_id', guildId)
+    .limit(5_000);
+  if (productError) return dbError(productError, 'license/health/products');
+  const productIds = (Array.isArray(productRows) ? productRows : [])
+    .map((row) => row.id)
+    .filter((id): id is string => typeof id === 'string');
+
   const since = new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString();
-  const [sessionsResult, validationsResult, alertsResult] = await Promise.all([
+  const [sessionsResult, validationsResult, keylessValidationsResult, alertsResult] = await Promise.all([
     keyIds.length === 0
       ? Promise.resolve({ data: [], error: null, count: 0 })
       : queryKeyChunks(keyIds, (chunk) => supabase
@@ -98,22 +114,39 @@ export async function GET(req: NextRequest) {
         .gte('created_at', since)
         .order('created_at', { ascending: false })
         .limit(5_000)),
+    productIds.length === 0
+      ? Promise.resolve({ data: [], error: null, count: 0 })
+      : queryKeyChunks(productIds, (chunk) => supabase
+        .from('license_validations')
+        .select('id, license_key_id, result, created_at', { count: 'exact' })
+        .is('license_key_id', null)
+        .in('product_id', chunk)
+        .gte('created_at', since)
+        .order('created_at', { ascending: false })
+        .limit(5_000)),
     supabase
       .from('alerts')
       .select('id, alert_type, severity, title, created_at')
       .eq('guild_id', guildId)
       .is('resolved_at', null)
-      .or('alert_type.ilike.license%,alert_type.eq.commerce_missing_license_delivery')
+      // The commerce-prefixed license alerts (missing delivery, rotation
+      // receipt held) are license incidents too — a revoked old key whose
+      // replacement receipt cannot be delivered must not read 'healthy'.
+      .or('alert_type.ilike.license%,alert_type.ilike.commerce_license%,alert_type.eq.commerce_missing_license_delivery')
       .order('created_at', { ascending: false })
       .limit(100),
   ]);
 
   if (sessionsResult.error) return dbError(sessionsResult.error, 'license/health/sessions');
   if (validationsResult.error) return dbError(validationsResult.error, 'license/health/validations');
+  if (keylessValidationsResult.error) {
+    return dbError(keylessValidationsResult.error, 'license/health/keyless-validations');
+  }
   if (alertsResult.error) return dbError(alertsResult.error, 'license/health/alerts');
   if (
     !Array.isArray(sessionsResult.data)
     || !Array.isArray(validationsResult.data)
+    || !Array.isArray(keylessValidationsResult.data)
     || !Array.isArray(alertsResult.data)
   ) {
     return NextResponse.json(
@@ -122,10 +155,14 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const validationResults = validationsResult.data
+  const combinedValidationRows = [
+    ...validationsResult.data,
+    ...keylessValidationsResult.data,
+  ];
+  const validationResults = combinedValidationRows
     .map((row) => row.result)
     .filter((result): result is string => typeof result === 'string');
-  if (validationResults.length !== validationsResult.data.length) {
+  if (validationResults.length !== combinedValidationRows.length) {
     return NextResponse.json(
       { success: false, error: 'License health validation data is malformed' },
       { status: 500 },
@@ -172,7 +209,9 @@ export async function GET(req: NextRequest) {
   const totalKeys = keyTotal ?? keys.length;
   const keySampleTruncated = totalKeys > keys.length;
   const validationSampleTruncated =
-    (validationsResult.count ?? validationsResult.data.length) > validationsResult.data.length;
+    (validationsResult.count ?? validationsResult.data.length) > validationsResult.data.length
+    || (keylessValidationsResult.count ?? keylessValidationsResult.data.length)
+      > keylessValidationsResult.data.length;
   const sessionSampleTruncated =
     (sessionsResult.count ?? sessionsResult.data.length) > sessionsResult.data.length;
 
@@ -199,7 +238,8 @@ export async function GET(req: NextRequest) {
       sessionsOnTerminalKeys,
       totalSessions: sessionsResult.count ?? sessionsResult.data.length,
       validationWindowHours: 24,
-      validationCount: validationsResult.count ?? validationsResult.data.length,
+      validationCount: (validationsResult.count ?? validationsResult.data.length)
+        + (keylessValidationsResult.count ?? keylessValidationsResult.data.length),
       unavailable24h,
       deviceLimit24h,
       invalid24h,

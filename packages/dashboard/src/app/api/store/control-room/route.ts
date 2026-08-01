@@ -12,7 +12,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function requiresLicense(delivery: unknown): boolean {
-  return delivery === 'license_key' || delivery === 'mixed';
+  // Fulfillment mints and accepts license payloads ONLY for the exact
+  // license_key delivery type; classifying mixed as license-bearing made
+  // every completed mixed order read "missing license" and stuck after 15
+  // minutes for a key that will never exist.
+  return delivery === 'license_key';
 }
 
 function requiresDownload(delivery: unknown, frozenRequirement: unknown): boolean {
@@ -40,7 +44,7 @@ export async function GET(req: NextRequest) {
   const { data: orderData, error: orderError, count } = await supabase
     .from('orders')
     .select(
-      'id, order_number, customer_id, product_id, status, delivery_type_snapshot, download_required_snapshot, created_at',
+      'id, order_number, customer_id, product_id, status, delivery_type_snapshot, download_required_snapshot, created_at, updated_at',
       { count: 'exact' },
     )
     .eq('guild_id', guildId)
@@ -236,25 +240,61 @@ export async function GET(req: NextRequest) {
     const age = elapsedMs(order.created_at, now);
     const orderCreatedAtMs =
       typeof order.created_at === 'string' ? Date.parse(order.created_at) : Number.NaN;
+    // Ledger coverage is decided at FULFILLMENT time, not order creation: an
+    // order created before the deliveries cutover but completed after it
+    // delivers entirely in the evidence-recording era, so a missing download
+    // must still flag. The entitlement write IS the fulfillment transition;
+    // an order with no entitlement falls back to creation time and is
+    // already flagged by the no-entitlement rule above.
+    const entitlementCreatedAtMs =
+      typeof entitlement?.created_at === 'string'
+        ? Date.parse(entitlement.created_at)
+        : Number.NaN;
+    const fulfillmentAnchorMs = Number.isFinite(entitlementCreatedAtMs)
+      ? entitlementCreatedAtMs
+      : orderCreatedAtMs;
     const downloadEvidenceAvailable =
-      Number.isFinite(orderCreatedAtMs)
+      Number.isFinite(fulfillmentAnchorMs)
       && Number.isFinite(downloadCutoverAtMs)
-      && orderCreatedAtMs >= downloadCutoverAtMs;
+      && fulfillmentAnchorMs >= downloadCutoverAtMs;
     const reasons: string[] = [];
 
     if (order.status === 'pending_review') reasons.push('Payment is held for operator review.');
     if (hold) reasons.push(`Fulfillment is held: ${String(hold.hold_reason).replaceAll('_', ' ')}.`);
-    if (!entitlement && age > 15 * 60 * 1_000) {
+    // Post-payment SLAs only start once payment actually COMPLETED: a
+    // pending_review order is expectedly unfulfilled (the branch above
+    // already explains the hold) and must not read as a delivery failure.
+    const paymentCompleted = order.status === 'completed';
+    // The 15-minute clocks start at the COMPLETED transition, not order
+    // creation: an order held in review for an hour and then approved gets
+    // its full window. orders.updated_at is the durable upper bound of that
+    // transition (later updates can only restart the clock — conservative,
+    // never premature); creation time remains the fallback.
+    const paymentAge = elapsedMs(
+      paymentCompleted && typeof order.updated_at === 'string'
+        ? order.updated_at
+        : order.created_at,
+      now,
+    );
+    if (paymentCompleted && !entitlement && paymentAge > 15 * 60 * 1_000) {
       reasons.push('No entitlement was recorded within 15 minutes of payment.');
     }
-    if (licenseRequired && !key && age > 15 * 60 * 1_000) {
+    if (paymentCompleted && licenseRequired && !key && paymentAge > 15 * 60 * 1_000) {
       reasons.push('No license key was issued within 15 minutes of payment.');
     }
+    // The 24-hour download window starts when the customer can actually
+    // download — at FULFILLMENT. An order pending for a day and then
+    // fulfilled must get its full advertised window, not be stuck instantly.
+    const fulfillmentAge = elapsedMs(
+      typeof entitlement?.created_at === 'string' ? entitlement.created_at : order.created_at,
+      now,
+    );
     if (
-      downloadRequired
+      paymentCompleted
+      && downloadRequired
       && downloadEvidenceAvailable
       && !download
-      && age > 24 * 60 * 60 * 1_000
+      && fulfillmentAge > 24 * 60 * 60 * 1_000
     ) {
       reasons.push('No completed download was recorded within 24 hours.');
     }

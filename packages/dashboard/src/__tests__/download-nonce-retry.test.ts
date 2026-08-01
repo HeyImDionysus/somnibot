@@ -251,6 +251,52 @@ describe('GET /api/downloads — nonce delivery boundary', () => {
     expect(after).toHaveBeenCalledOnce();
   });
 
+  it('legacy links without an entitlement id select the undelivered purchase (round 20)', async () => {
+    // A rolling-deployment link (no eid) must use the SAME delivery-aware
+    // ranking as link minting: the older UNDELIVERED order claims its
+    // evidence before the newest (already delivered) order is re-served.
+    vi.mocked(verifySignedDownloadUrl).mockReturnValue({
+      customerId: 'cust-1',
+      guildId: 'guild-1',
+      entitlementId: null,
+      nonce: 'nonce-1',
+    });
+    const mock = mockDownload();
+    const entitlements = mock._tables['entitlements'];
+    entitlements.in.mockResolvedValue({
+      data: [
+        {
+          id: 'ent-old',
+          order_id: 'order-old',
+          status: 'active',
+          grace_period_ends_at: null,
+          created_at: '2026-07-20T10:00:00.000Z',
+        },
+        {
+          id: 'ent-new',
+          order_id: 'order-new',
+          status: 'active',
+          grace_period_ends_at: null,
+          created_at: '2026-07-28T10:00:00.000Z',
+        },
+      ],
+      error: null,
+    });
+    const deliveries = mock._tables['commerce_download_deliveries'];
+    deliveries.in.mockResolvedValue({
+      data: [{ order_id: 'order-new' }],
+      error: null,
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue(mock as never);
+
+    const response = await downloadGet(request() as never, params);
+
+    expect(response.status).toBe(307);
+    expect(deliveries.insert).toHaveBeenCalledWith(
+      expect.objectContaining({ entitlement_id: 'ent-old', order_id: 'order-old' }),
+    );
+  });
+
   it('rejects a durable nonce conflict as a replay instead of redirecting (round 11)', async () => {
     // Valkey lost the consumed marker while the signed link was still valid:
     // the replay passes consumeDownloadNonce as fresh, and the durable

@@ -127,41 +127,94 @@ export async function markDiscordOccurrenceCleanupPending(
  * markDiscordOccurrenceCleanupPending. Merges into the existing result so the
  * claim's recovery metadata is preserved.
  */
+/**
+ * Records the created channel ids on the claimed occurrence and returns the
+ * occurrence's FRESH updated_at. The update fires the updated_at trigger, so
+ * any claim-identity snapshot captured at claim time is stale from this point
+ * on — ownership inserts must verify against the returned value.
+ */
 export async function recordDiscordOccurrenceChannels(
   supabase: SupabaseClient,
   occurrenceId: string,
   channelIds: string[],
-): Promise<void> {
-  const { data: current, error: readError } = await supabase
+  expectedUpdatedAt: string | null = null,
+): Promise<{ updatedAt: string | null }> {
+  const readQuery = supabase
     .from('discord_operation_occurrences')
     .select('result')
     .eq('id', occurrenceId)
-    .eq('status', 'claimed')
-    .maybeSingle();
+    .eq('status', 'claimed');
+  const { data: current, error: readError } = await (
+    expectedUpdatedAt ? readQuery.eq('updated_at', expectedUpdatedAt) : readQuery
+  ).maybeSingle();
   if (readError) {
     throw new Error(`Unable to read occurrence for channel-id record: ${readError.message}`);
   }
   if (!current) {
-    throw new Error(`Unable to record channel ids: occurrence ${occurrenceId} is no longer claimed`);
+    const landed = await verifyOwnChannelRecordLanded(supabase, occurrenceId, channelIds);
+    if (landed) return landed;
+    throw new Error(
+      `Unable to record channel ids: occurrence ${occurrenceId} is no longer claimed or owned by this worker`,
+    );
   }
   const result =
     current.result && typeof current.result === 'object' && !Array.isArray(current.result)
       ? { ...(current.result as Record<string, unknown>) }
       : {};
   result.createdChannelIds = channelIds;
-  const { data: updated, error: updateError } = await supabase
+  // CAS on the caller's claim generation: a creator that stalled past the
+  // stale threshold no longer owns this row — recovery reclaimed it (bumping
+  // updated_at) — and recording anyway would overwrite recovery's result AND
+  // hand the stalled worker a fresh generation that blesses its ownership
+  // insert, committing competing channels.
+  const updateQuery = supabase
     .from('discord_operation_occurrences')
     .update({ result })
     .eq('id', occurrenceId)
-    .eq('status', 'claimed')
-    .select('id')
+    .eq('status', 'claimed');
+  const { data: updated, error: updateError } = await (
+    expectedUpdatedAt ? updateQuery.eq('updated_at', expectedUpdatedAt) : updateQuery
+  )
+    .select('id, updated_at')
     .maybeSingle();
   if (updateError) {
     throw new Error(`Unable to record occurrence channel ids: ${updateError.message}`);
   }
   if (!updated) {
-    throw new Error(`Unable to record channel ids: occurrence ${occurrenceId} is no longer claimed`);
+    const landed = await verifyOwnChannelRecordLanded(supabase, occurrenceId, channelIds);
+    if (landed) return landed;
+    throw new Error(
+      `Unable to record channel ids: occurrence ${occurrenceId} is no longer claimed or owned by this worker`,
+    );
   }
+  return {
+    updatedAt: typeof updated.updated_at === 'string' ? updated.updated_at : null,
+  };
+}
+
+/**
+ * Retry disambiguation for the CAS above: an earlier attempt's UPDATE can
+ * land while its response is lost, so the retry's expected generation is
+ * stale even though the row now carries EXACTLY our channel ids. That is our
+ * own committed write — adopt the row's current generation instead of
+ * self-destructing channels this worker still owns.
+ */
+async function verifyOwnChannelRecordLanded(
+  supabase: SupabaseClient,
+  occurrenceId: string,
+  channelIds: string[],
+): Promise<{ updatedAt: string | null } | null> {
+  const { data: row, error } = await supabase
+    .from('discord_operation_occurrences')
+    .select('status, result, updated_at')
+    .eq('id', occurrenceId)
+    .maybeSingle();
+  if (error || !row || row.status !== 'claimed') return null;
+  const recorded = (row.result as Record<string, unknown> | null)?.createdChannelIds;
+  if (!Array.isArray(recorded) || JSON.stringify(recorded) !== JSON.stringify(channelIds)) {
+    return null;
+  }
+  return { updatedAt: typeof row.updated_at === 'string' ? row.updated_at : null };
 }
 
 export async function completeDiscordOccurrence(
@@ -170,17 +223,17 @@ export async function completeDiscordOccurrence(
   resourceId: string | null,
   result: Record<string, unknown> = {},
 ): Promise<void> {
-  const { error } = await supabase
-    .from('discord_operation_occurrences')
-    .update({
-      status: 'completed',
-      resource_id: resourceId,
-      result,
-      completed_at: new Date().toISOString(),
-      last_error: null,
-    })
-    .eq('id', occurrenceId)
-    .eq('status', 'claimed');
+  // Settlement MERGES into result (Definer-rights RPC): replacing the object
+  // dropped the counterReserved marker, so recovery completing a reclaimed
+  // occurrence let the stalled original sender pay a SECOND slot for the
+  // same due minute.
+  const { error } = await supabase.rpc('settle_discord_occurrence', {
+    p_occurrence_id: occurrenceId,
+    p_status: 'completed',
+    p_resource_id: resourceId,
+    p_result: result,
+    p_last_error: null,
+  });
   if (error) throw new Error(`Unable to complete Discord occurrence: ${error.message}`);
 }
 
@@ -191,17 +244,15 @@ export async function failDiscordOccurrence(
   resourceId: string | null = null,
   result: Record<string, unknown> = {},
 ): Promise<void> {
-  const { error: updateError } = await supabase
-    .from('discord_operation_occurrences')
-    .update({
-      status: 'failed',
-      resource_id: resourceId,
-      result,
-      last_error: error,
-      completed_at: new Date().toISOString(),
-    })
-    .eq('id', occurrenceId)
-    .eq('status', 'claimed');
+  // Same merge discipline as completion: a failed send that already paid its
+  // counter slot must keep the marker, or the retry pays twice.
+  const { error: updateError } = await supabase.rpc('settle_discord_occurrence', {
+    p_occurrence_id: occurrenceId,
+    p_status: 'failed',
+    p_resource_id: resourceId,
+    p_result: result,
+    p_last_error: error,
+  });
   if (updateError) throw new Error(`Unable to fail Discord occurrence: ${updateError.message}`);
 }
 

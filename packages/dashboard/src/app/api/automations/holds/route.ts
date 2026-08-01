@@ -68,28 +68,48 @@ export async function PATCH(req: NextRequest) {
 
   const supabase = createAdminSupabase();
   const now = new Date().toISOString();
-  const updates = decision === 'approve'
-    ? {
-      status: 'approved',
-      approved_by: auth.ctx.discordId,
-      approved_at: now,
-      last_error: null,
-    }
-    : {
+  let data: Record<string, unknown> | null = null;
+  let updates: Record<string, unknown>;
+  if (decision === 'reject') {
+    // One transaction for BOTH transitions: the hold flips to rejected AND
+    // its linked execution row is finalized as an owner rejection. Two
+    // separate writes let a transient fault after the first leave history
+    // reading 'Conditions not met' forever, with nothing retrying the second.
+    updates = {
       status: 'rejected',
       rejected_by: auth.ctx.discordId,
       rejected_at: now,
       last_error: null,
     };
-  const { data, error } = await supabase
-    .from('automation_mass_action_holds')
-    .update(updates)
-    .eq('id', id)
-    .eq('guild_id', auth.ctx.guildId)
-    .eq('status', 'held')
-    .select('*')
-    .maybeSingle();
-  if (error) return dbError(error, 'automations/holds/decision');
+    const { data: rejected, error } = await supabase.rpc(
+      'reject_automation_mass_action_hold',
+      {
+        p_hold_id: id,
+        p_guild_id: auth.ctx.guildId,
+        p_actor: auth.ctx.discordId,
+      },
+    );
+    if (error) return dbError(error, 'automations/holds/decision');
+    const rows = Array.isArray(rejected) ? rejected : rejected ? [rejected] : [];
+    data = (rows[0] as Record<string, unknown> | undefined) ?? null;
+  } else {
+    updates = {
+      status: 'approved',
+      approved_by: auth.ctx.discordId,
+      approved_at: now,
+      last_error: null,
+    };
+    const { data: approved, error } = await supabase
+      .from('automation_mass_action_holds')
+      .update(updates)
+      .eq('id', id)
+      .eq('guild_id', auth.ctx.guildId)
+      .eq('status', 'held')
+      .select('*')
+      .maybeSingle();
+    if (error) return dbError(error, 'automations/holds/decision');
+    data = (approved as Record<string, unknown> | null) ?? null;
+  }
   if (!data) {
     return NextResponse.json(
       { success: false, error: 'This hold was already decided or no longer exists' },
@@ -134,10 +154,15 @@ export async function PUT(req: NextRequest) {
   }
 
   const supabase = createAdminSupabase();
+  // Upsert, not update: a guild whose guild_config row was never created (a
+  // tolerated init state — reads fall back to the default of 25) must still
+  // be able to SAVE a threshold. Same shape as the general config endpoint.
   const { data, error } = await supabase
     .from('guild_config')
-    .update({ automation_mass_action_threshold: threshold })
-    .eq('guild_id', auth.ctx.guildId)
+    .upsert(
+      { guild_id: auth.ctx.guildId, automation_mass_action_threshold: threshold },
+      { onConflict: 'guild_id' },
+    )
     .select('automation_mass_action_threshold')
     .single();
   if (error) return dbError(error, 'automations/holds/config');

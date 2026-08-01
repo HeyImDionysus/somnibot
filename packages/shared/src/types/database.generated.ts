@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 238 migration files in packages/supabase/migrations/
+ * Source: 244 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -705,6 +705,7 @@ export interface DbAutomationExecution {
   duration_ms: number | null;
   created_at: string;
   occurrence_id: string | null;
+  actions_started: boolean;
 }
 
 export interface DbCustomCommand {
@@ -1174,6 +1175,7 @@ export interface DbBotDiagnostics {
   snapshot_at: string;
   type: string;
   data: Record<string, unknown> | null;
+  boot_id: string | null;
 }
 
 export interface DbBotActionQueue {
@@ -1504,6 +1506,9 @@ export interface DbAutomationMassActionHolds {
   updated_at: string;
   execution_owner_token: string | null;
   execution_lease_expires_at: string | null;
+  progress_executed: number;
+  progress_failed: number;
+  progress_errors: Json;
 }
 
 export interface DbButtonRoles {
@@ -2284,6 +2289,13 @@ export interface DbFeatureEmbedOverrides {
   thumbnail_url: string | null;
   author_name: string | null;
   updated_at: string;
+}
+
+export interface DbGuildRuntimeFeatures {
+  guild_id: string;
+  feature: string;
+  boot_id: string;
+  started_at: string;
 }
 
 export interface DbGuildTicketCounters {

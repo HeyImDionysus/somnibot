@@ -373,6 +373,10 @@ export class ScheduledMessageRunner {
     let occurrenceId: string;
     let reclaimedStaleClaim = false;
     let reclaimedResult: Record<string, unknown> = {};
+    // The claim-generation snapshot the counter RPC verifies: a stalled
+    // worker resuming after recovery reclaimed this minute must be told it
+    // no longer owns the send.
+    let occurrenceClaimUpdatedAt: string | null = null;
     try {
       const claim = await claimDiscordOccurrence(
         this.supabase,
@@ -432,8 +436,26 @@ export class ScheduledMessageRunner {
             ? existing.result as Record<string, unknown>
             : {};
         occurrenceId = existing.id;
+        // The reclaim bumped updated_at; re-read the authoritative snapshot
+        // so OUR counter claim passes the generation check. An unreadable
+        // snapshot means ownership cannot be proven — do not send.
+        const { data: freshOccurrence, error: freshError } = await this.supabase
+          .from('discord_operation_occurrences')
+          .select('updated_at')
+          .eq('id', existing.id)
+          .maybeSingle();
+        if (freshError || typeof freshOccurrence?.updated_at !== 'string') {
+          log.error(`Could not confirm reclaimed occurrence ownership for schedule ${schedule.id}:`, {
+            error: freshError?.message ?? 'updated_at missing',
+          });
+          return;
+        }
+        occurrenceClaimUpdatedAt = freshOccurrence.updated_at;
       } else {
         occurrenceId = claim.occurrence.id;
+        occurrenceClaimUpdatedAt = typeof claim.occurrence.updated_at === 'string'
+          ? claim.occurrence.updated_at
+          : null;
       }
     } catch (err) {
       log.error(`Failed to claim schedule ${schedule.id} occurrence:`, { error: String(err) });
@@ -501,10 +523,20 @@ export class ScheduledMessageRunner {
           // commits in the SAME transaction as the slot, so a crash between
           // the two can no longer make a paid minute look unreserved.
           p_occurrence_id: occurrenceId,
+          // Ownership: -1 comes back when this occurrence was reclaimed (or
+          // settled) while we stalled — the minute is no longer ours.
+          p_expected_updated_at: occurrenceClaimUpdatedAt,
         },
       );
       claimedSendCount = counterResult.data;
       counterError = counterResult.error;
+    }
+    if (claimedSendCount === -1) {
+      log.warn(
+        `Lost ownership of schedule ${schedule.id} occurrence ${occurrenceAt.toISOString()} `
+        + 'before reserving its counter; the reclaiming worker owns the delivery.',
+      );
+      return;
     }
     if (counterError) {
       // The RPC may have committed before its response was lost. Reconcile the
@@ -544,6 +576,29 @@ export class ScheduledMessageRunner {
       return;
     }
 
+    // The reservation stamp bumped the occurrence generation; refresh the
+    // baseline so the send-boundary recheck below compares against OUR
+    // current claim, not the pre-reserve snapshot.
+    {
+      const { data: baseline, error: baselineError } = await this.supabase
+        .from('discord_operation_occurrences')
+        .select('status, updated_at')
+        .eq('id', occurrenceId)
+        .maybeSingle();
+      if (
+        baselineError
+        || !baseline
+        || baseline.status !== 'claimed'
+        || typeof baseline.updated_at !== 'string'
+      ) {
+        log.warn(`Could not confirm occurrence ownership for schedule ${schedule.id} after reserving; skipping send`, {
+          error: baselineError?.message ?? `status=${baseline?.status ?? 'missing'}`,
+        });
+        return;
+      }
+      occurrenceClaimUpdatedAt = baseline.updated_at;
+    }
+
     let embed: EmbedBuilder | null = null;
 
     // Load embed config if referenced
@@ -579,6 +634,34 @@ export class ScheduledMessageRunner {
     }
 
     const content = schedule.message ? replaceVariables(schedule.message, this.guild) : undefined;
+
+    // Send-boundary ownership recheck: reserving can predate the send by an
+    // arbitrary stall (the embed-config query above, an event-loop pause).
+    // If the stall crossed the stale threshold, recovery may have reclaimed
+    // AND delivered this very minute — any generation movement or non-claimed
+    // status means we no longer own the send. (A reclaim strictly between
+    // this check and channel.send remains the documented at-least-once
+    // corner, now nanoscopic instead of minutes wide.)
+    {
+      const { data: sendGate, error: sendGateError } = await this.supabase
+        .from('discord_operation_occurrences')
+        .select('status, updated_at')
+        .eq('id', occurrenceId)
+        .maybeSingle();
+      if (
+        sendGateError
+        || !sendGate
+        || sendGate.status !== 'claimed'
+        || sendGate.updated_at !== occurrenceClaimUpdatedAt
+      ) {
+        log.warn(
+          `Occurrence ownership moved before the send for schedule ${schedule.id} `
+          + `(${occurrenceAt.toISOString()}); the current holder owns the delivery.`,
+          { error: sendGateError?.message ?? null },
+        );
+        return;
+      }
+    }
 
     // Send the message. The occurrence was already claimed atomically above, so
     // the "never duplicate" contract holds regardless of send outcome. A single
@@ -734,9 +817,13 @@ export class ScheduledMessageRunner {
     lastOcc: Date,
     now: Date,
   ): Promise<void> {
+    // Advance to the last MISSED occurrence, not the recovery time: stamping
+    // "now" made the next legitimate tick look like a duplicate to the
+    // ordinary send guard (a minutely schedule recovered at :30 lost its :00
+    // of the following minute). lastOcc still prevents repeat notices.
     const { data: won, error } = await this.supabase
       .from('scheduled_messages')
-      .update({ last_sent_at: now.toISOString() })
+      .update({ last_sent_at: lastOcc.toISOString() })
       .eq('id', schedule.id)
       .or(`last_sent_at.is.null,last_sent_at.lt.${lastOcc.toISOString()}`)
       .select('id');
@@ -744,7 +831,7 @@ export class ScheduledMessageRunner {
 
     const missedCount = this.countOccurrences(schedule, baseline, now);
     try {
-      await raiseOwnerAlert(this.supabase, this.guild.id, {
+      const noticeResult = await raiseOwnerAlert(this.supabase, this.guild.id, {
         alertType: 'scheduled_message_missed_occurrence',
         severity: 'info',
         title: `Scheduled message "${schedule.name}" missed ${missedCount} occurrence(s)`,
@@ -754,6 +841,37 @@ export class ScheduledMessageRunner {
         metadata: { schedule_id: schedule.id, missed_count: missedCount },
         guild: this.guild,
       });
+      if (
+        !noticeResult.inserted
+        && noticeResult.insertErrorCode !== '23505'
+        && !noticeResult.delivered
+      ) {
+        // Neither delivery leg landed (raiseOwnerAlert reports, never
+        // throws). The baseline advance above already won the single-winner
+        // race, so ROLL IT BACK to the pre-advance value: a transient alert
+        // outage must not permanently consume the missed notice — the next
+        // restart re-detects the gap and retries.
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          const { error: rollbackError } = await this.supabase
+            .from('scheduled_messages')
+            .update({ last_sent_at: baseline.toISOString() })
+            .eq('id', schedule.id)
+            .eq('last_sent_at', lastOcc.toISOString());
+          if (!rollbackError) break;
+          if (attempt === 3) {
+            // The advanced baseline is durable and the notice never landed:
+            // say so LOUDLY — this occurrence's notice is lost until an
+            // operator intervenes, and silence here was the original bug.
+            log.error('Missed-run notice failed AND its baseline rollback failed; the miss will not be re-announced:', {
+              scheduleId: schedule.id,
+              error: rollbackError.message,
+            });
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+          }
+        }
+      }
+
     } catch (alertErr) {
       log.error(
         'Failed to write missed-occurrence notice:',

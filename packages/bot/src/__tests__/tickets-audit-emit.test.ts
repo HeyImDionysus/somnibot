@@ -440,7 +440,19 @@ describe('ticket orphan cleanup reconciliation', () => {
   it('completes an uncertain occurrence without deleting its committed ticket channel', async () => {
     const channel = { id: 'tc-committed', delete: vi.fn() };
     const occurrenceUpdates = vi.fn();
+    const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
+      if (name === 'settle_discord_occurrence') {
+        occurrenceUpdates({
+          status: args?.p_status,
+          resource_id: args?.p_resource_id ?? null,
+          result: args?.p_result ?? {},
+          last_error: args?.p_last_error ?? null,
+        });
+      }
+      return { data: true, error: null };
+    });
     const supabase = {
+      rpc,
       from: vi.fn((table: string) => {
         const chain = makeCreateSupa().from('tickets');
         if (table === 'tickets') {

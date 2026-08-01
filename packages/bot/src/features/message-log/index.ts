@@ -70,6 +70,12 @@ const _bootRecoveryDone = new Set<string>();
 const _deliveryDegraded = new Set<string>();
 const _deliveryAlerted = new Set<string>();
 const _deliveryRecoveryChecked = new Set<string>();
+// Bounds the durable-row + ping retries while the owner notice remains
+// undelivered (e.g. alert channel briefly unavailable): one attempt per
+// guild per minute, with the alert-service's own 5-minute ping throttle on
+// top. The row insert itself dedupes on the partial unique index.
+const DELIVERY_ALERT_RETRY_MS = 60_000;
+const _deliveryAlertRetryAt = new Map<string, number>();
 
 /** Shallow value-equality for the audited config fields. */
 function configsEqual(a: MessageLogConfig, b: MessageLogConfig): boolean {
@@ -245,6 +251,13 @@ async function notifyDeliveryFailure(
   error: string,
 ): Promise<void> {
   if (_deliveryAlerted.has(guildId)) return;
+  if (
+    _deliveryDegraded.has(guildId)
+    && Date.now() < (_deliveryAlertRetryAt.get(guildId) ?? 0)
+  ) {
+    return;
+  }
+  _deliveryAlertRetryAt.set(guildId, Date.now() + DELIVERY_ALERT_RETRY_MS);
   if (!_deliveryDegraded.has(guildId)) {
     _deliveryDegraded.add(guildId);
     client.eventBus.emit('message_log.delivery_failed', guildId, { channelId, error });
@@ -261,7 +274,12 @@ async function notifyDeliveryFailure(
     metadata: { channel_id: channelId, error },
     client,
   });
-  if (result.inserted || result.insertErrorCode === '23505' || result.delivered) {
+  // Latch only when BOTH halves are durable: the notice was delivered AND
+  // the alert row exists (fresh insert or 23505 dedupe). A delivered ping
+  // whose row insert transiently failed used to latch, leaving the outage
+  // with no durable dashboard alert forever; a durable row whose ping failed
+  // equally keeps retrying under the throttles above.
+  if (result.delivered && (result.inserted || result.insertErrorCode === '23505')) {
     _deliveryAlerted.add(guildId);
   }
 }
@@ -283,6 +301,7 @@ async function noticeDeliveryRecovered(client: SomniClient, guildId: string): Pr
   _deliveryRecoveryChecked.add(guildId);
   _deliveryDegraded.delete(guildId);
   _deliveryAlerted.delete(guildId);
+  _deliveryAlertRetryAt.delete(guildId);
 }
 
 async function sendLogEmbed(

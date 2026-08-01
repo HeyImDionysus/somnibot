@@ -42,7 +42,7 @@ function setup(overrides: Partial<Record<string, Result>> = {}) {
         customer_id: CUSTOMER,
         product_id: PRODUCT,
         status: 'completed',
-        delivery_type_snapshot: 'mixed',
+        delivery_type_snapshot: 'license_key',
         download_required_snapshot: true,
         created_at: '2026-07-28T12:00:00.000Z',
       }],
@@ -118,7 +118,7 @@ describe('GET /api/store/control-room', () => {
     mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);
   });
 
-  it('projects a completed mixed-delivery customer through all four real stages', async () => {
+  it('projects a completed license-key customer through all four real stages', async () => {
     setup();
     const response = await GET(buildRequest('/api/store/control-room') as never);
     const body = await response.json();
@@ -142,6 +142,39 @@ describe('GET /api/store/control-room', () => {
       },
       stuck: false,
     });
+  });
+
+  it('never requires a license for a mixed order (round 30)', async () => {
+    // Fulfillment mints keys ONLY for license_key delivery; classifying
+    // mixed as license-bearing marked every completed mixed order stuck
+    // after 15 minutes for a key that will never exist.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-01T12:00:00.000Z'));
+    setup({
+      orders: {
+        data: [{
+          id: ORDER,
+          order_number: 'ORD-MIXED',
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'completed',
+          delivery_type_snapshot: 'mixed',
+          download_required_snapshot: false,
+          created_at: '2026-07-30T04:00:00.000Z',
+        }],
+        error: null,
+        count: 1,
+      },
+      license_keys: { data: [], error: null },
+    });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+
+    expect(body.data.customers[0].stages.licensed).toBe('not_applicable');
+    expect(body.data.customers[0].reasons ?? []).not.toContain(
+      'No license key was issued within 15 minutes of payment.',
+    );
+    expect(body.data.summary.licensed).toBe(0);
   });
 
   it('treats a revoked historical key as proof that a license was issued', async () => {
@@ -179,7 +212,7 @@ describe('GET /api/store/control-room', () => {
           customer_id: CUSTOMER,
           product_id: PRODUCT,
           status: 'completed',
-          delivery_type_snapshot: 'mixed',
+          delivery_type_snapshot: 'license_key',
           download_required_snapshot: true,
           created_at: '2026-07-30T04:00:00.000Z',
         }],
@@ -241,6 +274,122 @@ describe('GET /api/store/control-room', () => {
       'No completed download was recorded within 24 hours.',
     );
     expect(body.data.customers[0].stuck).toBe(false);
+  });
+
+  it('flags a pre-cutover order FULFILLED after the cutover when its download never happened (round 14)', async () => {
+    // Coverage is decided at fulfillment time: this order predates the
+    // deliveries ledger, but its entitlement (the fulfillment transition)
+    // landed after the cutover, so the whole delivery ran in the
+    // evidence-recording era. Classifying by created_at exempted it forever.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-01T12:00:00.000Z'));
+    setup({
+      orders: {
+        data: [{
+          id: ORDER,
+          order_number: 'ORD-PRE-CUTOVER-LATE-FULFILL',
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'completed',
+          delivery_type_snapshot: 'file',
+          created_at: '2026-07-30T02:00:00.000Z',
+        }],
+        error: null,
+        count: 1,
+      },
+      entitlements: {
+        data: [{
+          id: 'ent-late',
+          order_id: ORDER,
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'active',
+          created_at: '2026-07-30T04:00:00.000Z',
+        }],
+        error: null,
+      },
+      commerce_download_deliveries: { data: [], error: null },
+    });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+    expect(body.data.customers[0].reasons).toContain(
+      'No completed download was recorded within 24 hours.',
+    );
+    expect(body.data.customers[0].stuck).toBe(true);
+  });
+
+  it('gives a late-fulfilled order its FULL 24h download window (round 16)', async () => {
+    // Created three days ago, fulfilled one hour ago: the deadline runs from
+    // fulfillment — the customer has had one hour, not three days.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-02T12:00:00.000Z'));
+    setup({
+      orders: {
+        data: [{
+          id: ORDER,
+          order_number: 'ORD-LATE-FULFILL-WINDOW',
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'completed',
+          delivery_type_snapshot: 'file',
+          created_at: '2026-07-30T12:00:00.000Z',
+        }],
+        error: null,
+        count: 1,
+      },
+      entitlements: {
+        data: [{
+          id: 'ent-recent',
+          order_id: ORDER,
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'active',
+          created_at: '2026-08-02T11:00:00.000Z',
+        }],
+        error: null,
+      },
+      commerce_download_deliveries: { data: [], error: null },
+    });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+    expect(body.data.customers[0].reasons).not.toContain(
+      'No completed download was recorded within 24 hours.',
+    );
+  });
+
+  it('starts the 15-minute SLAs at the completed transition, not order creation (round 18)', async () => {
+    // Held in review for three days, approved ten minutes ago: fulfillment
+    // just became possible, so nothing is late yet.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-02T12:00:00.000Z'));
+    setup({
+      orders: {
+        data: [{
+          id: ORDER,
+          order_number: 'ORD-LATE-APPROVAL',
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'completed',
+          delivery_type_snapshot: 'mixed',
+          download_required_snapshot: true,
+          created_at: '2026-07-30T12:00:00.000Z',
+          updated_at: '2026-08-02T11:50:00.000Z',
+        }],
+        error: null,
+        count: 1,
+      },
+      license_keys: { data: [], error: null },
+      entitlements: { data: [], error: null },
+      commerce_download_deliveries: { data: [], error: null },
+    });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+    expect(body.data.customers[0].reasons).not.toContain(
+      'No entitlement was recorded within 15 minutes of payment.',
+    );
+    expect(body.data.customers[0].reasons).not.toContain(
+      'No license key was issued within 15 minutes of payment.',
+    );
   });
 
   it('uses the persisted deployment cutover instead of the migration filename time', async () => {
@@ -330,7 +479,7 @@ describe('GET /api/store/control-room — rotation history cannot mask issuance'
             customer_id: CUSTOMER,
             product_id: PRODUCT,
             status: 'completed',
-            delivery_type_snapshot: 'mixed',
+            delivery_type_snapshot: 'license_key',
             download_required_snapshot: false,
             created_at: '2026-07-28T12:00:00.000Z',
           },
@@ -340,7 +489,7 @@ describe('GET /api/store/control-room — rotation history cannot mask issuance'
             customer_id: CUSTOMER,
             product_id: PRODUCT,
             status: 'completed',
-            delivery_type_snapshot: 'mixed',
+            delivery_type_snapshot: 'license_key',
             download_required_snapshot: false,
             created_at: '2026-07-28T12:00:30.000Z',
           },

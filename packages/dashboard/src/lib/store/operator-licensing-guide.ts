@@ -60,15 +60,20 @@ export function getOperatorLicensingGuide(
   }
 
   if (choice.deliveryType === 'mixed') {
+    // Fulfillment mints a license key ONLY for the exact license_key
+    // delivery type (handleCaptureCompleted), and staged license payloads
+    // are rejected for mixed — promising a key here sold buyers a bundle
+    // that never delivers one.
     return {
       kind: 'mixed',
       title: 'Mixed delivery bundle',
-      summary: 'This product combines a key with another delivery method; configure and verify each part.',
-      keyRequired: true,
+      summary:
+        'Bundle Discord roles with a download in one purchase. No license key is issued for mixed delivery.',
+      keyRequired: false,
       steps: [
-        'Configure the license key machine limit, heartbeat interval, and offline grace period.',
-        'Upload the file or select the Discord roles included in the same purchase.',
-        'Test key issuance and every bundled delivery separately before putting the product on sale.',
+        'Upload the file or link and select every bundled Discord role; keep the bot role above the granted roles.',
+        'Test-purchase and verify every bundled delivery — fulfillment grants each part separately.',
+        'Need a key? Use License Key delivery instead: keys are minted only for that exact delivery type, never for mixed.',
       ],
     };
   }

@@ -30,29 +30,45 @@ BEGIN
       MESSAGE = 'reclaim_stale_discord_occurrence: complete claim identity is required';
   END IF;
 
-  UPDATE public.discord_operation_occurrences AS occurrence
-     SET claimed_at = pg_catalog.clock_timestamp(),
-         updated_at = pg_catalog.clock_timestamp(),
-         last_error = NULL
+  -- Round 22: lock-then-check. A single UPDATE's NOT EXISTS subqueries run
+  -- against the statement snapshot, so an ownership insert committing while
+  -- this statement waited on the row lock was never seen. Locking the
+  -- occurrence row FIRST serializes against the ownership RPCs (which take
+  -- the same lock before inserting); the ownership checks then run as NEW
+  -- statements whose snapshots postdate any insert that won the lock race.
+  SELECT occurrence.id INTO v_reclaimed
+    FROM public.discord_operation_occurrences AS occurrence
    WHERE occurrence.id = p_occurrence_id
      AND occurrence.guild_id = p_guild_id
      AND occurrence.operation_kind = p_operation_kind
      AND occurrence.status = 'claimed'
      AND occurrence.updated_at = p_expected_updated_at
      AND occurrence.claimed_at < p_stale_before
-     AND NOT EXISTS (
-       SELECT 1
-         FROM public.active_temp_channels AS active
-        WHERE active.creation_occurrence_id = occurrence.id
-     )
-     AND NOT EXISTS (
-       SELECT 1
-         FROM public.tickets AS ticket
-        WHERE ticket.creation_occurrence_id = occurrence.id
-     )
-  RETURNING occurrence.id INTO v_reclaimed;
+   FOR UPDATE;
 
-  RETURN v_reclaimed IS NOT NULL;
+  IF v_reclaimed IS NULL THEN
+    RETURN FALSE;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+      FROM public.active_temp_channels AS active
+     WHERE active.creation_occurrence_id = v_reclaimed
+  ) OR EXISTS (
+    SELECT 1
+      FROM public.tickets AS ticket
+     WHERE ticket.creation_occurrence_id = v_reclaimed
+  ) THEN
+    RETURN FALSE;
+  END IF;
+
+  UPDATE public.discord_operation_occurrences
+     SET claimed_at = pg_catalog.clock_timestamp(),
+         updated_at = pg_catalog.clock_timestamp(),
+         last_error = NULL
+   WHERE id = v_reclaimed;
+
+  RETURN TRUE;
 END;
 $$;
 
