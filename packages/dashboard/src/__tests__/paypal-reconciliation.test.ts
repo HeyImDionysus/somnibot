@@ -4382,6 +4382,7 @@ describe('runPayPalReconciliation', () => {
       }],
     });
     scriptProviderObjects({
+      sales: { 'SALE-MON': saleObject({ state: 'refunded', total: '25.00' }) },
       saleRefunds: {
         'SALEREF-MON': {
           state: 'completed',
@@ -6007,6 +6008,234 @@ describe('runPayPalReconciliation', () => {
       reason: 'subscription transactions lookup returned a malformed record',
       retriable: false,
     });
+  });
+
+  // ── PR #409 review round 26 repairs ─────────────────────────────────────
+
+  it('validates the old terminal parent behind an ordinary refund row', async () => {
+    // The window refund row verifies cleanly — but its pre-window reversed
+    // parent drifted to 1900 cents. The historical-parent sweep is that
+    // row's only provider touch and must surface the drift.
+    withLedger({
+      payments: [paymentRow({
+        status: 'reversed',
+        amount_cents: 1900,
+        created_at: '2026-07-10T10:00:00.000Z',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: '2026-07-10T10:00:00.000Z',
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'REF-1',
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject({ status: 'REFUNDED', value: '25.00' }) },
+      refunds: { 'REF-1': refundObject({ value: '25.00' }) },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.amountMismatches).toEqual([{
+      transactionId: 'CAP-1',
+      guildId: GUILD_ID,
+      providerAmountCents: 2500,
+      localAmountCents: 1900,
+      providerCurrency: 'USD',
+      localCurrency: 'USD',
+    }]);
+    expect(result.missingLocalPayments).toEqual([]);
+  });
+
+  it('fails closed on an unrecognized provider capture status', async () => {
+    withLedger({
+      payments: [paymentRow()],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject({ status: 'MYSTERY_HOLD' }) },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'capture lookup returned a malformed record',
+      retriable: false,
+    });
+  });
+
+  it('fails closed on unrecognized sale, refund, and order states', async () => {
+    // One fixture per parser: unknown provider states must never read as
+    // ordinary non-settlement.
+    withLedger({
+      payments: [paymentRow({ paypal_payment_id: 'SALE-1' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-1': saleObject({ state: 'on_hold' }) },
+      subscriptions: { 'SUB-1': subscriptionObject({ lastPaymentTime: null }) },
+      subscriptionTransactions: { 'SUB-1': { transactions: [] } },
+    });
+    expect(await runPayPalReconciliation(supabase as never, OPTS)).toMatchObject({
+      status: 'failed',
+      reason: 'sale lookup returned a malformed record',
+      retriable: false,
+    });
+
+    withLedger({
+      payments: [paymentRow({ status: 'refunded' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'REF-1',
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject({ status: 'REFUNDED', value: '25.00' }) },
+      refunds: { 'REF-1': refundObject({ status: 'ON_HOLD', value: '25.00' }) },
+    });
+    expect(await runPayPalReconciliation(supabase as never, OPTS)).toMatchObject({
+      status: 'failed',
+      reason: 'refund lookup returned a malformed record',
+      retriable: false,
+    });
+
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'pending',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({
+      orders: { 'PP-ORDER-1': orderObject({ status: 'IN_PROGRESS' }) },
+    });
+    expect(await runPayPalReconciliation(supabase as never, OPTS)).toMatchObject({
+      status: 'failed',
+      reason: 'order lookup returned a malformed record',
+      retriable: false,
+    });
+  });
+
+  it('fails closed on an unrecognized v1 sale-refund state', async () => {
+    withLedger({
+      payments: [paymentRow({ paypal_payment_id: 'SALE-1', status: 'refunded' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'SALEREF-1',
+        event_type: 'PAYMENT.SALE.REFUNDED',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-1': saleObject({ state: 'refunded', total: '25.00' }) },
+      saleRefunds: {
+        'SALEREF-1': {
+          state: 'on_hold',
+          amount: { currency: 'USD', total: '25.00' },
+          sale_id: 'SALE-1',
+        },
+      },
+      subscriptions: { 'SUB-1': subscriptionObject({ lastPaymentTime: null }) },
+      subscriptionTransactions: { 'SUB-1': { transactions: [] } },
+    });
+
+    expect(await runPayPalReconciliation(supabase as never, OPTS)).toMatchObject({
+      status: 'failed',
+      reason: 'sale refund lookup returned a malformed record',
+      retriable: false,
+    });
+  });
+
+  it('reports a lookback payment whose provider object vanished', async () => {
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'CAP-OLD',
+        created_at: '2026-07-01T10:00:00.000Z',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: 'PP-ORDER-OLD',
+      }],
+    });
+    scriptProviderObjects({});
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingProviderPayments).toEqual([{
+      kind: 'payment',
+      orderId: ORDER_UUID,
+      orderNumber: null,
+      guildId: GUILD_ID,
+      paypalPaymentIds: ['CAP-OLD'],
+      amountCents: 2500,
+      currency: 'USD',
+      createdAt: '2026-07-01T10:00:00.000Z',
+    }]);
   });
 
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {
