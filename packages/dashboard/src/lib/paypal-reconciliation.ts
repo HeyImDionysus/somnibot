@@ -2603,6 +2603,25 @@ async function runPass(
           localCurrency: input.providerCurrency,
         });
       }
+      // A FULLY refunded capture is the stronger truth than the enumerated
+      // list: when the list (and the ledger) cover less than the capture
+      // amount, the uncovered remainder is a lost refund the order response
+      // failed to enumerate.
+      if (input.providerStatusFullyRefunded) {
+        const covered = Math.max(localTotal, providerTotal);
+        if (covered < input.providerAmountCents) {
+          missingLocalPayments.push({
+            kind: 'refund',
+            transactionId: input.providerId,
+            guildId: input.guildId,
+            amountCents: input.providerAmountCents - covered,
+            currency: input.providerCurrency,
+            initiatedAt: null,
+            source: 'capture',
+            referenceId: input.providerId,
+          });
+        }
+      }
       return;
     }
     if (input.providerStatusFullyRefunded && localTotal < input.providerAmountCents) {
@@ -3984,9 +4003,7 @@ async function runPass(
         };
       }
       const fallbackRowsByProviderId = new Map(
-        validatedFallback.rows
-          .filter((row) => row.status === 'completed')
-          .map((row) => [row.paypal_payment_id as string, row]),
+        validatedFallback.rows.map((row) => [row.paypal_payment_id as string, row]),
       );
       const fallbackParentScan = await lookupOrdersByExactColumn(
         supabase,
@@ -4016,6 +4033,53 @@ async function runPass(
             || rowOrder.guild_id !== fallbackRow.guild_id
           ) {
             return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+          }
+          // The row must MATCH the transaction's terminal family: a
+          // completed row behind a REFUNDED/REVERSED transaction means the
+          // refund webhook was lost — judge the refund ledger instead of
+          // silently accounting; a non-settled row never accounts at all.
+          const terminalTxn = ['REFUNDED', 'REVERSED'].includes(txn.status);
+          if (terminalTxn && fallbackRow.status === 'completed') {
+            const totalsFailure = await loadLocalRefundTotals([fallbackRow]);
+            if (totalsFailure) return totalsFailure;
+            judgeRefundedPayment({
+              payment: fallbackRow,
+              guildId: fallbackRow.guild_id as string,
+              providerId: txn.id,
+              providerStatusFullyRefunded: true,
+              providerAmountCents: txn.amountCents ?? fallbackRow.amount_cents,
+              providerCurrency: txn.currency
+                ?? (normalizeCurrency(fallbackRow.currency) as string),
+              providerRefunds: null,
+            });
+            continue;
+          }
+          if (terminalTxn && !['refunded', 'reversed'].includes(fallbackRow.status)) {
+            // pending/failed behind terminal provider money: not accounted.
+            missingLocalPayments.push({
+              kind: 'payment',
+              transactionId: txn.id,
+              guildId: order.guild_id as string,
+              amountCents: txn.amountCents ?? order.amount_cents,
+              currency: txn.currency ?? (normalizeCurrency(order.currency) as string),
+              initiatedAt: new Date(txn.timeMs).toISOString(),
+              source: 'subscription',
+              referenceId: subscriptionId,
+            });
+            continue;
+          }
+          if (!terminalTxn && fallbackRow.status !== 'completed') {
+            missingLocalPayments.push({
+              kind: 'payment',
+              transactionId: txn.id,
+              guildId: order.guild_id as string,
+              amountCents: txn.amountCents ?? order.amount_cents,
+              currency: txn.currency ?? (normalizeCurrency(order.currency) as string),
+              initiatedAt: new Date(txn.timeMs).toISOString(),
+              source: 'subscription',
+              referenceId: subscriptionId,
+            });
+            continue;
           }
           // Rows outside the window never met the sale pass: the discovered
           // transaction's money must match or the drift surfaces here.
