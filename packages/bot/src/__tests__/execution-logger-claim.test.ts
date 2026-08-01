@@ -128,6 +128,25 @@ describe('ExecutionLogger occurrence claim', () => {
     expect(calls).not.toContain('finalize_stale_started_automation_execution');
   });
 
+  it('reports an existing occurrence claim through the cheap pre-check (round 30)', async () => {
+    const supa = makeSupa({ data: { id: 'row-1' }, error: null });
+    const selectChain: any = {};
+    selectChain.eq = vi.fn(() => selectChain);
+    selectChain.limit = vi.fn(() => selectChain);
+    selectChain.maybeSingle = vi.fn(async () => ({ data: { id: 'row-1' }, error: null }));
+    supa.from = vi.fn(() => ({ select: vi.fn(() => selectChain) }));
+    const logger = new ExecutionLogger(supa);
+
+    await expect(logger.isOccurrenceConsumed('auto-1', 'g1', 'occ-1')).resolves.toBe(true);
+
+    selectChain.maybeSingle = vi.fn(async () => ({ data: null, error: null }));
+    await expect(logger.isOccurrenceConsumed('auto-1', 'g1', 'occ-1')).resolves.toBe(false);
+
+    // Read errors fail OPEN — the claim INSERT stays authoritative.
+    selectChain.maybeSingle = vi.fn(async () => ({ data: null, error: { message: 'down' } }));
+    await expect(logger.isOccurrenceConsumed('auto-1', 'g1', 'occ-1')).resolves.toBe(false);
+  });
+
   it('sweeps stale started executions guild-wide via the plural RPC (round 28)', async () => {
     const supa = makeSupa({ data: { id: 'row-1' }, error: null });
     supa.rpc = vi.fn(async () => ({ data: 3, error: null }));

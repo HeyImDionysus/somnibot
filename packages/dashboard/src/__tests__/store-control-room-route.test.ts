@@ -42,7 +42,7 @@ function setup(overrides: Partial<Record<string, Result>> = {}) {
         customer_id: CUSTOMER,
         product_id: PRODUCT,
         status: 'completed',
-        delivery_type_snapshot: 'mixed',
+        delivery_type_snapshot: 'license_key',
         download_required_snapshot: true,
         created_at: '2026-07-28T12:00:00.000Z',
       }],
@@ -118,7 +118,7 @@ describe('GET /api/store/control-room', () => {
     mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);
   });
 
-  it('projects a completed mixed-delivery customer through all four real stages', async () => {
+  it('projects a completed license-key customer through all four real stages', async () => {
     setup();
     const response = await GET(buildRequest('/api/store/control-room') as never);
     const body = await response.json();
@@ -142,6 +142,39 @@ describe('GET /api/store/control-room', () => {
       },
       stuck: false,
     });
+  });
+
+  it('never requires a license for a mixed order (round 30)', async () => {
+    // Fulfillment mints keys ONLY for license_key delivery; classifying
+    // mixed as license-bearing marked every completed mixed order stuck
+    // after 15 minutes for a key that will never exist.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-01T12:00:00.000Z'));
+    setup({
+      orders: {
+        data: [{
+          id: ORDER,
+          order_number: 'ORD-MIXED',
+          customer_id: CUSTOMER,
+          product_id: PRODUCT,
+          status: 'completed',
+          delivery_type_snapshot: 'mixed',
+          download_required_snapshot: false,
+          created_at: '2026-07-30T04:00:00.000Z',
+        }],
+        error: null,
+        count: 1,
+      },
+      license_keys: { data: [], error: null },
+    });
+
+    const body = await (await GET(buildRequest('/api/store/control-room') as never)).json();
+
+    expect(body.data.customers[0].stages.licensed).toBe('not_applicable');
+    expect(body.data.customers[0].reasons ?? []).not.toContain(
+      'No license key was issued within 15 minutes of payment.',
+    );
+    expect(body.data.summary.licensed).toBe(0);
   });
 
   it('treats a revoked historical key as proof that a license was issued', async () => {
@@ -179,7 +212,7 @@ describe('GET /api/store/control-room', () => {
           customer_id: CUSTOMER,
           product_id: PRODUCT,
           status: 'completed',
-          delivery_type_snapshot: 'mixed',
+          delivery_type_snapshot: 'license_key',
           download_required_snapshot: true,
           created_at: '2026-07-30T04:00:00.000Z',
         }],
@@ -446,7 +479,7 @@ describe('GET /api/store/control-room — rotation history cannot mask issuance'
             customer_id: CUSTOMER,
             product_id: PRODUCT,
             status: 'completed',
-            delivery_type_snapshot: 'mixed',
+            delivery_type_snapshot: 'license_key',
             download_required_snapshot: false,
             created_at: '2026-07-28T12:00:00.000Z',
           },
@@ -456,7 +489,7 @@ describe('GET /api/store/control-room — rotation history cannot mask issuance'
             customer_id: CUSTOMER,
             product_id: PRODUCT,
             status: 'completed',
-            delivery_type_snapshot: 'mixed',
+            delivery_type_snapshot: 'license_key',
             download_required_snapshot: false,
             created_at: '2026-07-28T12:00:30.000Z',
           },

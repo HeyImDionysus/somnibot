@@ -482,7 +482,24 @@ export async function handleBuyButton(
   const grantedChannelIds: string[] = Array.isArray(product.granted_channel_ids)
     ? product.granted_channel_ids.filter((id: unknown): id is string => typeof id === 'string')
     : [];
-  if (liveGuild && (grantedRoleIds.length > 0 || grantedChannelIds.length > 0)) {
+  // Temporary roles are benefits too — they live in their own config table
+  // (frozen into temporary_role_grants_snapshot at order time), so the guard
+  // must load them or a deleted temp role still takes money. A read error is
+  // a money-guard failure: degrade honestly.
+  const { data: tempRoleRows, error: tempRoleError } = await supabase
+    .from('commerce_product_temp_role_config')
+    .select('role_id')
+    .eq('product_id', productId)
+    .eq('guild_id', guildId);
+  if (tempRoleError) {
+    await replyCheckoutUnavailable(interaction, supabase, guildId);
+    return;
+  }
+  const temporaryRoleIds: string[] = (Array.isArray(tempRoleRows) ? tempRoleRows : [])
+    .map((row) => row.role_id)
+    .filter((id): id is string => typeof id === 'string');
+  if (liveGuild
+    && (grantedRoleIds.length > 0 || grantedChannelIds.length > 0 || temporaryRoleIds.length > 0)) {
     const problems: string[] = [];
     const me = liveGuild.members.me;
     const botHighest = me?.roles.highest.position ?? 0;
@@ -495,6 +512,18 @@ export async function handleBuyButton(
         problems.push(`granted role ${role.name} is integration-managed and cannot be assigned`);
       } else if (role.position >= botHighest) {
         problems.push(`granted role ${role.name} sits at or above the bot's highest role`);
+      } else if (!canManageRoles) {
+        problems.push('the bot is missing the Manage Roles permission needed to assign roles');
+      }
+    }
+    for (const roleId of temporaryRoleIds) {
+      const role = liveGuild.roles.cache.get(roleId);
+      if (!role) {
+        problems.push(`temporary role ${roleId} no longer exists`);
+      } else if (role.managed) {
+        problems.push(`temporary role ${role.name} is integration-managed and cannot be assigned`);
+      } else if (role.position >= botHighest) {
+        problems.push(`temporary role ${role.name} sits at or above the bot's highest role`);
       } else if (!canManageRoles) {
         problems.push('the bot is missing the Manage Roles permission needed to assign roles');
       }

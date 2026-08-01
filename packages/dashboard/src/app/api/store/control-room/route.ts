@@ -12,7 +12,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function requiresLicense(delivery: unknown): boolean {
-  return delivery === 'license_key' || delivery === 'mixed';
+  // Fulfillment mints and accepts license payloads ONLY for the exact
+  // license_key delivery type; classifying mixed as license-bearing made
+  // every completed mixed order read "missing license" and stuck after 15
+  // minutes for a key that will never exist.
+  return delivery === 'license_key';
 }
 
 function requiresDownload(delivery: unknown, frozenRequirement: unknown): boolean {

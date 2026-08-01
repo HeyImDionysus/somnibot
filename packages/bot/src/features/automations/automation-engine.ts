@@ -405,7 +405,24 @@ export class AutomationEngine {
       return; // Silently skip — scope filters are lightweight pre-checks
     }
 
-    // 2. Rate limit check
+    // 2. Rate limit check. A REPLAY must never spend quota: a redelivered
+    // durable occurrence that already claimed (executed or held) is skipped
+    // by 2b anyway, but by then allowFire/allowCustom had already
+    // incremented — enough gateway RESUME duplicates suppressed unrelated
+    // legitimate events for the rest of those windows. The cheap read here
+    // fails open on error; 2b's INSERT remains the authoritative dedupe for
+    // two racing first deliveries.
+    if (ctx.member && ctx.occurrenceId && await this.executionLogger.isOccurrenceConsumed(
+      automation.id,
+      this.guild.id,
+      ctx.occurrenceId,
+    )) {
+      log.info(
+        `Duplicate occurrence for "${automation.name}" (occurrence ${ctx.occurrenceId}) — `
+        + 'skipping before any rate-limit spend',
+      );
+      return;
+    }
     if (ctx.member) {
       const allowed = await this.rateLimiter.allowFire(this.guild.id, ctx.member.id);
       if (!allowed) {

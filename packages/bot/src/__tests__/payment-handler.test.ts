@@ -115,6 +115,70 @@ describe('payment-handler', () => {
     expect(JSON.stringify(reply)).toContain('Temporarily Unavailable');
   });
 
+  it('refuses checkout when a TEMPORARY role benefit is undeliverable (round 30 P1)', async () => {
+    // Temporary roles live in commerce_product_temp_role_config, not
+    // granted_role_ids — the round-28 guard missed them entirely.
+    const product = {
+      id: 'prod-1',
+      guild_id: 'guild-1',
+      active: true,
+      type: 'one_time',
+      price_cents: 500,
+      name: 'Weekend VIP',
+      delivery_type: 'role',
+      granted_role_ids: [],
+      granted_channel_ids: [],
+    };
+    const alertsInserted: Array<Record<string, unknown>> = [];
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'products') return makeChain(product);
+        if (table === 'commerce_product_temp_role_config') {
+          const c = makeChain();
+          c.then = (resolve: Function) => resolve({
+            data: [{ role_id: 'temp-role-gone' }],
+            error: null,
+          });
+          return c;
+        }
+        if (table === 'alerts') {
+          const c = makeChain();
+          c.insert = vi.fn((row: Record<string, unknown>) => {
+            alertsInserted.push(row);
+            return makeChain();
+          });
+          return c;
+        }
+        return makeChain();
+      }),
+      rpc: vi.fn(async () => ({ data: null, error: null })),
+    } as any;
+    const guild = {
+      id: 'guild-1',
+      name: 'Cool Server',
+      members: {
+        me: {
+          roles: { highest: { position: 5 } },
+          permissions: { has: vi.fn(() => true) },
+        },
+      },
+      roles: { cache: new Map() },
+      channels: { cache: new Map() },
+    };
+    const interaction = { ...makeInteraction(), guild } as any;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    await handleBuyButton(interaction, supabase, 'guild-1', 'https://api.paypal.com', 'client-id', 'secret', 'https://dashboard.com');
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+    expect(alertsInserted.some((row) =>
+      row.alert_type === 'commerce_undeliverable_benefit'
+      && JSON.stringify(row).includes('temporary role'))).toBe(true);
+    const reply = interaction.editReply.mock.calls.at(-1)?.[0];
+    expect(JSON.stringify(reply)).toContain('Temporarily Unavailable');
+  });
+
   it('lets checkout proceed past the guard when granted benefits are deliverable (round 28 P1)', async () => {
     const product = {
       id: 'prod-1',

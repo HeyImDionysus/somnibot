@@ -42,9 +42,9 @@ does not read `.env`.
 - **Setup** — `setup-wizard-surfaces`, `setup-wizard`,
   `setup-verification-wizard-contract`, and `interaction-verification-gate`.
 - **Bot/full** — the complete bot Vitest suite, plus the focused files named in
-  the table: 272 files / 4,158 tests passed (2026-08-01, final candidate).
+  the table: 272 files / 4,162 tests passed (2026-08-01, final candidate).
 - **Dashboard/full** — the complete dashboard Vitest suite, including the
-  focused route/UI files named in the table: 141 files / 2,100 tests passed
+  focused route/UI files named in the table: 141 files / 2,103 tests passed
   (2026-08-01, final candidate).
 - **Database** — 44 local PostgreSQL integration files / 604 tests passed; a
   final fresh-database twin (2026-08-01) applied all 243 migrations through

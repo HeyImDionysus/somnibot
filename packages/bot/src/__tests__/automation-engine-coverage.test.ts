@@ -71,6 +71,7 @@ const mockRelease = vi.fn().mockResolvedValue(undefined);
 const mockMarkStarted = vi.fn().mockResolvedValue(undefined);
 const mockFinalizeStrict = vi.fn().mockResolvedValue(undefined);
 const mockFinalizeSweep = vi.fn().mockResolvedValue(0);
+const mockIsConsumed = vi.fn().mockResolvedValue(false);
 vi.mock('../features/automations/execution-logger.js', () => ({
   ExecutionLogger: class {
     log = mockLogExecution;
@@ -78,6 +79,7 @@ vi.mock('../features/automations/execution-logger.js', () => ({
     finalize = mockFinalize;
     finalizeStrict = mockFinalizeStrict;
     finalizeStaleStartedSweep = mockFinalizeSweep;
+    isOccurrenceConsumed = mockIsConsumed;
     release = mockRelease;
     markActionsStarted = mockMarkStarted;
   },
@@ -554,6 +556,24 @@ describe('AutomationEngine', () => {
       );
       expect(mockExecuteActions).toHaveBeenCalledTimes(1);
       expect(mockExecuteActions.mock.calls[0][1].member.id).toBe('10000000000000000');
+    });
+
+    it('skips a replayed occurrence BEFORE spending rate-limit quota (round 30)', async () => {
+      // A gateway RESUME redelivers the same durable occurrence: the claim
+      // dedupes the action, but allowFire/allowCustom had already burned the
+      // member's windows — enough replays suppressed unrelated events.
+      mockIsConsumed.mockResolvedValueOnce(true);
+      mockGetForTrigger.mockReturnValue([makeAutomation({})]);
+      await engine.start();
+      eventBus.fire({
+        type: 'member.verified',
+        guildId: 'g1',
+        data: { discordId: '10000000000000000' },
+      });
+
+      await vi.waitFor(() => expect(mockIsConsumed).toHaveBeenCalled());
+      expect(mockAllowFire).not.toHaveBeenCalled();
+      expect(mockClaim).not.toHaveBeenCalled();
     });
 
     it('sweeps interrupted immediate executions at startup (round 28)', async () => {

@@ -373,6 +373,10 @@ export class ScheduledMessageRunner {
     let occurrenceId: string;
     let reclaimedStaleClaim = false;
     let reclaimedResult: Record<string, unknown> = {};
+    // The claim-generation snapshot the counter RPC verifies: a stalled
+    // worker resuming after recovery reclaimed this minute must be told it
+    // no longer owns the send.
+    let occurrenceClaimUpdatedAt: string | null = null;
     try {
       const claim = await claimDiscordOccurrence(
         this.supabase,
@@ -432,8 +436,26 @@ export class ScheduledMessageRunner {
             ? existing.result as Record<string, unknown>
             : {};
         occurrenceId = existing.id;
+        // The reclaim bumped updated_at; re-read the authoritative snapshot
+        // so OUR counter claim passes the generation check. An unreadable
+        // snapshot means ownership cannot be proven — do not send.
+        const { data: freshOccurrence, error: freshError } = await this.supabase
+          .from('discord_operation_occurrences')
+          .select('updated_at')
+          .eq('id', existing.id)
+          .maybeSingle();
+        if (freshError || typeof freshOccurrence?.updated_at !== 'string') {
+          log.error(`Could not confirm reclaimed occurrence ownership for schedule ${schedule.id}:`, {
+            error: freshError?.message ?? 'updated_at missing',
+          });
+          return;
+        }
+        occurrenceClaimUpdatedAt = freshOccurrence.updated_at;
       } else {
         occurrenceId = claim.occurrence.id;
+        occurrenceClaimUpdatedAt = typeof claim.occurrence.updated_at === 'string'
+          ? claim.occurrence.updated_at
+          : null;
       }
     } catch (err) {
       log.error(`Failed to claim schedule ${schedule.id} occurrence:`, { error: String(err) });
@@ -501,10 +523,20 @@ export class ScheduledMessageRunner {
           // commits in the SAME transaction as the slot, so a crash between
           // the two can no longer make a paid minute look unreserved.
           p_occurrence_id: occurrenceId,
+          // Ownership: -1 comes back when this occurrence was reclaimed (or
+          // settled) while we stalled — the minute is no longer ours.
+          p_expected_updated_at: occurrenceClaimUpdatedAt,
         },
       );
       claimedSendCount = counterResult.data;
       counterError = counterResult.error;
+    }
+    if (claimedSendCount === -1) {
+      log.warn(
+        `Lost ownership of schedule ${schedule.id} occurrence ${occurrenceAt.toISOString()} `
+        + 'before reserving its counter; the reclaiming worker owns the delivery.',
+      );
+      return;
     }
     if (counterError) {
       // The RPC may have committed before its response was lost. Reconcile the

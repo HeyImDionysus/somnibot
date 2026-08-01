@@ -161,6 +161,28 @@ export class ExecutionLogger {
   }
 
   /**
+   * Cheap read: has this occurrence already been claimed? Used BEFORE the
+   * per-member rate limiters so gateway replays cannot burn quotas; the
+   * claim INSERT stays authoritative for races. Fails open on read errors.
+   */
+  async isOccurrenceConsumed(
+    automationId: string,
+    guildId: string,
+    occurrenceId: string,
+  ): Promise<boolean> {
+    const { data, error } = await this.supabase
+      .from('automation_executions')
+      .select('id')
+      .eq('automation_id', automationId)
+      .eq('guild_id', guildId)
+      .eq('occurrence_id', occurrenceId)
+      .limit(1)
+      .maybeSingle();
+    if (error) return false;
+    return data !== null;
+  }
+
+  /**
    * Guild-wide sweep of the same interrupted shape, for STARTUP: gateway
    * events never replay across restarts, so the claim-time terminalizer
    * alone cannot reach rows stranded by a crashed worker. Returns how many

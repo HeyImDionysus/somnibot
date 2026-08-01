@@ -47,6 +47,7 @@ function schedSupa(
     schedulesLoadError?: { message: string };
     /** When set, claim_scheduled_message_send returns null (max_sends reached). */
     counterExhausted?: boolean;
+  counterOwnershipLost?: boolean;
   } = {},
 ) {
   const inserts: Record<string, any[]> = { alerts: [] };
@@ -146,6 +147,11 @@ function schedSupa(
       const r = options.reclaimResult;
       if (r && typeof r === 'object' && 'error' in r) return { data: null, error: r.error };
       return { data: r === true, error: null };
+    }
+    if (options.counterOwnershipLost && name === 'claim_scheduled_message_send') {
+      // Round 30: the generation check says another worker reclaimed and
+      // delivered this minute while we stalled.
+      return { data: -1, error: null };
     }
     if (options.counterError) return { data: null, error: options.counterError };
     if (options.counterExhausted) return { data: null, error: null };
@@ -319,6 +325,27 @@ describe('ScheduledMessageRunner — missed-run policy', () => {
 
     expect(send).not.toHaveBeenCalled();
     expect(inserts.alerts.length).toBe(0);
+  });
+});
+
+describe('ScheduledMessageRunner — a stalled worker cannot double-send a reclaimed minute (round 30)', () => {
+  it('refuses to send when the counter RPC reports lost ownership (-1)', async () => {
+    // The stalled original resumes AFTER recovery reclaimed, reserved, sent,
+    // and settled the occurrence. The marker fast-path used to bless it with
+    // idempotent success and it posted the SAME due minute again — the
+    // generation check now returns -1 and the worker walks away without
+    // sending or settling anything.
+    const Runner = await loadRunner();
+    const sched = { ...BASE_SCHEDULE };
+    const { supabase, updates } = schedSupa([sched], { counterOwnershipLost: true });
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+
+    await (runner as any).tick(new Date('2026-07-27T12:00:30.000Z'));
+
+    expect(send).not.toHaveBeenCalled();
+    // No settlement either: whoever owns the claim settles it.
+    expect(updates.some((u) => u.payload?.status === 'completed')).toBe(false);
   });
 });
 
