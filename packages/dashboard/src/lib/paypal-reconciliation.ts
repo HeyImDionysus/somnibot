@@ -2283,6 +2283,65 @@ async function runPass(
     }
   }
 
+  // Cancelled orders leave the creation-window scan after DEFAULT_WINDOW_MS,
+  // but the deny-then-late-capture race outlives it: PayPal can settle a
+  // capture whose webhook was lost long after the local cancellation. Page
+  // the PayPal-identified historical cancelled backlog (refund-lookback
+  // horizon) into the same recheck set.
+  {
+    const cancelledLookbackStartIso = new Date(
+      windowStartMs - Math.max(0, refundLookbackMs),
+    ).toISOString();
+    const targetedOrderIds = new Set(orderGetTargets.map((order) => order.id));
+    for (let from = 0; ; from += LOCAL_PAGE_SIZE) {
+      if (from >= LOCAL_SCAN_MAX_ROWS) {
+        return {
+          status: 'failed',
+          reason: `historical cancelled-order scan exceeded ${LOCAL_SCAN_MAX_ROWS} rows — narrow the lookback`,
+          retriable: true,
+        };
+      }
+      const heartbeatFailure = await heartbeat();
+      if (heartbeatFailure) return heartbeatFailure;
+      const { data, error } = await supabase
+        .from('orders')
+        .select('id, order_number, guild_id, customer_id, product_id, plan_id, amount_cents, currency, status, source, paypal_order_id, paypal_subscription_id, created_at')
+        .or('source.eq.purchase,source.is.null')
+        .gt('amount_cents', 0)
+        .eq('status', 'cancelled')
+        .not('paypal_order_id', 'is', null)
+        .gte('created_at', cancelledLookbackStartIso)
+        .lt('created_at', windowStart)
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, from + LOCAL_PAGE_SIZE - 1);
+      if (error) {
+        return {
+          status: 'failed',
+          reason: `historical cancelled-order scan failed: ${error.message}`,
+          retriable: true,
+        };
+      }
+      const page = (data ?? []) as LocalOrderRow[];
+      for (const order of page) {
+        // Re-assert the predicate in code: the recheck set must hold ONLY
+        // identified historical cancellations even if the storage layer
+        // returns a wider page.
+        if (
+          order.status !== 'cancelled'
+          || !isProviderId(order.paypal_order_id)
+          || String(order.created_at ?? '') >= windowStart
+          || targetedOrderIds.has(order.id)
+        ) {
+          continue;
+        }
+        targetedOrderIds.add(order.id);
+        orderGetTargets.push(order);
+      }
+      if (page.length < LOCAL_PAGE_SIZE) break;
+    }
+  }
+
   // Customer identities back the custom_id tamper check on fetched orders.
   const customerIdentityScan = await loadCustomerIdentities(
     supabase,
@@ -3136,11 +3195,16 @@ async function runPass(
       for (const { payment, lookup } of pageSaleMap.results) {
         if (!lookup.ok || !lookup.found) continue;
         const lookbackOrder = ordersById.get(payment.order_id as string);
+        // Same strict rule as the window sale pass: an agreement-less sale
+        // is not a valid subscription-sale shape, and a mismatched one is a
+        // borrowed identity — the lookback is this row's ONLY verification.
         if (
-          lookup.value.billingAgreementId !== null
-          && lookbackOrder
+          lookbackOrder
           && isProviderId(lookbackOrder.paypal_subscription_id)
-          && lookup.value.billingAgreementId !== lookbackOrder.paypal_subscription_id
+          && (
+            lookup.value.billingAgreementId === null
+            || lookup.value.billingAgreementId !== lookbackOrder.paypal_subscription_id
+          )
         ) {
           return { status: 'failed', reason: 'provider identity conflict', retriable: false };
         }
@@ -3360,7 +3424,56 @@ async function runPass(
               ) {
                 continue;
               }
-              if (['reversed', 'refunded'].includes(parentLookup.value.state)) continue;
+              if (['reversed', 'refunded'].includes(parentLookup.value.state)) {
+                const parentSale = parentLookup.value;
+                // Same rule as the capture-witness path: acceptance must
+                // not skip the checks an OLD parent never met elsewhere —
+                // agreement identity, the parent row's own money, and the
+                // full refund ledger (v1 exposes no sibling list, so the
+                // status-bound aggregate judges it).
+                if (String(witnessParent.created_at ?? '') < windowStart) {
+                  const parentOrder = ordersById.get(witnessParent.order_id as string);
+                  if (
+                    parentOrder
+                    && isProviderId(parentOrder.paypal_subscription_id)
+                    && (
+                      parentSale.billingAgreementId === null
+                      || parentSale.billingAgreementId !== parentOrder.paypal_subscription_id
+                    )
+                  ) {
+                    return {
+                      status: 'failed',
+                      reason: 'provider identity conflict',
+                      retriable: false,
+                    };
+                  }
+                  if (
+                    parentSale.amountCents !== witnessParent.amount_cents
+                    || parentSale.currency !== normalizeCurrency(witnessParent.currency)
+                  ) {
+                    amountMismatches.push({
+                      transactionId: witnessParent.paypal_payment_id as string,
+                      guildId,
+                      providerAmountCents: parentSale.amountCents,
+                      localAmountCents: witnessParent.amount_cents,
+                      providerCurrency: parentSale.currency,
+                      localCurrency: normalizeCurrency(witnessParent.currency),
+                    });
+                  }
+                  const totalsFailure = await loadLocalRefundTotals([witnessParent]);
+                  if (totalsFailure) return totalsFailure;
+                  judgeRefundedPayment({
+                    payment: witnessParent,
+                    guildId,
+                    providerId: witnessParent.paypal_payment_id as string,
+                    providerStatusFullyRefunded: true,
+                    providerAmountCents: parentSale.amountCents,
+                    providerCurrency: parentSale.currency,
+                    providerRefunds: null,
+                  });
+                }
+                continue;
+              }
             }
           } else {
             const parentLookup = await fetchProviderCapture(
@@ -3469,11 +3582,16 @@ async function runPass(
       ? refundPaymentRowsById.get(refund.payment_id)
       : undefined;
     if (
-      lookup.value.parentCaptureId !== null
-      && parentRow
+      parentRow
       && isProviderId(parentRow.paypal_payment_id)
-      && lookup.value.parentCaptureId !== parentRow.paypal_payment_id
+      && (
+        lookup.value.parentCaptureId === null
+        || lookup.value.parentCaptureId !== parentRow.paypal_payment_id
+      )
     ) {
+      // Ingestion refuses refund events without one unambiguous canonical
+      // parent; a fetched refund OMITTING its up-link (or naming another
+      // parent) is a standalone/foreign object and must not verify.
       return { status: 'failed', reason: 'provider refund identity conflict', retriable: false };
     }
     if (lookup.value.status !== 'COMPLETED') {
