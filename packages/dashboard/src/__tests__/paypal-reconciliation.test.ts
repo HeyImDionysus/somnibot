@@ -173,6 +173,8 @@ interface ProviderRegistry {
   subscriptions?: Record<string, unknown>;
   sales?: Record<string, unknown>;
   saleRefunds?: Record<string, unknown>;
+  /** Per-subscription transaction lists; live subscriptions default to []. */
+  subscriptionTransactions?: Record<string, unknown>;
   tokenStatus?: number;
 }
 
@@ -185,6 +187,14 @@ function scriptProviderObjects(objects: ProviderRegistry = {}) {
         return new Response('{}', { status: objects.tokenStatus });
       }
       return new Response(JSON.stringify({ access_token: 'tok-1' }), { status: 200 });
+    }
+    const txnMatch = target.match(/\/v1\/billing\/subscriptions\/([^/?]+)\/transactions(?:\?|$)/);
+    if (txnMatch) {
+      const id = decodeURIComponent(txnMatch[1]!);
+      const body = objects.subscriptionTransactions?.[id]
+        ?? (objects.subscriptions?.[id] !== undefined ? { transactions: [] } : undefined);
+      if (body === undefined) return new Response('{}', { status: 404 });
+      return new Response(JSON.stringify(body), { status: 200 });
     }
     const routes: Array<[RegExp, Record<string, unknown> | undefined]> = [
       [/\/v2\/payments\/captures\/([^/?]+)$/, objects.captures],
@@ -275,9 +285,13 @@ function subscriptionObject(spec: {
   lastPaymentTime?: string | null;
   lastPaymentValue?: string;
   lastPaymentCurrency?: string;
+  customId?: string;
+  planId?: string;
 } = {}) {
   return {
     status: spec.status ?? 'ACTIVE',
+    ...(spec.customId ? { custom_id: spec.customId } : {}),
+    ...(spec.planId ? { plan_id: spec.planId } : {}),
     billing_info: spec.lastPaymentTime === null
       ? {}
       : {
@@ -617,6 +631,8 @@ describe('per-object provider fetchers', () => {
       found: true,
       value: {
         status: 'ACTIVE',
+        customId: null,
+        planId: null,
         lastPaymentTime: '2026-07-20T10:00:00Z',
         lastPaymentAmountCents: 999,
         lastPaymentCurrency: 'USD',
@@ -630,6 +646,8 @@ describe('per-object provider fetchers', () => {
       found: true,
       value: {
         status: 'ACTIVE',
+        customId: null,
+        planId: null,
         lastPaymentTime: null,
         lastPaymentAmountCents: null,
         lastPaymentCurrency: null,
@@ -2076,6 +2094,321 @@ describe('runPayPalReconciliation', () => {
     ));
 
     expect(result.missingLocalPayments).toEqual([]);
+  });
+
+  // ── PR #409 review round 4 repairs ────────────────────────────────────────
+
+  it('fails closed on a subscription minted by a DIFFERENT checkout', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({
+          lastPaymentTime: null,
+          customId: JSON.stringify({
+            g: '999999999999999999',
+            p: PRODUCT_UUID,
+            c: CUSTOMER_UUID,
+            d: DISCORD_ID,
+          }),
+        }),
+      },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'provider identity conflict',
+      retriable: false,
+    });
+  });
+
+  it('fails closed when the provider bills a DIFFERENT plan', async () => {
+    const PLAN_UUID = '50000000-0000-4000-8000-000000000001';
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+        plan_id: PLAN_UUID,
+      }],
+    });
+    resolvers['plans'] = () => ({
+      data: [{ id: PLAN_UUID, paypal_plan_id: 'P-LOCAL' }],
+      error: null,
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: null, planId: 'P-OTHER' }),
+      },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'provider identity conflict',
+      retriable: false,
+    });
+  });
+
+  it('surfaces a lost REACTIVATION after an observed suspension', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    resolvers['commerce_subscription_lifecycle_heads'] = () => ({
+      data: [{
+        paypal_subscription_id: 'SUB-1',
+        last_event_priority: 50,
+        last_provider_event_type: 'BILLING.SUBSCRIPTION.SUSPENDED',
+      }],
+      error: null,
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'ACTIVE', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'SUB-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'subscription_reactivated_unfulfilled',
+      orderStatus: 'completed',
+    }]);
+  });
+
+  it('lets the settlement lag absorb a latest charge still in flight', async () => {
+    // Daily plan: yesterday's charge is local and in-window; today's charge
+    // happened 5 minutes ago (inside the 15-minute lag). No reverse
+    // missing-at-PayPal alert.
+    const YESTERDAY = '2026-07-26T12:00:00.000Z';
+    const FIVE_MIN_AGO = '2026-07-27T11:55:00.000Z';
+    withLedger({
+      payments: [paymentRow({ paypal_payment_id: 'SALE-YDAY', created_at: YESTERDAY })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-YDAY': saleObject({ total: '25.00' }) },
+      subscriptions: {
+        'SUB-1': subscriptionObject({
+          lastPaymentTime: FIVE_MIN_AGO,
+          lastPaymentValue: '25.00',
+        }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(
+      supabase as never,
+      { now: NOW, settlementLagMs: 15 * 60 * 1000 },
+    ));
+
+    expect(result.missingProviderPayments).toEqual([]);
+  });
+
+  it('keeps local and provider refund aggregates symmetric under the lag', async () => {
+    // The refund webhook landed seconds ago: the local row exists while the
+    // provider aggregate deliberately excludes the in-flight refund. No
+    // false mismatch.
+    const JUST_NOW = '2026-07-27T11:59:30.000Z';
+    withLedger({
+      payments: [paymentRow({ status: 'refunded' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'REF-1',
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: JUST_NOW,
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-1': captureObject({
+          status: 'REFUNDED',
+          value: '25.00',
+          relatedOrderId: 'PP-ORDER-1',
+        }),
+      },
+      refunds: { 'REF-1': refundObject({ value: '25.00' }) },
+      orders: {
+        'PP-ORDER-1': {
+          status: 'COMPLETED',
+          purchase_units: [{
+            custom_id: IDENTITY_CUSTOM_FIELD,
+            payments: {
+              captures: [{
+                id: 'CAP-1',
+                status: 'REFUNDED',
+                amount: { currency_code: 'USD', value: '25.00' },
+              }],
+              refunds: [{
+                id: 'REF-1',
+                status: 'COMPLETED',
+                amount: { currency_code: 'USD', value: '25.00' },
+                create_time: JUST_NOW,
+              }],
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(
+      supabase as never,
+      { now: NOW, settlementLagMs: 15 * 60 * 1000 },
+    ));
+
+    expect(result.amountMismatches).toEqual([]);
+    expect(result.missingLocalPayments).toEqual([]);
+  });
+
+  it('treats a REVERSED sale as settled reversal evidence, not missing money', async () => {
+    withLedger({
+      payments: [paymentRow({ paypal_payment_id: 'SALE-1', status: 'reversed' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'SALEREF-1',
+        event_type: 'PAYMENT.SALE.REVERSED',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-1': saleObject({ state: 'reversed', total: '25.00' }) },
+      saleRefunds: {
+        'SALEREF-1': {
+          state: 'completed',
+          amount: { currency: 'USD', total: '25.00' },
+          sale_id: 'SALE-1',
+        },
+      },
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingProviderPayments).toEqual([]);
+    expect(result.missingLocalPayments).toEqual([]);
+  });
+
+  it('discovers a NON-latest lost charge through the transactions list', async () => {
+    // Monday's webhook lost, Tuesday's landed: last_payment matches locally,
+    // but the enumeration must still find Monday's money.
+    const MONDAY = '2026-07-23T10:00:00.000Z';
+    const TUESDAY = '2026-07-24T10:00:00.000Z';
+    withLedger({
+      payments: [paymentRow({ paypal_payment_id: 'SALE-TUE', created_at: TUESDAY })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-TUE': saleObject({ total: '25.00' }) },
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: TUESDAY, lastPaymentValue: '25.00' }),
+      },
+      subscriptionTransactions: {
+        'SUB-1': {
+          transactions: [
+            {
+              id: 'SALE-MON',
+              status: 'COMPLETED',
+              time: MONDAY,
+              amount_with_breakdown: {
+                gross_amount: { currency_code: 'USD', value: '25.00' },
+              },
+            },
+            {
+              id: 'SALE-TUE',
+              status: 'COMPLETED',
+              time: TUESDAY,
+              amount_with_breakdown: {
+                gross_amount: { currency_code: 'USD', value: '25.00' },
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toEqual([{
+      kind: 'payment',
+      transactionId: 'SALE-MON',
+      guildId: GUILD_ID,
+      amountCents: 2500,
+      currency: 'USD',
+      initiatedAt: new Date(Date.parse(MONDAY)).toISOString(),
+      source: 'subscription',
+      referenceId: 'SUB-1',
+    }]);
   });
 
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {

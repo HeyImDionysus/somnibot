@@ -236,6 +236,18 @@ fire when the bot is down. All are money-path; treat them as page-worthy.
 
 ### PayPal reconciliation
 
+**Stated boundary — v1 sale refund siblings.** Refunds of v2 captures are
+enumerable through the parent order (`/v2/checkout/orders/{id}` lists every
+refund), so a lost middle sibling of a partial series is detected exactly.
+The v1 Payments API exposes NO per-sale refund list: for subscription sales
+the pass verifies the sale state (`refunded`/`partially_refunded`/`reversed`),
+judges full refunds and reversals against the summed local ledger, and
+verifies every LOCAL refund row per object via `/v1/payments/refund` — but a
+provider-side partial-refund sibling whose webhook was lost, on a sale that
+remains `partially_refunded`, is not independently discoverable without the
+gated reporting product. This is the one documented gap in per-object
+subscription refund coverage.
+
 Runs inside the **dashboard** container (not the bot — that is the point: it
 must work when the bot is the broken thing). It self-schedules every 6h,
 starting 5 minutes after boot, and verifies the ledger **per object** over a
