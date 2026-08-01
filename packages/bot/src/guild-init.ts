@@ -401,61 +401,6 @@ export async function initGuildFeatures(
   } catch (err) {
     guildLog.error('Community features init error', { error: String(err) });
   }
-  // The dashboard's feature panel must know which managers THIS boot
-  // constructed: a feature enabled after boot has no manager until restart,
-  // and a current global heartbeat alone must not read as 'reachable'.
-  // Rewritten every boot so rows always reflect the latest initialization.
-  try {
-    // Upsert the running set FIRST, then prune stale rows — supabase reports
-    // failures via `error`, not throws, and this order never publishes a
-    // partial snapshot that under-reports running managers: an upsert
-    // failure leaves last boot's rows (checked below), and a prune failure
-    // only over-reports features until the next boot.
-    if (startedRuntimeFeatures.length > 0) {
-      const { error: upsertError } = await supabase
-        .from('guild_runtime_features')
-        .upsert(
-          startedRuntimeFeatures.map((feature) => ({
-            guild_id: guild.id,
-            feature,
-            // Boot identity: the dashboard compares this to the heartbeat's
-            // boot_id, so rows stranded by an earlier boot (this upsert or
-            // the prune below failing transiently) can never combine with a
-            // RECOVERED heartbeat into a false 'operational'.
-            boot_id: BOOT_ID,
-          })),
-          { onConflict: 'guild_id,feature' },
-        );
-      if (upsertError) {
-        guildLog.error('Failed to record runtime feature state', {
-          error: upsertError.message,
-        });
-      } else {
-        // Prune by boot identity: anything not written by THIS boot is
-        // stale, including features that failed to start this time.
-        const { error: pruneError } = await supabase
-          .from('guild_runtime_features')
-          .delete()
-          .eq('guild_id', guild.id)
-          .neq('boot_id', BOOT_ID);
-        if (pruneError) {
-          guildLog.error('Failed to prune stale runtime feature rows', {
-            error: pruneError.message,
-          });
-        }
-      }
-    } else {
-      const { error: clearError } = await supabase
-        .from('guild_runtime_features')
-        .delete()
-        .eq('guild_id', guild.id);
-      if (clearError) {
-        guildLog.error('Failed to clear runtime feature rows', { error: clearError.message });
-      }
-    }
-  } catch (err) {
-    guildLog.error('Failed to record runtime feature state', { error: String(err) });
-  }
 
 
   // ── Music system ──
@@ -470,6 +415,7 @@ export async function initGuildFeatures(
       services.musicStatusReporter = new MusicStatusReporter(musicPlayer, supabase, guildId);
       services.musicStatusReporter.start();
       guildLog.info('Music system started', { commands: musicCmds.length });
+      startedRuntimeFeatures.push('music');
     }
   } catch (err) {
     guildLog.error('Music system init error', { error: String(err) });
@@ -798,6 +744,62 @@ export async function initGuildFeatures(
   ctx.setManager('_commands', allCommands);
 
   guildLog.info('All features initialized', { commandCount: allCommands.length });
+  // The dashboard's feature panel must know which managers THIS boot
+  // constructed: a feature enabled after boot has no manager until restart,
+  // and a current global heartbeat alone must not read as 'reachable'.
+  // Rewritten every boot so rows always reflect the latest initialization.
+  try {
+    // Upsert the running set FIRST, then prune stale rows — supabase reports
+    // failures via `error`, not throws, and this order never publishes a
+    // partial snapshot that under-reports running managers: an upsert
+    // failure leaves last boot's rows (checked below), and a prune failure
+    // only over-reports features until the next boot.
+    if (startedRuntimeFeatures.length > 0) {
+      const { error: upsertError } = await supabase
+        .from('guild_runtime_features')
+        .upsert(
+          startedRuntimeFeatures.map((feature) => ({
+            guild_id: guild.id,
+            feature,
+            // Boot identity: the dashboard compares this to the heartbeat's
+            // boot_id, so rows stranded by an earlier boot (this upsert or
+            // the prune below failing transiently) can never combine with a
+            // RECOVERED heartbeat into a false 'operational'.
+            boot_id: BOOT_ID,
+          })),
+          { onConflict: 'guild_id,feature' },
+        );
+      if (upsertError) {
+        guildLog.error('Failed to record runtime feature state', {
+          error: upsertError.message,
+        });
+      } else {
+        // Prune by boot identity: anything not written by THIS boot is
+        // stale, including features that failed to start this time.
+        const { error: pruneError } = await supabase
+          .from('guild_runtime_features')
+          .delete()
+          .eq('guild_id', guild.id)
+          .neq('boot_id', BOOT_ID);
+        if (pruneError) {
+          guildLog.error('Failed to prune stale runtime feature rows', {
+            error: pruneError.message,
+          });
+        }
+      }
+    } else {
+      const { error: clearError } = await supabase
+        .from('guild_runtime_features')
+        .delete()
+        .eq('guild_id', guild.id);
+      if (clearError) {
+        guildLog.error('Failed to clear runtime feature rows', { error: clearError.message });
+      }
+    }
+  } catch (err) {
+    guildLog.error('Failed to record runtime feature state', { error: String(err) });
+  }
+
   return allCommands;
 }
 

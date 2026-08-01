@@ -49,7 +49,10 @@ export function DiscordEmbedPreview({
     embed.imageUrl ||
     embed.thumbnailUrl ||
     embed.footerText ||
-    footerSuffix,
+    footerSuffix ||
+    // A timestamp renders in the footer — timestamp-only embeds must not
+    // show the contradictory "no visible content" placeholder.
+    embed.includeTimestamp,
   );
   const footerParts = [embed.footerText, footerSuffix].filter(Boolean) as string[];
 

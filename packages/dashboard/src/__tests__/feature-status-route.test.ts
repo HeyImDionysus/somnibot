@@ -83,6 +83,35 @@ describe('GET /api/dashboard/feature-status', () => {
     expect(body.data.runtimeFeatures).toEqual(['temp_channels', 'giveaways']);
   });
 
+  it('never lets an UNidentified diagnostics row admit identified runtime rows (round 29)', async () => {
+    // Health rows are per-guild; before they carried boot ids, the newest
+    // diagnostics row for a non-primary guild had none — failing open there
+    // admitted rows from ANY prior boot.
+    const config = chain({ stats_channels_enabled: true });
+    const heartbeat = chain({ snapshot_at: new Date().toISOString() });
+    const runtime = chain(null) as Record<string, unknown>;
+    runtime.then = (resolve: (value: unknown) => void) => resolve({
+      data: [
+        { feature: 'stats_channels', boot_id: 'boot-A' },
+        { feature: 'giveaways', boot_id: '' },
+      ],
+      error: null,
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue({
+      from: vi.fn((table: string) => table === 'guild_config'
+        ? config
+        : table === 'bot_diagnostics' ? heartbeat : runtime),
+    } as never);
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    // The identified row is rejected without an identified heartbeat; only
+    // the legacy row fails open.
+    expect(body.data.runtimeFeatures).toEqual(['giveaways']);
+  });
+
   it('reports a MISSING guild_config row as null, never as everything-disabled', async () => {
     // Review 3689865706: new-guild init tolerates a failed config insert, and
     // the bot then runs defaults like `temp_channels_enabled !== false`.
@@ -131,6 +160,24 @@ describe('deriveFeatureReadiness — runtime-gated readiness (round 22)', () => 
     // Runtime state unreadable: fail open to the heartbeat verdict rather
     // than inventing a restart demand.
     expect(deriveFeatureReadiness({ ...base, runtimeFeatures: null }))
+      .toMatchObject({ state: 'operational' });
+  });
+
+  it('gates music readiness on its runtime manager (round 29)', async () => {
+    const { deriveFeatureReadiness, featureForPath } =
+      await import('@/lib/dashboard/feature-status');
+    const feature = featureForPath('/music')!;
+    const base = {
+      feature,
+      config: { music_enabled: true },
+      botOnline: true,
+      staleSecs: 5,
+    };
+    // Enabled after boot (or init failed): no player/commands exist until
+    // restart, so a current heartbeat alone must not read as reachable.
+    expect(deriveFeatureReadiness({ ...base, runtimeFeatures: ['temp_channels'] }))
+      .toMatchObject({ state: 'blocked', heading: expect.stringContaining('awaiting bot restart') });
+    expect(deriveFeatureReadiness({ ...base, runtimeFeatures: ['music'] }))
       .toMatchObject({ state: 'operational' });
   });
 });

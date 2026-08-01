@@ -70,5 +70,9 @@ describe('operator licensing guide', () => {
 
     expect(guide.kind).toBe('mixed');
     expect(guide.steps.join(' ')).toContain('every bundled delivery');
+    // Round 29 P1: fulfillment mints keys ONLY for license_key delivery —
+    // the guide must not promise one for a mixed bundle.
+    expect(guide.keyRequired).toBe(false);
+    expect(guide.summary).toContain('No license key');
   });
 });

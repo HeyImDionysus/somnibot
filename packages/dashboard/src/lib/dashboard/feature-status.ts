@@ -25,7 +25,7 @@ const FEATURE_STATUS: Array<[prefix: string, definition: FeatureStatusDefinition
   ['/welcome', { label: 'Welcome messages', configKey: 'welcome_enabled' }],
   ['/levels', { label: 'Levels and XP', configKey: 'levels_enabled' }],
   ['/tickets', { label: 'Tickets', configKey: null }],
-  ['/music', { label: 'Music', configKey: 'music_enabled' }],
+  ['/music', { label: 'Music', configKey: 'music_enabled', runtimeKey: 'music' }],
   ['/store', { label: 'Store and fulfillment', configKey: 'store_enabled' }],
   ['/polls', { label: 'Polls', configKey: 'polls_enabled' }],
   ['/sync', { label: 'Discord sync', configKey: 'sync_enabled' }],

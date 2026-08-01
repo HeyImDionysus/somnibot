@@ -76,16 +76,20 @@ export async function GET() {
           ? runtimeResult.data
             // Rows stranded by an EARLIER boot must not let a recovered
             // heartbeat vouch for managers this process never constructed.
-            // A missing id on either side fails open (pre-identity writer).
+            // Only a LEGACY row (no id) fails open; an identified row
+            // requires a MATCHING identified diagnostics row — health rows
+            // are per-guild and identified too, so an unidentified newest
+            // row means an older writer, not this boot.
             .filter((row) => {
+              const rowBootId = typeof row.boot_id === 'string' && row.boot_id !== ''
+                ? row.boot_id
+                : null;
+              if (rowBootId === null) return true;
               const heartbeatBootId = typeof heartbeatResult.data?.boot_id === 'string'
                 && heartbeatResult.data.boot_id !== ''
                 ? heartbeatResult.data.boot_id
                 : null;
-              return heartbeatBootId === null
-                || typeof row.boot_id !== 'string'
-                || row.boot_id === ''
-                || row.boot_id === heartbeatBootId;
+              return heartbeatBootId !== null && rowBootId === heartbeatBootId;
             })
             .map((row) => row.feature)
             .filter((feature): feature is string => typeof feature === 'string')
