@@ -199,6 +199,30 @@ function scriptProviderObjects(objects: ProviderRegistry = {}) {
       if (body === undefined) return new Response('{}', { status: 404 });
       return new Response(JSON.stringify(body), { status: 200 });
     }
+    // Settled orders are always fetched now: when a fixture scripts
+    // captures but no orders registry, serve the canonical order with the
+    // scripted captures mirrored so single-capture fixtures stay valid.
+    const autoOrderMatch = target.match(/\/v2\/checkout\/orders\/([^/?]+)$/);
+    if (autoOrderMatch && objects.orders === undefined) {
+      const requestedOrderId = decodeURIComponent(autoOrderMatch[1]!);
+      const captureEntries = Object.entries(objects.captures ?? {});
+      if (requestedOrderId === 'PP-ORDER-1' && captureEntries.length > 0) {
+        return new Response(JSON.stringify({
+          status: 'COMPLETED',
+          purchase_units: [{
+            custom_id: IDENTITY_CUSTOM_FIELD,
+            payments: {
+              captures: captureEntries.map(([captureId, capture]) => ({
+                id: captureId,
+                status: (capture as Record<string, unknown>).status,
+                amount: (capture as Record<string, unknown>).amount,
+              })),
+            },
+          }],
+        }), { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    }
     const routes: Array<[RegExp, Record<string, unknown> | undefined]> = [
       [/\/v2\/payments\/captures\/([^/?]+)$/, objects.captures],
       [/\/v2\/payments\/refunds\/([^/?]+)$/, objects.refunds],
@@ -734,7 +758,7 @@ describe('runPayPalReconciliation', () => {
     expect(result.missingProviderPayments).toEqual([]);
     expect(result.amountMismatches).toEqual([]);
     expect(result.unsettledLocalPayments).toEqual([]);
-    expect(result.providerTransactions).toBe(1);
+    expect(result.providerTransactions).toBe(2);
     expect(result.localPayments).toBe(1);
     // The white-label model: only per-object commerce GETs, which any bare
     // REST app may call. The reporting product (Transaction Search) that
@@ -754,16 +778,28 @@ describe('runPayPalReconciliation', () => {
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.missingProviderPayments).toEqual([{
-      kind: 'payment',
-      orderId: ORDER_UUID,
-      orderNumber: null,
-      guildId: GUILD_ID,
-      paypalPaymentIds: ['CAP-1'],
-      amountCents: 2500,
-      currency: 'USD',
-      createdAt: IN_WINDOW,
-    }]);
+    expect(result.missingProviderPayments).toEqual([
+      {
+        kind: 'payment',
+        orderId: ORDER_UUID,
+        orderNumber: null,
+        guildId: GUILD_ID,
+        paypalPaymentIds: ['CAP-1'],
+        amountCents: 2500,
+        currency: 'USD',
+        createdAt: IN_WINDOW,
+      },
+      {
+        kind: 'order',
+        orderId: ORDER_UUID,
+        orderNumber: null,
+        guildId: GUILD_ID,
+        paypalPaymentIds: [],
+        amountCents: 2500,
+        currency: 'USD',
+        createdAt: IN_WINDOW,
+      },
+    ]);
     const alertInserts = opsFor('alerts', 'insert');
     expect(alertInserts.length).toBe(1);
     expect(alertInserts[0]!.payload).toMatchObject({
@@ -857,7 +893,7 @@ describe('runPayPalReconciliation', () => {
     expect(result.missingLocalPayments).toEqual([]);
     expect(result.missingProviderPayments).toEqual([]);
     expect(result.amountMismatches).toEqual([]);
-    expect(result.providerTransactions).toBe(2);
+    expect(result.providerTransactions).toBe(3);
   });
 
   it('flags a local refund PayPal cannot produce, tolerating zero-amount reversal witnesses', async () => {
@@ -1314,16 +1350,28 @@ describe('runPayPalReconciliation', () => {
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.missingProviderPayments).toEqual([{
-      kind: 'payment',
-      orderId: ORDER_UUID,
-      orderNumber: null,
-      guildId: GUILD_ID,
-      paypalPaymentIds: ['CAP-1'],
-      amountCents: 2500,
-      currency: 'USD',
-      createdAt: IN_WINDOW,
-    }]);
+    expect(result.missingProviderPayments).toEqual([
+      {
+        kind: 'payment',
+        orderId: ORDER_UUID,
+        orderNumber: null,
+        guildId: GUILD_ID,
+        paypalPaymentIds: ['CAP-1'],
+        amountCents: 2500,
+        currency: 'USD',
+        createdAt: IN_WINDOW,
+      },
+      {
+        kind: 'order',
+        orderId: ORDER_UUID,
+        orderNumber: null,
+        guildId: GUILD_ID,
+        paypalPaymentIds: [],
+        amountCents: 2500,
+        currency: 'USD',
+        createdAt: IN_WINDOW,
+      },
+    ]);
   });
 
   it('fails closed when a capture belongs to a DIFFERENT provider order', async () => {
@@ -2896,16 +2944,28 @@ describe('runPayPalReconciliation', () => {
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.missingProviderPayments).toEqual([{
-      kind: 'payment',
-      orderId: ORDER_UUID,
-      orderNumber: null,
-      guildId: GUILD_ID,
-      paypalPaymentIds: ['CAP-1'],
-      amountCents: 2500,
-      currency: 'USD',
-      createdAt: IN_WINDOW,
-    }]);
+    expect(result.missingProviderPayments).toEqual([
+      {
+        kind: 'payment',
+        orderId: ORDER_UUID,
+        orderNumber: null,
+        guildId: GUILD_ID,
+        paypalPaymentIds: ['CAP-1'],
+        amountCents: 2500,
+        currency: 'USD',
+        createdAt: IN_WINDOW,
+      },
+      {
+        kind: 'order',
+        orderId: ORDER_UUID,
+        orderNumber: null,
+        guildId: GUILD_ID,
+        paypalPaymentIds: [],
+        amountCents: 2500,
+        currency: 'USD',
+        createdAt: IN_WINDOW,
+      },
+    ]);
   });
 
   // ── PR #409 review round 7 repairs ────────────────────────────────────────
@@ -6468,6 +6528,7 @@ describe('runPayPalReconciliation', () => {
       captures: {
         'CAP-1': captureObject({ status: 'PARTIALLY_REFUNDED', value: '25.00' }),
       },
+      orders: {},
     });
 
     const result = await runPayPalReconciliation(supabase as never, OPTS);
@@ -6612,6 +6673,124 @@ describe('runPayPalReconciliation', () => {
     expect(result.amountMismatches).toEqual([]);
   });
 
+  // ── PR #409 review round 29 repairs ─────────────────────────────────────
+
+  it('compares money on a still-completed lookback payment', async () => {
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'CAP-OLD',
+        amount_cents: 1500,
+        created_at: '2026-07-01T10:00:00.000Z',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 1500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: 'PP-ORDER-OLD',
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-OLD': captureObject({
+          status: 'COMPLETED',
+          value: '25.00',
+          relatedOrderId: 'PP-ORDER-OLD',
+        }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.amountMismatches).toEqual([{
+      transactionId: 'CAP-OLD',
+      guildId: GUILD_ID,
+      providerAmountCents: 2500,
+      localAmountCents: 1500,
+      providerCurrency: 'USD',
+      localCurrency: 'USD',
+    }]);
+  });
+
+  it('enumerates a settled order past its single known capture', async () => {
+    // Capture A's webhook wrote its row; capture B's was lost. The order
+    // GET must run despite the known identity and surface B.
+    withLedger({
+      payments: [paymentRow()],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject() },
+      orders: {
+        'PP-ORDER-1': orderObject({
+          status: 'COMPLETED',
+          captures: [
+            { id: 'CAP-1', status: 'COMPLETED', value: '25.00' },
+            { id: 'CAP-B', status: 'COMPLETED', value: '10.00' },
+          ],
+        }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toEqual([{
+      kind: 'payment',
+      transactionId: 'CAP-B',
+      guildId: GUILD_ID,
+      amountCents: 1000,
+      currency: 'USD',
+      initiatedAt: null,
+      source: 'order',
+      referenceId: 'PP-ORDER-1',
+    }]);
+  });
+
+  it('reports an unresolved historical row whose capture settled', async () => {
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'CAP-OLD',
+        status: 'pending',
+        created_at: '2026-07-01T10:00:00.000Z',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'pending',
+        created_at: '2026-07-01T10:00:00.000Z',
+        paypal_order_id: 'PP-ORDER-OLD',
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-OLD': captureObject({
+          status: 'COMPLETED',
+          value: '25.00',
+          relatedOrderId: 'PP-ORDER-OLD',
+        }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'CAP-OLD',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'pending',
+      orderStatus: 'pending',
+    }]);
+  });
+
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {
     withLedger({ payments: [paymentRow()] });
     scriptProviderObjects({ captures: { 'CAP-1': { __status: 503 } } });
@@ -6640,6 +6819,12 @@ describe('runPayPalReconciliation', () => {
   });
 
   it('alerts the divergent guild and resolves the clean one', async () => {
+    const secondCustom = JSON.stringify({
+      g: SECOND_GUILD_ID,
+      p: PRODUCT_UUID,
+      c: SECOND_CUSTOMER_UUID,
+      d: DISCORD_ID,
+    });
     withLedger({
       payments: [
         paymentRow(),
@@ -6650,14 +6835,46 @@ describe('runPayPalReconciliation', () => {
           paypal_payment_id: 'CAP-2',
         }),
       ],
+      orders: [
+        {
+          id: ORDER_UUID,
+          guild_id: GUILD_ID,
+          amount_cents: 2500,
+          status: 'completed',
+          created_at: IN_WINDOW,
+          paypal_order_id: 'PP-ORDER-1',
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000002',
+          guild_id: SECOND_GUILD_ID,
+          customer_id: SECOND_CUSTOMER_UUID,
+          amount_cents: 2500,
+          status: 'completed',
+          created_at: IN_WINDOW,
+          paypal_order_id: 'PP-ORDER-2',
+        },
+      ],
       guildIds: [GUILD_ID, SECOND_GUILD_ID],
     });
-    scriptProviderObjects({ captures: { 'CAP-2': captureObject({ value: '25.00' }) } });
+    scriptProviderObjects({
+      captures: {
+        'CAP-2': captureObject({ value: '25.00', relatedOrderId: 'PP-ORDER-2' }),
+      },
+      orders: {
+        'PP-ORDER-2': orderObject({
+          customId: secondCustom,
+          captures: [{ id: 'CAP-2', value: '25.00' }],
+        }),
+      },
+    });
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.missingProviderPayments).toHaveLength(1);
-    expect(result.missingProviderPayments[0]!.guildId).toBe(GUILD_ID);
+    // Guild 1's capture AND its order evidence are both unproducible.
+    expect(result.missingProviderPayments).toHaveLength(2);
+    expect(result.missingProviderPayments.every(
+      (finding) => finding.guildId === GUILD_ID,
+    )).toBe(true);
     const alertInserts = opsFor('alerts', 'insert');
     expect(alertInserts).toHaveLength(1);
     expect(alertInserts[0]!.payload?.guild_id).toBe(GUILD_ID);
@@ -6680,17 +6897,40 @@ describe('runPayPalReconciliation', () => {
           paypal_payment_id: 'CAP-2',
         }),
       ],
+      orders: [
+        {
+          id: ORDER_UUID,
+          guild_id: GUILD_ID,
+          amount_cents: 2500,
+          status: 'completed',
+          created_at: IN_WINDOW,
+          paypal_order_id: 'PP-ORDER-1',
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000002',
+          guild_id: SECOND_GUILD_ID,
+          customer_id: SECOND_CUSTOMER_UUID,
+          amount_cents: 2500,
+          status: 'completed',
+          created_at: IN_WINDOW,
+          paypal_order_id: 'PP-ORDER-2',
+        },
+      ],
       guildIds: [GUILD_ID, SECOND_GUILD_ID],
     });
-    scriptProviderObjects({ captures: {} });
+    scriptProviderObjects({ captures: {}, orders: {} });
 
     const result = completedResult(await runPayPalReconciliation(
       supabase as never,
       { ...OPTS, resultGuildId: SECOND_GUILD_ID },
     ));
 
-    expect(result.missingProviderPayments).toHaveLength(1);
-    expect(result.missingProviderPayments[0]!.guildId).toBe(SECOND_GUILD_ID);
+    // Each guild diverges on its capture AND its order evidence; the
+    // returned scope carries only the second guild's pair.
+    expect(result.missingProviderPayments).toHaveLength(2);
+    expect(result.missingProviderPayments.every(
+      (finding) => finding.guildId === SECOND_GUILD_ID,
+    )).toBe(true);
     expect(opsFor('alerts', 'insert')).toHaveLength(2);
   });
 });
