@@ -133,6 +133,36 @@ describe('/api/automations/holds', () => {
     );
   });
 
+  it('finalizes the linked execution record when a hold is rejected (round 19)', async () => {
+    // Left with pre-claim defaults, the executions history reads 'Conditions
+    // not met' forever for an occurrence the owner explicitly stopped.
+    const { admin, calls } = makeAdmin({
+      decided: {
+        ...HOLD,
+        status: 'rejected',
+        rejected_by: 'owner-1',
+        execution_id: 'e0000000-0000-4000-8000-00000000000e',
+      },
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue(admin as never);
+
+    const res = await PATCH(request('PATCH', { id: HOLD.id, decision: 'reject' }));
+
+    expect(res.status).toBe(200);
+    expect(calls['automation_executions.update'][0][0]).toEqual({
+      conditions_passed: true,
+      errors: ['Rejected by the owner before any action ran'],
+    });
+    // Conditional on the pre-claim defaults so a finalized row is never
+    // clobbered.
+    expect(calls['automation_executions.eq']).toEqual(expect.arrayContaining([
+      ['id', 'e0000000-0000-4000-8000-00000000000e'],
+      ['conditions_passed', false],
+      ['actions_executed', 0],
+      ['actions_failed', 0],
+    ]));
+  });
+
   it('returns conflict when another owner or worker already decided the hold', async () => {
     const { admin } = makeAdmin({ decided: null });
     vi.mocked(createAdminSupabase).mockReturnValue(admin as never);

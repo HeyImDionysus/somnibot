@@ -400,6 +400,29 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     });
   }, 20_000);
 
+  it('does not mint another counter each tick while the identity stays ambiguous (round 19)', async () => {
+    // Database fully down but Discord reachable: the first tick creates ONE
+    // channel and its identity stays ambiguous. Every later tick must retry
+    // THAT channel's identity, never create another untracked counter.
+    const StatsChannelManager = await load();
+    const created = { id: 'vc-maybe', delete: vi.fn(async () => ({})) };
+    const { supabase } = survivorSupa({
+      configRows: [{ ...CONFIG_ROW }],
+      scanRows: [],
+      identityWriteFails: true,
+      identityReadBackFails: true,
+    });
+    const guild = makeGuild({ created });
+    const mgr = new StatsChannelManager(guild, supabase, 60);
+    await mgr.start().catch(() => {});
+    await (mgr as unknown as { updateAll(): Promise<void> }).updateAll().catch(() => {});
+    await (mgr as unknown as { updateAll(): Promise<void> }).updateAll().catch(() => {});
+    mgr.stop?.();
+
+    expect(guild.channels.create).toHaveBeenCalledTimes(1);
+    expect(created.delete).not.toHaveBeenCalled();
+  }, 30_000);
+
   it('disposes of its own channel when another process wins the identity claim (round 12)', async () => {
     // Two overlapping processes both create a counter channel; the identity
     // write is a CONDITIONAL claim on channel_id IS NULL. The loser must not

@@ -39,6 +39,13 @@ export class StatsChannelManager {
   private timer: NodeJS.Timeout | null = null;
   private intervalMs: number;
   private degradedChannels = new Set<string>();
+  /**
+   * configId → channelId for counters whose identity write stayed AMBIGUOUS
+   * (every attempt errored and the read-back failed too). While listed, the
+   * create branch retries THIS channel's identity instead of minting another
+   * counter every interval during a database outage.
+   */
+  private ambiguousChannels = new Map<string, string>();
   private alertedDegradedChannels = new Set<string>();
   private recoveryChecked = new Set<string>();
 
@@ -130,6 +137,46 @@ export class StatsChannelManager {
           }
           await channel.setName(newName);
         } else {
+          const ambiguousId = this.ambiguousChannels.get(config.id);
+          if (ambiguousId) {
+            // Resolve the ambiguous channel before ever creating another.
+            const retry = await this.persistChannelIdentity(config, ambiguousId);
+            if (retry.outcome === 'persisted') {
+              this.ambiguousChannels.delete(config.id);
+            } else if (retry.outcome === 'lost_race') {
+              // Another process registered its own counter meanwhile; ours is
+              // a duplicate — dispose durably, never blind-delete.
+              this.ambiguousChannels.delete(config.id);
+              config.channel_id = retry.winnerChannelId;
+              const pended = await this.persistPendingCleanup(config, ambiguousId);
+              if (!pended) {
+                const channel = this.guild.channels.cache.get(ambiguousId);
+                if (channel) {
+                  await this.deleteChannelWithRetries(
+                    channel as VoiceChannel,
+                    'Stats channel lost identity race',
+                  );
+                }
+              }
+            } else if (retry.outcome === 'error') {
+              // The read-back worked and the row does NOT point at our
+              // channel: the original write never committed. Hand the channel
+              // to the reconciler (adopt-or-delete) and stop tracking it.
+              this.ambiguousChannels.delete(config.id);
+              const pended = await this.persistPendingCleanup(config, ambiguousId);
+              if (!pended) {
+                const channel = this.guild.channels.cache.get(ambiguousId);
+                if (channel) {
+                  await this.deleteChannelWithRetries(
+                    channel as VoiceChannel,
+                    'Stats channel identity write failed',
+                  );
+                }
+              }
+            }
+            // Still ambiguous, or just resolved: never create this tick.
+            continue;
+          }
           // Create the voice channel if it doesn't exist yet
           const configObj = config.stat_config ?? {};
           const categoryId = typeof configObj === 'object' && 'category_id' in configObj
@@ -166,9 +213,11 @@ export class StatsChannelManager {
           if (identity.outcome === 'ambiguous') {
             // The identity write may have COMMITTED with a lost response and
             // the read-back could not settle it. Deleting would risk killing
-            // a live counter whose durable pointer survives recovery — record
-            // the pointer for the reconciler if possible, keep the channel
-            // either way, and let the next tick converge.
+            // a live counter whose durable pointer survives recovery — keep
+            // the channel, remember it locally so later ticks RETRY its
+            // identity instead of creating another counter per interval, and
+            // best-effort record the reconciler pointer too.
+            this.ambiguousChannels.set(config.id, channel.id);
             await this.persistPendingCleanup(config, channel.id);
             throw new Error(
               `Failed to confirm stats channel identity: ${identity.message}`,

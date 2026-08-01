@@ -680,7 +680,17 @@ export class TempChannelManager {
       }
     }
 
-    const voice = [...this.guild.channels.cache.values()].find((candidate) => {
+    // The durable createdChannelIds are the AUTHORITATIVE room identity: a
+    // survivor renamed or moved during the stale window would slip past the
+    // name/category/timestamp heuristic, get reclaimed, and be recreated
+    // while the known room orphans. The heuristic remains only for claims
+    // that predate the id write.
+    const voiceById = createdChannelIds
+      .map((channelId) => this.guild.channels.cache.get(channelId))
+      .find((channel): channel is VoiceChannel =>
+        channel?.type === ChannelType.GuildVoice,
+      );
+    const voice = voiceById ?? [...this.guild.channels.cache.values()].find((candidate) => {
       if (candidate.type !== ChannelType.GuildVoice) return false;
       const channel = candidate as VoiceChannel;
       return channel.name === plannedChannelName

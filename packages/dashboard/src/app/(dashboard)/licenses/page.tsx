@@ -55,6 +55,7 @@ interface LicenseHealth {
   validationWindowHours: number;
   validationCount: number;
   unavailable24h: number;
+  sessionsOnTerminalKeys: number;
   deviceLimit24h: number;
   invalid24h: number;
   pendingOlderThanDay: number;
@@ -282,6 +283,7 @@ export default function LicensesPage() {
             </div>
             {(health.pendingOlderThanDay > 0
               || health.keyCounts.suspended > 0
+              || health.sessionsOnTerminalKeys > 0
               || health.unavailable24h > 0
               || health.deviceLimit24h > 0
               || health.invalid24h > 0
@@ -289,6 +291,7 @@ export default function LicensesPage() {
               <ul className="space-y-1 text-sm text-discord-text-secondary">
                 {health.pendingOlderThanDay > 0 && <li>{health.pendingOlderThanDay} key(s) have waited over 24 hours for activation.</li>}
                 {health.keyCounts.suspended > 0 && <li>{health.keyCounts.suspended} key(s) are suspended.</li>}
+                {health.sessionsOnTerminalKeys > 0 && <li>{health.sessionsOnTerminalKeys} device session(s) are still active on revoked or expired keys.</li>}
                 {health.unavailable24h > 0 && <li>{health.unavailable24h} validation(s) reported a service outage in the last 24 hours.</li>}
                 {health.deviceLimit24h > 0 && <li>{health.deviceLimit24h} validation(s) hit a device limit in the last 24 hours.</li>}
                 {health.invalid24h > 0 && <li>{health.invalid24h} validation(s) were rejected as invalid in the last 24 hours.</li>}

@@ -97,6 +97,32 @@ export async function PATCH(req: NextRequest) {
     );
   }
 
+  if (decision === 'reject' && typeof (data as { execution_id?: unknown }).execution_id === 'string') {
+    // The linked execution row still carries pre-claim defaults; left alone,
+    // the Automations history reads 'Conditions not met' forever for an
+    // occurrence whose conditions MATCHED and which the owner explicitly
+    // stopped. Conditional on those defaults so a finalized row is never
+    // clobbered; failure is logged, not fatal — the rejection itself is
+    // already committed.
+    const { error: executionError } = await supabase
+      .from('automation_executions')
+      .update({
+        conditions_passed: true,
+        errors: ['Rejected by the owner before any action ran'],
+      })
+      .eq('id', (data as { execution_id: string }).execution_id)
+      .eq('guild_id', auth.ctx.guildId)
+      .eq('conditions_passed', false)
+      .eq('actions_executed', 0)
+      .eq('actions_failed', 0);
+    if (executionError) {
+      console.error(
+        '[automations/holds] Failed to finalize the rejected execution record:',
+        executionError.message,
+      );
+    }
+  }
+
   await recordCrudChange({
     guildId: auth.ctx.guildId,
     actorId: auth.ctx.discordId,
