@@ -1781,6 +1781,303 @@ describe('runPayPalReconciliation', () => {
     }]);
   });
 
+  // ── PR #409 review round 3 repairs ────────────────────────────────────────
+
+  it('fails closed when a sale belongs to a DIFFERENT subscription', async () => {
+    withLedger({
+      payments: [paymentRow({ paypal_payment_id: 'SALE-1' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      sales: {
+        'SALE-1': {
+          ...saleObject({ total: '25.00' }),
+          billing_agreement_id: 'SUB-SOMEONE-ELSES',
+        },
+      },
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: IN_WINDOW, lastPaymentValue: '25.00' }),
+      },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'provider identity conflict',
+      retriable: false,
+    });
+  });
+
+  it('does not re-alert a lifecycle transition the durable head already observed', async () => {
+    // Purchase orders stay 'completed' forever by design: a properly
+    // processed cancellation must read clean, not critical, forever.
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    resolvers['commerce_subscription_lifecycle_heads'] = () => ({
+      data: [{ paypal_subscription_id: 'SUB-1', last_event_priority: 60 }],
+      error: null,
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'CANCELLED', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([]);
+  });
+
+  it('surfaces a lost activation for a pending subscription order', async () => {
+    // Free trials can be ACTIVE with no payment at all — the divergence is
+    // the pending local order behind an ACTIVE provider subscription.
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'pending',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'ACTIVE', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'SUB-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'subscription_active_unfulfilled',
+      orderStatus: 'pending',
+    }]);
+  });
+
+  it('applies money checks to EVERY fetched sale, not only the latest charge', async () => {
+    // Two daily charges in-window; the older local row drifted. The correct
+    // newest charge must not make the pass clean.
+    const EARLIER = '2026-07-22T10:00:00.000Z';
+    withLedger({
+      payments: [
+        paymentRow({ paypal_payment_id: 'SALE-OLD', created_at: EARLIER, amount_cents: 1500 }),
+        paymentRow({
+          id: PAY2_UUID,
+          paypal_payment_id: 'SALE-NEW',
+          created_at: IN_WINDOW,
+        }),
+      ],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      sales: {
+        'SALE-OLD': saleObject({ total: '25.00' }),
+        'SALE-NEW': saleObject({ total: '25.00' }),
+      },
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: IN_WINDOW, lastPaymentValue: '25.00' }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.amountMismatches).toEqual([{
+      transactionId: 'SALE-OLD',
+      guildId: GUILD_ID,
+      providerAmountCents: 2500,
+      localAmountCents: 1500,
+      providerCurrency: 'USD',
+      localCurrency: 'USD',
+    }]);
+  });
+
+  it('surfaces an APPROVED provider order whose capture webhook was lost', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'pending',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({
+      orders: { 'PP-ORDER-1': orderObject({ status: 'APPROVED', captures: [] }) },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'PP-ORDER-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'order_approved_uncaptured',
+      orderStatus: 'pending',
+    }]);
+  });
+
+  it('excludes cross-currency historical refund rows from the aggregate and flags them', async () => {
+    withLedger({
+      payments: [paymentRow({ status: 'refunded' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'REF-1',
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        amount_cents: 2500,
+        currency: 'EUR',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject({ status: 'REFUNDED', value: '25.00' }) },
+      refunds: { 'REF-1': refundObject({ value: '25.00', currency: 'EUR' }) },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    // The EUR row cannot certify the USD capture's refund: the aggregate
+    // stays short (missing 25.00) and the row itself is flagged.
+    expect(result.missingLocalPayments).toContainEqual(expect.objectContaining({
+      kind: 'refund',
+      transactionId: 'CAP-1',
+      amountCents: 2500,
+    }));
+    expect(result.amountMismatches).toContainEqual(expect.objectContaining({
+      transactionId: 'REF-1',
+      localCurrency: 'EUR',
+    }));
+  });
+
+  it('fails closed on a foreign capture parent in the refund LOOKBACK', async () => {
+    const OLD = '2026-06-30T10:00:00.000Z';
+    withLedger({
+      payments: [paymentRow({ created_at: OLD })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: OLD,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-1': captureObject({
+          status: 'REFUNDED',
+          value: '25.00',
+          relatedOrderId: 'PP-ORDER-OTHER',
+        }),
+      },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'provider identity conflict',
+      retriable: false,
+    });
+  });
+
+  it('lets the settlement lag absorb a provider refund issued moments ago', async () => {
+    // The operator refunded just before the pass: the order GET already
+    // shows the refund while the webhook is legitimately in flight — no
+    // critical alert yet.
+    const JUST_NOW = '2026-07-27T11:59:30.000Z';
+    withLedger({
+      payments: [paymentRow()],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-1': captureObject({
+          status: 'REFUNDED',
+          value: '25.00',
+          relatedOrderId: 'PP-ORDER-1',
+        }),
+      },
+      orders: {
+        'PP-ORDER-1': {
+          status: 'COMPLETED',
+          purchase_units: [{
+            custom_id: IDENTITY_CUSTOM_FIELD,
+            payments: {
+              captures: [{
+                id: 'CAP-1',
+                status: 'REFUNDED',
+                amount: { currency_code: 'USD', value: '25.00' },
+              }],
+              refunds: [{
+                id: 'REF-FRESH',
+                status: 'COMPLETED',
+                amount: { currency_code: 'USD', value: '25.00' },
+                create_time: JUST_NOW,
+              }],
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(
+      supabase as never,
+      { now: NOW, settlementLagMs: 15 * 60 * 1000 },
+    ));
+
+    expect(result.missingLocalPayments).toEqual([]);
+  });
+
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {
     withLedger({ payments: [paymentRow()] });
     scriptProviderObjects({ captures: { 'CAP-1': { __status: 503 } } });
