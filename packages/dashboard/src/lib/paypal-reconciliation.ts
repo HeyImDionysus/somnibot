@@ -3553,27 +3553,7 @@ async function runPass(
       }
     }
     const batchOrderIds = [...new Set(fresh.map(([, order]) => order.id))];
-    const stagedFulfillmentOrderIds = new Set<string>();
-    for (let from = 0; from < batchOrderIds.length; from += EXACT_LOOKUP_CHUNK_SIZE) {
-      const chunk = batchOrderIds.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
-      const { data: stagedRows, error: stagedError } = await supabase
-        .from('bot_action_queue')
-        .select('payload')
-        .eq('status', 'staged')
-        .eq('action', 'fulfill_subscription')
-        .in('payload->>order_id', chunk);
-      if (stagedError) {
-        return {
-          status: 'failed',
-          reason: `staged fulfillment scan failed: ${stagedError.message}`,
-          retriable: true,
-        };
-      }
-      for (const row of (stagedRows ?? []) as Array<Record<string, unknown>>) {
-        const orderId = (row.payload as Record<string, unknown> | null)?.order_id;
-        if (typeof orderId === 'string') stagedFulfillmentOrderIds.add(orderId);
-      }
-    }
+
     // Plan identity compares against the HISTORICAL provider plan retained
     // by the ACTIVATION carrier's payload — addressed by its exact
     // idempotency key (paypal:subscription:<id>:fulfill_subscription), so
@@ -3582,6 +3562,10 @@ async function runPass(
     // consulted: owners rotate paypal_plan_id for future checkouts while
     // old subscriptions keep billing the plan they were minted on.
     const historicalPlanBySubscription = new Map<string, string>();
+    // The activation carrier's STATUS decides fulfillment truth: staged
+    // means never released, failed means released and lost — either way an
+    // ACTIVE subscription's buyer received nothing.
+    const activationCarrierStatusBySubscription = new Map<string, string>();
     const activationKeys = fresh.map(([subscriptionId]) =>
       `paypal:subscription:${subscriptionId}:fulfill_subscription`,
     );
@@ -3589,7 +3573,7 @@ async function runPass(
       const chunk = activationKeys.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
       const { data, error } = await supabase
         .from('bot_action_queue')
-        .select('idempotency_key, payload')
+        .select('idempotency_key, payload, status')
         .in('idempotency_key', chunk);
       if (error) {
         return {
@@ -3600,13 +3584,17 @@ async function runPass(
       }
       for (const row of (data ?? []) as Array<Record<string, unknown>>) {
         const key = row.idempotency_key;
+        if (typeof key !== 'string') continue;
+        const subscriptionId = key.slice(
+          'paypal:subscription:'.length,
+          -':fulfill_subscription'.length,
+        );
         const providerPlan = (row.payload as Record<string, unknown> | null)?.paypal_plan_id;
-        if (typeof key === 'string' && isProviderId(providerPlan)) {
-          const subscriptionId = key.slice(
-            'paypal:subscription:'.length,
-            -':fulfill_subscription'.length,
-          );
+        if (isProviderId(providerPlan)) {
           historicalPlanBySubscription.set(subscriptionId, providerPlan);
+        }
+        if (typeof row.status === 'string') {
+          activationCarrierStatusBySubscription.set(subscriptionId, row.status);
         }
       }
     }
@@ -3738,13 +3726,16 @@ async function runPass(
       if (
         subscription.status === 'ACTIVE'
         && order.status === 'completed'
-        && stagedFulfillmentOrderIds.has(order.id)
+        && ['staged', 'failed'].includes(
+          activationCarrierStatusBySubscription.get(subscriptionId) ?? '',
+        )
         && activationSettled
       ) {
         // The activation handler completes the order BEFORE releasing the
-        // staged fulfillment: a crash in that gap leaves an ACTIVE
-        // subscription, a completed order, and a paying buyer with nothing
-        // delivered — invisible to the pending-order check below.
+        // staged fulfillment: a STAGED carrier means the release never ran,
+        // and a FAILED carrier means the queue worker lost it after release
+        // — either way the buyer received nothing while the order and
+        // subscription both read healthy.
         unsettledLocalPayments.push({
           transactionId: subscriptionId,
           guildId,
@@ -3836,13 +3827,24 @@ async function runPass(
       // (daily plans hit this naturally). Only a stale or missing latest
       // payment makes local settled sales unevidenced.
       const lastPaymentFresh = Number.isFinite(lastPaymentMs) && lastPaymentMs > windowEndMs;
+      // A charge just BEFORE the window start whose webhook row landed just
+      // after it belongs to the previous pass — within the same tolerance,
+      // it is not absent billing evidence.
+      const lastPaymentJustBeforeWindow = Number.isFinite(lastPaymentMs)
+        && lastPaymentMs < windowStartMs
+        && lastPaymentMs >= windowStartMs - SUBSCRIPTION_CHARGE_TOLERANCE_MS;
       // Only money the ledger claims KEPT needs billing evidence — a
       // refunded/reversed row's evidence is the sale object itself, which
       // the sale pass already verified.
       const keptWindowPayments = settledWindowPayments.filter(
         (payment) => payment.status === 'completed',
       );
-      if (!lastPaymentInWindow && !lastPaymentFresh && keptWindowPayments.length > 0) {
+      if (
+        !lastPaymentInWindow
+        && !lastPaymentFresh
+        && !lastPaymentJustBeforeWindow
+        && keptWindowPayments.length > 0
+      ) {
         const latest = keptWindowPayments.reduce((best, candidate) =>
           String(candidate.created_at ?? '') > String(best.created_at ?? '') ? candidate : best,
         );
@@ -3890,14 +3892,20 @@ async function runPass(
         return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
       }
       const unaccounted = latestChargeUnaccounted.get(subscriptionId);
+      const unaccountedLastPaymentMs = unaccounted?.subscription.lastPaymentTime
+        ? Date.parse(unaccounted.subscription.lastPaymentTime)
+        : Number.NaN;
       if (
         unaccounted
         && lookup.ok
         && lookup.found
+        // The list must contain the ADVERTISED latest charge itself — any
+        // older in-window renewal (yesterday's known daily charge) must not
+        // suppress the fallback for today's missing one.
         && !lookup.value.some((txn) =>
           MONEY_TXN_STATUSES.includes(txn.status)
-          && txn.timeMs >= windowStartMs
-          && txn.timeMs <= windowEndMs)
+          && Number.isFinite(unaccountedLastPaymentMs)
+          && txn.timeMs >= unaccountedLastPaymentMs - SUBSCRIPTION_CHARGE_TOLERANCE_MS)
       ) {
         // billing_info.last_payment proved an in-window charge, but the
         // enumeration has no money transaction to name. Fall back to the
@@ -3957,8 +3965,21 @@ async function runPass(
       if (!lookupScan.ok) {
         return { status: 'failed', reason: lookupScan.reason, retriable: lookupScan.retriable };
       }
+      // Fallback rows never crossed the window validators: run them through
+      // the same shape/guild validation, and only a SETTLED row may account
+      // for a settled provider transaction.
+      const validatedFallback = validateLocalPayments(lookupScan.rows, configuredGuildIds);
+      if (!validatedFallback.ok) {
+        return {
+          status: 'failed',
+          reason: validatedFallback.reason,
+          retriable: validatedFallback.retriable,
+        };
+      }
       const fallbackRowsByProviderId = new Map(
-        lookupScan.rows.map((row) => [row.paypal_payment_id as string, row]),
+        validatedFallback.rows
+          .filter((row) => row.status === 'completed')
+          .map((row) => [row.paypal_payment_id as string, row]),
       );
       const fallbackParentScan = await lookupOrdersByExactColumn(
         supabase,
@@ -3982,7 +4003,11 @@ async function runPass(
         const fallbackRow = fallbackRowsByProviderId.get(txn.id);
         if (fallbackRow) {
           const rowOrder = ordersById.get(fallbackRow.order_id as string);
-          if (!rowOrder || rowOrder.paypal_subscription_id !== subscriptionId) {
+          if (
+            !rowOrder
+            || rowOrder.paypal_subscription_id !== subscriptionId
+            || rowOrder.guild_id !== fallbackRow.guild_id
+          ) {
             return { status: 'failed', reason: 'provider identity conflict', retriable: false };
           }
           continue;

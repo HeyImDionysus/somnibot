@@ -2972,17 +2972,17 @@ describe('runPayPalReconciliation', () => {
         paypal_subscription_id: 'SUB-1',
       }],
     });
-    resolvers['bot_action_queue'] = (op) => {
-      const wantsStaged = op.filters.some(
-        (f) => f.method === 'eq' && f.args[0] === 'status' && f.args[1] === 'staged',
-      );
-      return {
-        data: wantsStaged
-          ? [{ payload: { order_id: ORDER_UUID } }]
-          : [],
-        error: null,
-      };
-    };
+    // Round 13: the exact activation carrier's status is the truth — a
+    // STAGED (or FAILED) carrier behind an ACTIVE completed order means the
+    // buyer received nothing.
+    resolvers['bot_action_queue'] = () => ({
+      data: [{
+        idempotency_key: 'paypal:subscription:SUB-1:fulfill_subscription',
+        payload: { order_id: ORDER_UUID },
+        status: 'staged',
+      }],
+      error: null,
+    });
     scriptProviderObjects({
       subscriptions: {
         'SUB-1': subscriptionObject({ status: 'ACTIVE', lastPaymentTime: null }),
@@ -3746,6 +3746,170 @@ describe('runPayPalReconciliation', () => {
       source: 'subscription',
       referenceId: 'SUB-1',
     }]);
+  });
+
+  // ── PR #409 review round 13 repairs ───────────────────────────────────────
+
+  it('flags a FAILED activation carrier behind an ACTIVE subscription', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    resolvers['bot_action_queue'] = () => ({
+      data: [{
+        idempotency_key: 'paypal:subscription:SUB-1:fulfill_subscription',
+        payload: { order_id: ORDER_UUID },
+        status: 'failed',
+      }],
+      error: null,
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'ACTIVE', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'SUB-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'subscription_activation_unreleased',
+      orderStatus: 'completed',
+    }]);
+  });
+
+  it("does not let yesterday's renewal suppress the fallback for today's lost charge", async () => {
+    const YESTERDAY = '2026-07-26T10:00:00.000Z';
+    const TODAY = '2026-07-27T10:00:00.000Z';
+    withLedger({
+      payments: [paymentRow({ paypal_payment_id: 'SALE-YDAY', created_at: YESTERDAY })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-YDAY': saleObject({ total: '25.00' }) },
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: TODAY, lastPaymentValue: '25.00' }),
+      },
+      subscriptionTransactions: {
+        'SUB-1': {
+          // The list omits TODAY's advertised charge and returns only the
+          // known older renewal.
+          transactions: [{
+            id: 'SALE-YDAY',
+            status: 'COMPLETED',
+            time: YESTERDAY,
+            amount_with_breakdown: {
+              gross_amount: { currency_code: 'USD', value: '25.00' },
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toContainEqual(expect.objectContaining({
+      kind: 'payment',
+      transactionId: 'SUB-1',
+      referenceId: 'SUB-1',
+      initiatedAt: TODAY,
+    }));
+  });
+
+  it('does not let a pending fallback row suppress a settled discovered charge', async () => {
+    const MONDAY = '2026-07-23T10:00:00.000Z';
+    withLedger({
+      // The row exists but never settled — created OUTSIDE the window so
+      // only the enumeration fallback path can see it.
+      payments: [paymentRow({
+        paypal_payment_id: 'SALE-MON',
+        created_at: '2026-07-10T10:00:00.000Z',
+        status: 'pending',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-MON': saleObject({ total: '25.00' }) },
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: null }),
+      },
+      subscriptionTransactions: {
+        'SUB-1': {
+          transactions: [{
+            id: 'SALE-MON',
+            status: 'COMPLETED',
+            time: MONDAY,
+            amount_with_breakdown: {
+              gross_amount: { currency_code: 'USD', value: '25.00' },
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toContainEqual(expect.objectContaining({
+      kind: 'payment',
+      transactionId: 'SALE-MON',
+    }));
+  });
+
+  it('tolerates a boundary charge whose row bled into the window', async () => {
+    // The charge happened moments before the window start; its webhook row
+    // landed inside. Not absent billing evidence.
+    const JUST_BEFORE_WINDOW = '2026-07-20T11:58:00.000Z';
+    const ROW_IN_WINDOW = '2026-07-20T12:01:00.000Z';
+    withLedger({
+      payments: [paymentRow({ paypal_payment_id: 'SALE-EDGE', created_at: ROW_IN_WINDOW })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-EDGE': saleObject({ total: '25.00' }) },
+      subscriptions: {
+        'SUB-1': subscriptionObject({
+          lastPaymentTime: JUST_BEFORE_WINDOW,
+          lastPaymentValue: '25.00',
+        }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingProviderPayments).toEqual([]);
   });
 
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {
