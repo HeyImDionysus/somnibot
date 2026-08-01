@@ -121,6 +121,14 @@ export class StatsChannelManager {
 
         // Only update if value changed
         if (config.last_value === value && config.channel_id) {
+          // A transiently failed alert resolution must stay retryable even
+          // when the value never moves again (role/boost counts can sit
+          // stable for weeks). The counter itself is healthy — a previous
+          // tick proved that by persisting last_value — only the resolution
+          // write is outstanding, so retry it before shortcutting.
+          if (this.degradedChannels.has(config.id) || !this.recoveryChecked.has(config.id)) {
+            await this.resolveUpdateAlerts(config);
+          }
           continue;
         }
 

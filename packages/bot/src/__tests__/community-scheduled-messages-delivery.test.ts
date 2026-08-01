@@ -48,10 +48,12 @@ function schedSupa(
     /** When set, claim_scheduled_message_send returns null (max_sends reached). */
     counterExhausted?: boolean;
   counterOwnershipLost?: boolean;
+  gateGenerationMoves?: boolean;
   } = {},
 ) {
   const inserts: Record<string, any[]> = { alerts: [] };
   const updates: Array<{ payload: any }> = [];
+  let occurrenceOwnershipReads = 0;
   const deletes: string[] = [];
   function chainFor(table: string) {
     const c: any = { _isUpdate: false, _insertRow: null, _updatePayload: null };
@@ -74,6 +76,16 @@ function schedSupa(
       // The claim-loss read-back of the existing occurrence row.
       if (table === 'discord_operation_occurrences' && !c._insertRow && options.existingOccurrence) {
         return { data: options.existingOccurrence, error: null };
+      }
+      if (table === 'discord_operation_occurrences' && !c._insertRow) {
+        occurrenceOwnershipReads += 1;
+        // Round 32: the post-reserve baseline and the send-boundary gate. A
+        // healthy claimed occurrence with a stable generation by default;
+        // gateGenerationMoves simulates recovery reclaiming between them.
+        if (options.gateGenerationMoves && occurrenceOwnershipReads >= 2) {
+          return { data: { status: 'claimed', updated_at: '2026-07-27T12:09:00.000Z' }, error: null };
+        }
+        return { data: { status: 'claimed', updated_at: '2026-07-27T12:00:00.000Z' }, error: null };
       }
       // The reclaimed-counter reconcile read against the authoritative row.
       if (table === 'scheduled_messages' && options.priorCounterError) {
@@ -329,6 +341,22 @@ describe('ScheduledMessageRunner — missed-run policy', () => {
 });
 
 describe('ScheduledMessageRunner — a stalled worker cannot double-send a reclaimed minute (round 30)', () => {
+  it('refuses to send when the generation moves between reserving and sending', async () => {
+    // Round 32: the worker stalls AFTER reserving (embed query, event-loop
+    // pause); recovery reclaims and delivers the minute. The send-boundary
+    // gate sees the generation moved and walks away.
+    const Runner = await loadRunner();
+    const sched = { ...BASE_SCHEDULE };
+    const { supabase, updates } = schedSupa([sched], { gateGenerationMoves: true });
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+
+    await (runner as any).tick(new Date('2026-07-27T12:00:30.000Z'));
+
+    expect(send).not.toHaveBeenCalled();
+    expect(updates.some((u) => u.payload?.status === 'completed')).toBe(false);
+  });
+
   it('refuses to send when the counter RPC reports lost ownership (-1)', async () => {
     // The stalled original resumes AFTER recovery reclaimed, reserved, sent,
     // and settled the occurrence. The marker fast-path used to bless it with

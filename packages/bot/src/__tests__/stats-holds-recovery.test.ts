@@ -437,6 +437,29 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     ).toBe(true);
   }, 30_000);
 
+  it('retries alert resolution behind the unchanged-value shortcut (round 32)', async () => {
+    // The counter is healthy (last_value already persisted) but a previous
+    // tick's alert resolution transiently failed. Stable statistics (role or
+    // boost counts) may never change again — the shortcut must retry the
+    // resolution instead of leaving the failure alert standing forever.
+    const StatsChannelManager = await load();
+    const { supabase } = survivorSupa({
+      configRows: [{ ...CONFIG_ROW, stat_type: 'total_members', channel_id: 'vc-live', last_value: '10' }],
+      scanRows: [],
+    });
+    const guild = makeGuild({});
+    const mgr = new StatsChannelManager(guild, supabase, 60);
+    const resolveSpy = vi.fn(async () => {});
+    (mgr as unknown as { resolveUpdateAlerts: unknown }).resolveUpdateAlerts = resolveSpy;
+    (mgr as unknown as { degradedChannels: Set<string> }).degradedChannels.add('sc-1');
+    await mgr.start().catch(() => {});
+    await (mgr as unknown as { updateAll(): Promise<void> }).updateAll().catch(() => {});
+    mgr.stop?.();
+
+    // The unchanged-value shortcut still ran the resolution retry.
+    expect(resolveSpy).toHaveBeenCalled();
+  }, 30_000);
+
   it('propagates a recovered-tick rename failure instead of resuming bookkeeping (round 28)', async () => {
     // Same recovery shape as round 20, but the confirmed channel's rename
     // fails (Discord outage / permissions revoked). Swallowing it persisted

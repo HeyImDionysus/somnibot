@@ -133,7 +133,13 @@ describe('ExecutionLogger occurrence claim', () => {
     const selectChain: any = {};
     selectChain.eq = vi.fn(() => selectChain);
     selectChain.limit = vi.fn(() => selectChain);
-    supa.from = vi.fn(() => ({ select: vi.fn(() => selectChain) }));
+    const holdChain: any = {};
+    holdChain.eq = vi.fn(() => holdChain);
+    holdChain.limit = vi.fn(() => holdChain);
+    holdChain.maybeSingle = vi.fn(async () => ({ data: null, error: null }));
+    supa.from = vi.fn((table: string) => (table === 'automation_mass_action_holds'
+      ? { select: vi.fn(() => holdChain) }
+      : { select: vi.fn(() => selectChain) }));
     const logger = new ExecutionLogger(supa);
     const row = (overrides: Record<string, unknown>) => ({
       actions_started: false,
@@ -165,12 +171,21 @@ describe('ExecutionLogger occurrence claim', () => {
 
     // STALE pre-action row (round 31): a STRANDED claim must fall through to
     // claim() so its 23505 reclaim path can re-run the occurrence — the
-    // startup sweep repairs only started rows.
+    // startup sweep repairs only started rows. Round 32: that verdict now
+    // requires NO durable hold to be linked (holdChain below returns none).
     selectChain.maybeSingle = vi.fn(async () => ({
-      data: row({ created_at: new Date(Date.now() - 60 * 60_000).toISOString() }),
+      data: row({ id: 'row-1', created_at: new Date(Date.now() - 60 * 60_000).toISOString() }),
       error: null,
     }));
+    holdChain.maybeSingle = vi.fn(async () => ({ data: null, error: null }));
     await expect(logger.isOccurrenceConsumed('auto-1', 'g1', 'occ-1')).resolves.toBe(false);
+
+    // Round 32: a HELD execution keeps the pre-action shape for as long as
+    // approval takes — its redeliveries must skip quota-free, not round-trip
+    // to a refusing claim().
+    holdChain.maybeSingle = vi.fn(async () => ({ data: { id: 'hold-1' }, error: null }));
+    await expect(logger.isOccurrenceConsumed('auto-1', 'g1', 'occ-1')).resolves.toBe(true);
+    holdChain.maybeSingle = vi.fn(async () => ({ data: null, error: null }));
 
     // No row / read errors: fail open — the claim INSERT stays authoritative.
     selectChain.maybeSingle = vi.fn(async () => ({ data: null, error: null }));

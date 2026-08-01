@@ -576,6 +576,29 @@ export class ScheduledMessageRunner {
       return;
     }
 
+    // The reservation stamp bumped the occurrence generation; refresh the
+    // baseline so the send-boundary recheck below compares against OUR
+    // current claim, not the pre-reserve snapshot.
+    {
+      const { data: baseline, error: baselineError } = await this.supabase
+        .from('discord_operation_occurrences')
+        .select('status, updated_at')
+        .eq('id', occurrenceId)
+        .maybeSingle();
+      if (
+        baselineError
+        || !baseline
+        || baseline.status !== 'claimed'
+        || typeof baseline.updated_at !== 'string'
+      ) {
+        log.warn(`Could not confirm occurrence ownership for schedule ${schedule.id} after reserving; skipping send`, {
+          error: baselineError?.message ?? `status=${baseline?.status ?? 'missing'}`,
+        });
+        return;
+      }
+      occurrenceClaimUpdatedAt = baseline.updated_at;
+    }
+
     let embed: EmbedBuilder | null = null;
 
     // Load embed config if referenced
@@ -611,6 +634,34 @@ export class ScheduledMessageRunner {
     }
 
     const content = schedule.message ? replaceVariables(schedule.message, this.guild) : undefined;
+
+    // Send-boundary ownership recheck: reserving can predate the send by an
+    // arbitrary stall (the embed-config query above, an event-loop pause).
+    // If the stall crossed the stale threshold, recovery may have reclaimed
+    // AND delivered this very minute — any generation movement or non-claimed
+    // status means we no longer own the send. (A reclaim strictly between
+    // this check and channel.send remains the documented at-least-once
+    // corner, now nanoscopic instead of minutes wide.)
+    {
+      const { data: sendGate, error: sendGateError } = await this.supabase
+        .from('discord_operation_occurrences')
+        .select('status, updated_at')
+        .eq('id', occurrenceId)
+        .maybeSingle();
+      if (
+        sendGateError
+        || !sendGate
+        || sendGate.status !== 'claimed'
+        || sendGate.updated_at !== occurrenceClaimUpdatedAt
+      ) {
+        log.warn(
+          `Occurrence ownership moved before the send for schedule ${schedule.id} `
+          + `(${occurrenceAt.toISOString()}); the current holder owns the delivery.`,
+          { error: sendGateError?.message ?? null },
+        );
+        return;
+      }
+    }
 
     // Send the message. The occurrence was already claimed atomically above, so
     // the "never duplicate" contract holds regardless of send outcome. A single

@@ -172,7 +172,7 @@ export class ExecutionLogger {
   ): Promise<boolean> {
     const { data, error } = await this.supabase
       .from('automation_executions')
-      .select('actions_started, conditions_passed, actions_executed, actions_failed, duration_ms, created_at')
+      .select('id, actions_started, conditions_passed, actions_executed, actions_failed, duration_ms, created_at')
       .eq('automation_id', automationId)
       .eq('guild_id', guildId)
       .eq('occurrence_id', occurrenceId)
@@ -192,7 +192,19 @@ export class ExecutionLogger {
     // row is another worker mid-run: skip without spending quota.
     const createdMs = Date.parse(String(data.created_at ?? ''));
     if (!Number.isFinite(createdMs)) return true;
-    return Date.now() - createdMs < STALE_PRE_ACTION_CLAIM_MS;
+    if (Date.now() - createdMs < STALE_PRE_ACTION_CLAIM_MS) return true;
+    // Old pre-action rows split two ways: a STRANDED claim (reclaimable —
+    // report unconsumed) versus a HELD mass action, which keeps this shape
+    // for as long as approval takes and is intentionally unreclaimable — its
+    // redeliveries must not burn quota round-tripping to a refusing claim().
+    const { data: hold, error: holdError } = await this.supabase
+      .from('automation_mass_action_holds')
+      .select('id')
+      .eq('execution_id', data.id)
+      .limit(1)
+      .maybeSingle();
+    if (holdError) return false;
+    return hold !== null;
   }
 
   /**

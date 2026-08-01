@@ -67,6 +67,7 @@ function makeSupabase(
             operation_kind: 'scheduled_message',
             occurrence_key: 'test',
             status: 'claimed',
+            updated_at: '2026-07-30T12:00:00.000Z',
             resource_id: null,
             result: {},
             last_error: null,
