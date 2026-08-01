@@ -2372,6 +2372,16 @@ async function runPass(
     string,
     { amountCents: number; currency: string | null }
   >();
+  // Lag-fresh local refund rows (created inside the settlement interval):
+  // held aside, counted only where the provider side is CONFIRMED settled.
+  const recentLocalRefundRowsByProviderId = new Map<
+    string,
+    { amountCents: number; currency: string | null }
+  >();
+  const recentLocalRefundsByPaymentRow = new Map<
+    string,
+    Array<{ providerId: string; amountCents: number }>
+  >();
   const refundTotalParentById = new Map<string, LocalPaymentRow>();
   const loadLocalRefundTotals = async (parents: LocalPaymentRow[]) => {
     for (const parent of parents) refundTotalParentById.set(parent.id, parent);
@@ -2399,10 +2409,6 @@ async function runPass(
       localRefundIdsByPaymentRow.set(id, new Set());
     }
     for (const refund of validated.rows) {
-      // Symmetric with the provider aggregate: a refund row younger than the
-      // window end (its provider twin deliberately excluded as in-flight)
-      // must not inflate the local side into a false mismatch.
-      if (String(refund.created_at ?? '') > windowEnd) continue;
       const key = refund.payment_id as string;
       const parent = refundTotalParentById.get(key);
       // Parent OWNERSHIP, exactly like the in-window relation guard: a row
@@ -2432,6 +2438,28 @@ async function runPass(
           localAmountCents: refund.amount_cents as number,
           providerCurrency: normalizeCurrency(parent.currency) ?? 'UNKNOWN',
           localCurrency: normalizeCurrency(refund.currency),
+        });
+        continue;
+      }
+      // Symmetric with the provider aggregate -- but not blindly: a refund
+      // row younger than the window end may merely be the LATE local write
+      // of an old, settled provider refund, and dropping it manufactured a
+      // false "missing locally" against its settled sibling. Its twin may
+      // equally still be in flight, so hold it aside: it counts only where
+      // the provider side is CONFIRMED settled (an enumerated settled
+      // sibling carrying this id, or a parent whose refunded status itself
+      // passed the update-time lag gate).
+      if (String(refund.created_at ?? '') > windowEnd) {
+        recentLocalRefundsByPaymentRow.set(key, [
+          ...(recentLocalRefundsByPaymentRow.get(key) ?? []),
+          {
+            providerId: refund.paypal_refund_id,
+            amountCents: Math.max(0, refund.amount_cents as number),
+          },
+        ]);
+        recentLocalRefundRowsByProviderId.set(refund.paypal_refund_id, {
+          amountCents: refund.amount_cents as number,
+          currency: normalizeCurrency(refund.currency),
         });
         continue;
       }
@@ -2540,6 +2568,7 @@ async function runPass(
   }) => {
     const localTotal = localRefundTotalsByPaymentRow.get(input.payment.id) ?? 0;
     const localIds = localRefundIdsByPaymentRow.get(input.payment.id) ?? new Set<string>();
+    const recentRows = recentLocalRefundsByPaymentRow.get(input.payment.id) ?? [];
     // Wholly lag-filtered lists DEFER (webhooks in flight, the next pass
     // owns them); an empty list behind a capture whose own state proves
     // refund activity is provider-inconsistent and falls back to the
@@ -2555,12 +2584,22 @@ async function runPass(
       // ids cannot mask identity drift.
       const providerTotal = providerRefunds
         .reduce((sum, refund) => sum + refund.amountCents, 0);
+      let recentMatchedTotal = 0;
       for (const refund of providerRefunds) {
-        if (localIds.has(refund.id)) {
+        // A lag-fresh local row whose id matches THIS enumerated settled
+        // sibling is the late write of an old refund -- present, not
+        // missing; its provider twin is confirmed settled by the list.
+        const recentRow = localIds.has(refund.id)
+          ? undefined
+          : recentLocalRefundRowsByProviderId.get(refund.id);
+        if (recentRow !== undefined) {
+          recentMatchedTotal += Math.max(0, recentRow.amountCents);
+        }
+        if (localIds.has(refund.id) || recentRow !== undefined) {
           // Matched by id is not matched by MONEY: an understated historical
           // row (or offsetting sibling errors) must still surface. The
           // in-window refund pass owns window rows; this catches the rest.
-          const localRow = localRefundRowsByProviderId.get(refund.id);
+          const localRow = recentRow ?? localRefundRowsByProviderId.get(refund.id);
           if (
             localRow
             && (
@@ -2592,12 +2631,13 @@ async function runPass(
           referenceId: input.providerId,
         });
       }
-      if (localTotal > providerTotal) {
+      const coveredLocalTotal = localTotal + recentMatchedTotal;
+      if (coveredLocalTotal > providerTotal) {
         amountMismatches.push({
           transactionId: input.providerId,
           guildId: input.guildId,
           providerAmountCents: providerTotal,
-          localAmountCents: localTotal,
+          localAmountCents: coveredLocalTotal,
           providerCurrency: input.providerCurrency,
           localCurrency: input.providerCurrency,
         });
@@ -2607,7 +2647,7 @@ async function runPass(
       // amount, the uncovered remainder is a lost refund the order response
       // failed to enumerate.
       if (input.providerStatusFullyRefunded) {
-        const covered = Math.max(localTotal, providerTotal);
+        const covered = Math.max(coveredLocalTotal, providerTotal);
         if (covered < input.providerAmountCents) {
           missingLocalPayments.push({
             kind: 'refund',
@@ -2623,18 +2663,39 @@ async function runPass(
       }
       return;
     }
-    if (input.providerStatusFullyRefunded && localTotal < input.providerAmountCents) {
+    // The status-bound fallback runs only for parents whose refunded state
+    // passed the update-time lag gate: every refund that state reflects is
+    // settled-age, so lag-fresh local rows for THIS parent are late writes
+    // of settled refunds and count.
+    const fallbackLocalTotal = localTotal
+      + recentRows.reduce((sum, row) => sum + Math.max(0, row.amountCents), 0);
+    if (input.providerStatusFullyRefunded && fallbackLocalTotal < input.providerAmountCents) {
       missingLocalPayments.push({
         kind: 'refund',
         transactionId: input.providerId,
         guildId: input.guildId,
-        amountCents: input.providerAmountCents - localTotal,
+        amountCents: input.providerAmountCents - fallbackLocalTotal,
         currency: input.providerCurrency,
         initiatedAt: null,
         source: 'capture',
         referenceId: input.providerId,
       });
-    } else if (!input.providerStatusFullyRefunded && localTotal === 0) {
+    } else if (
+      input.providerStatusFullyRefunded
+      && fallbackLocalTotal > input.providerAmountCents
+    ) {
+      // Symmetric with the enumerated over-refund check: a fully refunded
+      // parent bounds its ledger at the parent amount, and an OVERSTATED
+      // aggregate is corruption the under-refund branch cannot see.
+      amountMismatches.push({
+        transactionId: input.providerId,
+        guildId: input.guildId,
+        providerAmountCents: input.providerAmountCents,
+        localAmountCents: fallbackLocalTotal,
+        providerCurrency: input.providerCurrency,
+        localCurrency: input.providerCurrency,
+      });
+    } else if (!input.providerStatusFullyRefunded && fallbackLocalTotal === 0) {
       missingLocalPayments.push({
         kind: 'refund',
         transactionId: input.providerId,
@@ -2647,13 +2708,13 @@ async function runPass(
       });
     } else if (
       !input.providerStatusFullyRefunded
-      && localTotal >= input.providerAmountCents
+      && fallbackLocalTotal >= input.providerAmountCents
     ) {
       amountMismatches.push({
         transactionId: input.providerId,
         guildId: input.guildId,
         providerAmountCents: input.providerAmountCents,
-        localAmountCents: localTotal,
+        localAmountCents: fallbackLocalTotal,
         providerCurrency: input.providerCurrency,
         localCurrency: input.providerCurrency,
       });
@@ -3379,21 +3440,25 @@ async function runPass(
     }
     if (
       pendingish
-      && providerOrder.status === 'APPROVED'
+      && ['APPROVED', 'COMPLETED'].includes(providerOrder.status)
       && settledCaptures.length === 0
-      // An approval that happened inside the settlement lag has its
-      // CHECKOUT.ORDER.APPROVED webhook legitimately in flight.
+      // A transition inside the settlement lag has its webhook legitimately
+      // in flight.
       && !(providerOrder.updateTimeMs !== null && providerOrder.updateTimeMs > windowEndMs)
     ) {
-      // The buyer approved the checkout and the CHECKOUT.ORDER.APPROVED
-      // webhook — the only path that captures an intent-CAPTURE order — was
-      // lost: neither charged nor fulfilled. Surface for replay instead of
-      // treating pending-approval silence as clean.
+      // APPROVED: the buyer approved the checkout and the
+      // CHECKOUT.ORDER.APPROVED webhook -- the only path that captures an
+      // intent-CAPTURE order -- was lost: neither charged nor fulfilled.
+      // COMPLETED: PayPal claims completion while every capture row is
+      // still PENDING/DENIED -- no money settled and nothing local advanced,
+      // so completion alone must not read as clean. Surface for replay.
       unsettledLocalPayments.push({
         transactionId: order.paypal_order_id as string,
         guildId,
         orderId: order.id,
-        paymentStatus: 'order_approved_uncaptured',
+        paymentStatus: providerOrder.status === 'APPROVED'
+          ? 'order_approved_uncaptured'
+          : 'order_completed_uncaptured',
         orderStatus: order.status,
       });
     }
@@ -3552,7 +3617,7 @@ async function runPass(
       const chunk = expectedKeys.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
       const { data: actionRows, error: actionError } = await supabase
         .from('bot_action_queue')
-        .select('idempotency_key, status')
+        .select('idempotency_key, status, created_at')
         .in('idempotency_key', chunk);
       if (actionError) {
         return {
@@ -3562,10 +3627,18 @@ async function runPass(
         };
       }
       for (const row of (actionRows ?? []) as Array<Record<string, unknown>>) {
-        if (
-          typeof row.idempotency_key === 'string'
-          && ['pending', 'processing', 'completed'].includes(String(row.status))
-        ) {
+        if (typeof row.idempotency_key !== 'string') continue;
+        // completed is proof. pending/processing only mean "still working"
+        // while the carrier is younger than the settlement lag: this pass
+        // is the watchdog for a BROKEN bot, and a queue row aging past the
+        // lag with access unrevoked is exactly the failure it must surface.
+        const createdAtMs = typeof row.created_at === 'string'
+          ? Date.parse(row.created_at)
+          : Number.NaN;
+        const inProgressFresh = ['pending', 'processing'].includes(String(row.status))
+          && Number.isFinite(createdAtMs)
+          && createdAtMs > windowEndMs;
+        if (String(row.status) === 'completed' || inProgressFresh) {
           healthyActionKeys.add(row.idempotency_key);
         }
       }
@@ -4004,7 +4077,12 @@ async function runPass(
           if (!rowOrder || rowOrder.paypal_subscription_id !== subscriptionId) {
             return { status: 'failed', reason: 'provider identity conflict', retriable: false };
           }
-          continue;
+          // Known is not JUDGED: only WINDOW rows crossed the sale pass
+          // (money, status, refund ledger). A row registered merely as the
+          // PARENT of a window refund row never met any money comparison —
+          // hand it to the fallback machinery for the same terminal-family
+          // and drift judgment instead of silently accounting the charge.
+          if (windowPaymentIds.has(knownRow.id)) continue;
         }
         unknownTxns.push({ subscriptionId, order, txn });
       }
@@ -4085,6 +4163,24 @@ async function runPass(
                 ?? (normalizeCurrency(fallbackRow.currency) as string),
               providerRefunds: null,
             });
+            // Refund-ledger parity does not excuse PAYMENT-money drift: the
+            // out-of-window row never met the sale pass, so its own amount
+            // must still match the discovered transaction, or an offsetting
+            // refund ledger masks a drifted charge row.
+            if (
+              (txn.amountCents !== null && txn.amountCents !== fallbackRow.amount_cents)
+              || (txn.currency !== null
+                && txn.currency !== normalizeCurrency(fallbackRow.currency))
+            ) {
+              amountMismatches.push({
+                transactionId: txn.id,
+                guildId: fallbackRow.guild_id as string,
+                providerAmountCents: txn.amountCents ?? 0,
+                localAmountCents: fallbackRow.amount_cents,
+                providerCurrency: txn.currency ?? 'UNKNOWN',
+                localCurrency: normalizeCurrency(fallbackRow.currency),
+              });
+            }
             continue;
           }
           if (terminalTxn && !['refunded', 'reversed'].includes(fallbackRow.status)) {
