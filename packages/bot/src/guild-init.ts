@@ -428,6 +428,7 @@ export async function initGuildFeatures(
       ctx.setManager('entitlementService', entitlementService);
       const commerceCmds = [buildStoreCommand(), buildLicenseCommand()];
       for (const cmd of commerceCmds) allCommands.push(cmd.toJSON());
+      startedRuntimeFeatures.push('commerce');
       guildLog.info('Commerce system started');
     }
   } catch (err) {

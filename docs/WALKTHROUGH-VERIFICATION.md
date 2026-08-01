@@ -42,13 +42,13 @@ does not read `.env`.
 - **Setup** — `setup-wizard-surfaces`, `setup-wizard`,
   `setup-verification-wizard-contract`, and `interaction-verification-gate`.
 - **Bot/full** — the complete bot Vitest suite, plus the focused files named in
-  the table: 274 files / 4,173 tests passed (2026-08-01, final candidate).
+  the table: 275 files / 4,176 tests passed (2026-08-01, final candidate).
 - **Dashboard/full** — the complete dashboard Vitest suite, including the
-  focused route/UI files named in the table: 141 files / 2,103 tests passed
+  focused route/UI files named in the table: 141 files / 2,104 tests passed
   (2026-08-01, final candidate).
 - **Database** — 44 local PostgreSQL integration files / 604 tests passed; a
-  final fresh-database twin (2026-08-01) applied all 243 migrations through
-  `20260731130000` in order and live-asserted the newest semantics — stale
+  final fresh-database twin (2026-08-01) applied all 244 migrations through
+  `20260731140000` in order and live-asserted the newest semantics — stale
   occurrence reclaim, occurrence-owned ticket/temp-channel inserts, the
   per-occurrence idempotent scheduled-send reservation (same occurrence
   re-asked → same slot, counter unchanged; paid slot honored even at the send
@@ -56,7 +56,7 @@ does not read `.env`.
   truthful without re-running; unstarted and held rows refused), and durable
   hold progress (lease renewals persist a lower bound that lease-expiry
   recovery restores into history instead of zeros). The security-definer
-  audit passed across all 243 migration files / 283 effective function
+  audit passed across all 244 migration files / 283 effective function
   definitions, and regenerated database types have no drift.
 - **Discord/deploy** — 23 guarded live-deployment assertions passed against the
   owner-provided test guild, including role hierarchy, channel creation,

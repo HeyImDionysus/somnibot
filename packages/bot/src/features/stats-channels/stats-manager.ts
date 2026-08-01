@@ -635,10 +635,14 @@ export class StatsChannelManager {
       log.error('Failed to write stats-channel update alert:', { error: String(alertErr) });
       return { inserted: false, insertErrorCode: undefined, delivered: false };
     });
-    // Latch ONLY on a delivered owner notice (same contract as message-log):
-    // a durable row whose ping failed keeps retrying — one attempt per update
-    // interval, deduped at the row by the partial unique index.
-    if (result.delivered) {
+    // Latch only when BOTH halves are durable (same contract as message-log
+    // after round 33): the notice was delivered AND the alert row exists
+    // (fresh insert or 23505 dedupe). A delivered ping whose row insert
+    // transiently failed must keep retrying the write, or the degradation
+    // never gains its durable dashboard alert; a durable row whose ping
+    // failed equally keeps retrying — one attempt per update interval,
+    // deduped at the row by the partial unique index.
+    if (result.delivered && (result.inserted || result.insertErrorCode === '23505')) {
       this.alertedDegradedChannels.add(config.id);
     }
   }

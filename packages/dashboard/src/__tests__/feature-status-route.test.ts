@@ -163,6 +163,25 @@ describe('deriveFeatureReadiness — runtime-gated readiness (round 22)', () => 
       .toMatchObject({ state: 'operational' });
   });
 
+  it('gates store readiness on the commerce runtime (round 34)', async () => {
+    const { deriveFeatureReadiness, featureForPath } =
+      await import('@/lib/dashboard/feature-status');
+    const feature = featureForPath('/store')!;
+    const base = {
+      feature,
+      config: { store_enabled: true },
+      botOnline: true,
+      staleSecs: 5,
+    };
+    // store_enabled true but paypal_enabled false: guild-init never
+    // constructed EntitlementService or registered /store and /license — a
+    // current heartbeat alone must not read as reachable.
+    expect(deriveFeatureReadiness({ ...base, runtimeFeatures: ['temp_channels'] }))
+      .toMatchObject({ state: 'blocked', heading: expect.stringContaining('awaiting bot restart') });
+    expect(deriveFeatureReadiness({ ...base, runtimeFeatures: ['commerce'] }))
+      .toMatchObject({ state: 'operational' });
+  });
+
   it('gates music readiness on its runtime manager (round 29)', async () => {
     const { deriveFeatureReadiness, featureForPath } =
       await import('@/lib/dashboard/feature-status');
