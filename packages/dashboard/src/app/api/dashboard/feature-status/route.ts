@@ -24,7 +24,7 @@ export async function GET() {
     // minimal status projection. It contains no owner-only configuration.
     const ctx = await requirePermission(null);
     const supabase = createAdminSupabase();
-    const [configResult, heartbeatResult] = await Promise.all([
+    const [configResult, heartbeatResult, runtimeResult] = await Promise.all([
       supabase
         .from('guild_config')
         .select(FEATURE_CONFIG_COLUMNS)
@@ -38,9 +38,15 @@ export async function GET() {
         .order('snapshot_at', { ascending: false })
         .limit(1)
         .maybeSingle(),
+      supabase
+        .from('guild_runtime_features')
+        .select('feature')
+        .eq('guild_id', ctx.guildId)
+        .limit(100),
     ]);
     if (configResult.error) return dbError(configResult.error, 'dashboard/feature-status/config');
     if (heartbeatResult.error) return dbError(heartbeatResult.error, 'dashboard/feature-status/heartbeat');
+    if (runtimeResult.error) return dbError(runtimeResult.error, 'dashboard/feature-status/runtime');
 
     const snapshotAt = heartbeatResult.data?.snapshot_at
       ? Date.parse(heartbeatResult.data.snapshot_at)
@@ -66,6 +72,11 @@ export async function GET() {
           online: staleSecs !== null && staleSecs < 120,
           staleSecs,
         },
+        runtimeFeatures: Array.isArray(runtimeResult.data)
+          ? runtimeResult.data
+            .map((row) => row.feature)
+            .filter((feature): feature is string => typeof feature === 'string')
+          : null,
       },
     });
   } catch (error) {

@@ -360,6 +360,7 @@ export async function initGuildFeatures(
   }
 
   // ── Community features (temp channels, stats, scheduled messages, giveaways) ──
+  const startedRuntimeFeatures: string[] = [];
   try {
     if (guildCfg?.temp_channels_enabled !== false) {
       services.tempChannelManager = new TempChannelManager(guild, supabase);
@@ -367,6 +368,7 @@ export async function initGuildFeatures(
       ctx.setManager('tempChannelManager', services.tempChannelManager);
       const voiceCmd = buildTempChannelCommands();
       allCommands.push(voiceCmd.toJSON());
+      startedRuntimeFeatures.push('temp_channels');
       guildLog.info('Temp channels started');
     }
     if (guildCfg?.stats_enabled !== false) {
@@ -374,12 +376,14 @@ export async function initGuildFeatures(
       services.statsManager = new StatsChannelManager(guild, supabase, intervalMins);
       await services.statsManager.start();
       ctx.setManager('statsManager', services.statsManager);
+      startedRuntimeFeatures.push('stats_channels');
       guildLog.info('Stats channels started');
     }
     if (guildCfg?.scheduled_messages_enabled !== false) {
       services.scheduledRunner = new ScheduledMessageRunner(guild, supabase);
       await services.scheduledRunner.start();
       ctx.setManager('scheduledRunner', services.scheduledRunner);
+      startedRuntimeFeatures.push('scheduled_messages');
       guildLog.info('Scheduled messages started');
     }
     if (guildCfg?.giveaways_enabled !== false) {
@@ -390,11 +394,30 @@ export async function initGuildFeatures(
       allCommands.push(giveawayCmd.toJSON());
       services.giveawayFulfillment = new GiveawayFulfillmentService(guild, supabase, eventBus);
       services.giveawayFulfillment.start();
+      startedRuntimeFeatures.push('giveaways');
       guildLog.info('Giveaway system started');
     }
   } catch (err) {
     guildLog.error('Community features init error', { error: String(err) });
   }
+  // The dashboard's feature panel must know which managers THIS boot
+  // constructed: a feature enabled after boot has no manager until restart,
+  // and a current global heartbeat alone must not read as 'reachable'.
+  // Rewritten every boot so rows always reflect the latest initialization.
+  try {
+    await supabase
+      .from('guild_runtime_features')
+      .delete()
+      .eq('guild_id', guild.id);
+    if (startedRuntimeFeatures.length > 0) {
+      await supabase.from('guild_runtime_features').insert(
+        startedRuntimeFeatures.map((feature) => ({ guild_id: guild.id, feature })),
+      );
+    }
+  } catch (err) {
+    guildLog.error('Failed to record runtime feature state', { error: String(err) });
+  }
+
 
   // ── Music system ──
   try {

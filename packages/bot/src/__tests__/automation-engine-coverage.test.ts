@@ -69,11 +69,13 @@ const mockClaim = vi.fn().mockResolvedValue({ claimed: true, rowId: 'exec-1' });
 const mockFinalize = vi.fn().mockResolvedValue(undefined);
 const mockRelease = vi.fn().mockResolvedValue(undefined);
 const mockMarkStarted = vi.fn().mockResolvedValue(undefined);
+const mockFinalizeStrict = vi.fn().mockResolvedValue(undefined);
 vi.mock('../features/automations/execution-logger.js', () => ({
   ExecutionLogger: class {
     log = mockLogExecution;
     claim = mockClaim;
     finalize = mockFinalize;
+    finalizeStrict = mockFinalizeStrict;
     release = mockRelease;
     markActionsStarted = mockMarkStarted;
   },
@@ -191,6 +193,7 @@ describe('AutomationEngine', () => {
     mockFinalize.mockResolvedValue(undefined);
     mockRelease.mockResolvedValue(undefined);
     mockMarkStarted.mockResolvedValue(undefined);
+    mockFinalizeStrict.mockResolvedValue(undefined);
     mockMassThreshold.mockResolvedValue(25);
     mockMassHoldCreate.mockResolvedValue({
       created: true,

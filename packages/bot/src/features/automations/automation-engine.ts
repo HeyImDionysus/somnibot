@@ -618,6 +618,16 @@ export class AutomationEngine {
 
     let actionResult: { executed: number; failed: number; errors: string[] };
     try {
+      // Durable point of no return FIRST: rate-limit counters are consumed by
+      // filterBulkRateLimits, so a marker failure after them would release
+      // the claim with the counters already burned and the redelivery would
+      // reject every target. Marker fails -> release with counters untouched.
+      try {
+        await this.executionLogger.markActionsStarted(claimRowId);
+      } catch (markError) {
+        await this.executionLogger.release(claimRowId);
+        throw markError;
+      }
       const rateLimitedMemberIds = affectedMemberIds.length > 0
         ? await this.filterBulkRateLimits(automation, affectedMemberIds)
         : affectedMemberIds;
@@ -638,16 +648,6 @@ export class AutomationEngine {
           durationMs: Date.now() - startTime,
         });
         return;
-      }
-      // Durable point of no return: after this write a crash cannot cause a
-      // redelivery to repeat external side effects (the reclaim refuses
-      // started rows). If the marker itself cannot persist, RELEASE — nothing
-      // external has run, so the stable occurrence can retry safely.
-      try {
-        await this.executionLogger.markActionsStarted(claimRowId);
-      } catch (markError) {
-        await this.executionLogger.release(claimRowId);
-        throw markError;
       }
       actionResult = await this.executeResolvedActions(
         actions,
@@ -1078,6 +1078,7 @@ export class AutomationEngine {
       actionType: string,
       actionRoleId: string | null,
     ) => (() => void) | undefined,
+    progress?: { executed: number; failed: number; errors: string[] },
   ): Promise<{ executed: number; failed: number; errors: string[] }> {
     if (affectedMemberIds.length === 0) {
       return executeActions(actions, baseContext);
@@ -1089,6 +1090,14 @@ export class AutomationEngine {
       total.executed += result.executed;
       total.failed += result.failed;
       total.errors.push(...result.errors);
+      if (progress) {
+        // Mirror progress OUTWARD as it happens: a mid-run throw (lease
+        // expiry between members) must not erase how much of a destructive
+        // bulk action already reached Discord.
+        progress.executed = total.executed;
+        progress.failed = total.failed;
+        progress.errors = [...total.errors];
+      }
     };
 
     for (const [actionIndex, action] of actions.entries()) {
@@ -1147,6 +1156,9 @@ export class AutomationEngine {
     const startTime = Date.now();
     let leaseError: Error | null = null;
     let renewalInFlight = false;
+    // Mirrors bulk progress OUTWARD so the interruption path can report how
+    // much of a destructive run already reached Discord instead of zeros.
+    const heldProgress = { executed: 0, failed: 0, errors: [] as string[] };
     // The deadline this worker has actually been ACKNOWLEDGED to hold. A
     // renewal that hangs or stays in flight past expiry leaves leaseError
     // null, so error-only checking let the worker keep running member actions
@@ -1270,6 +1282,7 @@ export class AutomationEngine {
           heldTargets,
           assertLease,
           recordMemberDepthHint,
+          heldProgress,
         );
       } finally {
         // One-shot hints expire on their own; nothing guild-wide to unwind.
@@ -1314,28 +1327,39 @@ export class AutomationEngine {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // History must not read 'Conditions not met' for an APPROVED hold that
-      // failed mid-flight: finalize the linked execution with the truth
-      // before failing the hold. Best effort — the expired-lease recovery RPC
-      // is the durable backstop when this write also fails.
+      // failed mid-flight — and it must show the PROGRESS that reached
+      // Discord, not zeros. STRICT ordering: finalize first; only a
+      // successful finalize may terminalize the hold. If finalization fails,
+      // the hold stays 'executing' so the expired-lease recovery RPC later
+      // fails it AND finalizes the execution in one transaction — a terminal
+      // hold with defaulted history can never exist.
+      let interruptedFinalized = false;
       try {
-        await this.executionLogger.finalize(hold.execution_id, {
+        await this.executionLogger.finalizeStrict(hold.execution_id, {
           automationId: hold.automation_id,
           guildId: this.guild.id,
           triggeredBy: hold.triggered_by,
           triggerEvent: hold.trigger_event,
           conditionsPassed: true,
-          actionsExecuted: 0,
-          actionsFailed: 0,
-          errors: [`Approved mass action was interrupted: ${message}`],
+          actionsExecuted: heldProgress.executed,
+          actionsFailed: heldProgress.failed,
+          errors: [
+            ...heldProgress.errors,
+            `Approved mass action was interrupted: ${message}`,
+          ],
           durationMs: Date.now() - startTime,
         });
+        interruptedFinalized = true;
       } catch (finalizeError) {
         log.error(
-          `Failed to finalize interrupted execution for hold ${hold.id}:`,
+          `Failed to finalize interrupted execution for hold ${hold.id}; `
+          + 'leaving it executing for lease-expiry recovery:',
           finalizeError,
         );
       }
-      await this.massActionHolds.fail(hold.id, message);
+      if (interruptedFinalized) {
+        await this.massActionHolds.fail(hold.id, message);
+      }
       throw err;
     } finally {
       clearInterval(leaseTimer);

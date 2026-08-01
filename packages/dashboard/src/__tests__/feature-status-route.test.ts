@@ -82,3 +82,28 @@ describe('GET /api/dashboard/feature-status', () => {
     expect(body.data.bot).toEqual({ online: false, staleSecs: null });
   });
 });
+
+describe('deriveFeatureReadiness — runtime-gated readiness (round 22)', () => {
+  it('reports enabled-but-uninitialized instead of reachable when the manager never started', async () => {
+    const { deriveFeatureReadiness, featureForPath } =
+      await import('@/lib/dashboard/feature-status');
+    const feature = featureForPath('/temp-channels')!;
+    const base = {
+      feature,
+      config: { temp_channels_enabled: true },
+      botOnline: true,
+      staleSecs: 5,
+    };
+    // Enabled after boot: heartbeat is current but no manager exists.
+    expect(deriveFeatureReadiness({ ...base, runtimeFeatures: ['stats_channels'] }))
+      .toMatchObject({ state: 'blocked', heading: expect.stringContaining('awaiting bot restart') });
+    // Initialized this boot: operational.
+    expect(deriveFeatureReadiness({ ...base, runtimeFeatures: ['temp_channels'] }))
+      .toMatchObject({ state: 'operational' });
+    // Runtime state unreadable: fail open to the heartbeat verdict rather
+    // than inventing a restart demand.
+    expect(deriveFeatureReadiness({ ...base, runtimeFeatures: null }))
+      .toMatchObject({ state: 'operational' });
+  });
+});
+

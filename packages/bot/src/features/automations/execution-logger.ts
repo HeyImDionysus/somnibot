@@ -182,6 +182,36 @@ export class ExecutionLogger {
     }
   }
 
+  /**
+   * finalize that THROWS on a failed row update. The interrupted-hold path
+   * must know the truth landed before terminalizing the hold — a swallowed
+   * error there left a terminal hold with pre-action history forever.
+   */
+  async finalizeStrict(rowId: string | null, result: ExecutionResult): Promise<void> {
+    if (!rowId) {
+      await this.log(result);
+      return;
+    }
+    const { data, error } = await this.supabase
+      .from('automation_executions')
+      .update({
+        conditions_passed: result.conditionsPassed,
+        actions_executed: result.actionsExecuted,
+        actions_failed: result.actionsFailed,
+        errors: result.errors,
+        duration_ms: result.durationMs,
+      })
+      .eq('id', rowId)
+      .select('id')
+      .maybeSingle();
+    if (error) {
+      throw new Error(`Failed to finalize execution: ${error.message}`);
+    }
+    if (!data) {
+      throw new Error('Execution row disappeared before finalization');
+    }
+  }
+
   async finalize(rowId: string | null, result: ExecutionResult): Promise<void> {
     if (rowId) {
       const { error } = await this.supabase

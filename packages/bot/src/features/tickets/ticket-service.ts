@@ -372,10 +372,12 @@ export async function createTicket(
   occurrenceKey?: string,
 ): Promise<{ channel: TextChannel; ticket: DbTicket } | { error: string }> {
   let occurrenceId: string | null = null;
+  let occurrenceClaimUpdatedAt: string | null = null;
   if (occurrenceKey) {
     try {
       const claim = await claimDiscordOccurrence(supabase, guild.id, 'ticket', occurrenceKey);
       occurrenceId = claim.occurrence.id;
+      occurrenceClaimUpdatedAt = claim.occurrence.updated_at ?? null;
       if (!claim.won) {
         // A completion update can be interrupted after the ticket row commits.
         // The ticket row's unique occurrence FK is therefore the recovery source
@@ -659,22 +661,71 @@ export async function createTicket(
     return { error: 'Failed to initialize ticket channel. Please try again.' };
   }
 
-  // Save ticket record
-  const { data: insertedTicket, error: dbError } = await supabase
-    .from('tickets')
-    .insert({
-      guild_id: guild.id,
-      panel_id: panel.id,
-      channel_id: channel.id,
-      ticket_number: ticketNumber,
-      creator_id: member.id,
-      type: ticketType.id,
-      status: 'open',
-      message_count: 0,
-      creation_occurrence_id: occurrenceId,
-    })
-    .select()
-    .single();
+  // Save ticket record. With an occurrence claim, the insert is SERIALIZED
+  // against stale reclaim: the RPC locks the occurrence row and verifies this
+  // worker still owns the claim (updated_at snapshot) before inserting —
+  // recovery cannot delete a channel this row is about to own, and a worker
+  // that lost its claim learns it here instead of inserting a ticket that
+  // points at a channel recovery is deleting.
+  let insertedTicket: unknown = null;
+  let dbError: { message: string } | null = null;
+  let ticketOwnershipLost = false;
+  if (occurrenceId && occurrenceClaimUpdatedAt) {
+    const { data: ownedRows, error: rpcError } = await supabase.rpc('insert_owned_ticket', {
+      p_occurrence_id: occurrenceId,
+      p_expected_updated_at: occurrenceClaimUpdatedAt,
+      p_guild_id: guild.id,
+      p_panel_id: panel.id,
+      p_channel_id: channel.id,
+      p_ticket_number: ticketNumber,
+      p_creator_id: member.id,
+      p_type: ticketType.id,
+    });
+    if (rpcError) {
+      dbError = { message: rpcError.message };
+    } else {
+      const rows = Array.isArray(ownedRows) ? ownedRows : ownedRows ? [ownedRows] : [];
+      insertedTicket = rows[0] ?? null;
+      if (!insertedTicket) ticketOwnershipLost = true;
+    }
+  } else {
+    const { data: plainTicket, error: plainError } = await supabase
+      .from('tickets')
+      .insert({
+        guild_id: guild.id,
+        panel_id: panel.id,
+        channel_id: channel.id,
+        ticket_number: ticketNumber,
+        creator_id: member.id,
+        type: ticketType.id,
+        status: 'open',
+        message_count: 0,
+        creation_occurrence_id: occurrenceId,
+      })
+      .select()
+      .single();
+    insertedTicket = plainTicket;
+    dbError = plainError ? { message: plainError.message } : null;
+  }
+
+  if (ticketOwnershipLost) {
+    // Stale recovery reclaimed the occurrence while this worker was slow:
+    // recovery owns the flow now, and this channel is the duplicate. Remove
+    // it and report the suppression without touching the occurrence.
+    log.warn('Ticket creation lost its claim to stale recovery; removing duplicate channel', {
+      occurrenceId,
+      channelId: channel.id,
+    });
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await channel.delete('Ticket claim was reclaimed by recovery');
+        break;
+      } catch {
+        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
+      }
+    }
+    return { error: 'This ticket request was already handled by recovery. Please try again if you still need a ticket.' };
+  }
 
   let ticket = insertedTicket as DbTicket | null;
   if (dbError || !ticket) {

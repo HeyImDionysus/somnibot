@@ -263,6 +263,37 @@ describe('ScheduledMessageRunner — missed-run policy', () => {
     expect(stamped?.payload.last_sent_at).toBe(lastOcc.toISOString());
   });
 
+  it('rolls the baseline back when the missed-run notice cannot be made durable (round 22)', async () => {
+    // raiseOwnerAlert reports failure instead of throwing; consuming the
+    // missed occurrence anyway meant a transient alert outage silenced the
+    // owner forever. The advance is rolled back so the next restart retries.
+    const Runner = await loadRunner();
+    const sched = { ...BASE_SCHEDULE, missed_run_policy: 'skip-missed' };
+    const { supabase, updates } = schedSupa([sched]);
+    const alertModule = await import('../services/alert-service.js');
+    const raiseSpy = vi.spyOn(alertModule, 'raiseOwnerAlert').mockResolvedValue({
+      inserted: false,
+      delivered: false,
+    } as never);
+    try {
+      const { guild: g } = guild();
+      const runner = new Runner(g, supabase);
+      const baseline = new Date('2026-07-27T11:00:00.000Z');
+      const lastOcc = new Date('2026-07-27T11:59:00.000Z');
+      const now = new Date('2026-07-27T11:59:30.000Z');
+
+      await (runner as any).noticeMissed(sched, baseline, lastOcc, now);
+
+      const stamps = updates
+        .map((u) => u.payload?.last_sent_at)
+        .filter((v): v is string => typeof v === 'string');
+      // Advance won the single-winner race, then rolled back to the baseline.
+      expect(stamps).toEqual([lastOcc.toISOString(), baseline.toISOString()]);
+    } finally {
+      raiseSpy.mockRestore();
+    }
+  });
+
   it('a brand-new schedule (no baseline) never triggers a spurious catch-up', async () => {
     const Runner = await loadRunner();
     const sched = { ...BASE_SCHEDULE, missed_run_policy: 'send-latest', last_sent_at: null, start_date: null };

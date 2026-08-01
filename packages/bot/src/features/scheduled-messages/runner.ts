@@ -748,7 +748,7 @@ export class ScheduledMessageRunner {
 
     const missedCount = this.countOccurrences(schedule, baseline, now);
     try {
-      await raiseOwnerAlert(this.supabase, this.guild.id, {
+      const noticeResult = await raiseOwnerAlert(this.supabase, this.guild.id, {
         alertType: 'scheduled_message_missed_occurrence',
         severity: 'info',
         title: `Scheduled message "${schedule.name}" missed ${missedCount} occurrence(s)`,
@@ -758,6 +758,23 @@ export class ScheduledMessageRunner {
         metadata: { schedule_id: schedule.id, missed_count: missedCount },
         guild: this.guild,
       });
+      if (
+        !noticeResult.inserted
+        && noticeResult.insertErrorCode !== '23505'
+        && !noticeResult.delivered
+      ) {
+        // Neither delivery leg landed (raiseOwnerAlert reports, never
+        // throws). The baseline advance above already won the single-winner
+        // race, so ROLL IT BACK to the pre-advance value: a transient alert
+        // outage must not permanently consume the missed notice — the next
+        // restart re-detects the gap and retries.
+        await this.supabase
+          .from('scheduled_messages')
+          .update({ last_sent_at: baseline.toISOString() })
+          .eq('id', schedule.id)
+          .eq('last_sent_at', lastOcc.toISOString());
+      }
+
     } catch (alertErr) {
       log.error(
         'Failed to write missed-occurrence notice:',

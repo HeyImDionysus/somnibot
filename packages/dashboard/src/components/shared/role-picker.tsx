@@ -298,7 +298,12 @@ export function RolePicker({
     () => missingRoleIds(selected, roles, liveRolesAuthoritative),
     [selected, roles, liveRolesAuthoritative],
   );
-  const unresolvedSelected = liveRolesAuthoritative ? [] : selected;
+  // Only ids the stale payload cannot resolve render as unresolved chips —
+  // ids still resolvable from the (stale) snapshot keep their single normal
+  // chip. Rendering both produced two chips per configured role.
+  const unresolvedSelected = liveRolesAuthoritative
+    ? []
+    : selected.filter((id) => !roles.some((role) => role.id === id));
   const unreachableSelected = useMemo(
     () => requireAssignable
       ? selectedRoles.filter((role) => role.editableByBot === false)

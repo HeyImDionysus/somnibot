@@ -59,6 +59,10 @@ export function FeatureStatusPanel() {
         config,
         botOnline: typeof bot?.online === 'boolean' ? bot.online : null,
         staleSecs: typeof bot?.staleSecs === 'number' ? bot.staleSecs : null,
+        runtimeFeatures: response.ok && payload.success
+          && Array.isArray(payload.data?.runtimeFeatures)
+          ? payload.data.runtimeFeatures as string[]
+          : null,
       }));
     } catch {
       publish({

@@ -254,6 +254,7 @@ export class TempChannelManager {
     hubChannelId: string,
     occurrenceKey?: string,
   ): Promise<void> {
+    let occurrenceClaimUpdatedAt: string | null = null;
     const hub = this.hubs.get(hubChannelId);
     if (!hub) return;
 
@@ -317,6 +318,7 @@ export class TempChannelManager {
           },
         );
         occurrenceId = claim.occurrence.id;
+        occurrenceClaimUpdatedAt = claim.occurrence.updated_at ?? null;
         if (!claim.won) {
           const { data: existing } = await this.supabase
             .from('active_temp_channels')
@@ -493,7 +495,57 @@ export class TempChannelManager {
         creation_occurrence_id: occurrenceId,
       };
 
-      let { error: recordError } = await this.supabase.from('active_temp_channels').insert(record);
+      // The ownership insert is SERIALIZED against stale reclaim: the RPC
+      // locks the occurrence row and verifies this worker's claim identity
+      // (updated_at snapshot) before inserting. A reclaim that won the race
+      // returns ownershipLost instead of silently inserting a row recovery
+      // will never see.
+      let recordError: { message: string } | null = null;
+      let ownershipLost = false;
+      if (occurrenceId && occurrenceClaimUpdatedAt) {
+        const { data: inserted, error: rpcError } = await this.supabase.rpc(
+          'insert_owned_temp_channel',
+          {
+            p_occurrence_id: occurrenceId,
+            p_expected_updated_at: occurrenceClaimUpdatedAt,
+            p_channel_id: record.channel_id,
+            p_text_channel_id: record.text_channel_id,
+            p_guild_id: record.guild_id,
+            p_hub_id: record.hub_id,
+            p_owner_id: record.owner_id,
+          },
+        );
+        if (rpcError) {
+          recordError = { message: rpcError.message };
+        } else if (inserted !== true) {
+          ownershipLost = true;
+        }
+      } else {
+        const { error: plainError } = await this.supabase
+          .from('active_temp_channels')
+          .insert(record);
+        recordError = plainError ? { message: plainError.message } : null;
+      }
+      if (ownershipLost) {
+        // Stale recovery reclaimed this occurrence while we were creating
+        // channels: OUR channels are the duplicates now. Delete them and walk
+        // away without touching the occurrence — it belongs to recovery.
+        log.warn('Temp-room creation lost its claim to stale recovery; removing duplicates', {
+          occurrenceId,
+          channelId: vc.id,
+        });
+        const targets = [
+          { channelId: vc.id, remove: () => vc.delete('Temp channel claim was reclaimed') },
+          ...(textChannel
+            ? [{
+                channelId: textChannel.id,
+                remove: () => textChannel.delete('Temp channel claim was reclaimed'),
+              }]
+            : []),
+        ];
+        await this.deleteCreatedChannels(targets);
+        return;
+      }
       if (recordError && occurrenceId) {
         // The insert response can be lost AFTER commit. If a durable row now
         // owns these channels, deleting them would leave that committed row
