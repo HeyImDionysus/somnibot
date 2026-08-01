@@ -1216,6 +1216,39 @@ describe('AutomationEngine', () => {
       ).toBe(0);
     });
 
+    it('finalizes an all-rate-limited bulk occurrence as a condition MATCH (round 20)', async () => {
+      // Conditions were evaluated and matched; rate limiting suppressed the
+      // run. History must say that — not fabricate a failed evaluation.
+      mockGetForTrigger.mockReturnValue([
+        makeAutomation({
+          actions: [{ type: 'give_role', config: { role_id: 'role1' } }],
+        }),
+      ]);
+      mockAllowFire.mockResolvedValue(false);
+      await engine.start();
+
+      const event = {
+        type: 'member.verified',
+        guildId: 'g1',
+        // No single member id: the producer resolved a BULK target set.
+        data: {},
+        affectedMemberIds: ['10000000000000000', '10000000000000001'],
+      };
+      await (eventBus._listeners[0] as (event: unknown) => Promise<void>)(event);
+      // processAutomation is deliberately fire-and-forget inside handleEvent.
+      await vi.waitFor(() => expect(mockFinalize).toHaveBeenCalled());
+
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+      expect(mockFinalize).toHaveBeenCalledWith(
+        'exec-1',
+        expect.objectContaining({
+          conditionsPassed: true,
+          actionsExecuted: 0,
+          errors: ['Every matched member was rate-limited; no action ran'],
+        }),
+      );
+    });
+
     it('gives level.up NO durable occurrence identity (round 16)', async () => {
       // user+level is not lifetime-unique: /xp reset|remove|set can drop a
       // member below a milestone they legitimately re-cross, and a durable

@@ -703,7 +703,15 @@ export class TempChannelManager {
     if (voice) {
       const pairedTextName =
         typeof metadata.pairedTextName === 'string' ? metadata.pairedTextName : null;
-      const pairedText = pairedTextName
+      // Same durable-id preference as the voice member of the pair: a text
+      // channel renamed or moved during the stale window must not be dropped
+      // to text_channel_id null and orphaned outside every cleanup path.
+      const pairedTextById = createdChannelIds
+        .map((channelId) => this.guild.channels.cache.get(channelId))
+        .find((channel): channel is TextChannel =>
+          channel?.type === ChannelType.GuildText,
+        );
+      const pairedText = pairedTextById ?? (pairedTextName
         ? [...this.guild.channels.cache.values()].find((candidate) => {
             if (candidate.type !== ChannelType.GuildText) return false;
             const channel = candidate as TextChannel;
@@ -719,7 +727,7 @@ export class TempChannelManager {
               && channel.permissionOverwrites.cache
                 .get(this.guild.id)?.deny.has(PermissionFlagsBits.ViewChannel) === true;
           }) as TextChannel | undefined
-        : undefined;
+        : undefined);
       const recovered: ActiveTempChannel = {
         channel_id: voice.id,
         text_channel_id: pairedText?.id ?? null,

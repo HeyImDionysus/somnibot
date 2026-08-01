@@ -142,7 +142,22 @@ export class StatsChannelManager {
             // Resolve the ambiguous channel before ever creating another.
             const retry = await this.persistChannelIdentity(config, ambiguousId);
             if (retry.outcome === 'persisted') {
+              // Fall THROUGH to the normal success bookkeeping (value write,
+              // event, resolveUpdateAlerts) — an unconditional continue left
+              // the update-failed alert standing forever once last_value
+              // matched and later ticks took the unchanged-value shortcut.
               this.ambiguousChannels.delete(config.id);
+              channelId = ambiguousId;
+              const resolvedChannel =
+                this.guild.channels.cache.get(ambiguousId) as VoiceChannel | undefined;
+              if (resolvedChannel) {
+                await resolvedChannel.setName(newName).catch((renameError) => {
+                  log.warn('Recovered stats counter could not be renamed this tick:', {
+                    statsChannelId: config.id,
+                    error: String(renameError),
+                  });
+                });
+              }
             } else if (retry.outcome === 'lost_race') {
               // Another process registered its own counter meanwhile; ours is
               // a duplicate — dispose durably, never blind-delete.
@@ -174,9 +189,12 @@ export class StatsChannelManager {
                 }
               }
             }
-            // Still ambiguous, or just resolved: never create this tick.
-            continue;
+            if (!channelId) {
+              // Still ambiguous or disposed: never create this tick.
+              continue;
+            }
           }
+          if (!channelId) {
           // Create the voice channel if it doesn't exist yet
           const configObj = config.stat_config ?? {};
           const categoryId = typeof configObj === 'object' && 'category_id' in configObj
@@ -240,6 +258,7 @@ export class StatsChannelManager {
           }
           channelId = channel.id;
           created = true;
+          }
         }
 
         const { error: lastValueError } = await this.supabase

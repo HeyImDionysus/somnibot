@@ -622,17 +622,19 @@ export class AutomationEngine {
         ? await this.filterBulkRateLimits(automation, affectedMemberIds)
         : affectedMemberIds;
       if (affectedMemberIds.length > 0 && rateLimitedMemberIds.length === 0) {
-        // Every target is rate-limited: the same outcome the old
-        // pre-decision filter produced — nothing runs.
+        // Every target is rate-limited: nothing runs, but the conditions DID
+        // match — history must say why nothing happened, not fabricate a
+        // failed evaluation (approved holds record the same truth when
+        // release-time limits empty their target set).
         await this.executionLogger.finalize(claimRowId, {
           automationId: automation.id,
           guildId: this.guild.id,
           triggeredBy: userId,
           triggerEvent: event.type,
-          conditionsPassed: false,
+          conditionsPassed: true,
           actionsExecuted: 0,
           actionsFailed: 0,
-          errors: [],
+          errors: ['Every matched member was rate-limited; no action ran'],
           durationMs: Date.now() - startTime,
         });
         return;

@@ -400,6 +400,40 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     });
   }, 20_000);
 
+  it('resumes normal bookkeeping once an ambiguous identity resolves (round 20)', async () => {
+    // Tick 1: database down → ambiguous, one channel. Tick 2: database back →
+    // the retry confirms identity and the tick must fall through to the
+    // value write (and alert resolution) instead of skipping forever.
+    const StatsChannelManager = await load();
+    const created = {
+      id: 'vc-maybe',
+      delete: vi.fn(async () => ({})),
+      setName: vi.fn(async () => ({})),
+    };
+    const options = {
+      configRows: [{ ...CONFIG_ROW }],
+      scanRows: [] as Array<Record<string, unknown>>,
+      identityWriteFails: true,
+      identityReadBackFails: true,
+    };
+    const { supabase, updatePayloads } = survivorSupa(options);
+    const guild = makeGuild({ created });
+    const mgr = new StatsChannelManager(guild, supabase, 60);
+    await mgr.start().catch(() => {});
+    // Recovery: the database is reachable again.
+    options.identityWriteFails = false;
+    options.identityReadBackFails = false;
+    await (mgr as unknown as { updateAll(): Promise<void> }).updateAll().catch(() => {});
+    mgr.stop?.();
+
+    expect(guild.channels.create).toHaveBeenCalledTimes(1);
+    expect(created.delete).not.toHaveBeenCalled();
+    // The resolved tick performed the normal success bookkeeping.
+    expect(
+      updatePayloads.some((payload) => 'last_value' in payload),
+    ).toBe(true);
+  }, 30_000);
+
   it('does not mint another counter each tick while the identity stays ambiguous (round 19)', async () => {
     // Database fully down but Discord reachable: the first tick creates ONE
     // channel and its identity stays ambiguous. Every later tick must retry
