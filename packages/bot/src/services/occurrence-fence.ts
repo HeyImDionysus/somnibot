@@ -137,40 +137,84 @@ export async function recordDiscordOccurrenceChannels(
   supabase: SupabaseClient,
   occurrenceId: string,
   channelIds: string[],
+  expectedUpdatedAt: string | null = null,
 ): Promise<{ updatedAt: string | null }> {
-  const { data: current, error: readError } = await supabase
+  const readQuery = supabase
     .from('discord_operation_occurrences')
     .select('result')
     .eq('id', occurrenceId)
-    .eq('status', 'claimed')
-    .maybeSingle();
+    .eq('status', 'claimed');
+  const { data: current, error: readError } = await (
+    expectedUpdatedAt ? readQuery.eq('updated_at', expectedUpdatedAt) : readQuery
+  ).maybeSingle();
   if (readError) {
     throw new Error(`Unable to read occurrence for channel-id record: ${readError.message}`);
   }
   if (!current) {
-    throw new Error(`Unable to record channel ids: occurrence ${occurrenceId} is no longer claimed`);
+    const landed = await verifyOwnChannelRecordLanded(supabase, occurrenceId, channelIds);
+    if (landed) return landed;
+    throw new Error(
+      `Unable to record channel ids: occurrence ${occurrenceId} is no longer claimed or owned by this worker`,
+    );
   }
   const result =
     current.result && typeof current.result === 'object' && !Array.isArray(current.result)
       ? { ...(current.result as Record<string, unknown>) }
       : {};
   result.createdChannelIds = channelIds;
-  const { data: updated, error: updateError } = await supabase
+  // CAS on the caller's claim generation: a creator that stalled past the
+  // stale threshold no longer owns this row — recovery reclaimed it (bumping
+  // updated_at) — and recording anyway would overwrite recovery's result AND
+  // hand the stalled worker a fresh generation that blesses its ownership
+  // insert, committing competing channels.
+  const updateQuery = supabase
     .from('discord_operation_occurrences')
     .update({ result })
     .eq('id', occurrenceId)
-    .eq('status', 'claimed')
+    .eq('status', 'claimed');
+  const { data: updated, error: updateError } = await (
+    expectedUpdatedAt ? updateQuery.eq('updated_at', expectedUpdatedAt) : updateQuery
+  )
     .select('id, updated_at')
     .maybeSingle();
   if (updateError) {
     throw new Error(`Unable to record occurrence channel ids: ${updateError.message}`);
   }
   if (!updated) {
-    throw new Error(`Unable to record channel ids: occurrence ${occurrenceId} is no longer claimed`);
+    const landed = await verifyOwnChannelRecordLanded(supabase, occurrenceId, channelIds);
+    if (landed) return landed;
+    throw new Error(
+      `Unable to record channel ids: occurrence ${occurrenceId} is no longer claimed or owned by this worker`,
+    );
   }
   return {
     updatedAt: typeof updated.updated_at === 'string' ? updated.updated_at : null,
   };
+}
+
+/**
+ * Retry disambiguation for the CAS above: an earlier attempt's UPDATE can
+ * land while its response is lost, so the retry's expected generation is
+ * stale even though the row now carries EXACTLY our channel ids. That is our
+ * own committed write — adopt the row's current generation instead of
+ * self-destructing channels this worker still owns.
+ */
+async function verifyOwnChannelRecordLanded(
+  supabase: SupabaseClient,
+  occurrenceId: string,
+  channelIds: string[],
+): Promise<{ updatedAt: string | null } | null> {
+  const { data: row, error } = await supabase
+    .from('discord_operation_occurrences')
+    .select('status, result, updated_at')
+    .eq('id', occurrenceId)
+    .maybeSingle();
+  if (error || !row || row.status !== 'claimed') return null;
+  const recorded = (row.result as Record<string, unknown> | null)?.createdChannelIds;
+  if (!Array.isArray(recorded) || JSON.stringify(recorded) !== JSON.stringify(channelIds)) {
+    return null;
+  }
+  return { updatedAt: typeof row.updated_at === 'string' ? row.updated_at : null };
 }
 
 export async function completeDiscordOccurrence(

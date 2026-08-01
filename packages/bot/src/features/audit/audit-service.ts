@@ -602,7 +602,12 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     category: 'tickets',
     targetType: 'ticket',
     actorType: 'user',
-    details: (d) => ({ userDiscordId: d.userDiscordId, panelId: d.panelId, ticketNumber: d.ticketNumber, stage: d.stage, error: d.error }),
+    // The requesting member IS the actor: without this the row fell back to
+    // actor_id 'bot', misattributing the event and hiding it from
+    // purge_member_data's (actor_type='user' AND actor_id=...) predicate —
+    // /forgetme left the member id behind in the details payload.
+    actorId: (d) => d.userDiscordId as string,
+    details: (d) => ({ panelId: d.panelId, ticketNumber: d.ticketNumber, stage: d.stage, error: d.error }),
     success: false,
   },
   'ticket.transcript_failed': {

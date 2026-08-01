@@ -274,11 +274,12 @@ async function notifyDeliveryFailure(
     metadata: { channel_id: channelId, error },
     client,
   });
-  // Latch ONLY on a delivered owner notice. A durable row whose Discord ping
-  // failed (alert channel briefly unavailable) must keep retrying under the
-  // throttles above — latching on the row alone meant repairing the alert
-  // channel never produced a notice until message-log itself recovered.
-  if (result.delivered) {
+  // Latch only when BOTH halves are durable: the notice was delivered AND
+  // the alert row exists (fresh insert or 23505 dedupe). A delivered ping
+  // whose row insert transiently failed used to latch, leaving the outage
+  // with no durable dashboard alert forever; a durable row whose ping failed
+  // equally keeps retrying under the throttles above.
+  if (result.delivered && (result.inserted || result.insertErrorCode === '23505')) {
     _deliveryAlerted.add(guildId);
   }
 }

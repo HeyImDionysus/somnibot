@@ -137,6 +137,48 @@ describe('message-log recovery boundary', () => {
     )).toHaveLength(1);
   });
 
+  it('does not latch on a delivered ping whose alert row failed to insert (round 33)', async () => {
+    // The inverse of round 12: the Discord notice landed but the alerts-table
+    // insert transiently failed. Latching then meant the outage never gained
+    // a durable dashboard alert — the next failure past the backoff must
+    // attempt the insert again.
+    const send = vi.fn().mockRejectedValue(Object.assign(new Error('forbidden'), { status: 403 }));
+    raiseOwnerAlert
+      .mockResolvedValueOnce({ inserted: false, delivered: true })
+      .mockResolvedValueOnce({ inserted: true, delivered: true });
+    const client = {
+      supabase: {
+        from: vi.fn(() => chain({
+          data: {
+            message_log_enabled: true,
+            message_log_channel_id: 'log-ch',
+            message_log_edits_enabled: true,
+            message_log_deletes_enabled: true,
+            message_log_ignored_channel_ids: [],
+          },
+          error: null,
+        })),
+      },
+      eventBus: { emit: vi.fn() },
+      guilds: { cache: new Map() },
+    };
+
+    vi.useFakeTimers();
+    try {
+      await logMessageDelete(client as any, message(send, 'row-fail-1'));
+      vi.advanceTimersByTime(61_000);
+      await logMessageDelete(client as any, message(send, 'row-fail-2'));
+      vi.advanceTimersByTime(61_000);
+      await logMessageDelete(client as any, message(send, 'row-fail-3'));
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Attempt 2 re-ran the insert (row landed + delivered → latched);
+    // attempt 3 was swallowed by the now-legitimate latch.
+    expect(raiseOwnerAlert).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps retrying the owner ping after the durable row exists, latching only on delivery (round 12)', async () => {
     // Latching on the ROW alone meant a ping that failed (alert channel
     // briefly unavailable) was never retried: repairing the channel produced

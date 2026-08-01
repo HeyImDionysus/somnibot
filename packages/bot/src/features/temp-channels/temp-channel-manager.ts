@@ -425,6 +425,7 @@ export class TempChannelManager {
               this.supabase,
               occurrenceId,
               [vc.id, ...(textChannelId ? [textChannelId] : [])],
+              occurrenceClaimUpdatedAt,
             );
             // Refresh the claim snapshot: the record write bumped updated_at
             // and a stale snapshot would make the ownership insert refuse.
