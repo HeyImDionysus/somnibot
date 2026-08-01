@@ -229,14 +229,17 @@ function captureObject(spec: {
   status?: string;
   value?: string;
   currency?: string;
-  relatedOrderId?: string;
+  relatedOrderId?: string | null;
 } = {}) {
+  const related = spec.relatedOrderId === null
+    ? null
+    : spec.relatedOrderId ?? 'PP-ORDER-1';
   return {
     status: spec.status ?? 'COMPLETED',
     amount: { currency_code: spec.currency ?? 'USD', value: spec.value ?? '25.00' },
-    ...(spec.relatedOrderId
-      ? { supplementary_data: { related_ids: { order_id: spec.relatedOrderId } } }
-      : {}),
+    ...(related === null
+      ? {}
+      : { supplementary_data: { related_ids: { order_id: related } } }),
   };
 }
 
@@ -388,7 +391,7 @@ function withLedger(opts: {
     customer_id: CUSTOMER_UUID,
     product_id: PRODUCT_UUID,
     plan_id: null,
-    paypal_order_id: `PAYPAL-${String(order.id ?? 'ORDER')}`,
+    paypal_order_id: 'PP-ORDER-1',
     paypal_subscription_id: null,
     ...order,
   }));
@@ -411,7 +414,7 @@ function withLedger(opts: {
         currency: payment.currency ?? 'USD',
         status: 'completed',
         source: 'purchase',
-        paypal_order_id: `PAYPAL-${String(payment.order_id)}`,
+        paypal_order_id: 'PP-ORDER-1',
         paypal_subscription_id: null,
         created_at: payment.created_at,
       }));
@@ -530,7 +533,13 @@ describe('per-object provider fetchers', () => {
     expect(result).toEqual({
       ok: true,
       found: true,
-      value: { status: 'COMPLETED', amountCents: 1999, currency: 'USD', relatedOrderId: null, updateTimeMs: null },
+      value: {
+        status: 'COMPLETED',
+        amountCents: 1999,
+        currency: 'USD',
+        relatedOrderId: 'PP-ORDER-1',
+        updateTimeMs: null,
+      },
     });
   });
 
@@ -5336,7 +5345,13 @@ describe('runPayPalReconciliation', () => {
       }],
     });
     scriptProviderObjects({
-      captures: { 'CAP-OLD': captureObject({ status: 'REFUNDED', value: '25.00' }) },
+      captures: {
+        'CAP-OLD': captureObject({
+          status: 'REFUNDED',
+          value: '25.00',
+          relatedOrderId: 'PP-ORDER-OLD',
+        }),
+      },
     });
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
@@ -5875,6 +5890,121 @@ describe('runPayPalReconciliation', () => {
     expect(result).toMatchObject({
       status: 'failed',
       reason: 'provider refund identity conflict',
+      retriable: false,
+    });
+  });
+
+  // ── PR #409 review round 25 repairs ─────────────────────────────────────
+
+  it('judges the incomplete ledger behind a terminal fallback row', async () => {
+    // The out-of-window row is already refunded — but the provider says the
+    // sale is REFUNDED at 2500 and the local ledger holds nothing. Status
+    // agreement must not bless a missing aggregate.
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'SALE-MON',
+        status: 'refunded',
+        created_at: '2026-07-10T10:00:00.000Z',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'CANCELLED', lastPaymentTime: null }),
+      },
+      subscriptionTransactions: {
+        'SUB-1': {
+          transactions: [{
+            id: 'SALE-MON',
+            status: 'REFUNDED',
+            time: '2026-07-23T10:00:00.000Z',
+            amount_with_breakdown: {
+              gross_amount: { currency_code: 'USD', value: '25.00' },
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toContainEqual({
+      kind: 'refund',
+      transactionId: 'SALE-MON',
+      guildId: GUILD_ID,
+      amountCents: 2500,
+      currency: 'USD',
+      initiatedAt: null,
+      source: 'capture',
+      referenceId: 'SALE-MON',
+    });
+  });
+
+  it('fails closed on a capture that omits its related order', async () => {
+    withLedger({
+      payments: [paymentRow()],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject({ relatedOrderId: null }) },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'provider identity conflict',
+      retriable: false,
+    });
+  });
+
+  it('fails closed on a settled subscription transaction with no money', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: null }),
+      },
+      subscriptionTransactions: {
+        'SUB-1': {
+          transactions: [{
+            id: 'SALE-NOMONEY',
+            status: 'COMPLETED',
+            time: IN_WINDOW,
+          }],
+        },
+      },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'subscription transactions lookup returned a malformed record',
       retriable: false,
     });
   });

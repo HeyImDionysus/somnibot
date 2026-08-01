@@ -57,6 +57,9 @@ export const RECONCILE_LAST_RESULT_KEY = 'paypal_reconcile_last_result';
 export const RECONCILE_ALERT_TYPE = 'paypal_reconciliation_mismatch';
 export const RECONCILE_FAILURE_ALERT_TYPE = 'paypal_reconciliation_failure';
 
+/** Transaction statuses that represent moved money and demand evidence. */
+const MONEY_TXN_STATUSES = ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'REVERSED'];
+
 const ORDER_SCAN_STATUSES = [
   'completed',
   'disputed',
@@ -897,6 +900,19 @@ export async function fetchProviderSubscriptionTransactions(
     const breakdown = (txn.amount_with_breakdown as
       { gross_amount?: unknown } | undefined)?.gross_amount;
     const money = readProviderAmount(breakdown);
+    // A money-moving status with no money is not an optional field — the
+    // null-guarded downstream comparisons would silently skip every check
+    // and let an arbitrary local row account for the charge.
+    if (
+      MONEY_TXN_STATUSES.includes(txn.status)
+      && (money.amountCents === null || money.currency === null)
+    ) {
+      return {
+        ok: false,
+        retriable: false,
+        reason: 'subscription transactions lookup returned a malformed record',
+      };
+    }
     transactions.push({
       id: txn.id,
       status: txn.status,
@@ -2970,11 +2986,16 @@ async function runPass(
     // order's provider identity. A valid capture id borrowed from another
     // order/guild with matching amounts previously verified cleanly.
     if (
-      capture.relatedOrderId !== null
-      && order
+      order
       && isProviderId(order.paypal_order_id)
-      && capture.relatedOrderId !== order.paypal_order_id
+      && (
+        capture.relatedOrderId === null
+        || capture.relatedOrderId !== order.paypal_order_id
+      )
     ) {
+      // An omitted related order is the same defect as a foreign one: the
+      // only capture-to-order ownership check must not be skippable by
+      // stripping supplementary_data.
       return { status: 'failed', reason: 'provider identity conflict', retriable: false };
     }
     const providerRefunded = ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(capture.status)
@@ -3337,10 +3358,12 @@ async function runPass(
         if (!lookup.ok || !lookup.found) continue;
         const lookbackOrder = ordersById.get(payment.order_id as string);
         if (
-          lookup.value.relatedOrderId !== null
-          && lookbackOrder
+          lookbackOrder
           && isProviderId(lookbackOrder.paypal_order_id)
-          && lookup.value.relatedOrderId !== lookbackOrder.paypal_order_id
+          && (
+            lookup.value.relatedOrderId === null
+            || lookup.value.relatedOrderId !== lookbackOrder.paypal_order_id
+          )
         ) {
           return { status: 'failed', reason: 'provider identity conflict', retriable: false };
         }
@@ -3768,10 +3791,12 @@ async function runPass(
                 if (String(witnessParent.created_at ?? '') < windowStart) {
                   const parentOrder = ordersById.get(witnessParent.order_id as string);
                   if (
-                    parentCapture.relatedOrderId !== null
-                    && parentOrder
+                    parentOrder
                     && isProviderId(parentOrder.paypal_order_id)
-                    && parentCapture.relatedOrderId !== parentOrder.paypal_order_id
+                    && (
+                      parentCapture.relatedOrderId === null
+                      || parentCapture.relatedOrderId !== parentOrder.paypal_order_id
+                    )
                   ) {
                     return {
                       status: 'failed',
@@ -4566,7 +4591,6 @@ async function runPass(
       }),
     );
     if (!txnMap.ok) return txnMap.failure;
-    const MONEY_TXN_STATUSES = ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'REVERSED'];
     const unknownTxns: Array<{
       subscriptionId: string;
       order: LocalOrderRow;
@@ -4698,15 +4722,31 @@ async function runPass(
           ) {
             return { status: 'failed', reason: 'provider identity conflict', retriable: false };
           }
-          // The row must MATCH the transaction's terminal family: a
-          // completed row behind a REFUNDED/REVERSED transaction means the
-          // refund webhook was lost — judge the refund ledger instead of
-          // silently accounting; a non-settled row never accounts at all.
+          // A TERMINAL provider transaction always faces the aggregate
+          // judgment: a completed row means the refund webhook was lost,
+          // and a terminal row may sit over an INCOMPLETE ledger (one
+          // sibling lost) that status alone would bless — terminal rows are
+          // also excluded from the completed-only lookback, so this is
+          // their only ledger check. A non-settled row never accounts.
           const terminalTxn = ['REFUNDED', 'REVERSED'].includes(txn.status);
           if (
-            (terminalTxn && fallbackRow.status === 'completed')
-            || txn.status === 'PARTIALLY_REFUNDED'
+            terminalTxn
+            && !['completed', 'refunded', 'reversed'].includes(fallbackRow.status)
           ) {
+            // pending/failed behind terminal provider money: not accounted.
+            missingLocalPayments.push({
+              kind: 'payment',
+              transactionId: txn.id,
+              guildId: order.guild_id as string,
+              amountCents: txn.amountCents ?? order.amount_cents,
+              currency: txn.currency ?? (normalizeCurrency(order.currency) as string),
+              initiatedAt: new Date(txn.timeMs).toISOString(),
+              source: 'subscription',
+              referenceId: subscriptionId,
+            });
+            continue;
+          }
+          if (terminalTxn || txn.status === 'PARTIALLY_REFUNDED') {
             // Terminal or partially refunded provider money behind an
             // out-of-window row: judge the refund ledger — a lost partial
             // webhook leaves zero local rows and must surface.
@@ -4740,20 +4780,6 @@ async function runPass(
                 localCurrency: normalizeCurrency(fallbackRow.currency),
               });
             }
-            continue;
-          }
-          if (terminalTxn && !['refunded', 'reversed'].includes(fallbackRow.status)) {
-            // pending/failed behind terminal provider money: not accounted.
-            missingLocalPayments.push({
-              kind: 'payment',
-              transactionId: txn.id,
-              guildId: order.guild_id as string,
-              amountCents: txn.amountCents ?? order.amount_cents,
-              currency: txn.currency ?? (normalizeCurrency(order.currency) as string),
-              initiatedAt: new Date(txn.timeMs).toISOString(),
-              source: 'subscription',
-              referenceId: subscriptionId,
-            });
             continue;
           }
           if (!terminalTxn && fallbackRow.status !== 'completed') {
