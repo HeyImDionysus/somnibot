@@ -55,6 +55,34 @@ describe('GET /api/dashboard/feature-status', () => {
     });
   });
 
+  it('rejects runtime rows stranded by an earlier boot (round 28)', async () => {
+    const config = chain({ stats_channels_enabled: true });
+    const heartbeat = chain({ snapshot_at: new Date().toISOString(), boot_id: 'boot-B' });
+    const runtime = chain(null) as Record<string, unknown>;
+    runtime.then = (resolve: (value: unknown) => void) => resolve({
+      data: [
+        { feature: 'stats_channels', boot_id: 'boot-A' },
+        { feature: 'temp_channels', boot_id: 'boot-B' },
+        { feature: 'giveaways', boot_id: '' },
+      ],
+      error: null,
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue({
+      from: vi.fn((table: string) => table === 'guild_config'
+        ? config
+        : table === 'bot_diagnostics' ? heartbeat : runtime),
+    } as never);
+
+    const response = await GET();
+    const body = await response.json();
+
+    // stats_channels was written by boot-A while the live heartbeat is
+    // boot-B: a failed re-init must not read as running just because the
+    // heartbeat recovered. Empty boot ids fail open (pre-identity writer).
+    expect(response.status).toBe(200);
+    expect(body.data.runtimeFeatures).toEqual(['temp_channels', 'giveaways']);
+  });
+
   it('reports a MISSING guild_config row as null, never as everything-disabled', async () => {
     // Review 3689865706: new-guild init tolerates a failed config insert, and
     // the bot then runs defaults like `temp_channels_enabled !== false`.

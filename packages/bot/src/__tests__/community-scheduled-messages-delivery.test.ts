@@ -127,7 +127,21 @@ function schedSupa(
     };
     return c;
   }
-  const rpc = vi.fn(async (name: string) => {
+  const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
+    if (name === 'settle_discord_occurrence') {
+      // Settlement moved to a merge RPC (round 28): record it like the old
+      // occurrence table update so completion/failure assertions stay
+      // anchored to the same collector.
+      updates.push({
+        payload: {
+          status: args?.p_status,
+          resource_id: args?.p_resource_id ?? null,
+          result: args?.p_result ?? {},
+          last_error: args?.p_last_error ?? null,
+        },
+      });
+      return { data: true, error: null };
+    }
     if (name === 'reclaim_stale_discord_occurrence') {
       const r = options.reclaimResult;
       if (r && typeof r === 'object' && 'error' in r) return { data: null, error: r.error };

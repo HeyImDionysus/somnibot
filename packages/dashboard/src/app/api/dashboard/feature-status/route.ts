@@ -32,7 +32,7 @@ export async function GET() {
         .maybeSingle(),
       supabase
         .from('bot_diagnostics')
-        .select('snapshot_at')
+        .select('snapshot_at, boot_id')
         .eq('guild_id', ctx.guildId)
         .in('type', ['heartbeat', 'health'])
         .order('snapshot_at', { ascending: false })
@@ -40,7 +40,7 @@ export async function GET() {
         .maybeSingle(),
       supabase
         .from('guild_runtime_features')
-        .select('feature')
+        .select('feature, boot_id')
         .eq('guild_id', ctx.guildId)
         .limit(100),
     ]);
@@ -74,6 +74,19 @@ export async function GET() {
         },
         runtimeFeatures: Array.isArray(runtimeResult.data)
           ? runtimeResult.data
+            // Rows stranded by an EARLIER boot must not let a recovered
+            // heartbeat vouch for managers this process never constructed.
+            // A missing id on either side fails open (pre-identity writer).
+            .filter((row) => {
+              const heartbeatBootId = typeof heartbeatResult.data?.boot_id === 'string'
+                && heartbeatResult.data.boot_id !== ''
+                ? heartbeatResult.data.boot_id
+                : null;
+              return heartbeatBootId === null
+                || typeof row.boot_id !== 'string'
+                || row.boot_id === ''
+                || row.boot_id === heartbeatBootId;
+            })
             .map((row) => row.feature)
             .filter((feature): feature is string => typeof feature === 'string')
           : null,

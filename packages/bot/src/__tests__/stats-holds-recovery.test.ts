@@ -437,6 +437,43 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     ).toBe(true);
   }, 30_000);
 
+  it('propagates a recovered-tick rename failure instead of resuming bookkeeping (round 28)', async () => {
+    // Same recovery shape as round 20, but the confirmed channel's rename
+    // fails (Discord outage / permissions revoked). Swallowing it persisted
+    // last_value, resolved the failure alert, and the unchanged-value
+    // shortcut then hid the stale name forever — the failure must reach the
+    // outer failure path, leaving last_value unwritten so the next tick
+    // retries the rename.
+    const StatsChannelManager = await load();
+    const created = {
+      id: 'vc-maybe',
+      delete: vi.fn(async () => ({})),
+      setName: vi.fn(async () => {
+        throw new Error('Missing Permissions');
+      }),
+    };
+    const options = {
+      configRows: [{ ...CONFIG_ROW }],
+      scanRows: [] as Array<Record<string, unknown>>,
+      identityWriteFails: true,
+      identityReadBackFails: true,
+    };
+    const { supabase, updatePayloads } = survivorSupa(options);
+    const guild = makeGuild({ created });
+    const mgr = new StatsChannelManager(guild, supabase, 60);
+    await mgr.start().catch(() => {});
+    (guild.channels.cache as Map<string, unknown>).set('vc-maybe', created);
+    options.identityWriteFails = false;
+    options.identityReadBackFails = false;
+    await (mgr as unknown as { updateAll(): Promise<void> }).updateAll().catch(() => {});
+    mgr.stop?.();
+
+    expect(created.delete).not.toHaveBeenCalled();
+    // No success bookkeeping: last_value stays unwritten, so the stale name
+    // cannot hide behind the unchanged-value shortcut.
+    expect(updatePayloads.every((payload) => !('last_value' in payload))).toBe(true);
+  }, 30_000);
+
   it('does not mint another counter each tick while the identity stays ambiguous (round 19)', async () => {
     // Database fully down but Discord reachable: the first tick creates ONE
     // channel and its identity stays ambiguous. Every later tick must retry

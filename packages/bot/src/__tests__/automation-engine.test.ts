@@ -45,6 +45,7 @@ vi.mock('../features/automations/execution-logger.js', () => ({
     log = vi.fn(async () => {});
       markActionsStarted = vi.fn(async () => undefined);
     finalizeStrict = vi.fn(async () => undefined);
+    finalizeStaleStartedSweep = vi.fn(async () => 0);
   },
 }));
 vi.mock('../services/alert-service.js', () => ({

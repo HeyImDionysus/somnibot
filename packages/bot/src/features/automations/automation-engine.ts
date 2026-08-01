@@ -185,6 +185,13 @@ export class AutomationEngine {
       log.error('Failed to reconcile interrupted mass actions:', err);
     }
     try {
+      // Immediate-path twin of the hold recovery above: rows stranded
+      // between the actions marker and finalize turn truthful at boot.
+      await this.executionLogger.finalizeStaleStartedSweep(this.guild.id);
+    } catch (err) {
+      log.error('Failed to sweep interrupted immediate executions:', err);
+    }
+    try {
       await this.massActionHolds.pruneTerminal();
       this.lastTerminalPruneAt = Date.now();
     } catch (err) {
@@ -1032,6 +1039,11 @@ export class AutomationEngine {
         await this.massActionHolds.failInterruptedExecutions();
       } catch (err) {
         log.error('Failed to reconcile expired mass-action leases:', err);
+      }
+      try {
+        await this.executionLogger.finalizeStaleStartedSweep(this.guild.id);
+      } catch (err) {
+        log.error('Failed to sweep interrupted immediate executions:', err);
       }
       if (Date.now() - this.lastTerminalPruneAt >= 6 * 60 * 60 * 1_000) {
         try {

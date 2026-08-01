@@ -70,12 +70,14 @@ const mockFinalize = vi.fn().mockResolvedValue(undefined);
 const mockRelease = vi.fn().mockResolvedValue(undefined);
 const mockMarkStarted = vi.fn().mockResolvedValue(undefined);
 const mockFinalizeStrict = vi.fn().mockResolvedValue(undefined);
+const mockFinalizeSweep = vi.fn().mockResolvedValue(0);
 vi.mock('../features/automations/execution-logger.js', () => ({
   ExecutionLogger: class {
     log = mockLogExecution;
     claim = mockClaim;
     finalize = mockFinalize;
     finalizeStrict = mockFinalizeStrict;
+    finalizeStaleStartedSweep = mockFinalizeSweep;
     release = mockRelease;
     markActionsStarted = mockMarkStarted;
   },
@@ -552,6 +554,14 @@ describe('AutomationEngine', () => {
       );
       expect(mockExecuteActions).toHaveBeenCalledTimes(1);
       expect(mockExecuteActions.mock.calls[0][1].member.id).toBe('10000000000000000');
+    });
+
+    it('sweeps interrupted immediate executions at startup (round 28)', async () => {
+      // Gateway events never replay across restarts, so rows stranded
+      // between the actions marker and finalize would otherwise read
+      // 'Conditions not met' forever.
+      await engine.start();
+      expect(mockFinalizeSweep).toHaveBeenCalledWith('g1');
     });
 
     it('runs one-shot actions when every bulk target is rate-limited (round 26)', async () => {

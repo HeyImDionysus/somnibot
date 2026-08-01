@@ -179,17 +179,17 @@ export async function completeDiscordOccurrence(
   resourceId: string | null,
   result: Record<string, unknown> = {},
 ): Promise<void> {
-  const { error } = await supabase
-    .from('discord_operation_occurrences')
-    .update({
-      status: 'completed',
-      resource_id: resourceId,
-      result,
-      completed_at: new Date().toISOString(),
-      last_error: null,
-    })
-    .eq('id', occurrenceId)
-    .eq('status', 'claimed');
+  // Settlement MERGES into result (Definer-rights RPC): replacing the object
+  // dropped the counterReserved marker, so recovery completing a reclaimed
+  // occurrence let the stalled original sender pay a SECOND slot for the
+  // same due minute.
+  const { error } = await supabase.rpc('settle_discord_occurrence', {
+    p_occurrence_id: occurrenceId,
+    p_status: 'completed',
+    p_resource_id: resourceId,
+    p_result: result,
+    p_last_error: null,
+  });
   if (error) throw new Error(`Unable to complete Discord occurrence: ${error.message}`);
 }
 
@@ -200,17 +200,15 @@ export async function failDiscordOccurrence(
   resourceId: string | null = null,
   result: Record<string, unknown> = {},
 ): Promise<void> {
-  const { error: updateError } = await supabase
-    .from('discord_operation_occurrences')
-    .update({
-      status: 'failed',
-      resource_id: resourceId,
-      result,
-      last_error: error,
-      completed_at: new Date().toISOString(),
-    })
-    .eq('id', occurrenceId)
-    .eq('status', 'claimed');
+  // Same merge discipline as completion: a failed send that already paid its
+  // counter slot must keep the marker, or the retry pays twice.
+  const { error: updateError } = await supabase.rpc('settle_discord_occurrence', {
+    p_occurrence_id: occurrenceId,
+    p_status: 'failed',
+    p_resource_id: resourceId,
+    p_result: result,
+    p_last_error: error,
+  });
   if (updateError) throw new Error(`Unable to fail Discord occurrence: ${updateError.message}`);
 }
 

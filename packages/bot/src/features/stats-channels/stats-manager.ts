@@ -160,12 +160,11 @@ export class StatsChannelManager {
                 await this.raiseChannelDeletedAlert(config);
                 continue;
               }
-              await resolvedChannel.setName(newName).catch((renameError) => {
-                log.warn('Recovered stats counter could not be renamed this tick:', {
-                  statsChannelId: config.id,
-                  error: String(renameError),
-                });
-              });
+              // A rename failure must reach the SAME outer failure path the
+              // ordinary update uses: swallowing it here persisted the new
+              // last_value, resolved the failure alert, and the
+              // unchanged-value shortcut then hid the stale name forever.
+              await resolvedChannel.setName(newName);
             } else if (retry.outcome === 'lost_race') {
               // Another process registered its own counter meanwhile; ours is
               // a duplicate — dispose durably, never blind-delete.

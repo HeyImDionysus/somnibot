@@ -128,6 +128,19 @@ describe('ExecutionLogger occurrence claim', () => {
     expect(calls).not.toContain('finalize_stale_started_automation_execution');
   });
 
+  it('sweeps stale started executions guild-wide via the plural RPC (round 28)', async () => {
+    const supa = makeSupa({ data: { id: 'row-1' }, error: null });
+    supa.rpc = vi.fn(async () => ({ data: 3, error: null }));
+    const logger = new ExecutionLogger(supa);
+
+    await expect(logger.finalizeStaleStartedSweep('g1')).resolves.toBe(3);
+
+    expect(supa.rpc).toHaveBeenCalledWith(
+      'finalize_stale_started_automation_executions',
+      expect.objectContaining({ p_guild_id: 'g1' }),
+    );
+  });
+
   it('releases a proven-unused occurrence claim by row id', async () => {
     const supa = makeSupa({ data: { id: 'row-1' }, error: null });
     const logger = new ExecutionLogger(supa);

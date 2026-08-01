@@ -23,6 +23,11 @@
 CREATE TABLE IF NOT EXISTS public.guild_runtime_features (
   guild_id TEXT NOT NULL REFERENCES public.guild(id) ON DELETE CASCADE,
   feature TEXT NOT NULL,
+  -- Round 28: which PROCESS boot wrote this row. The heartbeat publishes the
+  -- same id, so the dashboard rejects rows stranded by an earlier boot
+  -- instead of letting a current heartbeat vouch for managers this process
+  -- never constructed. Empty string = pre-identity writer (fails open).
+  boot_id TEXT NOT NULL DEFAULT '',
   started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (guild_id, feature)
 );

@@ -161,6 +161,30 @@ export class ExecutionLogger {
   }
 
   /**
+   * Guild-wide sweep of the same interrupted shape, for STARTUP: gateway
+   * events never replay across restarts, so the claim-time terminalizer
+   * alone cannot reach rows stranded by a crashed worker. Returns how many
+   * rows turned truthful.
+   */
+  async finalizeStaleStartedSweep(guildId: string): Promise<number> {
+    const staleBefore = new Date(Date.now() - STALE_PRE_ACTION_CLAIM_MS).toISOString();
+    const { data, error } = await this.supabase.rpc(
+      'finalize_stale_started_automation_executions',
+      { p_guild_id: guildId, p_stale_before: staleBefore },
+    );
+    if (error) {
+      throw new Error(`Failed to sweep stale started executions: ${error.message}`);
+    }
+    const count = typeof data === 'number' ? data : 0;
+    if (count > 0) {
+      log.warn(
+        `Terminalized ${count} interrupted automation execution(s) left by an earlier run.`,
+      );
+    }
+    return count;
+  }
+
+  /**
    * Terminalize a stale STARTED claim as interrupted (Definer-rights RPC,
    * lock-then-check, age floor, no linked hold). Actions may have reached
    * Discord, so the occurrence is never re-executed; only the history row

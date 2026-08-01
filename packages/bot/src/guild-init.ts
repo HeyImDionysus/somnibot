@@ -12,6 +12,7 @@
  */
 
 import type { Guild, RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
+import { BOOT_ID } from './services/boot-identity.js';
 import { seedStarterContent } from './services/content-seeder.js';
 import { backfillMembers } from './features/welcome/member-service.js';
 import { REST, Routes } from 'discord.js';
@@ -414,7 +415,15 @@ export async function initGuildFeatures(
       const { error: upsertError } = await supabase
         .from('guild_runtime_features')
         .upsert(
-          startedRuntimeFeatures.map((feature) => ({ guild_id: guild.id, feature })),
+          startedRuntimeFeatures.map((feature) => ({
+            guild_id: guild.id,
+            feature,
+            // Boot identity: the dashboard compares this to the heartbeat's
+            // boot_id, so rows stranded by an earlier boot (this upsert or
+            // the prune below failing transiently) can never combine with a
+            // RECOVERED heartbeat into a false 'operational'.
+            boot_id: BOOT_ID,
+          })),
           { onConflict: 'guild_id,feature' },
         );
       if (upsertError) {
@@ -422,11 +431,13 @@ export async function initGuildFeatures(
           error: upsertError.message,
         });
       } else {
+        // Prune by boot identity: anything not written by THIS boot is
+        // stale, including features that failed to start this time.
         const { error: pruneError } = await supabase
           .from('guild_runtime_features')
           .delete()
           .eq('guild_id', guild.id)
-          .not('feature', 'in', `(${startedRuntimeFeatures.map((f) => `"${f}"`).join(',')})`);
+          .neq('boot_id', BOOT_ID);
         if (pruneError) {
           guildLog.error('Failed to prune stale runtime feature rows', {
             error: pruneError.message,
