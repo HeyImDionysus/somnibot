@@ -114,6 +114,8 @@ export interface ProviderOrderRefund {
   currency: string;
   /** Provider-side creation time; null when the API omits it. */
   createTimeMs: number | null;
+  /** Parent capture from the refund's up-link; null when the API omits it. */
+  parentCaptureId: string | null;
 }
 
 /** v1 sale object — subscription billing writes sale ids, not captures. */
@@ -614,12 +616,22 @@ export async function fetchProviderOrder(
       const createTimeMs = typeof refundRecord.create_time === 'string'
         ? Date.parse(refundRecord.create_time)
         : Number.NaN;
+      let refundParentCaptureId: string | null = null;
+      const refundLinks = Array.isArray(refundRecord.links) ? refundRecord.links : [];
+      for (const link of refundLinks) {
+        const linkRecord = link as { rel?: unknown; href?: unknown } | null;
+        if (linkRecord?.rel === 'up' && typeof linkRecord.href === 'string') {
+          const match = /\/v2\/payments\/captures\/([^/?#]+)/.exec(linkRecord.href);
+          if (match && isProviderId(match[1])) refundParentCaptureId = match[1];
+        }
+      }
       refunds.push({
         id: refundRecord.id,
         status: refundRecord.status,
         amountCents: money.amountCents,
         currency: money.currency,
         createTimeMs: Number.isFinite(createTimeMs) ? createTimeMs : null,
+        parentCaptureId: refundParentCaptureId,
       });
     }
     for (const capture of unitCaptures) {
@@ -778,7 +790,23 @@ export async function fetchProviderSubscription(
   );
   if (!result.ok || !result.found) return result;
   const record = result.value;
-  if (typeof record.status !== 'string' || record.status.length === 0) {
+  // Every divergence branch downstream keys on a KNOWN state; an
+  // unrecognized (new or malformed) status would run none of them and let
+  // the subscription reconcile cleanly on silence. Fail closed instead.
+  const KNOWN_SUBSCRIPTION_STATUSES = [
+    'APPROVAL_PENDING',
+    'APPROVED',
+    'CREATED',
+    'ACTIVE',
+    'SUSPENDED',
+    'CANCELLED',
+    'EXPIRED',
+  ];
+  if (
+    typeof record.status !== 'string'
+    || record.status.length === 0
+    || !KNOWN_SUBSCRIPTION_STATUSES.includes(record.status)
+  ) {
     return {
       ok: false,
       retriable: false,
@@ -2614,8 +2642,8 @@ async function runPass(
 
   const orderRefundLists = new Map<string, {
     refunds: ProviderOrderRefund[];
-    /** True when completed refunds existed but were ALL inside the lag. */
-    deferredInFlight: boolean;
+    /** Parent captures of completed refunds excluded as in-flight. */
+    inFlightParentIds: Array<string | null>;
   } | null>();
   const loadOrderRefundTotals = async (orderProviderIds: string[]) => {
     const targets = [...new Set(orderProviderIds)].filter(
@@ -2655,7 +2683,9 @@ async function runPass(
         );
         orderRefundLists.set(providerOrderId, {
           refunds: settled,
-          deferredInFlight: settled.length === 0 && completed.length > 0,
+          inFlightParentIds: completed
+            .filter((refund) => !settled.includes(refund))
+            .map((refund) => refund.parentCaptureId),
         });
       }
     }
@@ -2693,19 +2723,39 @@ async function runPass(
     providerStatusFullyRefunded: boolean;
     providerAmountCents: number;
     providerCurrency: string;
-    providerRefunds: { refunds: ProviderOrderRefund[]; deferredInFlight: boolean } | null;
+    providerRefunds: {
+      refunds: ProviderOrderRefund[];
+      inFlightParentIds: Array<string | null>;
+    } | null;
   }) => {
     const localTotal = localRefundTotalsByPaymentRow.get(input.payment.id) ?? 0;
     const localIds = localRefundIdsByPaymentRow.get(input.payment.id) ?? new Set<string>();
     const recentRows = recentLocalRefundsByPaymentRow.get(input.payment.id) ?? [];
-    // Wholly lag-filtered lists DEFER (webhooks in flight, the next pass
-    // owns them); an empty list behind a capture whose own state proves
-    // refund activity is provider-inconsistent and falls back to the
-    // status-bound comparison; a populated list is authoritative.
-    if (input.providerRefunds !== null && input.providerRefunds.deferredInFlight) return;
-    const providerRefunds = input.providerRefunds !== null
-      && input.providerRefunds.refunds.length > 0
-      ? input.providerRefunds.refunds
+    // The order's list spans ALL its captures: judge THIS parent only
+    // against siblings attributable to it (up-link matches, or no up-link
+    // to partition by), or one capture's correct ledger reads as another's
+    // missing money. Wholly lag-filtered attributable lists DEFER (webhooks
+    // in flight, the next pass owns them); an empty list behind a capture
+    // whose own state proves refund activity is provider-inconsistent and
+    // falls back to the status-bound comparison; a populated list is
+    // authoritative.
+    const attributable = (parentId: string | null) =>
+      parentId === null || parentId === input.providerId;
+    const refundsForParent = input.providerRefunds === null
+      ? null
+      : input.providerRefunds.refunds.filter(
+          (refund) => attributable(refund.parentCaptureId),
+        );
+    if (
+      refundsForParent !== null
+      && refundsForParent.length === 0
+      && input.providerRefunds !== null
+      && input.providerRefunds.inFlightParentIds.some(attributable)
+    ) {
+      return;
+    }
+    const providerRefunds = refundsForParent !== null && refundsForParent.length > 0
+      ? refundsForParent
       : null;
     if (providerRefunds !== null) {
       // Per-SIBLING diff, not an aggregate: operators get the exact refund
@@ -3184,6 +3234,24 @@ async function runPass(
         };
       }
       for (const order of pageParentScan.rows) ordersById.set(order.id, order);
+      // Same relation guard the window and refund-parent rows cross: a
+      // historical payment claiming guild B while referencing guild A's
+      // order must fail the pass, not sail into the provider comparisons.
+      for (const payment of pagePayments) {
+        const parentOrder = typeof payment.order_id === 'string'
+          ? ordersById.get(payment.order_id)
+          : undefined;
+        if (!parentOrder) {
+          return {
+            status: 'failed',
+            reason: 'local PayPal payment relation is missing',
+            retriable: false,
+          };
+        }
+        if (payment.guild_id !== parentOrder.guild_id) {
+          return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+        }
+      }
       const pageCaptureRows = pagePayments.filter((payment) => !isSubscriptionSaleRow(payment));
       const pageSaleRows = pagePayments.filter((payment) => isSubscriptionSaleRow(payment));
 
@@ -3363,6 +3431,11 @@ async function runPass(
         if (
           parentRow
           && refund.paypal_refund_id === parentRow.paypal_payment_id
+          // Ingestion permits the sale-id-as-refund-id substitution ONLY
+          // for the documented PAYMENT.SALE.REVERSED shape; any other row
+          // carrying the sale id is malformed identity and must face the
+          // real refund endpoint instead of a synthesized verdict.
+          && refund.event_type === 'PAYMENT.SALE.REVERSED'
         ) {
           // Direct Sale reversal witness: the webhook stores the SALE id as
           // the refund id because PayPal minted no distinct refund object.

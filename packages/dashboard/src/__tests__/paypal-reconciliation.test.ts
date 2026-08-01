@@ -457,7 +457,21 @@ function withLedger(opts: {
         : refunds;
     return { data: page(selected, op), error: null };
   };
-  resolvers['orders'] = (op) => ({ data: page(orders, op), error: null });
+  resolvers['orders'] = (op) => {
+    // The window scan and the historical cancelled scan carry created_at
+    // bounds; exact-id lookups and the subscription sweep carry none.
+    const gte = filterArgs(op, 'gte').find((args) => args[0] === 'created_at')?.[1] as
+      string | undefined;
+    const lte = filterArgs(op, 'lte').find((args) => args[0] === 'created_at')?.[1] as
+      string | undefined;
+    const lt = filterArgs(op, 'lt').find((args) => args[0] === 'created_at')?.[1] as
+      string | undefined;
+    const bounded = orders.filter((order) => {
+      const created = String(order.created_at ?? '');
+      return (!gte || created >= gte) && (!lte || created <= lte) && (!lt || created < lt);
+    });
+    return { data: page(bounded, op), error: null };
+  };
   resolvers['customers'] = (op) => ({ data: page(customers, op), error: null });
   const derivedGuilds = new Set(
     opts.guildIds
@@ -5454,6 +5468,192 @@ describe('runPayPalReconciliation', () => {
     });
   });
 
+  // ── PR #409 review round 23 repairs ─────────────────────────────────────
+
+  it('fails closed on a lookback payment attached to a foreign-guild order', async () => {
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'CAP-OLD',
+        guild_id: '222222222222222222',
+        created_at: '2026-07-01T10:00:00.000Z',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: 'PP-ORDER-OLD',
+      }],
+      guildIds: [GUILD_ID, '222222222222222222'],
+    });
+    scriptProviderObjects({});
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'provider identity conflict',
+      retriable: false,
+    });
+  });
+
+  it('judges each capture only against its own refund siblings', async () => {
+    // The order enumerates refunds for TWO captures; capture A's judge must
+    // not read capture B's refund as A's missing money.
+    withLedger({
+      payments: [paymentRow({ status: 'refunded' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'REF-A',
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-1': captureObject({
+          status: 'REFUNDED',
+          value: '25.00',
+          relatedOrderId: 'PP-ORDER-1',
+        }),
+      },
+      refunds: { 'REF-A': refundObject({ value: '25.00' }) },
+      orders: {
+        'PP-ORDER-1': {
+          status: 'COMPLETED',
+          purchase_units: [{
+            custom_id: IDENTITY_CUSTOM_FIELD,
+            payments: {
+              captures: [{
+                id: 'CAP-1',
+                status: 'REFUNDED',
+                amount: { currency_code: 'USD', value: '25.00' },
+              }],
+              refunds: [
+                {
+                  id: 'REF-A',
+                  status: 'COMPLETED',
+                  amount: { currency_code: 'USD', value: '25.00' },
+                  create_time: IN_WINDOW,
+                  links: [{
+                    rel: 'up',
+                    href: 'https://api-m.sandbox.paypal.com/v2/payments/captures/CAP-1',
+                  }],
+                },
+                {
+                  id: 'REF-B',
+                  status: 'COMPLETED',
+                  amount: { currency_code: 'USD', value: '3.00' },
+                  create_time: IN_WINDOW,
+                  links: [{
+                    rel: 'up',
+                    href: 'https://api-m.sandbox.paypal.com/v2/payments/captures/CAP-OTHER',
+                  }],
+                },
+              ],
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toEqual([]);
+    expect(result.amountMismatches).toEqual([]);
+  });
+
+  it('refuses the direct-witness shortcut for a REFUNDED row carrying the sale id', async () => {
+    // Only PAYMENT.SALE.REVERSED may substitute the sale id for the refund
+    // id; a REFUNDED row doing so is malformed identity and must face the
+    // real refund endpoint (which cannot produce it).
+    withLedger({
+      payments: [paymentRow({ paypal_payment_id: 'SALE-1', status: 'refunded' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'SALE-1',
+        event_type: 'PAYMENT.SALE.REFUNDED',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-1': saleObject({ state: 'refunded', total: '25.00' }) },
+      saleRefunds: {},
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: null }),
+      },
+      subscriptionTransactions: { 'SUB-1': { transactions: [] } },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingProviderPayments).toContainEqual({
+      kind: 'refund',
+      orderId: ORDER_UUID,
+      orderNumber: null,
+      guildId: GUILD_ID,
+      paypalPaymentIds: ['SALE-1'],
+      amountCents: 2500,
+      currency: 'USD',
+      createdAt: IN_WINDOW,
+    });
+  });
+
+  it('fails closed on an unrecognized provider subscription status', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'SUSPENDED_PENDING_REVIEW', lastPaymentTime: null }),
+      },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'subscription lookup returned a malformed record',
+      retriable: false,
+    });
+  });
+
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {
     withLedger({ payments: [paymentRow()] });
     scriptProviderObjects({ captures: { 'CAP-1': { __status: 503 } } });
@@ -5801,7 +6001,9 @@ describe('POST /api/paypal/reconcile', () => {
       d: DISCORD_ID,
     });
     // Each guild's settled order carries a provider capture with no local
-    // payment row — one per-object finding per guild.
+    // payment row — one per-object finding per guild. The route derives its
+    // window from the real clock, so the fixture anchors on it too.
+    const recentCreatedAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     scriptProviderObjects({
       orders: {
         'OWNER-GUILD-ORDER': orderObject({
@@ -5821,7 +6023,7 @@ describe('POST /api/paypal/reconcile', () => {
           guild_id: GUILD_ID,
           amount_cents: 999,
           paypal_order_id: 'OWNER-GUILD-ORDER',
-          created_at: '2026-07-20T10:00:00.000Z',
+          created_at: recentCreatedAt,
         },
         {
           id: '00000000-0000-4000-8000-000000000002',
@@ -5829,7 +6031,7 @@ describe('POST /api/paypal/reconcile', () => {
           customer_id: SECOND_CUSTOMER_UUID,
           amount_cents: 1999,
           paypal_order_id: 'OTHER-GUILD-ORDER',
-          created_at: '2026-07-20T10:00:00.000Z',
+          created_at: recentCreatedAt,
         },
       ],
     });
