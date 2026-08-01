@@ -602,6 +602,7 @@ describe('per-object provider fetchers', () => {
         subscriptionId: null,
         captures: [{ id: 'CAP-A', status: 'COMPLETED', amountCents: 2500, currency: 'USD', createTimeMs: null }],
         refunds: [],
+        updateTimeMs: null,
       },
     });
   });
@@ -2819,6 +2820,68 @@ describe('runPayPalReconciliation', () => {
       currency: 'USD',
       createdAt: IN_WINDOW,
     }]);
+  });
+
+  // ── PR #409 review round 7 repairs ────────────────────────────────────────
+
+  it('defers a terminal lifecycle flip that happened inside the lag', async () => {
+    const FIVE_MIN_AGO = '2026-07-27T11:55:00.000Z';
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': {
+          ...subscriptionObject({ status: 'CANCELLED', lastPaymentTime: null }),
+          status_update_time: FIVE_MIN_AGO,
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(
+      supabase as never,
+      { now: NOW, settlementLagMs: 15 * 60 * 1000 },
+    ));
+
+    // The cancellation webhook is in flight — the next pass owns it.
+    expect(result.unsettledLocalPayments).toEqual([]);
+  });
+
+  it('defers an approval that happened inside the lag', async () => {
+    const FIVE_MIN_AGO = '2026-07-27T11:55:00.000Z';
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'pending',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({
+      orders: {
+        'PP-ORDER-1': {
+          ...orderObject({ status: 'APPROVED', captures: [] }),
+          update_time: FIVE_MIN_AGO,
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(
+      supabase as never,
+      { now: NOW, settlementLagMs: 15 * 60 * 1000 },
+    ));
+
+    expect(result.unsettledLocalPayments).toEqual([]);
   });
 
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {

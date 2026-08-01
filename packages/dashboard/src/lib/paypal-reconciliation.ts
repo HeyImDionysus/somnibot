@@ -136,6 +136,8 @@ export interface ProviderOrderObject {
   /** Provider refunds enumerated per purchase unit — the authoritative
    *  sibling list the capture object itself cannot expose. */
   refunds: ProviderOrderRefund[];
+  /** When the order last changed; null when the API omits it. */
+  updateTimeMs: number | null;
 }
 
 export interface ProviderSubscriptionObject {
@@ -642,6 +644,12 @@ export async function fetchProviderOrder(
       subscriptionId: isProviderId(record.subscription_id) ? record.subscription_id : null,
       captures,
       refunds,
+      updateTimeMs: (() => {
+        const parsed = typeof record.update_time === 'string'
+          ? Date.parse(record.update_time)
+          : Number.NaN;
+        return Number.isFinite(parsed) ? parsed : null;
+      })(),
     },
   };
 }
@@ -3191,6 +3199,9 @@ async function runPass(
       pendingish
       && providerOrder.status === 'APPROVED'
       && settledCaptures.length === 0
+      // An approval that happened inside the settlement lag has its
+      // CHECKOUT.ORDER.APPROVED webhook legitimately in flight.
+      && !(providerOrder.updateTimeMs !== null && providerOrder.updateTimeMs > windowEndMs)
     ) {
       // The buyer approved the checkout and the CHECKOUT.ORDER.APPROVED
       // webhook — the only path that captures an intent-CAPTURE order — was
@@ -3401,6 +3412,9 @@ async function runPass(
         && head.eventType !== null
         && ['BILLING.SUBSCRIPTION.SUSPENDED', 'BILLING.SUBSCRIPTION.PAYMENT.FAILED']
           .includes(head.eventType)
+        // A reactivation inside the lag interval is in flight, not lost.
+        && (subscription.statusUpdateTimeMs === null
+          || subscription.statusUpdateTimeMs <= windowEndMs)
       ) {
         unsettledLocalPayments.push({
           transactionId: subscriptionId,
@@ -3410,9 +3424,14 @@ async function runPass(
           orderStatus: order.status,
         });
       }
+      // A transition that happened inside the settlement lag has its
+      // lifecycle webhook legitimately in flight — the next pass owns it.
+      const transitionSettled = subscription.statusUpdateTimeMs === null
+        || subscription.statusUpdateTimeMs <= windowEndMs;
       const expectedPriority = TERMINAL_PRIORITY_BY_STATUS[subscription.status];
       if (
         expectedPriority !== undefined
+        && transitionSettled
         && (lifecycleHeads.get(subscriptionId)?.priority ?? 0) < expectedPriority
       ) {
         // PayPal reports a terminal state the durable lifecycle head never
