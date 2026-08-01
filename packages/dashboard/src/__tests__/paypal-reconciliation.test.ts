@@ -3414,6 +3414,174 @@ describe('runPayPalReconciliation', () => {
     }]);
   });
 
+  // ── PR #409 review round 11 repairs ───────────────────────────────────────
+
+  it('discovers a REVERSED subscription transaction with no local rows', async () => {
+    const MONDAY = '2026-07-23T10:00:00.000Z';
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: null }),
+      },
+      subscriptionTransactions: {
+        'SUB-1': {
+          transactions: [{
+            id: 'SALE-REV',
+            status: 'REVERSED',
+            time: MONDAY,
+            amount_with_breakdown: {
+              gross_amount: { currency_code: 'USD', value: '25.00' },
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toContainEqual(expect.objectContaining({
+      kind: 'payment',
+      transactionId: 'SALE-REV',
+      referenceId: 'SUB-1',
+    }));
+  });
+
+  it('falls back to the capture state when the refund list is inexplicably empty', async () => {
+    // REFUNDED capture, parent order enumerates NO refunds at all: the empty
+    // list is provider-inconsistent, never authoritative — the status-bound
+    // comparison must still report the lost refund.
+    withLedger({
+      payments: [paymentRow()],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-1': captureObject({
+          status: 'REFUNDED',
+          value: '25.00',
+          relatedOrderId: 'PP-ORDER-1',
+        }),
+      },
+      orders: {
+        'PP-ORDER-1': {
+          status: 'COMPLETED',
+          purchase_units: [{
+            custom_id: IDENTITY_CUSTOM_FIELD,
+            payments: {
+              captures: [{
+                id: 'CAP-1',
+                status: 'REFUNDED',
+                amount: { currency_code: 'USD', value: '25.00' },
+              }],
+              refunds: [],
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toContainEqual(expect.objectContaining({
+      kind: 'refund',
+      transactionId: 'CAP-1',
+      amountCents: 2500,
+    }));
+  });
+
+  it('rejects a COMPLETED order whose capture collection is absent', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'pending',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({
+      orders: {
+        'PP-ORDER-1': {
+          status: 'COMPLETED',
+          purchase_units: [{ custom_id: IDENTITY_CUSTOM_FIELD }],
+        },
+      },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'order lookup returned a malformed record',
+    });
+  });
+
+  it('judges the FULL ledger of an old direct sale reversal, not the echo', async () => {
+    // The witness row's remaining balance (12.00) would compare equal by
+    // construction; the sale's own total (25.00) vs the local ledger is the
+    // real check, and here 13.00 of reversal never landed.
+    const OLD = '2026-06-15T10:00:00.000Z';
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'SALE-1',
+        status: 'reversed',
+        created_at: OLD,
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: OLD,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'SALE-1',
+        event_type: 'PAYMENT.SALE.REVERSED',
+        amount_cents: 1200,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-1': saleObject({ state: 'reversed', total: '25.00' }) },
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toContainEqual(expect.objectContaining({
+      kind: 'refund',
+      transactionId: 'SALE-1',
+      amountCents: 1300,
+    }));
+  });
+
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {
     withLedger({ payments: [paymentRow()] });
     scriptProviderObjects({ captures: { 'CAP-1': { __status: 503 } } });

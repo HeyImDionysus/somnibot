@@ -580,6 +580,7 @@ export async function fetchProviderOrder(
   const captures: ProviderOrderCapture[] = [];
   const refunds: ProviderOrderRefund[] = [];
   let customId: string | null = null;
+  let sawCaptureCollection = false;
   for (const unit of units) {
     if (!unit || typeof unit !== 'object' || Array.isArray(unit)) {
       return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
@@ -590,6 +591,7 @@ export async function fetchProviderOrder(
     }
     const payments = unitRecord.payments as
       { captures?: unknown; refunds?: unknown } | undefined;
+    if (Array.isArray(payments?.captures)) sawCaptureCollection = true;
     const unitCaptures = Array.isArray(payments?.captures) ? payments.captures : [];
     const unitRefunds = Array.isArray(payments?.refunds) ? payments.refunds : [];
     for (const refund of unitRefunds) {
@@ -642,6 +644,12 @@ export async function fetchProviderOrder(
         createTimeMs: Number.isFinite(captureCreateMs) ? captureCreateMs : null,
       });
     }
+  }
+  if (record.status === 'COMPLETED' && !sawCaptureCollection) {
+    // A COMPLETED order without any capture collection is a malformed
+    // response, not "no captures" — treating it as empty let a lost
+    // capture write pass cleanly behind a pending local order.
+    return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
   }
   return {
     ok: true,
@@ -2426,7 +2434,11 @@ async function runPass(
     if (totalsFailure) return totalsFailure;
   }
 
-  const orderRefundLists = new Map<string, ProviderOrderRefund[] | null>();
+  const orderRefundLists = new Map<string, {
+    refunds: ProviderOrderRefund[];
+    /** True when completed refunds existed but were ALL inside the lag. */
+    deferredInFlight: boolean;
+  } | null>();
   const loadOrderRefundTotals = async (orderProviderIds: string[]) => {
     const targets = [...new Set(orderProviderIds)].filter(
       (id) => !orderRefundLists.has(id),
@@ -2449,18 +2461,25 @@ async function runPass(
           retriable: lookup.retriable,
         };
       }
-      orderRefundLists.set(
-        providerOrderId,
-        lookup.found
-          ? lookup.value.refunds
-            // The settlement lag applies to provider-side refunds too: a
-            // refund issued moments ago has its webhook legitimately in
-            // flight, so refunds younger than the window end are excluded
-            // (unknown times count as old).
-            .filter((refund) => refund.status === 'COMPLETED'
-              && (refund.createTimeMs === null || refund.createTimeMs <= windowEndMs))
-          : null,
-      );
+      if (!lookup.found) {
+        orderRefundLists.set(providerOrderId, null);
+      } else {
+        const completed = lookup.value.refunds.filter(
+          (refund) => refund.status === 'COMPLETED',
+        );
+        // The settlement lag applies to provider-side refunds too: a refund
+        // issued moments ago has its webhook legitimately in flight, so
+        // refunds younger than the window end are excluded (unknown times
+        // count as old) — but if EVERYTHING was excluded, that is a defer,
+        // never an authoritative empty ledger.
+        const settled = completed.filter(
+          (refund) => refund.createTimeMs === null || refund.createTimeMs <= windowEndMs,
+        );
+        orderRefundLists.set(providerOrderId, {
+          refunds: settled,
+          deferredInFlight: settled.length === 0 && completed.length > 0,
+        });
+      }
     }
     return null;
   };
@@ -2496,17 +2515,26 @@ async function runPass(
     providerStatusFullyRefunded: boolean;
     providerAmountCents: number;
     providerCurrency: string;
-    providerRefunds: ProviderOrderRefund[] | null;
+    providerRefunds: { refunds: ProviderOrderRefund[]; deferredInFlight: boolean } | null;
   }) => {
     const localTotal = localRefundTotalsByPaymentRow.get(input.payment.id) ?? 0;
     const localIds = localRefundIdsByPaymentRow.get(input.payment.id) ?? new Set<string>();
-    if (input.providerRefunds !== null) {
+    // Wholly lag-filtered lists DEFER (webhooks in flight, the next pass
+    // owns them); an empty list behind a capture whose own state proves
+    // refund activity is provider-inconsistent and falls back to the
+    // status-bound comparison; a populated list is authoritative.
+    if (input.providerRefunds !== null && input.providerRefunds.deferredInFlight) return;
+    const providerRefunds = input.providerRefunds !== null
+      && input.providerRefunds.refunds.length > 0
+      ? input.providerRefunds.refunds
+      : null;
+    if (providerRefunds !== null) {
       // Per-SIBLING diff, not an aggregate: operators get the exact refund
       // id to inspect/replay, and a same-total ledger with WRONG sibling
       // ids cannot mask identity drift.
-      const providerTotal = input.providerRefunds
+      const providerTotal = providerRefunds
         .reduce((sum, refund) => sum + refund.amountCents, 0);
-      for (const refund of input.providerRefunds) {
+      for (const refund of providerRefunds) {
         if (localIds.has(refund.id)) continue;
         missingLocalPayments.push({
           kind: 'refund',
@@ -3034,16 +3062,42 @@ async function runPass(
           // partially_refunded sale behind a full-reversal witness means
           // the provider disagrees with the terminal local claim.
           const reversed = ['reversed', 'refunded'].includes(saleLookup.value.state);
+          // The witness row's amount is the remaining balance by design, so
+          // the per-row comparison echoes it — the REAL money check is the
+          // full-ledger aggregate. Window parents get it from the sale
+          // pass; OLDER parents (reversed status, excluded from the
+          // completed-only lookback) get it here.
+          if (
+            reversed
+            && String(parentRow.created_at ?? '') < windowStart
+          ) {
+            const totalsFailure = await loadLocalRefundTotals([parentRow]);
+            if (totalsFailure) {
+              return {
+                refund,
+                lookup: {
+                  ok: false as const,
+                  retriable: totalsFailure.retriable,
+                  reason: totalsFailure.reason,
+                },
+              };
+            }
+            judgeRefundedPayment({
+              payment: parentRow,
+              guildId: parentRow.guild_id as string,
+              providerId: parentRow.paypal_payment_id as string,
+              providerStatusFullyRefunded: true,
+              providerAmountCents: saleLookup.value.amountCents,
+              providerCurrency: saleLookup.value.currency,
+              providerRefunds: null,
+            });
+          }
           return {
             refund,
             lookup: {
               ok: true as const,
               found: true as const,
               value: {
-                // A non-reversed sale behind a reversal witness reports as
-                // missing provider evidence through the COMPLETED gate; the
-                // witness row's amount is the remaining balance, not the
-                // sale total, so the money comparison echoes the row.
                 status: reversed ? 'COMPLETED' : saleLookup.value.state.toUpperCase(),
                 amountCents: refund.amount_cents as number,
                 currency: normalizeCurrency(refund.currency) as string,
@@ -3768,7 +3822,7 @@ async function runPass(
       }),
     );
     if (!txnMap.ok) return txnMap.failure;
-    const MONEY_TXN_STATUSES = ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED'];
+    const MONEY_TXN_STATUSES = ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'REVERSED'];
     const unknownTxns: Array<{
       subscriptionId: string;
       order: LocalOrderRow;
