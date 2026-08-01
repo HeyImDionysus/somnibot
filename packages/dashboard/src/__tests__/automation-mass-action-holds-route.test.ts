@@ -42,6 +42,7 @@ function makeAdmin(options: {
   configUpdated?: unknown;
 } = {}) {
   const calls: Record<string, unknown[][]> = {};
+  const rpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
   const makeChain = (table: string) => {
     const chain: Record<string, unknown> = {};
     let statusFilter: unknown = null;
@@ -72,7 +73,16 @@ function makeAdmin(options: {
     return chain;
   };
   return {
-    admin: { from: vi.fn((table: string) => makeChain(table)) },
+    admin: {
+      from: vi.fn((table: string) => makeChain(table)),
+      rpc: vi.fn(async (fn: string, args: Record<string, unknown>) => {
+        rpcCalls.push({ fn, args });
+        // Mirrors reject_automation_mass_action_hold: zero rows when the
+        // hold was already decided.
+        return { data: options.decided ? [options.decided] : [], error: null };
+      }),
+    },
+    rpcCalls,
     calls,
   };
 }
@@ -133,10 +143,11 @@ describe('/api/automations/holds', () => {
     );
   });
 
-  it('finalizes the linked execution record when a hold is rejected (round 19)', async () => {
-    // Left with pre-claim defaults, the executions history reads 'Conditions
-    // not met' forever for an occurrence the owner explicitly stopped.
-    const { admin, calls } = makeAdmin({
+  it('rejects a hold and finalizes its execution through ONE transactional RPC (round 21)', async () => {
+    // Two separate writes let a transient fault after the hold update leave
+    // history reading 'Conditions not met' forever — the RPC carries both
+    // transitions in one transaction.
+    const { admin, calls, rpcCalls } = makeAdmin({
       decided: {
         ...HOLD,
         status: 'rejected',
@@ -149,18 +160,13 @@ describe('/api/automations/holds', () => {
     const res = await PATCH(request('PATCH', { id: HOLD.id, decision: 'reject' }));
 
     expect(res.status).toBe(200);
-    expect(calls['automation_executions.update'][0][0]).toEqual({
-      conditions_passed: true,
-      errors: ['Rejected by the owner before any action ran'],
+    expect(rpcCalls).toContainEqual({
+      fn: 'reject_automation_mass_action_hold',
+      args: { p_hold_id: HOLD.id, p_guild_id: 'guild-1', p_actor: 'owner-1' },
     });
-    // Conditional on the pre-claim defaults so a finalized row is never
-    // clobbered.
-    expect(calls['automation_executions.eq']).toEqual(expect.arrayContaining([
-      ['id', 'e0000000-0000-4000-8000-00000000000e'],
-      ['conditions_passed', false],
-      ['actions_executed', 0],
-      ['actions_failed', 0],
-    ]));
+    // No separate table writes for the rejection path.
+    expect(calls['automation_mass_action_holds.update']).toBeUndefined();
+    expect(calls['automation_executions.update']).toBeUndefined();
   });
 
   it('returns conflict when another owner or worker already decided the hold', async () => {

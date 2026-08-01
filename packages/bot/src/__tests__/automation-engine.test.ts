@@ -43,6 +43,7 @@ vi.mock('../features/automations/rate-limiter.js', () => ({
 vi.mock('../features/automations/execution-logger.js', () => ({
   ExecutionLogger: class {
     log = vi.fn(async () => {});
+      markActionsStarted = vi.fn(async () => undefined);
   },
 }));
 vi.mock('../services/alert-service.js', () => ({

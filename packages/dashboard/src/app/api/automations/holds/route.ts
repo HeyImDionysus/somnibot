@@ -68,59 +68,53 @@ export async function PATCH(req: NextRequest) {
 
   const supabase = createAdminSupabase();
   const now = new Date().toISOString();
-  const updates = decision === 'approve'
-    ? {
-      status: 'approved',
-      approved_by: auth.ctx.discordId,
-      approved_at: now,
-      last_error: null,
-    }
-    : {
+  let data: Record<string, unknown> | null = null;
+  let updates: Record<string, unknown>;
+  if (decision === 'reject') {
+    // One transaction for BOTH transitions: the hold flips to rejected AND
+    // its linked execution row is finalized as an owner rejection. Two
+    // separate writes let a transient fault after the first leave history
+    // reading 'Conditions not met' forever, with nothing retrying the second.
+    updates = {
       status: 'rejected',
       rejected_by: auth.ctx.discordId,
       rejected_at: now,
       last_error: null,
     };
-  const { data, error } = await supabase
-    .from('automation_mass_action_holds')
-    .update(updates)
-    .eq('id', id)
-    .eq('guild_id', auth.ctx.guildId)
-    .eq('status', 'held')
-    .select('*')
-    .maybeSingle();
-  if (error) return dbError(error, 'automations/holds/decision');
+    const { data: rejected, error } = await supabase.rpc(
+      'reject_automation_mass_action_hold',
+      {
+        p_hold_id: id,
+        p_guild_id: auth.ctx.guildId,
+        p_actor: auth.ctx.discordId,
+      },
+    );
+    if (error) return dbError(error, 'automations/holds/decision');
+    const rows = Array.isArray(rejected) ? rejected : rejected ? [rejected] : [];
+    data = (rows[0] as Record<string, unknown> | undefined) ?? null;
+  } else {
+    updates = {
+      status: 'approved',
+      approved_by: auth.ctx.discordId,
+      approved_at: now,
+      last_error: null,
+    };
+    const { data: approved, error } = await supabase
+      .from('automation_mass_action_holds')
+      .update(updates)
+      .eq('id', id)
+      .eq('guild_id', auth.ctx.guildId)
+      .eq('status', 'held')
+      .select('*')
+      .maybeSingle();
+    if (error) return dbError(error, 'automations/holds/decision');
+    data = (approved as Record<string, unknown> | null) ?? null;
+  }
   if (!data) {
     return NextResponse.json(
       { success: false, error: 'This hold was already decided or no longer exists' },
       { status: 409 },
     );
-  }
-
-  if (decision === 'reject' && typeof (data as { execution_id?: unknown }).execution_id === 'string') {
-    // The linked execution row still carries pre-claim defaults; left alone,
-    // the Automations history reads 'Conditions not met' forever for an
-    // occurrence whose conditions MATCHED and which the owner explicitly
-    // stopped. Conditional on those defaults so a finalized row is never
-    // clobbered; failure is logged, not fatal — the rejection itself is
-    // already committed.
-    const { error: executionError } = await supabase
-      .from('automation_executions')
-      .update({
-        conditions_passed: true,
-        errors: ['Rejected by the owner before any action ran'],
-      })
-      .eq('id', (data as { execution_id: string }).execution_id)
-      .eq('guild_id', auth.ctx.guildId)
-      .eq('conditions_passed', false)
-      .eq('actions_executed', 0)
-      .eq('actions_failed', 0);
-    if (executionError) {
-      console.error(
-        '[automations/holds] Failed to finalize the rejected execution record:',
-        executionError.message,
-      );
-    }
   }
 
   await recordCrudChange({

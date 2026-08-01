@@ -508,6 +508,16 @@ export class TempChannelManager {
           .maybeSingle();
         if (!readBackError && committed?.channel_id === vc.id) {
           recordError = null;
+        } else if (readBackError) {
+          // The insert outcome is UNRESOLVED: a transient read failure is not
+          // confirmed absence, and deleting could destroy channels a
+          // committed row already owns. Preserve everything — the claim stays
+          // CLAIMED and the durable createdChannelIds let stale recovery
+          // adopt or dispose once the database answers authoritatively.
+          cleanupPersistExhausted = true;
+          throw new Error(
+            `Temp-channel record outcome unresolved: ${recordError.message}`,
+          );
         }
       }
       if (recordError) {

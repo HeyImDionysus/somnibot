@@ -68,12 +68,14 @@ const mockLogExecution = vi.fn().mockResolvedValue(undefined);
 const mockClaim = vi.fn().mockResolvedValue({ claimed: true, rowId: 'exec-1' });
 const mockFinalize = vi.fn().mockResolvedValue(undefined);
 const mockRelease = vi.fn().mockResolvedValue(undefined);
+const mockMarkStarted = vi.fn().mockResolvedValue(undefined);
 vi.mock('../features/automations/execution-logger.js', () => ({
   ExecutionLogger: class {
     log = mockLogExecution;
     claim = mockClaim;
     finalize = mockFinalize;
     release = mockRelease;
+    markActionsStarted = mockMarkStarted;
   },
 }));
 
@@ -188,6 +190,7 @@ describe('AutomationEngine', () => {
     mockClaim.mockResolvedValue({ claimed: true, rowId: 'exec-1' });
     mockFinalize.mockResolvedValue(undefined);
     mockRelease.mockResolvedValue(undefined);
+    mockMarkStarted.mockResolvedValue(undefined);
     mockMassThreshold.mockResolvedValue(25);
     mockMassHoldCreate.mockResolvedValue({
       created: true,
@@ -1214,6 +1217,47 @@ describe('AutomationEngine', () => {
         (engine as unknown as { _holdMemberDepthHints: Map<string, unknown> })
           ._holdMemberDepthHints.size,
       ).toBe(0);
+    });
+
+    it('durably marks actions-started BEFORE the first action and releases when the marker fails (round 21 P1)', async () => {
+      // The reclaim refuses started rows: without this ordering, a crash
+      // after send_message reached Discord let a stale redelivery reclaim
+      // the claim and repeat the side effect. And when the marker itself
+      // cannot persist, nothing external has run yet — the claim must be
+      // RELEASED for a safe retry, never executed unmarked.
+      mockGetForTrigger.mockReturnValue([makeAutomation()]);
+      await engine.start();
+      const fire = async () => {
+        const event = {
+          type: 'member.verified',
+          guildId: 'g1',
+          data: { discordId: 'u1' },
+        };
+        await (eventBus._listeners[0] as (event: unknown) => Promise<void>)(event);
+        await vi.waitFor(() =>
+          expect(mockMarkStarted.mock.calls.length + mockRelease.mock.calls.length)
+            .toBeGreaterThan(0),
+        );
+      };
+
+      await fire();
+      await vi.waitFor(() => expect(mockExecuteActions).toHaveBeenCalled());
+      expect(mockMarkStarted.mock.invocationCallOrder[0]!)
+        .toBeLessThan(mockExecuteActions.mock.invocationCallOrder[0]!);
+
+      vi.clearAllMocks();
+      mockGetForTrigger.mockReturnValue([makeAutomation()]);
+      mockAllowFire.mockResolvedValue(true);
+      mockAllowCustom.mockResolvedValue(true);
+      mockEvaluateConditions.mockResolvedValue(true);
+      mockClaim.mockResolvedValue({ claimed: true, rowId: 'exec-1' });
+      mockMassThreshold.mockResolvedValue(25);
+      mockMarkStarted.mockRejectedValue(new Error('db down'));
+      mockRelease.mockResolvedValue(undefined);
+      await fire();
+      await vi.waitFor(() => expect(mockRelease).toHaveBeenCalledWith('exec-1'));
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+      expect(mockFinalize).not.toHaveBeenCalled();
     });
 
     it('finalizes an all-rate-limited bulk occurrence as a condition MATCH (round 20)', async () => {

@@ -639,6 +639,16 @@ export class AutomationEngine {
         });
         return;
       }
+      // Durable point of no return: after this write a crash cannot cause a
+      // redelivery to repeat external side effects (the reclaim refuses
+      // started rows). If the marker itself cannot persist, RELEASE — nothing
+      // external has run, so the stable occurrence can retry safely.
+      try {
+        await this.executionLogger.markActionsStarted(claimRowId);
+      } catch (markError) {
+        await this.executionLogger.release(claimRowId);
+        throw markError;
+      }
       actionResult = await this.executeResolvedActions(
         actions,
         actionCtx,
@@ -1243,6 +1253,8 @@ export class AutomationEngine {
         } as LoadedAutomation),
         hold.member_ids,
       );
+      // Same durable point of no return as the immediate path.
+      await this.executionLogger.markActionsStarted(hold.execution_id);
       let result: { executed: number; failed: number; errors: string[] };
       try {
         result = await this.executeResolvedActions(
@@ -1301,6 +1313,28 @@ export class AutomationEngine {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // History must not read 'Conditions not met' for an APPROVED hold that
+      // failed mid-flight: finalize the linked execution with the truth
+      // before failing the hold. Best effort — the expired-lease recovery RPC
+      // is the durable backstop when this write also fails.
+      try {
+        await this.executionLogger.finalize(hold.execution_id, {
+          automationId: hold.automation_id,
+          guildId: this.guild.id,
+          triggeredBy: hold.triggered_by,
+          triggerEvent: hold.trigger_event,
+          conditionsPassed: true,
+          actionsExecuted: 0,
+          actionsFailed: 0,
+          errors: [`Approved mass action was interrupted: ${message}`],
+          durationMs: Date.now() - startTime,
+        });
+      } catch (finalizeError) {
+        log.error(
+          `Failed to finalize interrupted execution for hold ${hold.id}:`,
+          finalizeError,
+        );
+      }
       await this.massActionHolds.fail(hold.id, message);
       throw err;
     } finally {

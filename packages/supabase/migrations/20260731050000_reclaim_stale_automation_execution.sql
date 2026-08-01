@@ -24,6 +24,15 @@
 
 BEGIN;
 
+-- Round 21: the pre-action DEFAULTS are not proof that no action ran — an
+-- immediate automation keeps them until finalize, so a crash after
+-- send_message/send_dm/create_ticket reached Discord let a stale redelivery
+-- reclaim the claim and repeat the external side effect. actions_started is
+-- flipped durably BEFORE the first action executes; the reclaim refuses any
+-- claim that reached it.
+ALTER TABLE public.automation_executions
+  ADD COLUMN IF NOT EXISTS actions_started BOOLEAN NOT NULL DEFAULT false;
+
 CREATE OR REPLACE FUNCTION public.reclaim_stale_automation_execution(
   p_guild_id TEXT,
   p_automation_id UUID,
@@ -59,6 +68,8 @@ BEGIN
      AND execution.actions_executed = 0
      AND execution.actions_failed = 0
      AND execution.duration_ms = 0
+     -- Never reclaim a claim whose actions may have reached Discord.
+     AND execution.actions_started = false
      -- Age floor: a live run finishes in seconds; ten minutes cannot race one.
      AND execution.created_at < p_stale_before
    FOR UPDATE;

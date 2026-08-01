@@ -158,6 +158,30 @@ export class ExecutionLogger {
    * there is no claim row (the claim insert errored), fall back to a plain insert
    * so the execution is still logged.
    */
+  /**
+   * Durably mark that this claim is about to execute its first action. The
+   * stale-claim reclaim refuses marked rows: after this point a crash before
+   * finalize must NOT let a redelivery repeat external side effects. Throws
+   * when the write fails or matches no row — callers must not execute.
+   */
+  async markActionsStarted(rowId: string | null): Promise<void> {
+    if (!rowId) {
+      throw new Error('Cannot mark actions started without a durable claim row');
+    }
+    const { data, error } = await this.supabase
+      .from('automation_executions')
+      .update({ actions_started: true })
+      .eq('id', rowId)
+      .select('id')
+      .maybeSingle();
+    if (error) {
+      throw new Error(`Failed to mark automation actions started: ${error.message}`);
+    }
+    if (!data) {
+      throw new Error('Automation claim disappeared before actions could start');
+    }
+  }
+
   async finalize(rowId: string | null, result: ExecutionResult): Promise<void> {
     if (rowId) {
       const { error } = await this.supabase
