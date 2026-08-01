@@ -88,7 +88,15 @@ function makeGuild(overrides: Record<string, any> = {}) {
       everyone,
       create: createRole,
       fetch: vi.fn(async () => roles),
-      setPositions: vi.fn(async () => undefined),
+      setPositions: vi.fn(async (updates: Array<{ role: string; position: number }>) => {
+        // Simulate Discord: apply the requested positions; unlisted roles
+        // (managed ones included) are displaced implicitly by the reorder.
+        for (const { role: id, position } of updates) {
+          const role = roles.get(id);
+          if (role) role.position = position;
+        }
+        return undefined;
+      }),
     },
     channels: {
       cache: channels,
@@ -258,7 +266,8 @@ describe('deployServerState — role creation', () => {
     const result = await deployServerState(guild as any, supabase, desiredState as any, options);
 
     expect(result.success, JSON.stringify(result.errors)).toBe(true);
-    expect(guild.roles.fetch).toHaveBeenCalledTimes(2);
+    // Preflight + pre-placement + post-placement outcome verification.
+    expect(guild.roles.fetch).toHaveBeenCalledTimes(3);
     expect(guild.roles.setPositions).toHaveBeenCalledWith([
       { role: 'new-role-Member', position: 1 },
       { role: 'new-role-Admin', position: 2 },
@@ -336,13 +345,13 @@ describe('deployServerState — role creation', () => {
     ]);
   });
 
-  it('rejects a clean-existing deploy whose cleanup would collapse a managed role into the band (round 15 P1)', async () => {
+  it('clean-existing deploy proceeds past a managed survivor and raises the created role above it (round 26 P1)', async () => {
     // Managed integration role at 2, deletable padding at 3..8, bot at 10,
-    // one desired role. TODAY the managed role is far below the band — but
-    // cleanExisting deletes the padding first, collapsing it to position 1
-    // directly beneath the bot, and creating the desired role then puts it
-    // inside the final band. The preflight must project that and reject
-    // BEFORE anything is deleted.
+    // one desired role. Round 15 projected the post-clean collapse and
+    // REJECTED this deploy up front — but managed roles are not immovable:
+    // raising the created role displaces the survivor implicitly, so the
+    // hierarchy lands and the preflight rejection only broke deployments in
+    // guilds that contain any other bot's role.
     const guild = makeGuild();
     guild.roles.cache.set('managed-low', {
       id: 'managed-low',
@@ -352,13 +361,16 @@ describe('deployServerState — role creation', () => {
       editable: false,
     });
     for (let position = 3; position <= 8; position++) {
-      guild.roles.cache.set(`old-role-${position}`, {
-        id: `old-role-${position}`,
+      const id = `old-role-${position}`;
+      guild.roles.cache.set(id, {
+        id,
         name: `Old ${position}`,
         position,
         managed: false,
         editable: true,
-        delete: vi.fn(async () => {}),
+        delete: vi.fn(async () => {
+          guild.roles.cache.delete(id);
+        }),
       });
     }
     const supabase = { from: vi.fn(() => supaChain()) } as any;
@@ -376,19 +388,19 @@ describe('deployServerState — role creation', () => {
       { cleanExisting: true, dryRun: false },
     );
 
-    expect(result.success).toBe(false);
-    expect(result.errors[0].entityName).toBe('Role Hierarchy Preflight');
-    // Rejected BEFORE the destructive steps: nothing deleted, nothing created.
-    expect(guild.roles.create).not.toHaveBeenCalled();
-    for (let position = 3; position <= 8; position++) {
-      expect(
-        (guild.roles.cache.get(`old-role-${position}`) as { delete: ReturnType<typeof vi.fn> })
-          .delete,
-      ).not.toHaveBeenCalled();
-    }
+    expect(result.success, JSON.stringify(result.errors)).toBe(true);
+    expect(guild.roles.create).toHaveBeenCalledTimes(1);
+    expect(guild.roles.setPositions).toHaveBeenCalledWith([
+      { role: 'new-role-Admin', position: 9 },
+    ]);
+    // The managed survivor was displaced beneath the deployed role, not
+    // treated as a barrier.
+    expect(
+      (guild.roles.cache.get('new-role-Admin') as { position: number }).position,
+    ).toBe(9);
   });
 
-  it('fails explicitly when a managed-role barrier blocks intended staff placement', async () => {
+  it('raises created roles above an in-band managed role instead of aborting (round 26 P1)', async () => {
     const guild = makeGuild();
     guild.roles.cache.set('managed-member', {
       id: 'managed-member',
@@ -413,18 +425,51 @@ describe('deployServerState — role creation', () => {
       { cleanExisting: false, dryRun: false },
     );
 
-    expect(result.success).toBe(false);
-    expect(result.errors.some((error) =>
-      error.error.includes('managed role Integration Member')
-      && error.error.includes('blocks placement directly below the bot'),
-    )).toBe(true);
-    expect(result.actions).toEqual([]);
-    expect(guild.roles.everyone.setPermissions).not.toHaveBeenCalled();
-    expect(guild.roles.create).not.toHaveBeenCalled();
-    expect(guild.roles.setPositions).not.toHaveBeenCalled();
+    expect(result.success, JSON.stringify(result.errors)).toBe(true);
+    expect(guild.roles.setPositions).toHaveBeenCalledWith([
+      { role: 'new-role-Member', position: 8 },
+      { role: 'new-role-Admin', position: 9 },
+    ]);
   });
 
-  it('rejects a managed-role barrier during dry run', async () => {
+  it('reports honestly when a role Discord did not displace remains inside the band', async () => {
+    // Outcome verification: if the reorder does NOT actually raise the
+    // created roles above an interloper, step 4 must fail loudly instead of
+    // claiming success with an ineffective hierarchy.
+    const guild = makeGuild();
+    guild.roles.cache.set('managed-member', {
+      id: 'managed-member',
+      name: 'Integration Member',
+      position: 8,
+      managed: true,
+      editable: false,
+    });
+    (guild.roles as { setPositions: unknown }).setPositions =
+      vi.fn(async () => undefined);
+    const supabase = { from: vi.fn(() => supaChain()) } as any;
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 0 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as any,
+      supabase,
+      desiredState as any,
+      { cleanExisting: false, dryRun: false },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors.some((error) =>
+      error.error.includes('remains between the bot and the deployed roles'),
+    )).toBe(true);
+  });
+
+  it('dry run succeeds with an in-band managed role and mutates nothing (round 26 P1)', async () => {
+    // Managed roles are displaced by the reorder, not barriers — a dry run
+    // must not reject the very deployments the live path can complete.
     const guild = makeGuild();
     guild.roles.cache.set('managed-member', {
       id: 'managed-member',
@@ -448,11 +493,10 @@ describe('deployServerState — role creation', () => {
       { cleanExisting: true, dryRun: true },
     );
 
-    expect(result.success).toBe(false);
-    expect(result.errors[0].entityName).toBe('Role Hierarchy Preflight');
-    expect(result.actions).toEqual([]);
+    expect(result.success, JSON.stringify(result.errors)).toBe(true);
     expect(guild.roles.everyone.setPermissions).not.toHaveBeenCalled();
     expect(guild.roles.create).not.toHaveBeenCalled();
+    expect(guild.roles.setPositions).not.toHaveBeenCalled();
   });
 });
 

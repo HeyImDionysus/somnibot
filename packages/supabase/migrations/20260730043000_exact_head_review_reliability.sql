@@ -56,7 +56,28 @@ SET search_path = ''
 AS $$
 DECLARE
   claimed_count INTEGER;
+  occ_result JSONB;
 BEGIN
+  IF p_occurrence_id IS NOT NULL THEN
+    -- Serialize per occurrence: a sender that stalls past the stale
+    -- threshold can resume AFTER recovery reclaimed this same occurrence and
+    -- reserved its slot. Lock the occurrence row first; the marker check is
+    -- then race-free with the marker write below, so one occurrence can
+    -- never pay for two slots however many workers ask.
+    SELECT o.result INTO occ_result
+      FROM public.discord_operation_occurrences o
+     WHERE o.id = p_occurrence_id
+       FOR UPDATE;
+    IF FOUND AND COALESCE(occ_result->>'counterReserved', 'false') = 'true' THEN
+      -- Idempotent success: THIS occurrence already owns a counter slot.
+      SELECT s.current_sends INTO claimed_count
+        FROM public.scheduled_messages s
+       WHERE s.id = p_schedule_id
+         AND s.guild_id = p_guild_id;
+      RETURN claimed_count;
+    END IF;
+  END IF;
+
   UPDATE public.scheduled_messages
      SET current_sends = current_sends + 1,
          last_sent_at = GREATEST(
@@ -71,11 +92,13 @@ BEGIN
   RETURNING current_sends INTO claimed_count;
 
   IF claimed_count IS NOT NULL AND p_occurrence_id IS NOT NULL THEN
+    -- Stamp unconditionally (the row is locked above): gating on
+    -- status = 'claimed' could skip the marker after the counter committed,
+    -- recreating the unmarked-slot corner this function exists to close.
     UPDATE public.discord_operation_occurrences
        SET result = COALESCE(result, '{}'::jsonb)
                     || pg_catalog.jsonb_build_object('counterReserved', true)
-     WHERE id = p_occurrence_id
-       AND status = 'claimed';
+     WHERE id = p_occurrence_id;
   END IF;
 
   RETURN claimed_count;

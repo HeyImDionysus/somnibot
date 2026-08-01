@@ -650,28 +650,46 @@ export class AutomationEngine {
         throw limitError;
       }
       if (affectedMemberIds.length > 0 && rateLimitedMemberIds.length === 0) {
-        // Every target is rate-limited: nothing runs, but the conditions DID
-        // match — history must say why nothing happened, not fabricate a
-        // failed evaluation (approved holds record the same truth when
-        // release-time limits empty their target set).
-        await this.executionLogger.finalize(claimRowId, {
-          automationId: automation.id,
-          guildId: this.guild.id,
-          triggeredBy: userId,
-          triggerEvent: event.type,
-          conditionsPassed: true,
-          actionsExecuted: 0,
-          actionsFailed: 0,
-          errors: ['Every matched member was rate-limited; no action ran'],
-          durationMs: Date.now() - startTime,
-        });
-        return;
+        const oneShotActions = actions.filter(
+          (action) => !MEMBER_TARGETED_ACTIONS.has(action.type),
+        );
+        if (oneShotActions.length === 0) {
+          // Every target is rate-limited: nothing runs, but the conditions
+          // DID match — history must say why nothing happened, not fabricate
+          // a failed evaluation (approved holds record the same truth when
+          // release-time limits empty their target set).
+          await this.executionLogger.finalize(claimRowId, {
+            automationId: automation.id,
+            guildId: this.guild.id,
+            triggeredBy: userId,
+            triggerEvent: event.type,
+            conditionsPassed: true,
+            actionsExecuted: 0,
+            actionsFailed: 0,
+            errors: ['Every matched member was rate-limited; no action ran'],
+            durationMs: Date.now() - startTime,
+          });
+          return;
+        }
+        // Mixed automation: the member-targeted actions are skipped, but the
+        // one-shot actions (channel message, …) still run once for the
+        // occurrence — the approved-hold path behaves the same way when
+        // release-time limits empty its target set.
+        const oneShotResult = await this.executeResolvedActions(oneShotActions, actionCtx, []);
+        actionResult = {
+          ...oneShotResult,
+          errors: [
+            ...oneShotResult.errors,
+            'Every matched member was rate-limited; member-targeted actions skipped',
+          ],
+        };
+      } else {
+        actionResult = await this.executeResolvedActions(
+          actions,
+          actionCtx,
+          rateLimitedMemberIds,
+        );
       }
-      actionResult = await this.executeResolvedActions(
-        actions,
-        actionCtx,
-        rateLimitedMemberIds,
-      );
     } finally {
       this._activeDepths.delete(execId);
     }

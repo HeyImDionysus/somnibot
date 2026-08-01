@@ -554,6 +554,43 @@ describe('AutomationEngine', () => {
       expect(mockExecuteActions.mock.calls[0][1].member.id).toBe('10000000000000000');
     });
 
+    it('runs one-shot actions when every bulk target is rate-limited (round 26)', async () => {
+      mockGetForTrigger.mockReturnValue([
+        makeAutomation({
+          actions: [
+            { type: 'give_role', config: { role_id: 'role1' } },
+            { type: 'send_message', config: { channel_id: 'c1', message: 'winners drawn' } },
+          ],
+          rateLimitPerUser: 1,
+          rateLimitWindowSeconds: 60,
+        }),
+      ]);
+      mockAllowFire.mockResolvedValue(false);
+      await engine.start();
+      eventBus.fire({
+        type: 'giveaway.ended',
+        guildId: 'g1',
+        data: { winnerIds: ['10000000000000000', '10000000000000001'] },
+      });
+
+      await vi.waitFor(() => expect(mockFinalize).toHaveBeenCalled());
+      // The member-targeted give_role was skipped for every rate-limited
+      // target, but the channel notification still ran once.
+      expect(mockExecuteActions).toHaveBeenCalledTimes(1);
+      expect(mockExecuteActions.mock.calls[0][0]).toEqual([
+        expect.objectContaining({ type: 'send_message' }),
+      ]);
+      expect(mockFinalize).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          conditionsPassed: true,
+          errors: expect.arrayContaining([
+            'Every matched member was rate-limited; member-targeted actions skipped',
+          ]),
+        }),
+      );
+    });
+
     it('atomically released hold fans member actions out once and finalizes the original claim', async () => {
       mockMassClaimApproved.mockResolvedValue({
         id: 'hold-1',

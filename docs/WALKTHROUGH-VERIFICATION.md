@@ -42,13 +42,19 @@ does not read `.env`.
 - **Setup** — `setup-wizard-surfaces`, `setup-wizard`,
   `setup-verification-wizard-contract`, and `interaction-verification-gate`.
 - **Bot/full** — the complete bot Vitest suite, plus the focused files named in
-  the table: 264 files / 4,026 tests passed.
+  the table: 272 files / 4,151 tests passed (2026-07-31, final candidate).
 - **Dashboard/full** — the complete dashboard Vitest suite, including the
-  focused route/UI files named in the table: 131 files / 2,002 tests passed.
-- **Database** — 44 local PostgreSQL integration files / 604 tests passed, all
-  migrations through `20260730040000` applied, the security-definer audit
-  passed across 230 migration files / 265 effective function definitions, and
-  generated database types have no drift.
+  focused route/UI files named in the table: 141 files / 2,095 tests passed
+  (2026-07-31, final candidate).
+- **Database** — 44 local PostgreSQL integration files / 604 tests passed; a
+  final fresh-database twin (2026-07-31) applied all 241 migrations through
+  `20260731110000` in order and live-asserted the newest semantics — stale
+  occurrence reclaim, occurrence-owned ticket/temp-channel inserts, mass-action
+  hold recovery, and the per-occurrence idempotent scheduled-send reservation
+  (same occurrence re-asked → same slot, counter unchanged; paid slot honored
+  even at the send cap). The security-definer audit passed across all 241
+  migration files / 280 effective function definitions, and regenerated
+  database types have no drift.
 - **Discord/deploy** — 23 guarded live-deployment assertions passed against the
   owner-provided test guild, including role hierarchy, channel creation,
   persisted mappings, audit, setup confirmation, and exact cleanup.

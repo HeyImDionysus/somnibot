@@ -93,7 +93,7 @@ export function buildActivityEvent(log: Record<string, unknown>): DashboardActiv
   return {
     type: activityType(action),
     action,
-    description: activityDescription(action, details, null, null),
+    description: activityDescription(action, details, text(log.target_type), text(log.target_id)),
     timestamp,
     success: log.success !== false,
   };

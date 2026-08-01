@@ -136,46 +136,18 @@ export async function deployServerState(
     }
 
     if (desiredState.roles.length > 0) {
-      // Refresh and reject immutable managed-role barriers before dry-run
-      // success or any destructive deployment step. Only roles inside the
-      // TARGET BAND matter: the desired hierarchy lands directly beneath the
-      // bot at positions [botHighest - N, botHighest), so a managed
-      // integration role parked far below (position 2 under a bot at 10,
-      // deploying 2 roles) cannot interfere and must not abort the whole
-      // deployment. This mirrors the narrower calculation the hierarchy step
-      // itself uses; the preflight previously treated ANY managed role below
-      // the bot as a barrier.
+      // Managed integration roles are NOT positional barriers: they cannot
+      // be edited directly, but raising an editable role displaces them
+      // implicitly, so the placement step can always slot the desired
+      // hierarchy directly beneath the bot — and it verifies that OUTCOME
+      // after moving. Rejecting up front on the mere presence of another
+      // bot's role (a common guild shape) aborted deployments that would
+      // have succeeded. The preflight only confirms the bot member itself is
+      // resolvable before any destructive step.
       await guild.roles.fetch();
       const botHighest = guild.members.me?.roles.highest.position;
-      let managedBarrier: (typeof guild.roles.cache extends Map<string, infer R> ? R : never) | undefined;
-      if (botHighest !== undefined) {
-        if (options.cleanExisting) {
-          // Step 2 deletes every non-managed role below the bot, so the
-          // managed survivors collapse to sit DIRECTLY beneath it with no
-          // padding left — the desired hierarchy can never be placed above
-          // them. Under cleanExisting, ANY managed role below the bot is a
-          // barrier no matter how low it is parked today; projecting the
-          // post-clean hierarchy here rejects the deployment BEFORE the
-          // destructive cleanup, where a current-position check only failed
-          // it afterwards.
-          managedBarrier = [...guild.roles.cache.values()].find((role) =>
-            role.managed && role.id !== guild.id && role.position < botHighest,
-          );
-        } else {
-          const bandFloor = botHighest - desiredState.roles.length;
-          managedBarrier = [...guild.roles.cache.values()].find((role) =>
-            role.managed
-            && role.id !== guild.id
-            && role.position >= Math.max(bandFloor, 1)
-            && role.position < botHighest,
-          );
-        }
-      }
-      if (botHighest === undefined || managedBarrier) {
-        const error = managedBarrier
-          ? `Cannot preserve the requested hierarchy because managed role ${managedBarrier.name} `
-            + `at position ${managedBarrier.position} blocks placement directly below the bot`
-          : 'Bot member is unavailable while validating the role hierarchy';
+      if (botHighest === undefined) {
+        const error = 'Bot member is unavailable while validating the role hierarchy';
         return {
           success: false,
           deployId,
@@ -364,28 +336,12 @@ export async function deployServerState(
           return role;
         });
         // The desired list is ordered low-to-high. Put it directly beneath the
-        // bot so newly deployed moderators remain above surviving member roles.
-        // Integration-managed roles form an immovable barrier; report that
-        // explicitly instead of claiming success with an ineffective hierarchy.
-        // The barrier scan uses the TARGET band [lowestTargetPosition,
-        // botHighest) — the same bounds the preflight checked. Comparing
-        // against the roles' initial bottom-of-list creation positions treated
-        // every managed role in the guild as a barrier, so a deployment the
-        // preflight approved failed AFTER creation (and, with cleanExisting,
-        // after deletions).
+        // bot so newly deployed moderators remain above surviving member
+        // roles. Managed integration roles are not treated as barriers here:
+        // raising the created (editable) roles displaces them downward
+        // implicitly, so the batch below lands even in guilds full of other
+        // bots' roles. Whether it actually landed is verified AFTER the move.
         const lowestTargetPosition = botHighest - createdRoles.length;
-        const managedBarrier = [...guild.roles.cache.values()].find((role) =>
-          role.managed
-          && !createdRoles.some(({ discordId }) => discordId === role.id)
-          && role.position >= Math.max(lowestTargetPosition, 1)
-          && role.position < botHighest,
-        );
-        if (managedBarrier) {
-          throw new Error(
-            `Cannot preserve the requested hierarchy because managed role ${managedBarrier.name} `
-            + `at position ${managedBarrier.position} blocks placement directly below the bot`,
-          );
-        }
         const availablePositions = createdRoles.map(
           (_, index) => lowestTargetPosition + index,
         );
@@ -416,6 +372,33 @@ export async function deployServerState(
         }
 
         await guild.roles.setPositions(positionUpdates);
+
+        // Outcome verification: the created roles must now be the top block
+        // directly beneath the bot. A role Discord did NOT displace is
+        // reported honestly instead of claiming success with an ineffective
+        // hierarchy.
+        await guild.roles.fetch();
+        const verifiedBotHighest = guild.members.me?.roles.highest.position;
+        if (verifiedBotHighest === undefined) {
+          throw new Error('Bot member is unavailable after setting the role hierarchy');
+        }
+        const createdIds = new Set(createdRoles.map(({ discordId }) => discordId));
+        const meRoleCache = guild.members.me?.roles.cache;
+        const botOwnRoleIds = new Set<string>(meRoleCache ? [...meRoleCache.keys()] : []);
+        const interloper = [...guild.roles.cache.values()]
+          .filter((role) =>
+            role.id !== guild.id
+            && !botOwnRoleIds.has(role.id)
+            && role.position < verifiedBotHighest)
+          .sort((a, b) => b.position - a.position)
+          .slice(0, createdRoles.length)
+          .find((role) => !createdIds.has(role.id));
+        if (interloper) {
+          throw new Error(
+            `Cannot preserve the requested hierarchy because role ${interloper.name} `
+            + `at position ${interloper.position} remains between the bot and the deployed roles`,
+          );
+        }
       }
       actions.push({
         step, action: 'set', entityType: 'role',

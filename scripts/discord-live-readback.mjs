@@ -110,6 +110,7 @@ try {
     || !result.setupDescriptionPresent
     || !result.botRoleAboveEveryone
     || result.readableTextChannels === 0
+    || result.sendableTextChannels === 0
   ) {
     process.exitCode = 1;
   }
