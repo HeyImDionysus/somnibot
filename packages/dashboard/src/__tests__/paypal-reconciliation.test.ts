@@ -1035,6 +1035,9 @@ describe('runPayPalReconciliation', () => {
             c: CUSTOMER_UUID,
             d: DISCORD_ID,
           }),
+          // Round 16: COMPLETED orders must carry a capture row, so give the
+          // identity check something well-formed to reach.
+          captures: [{ id: 'CAP-FOREIGN-ID', value: '25.00' }],
         }),
       },
     });
@@ -4109,6 +4112,77 @@ describe('runPayPalReconciliation', () => {
       kind: 'refund',
       transactionId: 'CAP-1',
       amountCents: 1700,
+    }));
+  });
+
+  // ── PR #409 review round 16 repairs ───────────────────────────────────────
+
+  it('rejects a COMPLETED order whose capture list is EMPTY', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'pending',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({
+      orders: { 'PP-ORDER-1': orderObject({ status: 'COMPLETED', captures: [] }) },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'order lookup returned a malformed record',
+    });
+  });
+
+  it('judges a PARTIALLY_REFUNDED fallback transaction with no local refunds', async () => {
+    const MONDAY = '2026-07-23T10:00:00.000Z';
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'SALE-MON',
+        created_at: '2026-07-10T10:00:00.000Z',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-MON': saleObject({ total: '25.00' }) },
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: null }),
+      },
+      subscriptionTransactions: {
+        'SUB-1': {
+          transactions: [{
+            id: 'SALE-MON',
+            status: 'PARTIALLY_REFUNDED',
+            time: MONDAY,
+            amount_with_breakdown: {
+              gross_amount: { currency_code: 'USD', value: '25.00' },
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    // Zero local refund rows behind provider-side partial refunds: the lost
+    // first partial webhook surfaces.
+    expect(result.missingLocalPayments).toContainEqual(expect.objectContaining({
+      kind: 'refund',
+      transactionId: 'SALE-MON',
     }));
   });
 

@@ -580,7 +580,6 @@ export async function fetchProviderOrder(
   const captures: ProviderOrderCapture[] = [];
   const refunds: ProviderOrderRefund[] = [];
   let customId: string | null = null;
-  let sawCaptureCollection = false;
   for (const unit of units) {
     if (!unit || typeof unit !== 'object' || Array.isArray(unit)) {
       return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
@@ -591,7 +590,6 @@ export async function fetchProviderOrder(
     }
     const payments = unitRecord.payments as
       { captures?: unknown; refunds?: unknown } | undefined;
-    if (Array.isArray(payments?.captures)) sawCaptureCollection = true;
     const unitCaptures = Array.isArray(payments?.captures) ? payments.captures : [];
     const unitRefunds = Array.isArray(payments?.refunds) ? payments.refunds : [];
     for (const refund of unitRefunds) {
@@ -645,10 +643,11 @@ export async function fetchProviderOrder(
       });
     }
   }
-  if (record.status === 'COMPLETED' && !sawCaptureCollection) {
-    // A COMPLETED order without any capture collection is a malformed
-    // response, not "no captures" — treating it as empty let a lost
-    // capture write pass cleanly behind a pending local order.
+  if (record.status === 'COMPLETED' && captures.length === 0) {
+    // A COMPLETED order without a single capture row — the collection
+    // absent OR empty — contradicts its own status: money cannot have
+    // completed with nothing captured. Treating it as "no captures" let a
+    // lost capture write pass cleanly behind a pending local order.
     return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
   }
   return {
@@ -4039,14 +4038,20 @@ async function runPass(
           // refund webhook was lost — judge the refund ledger instead of
           // silently accounting; a non-settled row never accounts at all.
           const terminalTxn = ['REFUNDED', 'REVERSED'].includes(txn.status);
-          if (terminalTxn && fallbackRow.status === 'completed') {
+          if (
+            (terminalTxn && fallbackRow.status === 'completed')
+            || txn.status === 'PARTIALLY_REFUNDED'
+          ) {
+            // Terminal or partially refunded provider money behind an
+            // out-of-window row: judge the refund ledger — a lost partial
+            // webhook leaves zero local rows and must surface.
             const totalsFailure = await loadLocalRefundTotals([fallbackRow]);
             if (totalsFailure) return totalsFailure;
             judgeRefundedPayment({
               payment: fallbackRow,
               guildId: fallbackRow.guild_id as string,
               providerId: txn.id,
-              providerStatusFullyRefunded: true,
+              providerStatusFullyRefunded: txn.status !== 'PARTIALLY_REFUNDED',
               providerAmountCents: txn.amountCents ?? fallbackRow.amount_cents,
               providerCurrency: txn.currency
                 ?? (normalizeCurrency(fallbackRow.currency) as string),
