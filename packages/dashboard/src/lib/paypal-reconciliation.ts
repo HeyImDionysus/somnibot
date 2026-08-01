@@ -2788,6 +2788,25 @@ async function runPass(
           : null,
       });
     }
+    if (
+      ['refunded', 'reversed'].includes(payment.status)
+      && capture.status === 'COMPLETED'
+      // A refund issued moments ago has not flipped the capture yet — the
+      // update-time lag owns that case.
+      && !(capture.updateTimeMs !== null && capture.updateTimeMs > windowEndMs)
+    ) {
+      // Settled statuses are not interchangeable: the ledger revoked access
+      // over a refund the provider has NO trace of — the capture still
+      // holds the customer's money as an ordinary completed charge.
+      unsettledLocalPayments.push({
+        transactionId: providerId,
+        guildId,
+        orderId: payment.order_id,
+        paymentStatus: payment.status,
+        orderStatus: order?.status ?? null,
+      });
+      continue;
+    }
     const settledAtProvider = PROVIDER_SETTLED_CAPTURE_STATUSES.includes(capture.status);
     if (settledAtProvider && !isSettledPair(payment, order)) {
       unsettledLocalPayments.push({
@@ -2895,13 +2914,18 @@ async function runPass(
     // Cross-tenant identity: the sale's billing agreement must be the local
     // order's subscription. A valid sale id borrowed from another
     // subscription/guild with matching amounts must never verify.
-    if (
-      sale.billingAgreementId !== null
-      && order
-      && isProviderId(order.paypal_subscription_id)
-      && sale.billingAgreementId !== order.paypal_subscription_id
-    ) {
-      return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+    if (order && isProviderId(order.paypal_subscription_id)) {
+      // Ingestion never records a subscription sale without a canonical
+      // billing agreement (provider_identity_malformed): a fetched sale
+      // MISSING its agreement id is not a valid subscription-sale shape,
+      // and a mismatched one is a borrowed identity. Either way the row
+      // must not verify.
+      if (
+        sale.billingAgreementId === null
+        || sale.billingAgreementId !== order.paypal_subscription_id
+      ) {
+        return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+      }
     }
     if (
       ['refunded', 'partially_refunded', 'reversed'].includes(sale.state)
@@ -2921,6 +2945,22 @@ async function runPass(
         providerCurrency: sale.currency,
         providerRefunds: null,
       });
+    }
+    if (
+      ['refunded', 'reversed'].includes(payment.status)
+      && sale.state === 'completed'
+      && !(sale.updateTimeMs !== null && sale.updateTimeMs > windowEndMs)
+    ) {
+      // Same family rule as captures: a locally terminal row behind an
+      // ordinary completed sale means the provider never saw the refund.
+      unsettledLocalPayments.push({
+        transactionId: providerId,
+        guildId,
+        orderId: payment.order_id,
+        paymentStatus: payment.status,
+        orderStatus: order?.status ?? null,
+      });
+      continue;
     }
     // The same settled-pair and money checks captures get: an older daily
     // charge with drifted amounts (or a non-settled provider state) must
@@ -3345,7 +3385,65 @@ async function runPass(
               // Only a FULLY refunded capture evidences a zero-remaining
               // reversal witness; PARTIALLY_REFUNDED means PayPal still
               // holds money the terminal local claim says is gone.
-              if (parentLookup.value.status === 'REFUNDED') continue;
+              if (parentLookup.value.status === 'REFUNDED') {
+                const parentCapture = parentLookup.value;
+                // Accepting the witness must not skip the checks the parent
+                // never met elsewhere: an older reversed parent is outside
+                // both the window pass and the completed-only lookback, so
+                // this is its ONLY provider touch — identity, money, and
+                // the refund ledger all still apply. Window parents were
+                // already judged by the capture pass.
+                if (String(witnessParent.created_at ?? '') < windowStart) {
+                  const parentOrder = ordersById.get(witnessParent.order_id as string);
+                  if (
+                    parentCapture.relatedOrderId !== null
+                    && parentOrder
+                    && isProviderId(parentOrder.paypal_order_id)
+                    && parentCapture.relatedOrderId !== parentOrder.paypal_order_id
+                  ) {
+                    return {
+                      status: 'failed',
+                      reason: 'provider identity conflict',
+                      retriable: false,
+                    };
+                  }
+                  if (
+                    parentCapture.amountCents !== witnessParent.amount_cents
+                    || parentCapture.currency !== normalizeCurrency(witnessParent.currency)
+                  ) {
+                    amountMismatches.push({
+                      transactionId: witnessParent.paypal_payment_id as string,
+                      guildId,
+                      providerAmountCents: parentCapture.amountCents,
+                      localAmountCents: witnessParent.amount_cents,
+                      providerCurrency: parentCapture.currency,
+                      localCurrency: normalizeCurrency(witnessParent.currency),
+                    });
+                  }
+                  const totalsFailure = await loadLocalRefundTotals([witnessParent]);
+                  if (totalsFailure) return totalsFailure;
+                  const parentProviderOrder = parentProviderOrderId(
+                    witnessParent,
+                    parentCapture.relatedOrderId,
+                  );
+                  if (parentProviderOrder !== null) {
+                    const enumFailure = await loadOrderRefundTotals([parentProviderOrder]);
+                    if (enumFailure) return enumFailure;
+                  }
+                  judgeRefundedPayment({
+                    payment: witnessParent,
+                    guildId,
+                    providerId: witnessParent.paypal_payment_id as string,
+                    providerStatusFullyRefunded: true,
+                    providerAmountCents: parentCapture.amountCents,
+                    providerCurrency: parentCapture.currency,
+                    providerRefunds: parentProviderOrder !== null
+                      ? orderRefundLists.get(parentProviderOrder) ?? null
+                      : null,
+                  });
+                }
+                continue;
+              }
             }
           }
         }
