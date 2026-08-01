@@ -821,6 +821,15 @@ export async function fetchProviderSubscriptionTransactions(
   );
   if (!result.ok || !result.found) return result;
   const record = result.value;
+  if (record.transactions !== undefined && !Array.isArray(record.transactions)) {
+    return {
+      ok: false,
+      retriable: false,
+      reason: 'subscription transactions lookup returned a malformed record',
+    };
+  }
+  // PayPal omits the field entirely for a subscription with no transactions
+  // in range; anything PRESENT must be an actual array.
   const raw = Array.isArray(record.transactions) ? record.transactions : [];
   const transactions: ProviderSubscriptionTransaction[] = [];
   for (const entry of raw) {
@@ -2904,7 +2913,12 @@ async function runPass(
         ) {
           return { status: 'failed', reason: 'provider identity conflict', retriable: false };
         }
-        if (['REFUNDED', 'PARTIALLY_REFUNDED'].includes(lookup.value.status)) {
+        if (
+          ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(lookup.value.status)
+          // Same lag discipline as the window path: a state change inside
+          // the final interval defers to the next pass.
+          && !(lookup.value.updateTimeMs !== null && lookup.value.updateTimeMs > windowEndMs)
+        ) {
           pageRefunded.push({
             payment,
             fullyRefunded: lookup.value.status === 'REFUNDED',
@@ -3078,8 +3092,17 @@ async function runPass(
     const guildId = refund.guild_id as string;
     if (!lookup.found) {
       // A zero-amount row is a terminal reversal witness with no distinct
-      // provider refund object; its absence is expected.
-      if (refund.amount_cents === 0) continue;
+      // provider refund object; its absence is expected — EXCEPT when the
+      // row IS a direct-sale witness (refund id equals the sale id): then
+      // the sale itself was the object we failed to find, and silence would
+      // bless a vanished sale behind a full reversal claim.
+      const witnessParent = typeof refund.payment_id === 'string'
+        ? refundPaymentRowsById.get(refund.payment_id)
+        : undefined;
+      const isDirectSaleWitness = Boolean(
+        witnessParent && refund.paypal_refund_id === witnessParent.paypal_payment_id,
+      );
+      if (refund.amount_cents === 0 && !isDirectSaleWitness) continue;
       const order = refund.order_id ? ordersById.get(refund.order_id) : undefined;
       missingProviderPayments.push({
         kind: 'refund',
@@ -3382,6 +3405,8 @@ async function runPass(
       'BILLING.SUBSCRIPTION.CANCELLED': 'subscription_cancelled',
       'BILLING.SUBSCRIPTION.SUSPENDED': 'subscription_suspended',
       'BILLING.SUBSCRIPTION.PAYMENT.FAILED': 'subscription_payment_failed',
+      // Expiry fulfills through the cancellation carrier.
+      'BILLING.SUBSCRIPTION.EXPIRED': 'subscription_cancelled',
     };
     const expectedActionKeyBySubscription = new Map<string, string>();
     for (const [subscriptionId] of fresh) {
@@ -3443,17 +3468,22 @@ async function runPass(
       }
     }
     // Plan identity compares against the HISTORICAL provider plan retained
-    // by the activation action's payload — the mutable plans row changes
-    // when the owner rotates paypal_plan_id for future checkouts, and old
-    // subscriptions legitimately keep billing the plan they were minted on.
-    const historicalPlanByOrderId = new Map<string, string>();
-    for (let from = 0; from < batchOrderIds.length; from += EXACT_LOOKUP_CHUNK_SIZE) {
-      const chunk = batchOrderIds.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
+    // by the ACTIVATION carrier's payload — addressed by its exact
+    // idempotency key (paypal:subscription:<id>:fulfill_subscription), so
+    // per-renewal actions can never flood the lookup past the response cap
+    // and silently skip the comparison. The mutable plans row is never
+    // consulted: owners rotate paypal_plan_id for future checkouts while
+    // old subscriptions keep billing the plan they were minted on.
+    const historicalPlanBySubscription = new Map<string, string>();
+    const activationKeys = fresh.map(([subscriptionId]) =>
+      `paypal:subscription:${subscriptionId}:fulfill_subscription`,
+    );
+    for (let from = 0; from < activationKeys.length; from += EXACT_LOOKUP_CHUNK_SIZE) {
+      const chunk = activationKeys.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
       const { data, error } = await supabase
         .from('bot_action_queue')
-        .select('payload')
-        .eq('action', 'fulfill_subscription')
-        .in('payload->>order_id', chunk);
+        .select('idempotency_key, payload')
+        .in('idempotency_key', chunk);
       if (error) {
         return {
           status: 'failed',
@@ -3462,11 +3492,14 @@ async function runPass(
         };
       }
       for (const row of (data ?? []) as Array<Record<string, unknown>>) {
-        const payload = row.payload as Record<string, unknown> | null;
-        const orderId = payload?.order_id;
-        const providerPlan = payload?.paypal_plan_id;
-        if (typeof orderId === 'string' && isProviderId(providerPlan)) {
-          historicalPlanByOrderId.set(orderId, providerPlan);
+        const key = row.idempotency_key;
+        const providerPlan = (row.payload as Record<string, unknown> | null)?.paypal_plan_id;
+        if (typeof key === 'string' && isProviderId(providerPlan)) {
+          const subscriptionId = key.slice(
+            'paypal:subscription:'.length,
+            -':fulfill_subscription'.length,
+          );
+          historicalPlanBySubscription.set(subscriptionId, providerPlan);
         }
       }
     }
@@ -3512,7 +3545,7 @@ async function runPass(
       // Plan identity: the provider's plan must be the HISTORICAL plan this
       // subscription was minted on (absent history → no check, never the
       // mutable current plans row).
-      const historicalPlanId = historicalPlanByOrderId.get(order.id) ?? null;
+      const historicalPlanId = historicalPlanBySubscription.get(subscriptionId) ?? null;
       if (
         subscription.planId !== null
         && historicalPlanId !== null
@@ -3580,6 +3613,22 @@ async function runPass(
         ? subscription.statusUpdateTimeMs <= windowEndMs
         : String(order.created_at ?? '') <= windowEnd;
       if (
+        ['APPROVAL_PENDING', 'APPROVED', 'CREATED'].includes(subscription.status)
+        && SETTLED_ORDER_STATUSES.includes(order.status)
+        && transitionSettled
+      ) {
+        // The local order (and entitlements) claim an activated
+        // subscription PayPal says never activated — free trials have no
+        // payment rows, so no billing check would ever catch this.
+        unsettledLocalPayments.push({
+          transactionId: subscriptionId,
+          guildId,
+          orderId: order.id,
+          paymentStatus: 'subscription_never_activated',
+          orderStatus: order.status,
+        });
+      }
+      if (
         subscription.status === 'ACTIVE'
         && order.status === 'completed'
         && stagedFulfillmentOrderIds.has(order.id)
@@ -3641,12 +3690,19 @@ async function runPass(
           && createdMs >= lastPaymentMs - SUBSCRIPTION_CHARGE_TOLERANCE_MS;
       });
       if (lastPaymentInWindow && settledWindowPayments.length === 0) {
-        const hasNonSettledRow = orderWindowPayments.some(
-          (payment) => !SETTLED_ROW_STATUSES.includes(payment.status),
-        );
-        if (hasNonSettledRow) {
+        // Only a non-settled row that CORRELATES with the latest charge is
+        // evidence that THAT charge failed locally — an older failed
+        // renewal must not stand in while the enumeration reports the
+        // actual missing sale.
+        const correlatedNonSettledRows = orderWindowPayments.filter((payment) => {
+          if (SETTLED_ROW_STATUSES.includes(payment.status)) return false;
+          const createdMs = Date.parse(String(payment.created_at ?? ''));
+          return Number.isFinite(createdMs)
+            && createdMs >= lastPaymentMs - SUBSCRIPTION_CHARGE_TOLERANCE_MS;
+        });
+        if (correlatedNonSettledRows.length > 0) {
           // Provider billed; a local row exists but never settled.
-          const latest = orderWindowPayments.reduce((best, candidate) =>
+          const latest = correlatedNonSettledRows.reduce((best, candidate) =>
             String(candidate.created_at ?? '') > String(best.created_at ?? '') ? candidate : best,
           );
           unsettledLocalPayments.push({

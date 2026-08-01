@@ -2232,6 +2232,7 @@ describe('runPayPalReconciliation', () => {
         data: wantsStaged
           ? []
           : [{
+              idempotency_key: 'paypal:subscription:SUB-1:fulfill_subscription',
               payload: { order_id: ORDER_UUID, paypal_plan_id: 'P-LOCAL' },
               status: 'completed',
             }],
@@ -3277,6 +3278,140 @@ describe('runPayPalReconciliation', () => {
       transactionId: 'REF-RIGHT',
       referenceId: 'CAP-1',
     }));
+  });
+
+  // ── PR #409 review round 10 repairs ───────────────────────────────────────
+
+  it('reads a processed EXPIRY clean through its cancellation action', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    resolvers['commerce_subscription_lifecycle_heads'] = () => ({
+      data: [{
+        paypal_subscription_id: 'SUB-1',
+        last_event_priority: 60,
+        last_provider_event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        last_webhook_event_id: 'WH-EXP',
+      }],
+      error: null,
+    });
+    resolvers['bot_action_queue'] = (op) => {
+      const wantsStaged = op.filters.some(
+        (f) => f.method === 'eq' && f.args[0] === 'status' && f.args[1] === 'staged',
+      );
+      return {
+        data: wantsStaged
+          ? []
+          : [{
+              idempotency_key: 'paypal:lifecycle:WH-EXP:subscription_cancelled',
+              status: 'completed',
+            }],
+        error: null,
+      };
+    };
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'EXPIRED', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([]);
+  });
+
+  it('flags a completed order whose subscription PayPal never activated', async () => {
+    // Free trial: no payment rows exist, so only the status comparison can
+    // catch entitlements claiming an activation that never happened.
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'APPROVAL_PENDING', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'SUB-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'subscription_never_activated',
+      orderStatus: 'completed',
+    }]);
+  });
+
+  it('reports a lost latest charge once even when an OLDER renewal failed', async () => {
+    const OLD_FAILED = '2026-07-21T10:00:00.000Z';
+    const LATEST = '2026-07-24T10:00:00.000Z';
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'SALE-OLDFAIL',
+        created_at: OLD_FAILED,
+        status: 'failed',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-OLDFAIL': saleObject({ state: 'denied', total: '25.00' }) },
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: LATEST, lastPaymentValue: '25.00' }),
+      },
+      subscriptionTransactions: {
+        'SUB-1': {
+          transactions: [{
+            id: 'SALE-LATEST',
+            status: 'COMPLETED',
+            time: LATEST,
+            amount_with_breakdown: {
+              gross_amount: { currency_code: 'USD', value: '25.00' },
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    // The stale failed renewal does not correlate with the latest charge:
+    // one finding, by the actual sale id.
+    expect(result.unsettledLocalPayments).toEqual([]);
+    expect(result.missingLocalPayments).toEqual([{
+      kind: 'payment',
+      transactionId: 'SALE-LATEST',
+      guildId: GUILD_ID,
+      amountCents: 2500,
+      currency: 'USD',
+      initiatedAt: new Date(Date.parse(LATEST)).toISOString(),
+      source: 'subscription',
+      referenceId: 'SUB-1',
+    }]);
   });
 
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {
