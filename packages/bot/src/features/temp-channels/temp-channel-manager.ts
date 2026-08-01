@@ -533,8 +533,38 @@ export class TempChannelManager {
       }
       if (ownershipLost) {
         // Stale recovery reclaimed this occurrence while we were creating
-        // channels: OUR channels are the duplicates now. Delete them and walk
-        // away without touching the occurrence — it belongs to recovery.
+        // channels. Recovery may have created its OWN replacement — but it
+        // can equally have ADOPTED our exact channels through the durable
+        // createdChannelIds. Deleting blindly disconnected the adopted
+        // room's users and left the committed active row pointing at
+        // nothing. Read back before deleting; only a CONFIRMED
+        // different-or-absent adoption makes ours the duplicates.
+        const { data: adopted, error: adoptionReadError } = await this.supabase
+          .from('active_temp_channels')
+          .select('channel_id')
+          .eq('guild_id', this.guild.id)
+          .eq('creation_occurrence_id', occurrenceId)
+          .maybeSingle();
+        if (adoptionReadError) {
+          // Unresolved: deleting could destroy an adopted live room, and the
+          // durable createdChannelIds let the reconciler adopt or dispose
+          // once the database answers. Preserve.
+          log.error('Could not verify temp-room adoption after a lost claim; preserving channels', {
+            occurrenceId,
+            channelId: vc.id,
+            error: adoptionReadError.message,
+          });
+          return;
+        }
+        if (adopted?.channel_id === vc.id) {
+          // Recovery adopted OUR room: it is the live counter of record.
+          // Walk away without deleting anything.
+          log.warn('Temp-room claim was reclaimed but recovery adopted our channels; preserving', {
+            occurrenceId,
+            channelId: vc.id,
+          });
+          return;
+        }
         log.warn('Temp-room creation lost its claim to stale recovery; removing duplicates', {
           occurrenceId,
           channelId: vc.id,

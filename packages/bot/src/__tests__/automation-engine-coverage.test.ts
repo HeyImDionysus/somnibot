@@ -558,6 +558,24 @@ describe('AutomationEngine', () => {
       expect(mockExecuteActions.mock.calls[0][1].member.id).toBe('10000000000000000');
     });
 
+    it('runs the automation without a marker when the claim fails open (round 31 P1)', async () => {
+      // A transient logging outage makes claim() return claimed:true with a
+      // null rowId ON PURPOSE. Rejecting the null id in markActionsStarted
+      // permanently dropped the automation for never-replayed events.
+      mockClaim.mockResolvedValueOnce({ claimed: true, rowId: null });
+      mockGetForTrigger.mockReturnValue([makeAutomation({})]);
+      await engine.start();
+      eventBus.fire({
+        type: 'member.verified',
+        guildId: 'g1',
+        data: { discordId: '10000000000000000' },
+      });
+
+      await vi.waitFor(() => expect(mockExecuteActions).toHaveBeenCalled());
+      expect(mockMarkStarted).not.toHaveBeenCalled();
+      expect(mockFinalize).toHaveBeenCalled();
+    });
+
     it('skips a replayed occurrence BEFORE spending rate-limit quota (round 30)', async () => {
       // A gateway RESUME redelivers the same durable occurrence: the claim
       // dedupes the action, but allowFire/allowCustom had already burned the

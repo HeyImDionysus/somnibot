@@ -646,11 +646,24 @@ export class AutomationEngine {
       // filterBulkRateLimits, so a marker failure after them would release
       // the claim with the counters already burned and the redelivery would
       // reject every target. Marker fails -> release with counters untouched.
-      try {
-        await this.executionLogger.markActionsStarted(claimRowId);
-      } catch (markError) {
-        await this.executionLogger.release(claimRowId);
-        throw markError;
+      if (claimRowId) {
+        try {
+          await this.executionLogger.markActionsStarted(claimRowId);
+        } catch (markError) {
+          await this.executionLogger.release(claimRowId);
+          throw markError;
+        }
+      } else {
+        // The claim deliberately failed OPEN (transient logging outage →
+        // claimed true, rowId null). There is no durable row to mark, and
+        // refusing to run here would permanently drop a real automation for
+        // ordinary events that are never replayed — after its member quota
+        // was already spent. Run without the marker; occurrence dedupe is
+        // degraded exactly as the fail-open contract already accepts.
+        log.warn(
+          `Automation "${automation.name}" runs without a durable claim row; `
+          + 'the execution-log insert failed open',
+        );
       }
       let rateLimitedMemberIds: string[];
       try {

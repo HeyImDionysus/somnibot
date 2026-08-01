@@ -172,14 +172,27 @@ export class ExecutionLogger {
   ): Promise<boolean> {
     const { data, error } = await this.supabase
       .from('automation_executions')
-      .select('id')
+      .select('actions_started, conditions_passed, actions_executed, actions_failed, duration_ms, created_at')
       .eq('automation_id', automationId)
       .eq('guild_id', guildId)
       .eq('occurrence_id', occurrenceId)
       .limit(1)
       .maybeSingle();
-    if (error) return false;
-    return data !== null;
+    if (error || !data) return false;
+    const preActionShaped = data.actions_started === false
+      && data.conditions_passed === false
+      && data.actions_executed === 0
+      && data.actions_failed === 0
+      && data.duration_ms === 0;
+    if (!preActionShaped) return true;
+    // A pre-action row PAST the stale floor is a STRANDED claim: report it
+    // unconsumed so claim()'s 23505 path can reclaim and re-run it — the
+    // startup sweep repairs only STARTED rows, so this redelivery is the
+    // stranded occurrence's only path back to execution. A FRESH pre-action
+    // row is another worker mid-run: skip without spending quota.
+    const createdMs = Date.parse(String(data.created_at ?? ''));
+    if (!Number.isFinite(createdMs)) return true;
+    return Date.now() - createdMs < STALE_PRE_ACTION_CLAIM_MS;
   }
 
   /**
