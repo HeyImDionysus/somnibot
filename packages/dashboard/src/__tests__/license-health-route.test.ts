@@ -128,7 +128,7 @@ describe('GET /api/license/health', () => {
       },
     });
 
-    const response = await GET(buildRequest());
+    const response = await GET(buildRequest('/api/license/health') as never);
     const payload = await response.json();
 
     expect(response.status).toBe(200);
