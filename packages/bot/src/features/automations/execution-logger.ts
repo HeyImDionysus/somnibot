@@ -187,7 +187,11 @@ export class ExecutionLogger {
    * must know the truth landed before terminalizing the hold — a swallowed
    * error there left a terminal hold with pre-action history forever.
    */
-  async finalizeStrict(rowId: string | null, result: ExecutionResult): Promise<void> {
+  async finalizeStrict(
+    rowId: string | null,
+    result: ExecutionResult,
+    opts?: { skipCountBump?: boolean },
+  ): Promise<void> {
     if (!rowId) {
       await this.log(result);
       return;
@@ -209,6 +213,20 @@ export class ExecutionLogger {
     }
     if (!data) {
       throw new Error('Execution row disappeared before finalization');
+    }
+    // History is truthfully written; retain the same fired-counter
+    // bookkeeping finalize()/log() perform so approved holds advance
+    // execution_count / last_executed_at. The counter stays ADVISORY:
+    // its failure must not throw an already-recorded history row back
+    // into the retry path. skipCountBump lets a caller that already
+    // counted this run (a landed success finalize being overwritten
+    // with interruption details) avoid counting it twice.
+    if (!opts?.skipCountBump) {
+      try {
+        await this.bumpCount(result);
+      } catch (bumpError) {
+        log.error('Failed to bump automation execution count:', bumpError);
+      }
     }
   }
 

@@ -1183,6 +1183,10 @@ export class AutomationEngine {
     // Mirrors bulk progress OUTWARD so the interruption path can report how
     // much of a destructive run already reached Discord instead of zeros.
     const heldProgress = { executed: 0, failed: 0, errors: [] as string[] };
+    // True once a strict finalize has landed (and therefore bumped the
+    // fired-counter). A later failure (e.g. the hold-release write) re-
+    // finalizes with interruption details, which must not double-count.
+    let historyCounted = false;
     // The deadline this worker has actually been ACKNOWLEDGED to hold. A
     // renewal that hangs or stays in flight past expiry leaves leaseError
     // null, so error-only checking let the worker keep running member actions
@@ -1332,6 +1336,7 @@ export class AutomationEngine {
       // finalizes with progress or leaves the hold executing for the
       // lease-expiry RPC to finalize transactionally.
       await this.executionLogger.finalizeStrict(hold.execution_id, executionResult);
+      historyCounted = true;
       const automationName = await this.automationName(hold.automation_id);
       if (result.failed > 0) {
         const failureMessage = result.errors.join('; ') || `${result.failed} action(s) failed`;
@@ -1379,7 +1384,7 @@ export class AutomationEngine {
             `Approved mass action was interrupted: ${message}`,
           ],
           durationMs: Date.now() - startTime,
-        });
+        }, { skipCountBump: historyCounted });
         interruptedFinalized = true;
       } catch (finalizeError) {
         log.error(

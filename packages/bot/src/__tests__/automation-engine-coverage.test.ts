@@ -580,6 +580,9 @@ describe('AutomationEngine', () => {
         'exec-1',
         expect.objectContaining({ actionsExecuted: 2, actionsFailed: 0 }),
       );
+      // Round 25: the success finalize must run WITH counter bookkeeping —
+      // no skipCountBump — so approved holds advance "Fired Nx".
+      expect(mockFinalizeStrict.mock.calls[0][2]).toBeUndefined();
       expect(mockMassComplete).toHaveBeenCalledWith('hold-1');
       expect(mockMassRenewLease).toHaveBeenCalledWith('hold-1');
       expect(eventBus.emit).toHaveBeenCalledWith(
@@ -587,6 +590,74 @@ describe('AutomationEngine', () => {
         'g1',
         expect.objectContaining({ actionsExecuted: 2, success: true }),
       );
+    });
+
+    it('does not double-count a run whose success finalize landed but whose hold release failed', async () => {
+      // Round 25 corner: finalizeStrict now bumps the fired-counter. If the
+      // success finalize LANDS and a later step (the hold-release write)
+      // throws, the catch re-finalizes with interruption details — that
+      // overwrite must skip the bump or one run counts twice.
+      mockMassClaimApproved.mockResolvedValue({
+        id: 'hold-count',
+        automation_id: 'auto1',
+        execution_id: 'exec-count',
+        occurrence_id: '10000000-0000-8000-8000-000000000009',
+        member_ids: ['10000000000000000'],
+        member_count: 1,
+        threshold: 1,
+        trigger_event: 'member.verified',
+        triggered_by: 'system',
+        action_snapshot: [{ type: 'give_role', config: { role_id: 'role1' } }],
+        context_snapshot: { channelId: null, messageId: null, variables: {} },
+      });
+      (engine as unknown as { automationName(id: string): Promise<string> }).automationName =
+        vi.fn().mockResolvedValue('Test Automation');
+      mockMassComplete.mockRejectedValueOnce(new Error('release write lost'));
+
+      await expect(
+        (engine as unknown as { runApprovedHold(id: string): Promise<void> })
+          .runApprovedHold('hold-count'),
+      ).rejects.toThrow('release write lost');
+
+      expect(mockFinalizeStrict).toHaveBeenCalledTimes(2);
+      // First (success) finalize counted the run…
+      expect(mockFinalizeStrict.mock.calls[0][2]).toBeUndefined();
+      // …so the interruption overwrite must not count it again.
+      expect(mockFinalizeStrict.mock.calls[1][2]).toEqual({ skipCountBump: true });
+      expect(mockMassFail).toHaveBeenCalledWith('hold-count', 'release write lost');
+    });
+
+    it('counts an interrupted run whose success finalize never landed', async () => {
+      // The inverse corner: when the failure precedes any successful
+      // finalize, the interruption finalize IS the one recording of the run
+      // and must keep its counter bump.
+      mockMassClaimApproved.mockResolvedValue({
+        id: 'hold-count2',
+        automation_id: 'auto1',
+        execution_id: 'exec-count2',
+        occurrence_id: '10000000-0000-8000-8000-00000000000a',
+        member_ids: ['10000000000000000'],
+        member_count: 1,
+        threshold: 1,
+        trigger_event: 'member.verified',
+        triggered_by: 'system',
+        action_snapshot: [{ type: 'give_role', config: { role_id: 'role1' } }],
+        context_snapshot: { channelId: null, messageId: null, variables: {} },
+      });
+      (engine as unknown as { automationName(id: string): Promise<string> }).automationName =
+        vi.fn().mockResolvedValue('Test Automation');
+      mockFinalizeStrict
+        .mockRejectedValueOnce(new Error('history write lost'))
+        .mockResolvedValueOnce(undefined);
+
+      await expect(
+        (engine as unknown as { runApprovedHold(id: string): Promise<void> })
+          .runApprovedHold('hold-count2'),
+      ).rejects.toThrow('history write lost');
+
+      expect(mockFinalizeStrict).toHaveBeenCalledTimes(2);
+      expect(mockFinalizeStrict.mock.calls[1][2]).toEqual({ skipCountBump: false });
+      expect(mockMassFail).toHaveBeenCalledWith('hold-count2', 'history write lost');
     });
 
     it('resumes the persisted chain depth while executing an approved hold', async () => {
