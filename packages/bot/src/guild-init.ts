@@ -405,14 +405,42 @@ export async function initGuildFeatures(
   // and a current global heartbeat alone must not read as 'reachable'.
   // Rewritten every boot so rows always reflect the latest initialization.
   try {
-    await supabase
-      .from('guild_runtime_features')
-      .delete()
-      .eq('guild_id', guild.id);
+    // Upsert the running set FIRST, then prune stale rows — supabase reports
+    // failures via `error`, not throws, and this order never publishes a
+    // partial snapshot that under-reports running managers: an upsert
+    // failure leaves last boot's rows (checked below), and a prune failure
+    // only over-reports features until the next boot.
     if (startedRuntimeFeatures.length > 0) {
-      await supabase.from('guild_runtime_features').insert(
-        startedRuntimeFeatures.map((feature) => ({ guild_id: guild.id, feature })),
-      );
+      const { error: upsertError } = await supabase
+        .from('guild_runtime_features')
+        .upsert(
+          startedRuntimeFeatures.map((feature) => ({ guild_id: guild.id, feature })),
+          { onConflict: 'guild_id,feature' },
+        );
+      if (upsertError) {
+        guildLog.error('Failed to record runtime feature state', {
+          error: upsertError.message,
+        });
+      } else {
+        const { error: pruneError } = await supabase
+          .from('guild_runtime_features')
+          .delete()
+          .eq('guild_id', guild.id)
+          .not('feature', 'in', `(${startedRuntimeFeatures.map((f) => `"${f}"`).join(',')})`);
+        if (pruneError) {
+          guildLog.error('Failed to prune stale runtime feature rows', {
+            error: pruneError.message,
+          });
+        }
+      }
+    } else {
+      const { error: clearError } = await supabase
+        .from('guild_runtime_features')
+        .delete()
+        .eq('guild_id', guild.id);
+      if (clearError) {
+        guildLog.error('Failed to clear runtime feature rows', { error: clearError.message });
+      }
     }
   } catch (err) {
     guildLog.error('Failed to record runtime feature state', { error: String(err) });

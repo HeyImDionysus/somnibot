@@ -127,11 +127,17 @@ export async function markDiscordOccurrenceCleanupPending(
  * markDiscordOccurrenceCleanupPending. Merges into the existing result so the
  * claim's recovery metadata is preserved.
  */
+/**
+ * Records the created channel ids on the claimed occurrence and returns the
+ * occurrence's FRESH updated_at. The update fires the updated_at trigger, so
+ * any claim-identity snapshot captured at claim time is stale from this point
+ * on — ownership inserts must verify against the returned value.
+ */
 export async function recordDiscordOccurrenceChannels(
   supabase: SupabaseClient,
   occurrenceId: string,
   channelIds: string[],
-): Promise<void> {
+): Promise<{ updatedAt: string | null }> {
   const { data: current, error: readError } = await supabase
     .from('discord_operation_occurrences')
     .select('result')
@@ -154,7 +160,7 @@ export async function recordDiscordOccurrenceChannels(
     .update({ result })
     .eq('id', occurrenceId)
     .eq('status', 'claimed')
-    .select('id')
+    .select('id, updated_at')
     .maybeSingle();
   if (updateError) {
     throw new Error(`Unable to record occurrence channel ids: ${updateError.message}`);
@@ -162,6 +168,9 @@ export async function recordDiscordOccurrenceChannels(
   if (!updated) {
     throw new Error(`Unable to record channel ids: occurrence ${occurrenceId} is no longer claimed`);
   }
+  return {
+    updatedAt: typeof updated.updated_at === 'string' ? updated.updated_at : null,
+  };
 }
 
 export async function completeDiscordOccurrence(

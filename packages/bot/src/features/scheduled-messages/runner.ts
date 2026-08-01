@@ -768,11 +768,25 @@ export class ScheduledMessageRunner {
         // race, so ROLL IT BACK to the pre-advance value: a transient alert
         // outage must not permanently consume the missed notice — the next
         // restart re-detects the gap and retries.
-        await this.supabase
-          .from('scheduled_messages')
-          .update({ last_sent_at: baseline.toISOString() })
-          .eq('id', schedule.id)
-          .eq('last_sent_at', lastOcc.toISOString());
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          const { error: rollbackError } = await this.supabase
+            .from('scheduled_messages')
+            .update({ last_sent_at: baseline.toISOString() })
+            .eq('id', schedule.id)
+            .eq('last_sent_at', lastOcc.toISOString());
+          if (!rollbackError) break;
+          if (attempt === 3) {
+            // The advanced baseline is durable and the notice never landed:
+            // say so LOUDLY — this occurrence's notice is lost until an
+            // operator intervenes, and silence here was the original bug.
+            log.error('Missed-run notice failed AND its baseline rollback failed; the miss will not be re-announced:', {
+              scheduleId: schedule.id,
+              error: rollbackError.message,
+            });
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+          }
+        }
       }
 
     } catch (alertErr) {

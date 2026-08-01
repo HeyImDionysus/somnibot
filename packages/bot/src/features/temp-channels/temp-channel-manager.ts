@@ -421,11 +421,16 @@ export class TempChannelManager {
         let idsPersisted = false;
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
-            await recordDiscordOccurrenceChannels(
+            const channelRecord = await recordDiscordOccurrenceChannels(
               this.supabase,
               occurrenceId,
               [vc.id, ...(textChannelId ? [textChannelId] : [])],
             );
+            // Refresh the claim snapshot: the record write bumped updated_at
+            // and a stale snapshot would make the ownership insert refuse.
+            if (channelRecord.updatedAt) {
+              occurrenceClaimUpdatedAt = channelRecord.updatedAt;
+            }
             idsPersisted = true;
             break;
           } catch (persistError) {

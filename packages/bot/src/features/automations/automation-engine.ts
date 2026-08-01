@@ -628,9 +628,27 @@ export class AutomationEngine {
         await this.executionLogger.release(claimRowId);
         throw markError;
       }
-      const rateLimitedMemberIds = affectedMemberIds.length > 0
-        ? await this.filterBulkRateLimits(automation, affectedMemberIds)
-        : affectedMemberIds;
+      let rateLimitedMemberIds: string[];
+      try {
+        rateLimitedMemberIds = affectedMemberIds.length > 0
+          ? await this.filterBulkRateLimits(automation, affectedMemberIds)
+          : affectedMemberIds;
+      } catch (limitError) {
+        // Valkey failed strictly between the marker and the first action:
+        // nothing external ran, so revert the marker and RELEASE — the stable
+        // occurrence retries instead of being permanently suppressed by the
+        // started-row reclaim guard. (Partially consumed counters may skip
+        // some members on the retry; losing the whole occurrence silently
+        // would be worse.) If even the revert cannot be confirmed, the claim
+        // stays marked — safe, visible in history, never double-run.
+        try {
+          await this.executionLogger.revertActionsStarted(claimRowId);
+          await this.executionLogger.release(claimRowId);
+        } catch (revertError) {
+          log.error('Could not revert a pre-action marker after a rate-limit fault:', revertError);
+        }
+        throw limitError;
+      }
       if (affectedMemberIds.length > 0 && rateLimitedMemberIds.length === 0) {
         // Every target is rate-limited: nothing runs, but the conditions DID
         // match — history must say why nothing happened, not fabricate a

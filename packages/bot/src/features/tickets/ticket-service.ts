@@ -521,7 +521,11 @@ export async function createTicket(
     let idPersisted = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        await recordDiscordOccurrenceChannels(supabase, occurrenceId, [channel.id]);
+        const channelRecord =
+          await recordDiscordOccurrenceChannels(supabase, occurrenceId, [channel.id]);
+        // The record write bumped updated_at: refresh the claim snapshot or
+        // the ownership insert would ALWAYS see it as stale and self-destruct.
+        if (channelRecord.updatedAt) occurrenceClaimUpdatedAt = channelRecord.updatedAt;
         idPersisted = true;
         break;
       } catch (persistError) {

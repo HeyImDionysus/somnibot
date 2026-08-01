@@ -212,6 +212,31 @@ export class ExecutionLogger {
     }
   }
 
+  /**
+   * Revert the actions-started marker when it is PROVEN nothing ran (the
+   * failure happened strictly between marking and the first action). Guarded
+   * on the pre-action counters so a row with real progress is never
+   * un-marked. Throws when the revert cannot be confirmed.
+   */
+  async revertActionsStarted(rowId: string | null): Promise<void> {
+    if (!rowId) return;
+    const { data, error } = await this.supabase
+      .from('automation_executions')
+      .update({ actions_started: false })
+      .eq('id', rowId)
+      .eq('actions_started', true)
+      .eq('actions_executed', 0)
+      .eq('actions_failed', 0)
+      .select('id')
+      .maybeSingle();
+    if (error) {
+      throw new Error(`Failed to revert actions-started marker: ${error.message}`);
+    }
+    if (!data) {
+      throw new Error('Actions-started marker could not be reverted');
+    }
+  }
+
   async finalize(rowId: string | null, result: ExecutionResult): Promise<void> {
     if (rowId) {
       const { error } = await this.supabase
