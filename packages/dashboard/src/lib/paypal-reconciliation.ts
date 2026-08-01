@@ -2293,14 +2293,8 @@ async function runPass(
       windowStartMs - Math.max(0, refundLookbackMs),
     ).toISOString();
     const targetedOrderIds = new Set(orderGetTargets.map((order) => order.id));
-    for (let from = 0; ; from += LOCAL_PAGE_SIZE) {
-      if (from >= LOCAL_SCAN_MAX_ROWS) {
-        return {
-          status: 'failed',
-          reason: `historical cancelled-order scan exceeded ${LOCAL_SCAN_MAX_ROWS} rows — narrow the lookback`,
-          retriable: true,
-        };
-      }
+    let scanComplete = false;
+    for (let from = 0; from < LOCAL_SCAN_MAX_ROWS; from += LOCAL_PAGE_SIZE) {
       const heartbeatFailure = await heartbeat();
       if (heartbeatFailure) return heartbeatFailure;
       const { data, error } = await supabase
@@ -2338,7 +2332,40 @@ async function runPass(
         targetedOrderIds.add(order.id);
         orderGetTargets.push(order);
       }
-      if (page.length < LOCAL_PAGE_SIZE) break;
+      if (page.length < LOCAL_PAGE_SIZE) {
+        scanComplete = true;
+        break;
+      }
+    }
+    if (!scanComplete) {
+      // Exactly-at-cap is SUPPORTED: only a probed row past the cap means
+      // the backlog truly exceeds it (same discipline as the other scans).
+      const { data: overflow, error: overflowError } = await supabase
+        .from('orders')
+        .select('id')
+        .or('source.eq.purchase,source.is.null')
+        .gt('amount_cents', 0)
+        .eq('status', 'cancelled')
+        .not('paypal_order_id', 'is', null)
+        .gte('created_at', cancelledLookbackStartIso)
+        .lt('created_at', windowStart)
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(LOCAL_SCAN_MAX_ROWS, LOCAL_SCAN_MAX_ROWS);
+      if (overflowError) {
+        return {
+          status: 'failed',
+          reason: `historical cancelled-order overflow probe failed: ${overflowError.message}`,
+          retriable: true,
+        };
+      }
+      if (((overflow ?? []) as Array<{ id: string }>).length > 0) {
+        return {
+          status: 'failed',
+          reason: `historical cancelled-order scan exceeded ${LOCAL_SCAN_MAX_ROWS} rows — narrow the lookback`,
+          retriable: true,
+        };
+      }
     }
   }
 
@@ -3236,6 +3263,22 @@ async function runPass(
           const guildId = target.payment.guild_id as string;
           const providerId = target.payment.paypal_payment_id as string;
           bumpVerified(guildId);
+          // Refund-ledger truth does not excuse PAYMENT-money drift: this
+          // is the historical row's only provider touch, so its own amount
+          // gets the same comparison the window passes perform.
+          if (
+            target.providerAmountCents !== target.payment.amount_cents
+            || target.providerCurrency !== normalizeCurrency(target.payment.currency)
+          ) {
+            amountMismatches.push({
+              transactionId: providerId,
+              guildId,
+              providerAmountCents: target.providerAmountCents,
+              localAmountCents: target.payment.amount_cents,
+              providerCurrency: target.providerCurrency,
+              localCurrency: normalizeCurrency(target.payment.currency),
+            });
+          }
           const parentId = parentProviderOrderId(target.payment, target.relatedOrderId);
           judgeRefundedPayment({
             payment: target.payment,
@@ -3312,6 +3355,42 @@ async function runPass(
             reversed
             && String(parentRow.created_at ?? '') < windowStart
           ) {
+            // Reversed parents are excluded from the completed-only
+            // lookback, so this witness is their only provider touch: the
+            // billing-agreement identity and the parent row's own money
+            // get the same checks the window sale pass performs.
+            const witnessParentOrder = ordersById.get(parentRow.order_id as string);
+            if (
+              witnessParentOrder
+              && isProviderId(witnessParentOrder.paypal_subscription_id)
+              && (
+                saleLookup.value.billingAgreementId === null
+                || saleLookup.value.billingAgreementId
+                  !== witnessParentOrder.paypal_subscription_id
+              )
+            ) {
+              return {
+                refund,
+                lookup: {
+                  ok: false as const,
+                  retriable: false,
+                  reason: 'provider identity conflict',
+                },
+              };
+            }
+            if (
+              saleLookup.value.amountCents !== parentRow.amount_cents
+              || saleLookup.value.currency !== normalizeCurrency(parentRow.currency)
+            ) {
+              amountMismatches.push({
+                transactionId: parentRow.paypal_payment_id as string,
+                guildId: parentRow.guild_id as string,
+                providerAmountCents: saleLookup.value.amountCents,
+                localAmountCents: parentRow.amount_cents,
+                providerCurrency: saleLookup.value.currency,
+                localCurrency: normalizeCurrency(parentRow.currency),
+              });
+            }
             const totalsFailure = await loadLocalRefundTotals([parentRow]);
             if (totalsFailure) {
               return {
