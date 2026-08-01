@@ -5654,6 +5654,231 @@ describe('runPayPalReconciliation', () => {
     });
   });
 
+  // ── PR #409 review round 24 repairs ─────────────────────────────────────
+
+  it('resolves an unlinked enumerated refund through the standalone endpoint', async () => {
+    // Multi-capture order, one enumerated refund without an up-link: the
+    // standalone refund object names the parent, and capture A judges clean
+    // instead of reading the linkless entry ambiguously.
+    withLedger({
+      payments: [paymentRow({ status: 'refunded' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'REF-A',
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-1': captureObject({
+          status: 'REFUNDED',
+          value: '25.00',
+          relatedOrderId: 'PP-ORDER-1',
+        }),
+      },
+      refunds: { 'REF-A': refundObject({ value: '25.00' }) },
+      orders: {
+        'PP-ORDER-1': {
+          status: 'COMPLETED',
+          purchase_units: [{
+            custom_id: IDENTITY_CUSTOM_FIELD,
+            payments: {
+              captures: [
+                {
+                  id: 'CAP-1',
+                  status: 'REFUNDED',
+                  amount: { currency_code: 'USD', value: '25.00' },
+                },
+                {
+                  id: 'CAP-OTHER',
+                  status: 'PENDING',
+                  amount: { currency_code: 'USD', value: '5.00' },
+                },
+              ],
+              refunds: [{
+                id: 'REF-A',
+                status: 'COMPLETED',
+                amount: { currency_code: 'USD', value: '25.00' },
+                create_time: IN_WINDOW,
+              }],
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toEqual([]);
+    expect(result.amountMismatches).toEqual([]);
+  });
+
+  it('fails closed when a multi-capture enumeration cannot name a parent', async () => {
+    withLedger({
+      payments: [paymentRow({ status: 'refunded' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'REF-A',
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-1': captureObject({
+          status: 'REFUNDED',
+          value: '25.00',
+          relatedOrderId: 'PP-ORDER-1',
+        }),
+      },
+      // REF-A is deliberately absent from the standalone registry AND from
+      // its own row's verification: the window refund pass would find it,
+      // so the enumerated ghost sibling is a different id.
+      refunds: { 'REF-A': refundObject({ value: '25.00' }) },
+      orders: {
+        'PP-ORDER-1': {
+          status: 'COMPLETED',
+          purchase_units: [{
+            custom_id: IDENTITY_CUSTOM_FIELD,
+            payments: {
+              captures: [
+                {
+                  id: 'CAP-1',
+                  status: 'REFUNDED',
+                  amount: { currency_code: 'USD', value: '25.00' },
+                },
+                {
+                  id: 'CAP-OTHER',
+                  status: 'PENDING',
+                  amount: { currency_code: 'USD', value: '5.00' },
+                },
+              ],
+              refunds: [{
+                id: 'REF-GHOST',
+                status: 'COMPLETED',
+                amount: { currency_code: 'USD', value: '3.00' },
+                create_time: IN_WINDOW,
+              }],
+            },
+          }],
+        },
+      },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'order lookup returned a malformed record',
+      retriable: false,
+    });
+  });
+
+  it('fails closed when activation history names a plan the provider omits', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    resolvers['bot_action_queue'] = () => ({
+      data: [{
+        idempotency_key: 'paypal:subscription:SUB-1:fulfill_subscription',
+        payload: { order_id: ORDER_UUID, paypal_plan_id: 'PLAN-1' },
+        status: 'completed',
+      }],
+      error: null,
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'ACTIVE', lastPaymentTime: null }),
+      },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'provider identity conflict',
+      retriable: false,
+    });
+  });
+
+  it('fails closed on a sale-family refund attached to a capture-backed order', async () => {
+    withLedger({
+      payments: [paymentRow({ status: 'refunded' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'REF-1',
+        event_type: 'PAYMENT.SALE.REFUNDED',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject({ status: 'REFUNDED', value: '25.00' }) },
+      saleRefunds: {
+        'REF-1': {
+          state: 'completed',
+          amount: { currency: 'USD', total: '25.00' },
+          sale_id: 'CAP-1',
+        },
+      },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'provider refund identity conflict',
+      retriable: false,
+    });
+  });
+
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {
     withLedger({ payments: [paymentRow()] });
     scriptProviderObjects({ captures: { 'CAP-1': { __status: 503 } } });

@@ -2681,8 +2681,46 @@ async function runPass(
         const settled = completed.filter(
           (refund) => refund.createTimeMs === null || refund.createTimeMs <= windowEndMs,
         );
+        // Partitioning by parent only works when every settled entry NAMES
+        // a parent. A single-capture order attributes unlinked entries by
+        // construction; on a multi-capture order the standalone refund
+        // endpoint resolves them, and an unresolvable parent is a malformed
+        // enumeration — attributing it to EVERY capture manufactured false
+        // missing-refund alerts on the others.
+        const captureIds = lookup.value.captures.map((capture) => capture.id);
+        const resolved: ProviderOrderRefund[] = [];
+        for (const refund of settled) {
+          if (refund.parentCaptureId !== null) {
+            resolved.push(refund);
+            continue;
+          }
+          if (captureIds.length === 1) {
+            resolved.push({ ...refund, parentCaptureId: captureIds[0] });
+            continue;
+          }
+          const standalone = await fetchProviderRefund(
+            config.apiBase,
+            token.token,
+            refund.id,
+          );
+          if (!standalone.ok) {
+            return {
+              status: 'failed' as const,
+              reason: standalone.reason,
+              retriable: standalone.retriable,
+            };
+          }
+          if (!standalone.found || standalone.value.parentCaptureId === null) {
+            return {
+              status: 'failed' as const,
+              reason: 'order lookup returned a malformed record',
+              retriable: false,
+            };
+          }
+          resolved.push({ ...refund, parentCaptureId: standalone.value.parentCaptureId });
+        }
         orderRefundLists.set(providerOrderId, {
-          refunds: settled,
+          refunds: resolved,
           inFlightParentIds: completed
             .filter((refund) => !settled.includes(refund))
             .map((refund) => refund.parentCaptureId),
@@ -3424,6 +3462,41 @@ async function runPass(
     windowRefunds,
     heartbeat,
     async (refund) => {
+      // Family AGREEMENT, not preference: ingestion and the ledger rules
+      // distinguish capture and sale refund families, so a SALE.* row on a
+      // capture-backed order (or a CAPTURE.* row on a subscription sale) is
+      // mislabeled identity — normalizing it onto the other endpoint let it
+      // verify on matching parent id and money.
+      {
+        const familyParentRow = typeof refund.payment_id === 'string'
+          ? refundPaymentRowsById.get(refund.payment_id)
+          : undefined;
+        const familyParentOrder = familyParentRow
+          ? ordersById.get(familyParentRow.order_id as string)
+          : undefined;
+        const eventFamily = typeof refund.event_type === 'string'
+          && refund.event_type.startsWith('PAYMENT.SALE.')
+          ? 'sale'
+          : typeof refund.event_type === 'string'
+            && refund.event_type.startsWith('PAYMENT.CAPTURE.')
+            ? 'capture'
+            : null;
+        if (
+          eventFamily !== null
+          && familyParentOrder !== undefined
+          && (eventFamily === 'sale')
+            !== isProviderId(familyParentOrder.paypal_subscription_id)
+        ) {
+          return {
+            refund,
+            lookup: {
+              ok: false as const,
+              retriable: false,
+              reason: 'provider refund identity conflict',
+            },
+          };
+        }
+      }
       if (isSaleRefundRow(refund)) {
         const parentRow = typeof refund.payment_id === 'string'
           ? refundPaymentRowsById.get(refund.payment_id)
@@ -4207,10 +4280,13 @@ async function runPass(
       // subscription was minted on (absent history → no check, never the
       // mutable current plans row).
       const historicalPlanId = historicalPlanBySubscription.get(subscriptionId) ?? null;
+      // When activation history NAMES a plan, the fetched subscription must
+      // carry that plan: an omitted/malformed plan_id alongside an accepted
+      // missing custom_id would leave a misattached subscription with zero
+      // checkout identity checks.
       if (
-        subscription.planId !== null
-        && historicalPlanId !== null
-        && subscription.planId !== historicalPlanId
+        historicalPlanId !== null
+        && (subscription.planId === null || subscription.planId !== historicalPlanId)
       ) {
         return { status: 'failed', reason: 'provider identity conflict', retriable: false };
       }
