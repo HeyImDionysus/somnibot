@@ -60,6 +60,16 @@ export const RECONCILE_FAILURE_ALERT_TYPE = 'paypal_reconciliation_failure';
 /** Transaction statuses that represent moved money and demand evidence. */
 const MONEY_TXN_STATUSES = ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'REVERSED'];
 
+/** Every documented subscription-transaction status; unknown fails closed. */
+const KNOWN_TXN_STATUSES = [
+  'COMPLETED',
+  'DECLINED',
+  'PARTIALLY_REFUNDED',
+  'PENDING',
+  'REFUNDED',
+  'REVERSED',
+];
+
 /** The provider's documented capture states; anything else fails closed. */
 const KNOWN_CAPTURE_STATUSES = [
   'COMPLETED',
@@ -652,6 +662,7 @@ export async function fetchProviderOrder(
       if (
         !isProviderId(refundRecord.id)
         || typeof refundRecord.status !== 'string'
+        || !KNOWN_REFUND_STATUSES.includes(refundRecord.status)
         || money.amountCents === null
         || money.currency === null
       ) {
@@ -687,6 +698,7 @@ export async function fetchProviderOrder(
       if (
         !isProviderId(captureRecord.id)
         || typeof captureRecord.status !== 'string'
+        || !KNOWN_CAPTURE_STATUSES.includes(captureRecord.status)
         || amountCents === null
         || currency === null
       ) {
@@ -937,7 +949,7 @@ export async function fetchProviderSubscriptionTransactions(
     if (
       !isProviderId(txn.id)
       || typeof txn.status !== 'string'
-      || txn.status.length === 0
+      || !KNOWN_TXN_STATUSES.includes(txn.status)
       || !Number.isFinite(timeMs)
     ) {
       return {
@@ -2434,7 +2446,19 @@ async function runPass(
         };
       }
       const page = (data ?? []) as LocalOrderRow[];
-      for (const order of page) {
+      // Same validator the window scan uses: malformed rows (or rows in an
+      // unconfigured guild) fail the pass closed instead of recording
+      // findings under an invisible tenant that every alert scope filters
+      // out.
+      const validatedHistoricalPage = validateLocalOrders(page, configuredGuildIds);
+      if (!validatedHistoricalPage.ok) {
+        return {
+          status: 'failed',
+          reason: validatedHistoricalPage.reason,
+          retriable: validatedHistoricalPage.retriable,
+        };
+      }
+      for (const order of validatedHistoricalPage.rows) {
         // Re-assert the predicate in code: the recheck set must hold ONLY
         // identified historical cancellations even if the storage layer
         // returns a wider page.
@@ -2738,6 +2762,9 @@ async function runPass(
         };
       }
       if (!lookup.found) {
+        // A vanished order leaves no sibling enumeration. FULL refunds are
+        // still soundly bounded by the capture/sale status; PARTIAL-refund
+        // judging treats this null as unverifiable at its call sites.
         orderRefundLists.set(providerOrderId, null);
       } else {
         const completed = lookup.value.refunds.filter(
@@ -2789,11 +2816,44 @@ async function runPass(
           }
           resolved.push({ ...refund, parentCaptureId: standalone.value.parentCaptureId });
         }
+        const inFlightResolved: Array<string | null> = [];
+        for (const refund of completed) {
+          if (settled.includes(refund)) continue;
+          if (refund.parentCaptureId !== null) {
+            inFlightResolved.push(refund.parentCaptureId);
+            continue;
+          }
+          if (captureIds.length === 1) {
+            inFlightResolved.push(captureIds[0]);
+            continue;
+          }
+          // An unlinked in-flight entry would defer EVERY capture's
+          // judgment on a multi-capture order; the standalone endpoint
+          // names its parent, and an unresolvable one is malformed.
+          const standalone = await fetchProviderRefund(
+            config.apiBase,
+            token.token,
+            refund.id,
+          );
+          if (!standalone.ok) {
+            return {
+              status: 'failed' as const,
+              reason: standalone.reason,
+              retriable: standalone.retriable,
+            };
+          }
+          if (!standalone.found || standalone.value.parentCaptureId === null) {
+            return {
+              status: 'failed' as const,
+              reason: 'order lookup returned a malformed record',
+              retriable: false,
+            };
+          }
+          inFlightResolved.push(standalone.value.parentCaptureId);
+        }
         orderRefundLists.set(providerOrderId, {
           refunds: resolved,
-          inFlightParentIds: completed
-            .filter((refund) => !settled.includes(refund))
-            .map((refund) => refund.parentCaptureId),
+          inFlightParentIds: inFlightResolved,
         });
       }
     }
@@ -3059,6 +3119,20 @@ async function runPass(
       && !(capture.updateTimeMs !== null && capture.updateTimeMs > windowEndMs);
     if (providerRefunded) {
       const parentId = parentProviderOrderId(payment, capture.relatedOrderId);
+      if (
+        capture.status === 'PARTIALLY_REFUNDED'
+        && parentId !== null
+        && (orderRefundLists.get(parentId) ?? null) === null
+      ) {
+        // Partial-refund ledgers are only verifiable through the order's
+        // sibling enumeration; a vanished order makes this row
+        // unverifiable this pass, not silently fallback-judged.
+        return {
+          status: 'failed',
+          reason: 'refund sibling enumeration unavailable: provider order missing',
+          retriable: true,
+        };
+      }
       judgeRefundedPayment({
         payment,
         guildId,
@@ -3438,6 +3512,22 @@ async function runPass(
         ) {
           return { status: 'failed', reason: 'provider identity conflict', retriable: false };
         }
+        if (!PROVIDER_SETTLED_CAPTURE_STATUSES.includes(lookup.value.status)) {
+          // Locally completed money the provider now calls PENDING/
+          // DECLINED/FAILED — the same disagreement the window path
+          // reports as missing provider evidence.
+          missingProviderPayments.push({
+            kind: 'payment',
+            orderId: payment.order_id as string,
+            orderNumber: lookbackOrder?.order_number ?? null,
+            guildId: payment.guild_id as string,
+            paypalPaymentIds: [payment.paypal_payment_id as string],
+            amountCents: payment.amount_cents,
+            currency: normalizeCurrency(payment.currency) as string,
+            createdAt: payment.created_at,
+          });
+          continue;
+        }
         if (
           ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(lookup.value.status)
           // Same lag discipline as the window path: a state change inside
@@ -3483,6 +3573,20 @@ async function runPass(
         ) {
           return { status: 'failed', reason: 'provider identity conflict', retriable: false };
         }
+        if (!['completed', 'refunded', 'partially_refunded', 'reversed']
+          .includes(lookup.value.state)) {
+          missingProviderPayments.push({
+            kind: 'payment',
+            orderId: payment.order_id as string,
+            orderNumber: lookbackOrder?.order_number ?? null,
+            guildId: payment.guild_id as string,
+            paypalPaymentIds: [payment.paypal_payment_id as string],
+            amountCents: payment.amount_cents,
+            currency: normalizeCurrency(payment.currency) as string,
+            createdAt: payment.created_at,
+          });
+          continue;
+        }
         if (
           ['refunded', 'partially_refunded', 'reversed'].includes(lookup.value.state)
           && !(lookup.value.updateTimeMs !== null && lookup.value.updateTimeMs > windowEndMs)
@@ -3512,6 +3616,21 @@ async function runPass(
           const guildId = target.payment.guild_id as string;
           const providerId = target.payment.paypal_payment_id as string;
           bumpVerified(guildId);
+          const partialParentId = parentProviderOrderId(
+            target.payment,
+            target.relatedOrderId,
+          );
+          if (
+            !target.fullyRefunded
+            && partialParentId !== null
+            && (orderRefundLists.get(partialParentId) ?? null) === null
+          ) {
+            return {
+              status: 'failed',
+              reason: 'refund sibling enumeration unavailable: provider order missing',
+              retriable: true,
+            };
+          }
           // Refund-ledger truth does not excuse PAYMENT-money drift: this
           // is the historical row's only provider touch, so its own amount
           // gets the same comparison the window passes perform.
@@ -4155,6 +4274,17 @@ async function runPass(
         if (parentProviderOrder !== null) {
           const enumFailure = await loadOrderRefundTotals([parentProviderOrder]);
           if (enumFailure) return enumFailure;
+        }
+        if (
+          parentCapture.status === 'PARTIALLY_REFUNDED'
+          && parentProviderOrder !== null
+          && (orderRefundLists.get(parentProviderOrder) ?? null) === null
+        ) {
+          return {
+            status: 'failed',
+            reason: 'refund sibling enumeration unavailable: provider order missing',
+            retriable: true,
+          };
         }
         judgeRefundedPayment({
           payment: parentRow,
