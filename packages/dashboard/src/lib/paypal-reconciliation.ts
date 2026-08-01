@@ -26,33 +26,97 @@ type AdminSupabase = ReturnType<typeof createAdminSupabase>;
 // ── Tunables and durable identities ────────────────────────────────────────
 
 export const DEFAULT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-export const DEFAULT_SETTLEMENT_LAG_MS = 6 * 60 * 60 * 1000;
+// Per-object commerce GETs are live (unlike the retired reporting sweep,
+// which lagged by hours); the lag only needs to absorb webhook/capture
+// latency so an order completed seconds ago is not flagged mid-flight.
+export const DEFAULT_SETTLEMENT_LAG_MS = 15 * 60 * 1000;
 export const DEFAULT_LEASE_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
-const PROVIDER_PAGE_SIZE = 500;
-const PROVIDER_MAX_PAGES = 40;
+const PROVIDER_CONCURRENCY = 5;
+const PROVIDER_TIMEOUT_MS = 15_000;
 const LOCAL_PAGE_SIZE = 1000;
 const EXACT_LOOKUP_CHUNK_SIZE = 100;
 export const LOCAL_SCAN_MAX_ROWS = 20_000;
+// PayPal accepts refunds up to ~180 days after capture; captures OLDER than
+// the rolling window can gain refunds whose webhooks were lost, so they are
+// re-checked for refund-status changes across this lookback.
+export const DEFAULT_REFUND_LOOKBACK_MS = 180 * 24 * 60 * 60 * 1000;
+// Provider passes heartbeat the lease between bounded chunks: a degraded
+// provider at 20k rows x 15s timeouts otherwise outlives the 6h lease and a
+// second scheduler overlaps the pass.
+const PROVIDER_CHUNK_SIZE = 200;
+// A local row represents the provider's LATEST charge only when it landed at
+// or after that charge (minus clock skew): webhook writes follow the charge
+// within minutes, so a generous tolerance still rejects yesterday's renewal
+// standing in for today's lost one.
+const SUBSCRIPTION_CHARGE_TOLERANCE_MS = 6 * 60 * 60 * 1000;
 const MAX_REPORTED_IDS = 25;
 
 export const RECONCILE_LAST_RESULT_KEY = 'paypal_reconcile_last_result';
 export const RECONCILE_ALERT_TYPE = 'paypal_reconciliation_mismatch';
 export const RECONCILE_FAILURE_ALERT_TYPE = 'paypal_reconciliation_failure';
 
-const PAYMENT_EVENT_CODES = new Set(['T0006', 'T0002']);
-const REFUND_EVENT_CODES = new Set(['T1106', 'T1107']);
-const SUPPORTED_EVENT_CODES = new Set([
-  ...PAYMENT_EVENT_CODES,
-  ...REFUND_EVENT_CODES,
-]);
+/** Transaction statuses that represent moved money and demand evidence. */
+const MONEY_TXN_STATUSES = ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'REVERSED'];
+
+/** Every documented subscription-transaction status; unknown fails closed. */
+const KNOWN_TXN_STATUSES = [
+  'COMPLETED',
+  'DECLINED',
+  'PARTIALLY_REFUNDED',
+  'PENDING',
+  'REFUNDED',
+  'REVERSED',
+];
+
+/** The provider's documented capture states; anything else fails closed. */
+const KNOWN_CAPTURE_STATUSES = [
+  'COMPLETED',
+  'DECLINED',
+  'FAILED',
+  'PARTIALLY_REFUNDED',
+  'PENDING',
+  'REFUNDED',
+];
+
+/** The provider's documented v1 sale states; anything else fails closed. */
+const KNOWN_SALE_STATES = [
+  'completed',
+  'denied',
+  'partially_refunded',
+  'pending',
+  'refunded',
+  'reversed',
+];
+
+/** The provider's documented v2 refund statuses. */
+const KNOWN_REFUND_STATUSES = ['CANCELLED', 'COMPLETED', 'FAILED', 'PENDING'];
+
+/** The provider's documented v1 refund states. */
+const KNOWN_V1_REFUND_STATES = ['completed', 'failed', 'pending'];
+
+/** The provider's documented order statuses. */
+const KNOWN_ORDER_STATUSES = [
+  'APPROVED',
+  'COMPLETED',
+  'CREATED',
+  'PAYER_ACTION_REQUIRED',
+  'SAVED',
+  'VOIDED',
+];
+
 const ORDER_SCAN_STATUSES = [
   'completed',
   'disputed',
   'refunded',
   'pending',
   'pending_review',
+  // Capture-denied checkouts move to cancelled — but a LATER capture can
+  // still succeed (or its webhook be lost), leaving PayPal holding settled
+  // money behind a customer the ledger says was never charged. Cancelled
+  // orders with a provider identity stay in the recheck set.
+  'cancelled',
 ] as const;
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -65,29 +129,109 @@ export interface SomniBotTransactionIdentity {
   planId: string | null;
 }
 
-export interface ProviderTransaction {
-  kind: 'payment' | 'refund';
-  transactionId: string;
+export interface ProviderCaptureObject {
+  status: string;
   amountCents: number;
   currency: string;
-  status: 'S';
-  eventCode: 'T0006' | 'T0002' | 'T1106' | 'T1107';
-  initiatedAt: string | null;
-  referenceId: string | null;
-  referenceType: 'ODR' | 'SUB' | 'TXN' | null;
-  customIdentity: SomniBotTransactionIdentity | null;
+  /** Parent order from supplementary_data.related_ids — cross-tenant guard. */
+  relatedOrderId: string | null;
+  /** When the capture last changed; null when the API omits it. */
+  updateTimeMs: number | null;
+}
+
+export interface ProviderRefundObject {
+  status: string;
+  amountCents: number;
+  currency: string;
+  /** Parent capture parsed from the refund's up-link — identity guard. */
+  parentCaptureId: string | null;
+}
+
+export interface ProviderOrderCapture {
+  id: string;
+  status: string;
+  amountCents: number;
+  currency: string;
+  /** Provider-side creation time; null when the API omits it. */
+  createTimeMs: number | null;
+}
+
+export interface ProviderOrderRefund {
+  id: string;
+  status: string;
+  amountCents: number;
+  currency: string;
+  /** Provider-side creation time; null when the API omits it. */
+  createTimeMs: number | null;
+  /** Parent capture from the refund's up-link; null when the API omits it. */
+  parentCaptureId: string | null;
+}
+
+/** v1 sale object — subscription billing writes sale ids, not captures. */
+export interface ProviderSaleObject {
+  state: string;
+  amountCents: number;
+  currency: string;
+  /** The parent subscription (billing agreement) — cross-tenant guard. */
+  billingAgreementId: string | null;
+  /** When the sale last changed state; null when the API omits it. */
+  updateTimeMs: number | null;
+}
+
+/** v1 refund object — refunds of subscription sales live on the v1 API. */
+export interface ProviderSaleRefundObject {
+  state: string;
+  amountCents: number;
+  currency: string;
+  saleId: string | null;
+}
+
+export interface ProviderOrderObject {
+  status: string;
+  customId: string | null;
+  subscriptionId: string | null;
+  captures: ProviderOrderCapture[];
+  /** Provider refunds enumerated per purchase unit — the authoritative
+   *  sibling list the capture object itself cannot expose. */
+  refunds: ProviderOrderRefund[];
+  /** When the order last changed; null when the API omits it. */
+  updateTimeMs: number | null;
+}
+
+export interface ProviderSubscriptionObject {
+  status: string;
+  lastPaymentTime: string | null;
+  lastPaymentAmountCents: number | null;
+  lastPaymentCurrency: string | null;
+  /** Checkout identity minted at subscription creation — tenant guard. */
+  customId: string | null;
+  /** The PayPal plan the provider says this subscription bills. */
+  planId: string | null;
+  /** When the provider status last changed; null when the API omits it. */
+  statusUpdateTimeMs: number | null;
+}
+
+/** One transaction from /v1/billing/subscriptions/{id}/transactions. */
+export interface ProviderSubscriptionTransaction {
+  id: string;
+  status: string;
+  timeMs: number;
+  amountCents: number | null;
+  currency: string | null;
 }
 
 export interface MissingLocalPayment {
   kind: 'payment' | 'refund';
+  /** The provider object id evidencing the money movement (capture/sale id). */
   transactionId: string;
   guildId: string;
   amountCents: number;
   currency: string;
   initiatedAt: string | null;
-  eventCode: ProviderTransaction['eventCode'];
+  /** Which per-object verification surfaced it. */
+  source: 'order' | 'capture' | 'subscription';
+  /** The parent provider object (order id, capture id, or subscription id). */
   referenceId: string | null;
-  referenceType: ProviderTransaction['referenceType'];
 }
 
 export interface MissingProviderPayment {
@@ -151,6 +295,7 @@ export type PayPalReconciliationResult =
 export interface PayPalReconciliationOptions {
   windowMs?: number;
   settlementLagMs?: number;
+  refundLookbackMs?: number;
   now?: number;
   leaseMs?: number;
   cooldownMs?: number;
@@ -213,12 +358,7 @@ interface LocalPaymentIdentityRow {
   order_id: string | null;
   guild_id: string | null;
   paypal_payment_id: string | null;
-}
-
-interface AttributedProviderTransaction {
-  transaction: ProviderTransaction;
-  guildId: string;
-  referencedOrderId: string | null;
+  created_at: string | null;
 }
 
 type ScanResult<T> =
@@ -326,300 +466,582 @@ function parseCustomIdentity(value: unknown): SomniBotTransactionIdentity | null
 
 // ── PayPal Transaction Search ──────────────────────────────────────────────
 
-function toPayPalDate(ms: number): string {
-  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, '.000Z');
+// ── Per-object provider verification ───────────────────────────────────────────
+//
+// SomniBot does PayPal per-object: every order/capture/refund/subscription id
+// in the local ledger was stored when WE created or confirmed that object, so
+// reconciliation asks PayPal about exactly those objects over the same
+// commerce API the webhook handler and refund/cancel routes already use.
+// This works with a bare REST app (client id/secret) for every
+// wizard-onboarded operator. The previous implementation swept
+// /v1/reporting/transactions — PayPal's separately entitled reporting
+// product — which 403s for standard operator apps and lags settlement by
+// hours; it could never run in the white-label credential model.
+
+type ProviderFetch<T> =
+  | { ok: true; found: true; value: T }
+  | { ok: true; found: false }
+  | { ok: false; retriable: boolean; reason: string };
+
+async function providerGet(
+  apiBase: string,
+  token: string,
+  path: string,
+  label: string,
+): Promise<ProviderFetch<Record<string, unknown>>> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase}${path}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      retriable: true,
+      reason: `${label} request failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+  if (response.status === 404) return { ok: true, found: false };
+  if (!response.ok) {
+    return {
+      ok: false,
+      retriable: response.status >= 500 || response.status === 429,
+      reason: `${label} returned ${response.status}`,
+    };
+  }
+  try {
+    const parsed: unknown = await response.json();
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, retriable: false, reason: `${label} returned a malformed envelope` };
+    }
+    return { ok: true, found: true, value: parsed as Record<string, unknown> };
+  } catch {
+    return { ok: false, retriable: true, reason: `${label} returned malformed JSON` };
+  }
 }
 
-type ProviderTransactionParse =
-  | { kind: 'ignored' }
-  | { kind: 'malformed' }
-  | { kind: 'transaction'; transaction: ProviderTransaction };
-
-function readTransaction(entry: unknown): ProviderTransactionParse {
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-    return { kind: 'malformed' };
-  }
-  const info = (entry as { transaction_info?: unknown }).transaction_info;
-  if (!info || typeof info !== 'object' || Array.isArray(info)) {
-    return { kind: 'malformed' };
-  }
-  const record = info as Record<string, unknown>;
-
-  if (
-    typeof record.transaction_status !== 'string'
-    || !/^[A-Z]$/.test(record.transaction_status)
-    || typeof record.transaction_event_code !== 'string'
-    || !/^T\d{4}$/.test(record.transaction_event_code)
-  ) return { kind: 'malformed' };
-  if (record.transaction_status !== 'S') return { kind: 'ignored' };
-  if (!SUPPORTED_EVENT_CODES.has(record.transaction_event_code)) {
-    return { kind: 'ignored' };
-  }
-  if (!isProviderId(record.transaction_id)) return { kind: 'malformed' };
-
-  const amount = record.transaction_amount as
-    { value?: unknown; currency_code?: unknown } | undefined;
-  const parsedAmountCents = parseAmountToCents(amount?.value);
-  const currency = normalizeCurrency(amount?.currency_code);
-  const eventCode = record.transaction_event_code as ProviderTransaction['eventCode'];
-  const kind = REFUND_EVENT_CODES.has(eventCode) ? 'refund' : 'payment';
-  if (
-    parsedAmountCents === null
-    || currency === null
-    || (kind === 'payment' && parsedAmountCents <= 0)
-    || (kind === 'refund' && parsedAmountCents >= 0)
-  ) {
-    return { kind: 'malformed' };
-  }
-  const amountCents = kind === 'refund' ? -parsedAmountCents : parsedAmountCents;
-
-  const hasReferenceId = Object.prototype.hasOwnProperty.call(record, 'paypal_reference_id');
-  const hasReferenceType =
-    Object.prototype.hasOwnProperty.call(record, 'paypal_reference_id_type');
-  if (hasReferenceId !== hasReferenceType || (kind === 'refund' && !hasReferenceId)) {
-    return { kind: 'malformed' };
-  }
-  let referenceId: string | null = null;
-  let referenceType: ProviderTransaction['referenceType'] = null;
-  if (hasReferenceId) {
-    if (
-      !isProviderId(record.paypal_reference_id)
-      || !['ODR', 'SUB', 'TXN'].includes(String(record.paypal_reference_id_type))
-    ) {
-      return { kind: 'malformed' };
-    }
-    referenceId = record.paypal_reference_id;
-    referenceType = record.paypal_reference_id_type as 'ODR' | 'SUB' | 'TXN';
-    const referenceMatchesEvent =
-      (eventCode === 'T0006' && referenceType === 'ODR')
-      || (eventCode === 'T0002' && referenceType === 'SUB')
-      || (REFUND_EVENT_CODES.has(eventCode) && referenceType === 'TXN');
-    if (!referenceMatchesEvent) return { kind: 'malformed' };
-  }
-
-  const parsedIdentity = parseCustomIdentity(record.custom_field);
-  const customIdentity = kind === 'refund'
-    || (eventCode === 'T0002' && parsedIdentity?.planId === null)
-    ? null
-    : parsedIdentity;
-
+function readProviderAmount(
+  record: unknown,
+): { amountCents: number | null; currency: string | null } {
+  const amount = record as { value?: unknown; currency_code?: unknown } | null | undefined;
   return {
-    kind: 'transaction',
-    transaction: {
-      kind,
-      transactionId: record.transaction_id,
+    amountCents: parseAmountToCents(amount?.value),
+    currency: normalizeCurrency(amount?.currency_code),
+  };
+}
+
+export async function fetchProviderCapture(
+  apiBase: string,
+  token: string,
+  captureId: string,
+): Promise<ProviderFetch<ProviderCaptureObject>> {
+  const result = await providerGet(
+    apiBase,
+    token,
+    `/v2/payments/captures/${encodeURIComponent(captureId)}`,
+    'capture lookup',
+  );
+  if (!result.ok || !result.found) return result;
+  const record = result.value;
+  const { amountCents, currency } = readProviderAmount(record.amount);
+  // Downstream treats every unknown status as ordinary non-settlement,
+  // which runs NO divergence branch for a pending local pair — a new or
+  // malformed money state must fail closed instead (same discipline as the
+  // subscription parser).
+  if (
+    typeof record.status !== 'string'
+    || record.status.length === 0
+    || !KNOWN_CAPTURE_STATUSES.includes(record.status)
+    || amountCents === null
+    || currency === null
+  ) {
+    return { ok: false, retriable: false, reason: 'capture lookup returned a malformed record' };
+  }
+  const related = (record.supplementary_data as
+    { related_ids?: { order_id?: unknown } } | undefined)?.related_ids;
+  return {
+    ok: true,
+    found: true,
+    value: {
+      status: record.status,
       amountCents,
       currency,
-      status: 'S',
-      eventCode,
-      initiatedAt: typeof record.transaction_initiation_date === 'string'
-        ? record.transaction_initiation_date
-        : null,
-      referenceId,
-      referenceType,
-      customIdentity,
+      relatedOrderId: isProviderId(related?.order_id) ? related.order_id : null,
+      updateTimeMs: (() => {
+        const parsed = typeof record.update_time === 'string'
+          ? Date.parse(record.update_time)
+          : Number.NaN;
+        return Number.isFinite(parsed) ? parsed : null;
+      })(),
     },
   };
 }
 
-export async function fetchProviderTransactions(
+export async function fetchProviderRefund(
   apiBase: string,
   token: string,
-  windowStartMs: number,
-  windowEndMs: number,
-): Promise<
-  { ok: true; transactions: ProviderTransaction[] }
-  | { ok: false; retriable: boolean; reason: string }
-> {
-  const transactions: ProviderTransaction[] = [];
-  const seen = new Set<string>();
-  let expectedTotalPages: number | null = null;
-  let expectedTotalItems: number | null = null;
-  let rawItemsSeen = 0;
-
-  for (let page = 1; page <= PROVIDER_MAX_PAGES; page++) {
-    const params = new URLSearchParams({
-      start_date: toPayPalDate(windowStartMs),
-      end_date: toPayPalDate(windowEndMs),
-      fields: 'transaction_info',
-      transaction_status: 'S',
-      // PayPal documents transaction ids as unique only inside the
-      // balance-affecting result set. Pin the default explicitly.
-      balance_affecting_records_only: 'Y',
-      page_size: String(PROVIDER_PAGE_SIZE),
-      page: String(page),
-    });
-
-    let response: Response;
-    try {
-      response = await fetch(`${apiBase}/v1/reporting/transactions?${params}`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        signal: AbortSignal.timeout(30_000),
-      });
-    } catch (error) {
-      return {
-        ok: false,
-        retriable: true,
-        reason: `transaction search request failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      };
+  refundId: string,
+): Promise<ProviderFetch<ProviderRefundObject>> {
+  const result = await providerGet(
+    apiBase,
+    token,
+    `/v2/payments/refunds/${encodeURIComponent(refundId)}`,
+    'refund lookup',
+  );
+  if (!result.ok || !result.found) return result;
+  const record = result.value;
+  const { amountCents, currency } = readProviderAmount(record.amount);
+  if (
+    typeof record.status !== 'string'
+    || !KNOWN_REFUND_STATUSES.includes(record.status)
+    || amountCents === null
+    || currency === null
+  ) {
+    return { ok: false, retriable: false, reason: 'refund lookup returned a malformed record' };
+  }
+  // The refund object exposes its parent capture only through the up-link.
+  let parentCaptureId: string | null = null;
+  const links = Array.isArray(record.links) ? record.links : [];
+  for (const link of links) {
+    const linkRecord = link as { rel?: unknown; href?: unknown } | null;
+    if (linkRecord?.rel === 'up' && typeof linkRecord.href === 'string') {
+      const match = /\/v2\/payments\/captures\/([^/?#]+)/.exec(linkRecord.href);
+      if (match && isProviderId(match[1])) parentCaptureId = match[1];
     }
+  }
+  return {
+    ok: true,
+    found: true,
+    value: { status: record.status, amountCents, currency, parentCaptureId },
+  };
+}
 
-    if (!response.ok) {
-      return {
-        ok: false,
-        retriable: response.status >= 500 || response.status === 429,
-        reason: response.status === 403
-          ? 'transaction search returned 403 — enable the "Transaction Search" permission on the PayPal REST app'
-          : `transaction search returned ${response.status}`,
-      };
+export async function fetchProviderOrder(
+  apiBase: string,
+  token: string,
+  orderId: string,
+): Promise<ProviderFetch<ProviderOrderObject>> {
+  const result = await providerGet(
+    apiBase,
+    token,
+    `/v2/checkout/orders/${encodeURIComponent(orderId)}`,
+    'order lookup',
+  );
+  if (!result.ok || !result.found) return result;
+  const record = result.value;
+  if (typeof record.status !== 'string' || record.status.length === 0) {
+    return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
+  }
+  const units = Array.isArray(record.purchase_units) ? record.purchase_units : [];
+  const captures: ProviderOrderCapture[] = [];
+  const refunds: ProviderOrderRefund[] = [];
+  let customId: string | null = null;
+  for (const unit of units) {
+    if (!unit || typeof unit !== 'object' || Array.isArray(unit)) {
+      return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
     }
-
-    let body: Record<string, unknown>;
-    try {
-      const parsed: unknown = await response.json();
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        return {
-          ok: false,
-          retriable: false,
-          reason: 'transaction search returned a malformed envelope',
-        };
+    const unitRecord = unit as Record<string, unknown>;
+    if (customId === null && typeof unitRecord.custom_id === 'string') {
+      customId = unitRecord.custom_id;
+    }
+    const payments = unitRecord.payments as
+      { captures?: unknown; refunds?: unknown } | undefined;
+    const unitCaptures = Array.isArray(payments?.captures) ? payments.captures : [];
+    const unitRefunds = Array.isArray(payments?.refunds) ? payments.refunds : [];
+    for (const refund of unitRefunds) {
+      if (!refund || typeof refund !== 'object' || Array.isArray(refund)) {
+        return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
       }
-      body = parsed as Record<string, unknown>;
-    } catch {
-      return {
-        ok: false,
-        retriable: true,
-        reason: 'transaction search returned malformed JSON',
-      };
+      const refundRecord = refund as Record<string, unknown>;
+      const money = readProviderAmount(refundRecord.amount);
+      if (
+        !isProviderId(refundRecord.id)
+        || typeof refundRecord.status !== 'string'
+        || !KNOWN_REFUND_STATUSES.includes(refundRecord.status)
+        || money.amountCents === null
+        || money.currency === null
+      ) {
+        return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
+      }
+      const createTimeMs = typeof refundRecord.create_time === 'string'
+        ? Date.parse(refundRecord.create_time)
+        : Number.NaN;
+      let refundParentCaptureId: string | null = null;
+      const refundLinks = Array.isArray(refundRecord.links) ? refundRecord.links : [];
+      for (const link of refundLinks) {
+        const linkRecord = link as { rel?: unknown; href?: unknown } | null;
+        if (linkRecord?.rel === 'up' && typeof linkRecord.href === 'string') {
+          const match = /\/v2\/payments\/captures\/([^/?#]+)/.exec(linkRecord.href);
+          if (match && isProviderId(match[1])) refundParentCaptureId = match[1];
+        }
+      }
+      refunds.push({
+        id: refundRecord.id,
+        status: refundRecord.status,
+        amountCents: money.amountCents,
+        currency: money.currency,
+        createTimeMs: Number.isFinite(createTimeMs) ? createTimeMs : null,
+        parentCaptureId: refundParentCaptureId,
+      });
     }
+    for (const capture of unitCaptures) {
+      if (!capture || typeof capture !== 'object' || Array.isArray(capture)) {
+        return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
+      }
+      const captureRecord = capture as Record<string, unknown>;
+      const { amountCents, currency } = readProviderAmount(captureRecord.amount);
+      if (
+        !isProviderId(captureRecord.id)
+        || typeof captureRecord.status !== 'string'
+        || !KNOWN_CAPTURE_STATUSES.includes(captureRecord.status)
+        || amountCents === null
+        || currency === null
+      ) {
+        return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
+      }
+      const captureCreateMs = typeof captureRecord.create_time === 'string'
+        ? Date.parse(captureRecord.create_time)
+        : Number.NaN;
+      captures.push({
+        id: captureRecord.id,
+        status: captureRecord.status,
+        amountCents,
+        currency,
+        createTimeMs: Number.isFinite(captureCreateMs) ? captureCreateMs : null,
+      });
+    }
+  }
+  if (
+    typeof record.status !== 'string'
+    || !KNOWN_ORDER_STATUSES.includes(record.status)
+  ) {
+    // Same discipline as the other parsers: an unknown order status runs
+    // NO divergence branch downstream and reads as clean silence.
+    return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
+  }
+  if (record.status === 'COMPLETED' && captures.length === 0) {
+    // A COMPLETED order without a single capture row — the collection
+    // absent OR empty — contradicts its own status: money cannot have
+    // completed with nothing captured. Treating it as "no captures" let a
+    // lost capture write pass cleanly behind a pending local order.
+    return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
+  }
+  return {
+    ok: true,
+    found: true,
+    value: {
+      status: record.status,
+      customId,
+      subscriptionId: isProviderId(record.subscription_id) ? record.subscription_id : null,
+      captures,
+      refunds,
+      updateTimeMs: (() => {
+        const parsed = typeof record.update_time === 'string'
+          ? Date.parse(record.update_time)
+          : Number.NaN;
+        return Number.isFinite(parsed) ? parsed : null;
+      })(),
+    },
+  };
+}
 
-    const details = body.transaction_details;
-    const responsePage = body.page;
-    const totalPages = body.total_pages;
-    const totalItems = body.total_items;
+/** v1 money shape: { total, currency } instead of v2's { value, currency_code }. */
+function readV1Amount(
+  record: unknown,
+): { amountCents: number | null; currency: string | null } {
+  const amount = record as { total?: unknown; currency?: unknown } | null | undefined;
+  return {
+    amountCents: parseAmountToCents(amount?.total),
+    currency: normalizeCurrency(amount?.currency),
+  };
+}
+
+export async function fetchProviderSale(
+  apiBase: string,
+  token: string,
+  saleId: string,
+): Promise<ProviderFetch<ProviderSaleObject>> {
+  const result = await providerGet(
+    apiBase,
+    token,
+    `/v1/payments/sale/${encodeURIComponent(saleId)}`,
+    'sale lookup',
+  );
+  if (!result.ok || !result.found) return result;
+  const record = result.value;
+  const { amountCents, currency } = readV1Amount(record.amount);
+  if (
+    typeof record.state !== 'string'
+    || !KNOWN_SALE_STATES.includes(record.state)
+    || amountCents === null
+    || currency === null
+  ) {
+    return { ok: false, retriable: false, reason: 'sale lookup returned a malformed record' };
+  }
+  return {
+    ok: true,
+    found: true,
+    value: {
+      state: record.state,
+      amountCents,
+      currency,
+      billingAgreementId: isProviderId(record.billing_agreement_id)
+        ? record.billing_agreement_id
+        : null,
+      updateTimeMs: (() => {
+        const parsed = typeof record.update_time === 'string'
+          ? Date.parse(record.update_time)
+          : Number.NaN;
+        return Number.isFinite(parsed) ? parsed : null;
+      })(),
+    },
+  };
+}
+
+export async function fetchProviderSaleRefund(
+  apiBase: string,
+  token: string,
+  refundId: string,
+): Promise<ProviderFetch<ProviderSaleRefundObject>> {
+  const result = await providerGet(
+    apiBase,
+    token,
+    `/v1/payments/refund/${encodeURIComponent(refundId)}`,
+    'sale refund lookup',
+  );
+  if (!result.ok || !result.found) return result;
+  const record = result.value;
+  const { amountCents, currency } = readV1Amount(record.amount);
+  if (
+    typeof record.state !== 'string'
+    || !KNOWN_V1_REFUND_STATES.includes(record.state)
+    || amountCents === null
+    || currency === null
+  ) {
+    return {
+      ok: false,
+      retriable: false,
+      reason: 'sale refund lookup returned a malformed record',
+    };
+  }
+  return {
+    ok: true,
+    found: true,
+    value: {
+      state: record.state,
+      amountCents,
+      currency,
+      saleId: isProviderId(record.sale_id) ? record.sale_id : null,
+    },
+  };
+}
+
+export async function fetchProviderSubscription(
+  apiBase: string,
+  token: string,
+  subscriptionId: string,
+): Promise<ProviderFetch<ProviderSubscriptionObject>> {
+  const result = await providerGet(
+    apiBase,
+    token,
+    `/v1/billing/subscriptions/${encodeURIComponent(subscriptionId)}`,
+    'subscription lookup',
+  );
+  if (!result.ok || !result.found) return result;
+  const record = result.value;
+  // Every divergence branch downstream keys on a KNOWN state; an
+  // unrecognized (new or malformed) status would run none of them and let
+  // the subscription reconcile cleanly on silence. Fail closed instead.
+  const KNOWN_SUBSCRIPTION_STATUSES = [
+    'APPROVAL_PENDING',
+    'APPROVED',
+    'CREATED',
+    'ACTIVE',
+    'SUSPENDED',
+    'CANCELLED',
+    'EXPIRED',
+  ];
+  if (
+    typeof record.status !== 'string'
+    || record.status.length === 0
+    || !KNOWN_SUBSCRIPTION_STATUSES.includes(record.status)
+  ) {
+    return {
+      ok: false,
+      retriable: false,
+      reason: 'subscription lookup returned a malformed record',
+    };
+  }
+  const billing = record.billing_info as
+    { last_payment?: { time?: unknown; amount?: unknown } } | undefined;
+  const lastPayment = billing?.last_payment;
+  const { amountCents, currency } = readProviderAmount(lastPayment?.amount);
+  // An ADVERTISED last payment is an atomic shape: normalizing a broken
+  // time or money to null silently skips every latest-charge divergence
+  // branch downstream. Absent last_payment (trials) remains legal.
+  if (lastPayment !== undefined) {
     if (
-      !Array.isArray(details)
-      || typeof responsePage !== 'number'
-      || !Number.isSafeInteger(responsePage)
-      || responsePage < 1
-      || typeof totalPages !== 'number'
-      || !Number.isSafeInteger(totalPages)
-      || totalPages < 0
-      || typeof totalItems !== 'number'
-      || !Number.isSafeInteger(totalItems)
-      || totalItems < 0
+      typeof lastPayment.time !== 'string'
+      || !Number.isFinite(Date.parse(lastPayment.time))
+      || amountCents === null
+      || currency === null
     ) {
       return {
         ok: false,
         retriable: false,
-        reason: 'transaction search returned a malformed envelope',
+        reason: 'subscription lookup returned a malformed record',
       };
-    }
-    if (responsePage !== page) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: 'transaction search returned an unexpected page number',
-      };
-    }
-    if (totalItems === 0) {
-      return page === 1 && totalPages === 0 && details.length === 0
-        ? { ok: true, transactions: [] }
-        : {
-            ok: false,
-            retriable: false,
-            reason: 'transaction search returned incoherent zero-result pagination',
-          };
-    }
-    if (totalPages < 1 || page > totalPages) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: 'transaction search returned invalid pagination metadata',
-      };
-    }
-    if (totalPages > PROVIDER_MAX_PAGES) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: `transaction search exceeded ${PROVIDER_MAX_PAGES} pages — narrow the window`,
-      };
-    }
-    if (expectedTotalPages !== null && totalPages !== expectedTotalPages) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: 'transaction search returned inconsistent pagination metadata',
-      };
-    }
-    expectedTotalPages = totalPages;
-    if (expectedTotalItems !== null && totalItems !== expectedTotalItems) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: 'transaction search returned inconsistent total_items metadata',
-      };
-    }
-    expectedTotalItems = totalItems;
-    rawItemsSeen += details.length;
-    if (rawItemsSeen > totalItems) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: 'transaction search returned more items than total_items',
-      };
-    }
-
-    for (const entry of details) {
-      const parsed = readTransaction(entry);
-      if (parsed.kind === 'ignored') continue;
-      if (parsed.kind === 'malformed') {
-        return {
-          ok: false,
-          retriable: false,
-          reason: 'transaction search returned a malformed supported payment record',
-        };
-      }
-      const transaction = parsed.transaction;
-      if (seen.has(transaction.transactionId)) {
-        return {
-          ok: false,
-          retriable: false,
-          reason: 'transaction search returned duplicate transaction ids',
-        };
-      }
-      seen.add(transaction.transactionId);
-      transactions.push(transaction);
-    }
-
-    if (details.length === 0) {
-      return {
-        ok: false,
-        retriable: false,
-        reason: 'transaction search returned an empty positive-result page',
-      };
-    }
-    if (page >= totalPages) {
-      return rawItemsSeen === totalItems
-        ? { ok: true, transactions }
-        : {
-            ok: false,
-            retriable: false,
-            reason: 'transaction search item count is incomplete',
-          };
     }
   }
-
   return {
-    ok: false,
-    retriable: false,
-    reason: `transaction search exceeded ${PROVIDER_MAX_PAGES} pages — narrow the window`,
+    ok: true,
+    found: true,
+    value: {
+      status: record.status,
+      lastPaymentTime: typeof lastPayment?.time === 'string' ? lastPayment.time : null,
+      lastPaymentAmountCents: amountCents,
+      lastPaymentCurrency: currency,
+      customId: typeof record.custom_id === 'string' && record.custom_id.length > 0
+        ? record.custom_id
+        : null,
+      planId: isProviderId(record.plan_id) ? record.plan_id : null,
+      statusUpdateTimeMs: (() => {
+        const parsed = typeof record.status_update_time === 'string'
+          ? Date.parse(record.status_update_time)
+          : Number.NaN;
+        return Number.isFinite(parsed) ? parsed : null;
+      })(),
+    },
   };
+}
+
+/**
+ * Every transaction PayPal recorded for the subscription in a time range —
+ * the discovery surface for NON-latest recurring charges whose webhooks were
+ * lost (billing_info.last_payment only ever names the newest one). Standard
+ * billing API; never the reporting product.
+ */
+export async function fetchProviderSubscriptionTransactions(
+  apiBase: string,
+  token: string,
+  subscriptionId: string,
+  startIso: string,
+  endIso: string,
+): Promise<ProviderFetch<ProviderSubscriptionTransaction[]>> {
+  const query = `start_time=${encodeURIComponent(startIso)}&end_time=${encodeURIComponent(endIso)}`;
+  const result = await providerGet(
+    apiBase,
+    token,
+    `/v1/billing/subscriptions/${encodeURIComponent(subscriptionId)}/transactions?${query}`,
+    'subscription transactions lookup',
+  );
+  if (!result.ok || !result.found) return result;
+  const record = result.value;
+  if (record.transactions !== undefined && !Array.isArray(record.transactions)) {
+    return {
+      ok: false,
+      retriable: false,
+      reason: 'subscription transactions lookup returned a malformed record',
+    };
+  }
+  // PayPal omits the field entirely for a subscription with no transactions
+  // in range; anything PRESENT must be an actual array.
+  const raw = Array.isArray(record.transactions) ? record.transactions : [];
+  const transactions: ProviderSubscriptionTransaction[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return {
+        ok: false,
+        retriable: false,
+        reason: 'subscription transactions lookup returned a malformed record',
+      };
+    }
+    const txn = entry as Record<string, unknown>;
+    const timeMs = typeof txn.time === 'string' ? Date.parse(txn.time) : Number.NaN;
+    if (
+      !isProviderId(txn.id)
+      || typeof txn.status !== 'string'
+      || !KNOWN_TXN_STATUSES.includes(txn.status)
+      || !Number.isFinite(timeMs)
+    ) {
+      return {
+        ok: false,
+        retriable: false,
+        reason: 'subscription transactions lookup returned a malformed record',
+      };
+    }
+    const breakdown = (txn.amount_with_breakdown as
+      { gross_amount?: unknown } | undefined)?.gross_amount;
+    const money = readProviderAmount(breakdown);
+    // A money-moving status with no money is not an optional field — the
+    // null-guarded downstream comparisons would silently skip every check
+    // and let an arbitrary local row account for the charge.
+    if (
+      MONEY_TXN_STATUSES.includes(txn.status)
+      && (money.amountCents === null || money.currency === null)
+    ) {
+      return {
+        ok: false,
+        retriable: false,
+        reason: 'subscription transactions lookup returned a malformed record',
+      };
+    }
+    transactions.push({
+      id: txn.id,
+      status: txn.status,
+      timeMs,
+      amountCents: money.amountCents,
+      currency: money.currency,
+    });
+  }
+  return { ok: true, found: true, value: transactions };
+}
+
+/** Bounded-concurrency map preserving order; provider GETs are I/O-bound. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  handler: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(limit, items.length)) },
+    async () => {
+      while (true) {
+        const index = next++;
+        if (index >= items.length) return;
+        results[index] = await handler(items[index]);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * Provider fetches in bounded chunks with a lease heartbeat between chunks —
+ * the whole target set must never outlive the lease silently.
+ */
+async function mapChunkedWithHeartbeat<T, R>(
+  items: T[],
+  heartbeat: () => Promise<PayPalReconciliationFailure | null>,
+  handler: (item: T) => Promise<R>,
+): Promise<{ ok: true; results: R[] } | { ok: false; failure: PayPalReconciliationFailure }> {
+  const results: R[] = [];
+  for (let from = 0; from < items.length; from += PROVIDER_CHUNK_SIZE) {
+    const chunk = items.slice(from, from + PROVIDER_CHUNK_SIZE);
+    results.push(...await mapWithConcurrency(chunk, PROVIDER_CONCURRENCY, handler));
+    const failure = await heartbeat();
+    if (failure) return { ok: false, failure };
+  }
+  return { ok: true, results };
 }
 
 // ── Lease ownership ────────────────────────────────────────────────────────
@@ -1123,25 +1545,35 @@ async function lookupPaymentsByExactColumn(
   return { ok: true, rows: found };
 }
 
-async function lookupRefundsByProviderId(
+async function lookupRefundsByExactColumn(
   supabase: AdminSupabase,
+  column: 'paypal_refund_id' | 'payment_id',
   values: string[],
 ): Promise<ScanResult<LocalRefundRow>> {
   if (values.length === 0) return { ok: true, rows: [] };
   const found: LocalRefundRow[] = [];
   for (const group of chunks([...new Set(values)], EXACT_LOOKUP_CHUNK_SIZE)) {
-    const { data, error } = await supabase
-      .from('payment_refunds')
-      .select(LOCAL_REFUND_SELECT)
-      .in('paypal_refund_id', group);
-    if (error) {
-      return {
-        ok: false,
-        retriable: true,
-        reason: `exact local refund lookup failed: ${error.message}`,
-      };
+    // One payment can carry MANY refund siblings: page each group with a
+    // stable order — an unpaged read silently truncates at the PostgREST
+    // response cap and a partial aggregate fakes parity.
+    for (let from = 0; ; from += LOCAL_PAGE_SIZE) {
+      const { data, error } = await supabase
+        .from('payment_refunds')
+        .select(LOCAL_REFUND_SELECT)
+        .in(column, group)
+        .order('id', { ascending: true })
+        .range(from, from + LOCAL_PAGE_SIZE - 1);
+      if (error) {
+        return {
+          ok: false,
+          retriable: true,
+          reason: `exact local refund lookup failed: ${error.message}`,
+        };
+      }
+      const page = (data ?? []) as LocalRefundRow[];
+      found.push(...page);
+      if (page.length < LOCAL_PAGE_SIZE) break;
     }
-    found.push(...(data ?? []) as LocalRefundRow[]);
   }
   return { ok: true, rows: found };
 }
@@ -1179,55 +1611,6 @@ async function lookupOrdersByExactColumn(
     found.push(...validated.rows);
   }
   return { ok: true, rows: found };
-}
-
-async function loadDurableAttributionOrders(
-  supabase: AdminSupabase,
-  transactions: ProviderTransaction[],
-  payments: LocalPaymentRow[],
-  guildIds: Set<string>,
-): Promise<ScanResult<LocalOrderRow>> {
-  const orderReferences = transactions
-    .filter((transaction) => transaction.referenceType === 'ODR')
-    .map((transaction) => transaction.referenceId)
-    .filter((id): id is string => id !== null);
-  const subscriptionReferences = transactions
-    .filter((transaction) => transaction.referenceType === 'SUB')
-    .map((transaction) => transaction.referenceId)
-    .filter((id): id is string => id !== null);
-  const localOrderIds = payments
-    .map((payment) => payment.order_id)
-    .filter((id): id is string => typeof id === 'string');
-
-  const [byOrderReference, bySubscriptionReference, byLocalOrder] =
-    await Promise.all([
-      lookupOrdersByExactColumn(
-        supabase,
-        'paypal_order_id',
-        orderReferences,
-        guildIds,
-      ),
-      lookupOrdersByExactColumn(
-        supabase,
-        'paypal_subscription_id',
-        subscriptionReferences,
-        guildIds,
-      ),
-      lookupOrdersByExactColumn(supabase, 'id', localOrderIds, guildIds),
-    ]);
-  if (!byOrderReference.ok) return byOrderReference;
-  if (!bySubscriptionReference.ok) return bySubscriptionReference;
-  if (!byLocalOrder.ok) return byLocalOrder;
-
-  const deduped = new Map<string, LocalOrderRow>();
-  for (const row of [
-    ...byOrderReference.rows,
-    ...bySubscriptionReference.rows,
-    ...byLocalOrder.rows,
-  ]) {
-    deduped.set(row.id, row);
-  }
-  return { ok: true, rows: [...deduped.values()] };
 }
 
 /**
@@ -1277,7 +1660,7 @@ async function loadOrderPaymentIdentities(
       const pageSize = Math.min(LOCAL_PAGE_SIZE, remaining);
       const { data, error } = await supabase
         .from('payments')
-        .select('id, order_id, guild_id, paypal_payment_id')
+        .select('id, order_id, guild_id, paypal_payment_id, created_at')
         .eq('provider', 'paypal')
         .not('paypal_payment_id', 'is', null)
         .in('order_id', group)
@@ -1364,7 +1747,7 @@ async function loadCustomerIdentities(
 function customIdentityMatchesOrder(
   identity: SomniBotTransactionIdentity,
   order: LocalOrderRow,
-  eventCode: ProviderTransaction['eventCode'],
+  subscriptionCommerce: boolean,
   customer: LocalCustomerIdentityRow | undefined,
 ): boolean {
   if (!customer) return false;
@@ -1378,7 +1761,7 @@ function customIdentityMatchesOrder(
   ) {
     return false;
   }
-  return eventCode === 'T0002'
+  return subscriptionCommerce
     ? identity.planId !== null && identity.planId === order.plan_id
     : order.plan_id === null;
 }
@@ -1392,22 +1775,6 @@ function isSettledPair(payment: LocalPaymentRow, order: LocalOrderRow | undefine
   }
   if (payment.status === 'refunded' || payment.status === 'reversed') {
     return order.status === 'refunded';
-  }
-  return false;
-}
-
-function localRefundMatchesProviderEvent(
-  refund: LocalRefundRow,
-  eventCode: ProviderTransaction['eventCode'],
-): boolean {
-  if (eventCode === 'T1106') {
-    return refund.event_type === 'PAYMENT.CAPTURE.REVERSED'
-      || refund.event_type === 'PAYMENT.SALE.REVERSED';
-  }
-  if (eventCode === 'T1107') {
-    return refund.event_type === 'ADMIN.REFUND'
-      || refund.event_type === 'PAYMENT.CAPTURE.REFUNDED'
-      || refund.event_type === 'PAYMENT.SALE.REFUNDED';
   }
   return false;
 }
@@ -1785,6 +2152,7 @@ async function runPass(
   nowMs: number,
   windowStartMs: number,
   windowEndMs: number,
+  refundLookbackMs: number,
   heartbeat: () => Promise<PayPalReconciliationFailure | null>,
   resultGuildId?: string,
 ): Promise<PayPalReconciliationResult> {
@@ -1797,18 +2165,6 @@ async function runPass(
   if (!token.ok) {
     return { status: 'failed', reason: token.reason, retriable: token.retriable };
   }
-
-  const provider = await fetchProviderTransactions(
-    config.apiBase,
-    token.token,
-    windowStartMs,
-    windowEndMs,
-  );
-  if (!provider.ok) {
-    return { status: 'failed', reason: provider.reason, retriable: provider.retriable };
-  }
-  const providerHeartbeatFailure = await heartbeat();
-  if (providerHeartbeatFailure) return providerHeartbeatFailure;
 
   const windowStart = new Date(windowStartMs).toISOString();
   const windowEnd = new Date(windowEndMs).toISOString();
@@ -1864,80 +2220,49 @@ async function runPass(
   const payments = validatedPayments.rows;
   const windowRefunds = validatedWindowRefunds.rows;
   const orders = validatedWindowOrders.rows;
-  const providerRefunds = provider.transactions.filter(
-    (transaction) => transaction.kind === 'refund',
-  );
-  const exactRefundScan = await lookupRefundsByProviderId(
-    supabase,
-    providerRefunds.map((transaction) => transaction.transactionId),
-  );
-  if (!exactRefundScan.ok) {
-    return {
-      status: 'failed',
-      reason: exactRefundScan.reason,
-      retriable: exactRefundScan.retriable,
-    };
+
+  // Parent orders of window payments/refunds may be older than the window.
+  const windowOrderIds = new Set(orders.map((order) => order.id));
+  const parentOrderIds = new Set<string>();
+  for (const payment of payments) {
+    if (typeof payment.order_id === 'string' && !windowOrderIds.has(payment.order_id)) {
+      parentOrderIds.add(payment.order_id);
+    }
   }
-  const validatedExactRefunds = validateLocalRefunds(
-    exactRefundScan.rows,
+  for (const refund of windowRefunds) {
+    if (typeof refund.order_id === 'string' && !windowOrderIds.has(refund.order_id)) {
+      parentOrderIds.add(refund.order_id);
+    }
+  }
+  const parentOrderScan = await lookupOrdersByExactColumn(
+    supabase,
+    'id',
+    [...parentOrderIds],
     configuredGuildIds,
   );
-  if (!validatedExactRefunds.ok) {
-    return {
-      status: 'failed',
-      reason: validatedExactRefunds.reason,
-      retriable: validatedExactRefunds.retriable,
-    };
+  if (!parentOrderScan.ok) {
+    return { status: 'failed', reason: parentOrderScan.reason, retriable: parentOrderScan.retriable };
   }
-  const refundsByProviderId = new Map<string, LocalRefundRow>();
-  const refundsById = new Map<string, LocalRefundRow>();
-  for (const refund of [...windowRefunds, ...validatedExactRefunds.rows]) {
-    const existingProvider = refundsByProviderId.get(refund.paypal_refund_id);
-    const existingId = refundsById.get(refund.id);
-    if (
-      (existingProvider && existingProvider.id !== refund.id)
-      || (existingId && existingId.paypal_refund_id !== refund.paypal_refund_id)
-    ) {
-      return {
-        status: 'failed',
-        reason: 'provider refund identity conflict',
-        retriable: false,
-      };
-    }
-    refundsByProviderId.set(refund.paypal_refund_id, refund);
-    refundsById.set(refund.id, refund);
+  const ordersById = new Map<string, LocalOrderRow>();
+  for (const order of [...orders, ...parentOrderScan.rows]) {
+    ordersById.set(order.id, order);
   }
 
-  const [refundPaymentsById, refundPaymentsByProviderId] = await Promise.all([
-    lookupPaymentsByExactColumn(
-      supabase,
-      'id',
-      [...refundsById.values()].map((refund) => refund.payment_id),
-    ),
-    lookupPaymentsByExactColumn(
-      supabase,
-      'paypal_payment_id',
-      providerRefunds
-        .map((transaction) => transaction.referenceId)
-        .filter((id): id is string => id !== null),
-    ),
-  ]);
-  if (!refundPaymentsById.ok) {
+  // Refund parents (payment rows) may also predate the window.
+  const refundPaymentScan = await lookupPaymentsByExactColumn(
+    supabase,
+    'id',
+    windowRefunds.map((refund) => refund.payment_id),
+  );
+  if (!refundPaymentScan.ok) {
     return {
       status: 'failed',
-      reason: refundPaymentsById.reason,
-      retriable: refundPaymentsById.retriable,
-    };
-  }
-  if (!refundPaymentsByProviderId.ok) {
-    return {
-      status: 'failed',
-      reason: refundPaymentsByProviderId.reason,
-      retriable: refundPaymentsByProviderId.retriable,
+      reason: refundPaymentScan.reason,
+      retriable: refundPaymentScan.retriable,
     };
   }
   const validatedRefundPayments = validateLocalPayments(
-    [...refundPaymentsById.rows, ...refundPaymentsByProviderId.rows],
+    refundPaymentScan.rows,
     configuredGuildIds,
   );
   if (!validatedRefundPayments.ok) {
@@ -1947,84 +2272,276 @@ async function runPass(
       retriable: validatedRefundPayments.retriable,
     };
   }
+
+  // Local identity maps + conflict checks. These are pure local-ledger
+  // consistency guards carried over from the previous implementation: a
+  // provider id claimed by two rows, or a refund pointing across guilds or
+  // orders, poisons every comparison built on top of it.
   const paymentEvidenceById = new Map<string, LocalPaymentRow>();
-  const paymentEvidenceByProviderId = new Map<string, LocalPaymentRow>();
+  const localByProviderId = new Map<string, LocalPaymentRow>();
   for (const payment of [...payments, ...validatedRefundPayments.rows]) {
-    const existing = paymentEvidenceByProviderId.get(payment.paypal_payment_id as string);
+    const providerId = payment.paypal_payment_id as string;
+    const existing = localByProviderId.get(providerId);
     if (existing && existing.id !== payment.id) {
+      return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+    }
+    localByProviderId.set(providerId, payment);
+    paymentEvidenceById.set(payment.id, payment);
+  }
+  // Historical refund parents live outside the window scan, so their orders
+  // may not be loaded yet — load them before the relation guard below, or a
+  // cross-tenant parent (payment and refund consistently claiming guild B
+  // while the ORDER belongs to guild A) sails through every later check.
+  {
+    const historicalParentOrderScan = await lookupOrdersByExactColumn(
+      supabase,
+      'id',
+      [...new Set(
+        validatedRefundPayments.rows
+          .map((payment) => payment.order_id)
+          .filter((id): id is string => typeof id === 'string' && !ordersById.has(id)),
+      )],
+      configuredGuildIds,
+    );
+    if (!historicalParentOrderScan.ok) {
       return {
         status: 'failed',
-        reason: 'provider payment identity conflict',
+        reason: historicalParentOrderScan.reason,
+        retriable: historicalParentOrderScan.retriable,
+      };
+    }
+    for (const order of historicalParentOrderScan.rows) ordersById.set(order.id, order);
+  }
+  for (const payment of [...payments, ...validatedRefundPayments.rows]) {
+    const order = typeof payment.order_id === 'string'
+      ? ordersById.get(payment.order_id)
+      : undefined;
+    if (!order) {
+      return {
+        status: 'failed',
+        reason: 'local PayPal payment relation is missing',
         retriable: false,
       };
     }
-    paymentEvidenceById.set(payment.id, payment);
-    paymentEvidenceByProviderId.set(payment.paypal_payment_id as string, payment);
+    if (payment.guild_id !== order.guild_id) {
+      return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+    }
   }
-  const durableOrderScan = await loadDurableAttributionOrders(
+  const refundsByProviderId = new Map<string, LocalRefundRow>();
+  for (const refund of windowRefunds) {
+    const existing = refundsByProviderId.get(refund.paypal_refund_id);
+    if (existing && existing.id !== refund.id) {
+      return { status: 'failed', reason: 'provider refund identity conflict', retriable: false };
+    }
+    refundsByProviderId.set(refund.paypal_refund_id, refund);
+    const ledgerPayment = paymentEvidenceById.get(refund.payment_id);
+    if (!ledgerPayment) {
+      return {
+        status: 'failed',
+        reason: 'local PayPal refund payment relation is missing',
+        retriable: false,
+      };
+    }
+    if (
+      refund.guild_id !== ledgerPayment.guild_id
+      || refund.order_id !== ledgerPayment.order_id
+    ) {
+      return { status: 'failed', reason: 'provider refund identity conflict', retriable: false };
+    }
+  }
+  const localHeartbeatFailure = await heartbeat();
+  if (localHeartbeatFailure) return localHeartbeatFailure;
+
+  // ── Verification target selection ────────────────────────────────────────
+  //
+  // Orders get a direct GET when the capture path cannot already prove them:
+  //  A) window orders still pending/pending_review (did the buyer complete
+  //     approval while our webhook was lost?), and
+  //  B) settled window orders with NO local payment identity at all (the
+  //     payment write is wholly absent, so no capture id exists to verify).
+  const paymentIdentityScan = await loadOrderPaymentIdentities(
     supabase,
-    provider.transactions,
-    payments,
-    configuredGuildIds,
+    orders.map((order) => order.id),
   );
-  if (!durableOrderScan.ok) {
+  if (!paymentIdentityScan.ok) {
     return {
       status: 'failed',
-      reason: durableOrderScan.reason,
-      retriable: durableOrderScan.retriable,
+      reason: paymentIdentityScan.reason,
+      retriable: paymentIdentityScan.retriable,
     };
   }
-
-  const ordersById = new Map<string, LocalOrderRow>();
-  for (const order of [...orders, ...durableOrderScan.rows]) {
-    ordersById.set(order.id, order);
-  }
-  const ordersByPayPalOrder = new Map(
-    [...ordersById.values()]
-      .filter((order) => isProviderId(order.paypal_order_id))
-      .map((order) => [order.paypal_order_id as string, order]),
-  );
-  const ordersBySubscription = new Map(
-    [...ordersById.values()]
-      .filter((order) => isProviderId(order.paypal_subscription_id))
-      .map((order) => [order.paypal_subscription_id as string, order]),
-  );
-  const localByProviderId = new Map<string, LocalPaymentRow>();
-  const paymentsByOrder = new Map<string, string[]>();
-  for (const payment of payments) {
-    const existingPayment = localByProviderId.get(payment.paypal_payment_id as string);
-    if (existingPayment && existingPayment.id !== payment.id) {
+  const orderIdsWithPaymentIdentity = new Set<string>();
+  for (const identity of paymentIdentityScan.rows) {
+    const order = identity.order_id ? ordersById.get(identity.order_id) : undefined;
+    if (
+      typeof identity.id !== 'string'
+      || identity.id.length === 0
+      || !order
+      || identity.guild_id !== order.guild_id
+      || !isProviderId(identity.paypal_payment_id)
+      // A NULL timestamp escapes every created_at-bounded scan while its
+      // identity still suppresses the order GET — nothing would ever
+      // verify the charge. Timestamps are load-bearing; fail closed.
+      || typeof identity.created_at !== 'string'
+      || !Number.isFinite(Date.parse(identity.created_at))
+    ) {
       return {
         status: 'failed',
-        reason: 'provider identity conflict',
+        reason: 'malformed local PayPal payment identity row',
         retriable: false,
       };
     }
-    localByProviderId.set(payment.paypal_payment_id as string, payment);
-    const existing = paymentsByOrder.get(payment.order_id as string) ?? [];
-    existing.push(payment.paypal_payment_id as string);
-    paymentsByOrder.set(payment.order_id as string, existing);
+    orderIdsWithPaymentIdentity.add(order.id);
+  }
+  const SETTLED_ORDER_STATUSES = ['completed', 'disputed', 'refunded'];
+  const missingLocalPayments: MissingLocalPayment[] = [];
+  const amountMismatches: AmountMismatch[] = [];
+  const unsettledLocalPayments: UnsettledLocalPayment[] = [];
+  const missingProviderPayments: MissingProviderPayment[] = [];
+  const orderGetTargets: LocalOrderRow[] = [];
+  for (const order of orders) {
+    const pendingish = order.status === 'pending' || order.status === 'pending_review';
+    const settled = SETTLED_ORDER_STATUSES.includes(order.status);
+    if (!isProviderId(order.paypal_order_id)) {
+      // A SETTLED purchase order with no provider identity anywhere — no
+      // order id, no subscription id, no payment row — has zero PayPal
+      // evidence behind money the ledger claims settled (historical rows or
+      // a failed identity write). It can never enter a provider target, so
+      // report it directly instead of silently skipping.
+      if (
+        settled
+        && !orderIdsWithPaymentIdentity.has(order.id)
+        && !isProviderId(order.paypal_subscription_id)
+      ) {
+        missingProviderPayments.push({
+          kind: 'order',
+          orderId: order.id,
+          orderNumber: order.order_number,
+          guildId: order.guild_id as string,
+          paypalPaymentIds: [],
+          amountCents: order.amount_cents,
+          currency: normalizeCurrency(order.currency) as string,
+          createdAt: order.created_at,
+        });
+      }
+      continue;
+    }
+    if (pendingish || order.status === 'cancelled' || settled) {
+      // Settled orders are fetched even when a payment identity exists: a
+      // single known capture must not suppress the enumeration that would
+      // reveal a SECOND settled capture whose webhook was lost. Captures
+      // already verified individually are deduplicated by the known-row
+      // check in the settled-captures sweep.
+      orderGetTargets.push(order);
+    }
   }
 
-  const customConsistencyCustomerIds = new Set<string>();
-  for (const transaction of provider.transactions) {
-    if (!transaction.customIdentity) continue;
-    const local = localByProviderId.get(transaction.transactionId);
-    const localOrder = local ? ordersById.get(local.order_id as string) : undefined;
-    const referencedOrder = transaction.referenceType === 'ODR' && transaction.referenceId
-      ? ordersByPayPalOrder.get(transaction.referenceId)
-      : transaction.referenceType === 'SUB' && transaction.referenceId
-        ? ordersBySubscription.get(transaction.referenceId)
-        : undefined;
-    for (const order of [localOrder, referencedOrder]) {
-      if (typeof order?.customer_id === 'string') {
-        customConsistencyCustomerIds.add(order.customer_id);
+  // Cancelled orders leave the creation-window scan after DEFAULT_WINDOW_MS,
+  // but the deny-then-late-capture race outlives it: PayPal can settle a
+  // capture whose webhook was lost long after the local cancellation. Page
+  // the PayPal-identified historical cancelled backlog (refund-lookback
+  // horizon) into the same recheck set.
+  {
+    const cancelledLookbackStartIso = new Date(
+      windowStartMs - Math.max(0, refundLookbackMs),
+    ).toISOString();
+    const targetedOrderIds = new Set(orderGetTargets.map((order) => order.id));
+    let scanComplete = false;
+    for (let from = 0; from < LOCAL_SCAN_MAX_ROWS; from += LOCAL_PAGE_SIZE) {
+      const heartbeatFailure = await heartbeat();
+      if (heartbeatFailure) return heartbeatFailure;
+      const { data, error } = await supabase
+        .from('orders')
+        .select('id, order_number, guild_id, customer_id, product_id, plan_id, amount_cents, currency, status, source, paypal_order_id, paypal_subscription_id, created_at')
+        .or('source.eq.purchase,source.is.null')
+        .gt('amount_cents', 0)
+        .eq('status', 'cancelled')
+        .not('paypal_order_id', 'is', null)
+        .gte('created_at', cancelledLookbackStartIso)
+        .lt('created_at', windowStart)
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, from + LOCAL_PAGE_SIZE - 1);
+      if (error) {
+        return {
+          status: 'failed',
+          reason: `historical cancelled-order scan failed: ${error.message}`,
+          retriable: true,
+        };
+      }
+      const page = (data ?? []) as LocalOrderRow[];
+      // Same validator the window scan uses: malformed rows (or rows in an
+      // unconfigured guild) fail the pass closed instead of recording
+      // findings under an invisible tenant that every alert scope filters
+      // out.
+      const validatedHistoricalPage = validateLocalOrders(page, configuredGuildIds);
+      if (!validatedHistoricalPage.ok) {
+        return {
+          status: 'failed',
+          reason: validatedHistoricalPage.reason,
+          retriable: validatedHistoricalPage.retriable,
+        };
+      }
+      for (const order of validatedHistoricalPage.rows) {
+        // Re-assert the predicate in code: the recheck set must hold ONLY
+        // identified historical cancellations even if the storage layer
+        // returns a wider page.
+        if (
+          order.status !== 'cancelled'
+          || !isProviderId(order.paypal_order_id)
+          || String(order.created_at ?? '') >= windowStart
+          || targetedOrderIds.has(order.id)
+        ) {
+          continue;
+        }
+        targetedOrderIds.add(order.id);
+        orderGetTargets.push(order);
+      }
+      if (page.length < LOCAL_PAGE_SIZE) {
+        scanComplete = true;
+        break;
+      }
+    }
+    if (!scanComplete) {
+      // Exactly-at-cap is SUPPORTED: only a probed row past the cap means
+      // the backlog truly exceeds it (same discipline as the other scans).
+      const { data: overflow, error: overflowError } = await supabase
+        .from('orders')
+        .select('id')
+        .or('source.eq.purchase,source.is.null')
+        .gt('amount_cents', 0)
+        .eq('status', 'cancelled')
+        .not('paypal_order_id', 'is', null)
+        .gte('created_at', cancelledLookbackStartIso)
+        .lt('created_at', windowStart)
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(LOCAL_SCAN_MAX_ROWS, LOCAL_SCAN_MAX_ROWS);
+      if (overflowError) {
+        return {
+          status: 'failed',
+          reason: `historical cancelled-order overflow probe failed: ${overflowError.message}`,
+          retriable: true,
+        };
+      }
+      if (((overflow ?? []) as Array<{ id: string }>).length > 0) {
+        return {
+          status: 'failed',
+          reason: `historical cancelled-order scan exceeded ${LOCAL_SCAN_MAX_ROWS} rows — narrow the lookback`,
+          retriable: true,
+        };
       }
     }
   }
+
+  // Customer identities back the custom_id tamper check on fetched orders.
   const customerIdentityScan = await loadCustomerIdentities(
     supabase,
-    [...customConsistencyCustomerIds],
+    [...new Set(
+      orderGetTargets
+        .map((order) => order.customer_id)
+        .filter((id): id is string => typeof id === 'string'),
+    )],
     configuredGuildIds,
   );
   if (!customerIdentityScan.ok) {
@@ -2037,377 +2554,2822 @@ async function runPass(
   const customersById = new Map(
     customerIdentityScan.rows.map((customer) => [customer.id, customer]),
   );
-  const localHeartbeatFailure = await heartbeat();
-  if (localHeartbeatFailure) return localHeartbeatFailure;
 
-  const attributed: AttributedProviderTransaction[] = [];
-  for (const transaction of provider.transactions) {
-    if (transaction.kind === 'refund') {
-      const localRefund = refundsByProviderId.get(transaction.transactionId);
-      const referencedPayment = transaction.referenceId
-        ? paymentEvidenceByProviderId.get(transaction.referenceId)
-        : undefined;
-      const ledgerPayment = localRefund
-        ? paymentEvidenceById.get(localRefund.payment_id)
-        : undefined;
-      if (localRefund && !ledgerPayment) {
-        return {
-          status: 'failed',
-          reason: 'local PayPal refund payment relation is missing',
-          retriable: false,
-        };
-      }
-      if (
-        localRefund
-        && ledgerPayment
-        && (
-          localRefund.guild_id !== ledgerPayment.guild_id
-          || localRefund.order_id !== ledgerPayment.order_id
-          || transaction.referenceId !== ledgerPayment.paypal_payment_id
-          || !localRefundMatchesProviderEvent(localRefund, transaction.eventCode)
-        )
-      ) {
-        return {
-          status: 'failed',
-          reason: 'provider refund identity conflict',
-          retriable: false,
-        };
-      }
-      if (
-        ledgerPayment
-        && referencedPayment
-        && ledgerPayment.id !== referencedPayment.id
-      ) {
-        return {
-          status: 'failed',
-          reason: 'provider refund identity conflict',
-          retriable: false,
-        };
-      }
-      const guildId = localRefund?.guild_id ?? referencedPayment?.guild_id;
-      if (typeof guildId === 'string') {
-        attributed.push({
-          transaction,
-          guildId,
-          referencedOrderId: null,
-        });
-      }
-      continue;
+  // Subscriptions to verify: the window's orders/payments seed the map, and
+  // a PAGED sweep over every settled subscription order runs at judge time —
+  // established subscriptions stay targets without a lifetime-wide cap.
+  const subscriptionTargets = new Map<string, LocalOrderRow>();
+  for (const order of orders) {
+    if (isProviderId(order.paypal_subscription_id)) {
+      subscriptionTargets.set(order.paypal_subscription_id, order);
     }
-
-    const local = localByProviderId.get(transaction.transactionId);
-    const localOrder = local
-      ? ordersById.get(local.order_id as string)
-      : undefined;
-    if (local && !localOrder) {
-      return {
-        status: 'failed',
-        reason: 'local PayPal payment relation is missing',
-        retriable: false,
-      };
+  }
+  for (const payment of payments) {
+    const order = ordersById.get(payment.order_id as string);
+    if (order && isProviderId(order.paypal_subscription_id)) {
+      subscriptionTargets.set(order.paypal_subscription_id, order);
     }
-    if (local && localOrder && local.guild_id !== localOrder.guild_id) {
-      return {
-        status: 'failed',
-        reason: 'provider identity conflict',
-        retriable: false,
-      };
-    }
-
-    const referencedOrder = transaction.referenceType === 'ODR' && transaction.referenceId
-      ? ordersByPayPalOrder.get(transaction.referenceId)
-      : transaction.referenceType === 'SUB' && transaction.referenceId
-        ? ordersBySubscription.get(transaction.referenceId)
-        : undefined;
-    if (localOrder && referencedOrder && localOrder.id !== referencedOrder.id) {
-      return {
-        status: 'failed',
-        reason: 'provider identity conflict',
-        retriable: false,
-      };
-    }
-
-    const localProviderReference = localOrder
-      ? transaction.eventCode === 'T0002'
-        ? localOrder.paypal_subscription_id
-        : localOrder.paypal_order_id
-      : null;
-    if (
-      transaction.referenceId
-      && localProviderReference
-      && transaction.referenceId !== localProviderReference
-    ) {
-      return {
-        status: 'failed',
-        reason: 'provider identity conflict',
-        retriable: false,
-      };
-    }
-
-    const identity = transaction.customIdentity;
-    if (
-      identity
-      && (
-        (localOrder && !customIdentityMatchesOrder(
-          identity,
-          localOrder,
-          transaction.eventCode,
-          typeof localOrder.customer_id === 'string'
-            ? customersById.get(localOrder.customer_id)
-            : undefined,
-        ))
-        || (referencedOrder && !customIdentityMatchesOrder(
-          identity,
-          referencedOrder,
-          transaction.eventCode,
-          typeof referencedOrder.customer_id === 'string'
-            ? customersById.get(referencedOrder.customer_id)
-            : undefined,
-        ))
-      )
-    ) {
-      return {
-        status: 'failed',
-        reason: 'provider identity conflict',
-        retriable: false,
-      };
-    }
-
-    const authoritativeOrder = localOrder ?? referencedOrder;
-    if (authoritativeOrder?.guild_id) {
-      attributed.push({
-        transaction,
-        guildId: authoritativeOrder.guild_id,
-        referencedOrderId: referencedOrder?.id ?? null,
-      });
-      continue;
-    }
-
-    // custom_field is deliberately not a fallback authority. In a shared
-    // merchant account, a foreign application can supply a syntactically
-    // valid (even copied) value. Without an exact payment id or ODR/SUB
-    // reference this transaction remains unattributed.
   }
 
-  const missingLocalPayments: MissingLocalPayment[] = [];
-  const amountMismatches: AmountMismatch[] = [];
-  const unsettledLocalPayments: UnsettledLocalPayment[] = [];
-  for (const item of attributed) {
-    const transaction = item.transaction;
-    if (transaction.kind === 'refund') {
-      const localRefund = refundsByProviderId.get(transaction.transactionId);
-      if (!localRefund) {
-        missingLocalPayments.push({
-          kind: 'refund',
-          transactionId: transaction.transactionId,
-          guildId: item.guildId,
-          amountCents: transaction.amountCents,
-          currency: transaction.currency,
-          initiatedAt: transaction.initiatedAt,
-          eventCode: transaction.eventCode,
-          referenceId: transaction.referenceId,
-          referenceType: transaction.referenceType,
+  // ── Per-object provider verification ─────────────────────────────────────
+  let providerObjectsVerified = 0;
+  const verifiedByGuild = new Map<string, number>();
+  const bumpVerified = (guildId: string | null) => {
+    providerObjectsVerified += 1;
+    if (typeof guildId === 'string') {
+      verifiedByGuild.set(guildId, (verifiedByGuild.get(guildId) ?? 0) + 1);
+    }
+  };
+  const PROVIDER_SETTLED_CAPTURE_STATUSES = ['COMPLETED', 'REFUNDED', 'PARTIALLY_REFUNDED'];
+
+  // 1) Captures — every window payment by its own provider identity, plus a
+  //    PAGED refund lookback over older settled rows (PayPal accepts refunds
+  //    for months; a page-at-a-time sweep never trips the window row cap).
+  //    Subscription billing writes v1 SALE ids — those rows are verified
+  //    through /v1/payments/sale instead of being skipped blind.
+  const windowPaymentIds = new Set(payments.map((payment) => payment.id));
+  // The established-subscription sweep is unbounded by design; a per-
+  // subscription full scan of up to 20k window payments multiplies into
+  // the billions. Index once, look up in constant time.
+  const windowPaymentsByOrderId = new Map<string, LocalPaymentRow[]>();
+  for (const payment of payments) {
+    const key = payment.order_id as string;
+    const list = windowPaymentsByOrderId.get(key);
+    if (list) list.push(payment);
+    else windowPaymentsByOrderId.set(key, [payment]);
+  }
+
+  const isSubscriptionSaleRow = (payment: LocalPaymentRow): boolean => {
+    const order = ordersById.get(payment.order_id as string);
+    return Boolean(order && isProviderId(order.paypal_subscription_id));
+  };
+
+  const windowCaptureRows = payments.filter((payment) => !isSubscriptionSaleRow(payment));
+  const windowSaleRows = payments.filter((payment) => isSubscriptionSaleRow(payment));
+
+  const captureMap = await mapChunkedWithHeartbeat(
+    windowCaptureRows,
+    heartbeat,
+    async (payment) => ({
+      payment,
+      lookup: await fetchProviderCapture(
+        config.apiBase,
+        token.token,
+        payment.paypal_payment_id as string,
+      ),
+    }),
+  );
+  if (!captureMap.ok) return captureMap.failure;
+  const captureResults = captureMap.results;
+  for (const { lookup } of captureResults) {
+    if (!lookup.ok) {
+      return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
+    }
+  }
+
+  // Provider-refunded captures: resolve their local refund totals exactly
+  // (refund rows may sit outside the window) AND enumerate the provider's
+  // own refund list through the parent ORDER — the capture object cannot
+  // list its refund siblings, but /v2/checkout/orders can, which is what
+  // makes a lost later sibling of a partial series detectable.
+  const refundedWindowCaptures = captureResults.filter(({ lookup }) =>
+    lookup.ok && lookup.found
+    && ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(lookup.value.status),
+  );
+  // Out-of-window rows judged by exactly ONE path. The refund lookback,
+  // the zero-amount witness paths, the ordinary-row parent sweep, and the
+  // subscription-transactions fallback can each reach the same historical
+  // row; whichever judges it first records it here.
+  const judgedHistoricalRefundParents = new Set<string>();
+  const localRefundTotalsByPaymentRow = new Map<string, number>();
+  const localRefundIdsByPaymentRow = new Map<string, Set<string>>();
+  const localRefundRowsByProviderId = new Map<
+    string,
+    { amountCents: number; currency: string | null }
+  >();
+  // Lag-fresh local refund rows (created inside the settlement interval):
+  // held aside, counted only where the provider side is CONFIRMED settled.
+  const recentLocalRefundRowsByProviderId = new Map<
+    string,
+    { amountCents: number; currency: string | null }
+  >();
+  const recentLocalRefundsByPaymentRow = new Map<
+    string,
+    Array<{ providerId: string; amountCents: number }>
+  >();
+  const refundTotalParentById = new Map<string, LocalPaymentRow>();
+  const loadLocalRefundTotals = async (parents: LocalPaymentRow[]) => {
+    for (const parent of parents) refundTotalParentById.set(parent.id, parent);
+    const missing = parents
+      .map((parent) => parent.id)
+      .filter((id) => !localRefundTotalsByPaymentRow.has(id));
+    if (missing.length === 0) return null;
+    const scan = await lookupRefundsByExactColumn(supabase, 'payment_id', missing);
+    if (!scan.ok) {
+      return { status: 'failed' as const, reason: scan.reason, retriable: scan.retriable };
+    }
+    // Historical rows never crossed validateLocalRefunds on this pass —
+    // aggregating an unvalidated amount would let a malformed old row fake
+    // parity with the provider total.
+    const validated = validateLocalRefunds(scan.rows, configuredGuildIds);
+    if (!validated.ok) {
+      return {
+        status: 'failed' as const,
+        reason: validated.reason,
+        retriable: validated.retriable,
+      };
+    }
+    for (const id of missing) {
+      localRefundTotalsByPaymentRow.set(id, 0);
+      localRefundIdsByPaymentRow.set(id, new Set());
+    }
+    for (const refund of validated.rows) {
+      const key = refund.payment_id as string;
+      const parent = refundTotalParentById.get(key);
+      // Parent OWNERSHIP, exactly like the in-window relation guard: a row
+      // that references this payment while carrying another order or guild
+      // is corrupt linkage — summing it would suppress the real capture's
+      // missing-refund finding and attribute money to the wrong ledger.
+      if (
+        parent
+        && (refund.order_id !== parent.order_id || refund.guild_id !== parent.guild_id)
+      ) {
+        return {
+          status: 'failed' as const,
+          reason: 'provider refund identity conflict',
+          retriable: false,
+        };
+      }
+      if (
+        parent
+        && normalizeCurrency(refund.currency) !== normalizeCurrency(parent.currency)
+      ) {
+        // A cross-currency refund row cannot participate in the aggregate;
+        // surface the drift instead of silently summing it.
+        amountMismatches.push({
+          transactionId: refund.paypal_refund_id,
+          guildId: refund.guild_id as string,
+          providerAmountCents: 0,
+          localAmountCents: refund.amount_cents as number,
+          providerCurrency: normalizeCurrency(parent.currency) ?? 'UNKNOWN',
+          localCurrency: normalizeCurrency(refund.currency),
         });
         continue;
       }
-      const localCurrency = normalizeCurrency(localRefund.currency);
-      if (
-        localRefund.amount_cents !== transaction.amountCents
-        || localCurrency !== transaction.currency
-      ) {
+      // Symmetric with the provider aggregate -- but not blindly: a refund
+      // row younger than the window end may merely be the LATE local write
+      // of an old, settled provider refund, and dropping it manufactured a
+      // false "missing locally" against its settled sibling. Its twin may
+      // equally still be in flight, so hold it aside: it counts only where
+      // the provider side is CONFIRMED settled (an enumerated settled
+      // sibling carrying this id, or a parent whose refunded status itself
+      // passed the update-time lag gate).
+      if (String(refund.created_at ?? '') > windowEnd) {
+        recentLocalRefundsByPaymentRow.set(key, [
+          ...(recentLocalRefundsByPaymentRow.get(key) ?? []),
+          {
+            providerId: refund.paypal_refund_id,
+            amountCents: Math.max(0, refund.amount_cents as number),
+          },
+        ]);
+        recentLocalRefundRowsByProviderId.set(refund.paypal_refund_id, {
+          amountCents: refund.amount_cents as number,
+          currency: normalizeCurrency(refund.currency),
+        });
+        continue;
+      }
+      localRefundTotalsByPaymentRow.set(
+        key,
+        (localRefundTotalsByPaymentRow.get(key) ?? 0)
+          + Math.max(0, refund.amount_cents as number),
+      );
+      localRefundIdsByPaymentRow.get(key)?.add(refund.paypal_refund_id);
+      localRefundRowsByProviderId.set(refund.paypal_refund_id, {
+        amountCents: refund.amount_cents as number,
+        currency: normalizeCurrency(refund.currency),
+      });
+    }
+    return null;
+  };
+  {
+    const totalsFailure = await loadLocalRefundTotals(
+      refundedWindowCaptures.map(({ payment }) => payment),
+    );
+    if (totalsFailure) return totalsFailure;
+  }
+
+  const orderRefundLists = new Map<string, {
+    refunds: ProviderOrderRefund[];
+    /** Parent captures of completed refunds excluded as in-flight. */
+    inFlightParentIds: Array<string | null>;
+  } | null>();
+  const loadOrderRefundTotals = async (orderProviderIds: string[]) => {
+    const targets = [...new Set(orderProviderIds)].filter(
+      (id) => !orderRefundLists.has(id),
+    );
+    if (targets.length === 0) return null;
+    const map = await mapChunkedWithHeartbeat(
+      targets,
+      heartbeat,
+      async (providerOrderId) => ({
+        providerOrderId,
+        lookup: await fetchProviderOrder(config.apiBase, token.token, providerOrderId),
+      }),
+    );
+    if (!map.ok) return map.failure;
+    for (const { providerOrderId, lookup } of map.results) {
+      if (!lookup.ok) {
+        return {
+          status: 'failed' as const,
+          reason: lookup.reason,
+          retriable: lookup.retriable,
+        };
+      }
+      if (!lookup.found) {
+        // A vanished order leaves no sibling enumeration. FULL refunds are
+        // still soundly bounded by the capture/sale status; PARTIAL-refund
+        // judging treats this null as unverifiable at its call sites.
+        orderRefundLists.set(providerOrderId, null);
+      } else {
+        const completed = lookup.value.refunds.filter(
+          (refund) => refund.status === 'COMPLETED',
+        );
+        // The settlement lag applies to provider-side refunds too: a refund
+        // issued moments ago has its webhook legitimately in flight, so
+        // refunds younger than the window end are excluded (unknown times
+        // count as old) — but if EVERYTHING was excluded, that is a defer,
+        // never an authoritative empty ledger.
+        const settled = completed.filter(
+          (refund) => refund.createTimeMs === null || refund.createTimeMs <= windowEndMs,
+        );
+        // Partitioning by parent only works when every settled entry NAMES
+        // a parent. A single-capture order attributes unlinked entries by
+        // construction; on a multi-capture order the standalone refund
+        // endpoint resolves them, and an unresolvable parent is a malformed
+        // enumeration — attributing it to EVERY capture manufactured false
+        // missing-refund alerts on the others.
+        const captureIds = lookup.value.captures.map((capture) => capture.id);
+        const resolved: ProviderOrderRefund[] = [];
+        for (const refund of settled) {
+          if (refund.parentCaptureId !== null) {
+            resolved.push(refund);
+            continue;
+          }
+          if (captureIds.length === 1) {
+            resolved.push({ ...refund, parentCaptureId: captureIds[0] });
+            continue;
+          }
+          const standalone = await fetchProviderRefund(
+            config.apiBase,
+            token.token,
+            refund.id,
+          );
+          if (!standalone.ok) {
+            return {
+              status: 'failed' as const,
+              reason: standalone.reason,
+              retriable: standalone.retriable,
+            };
+          }
+          if (!standalone.found || standalone.value.parentCaptureId === null) {
+            return {
+              status: 'failed' as const,
+              reason: 'order lookup returned a malformed record',
+              retriable: false,
+            };
+          }
+          resolved.push({ ...refund, parentCaptureId: standalone.value.parentCaptureId });
+        }
+        const inFlightResolved: Array<string | null> = [];
+        for (const refund of completed) {
+          if (settled.includes(refund)) continue;
+          if (refund.parentCaptureId !== null) {
+            inFlightResolved.push(refund.parentCaptureId);
+            continue;
+          }
+          if (captureIds.length === 1) {
+            inFlightResolved.push(captureIds[0]);
+            continue;
+          }
+          // An unlinked in-flight entry would defer EVERY capture's
+          // judgment on a multi-capture order; the standalone endpoint
+          // names its parent, and an unresolvable one is malformed.
+          const standalone = await fetchProviderRefund(
+            config.apiBase,
+            token.token,
+            refund.id,
+          );
+          if (!standalone.ok) {
+            return {
+              status: 'failed' as const,
+              reason: standalone.reason,
+              retriable: standalone.retriable,
+            };
+          }
+          if (!standalone.found || standalone.value.parentCaptureId === null) {
+            return {
+              status: 'failed' as const,
+              reason: 'order lookup returned a malformed record',
+              retriable: false,
+            };
+          }
+          inFlightResolved.push(standalone.value.parentCaptureId);
+        }
+        orderRefundLists.set(providerOrderId, {
+          refunds: resolved,
+          inFlightParentIds: inFlightResolved,
+        });
+      }
+    }
+    return null;
+  };
+  const parentProviderOrderId = (
+    payment: LocalPaymentRow,
+    relatedOrderId: string | null,
+  ): string | null => {
+    if (relatedOrderId) return relatedOrderId;
+    const order = ordersById.get(payment.order_id as string);
+    return order && isProviderId(order.paypal_order_id) ? order.paypal_order_id : null;
+  };
+  {
+    const enumFailure = await loadOrderRefundTotals(
+      refundedWindowCaptures
+        .map(({ payment, lookup }) => (lookup.ok && lookup.found
+          ? parentProviderOrderId(payment, lookup.value.relatedOrderId)
+          : null))
+        .filter((id): id is string => id !== null),
+    );
+    if (enumFailure) return enumFailure;
+  }
+
+  /**
+   * Judge a provider-refunded payment against the local refund ledger.
+   * Provider aggregate (from the parent order's refund list) is
+   * authoritative when available; otherwise the capture/sale status bounds
+   * the comparison.
+   */
+  const judgeRefundedPayment = (input: {
+    payment: LocalPaymentRow;
+    guildId: string;
+    providerId: string;
+    providerStatusFullyRefunded: boolean;
+    providerAmountCents: number;
+    providerCurrency: string;
+    providerRefunds: {
+      refunds: ProviderOrderRefund[];
+      inFlightParentIds: Array<string | null>;
+    } | null;
+  }) => {
+    const localTotal = localRefundTotalsByPaymentRow.get(input.payment.id) ?? 0;
+    const localIds = localRefundIdsByPaymentRow.get(input.payment.id) ?? new Set<string>();
+    const recentRows = recentLocalRefundsByPaymentRow.get(input.payment.id) ?? [];
+    // The order's list spans ALL its captures: judge THIS parent only
+    // against siblings attributable to it (up-link matches, or no up-link
+    // to partition by), or one capture's correct ledger reads as another's
+    // missing money. Wholly lag-filtered attributable lists DEFER (webhooks
+    // in flight, the next pass owns them); an empty list behind a capture
+    // whose own state proves refund activity is provider-inconsistent and
+    // falls back to the status-bound comparison; a populated list is
+    // authoritative.
+    const attributable = (parentId: string | null) =>
+      parentId === null || parentId === input.providerId;
+    const refundsForParent = input.providerRefunds === null
+      ? null
+      : input.providerRefunds.refunds.filter(
+          (refund) => attributable(refund.parentCaptureId),
+        );
+    if (
+      refundsForParent !== null
+      && refundsForParent.length === 0
+      && input.providerRefunds !== null
+      && input.providerRefunds.inFlightParentIds.some(attributable)
+    ) {
+      return;
+    }
+    const providerRefunds = refundsForParent !== null && refundsForParent.length > 0
+      ? refundsForParent
+      : null;
+    if (providerRefunds !== null) {
+      // Per-SIBLING diff, not an aggregate: operators get the exact refund
+      // id to inspect/replay, and a same-total ledger with WRONG sibling
+      // ids cannot mask identity drift.
+      const providerTotal = providerRefunds
+        .reduce((sum, refund) => sum + refund.amountCents, 0);
+      let recentMatchedTotal = 0;
+      for (const refund of providerRefunds) {
+        // A lag-fresh local row whose id matches THIS enumerated settled
+        // sibling is the late write of an old refund -- present, not
+        // missing; its provider twin is confirmed settled by the list.
+        const recentRow = localIds.has(refund.id)
+          ? undefined
+          : recentLocalRefundRowsByProviderId.get(refund.id);
+        if (recentRow !== undefined) {
+          recentMatchedTotal += Math.max(0, recentRow.amountCents);
+        }
+        if (localIds.has(refund.id) || recentRow !== undefined) {
+          // Matched by id is not matched by MONEY: an understated historical
+          // row (or offsetting sibling errors) must still surface. The
+          // in-window refund pass owns window rows; this catches the rest.
+          const localRow = recentRow ?? localRefundRowsByProviderId.get(refund.id);
+          if (
+            localRow
+            && (
+              localRow.amountCents !== refund.amountCents
+              || (localRow.currency !== null && localRow.currency !== refund.currency)
+            )
+          ) {
+            amountMismatches.push({
+              transactionId: refund.id,
+              guildId: input.guildId,
+              providerAmountCents: refund.amountCents,
+              localAmountCents: localRow.amountCents,
+              providerCurrency: refund.currency,
+              localCurrency: localRow.currency,
+            });
+          }
+          continue;
+        }
+        missingLocalPayments.push({
+          kind: 'refund',
+          transactionId: refund.id,
+          guildId: input.guildId,
+          amountCents: refund.amountCents,
+          currency: refund.currency,
+          initiatedAt: refund.createTimeMs !== null
+            ? new Date(refund.createTimeMs).toISOString()
+            : null,
+          source: 'capture',
+          referenceId: input.providerId,
+        });
+      }
+      const coveredLocalTotal = localTotal + recentMatchedTotal;
+      if (coveredLocalTotal > providerTotal) {
         amountMismatches.push({
-          transactionId: transaction.transactionId,
-          guildId: item.guildId,
-          providerAmountCents: transaction.amountCents,
-          localAmountCents: localRefund.amount_cents as number,
-          providerCurrency: transaction.currency,
-          localCurrency,
+          transactionId: input.providerId,
+          guildId: input.guildId,
+          providerAmountCents: providerTotal,
+          localAmountCents: coveredLocalTotal,
+          providerCurrency: input.providerCurrency,
+          localCurrency: input.providerCurrency,
+        });
+      }
+      // A FULLY refunded capture is the stronger truth than the enumerated
+      // list: when the list (and the ledger) cover less than the capture
+      // amount, the uncovered remainder is a lost refund the order response
+      // failed to enumerate.
+      if (input.providerStatusFullyRefunded) {
+        const covered = Math.max(coveredLocalTotal, providerTotal);
+        // An attributable sibling still inside the settlement lag owns the
+        // uncovered remainder: its webhook is legitimately in flight, and
+        // reporting its amount as missing manufactures a false critical.
+        // The old siblings above were still fully judged.
+        const attributableInFlight = input.providerRefunds !== null
+          && input.providerRefunds.inFlightParentIds.some(attributable);
+        if (covered < input.providerAmountCents && !attributableInFlight) {
+          missingLocalPayments.push({
+            kind: 'refund',
+            transactionId: input.providerId,
+            guildId: input.guildId,
+            amountCents: input.providerAmountCents - covered,
+            currency: input.providerCurrency,
+            initiatedAt: null,
+            source: 'capture',
+            referenceId: input.providerId,
+          });
+        }
+      }
+      return;
+    }
+    // The status-bound fallback runs only for parents whose refunded state
+    // passed the update-time lag gate: every refund that state reflects is
+    // settled-age, so lag-fresh local rows for THIS parent are late writes
+    // of settled refunds and count.
+    const fallbackLocalTotal = localTotal
+      + recentRows.reduce((sum, row) => sum + Math.max(0, row.amountCents), 0);
+    if (input.providerStatusFullyRefunded && fallbackLocalTotal < input.providerAmountCents) {
+      missingLocalPayments.push({
+        kind: 'refund',
+        transactionId: input.providerId,
+        guildId: input.guildId,
+        amountCents: input.providerAmountCents - fallbackLocalTotal,
+        currency: input.providerCurrency,
+        initiatedAt: null,
+        source: 'capture',
+        referenceId: input.providerId,
+      });
+    } else if (
+      input.providerStatusFullyRefunded
+      && fallbackLocalTotal > input.providerAmountCents
+    ) {
+      // Symmetric with the enumerated over-refund check: a fully refunded
+      // parent bounds its ledger at the parent amount, and an OVERSTATED
+      // aggregate is corruption the under-refund branch cannot see.
+      amountMismatches.push({
+        transactionId: input.providerId,
+        guildId: input.guildId,
+        providerAmountCents: input.providerAmountCents,
+        localAmountCents: fallbackLocalTotal,
+        providerCurrency: input.providerCurrency,
+        localCurrency: input.providerCurrency,
+      });
+    } else if (!input.providerStatusFullyRefunded && fallbackLocalTotal === 0) {
+      missingLocalPayments.push({
+        kind: 'refund',
+        transactionId: input.providerId,
+        guildId: input.guildId,
+        amountCents: input.payment.amount_cents,
+        currency: input.providerCurrency,
+        initiatedAt: null,
+        source: 'capture',
+        referenceId: input.providerId,
+      });
+    } else if (
+      !input.providerStatusFullyRefunded
+      && fallbackLocalTotal >= input.providerAmountCents
+    ) {
+      amountMismatches.push({
+        transactionId: input.providerId,
+        guildId: input.guildId,
+        providerAmountCents: input.providerAmountCents,
+        localAmountCents: fallbackLocalTotal,
+        providerCurrency: input.providerCurrency,
+        localCurrency: input.providerCurrency,
+      });
+    }
+  };
+
+  for (const { payment, lookup } of captureResults) {
+    if (!lookup.ok) continue;
+    const order = ordersById.get(payment.order_id as string);
+    const guildId = payment.guild_id as string;
+    const providerId = payment.paypal_payment_id as string;
+    // An order that CLAIMS settlement demands provider evidence even when
+    // its only payment row is pending/failed: entitlements follow the order,
+    // and a nonterminal row must not exempt the claim from proof.
+    const orderClaimsSettlement = Boolean(
+      order && SETTLED_ORDER_STATUSES.includes(order.status),
+    );
+    if (!lookup.found) {
+      if (isSettledPair(payment, order) || orderClaimsSettlement) {
+        missingProviderPayments.push({
+          kind: 'payment',
+          orderId: payment.order_id as string,
+          orderNumber: order?.order_number ?? null,
+          guildId,
+          paypalPaymentIds: [providerId],
+          amountCents: payment.amount_cents,
+          currency: normalizeCurrency(payment.currency) as string,
+          createdAt: payment.created_at,
         });
       }
       continue;
     }
-
-    const local = localByProviderId.get(transaction.transactionId);
-    if (!local) {
-      missingLocalPayments.push({
-        kind: 'payment',
-        transactionId: transaction.transactionId,
-        guildId: item.guildId,
-        amountCents: transaction.amountCents,
-        currency: transaction.currency,
-        initiatedAt: transaction.initiatedAt,
-        eventCode: transaction.eventCode,
-        referenceId: transaction.referenceId,
-        referenceType: transaction.referenceType,
-      });
-      continue;
+    bumpVerified(guildId);
+    const capture = lookup.value;
+    // Cross-tenant identity: the capture's parent order must be the LOCAL
+    // order's provider identity. A valid capture id borrowed from another
+    // order/guild with matching amounts previously verified cleanly.
+    if (
+      order
+      && isProviderId(order.paypal_order_id)
+      && (
+        capture.relatedOrderId === null
+        || capture.relatedOrderId !== order.paypal_order_id
+      )
+    ) {
+      // An omitted related order is the same defect as a foreign one: the
+      // only capture-to-order ownership check must not be skippable by
+      // stripping supplementary_data.
+      return { status: 'failed', reason: 'provider identity conflict', retriable: false };
     }
-
-    const order = typeof local.order_id === 'string'
-      ? ordersById.get(local.order_id)
-      : undefined;
-    if (!isSettledPair(local, order)) {
+    const providerRefunded = ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(capture.status)
+      // A capture whose state changed inside the settlement lag has its
+      // refund webhook in flight; without the order's refund list to time-
+      // filter, the status-only fallback must defer.
+      && !(capture.updateTimeMs !== null && capture.updateTimeMs > windowEndMs);
+    if (providerRefunded) {
+      const parentId = parentProviderOrderId(payment, capture.relatedOrderId);
+      if (
+        capture.status === 'PARTIALLY_REFUNDED'
+        && parentId !== null
+        && (orderRefundLists.get(parentId) ?? null) === null
+      ) {
+        // Partial-refund ledgers are only verifiable through the order's
+        // sibling enumeration; a vanished order makes this row
+        // unverifiable this pass, not silently fallback-judged.
+        return {
+          status: 'failed',
+          reason: 'refund sibling enumeration unavailable: provider order missing',
+          retriable: true,
+        };
+      }
+      judgeRefundedPayment({
+        payment,
+        guildId,
+        providerId,
+        providerStatusFullyRefunded: capture.status === 'REFUNDED',
+        providerAmountCents: capture.amountCents,
+        providerCurrency: capture.currency,
+        providerRefunds: parentId !== null
+          ? orderRefundLists.get(parentId) ?? null
+          : null,
+      });
+    }
+    if (
+      ['refunded', 'reversed'].includes(payment.status)
+      && capture.status === 'COMPLETED'
+      // A refund issued moments ago has not flipped the capture yet — the
+      // update-time lag owns that case.
+      && !(capture.updateTimeMs !== null && capture.updateTimeMs > windowEndMs)
+    ) {
+      // Settled statuses are not interchangeable: the ledger revoked access
+      // over a refund the provider has NO trace of — the capture still
+      // holds the customer's money as an ordinary completed charge.
       unsettledLocalPayments.push({
-        transactionId: transaction.transactionId,
-        guildId: item.guildId,
-        orderId: local.order_id,
-        paymentStatus: local.status,
+        transactionId: providerId,
+        guildId,
+        orderId: payment.order_id,
+        paymentStatus: payment.status,
         orderStatus: order?.status ?? null,
       });
       continue;
     }
-
-    const localCurrency = normalizeCurrency(local.currency);
+    const settledAtProvider = PROVIDER_SETTLED_CAPTURE_STATUSES.includes(capture.status);
+    if (settledAtProvider && !isSettledPair(payment, order)) {
+      unsettledLocalPayments.push({
+        transactionId: providerId,
+        guildId,
+        orderId: payment.order_id,
+        paymentStatus: payment.status,
+        orderStatus: order?.status ?? null,
+      });
+      continue;
+    }
+    if (!settledAtProvider && (isSettledPair(payment, order) || orderClaimsSettlement)) {
+      // The ledger (and entitlements) claim settled money the provider says
+      // is PENDING/DECLINED/etc. The window already starts a settlement lag
+      // behind now, so this is a material disagreement, not ordinary lag.
+      missingProviderPayments.push({
+        kind: 'payment',
+        orderId: payment.order_id as string,
+        orderNumber: order?.order_number ?? null,
+        guildId,
+        paypalPaymentIds: [providerId],
+        amountCents: payment.amount_cents,
+        currency: normalizeCurrency(payment.currency) as string,
+        createdAt: payment.created_at,
+      });
+      continue;
+    }
     if (
-      local.amount_cents !== transaction.amountCents
-      || localCurrency !== transaction.currency
+      settledAtProvider
+      && (
+        capture.amountCents !== payment.amount_cents
+        || capture.currency !== normalizeCurrency(payment.currency)
+      )
     ) {
       amountMismatches.push({
-        transactionId: transaction.transactionId,
-        guildId: item.guildId,
-        providerAmountCents: transaction.amountCents,
-        localAmountCents: local.amount_cents,
-        providerCurrency: transaction.currency,
-        localCurrency,
+        transactionId: providerId,
+        guildId,
+        providerAmountCents: capture.amountCents,
+        localAmountCents: payment.amount_cents,
+        providerCurrency: capture.currency,
+        localCurrency: normalizeCurrency(payment.currency),
       });
     }
   }
 
-  const providerPaymentIds = new Set(
-    attributed
-      .filter((item) => item.transaction.kind === 'payment')
-      .map((item) => item.transaction.transactionId),
+  // 1b) Subscription sale rows — the captures API 404s v1 sale ids by
+  //     design, but /v1/payments/sale serves them: verify settlement AND
+  //     refund state instead of skipping blind (a lost PAYMENT.SALE.REFUNDED
+  //     left the refunded subscriber's access live).
+  const saleMap = await mapChunkedWithHeartbeat(
+    windowSaleRows,
+    heartbeat,
+    async (payment) => ({
+      payment,
+      lookup: await fetchProviderSale(
+        config.apiBase,
+        token.token,
+        payment.paypal_payment_id as string,
+      ),
+    }),
   );
-  const providerRefundIds = new Set(
-    attributed
-      .filter((item) => item.transaction.kind === 'refund')
-      .map((item) => item.transaction.transactionId),
-  );
-  const providerReferenceOrderIds = new Set(
-    attributed
-      .map((item) => item.referencedOrderId)
-      .filter((id): id is string => id !== null),
-  );
-  const rawWindowOrderIds = new Set(
-    orderScan.rows
-      .map((order) => order.id)
-      .filter((id): id is string => typeof id === 'string'),
-  );
-  const ordersForMissingProvider = new Map(orders.map((order) => [order.id, order]));
-  for (const order of durableOrderScan.rows) {
-    if (
-      rawWindowOrderIds.has(order.id)
-      && paymentsByOrder.has(order.id)
-    ) {
-      // A nullable legacy source plus missing ODR/SUB write is still proven
-      // PayPal commerce when this window contains an exact linked PayPal
-      // payment. Do not lose that row merely because the window validator had
-      // to withhold it until the payment relation was loaded.
-      ordersForMissingProvider.set(order.id, order);
+  if (!saleMap.ok) return saleMap.failure;
+  for (const { lookup } of saleMap.results) {
+    if (!lookup.ok) {
+      return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
     }
   }
-  const missingProviderPayments: MissingProviderPayment[] = [];
-  const durablePaymentIdentityScan = await loadOrderPaymentIdentities(
-    supabase,
-    [...ordersForMissingProvider.keys()],
+  const refundedSaleRows = saleMap.results.filter(({ lookup }) =>
+    lookup.ok && lookup.found
+    && ['refunded', 'partially_refunded', 'reversed'].includes(lookup.value.state),
   );
-  if (!durablePaymentIdentityScan.ok) {
-    return {
-      status: 'failed',
-      reason: durablePaymentIdentityScan.reason,
-      retriable: durablePaymentIdentityScan.retriable,
-    };
+  {
+    const totalsFailure = await loadLocalRefundTotals(
+      refundedSaleRows.map(({ payment }) => payment),
+    );
+    if (totalsFailure) return totalsFailure;
   }
-  const durablePaymentIdentityOrderIds = new Set<string>();
-  for (const identity of durablePaymentIdentityScan.rows) {
-    const order = identity.order_id
-      ? ordersForMissingProvider.get(identity.order_id)
+  for (const { payment, lookup } of saleMap.results) {
+    if (!lookup.ok) continue;
+    const order = ordersById.get(payment.order_id as string);
+    const guildId = payment.guild_id as string;
+    const providerId = payment.paypal_payment_id as string;
+    // Same claim discipline as captures: an order that says settled demands
+    // provider sale evidence even when its only row is pending/failed.
+    const saleOrderClaimsSettlement = Boolean(
+      order && SETTLED_ORDER_STATUSES.includes(order.status),
+    );
+    if (!lookup.found) {
+      if (isSettledPair(payment, order) || saleOrderClaimsSettlement) {
+        missingProviderPayments.push({
+          kind: 'payment',
+          orderId: payment.order_id as string,
+          orderNumber: order?.order_number ?? null,
+          guildId,
+          paypalPaymentIds: [providerId],
+          amountCents: payment.amount_cents,
+          currency: normalizeCurrency(payment.currency) as string,
+          createdAt: payment.created_at,
+        });
+      }
+      continue;
+    }
+    bumpVerified(guildId);
+    const sale = lookup.value;
+    // Cross-tenant identity: the sale's billing agreement must be the local
+    // order's subscription. A valid sale id borrowed from another
+    // subscription/guild with matching amounts must never verify.
+    if (order && isProviderId(order.paypal_subscription_id)) {
+      // Ingestion never records a subscription sale without a canonical
+      // billing agreement (provider_identity_malformed): a fetched sale
+      // MISSING its agreement id is not a valid subscription-sale shape,
+      // and a mismatched one is a borrowed identity. Either way the row
+      // must not verify.
+      if (
+        sale.billingAgreementId === null
+        || sale.billingAgreementId !== order.paypal_subscription_id
+      ) {
+        return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+      }
+    }
+    if (
+      ['refunded', 'partially_refunded', 'reversed'].includes(sale.state)
+      // A sale whose state changed inside the settlement lag has its refund
+      // webhook legitimately in flight — the next pass owns it.
+      && !(sale.updateTimeMs !== null && sale.updateTimeMs > windowEndMs)
+    ) {
+      // The v1 sale exposes no refund-sibling list; the sale state bounds
+      // the aggregate (documented boundary). REVERSED is a full-reversal
+      // terminal state and is judged like a full refund.
+      judgeRefundedPayment({
+        payment,
+        guildId,
+        providerId,
+        providerStatusFullyRefunded: sale.state === 'refunded' || sale.state === 'reversed',
+        providerAmountCents: sale.amountCents,
+        providerCurrency: sale.currency,
+        providerRefunds: null,
+      });
+    }
+    if (
+      ['refunded', 'reversed'].includes(payment.status)
+      && sale.state === 'completed'
+      && !(sale.updateTimeMs !== null && sale.updateTimeMs > windowEndMs)
+    ) {
+      // Same family rule as captures: a locally terminal row behind an
+      // ordinary completed sale means the provider never saw the refund.
+      unsettledLocalPayments.push({
+        transactionId: providerId,
+        guildId,
+        orderId: payment.order_id,
+        paymentStatus: payment.status,
+        orderStatus: order?.status ?? null,
+      });
+      continue;
+    }
+    // The same settled-pair and money checks captures get: an older daily
+    // charge with drifted amounts (or a non-settled provider state) must
+    // not hide behind a correct newest charge.
+    const saleSettledAtProvider = ['completed', 'refunded', 'partially_refunded', 'reversed']
+      .includes(sale.state);
+    if (saleSettledAtProvider && !isSettledPair(payment, order)) {
+      unsettledLocalPayments.push({
+        transactionId: providerId,
+        guildId,
+        orderId: payment.order_id,
+        paymentStatus: payment.status,
+        orderStatus: order?.status ?? null,
+      });
+      continue;
+    }
+    if (!saleSettledAtProvider && (isSettledPair(payment, order) || saleOrderClaimsSettlement)) {
+      missingProviderPayments.push({
+        kind: 'payment',
+        orderId: payment.order_id as string,
+        orderNumber: order?.order_number ?? null,
+        guildId,
+        paypalPaymentIds: [providerId],
+        amountCents: payment.amount_cents,
+        currency: normalizeCurrency(payment.currency) as string,
+        createdAt: payment.created_at,
+      });
+      continue;
+    }
+    if (
+      saleSettledAtProvider
+      && (
+        sale.amountCents !== payment.amount_cents
+        || sale.currency !== normalizeCurrency(payment.currency)
+      )
+    ) {
+      amountMismatches.push({
+        transactionId: providerId,
+        guildId,
+        providerAmountCents: sale.amountCents,
+        localAmountCents: payment.amount_cents,
+        providerCurrency: sale.currency,
+        localCurrency: normalizeCurrency(payment.currency),
+      });
+    }
+  }
+
+  // 1c) Refund lookback — PAGED sweep of settled rows older than the window
+  //     (up to refundLookbackMs). Each page is verified and judged before the
+  //     next loads: no global accumulation, no window-cap failure, and lease
+  //     heartbeats inside every provider chunk.
+  const lookbackStartMs = windowStartMs - Math.max(0, refundLookbackMs);
+  if (lookbackStartMs < windowStartMs) {
+    const lookbackStartIso = new Date(lookbackStartMs).toISOString();
+    const lookbackEndIso = new Date(windowStartMs - 1).toISOString();
+    for (let from = 0; ; from += LOCAL_PAGE_SIZE) {
+      const { data, error } = await supabase
+        .from('payments')
+        .select('id, order_id, guild_id, paypal_payment_id, amount_cents, currency, status, provider, created_at')
+        .eq('provider', 'paypal')
+        .gte('created_at', lookbackStartIso)
+        .lte('created_at', lookbackEndIso)
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, from + LOCAL_PAGE_SIZE - 1);
+      if (error) {
+        return {
+          status: 'failed',
+          reason: `refund lookback scan failed: ${error.message}`,
+          retriable: true,
+        };
+      }
+      const pageRows = (data ?? []) as LocalPaymentRow[];
+      if (pageRows.length === 0) break;
+      const validatedPage = validateLocalPayments(pageRows, configuredGuildIds);
+      if (!validatedPage.ok) {
+        return {
+          status: 'failed',
+          reason: validatedPage.reason,
+          retriable: validatedPage.retriable,
+        };
+      }
+      const pagePayments = validatedPage.rows.filter(
+        (payment) => !windowPaymentIds.has(payment.id)
+          // Unresolved (pending/failed) historical rows stay in scope: a
+          // lost completion webhook otherwise leaves settled money
+          // invisible forever. Terminal refunded/reversed rows belong to
+          // the witness and parent-sweep paths.
+          && ['completed', 'pending', 'failed'].includes(payment.status),
+      );
+      const pageParentScan = await lookupOrdersByExactColumn(
+        supabase,
+        'id',
+        [...new Set(
+          pagePayments
+            .map((payment) => payment.order_id)
+            .filter((id): id is string => typeof id === 'string' && !ordersById.has(id)),
+        )],
+        configuredGuildIds,
+      );
+      if (!pageParentScan.ok) {
+        return {
+          status: 'failed',
+          reason: pageParentScan.reason,
+          retriable: pageParentScan.retriable,
+        };
+      }
+      for (const order of pageParentScan.rows) ordersById.set(order.id, order);
+      // Same relation guard the window and refund-parent rows cross: a
+      // historical payment claiming guild B while referencing guild A's
+      // order must fail the pass, not sail into the provider comparisons.
+      for (const payment of pagePayments) {
+        const parentOrder = typeof payment.order_id === 'string'
+          ? ordersById.get(payment.order_id)
+          : undefined;
+        if (!parentOrder) {
+          return {
+            status: 'failed',
+            reason: 'local PayPal payment relation is missing',
+            retriable: false,
+          };
+        }
+        if (payment.guild_id !== parentOrder.guild_id) {
+          return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+        }
+      }
+      const pageCaptureRows = pagePayments.filter((payment) => !isSubscriptionSaleRow(payment));
+      const pageSaleRows = pagePayments.filter((payment) => isSubscriptionSaleRow(payment));
+
+      const pageCaptureMap = await mapChunkedWithHeartbeat(
+        pageCaptureRows,
+        heartbeat,
+        async (payment) => ({
+          payment,
+          kind: 'capture' as const,
+          lookup: await fetchProviderCapture(
+            config.apiBase,
+            token.token,
+            payment.paypal_payment_id as string,
+          ),
+        }),
+      );
+      if (!pageCaptureMap.ok) return pageCaptureMap.failure;
+      const pageSaleMap = await mapChunkedWithHeartbeat(
+        pageSaleRows,
+        heartbeat,
+        async (payment) => ({
+          payment,
+          kind: 'sale' as const,
+          lookup: await fetchProviderSale(
+            config.apiBase,
+            token.token,
+            payment.paypal_payment_id as string,
+          ),
+        }),
+      );
+      if (!pageSaleMap.ok) return pageSaleMap.failure;
+      for (const { lookup } of [...pageCaptureMap.results, ...pageSaleMap.results]) {
+        if (!lookup.ok) {
+          return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
+        }
+      }
+      const pageRefunded: Array<{
+        payment: LocalPaymentRow;
+        fullyRefunded: boolean;
+        providerAmountCents: number;
+        providerCurrency: string;
+        relatedOrderId: string | null;
+      }> = [];
+      for (const { payment, lookup } of pageCaptureMap.results) {
+        if (!lookup.ok) continue;
+        const lookbackOrder = ordersById.get(payment.order_id as string);
+        if (!lookup.found) {
+          // A COMPLETED local claim whose provider object VANISHED: the
+          // lookback is this row's only verification, and skipping it
+          // blessed settled money with no provider evidence. A vanished
+          // object behind an UNRESOLVED row moved no money.
+          if (payment.status === 'completed') {
+            missingProviderPayments.push({
+              kind: 'payment',
+              orderId: payment.order_id as string,
+              orderNumber: lookbackOrder?.order_number ?? null,
+              guildId: payment.guild_id as string,
+              paypalPaymentIds: [payment.paypal_payment_id as string],
+              amountCents: payment.amount_cents,
+              currency: normalizeCurrency(payment.currency) as string,
+              createdAt: payment.created_at,
+            });
+          }
+          continue;
+        }
+        if (
+          lookbackOrder
+          && isProviderId(lookbackOrder.paypal_order_id)
+          && (
+            lookup.value.relatedOrderId === null
+            || lookup.value.relatedOrderId !== lookbackOrder.paypal_order_id
+          )
+        ) {
+          return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+        }
+        if (payment.status !== 'completed') {
+          // Unresolved historical row: report only when the provider says
+          // the money settled after all (lost completion webhook) — the
+          // same provider-settled vs local-unsettled divergence the window
+          // pass reports.
+          if (
+            PROVIDER_SETTLED_CAPTURE_STATUSES.includes(lookup.value.status)
+            && !(lookup.value.updateTimeMs !== null
+              && lookup.value.updateTimeMs > windowEndMs)
+          ) {
+            unsettledLocalPayments.push({
+              transactionId: payment.paypal_payment_id as string,
+              guildId: payment.guild_id as string,
+              orderId: payment.order_id,
+              paymentStatus: payment.status,
+              orderStatus: lookbackOrder?.status ?? null,
+            });
+          }
+          continue;
+        }
+        if (!PROVIDER_SETTLED_CAPTURE_STATUSES.includes(lookup.value.status)) {
+          // Locally completed money the provider now calls PENDING/
+          // DECLINED/FAILED — the same disagreement the window path
+          // reports as missing provider evidence.
+          missingProviderPayments.push({
+            kind: 'payment',
+            orderId: payment.order_id as string,
+            orderNumber: lookbackOrder?.order_number ?? null,
+            guildId: payment.guild_id as string,
+            paypalPaymentIds: [payment.paypal_payment_id as string],
+            amountCents: payment.amount_cents,
+            currency: normalizeCurrency(payment.currency) as string,
+            createdAt: payment.created_at,
+          });
+          continue;
+        }
+        // Settled provider money must match the historical row — the
+        // lookback is its only provider touch (refunded targets get the
+        // ledger judgment on top).
+        if (
+          lookup.value.amountCents !== payment.amount_cents
+          || lookup.value.currency !== normalizeCurrency(payment.currency)
+        ) {
+          amountMismatches.push({
+            transactionId: payment.paypal_payment_id as string,
+            guildId: payment.guild_id as string,
+            providerAmountCents: lookup.value.amountCents,
+            localAmountCents: payment.amount_cents,
+            providerCurrency: lookup.value.currency,
+            localCurrency: normalizeCurrency(payment.currency),
+          });
+        }
+        if (
+          ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(lookup.value.status)
+          // Same lag discipline as the window path: a state change inside
+          // the final interval defers to the next pass.
+          && !(lookup.value.updateTimeMs !== null && lookup.value.updateTimeMs > windowEndMs)
+        ) {
+          pageRefunded.push({
+            payment,
+            fullyRefunded: lookup.value.status === 'REFUNDED',
+            providerAmountCents: lookup.value.amountCents,
+            providerCurrency: lookup.value.currency,
+            relatedOrderId: lookup.value.relatedOrderId,
+          });
+        }
+      }
+      for (const { payment, lookup } of pageSaleMap.results) {
+        if (!lookup.ok) continue;
+        const lookbackOrder = ordersById.get(payment.order_id as string);
+        if (!lookup.found) {
+          if (payment.status === 'completed') {
+            missingProviderPayments.push({
+              kind: 'payment',
+              orderId: payment.order_id as string,
+              orderNumber: lookbackOrder?.order_number ?? null,
+              guildId: payment.guild_id as string,
+              paypalPaymentIds: [payment.paypal_payment_id as string],
+              amountCents: payment.amount_cents,
+              currency: normalizeCurrency(payment.currency) as string,
+              createdAt: payment.created_at,
+            });
+          }
+          continue;
+        }
+        // Same strict rule as the window sale pass: an agreement-less sale
+        // is not a valid subscription-sale shape, and a mismatched one is a
+        // borrowed identity — the lookback is this row's ONLY verification.
+        if (
+          lookbackOrder
+          && isProviderId(lookbackOrder.paypal_subscription_id)
+          && (
+            lookup.value.billingAgreementId === null
+            || lookup.value.billingAgreementId !== lookbackOrder.paypal_subscription_id
+          )
+        ) {
+          return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+        }
+        if (payment.status !== 'completed') {
+          if (
+            ['completed', 'refunded', 'partially_refunded', 'reversed']
+              .includes(lookup.value.state)
+            && !(lookup.value.updateTimeMs !== null
+              && lookup.value.updateTimeMs > windowEndMs)
+          ) {
+            unsettledLocalPayments.push({
+              transactionId: payment.paypal_payment_id as string,
+              guildId: payment.guild_id as string,
+              orderId: payment.order_id,
+              paymentStatus: payment.status,
+              orderStatus: lookbackOrder?.status ?? null,
+            });
+          }
+          continue;
+        }
+        if (!['completed', 'refunded', 'partially_refunded', 'reversed']
+          .includes(lookup.value.state)) {
+          missingProviderPayments.push({
+            kind: 'payment',
+            orderId: payment.order_id as string,
+            orderNumber: lookbackOrder?.order_number ?? null,
+            guildId: payment.guild_id as string,
+            paypalPaymentIds: [payment.paypal_payment_id as string],
+            amountCents: payment.amount_cents,
+            currency: normalizeCurrency(payment.currency) as string,
+            createdAt: payment.created_at,
+          });
+          continue;
+        }
+        if (
+          lookup.value.amountCents !== payment.amount_cents
+          || lookup.value.currency !== normalizeCurrency(payment.currency)
+        ) {
+          amountMismatches.push({
+            transactionId: payment.paypal_payment_id as string,
+            guildId: payment.guild_id as string,
+            providerAmountCents: lookup.value.amountCents,
+            localAmountCents: payment.amount_cents,
+            providerCurrency: lookup.value.currency,
+            localCurrency: normalizeCurrency(payment.currency),
+          });
+        }
+        if (
+          ['refunded', 'partially_refunded', 'reversed'].includes(lookup.value.state)
+          && !(lookup.value.updateTimeMs !== null && lookup.value.updateTimeMs > windowEndMs)
+        ) {
+          pageRefunded.push({
+            payment,
+            fullyRefunded: lookup.value.state === 'refunded' || lookup.value.state === 'reversed',
+            providerAmountCents: lookup.value.amountCents,
+            providerCurrency: lookup.value.currency,
+            relatedOrderId: null,
+          });
+        }
+      }
+      if (pageRefunded.length > 0) {
+        const totalsFailure = await loadLocalRefundTotals(
+          pageRefunded.map(({ payment }) => payment),
+        );
+        if (totalsFailure) return totalsFailure;
+        const enumFailure = await loadOrderRefundTotals(
+          pageRefunded
+            .map(({ payment, relatedOrderId }) => parentProviderOrderId(payment, relatedOrderId))
+            .filter((id): id is string => id !== null),
+        );
+        if (enumFailure) return enumFailure;
+        for (const target of pageRefunded) {
+          judgedHistoricalRefundParents.add(target.payment.id);
+          const guildId = target.payment.guild_id as string;
+          const providerId = target.payment.paypal_payment_id as string;
+          bumpVerified(guildId);
+          const partialParentId = parentProviderOrderId(
+            target.payment,
+            target.relatedOrderId,
+          );
+          if (
+            !target.fullyRefunded
+            && partialParentId !== null
+            && (orderRefundLists.get(partialParentId) ?? null) === null
+          ) {
+            return {
+              status: 'failed',
+              reason: 'refund sibling enumeration unavailable: provider order missing',
+              retriable: true,
+            };
+          }
+          const parentId = parentProviderOrderId(target.payment, target.relatedOrderId);
+          judgeRefundedPayment({
+            payment: target.payment,
+            guildId,
+            providerId,
+            providerStatusFullyRefunded: target.fullyRefunded,
+            providerAmountCents: target.providerAmountCents,
+            providerCurrency: target.providerCurrency,
+            providerRefunds: parentId !== null
+              ? orderRefundLists.get(parentId) ?? null
+              : null,
+          });
+        }
+      }
+      if (pageRows.length < LOCAL_PAGE_SIZE) break;
+    }
+  }
+
+  // 2) Refunds — every window refund by its provider identity.
+  const refundPaymentRowsById = new Map(
+    validatedRefundPayments.rows.map((payment) => [payment.id, payment]),
+  );
+  // Refunds of v2 captures live at /v2/payments/refunds; refunds of v1
+  // subscription SALES live at /v1/payments/refund. Dispatch by the refund's
+  // event family (falling back to the parent payment's order) or a
+  // legitimate sale refund 404s on the v2 endpoint and reads as missing at
+  // PayPal on every pass.
+  const isSaleRefundRow = (refund: LocalRefundRow): boolean => {
+    if (typeof refund.event_type === 'string' && refund.event_type.startsWith('PAYMENT.SALE.')) {
+      return true;
+    }
+    const parentRow = typeof refund.payment_id === 'string'
+      ? refundPaymentRowsById.get(refund.payment_id)
+      : undefined;
+    const parentOrder = parentRow
+      ? ordersById.get(parentRow.order_id as string)
+      : undefined;
+    return Boolean(parentOrder && isProviderId(parentOrder.paypal_subscription_id));
+  };
+  const refundMap = await mapChunkedWithHeartbeat(
+    windowRefunds,
+    heartbeat,
+    async (refund) => {
+      // Family AGREEMENT, not preference: ingestion and the ledger rules
+      // distinguish capture and sale refund families, so a SALE.* row on a
+      // capture-backed order (or a CAPTURE.* row on a subscription sale) is
+      // mislabeled identity — normalizing it onto the other endpoint let it
+      // verify on matching parent id and money.
+      {
+        const familyParentRow = typeof refund.payment_id === 'string'
+          ? refundPaymentRowsById.get(refund.payment_id)
+          : undefined;
+        const familyParentOrder = familyParentRow
+          ? ordersById.get(familyParentRow.order_id as string)
+          : undefined;
+        const eventFamily = typeof refund.event_type === 'string'
+          && refund.event_type.startsWith('PAYMENT.SALE.')
+          ? 'sale'
+          : typeof refund.event_type === 'string'
+            && refund.event_type.startsWith('PAYMENT.CAPTURE.')
+            ? 'capture'
+            : null;
+        if (
+          eventFamily !== null
+          && familyParentOrder !== undefined
+          && (eventFamily === 'sale')
+            !== isProviderId(familyParentOrder.paypal_subscription_id)
+        ) {
+          return {
+            refund,
+            lookup: {
+              ok: false as const,
+              retriable: false,
+              reason: 'provider refund identity conflict',
+            },
+          };
+        }
+      }
+      if (isSaleRefundRow(refund)) {
+        const parentRow = typeof refund.payment_id === 'string'
+          ? refundPaymentRowsById.get(refund.payment_id)
+          : undefined;
+        if (
+          parentRow
+          && refund.paypal_refund_id === parentRow.paypal_payment_id
+          // Ingestion permits the sale-id-as-refund-id substitution ONLY
+          // for the documented PAYMENT.SALE.REVERSED shape; any other row
+          // carrying the sale id is malformed identity and must face the
+          // real refund endpoint instead of a synthesized verdict.
+          && refund.event_type === 'PAYMENT.SALE.REVERSED'
+        ) {
+          // Direct Sale reversal witness: the webhook stores the SALE id as
+          // the refund id because PayPal minted no distinct refund object.
+          // The refund endpoint can never serve it — the sale's own terminal
+          // state IS the evidence.
+          const saleLookup = await fetchProviderSale(
+            config.apiBase,
+            token.token,
+            refund.paypal_refund_id,
+          );
+          if (!saleLookup.ok || !saleLookup.found) {
+            return { refund, lookup: saleLookup as ProviderFetch<ProviderRefundObject> };
+          }
+          // Only a FULLY terminal reversal state is completed evidence: a
+          // partially_refunded sale behind a full-reversal witness means
+          // the provider disagrees with the terminal local claim.
+          const reversed = ['reversed', 'refunded'].includes(saleLookup.value.state);
+          // The witness row's amount is the remaining balance by design, so
+          // the per-row comparison echoes it — the REAL money check is the
+          // full-ledger aggregate. Window parents get it from the sale
+          // pass; OLDER parents (reversed status, excluded from the
+          // completed-only lookback) get it here.
+          if (
+            reversed
+            && String(parentRow.created_at ?? '') < windowStart
+          ) {
+            judgedHistoricalRefundParents.add(parentRow.id as string);
+            // Reversed parents are excluded from the completed-only
+            // lookback, so this witness is their only provider touch: the
+            // billing-agreement identity and the parent row's own money
+            // get the same checks the window sale pass performs.
+            const witnessParentOrder = ordersById.get(parentRow.order_id as string);
+            if (
+              witnessParentOrder
+              && isProviderId(witnessParentOrder.paypal_subscription_id)
+              && (
+                saleLookup.value.billingAgreementId === null
+                || saleLookup.value.billingAgreementId
+                  !== witnessParentOrder.paypal_subscription_id
+              )
+            ) {
+              return {
+                refund,
+                lookup: {
+                  ok: false as const,
+                  retriable: false,
+                  reason: 'provider identity conflict',
+                },
+              };
+            }
+            if (
+              saleLookup.value.amountCents !== parentRow.amount_cents
+              || saleLookup.value.currency !== normalizeCurrency(parentRow.currency)
+            ) {
+              amountMismatches.push({
+                transactionId: parentRow.paypal_payment_id as string,
+                guildId: parentRow.guild_id as string,
+                providerAmountCents: saleLookup.value.amountCents,
+                localAmountCents: parentRow.amount_cents,
+                providerCurrency: saleLookup.value.currency,
+                localCurrency: normalizeCurrency(parentRow.currency),
+              });
+            }
+            const totalsFailure = await loadLocalRefundTotals([parentRow]);
+            if (totalsFailure) {
+              return {
+                refund,
+                lookup: {
+                  ok: false as const,
+                  retriable: totalsFailure.retriable,
+                  reason: totalsFailure.reason,
+                },
+              };
+            }
+            judgeRefundedPayment({
+              payment: parentRow,
+              guildId: parentRow.guild_id as string,
+              providerId: parentRow.paypal_payment_id as string,
+              providerStatusFullyRefunded: true,
+              providerAmountCents: saleLookup.value.amountCents,
+              providerCurrency: saleLookup.value.currency,
+              providerRefunds: null,
+            });
+          }
+          return {
+            refund,
+            lookup: {
+              ok: true as const,
+              found: true as const,
+              value: {
+                status: reversed ? 'COMPLETED' : saleLookup.value.state.toUpperCase(),
+                amountCents: refund.amount_cents as number,
+                currency: normalizeCurrency(refund.currency) as string,
+                parentCaptureId: parentRow.paypal_payment_id,
+              },
+            },
+          };
+        }
+        const saleLookup = await fetchProviderSaleRefund(
+          config.apiBase,
+          token.token,
+          refund.paypal_refund_id,
+        );
+        if (!saleLookup.ok || !saleLookup.found) {
+          return { refund, lookup: saleLookup as ProviderFetch<ProviderRefundObject> };
+        }
+        // Normalize the v1 shape onto the v2 verdict surface: state maps to
+        // status, sale_id is the parent identity.
+        return {
+          refund,
+          lookup: {
+            ok: true as const,
+            found: true as const,
+            value: {
+              status: saleLookup.value.state === 'completed'
+                ? 'COMPLETED'
+                : saleLookup.value.state.toUpperCase(),
+              amountCents: saleLookup.value.amountCents,
+              currency: saleLookup.value.currency,
+              parentCaptureId: saleLookup.value.saleId,
+            },
+          },
+        };
+      }
+      return {
+        refund,
+        lookup: await fetchProviderRefund(config.apiBase, token.token, refund.paypal_refund_id),
+      };
+    },
+  );
+  if (!refundMap.ok) return refundMap.failure;
+  for (const { refund, lookup } of refundMap.results) {
+    if (!lookup.ok) {
+      return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
+    }
+    const guildId = refund.guild_id as string;
+    if (!lookup.found) {
+      // A zero-amount row is a terminal reversal witness with no distinct
+      // provider refund object; its absence is expected — EXCEPT when the
+      // row IS a direct-sale witness (refund id equals the sale id): then
+      // the sale itself was the object we failed to find, and silence would
+      // bless a vanished sale behind a full reversal claim.
+      const witnessParent = typeof refund.payment_id === 'string'
+        ? refundPaymentRowsById.get(refund.payment_id)
+        : undefined;
+      const isDirectSaleWitness = Boolean(
+        witnessParent && refund.paypal_refund_id === witnessParent.paypal_payment_id,
+      );
+      if (refund.amount_cents === 0 && !isDirectSaleWitness) {
+        // The witness's own refund object is EXPECTED to be absent — but
+        // only when the PARENT shows the fully terminal state the witness
+        // claims. An unreversed parent behind a 404 witness is missing
+        // provider evidence, not an expected gap; a parent whose state
+        // changed inside the settlement lag defers to the next pass.
+        if (witnessParent && isProviderId(witnessParent.paypal_payment_id)) {
+          if (isSaleRefundRow(refund)) {
+            const parentLookup = await fetchProviderSale(
+              config.apiBase,
+              token.token,
+              witnessParent.paypal_payment_id,
+            );
+            if (!parentLookup.ok) {
+              return {
+                status: 'failed',
+                reason: parentLookup.reason,
+                retriable: parentLookup.retriable,
+              };
+            }
+            if (parentLookup.found) {
+              if (
+                parentLookup.value.updateTimeMs !== null
+                && parentLookup.value.updateTimeMs > windowEndMs
+              ) {
+                continue;
+              }
+              if (['reversed', 'refunded'].includes(parentLookup.value.state)) {
+                const parentSale = parentLookup.value;
+                // Same rule as the capture-witness path: acceptance must
+                // not skip the checks an OLD parent never met elsewhere —
+                // agreement identity, the parent row's own money, and the
+                // full refund ledger (v1 exposes no sibling list, so the
+                // status-bound aggregate judges it).
+                if (String(witnessParent.created_at ?? '') < windowStart) {
+                  judgedHistoricalRefundParents.add(witnessParent.id as string);
+                  const parentOrder = ordersById.get(witnessParent.order_id as string);
+                  if (
+                    parentOrder
+                    && isProviderId(parentOrder.paypal_subscription_id)
+                    && (
+                      parentSale.billingAgreementId === null
+                      || parentSale.billingAgreementId !== parentOrder.paypal_subscription_id
+                    )
+                  ) {
+                    return {
+                      status: 'failed',
+                      reason: 'provider identity conflict',
+                      retriable: false,
+                    };
+                  }
+                  if (
+                    parentSale.amountCents !== witnessParent.amount_cents
+                    || parentSale.currency !== normalizeCurrency(witnessParent.currency)
+                  ) {
+                    amountMismatches.push({
+                      transactionId: witnessParent.paypal_payment_id as string,
+                      guildId,
+                      providerAmountCents: parentSale.amountCents,
+                      localAmountCents: witnessParent.amount_cents,
+                      providerCurrency: parentSale.currency,
+                      localCurrency: normalizeCurrency(witnessParent.currency),
+                    });
+                  }
+                  const totalsFailure = await loadLocalRefundTotals([witnessParent]);
+                  if (totalsFailure) return totalsFailure;
+                  judgeRefundedPayment({
+                    payment: witnessParent,
+                    guildId,
+                    providerId: witnessParent.paypal_payment_id as string,
+                    providerStatusFullyRefunded: true,
+                    providerAmountCents: parentSale.amountCents,
+                    providerCurrency: parentSale.currency,
+                    providerRefunds: null,
+                  });
+                }
+                continue;
+              }
+            }
+          } else {
+            const parentLookup = await fetchProviderCapture(
+              config.apiBase,
+              token.token,
+              witnessParent.paypal_payment_id,
+            );
+            if (!parentLookup.ok) {
+              return {
+                status: 'failed',
+                reason: parentLookup.reason,
+                retriable: parentLookup.retriable,
+              };
+            }
+            if (parentLookup.found) {
+              if (
+                parentLookup.value.updateTimeMs !== null
+                && parentLookup.value.updateTimeMs > windowEndMs
+              ) {
+                continue;
+              }
+              // Only a FULLY refunded capture evidences a zero-remaining
+              // reversal witness; PARTIALLY_REFUNDED means PayPal still
+              // holds money the terminal local claim says is gone.
+              if (parentLookup.value.status === 'REFUNDED') {
+                const parentCapture = parentLookup.value;
+                // Accepting the witness must not skip the checks the parent
+                // never met elsewhere: an older reversed parent is outside
+                // both the window pass and the completed-only lookback, so
+                // this is its ONLY provider touch — identity, money, and
+                // the refund ledger all still apply. Window parents were
+                // already judged by the capture pass.
+                if (String(witnessParent.created_at ?? '') < windowStart) {
+                  judgedHistoricalRefundParents.add(witnessParent.id as string);
+                  const parentOrder = ordersById.get(witnessParent.order_id as string);
+                  if (
+                    parentOrder
+                    && isProviderId(parentOrder.paypal_order_id)
+                    && (
+                      parentCapture.relatedOrderId === null
+                      || parentCapture.relatedOrderId !== parentOrder.paypal_order_id
+                    )
+                  ) {
+                    return {
+                      status: 'failed',
+                      reason: 'provider identity conflict',
+                      retriable: false,
+                    };
+                  }
+                  if (
+                    parentCapture.amountCents !== witnessParent.amount_cents
+                    || parentCapture.currency !== normalizeCurrency(witnessParent.currency)
+                  ) {
+                    amountMismatches.push({
+                      transactionId: witnessParent.paypal_payment_id as string,
+                      guildId,
+                      providerAmountCents: parentCapture.amountCents,
+                      localAmountCents: witnessParent.amount_cents,
+                      providerCurrency: parentCapture.currency,
+                      localCurrency: normalizeCurrency(witnessParent.currency),
+                    });
+                  }
+                  const totalsFailure = await loadLocalRefundTotals([witnessParent]);
+                  if (totalsFailure) return totalsFailure;
+                  const parentProviderOrder = parentProviderOrderId(
+                    witnessParent,
+                    parentCapture.relatedOrderId,
+                  );
+                  if (parentProviderOrder !== null) {
+                    const enumFailure = await loadOrderRefundTotals([parentProviderOrder]);
+                    if (enumFailure) return enumFailure;
+                  }
+                  judgeRefundedPayment({
+                    payment: witnessParent,
+                    guildId,
+                    providerId: witnessParent.paypal_payment_id as string,
+                    providerStatusFullyRefunded: true,
+                    providerAmountCents: parentCapture.amountCents,
+                    providerCurrency: parentCapture.currency,
+                    providerRefunds: parentProviderOrder !== null
+                      ? orderRefundLists.get(parentProviderOrder) ?? null
+                      : null,
+                  });
+                }
+                continue;
+              }
+            }
+          }
+        }
+      }
+      const order = refund.order_id ? ordersById.get(refund.order_id) : undefined;
+      missingProviderPayments.push({
+        kind: 'refund',
+        orderId: refund.order_id as string,
+        orderNumber: order?.order_number ?? null,
+        guildId,
+        paypalPaymentIds: [refund.paypal_refund_id],
+        amountCents: refund.amount_cents as number,
+        currency: normalizeCurrency(refund.currency) as string,
+        createdAt: refund.created_at,
+      });
+      continue;
+    }
+    bumpVerified(guildId);
+    // Parent identity: the provider refund's up-link capture must be the
+    // capture our ledger says this refund belongs to. A refund id borrowed
+    // from another capture with matching amounts previously verified.
+    const parentRow = typeof refund.payment_id === 'string'
+      ? refundPaymentRowsById.get(refund.payment_id)
       : undefined;
     if (
-      typeof identity.id !== 'string'
-      || identity.id.length === 0
-      || !order
-      || identity.guild_id !== order.guild_id
-      || !isProviderId(identity.paypal_payment_id)
+      parentRow
+      && isProviderId(parentRow.paypal_payment_id)
+      && (
+        lookup.value.parentCaptureId === null
+        || lookup.value.parentCaptureId !== parentRow.paypal_payment_id
+      )
     ) {
+      // Ingestion refuses refund events without one unambiguous canonical
+      // parent; a fetched refund OMITTING its up-link (or naming another
+      // parent) is a standalone/foreign object and must not verify.
+      return { status: 'failed', reason: 'provider refund identity conflict', retriable: false };
+    }
+    if (lookup.value.status !== 'COMPLETED') {
+      // The local row already drove the order and access into a refunded
+      // state, but the provider says the money did NOT complete its return
+      // (PENDING/FAILED/CANCELLED). That is missing provider evidence for a
+      // terminal local refund, not a clean pass.
+      const order = refund.order_id ? ordersById.get(refund.order_id) : undefined;
+      missingProviderPayments.push({
+        kind: 'refund',
+        orderId: refund.order_id as string,
+        orderNumber: order?.order_number ?? null,
+        guildId,
+        paypalPaymentIds: [refund.paypal_refund_id],
+        amountCents: refund.amount_cents as number,
+        currency: normalizeCurrency(refund.currency) as string,
+        createdAt: refund.created_at,
+      });
+      continue;
+    }
+    // Local refund rows and provider refund objects both carry positive
+    // amounts (the ledger validator rejects negatives).
+    const providerAmountCents = lookup.value.amountCents;
+    if (
+      refund.amount_cents !== providerAmountCents
+      || normalizeCurrency(refund.currency) !== lookup.value.currency
+    ) {
+      amountMismatches.push({
+        transactionId: refund.paypal_refund_id,
+        guildId,
+        providerAmountCents,
+        localAmountCents: refund.amount_cents as number,
+        providerCurrency: lookup.value.currency,
+        localCurrency: normalizeCurrency(refund.currency),
+      });
+    }
+  }
+
+  // 2b) Old TERMINAL parents of ordinary window refund rows. The child
+  // refund object was verified above (up-link, money), but the PARENT —
+  // refunded/reversed before the window — is excluded from the window pass
+  // and the completed-only lookback: without this sweep its related-order/
+  // billing-agreement identity, its own money, and its aggregate refund
+  // ledger are never checked, and a drifted or misattached parent
+  // reconciles cleanly behind a correct child.
+  {
+    const historicalTerminalParents = new Map<string, LocalPaymentRow>();
+    for (const { refund, lookup } of refundMap.results) {
+      if (!lookup.ok || !lookup.found) continue;
+      const parentRow = typeof refund.payment_id === 'string'
+        ? refundPaymentRowsById.get(refund.payment_id)
+        : undefined;
+      if (!parentRow) continue;
+      if (String(parentRow.created_at ?? '') >= windowStart) continue;
+      if (!['refunded', 'reversed'].includes(parentRow.status)) continue;
+      if (judgedHistoricalRefundParents.has(parentRow.id)) continue;
+      historicalTerminalParents.set(parentRow.id, parentRow);
+    }
+    for (const parentRow of historicalTerminalParents.values()) {
+      judgedHistoricalRefundParents.add(parentRow.id);
+      const guildId = parentRow.guild_id as string;
+      const parentOrder = ordersById.get(parentRow.order_id as string);
+      const providerId = parentRow.paypal_payment_id as string;
+      const pushMissingEvidence = () => {
+        missingProviderPayments.push({
+          kind: 'payment',
+          orderId: parentRow.order_id as string,
+          orderNumber: parentOrder?.order_number ?? null,
+          guildId,
+          paypalPaymentIds: [providerId],
+          amountCents: parentRow.amount_cents,
+          currency: normalizeCurrency(parentRow.currency) as string,
+          createdAt: parentRow.created_at,
+        });
+      };
+      if (parentOrder && isProviderId(parentOrder.paypal_subscription_id)) {
+        const saleLookup = await fetchProviderSale(config.apiBase, token.token, providerId);
+        if (!saleLookup.ok) {
+          return { status: 'failed', reason: saleLookup.reason, retriable: saleLookup.retriable };
+        }
+        if (!saleLookup.found) {
+          pushMissingEvidence();
+          continue;
+        }
+        bumpVerified(guildId);
+        if (
+          saleLookup.value.billingAgreementId === null
+          || saleLookup.value.billingAgreementId !== parentOrder.paypal_subscription_id
+        ) {
+          return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+        }
+        if (
+          saleLookup.value.updateTimeMs !== null
+          && saleLookup.value.updateTimeMs > windowEndMs
+        ) {
+          continue;
+        }
+        if (
+          saleLookup.value.amountCents !== parentRow.amount_cents
+          || saleLookup.value.currency !== normalizeCurrency(parentRow.currency)
+        ) {
+          amountMismatches.push({
+            transactionId: providerId,
+            guildId,
+            providerAmountCents: saleLookup.value.amountCents,
+            localAmountCents: parentRow.amount_cents,
+            providerCurrency: saleLookup.value.currency,
+            localCurrency: normalizeCurrency(parentRow.currency),
+          });
+        }
+        if (['refunded', 'reversed', 'partially_refunded'].includes(saleLookup.value.state)) {
+          const totalsFailure = await loadLocalRefundTotals([parentRow]);
+          if (totalsFailure) return totalsFailure;
+          judgeRefundedPayment({
+            payment: parentRow,
+            guildId,
+            providerId,
+            providerStatusFullyRefunded: saleLookup.value.state !== 'partially_refunded',
+            providerAmountCents: saleLookup.value.amountCents,
+            providerCurrency: saleLookup.value.currency,
+            providerRefunds: null,
+          });
+        } else if (saleLookup.value.state === 'completed') {
+          // Terminal locally, ordinary completed at the provider: the
+          // refund the ledger acted on has no provider trace.
+          unsettledLocalPayments.push({
+            transactionId: providerId,
+            guildId,
+            orderId: parentRow.order_id,
+            paymentStatus: parentRow.status,
+            orderStatus: parentOrder?.status ?? null,
+          });
+        } else {
+          pushMissingEvidence();
+        }
+        continue;
+      }
+      const captureLookup = await fetchProviderCapture(config.apiBase, token.token, providerId);
+      if (!captureLookup.ok) {
+        return {
+          status: 'failed',
+          reason: captureLookup.reason,
+          retriable: captureLookup.retriable,
+        };
+      }
+      if (!captureLookup.found) {
+        pushMissingEvidence();
+        continue;
+      }
+      bumpVerified(guildId);
+      const parentCapture = captureLookup.value;
+      if (
+        parentOrder
+        && isProviderId(parentOrder.paypal_order_id)
+        && (
+          parentCapture.relatedOrderId === null
+          || parentCapture.relatedOrderId !== parentOrder.paypal_order_id
+        )
+      ) {
+        return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+      }
+      if (
+        parentCapture.updateTimeMs !== null
+        && parentCapture.updateTimeMs > windowEndMs
+      ) {
+        continue;
+      }
+      if (
+        parentCapture.amountCents !== parentRow.amount_cents
+        || parentCapture.currency !== normalizeCurrency(parentRow.currency)
+      ) {
+        amountMismatches.push({
+          transactionId: providerId,
+          guildId,
+          providerAmountCents: parentCapture.amountCents,
+          localAmountCents: parentRow.amount_cents,
+          providerCurrency: parentCapture.currency,
+          localCurrency: normalizeCurrency(parentRow.currency),
+        });
+      }
+      if (['REFUNDED', 'PARTIALLY_REFUNDED'].includes(parentCapture.status)) {
+        const totalsFailure = await loadLocalRefundTotals([parentRow]);
+        if (totalsFailure) return totalsFailure;
+        const parentProviderOrder = parentProviderOrderId(
+          parentRow,
+          parentCapture.relatedOrderId,
+        );
+        if (parentProviderOrder !== null) {
+          const enumFailure = await loadOrderRefundTotals([parentProviderOrder]);
+          if (enumFailure) return enumFailure;
+        }
+        if (
+          parentCapture.status === 'PARTIALLY_REFUNDED'
+          && parentProviderOrder !== null
+          && (orderRefundLists.get(parentProviderOrder) ?? null) === null
+        ) {
+          return {
+            status: 'failed',
+            reason: 'refund sibling enumeration unavailable: provider order missing',
+            retriable: true,
+          };
+        }
+        judgeRefundedPayment({
+          payment: parentRow,
+          guildId,
+          providerId,
+          providerStatusFullyRefunded: parentCapture.status === 'REFUNDED',
+          providerAmountCents: parentCapture.amountCents,
+          providerCurrency: parentCapture.currency,
+          providerRefunds: parentProviderOrder !== null
+            ? orderRefundLists.get(parentProviderOrder) ?? null
+            : null,
+        });
+      } else if (parentCapture.status === 'COMPLETED') {
+        unsettledLocalPayments.push({
+          transactionId: providerId,
+          guildId,
+          orderId: parentRow.order_id,
+          paymentStatus: parentRow.status,
+          orderStatus: parentOrder?.status ?? null,
+        });
+      } else {
+        pushMissingEvidence();
+      }
+    }
+  }
+
+  // 3) Orders — pending approval states and settled orders with no payment
+  //    identity.
+  const orderMap = await mapChunkedWithHeartbeat(
+    orderGetTargets,
+    heartbeat,
+    async (order) => ({
+      order,
+      lookup: await fetchProviderOrder(
+        config.apiBase,
+        token.token,
+        order.paypal_order_id as string,
+      ),
+    }),
+  );
+  if (!orderMap.ok) return orderMap.failure;
+  for (const { order, lookup } of orderMap.results) {
+    if (!lookup.ok) {
+      return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
+    }
+    const guildId = order.guild_id as string;
+    const pendingish = order.status === 'pending' || order.status === 'pending_review';
+    if (!lookup.found) {
+      // PayPal purges unapproved orders; a vanished PENDING or CANCELLED
+      // order moved no money. A vanished order behind SETTLED local
+      // commerce with no payment identity means the settlement cannot be
+      // evidenced at the provider.
+      if (SETTLED_ORDER_STATUSES.includes(order.status)) {
+        missingProviderPayments.push({
+          kind: 'order',
+          orderId: order.id,
+          orderNumber: order.order_number,
+          guildId,
+          paypalPaymentIds: [],
+          amountCents: order.amount_cents,
+          currency: normalizeCurrency(order.currency) as string,
+          createdAt: order.created_at,
+        });
+      }
+      continue;
+    }
+    bumpVerified(guildId);
+    const providerOrder = lookup.value;
+    const identity = parseCustomIdentity(providerOrder.customId);
+    if (
+      identity
+      && !customIdentityMatchesOrder(
+        identity,
+        order,
+        isProviderId(order.paypal_subscription_id),
+        typeof order.customer_id === 'string'
+          ? customersById.get(order.customer_id)
+          : undefined,
+      )
+    ) {
+      return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+    }
+    const settledCaptures = providerOrder.captures.filter((capture) =>
+      PROVIDER_SETTLED_CAPTURE_STATUSES.includes(capture.status),
+    );
+    for (const capture of settledCaptures) {
+      // A locally-known capture was already judged by the capture pass
+      // (settlement, amounts, refunds); reporting it again here would double
+      // count. Only captures with NO local row are this path's finding —
+      // and "known" must mean known ON THIS ORDER: historical refund
+      // parents enter the map without ever crossing the capture pass, so a
+      // capture id attached to another order/guild is an identity conflict,
+      // not a reason to skip.
+      const knownRow = localByProviderId.get(capture.id);
+      if (knownRow) {
+        if (knownRow.order_id !== order.id) {
+          return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+        }
+        continue;
+      }
+      // A capture created inside the settlement lag has its payment webhook
+      // legitimately in flight — the next pass owns it.
+      if (capture.createTimeMs !== null && capture.createTimeMs > windowEndMs) continue;
+      // The buyer's money settled at PayPal and no local payment row
+      // exists — the customer may have paid and received nothing.
+      missingLocalPayments.push({
+        kind: 'payment',
+        transactionId: capture.id,
+        guildId,
+        amountCents: capture.amountCents,
+        currency: capture.currency,
+        initiatedAt: null,
+        source: 'order',
+        referenceId: order.paypal_order_id,
+      });
+    }
+    if (
+      pendingish
+      && ['APPROVED', 'COMPLETED'].includes(providerOrder.status)
+      && settledCaptures.length === 0
+      // A transition inside the settlement lag has its webhook legitimately
+      // in flight.
+      && !(providerOrder.updateTimeMs !== null && providerOrder.updateTimeMs > windowEndMs)
+    ) {
+      // APPROVED: the buyer approved the checkout and the
+      // CHECKOUT.ORDER.APPROVED webhook -- the only path that captures an
+      // intent-CAPTURE order -- was lost: neither charged nor fulfilled.
+      // COMPLETED: PayPal claims completion while every capture row is
+      // still PENDING/DENIED -- no money settled and nothing local advanced,
+      // so completion alone must not read as clean. Surface for replay.
+      unsettledLocalPayments.push({
+        transactionId: order.paypal_order_id as string,
+        guildId,
+        orderId: order.id,
+        paymentStatus: providerOrder.status === 'APPROVED'
+          ? 'order_approved_uncaptured'
+          : 'order_completed_uncaptured',
+        orderStatus: order.status,
+      });
+    }
+    if (SETTLED_ORDER_STATUSES.includes(order.status) && settledCaptures.length === 0) {
+      // Locally settled with NO settled provider capture — regardless of the
+      // provider order's own status: a CREATED/APPROVED/VOIDED order with no
+      // completed capture is PayPal explicitly saying no money settled.
+      missingProviderPayments.push({
+        kind: 'order',
+        orderId: order.id,
+        orderNumber: order.order_number,
+        guildId,
+        paypalPaymentIds: [],
+        amountCents: order.amount_cents,
+        currency: normalizeCurrency(order.currency) as string,
+        createdAt: order.created_at,
+      });
+    }
+  }
+
+  // 4) Subscriptions — recurring billing writes v1 sale objects the captures
+  //    API cannot serve, so subscription commerce is verified through the
+  //    subscription's own billing state. Boundary (documented in the
+  //    walkthrough): only the LATEST provider charge is individually
+  //    assertable without the reporting product.
+  // Lifecycle divergence compares the provider status with the DURABLE
+  // lifecycle head — purchase orders stay 'completed' forever by design, so
+  // judging by order status would re-alert after every properly processed
+  // cancellation.
+  const TERMINAL_PRIORITY_BY_STATUS: Record<string, number> = {
+    SUSPENDED: 50,
+    CANCELLED: 60,
+    EXPIRED: 60,
+  };
+  const lifecycleHeads = new Map<string, {
+    priority: number;
+    eventType: string | null;
+    lastWebhookEventId: string | null;
+  }>();
+  const loadLifecycleHeads = async (subscriptionIds: string[]) => {
+    const missing = [...new Set(subscriptionIds)].filter(
+      (id) => !lifecycleHeads.has(id),
+    );
+    for (let from = 0; from < missing.length; from += EXACT_LOOKUP_CHUNK_SIZE) {
+      const chunk = missing.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
+      const { data, error } = await supabase
+        .from('commerce_subscription_lifecycle_heads')
+        .select('paypal_subscription_id, last_event_priority, last_provider_event_type, last_webhook_event_id')
+        .in('paypal_subscription_id', chunk);
+      if (error) {
+        return {
+          status: 'failed' as const,
+          reason: `subscription lifecycle head scan failed: ${error.message}`,
+          retriable: true,
+        };
+      }
+      for (const id of chunk) {
+        if (!lifecycleHeads.has(id)) {
+          lifecycleHeads.set(id, { priority: 0, eventType: null, lastWebhookEventId: null });
+        }
+      }
+      for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+        if (
+          typeof row.paypal_subscription_id === 'string'
+          && typeof row.last_event_priority === 'number'
+        ) {
+          lifecycleHeads.set(row.paypal_subscription_id, {
+            priority: row.last_event_priority,
+            eventType: typeof row.last_provider_event_type === 'string'
+              ? row.last_provider_event_type
+              : null,
+            lastWebhookEventId: typeof row.last_webhook_event_id === 'string'
+              ? row.last_webhook_event_id
+              : null,
+          });
+        }
+      }
+    }
+    return null;
+  };
+
+  const processedSubscriptionIds = new Set<string>();
+  const latestChargeUnaccounted = new Map<string, {
+    order: LocalOrderRow;
+    subscription: ProviderSubscriptionObject;
+  }>();
+  const judgeSubscriptionEntries = async (
+    entries: Array<[string, LocalOrderRow]>,
+  ): Promise<PayPalReconciliationFailure | null> => {
+    const fresh = entries.filter(([id]) => !processedSubscriptionIds.has(id));
+    if (fresh.length === 0) return null;
+    for (const [id] of fresh) processedSubscriptionIds.add(id);
+    const map = await mapChunkedWithHeartbeat(
+      fresh,
+      heartbeat,
+      async ([subscriptionId, order]) => ({
+        subscriptionId,
+        order,
+        lookup: await fetchProviderSubscription(config.apiBase, token.token, subscriptionId),
+      }),
+    );
+    if (!map.ok) return map.failure;
+    const headsFailure = await loadLifecycleHeads(fresh.map(([id]) => id));
+    if (headsFailure) return headsFailure;
+    // Checkout identity backs the custom_id tamper check on fetched
+    // subscriptions; the plan map backs the plan identity check.
+    const batchCustomerScan = await loadCustomerIdentities(
+      supabase,
+      [...new Set(
+        fresh
+          .map(([, order]) => order.customer_id)
+          .filter((id): id is string => typeof id === 'string'),
+      )],
+      configuredGuildIds,
+    );
+    if (!batchCustomerScan.ok) {
       return {
         status: 'failed',
-        reason: 'malformed local PayPal payment identity row',
-        retriable: false,
+        reason: batchCustomerScan.reason,
+        retriable: batchCustomerScan.retriable,
       };
     }
-    durablePaymentIdentityOrderIds.add(order.id);
-  }
-  const identityHeartbeatFailure = await heartbeat();
-  if (identityHeartbeatFailure) return identityHeartbeatFailure;
+    const batchCustomersById = new Map(
+      batchCustomerScan.rows.map((customer) => [customer.id, customer]),
+    );
+    // The head only proves the transition was OBSERVED; the fulfillment
+    // ACTION that actually revokes/suspends access is a separate write that
+    // can fail or stay held — and it must be the action for the CURRENT
+    // transition, keyed by the head's webhook event id, or an old completed
+    // suspension masks a lost second one after a reactivation. Staged-row
+    // detection is likewise scoped to the ACTIVATION carrier so a held
+    // cancellation row cannot fake an unreleased activation.
+    const FULFILLMENT_TYPE_BY_HEAD_EVENT: Record<string, string> = {
+      'BILLING.SUBSCRIPTION.CANCELLED': 'subscription_cancelled',
+      'BILLING.SUBSCRIPTION.SUSPENDED': 'subscription_suspended',
+      'BILLING.SUBSCRIPTION.PAYMENT.FAILED': 'subscription_payment_failed',
+      // Expiry fulfills through the cancellation carrier.
+      'BILLING.SUBSCRIPTION.EXPIRED': 'subscription_cancelled',
+    };
+    const expectedActionKeyBySubscription = new Map<string, string>();
+    for (const [subscriptionId] of fresh) {
+      const head = lifecycleHeads.get(subscriptionId);
+      const fulfillmentType = head?.eventType
+        ? FULFILLMENT_TYPE_BY_HEAD_EVENT[head.eventType]
+        : undefined;
+      if (head?.lastWebhookEventId && fulfillmentType) {
+        expectedActionKeyBySubscription.set(
+          subscriptionId,
+          `paypal:lifecycle:${head.lastWebhookEventId}:${fulfillmentType}`,
+        );
+      }
+    }
+    const healthyActionKeys = new Set<string>();
+    const expectedKeys = [...new Set(expectedActionKeyBySubscription.values())];
+    for (let from = 0; from < expectedKeys.length; from += EXACT_LOOKUP_CHUNK_SIZE) {
+      const chunk = expectedKeys.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
+      const { data: actionRows, error: actionError } = await supabase
+        .from('bot_action_queue')
+        .select('idempotency_key, status, created_at')
+        .in('idempotency_key', chunk);
+      if (actionError) {
+        return {
+          status: 'failed',
+          reason: `lifecycle action scan failed: ${actionError.message}`,
+          retriable: true,
+        };
+      }
+      for (const row of (actionRows ?? []) as Array<Record<string, unknown>>) {
+        if (typeof row.idempotency_key !== 'string') continue;
+        // completed is proof. pending/processing only mean "still working"
+        // while the carrier is younger than the settlement lag: this pass
+        // is the watchdog for a BROKEN bot, and a queue row aging past the
+        // lag with access unrevoked is exactly the failure it must surface.
+        const createdAtMs = typeof row.created_at === 'string'
+          ? Date.parse(row.created_at)
+          : Number.NaN;
+        const inProgressFresh = ['pending', 'processing'].includes(String(row.status))
+          && Number.isFinite(createdAtMs)
+          && createdAtMs > windowEndMs;
+        if (String(row.status) === 'completed' || inProgressFresh) {
+          healthyActionKeys.add(row.idempotency_key);
+        }
+      }
+    }
+    const batchOrderIds = [...new Set(fresh.map(([, order]) => order.id))];
 
-  // Reverse-reconcile every settled local PayPal payment by its own provider
-  // identity. An ODR/SUB reference, or a matching sibling payment on the same
-  // order, cannot prove that this distinct capture/sale exists at PayPal.
-  for (const payment of payments) {
-    const order = ordersById.get(payment.order_id as string);
-    if (!isSettledPair(payment, order)) continue;
-    const paymentId = payment.paypal_payment_id as string;
-    if (providerPaymentIds.has(paymentId)) continue;
-    missingProviderPayments.push({
-      kind: 'payment',
-      orderId: payment.order_id as string,
-      orderNumber: order?.order_number ?? null,
-      guildId: payment.guild_id as string,
-      paypalPaymentIds: [paymentId],
-      amountCents: payment.amount_cents,
-      currency: normalizeCurrency(payment.currency) as string,
-      createdAt: payment.created_at,
-    });
+    // Plan identity compares against the HISTORICAL provider plan retained
+    // by the ACTIVATION carrier's payload — addressed by its exact
+    // idempotency key (paypal:subscription:<id>:fulfill_subscription), so
+    // per-renewal actions can never flood the lookup past the response cap
+    // and silently skip the comparison. The mutable plans row is never
+    // consulted: owners rotate paypal_plan_id for future checkouts while
+    // old subscriptions keep billing the plan they were minted on.
+    const historicalPlanBySubscription = new Map<string, string>();
+    // The activation carrier's STATUS decides fulfillment truth: staged
+    // means never released, failed means released and lost — either way an
+    // ACTIVE subscription's buyer received nothing.
+    const activationCarrierStatusBySubscription = new Map<string, string>();
+    const activationCarrierCreatedAtMsBySubscription = new Map<string, number>();
+    const activationKeys = fresh.map(([subscriptionId]) =>
+      `paypal:subscription:${subscriptionId}:fulfill_subscription`,
+    );
+    for (let from = 0; from < activationKeys.length; from += EXACT_LOOKUP_CHUNK_SIZE) {
+      const chunk = activationKeys.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
+      const { data, error } = await supabase
+        .from('bot_action_queue')
+        .select('idempotency_key, payload, status, created_at')
+        .in('idempotency_key', chunk);
+      if (error) {
+        return {
+          status: 'failed',
+          reason: `plan identity scan failed: ${error.message}`,
+          retriable: true,
+        };
+      }
+      for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+        const key = row.idempotency_key;
+        if (typeof key !== 'string') continue;
+        const subscriptionId = key.slice(
+          'paypal:subscription:'.length,
+          -':fulfill_subscription'.length,
+        );
+        const providerPlan = (row.payload as Record<string, unknown> | null)?.paypal_plan_id;
+        if (isProviderId(providerPlan)) {
+          historicalPlanBySubscription.set(subscriptionId, providerPlan);
+        }
+        if (typeof row.status === 'string') {
+          activationCarrierStatusBySubscription.set(subscriptionId, row.status);
+        }
+        const carrierCreatedAtMs = typeof row.created_at === 'string'
+          ? Date.parse(row.created_at)
+          : Number.NaN;
+        if (Number.isFinite(carrierCreatedAtMs)) {
+          activationCarrierCreatedAtMsBySubscription.set(subscriptionId, carrierCreatedAtMs);
+        }
+      }
+    }
+    for (const { subscriptionId, order, lookup } of map.results) {
+      if (!lookup.ok) {
+        return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
+      }
+      const guildId = order.guild_id as string;
+      if (!lookup.found) {
+        if (SETTLED_ORDER_STATUSES.includes(order.status)) {
+          missingProviderPayments.push({
+            kind: 'order',
+            orderId: order.id,
+            orderNumber: order.order_number,
+            guildId,
+            paypalPaymentIds: [subscriptionId],
+            amountCents: order.amount_cents,
+            currency: normalizeCurrency(order.currency) as string,
+            createdAt: order.created_at,
+          });
+        }
+        continue;
+      }
+      bumpVerified(guildId);
+      const subscription = lookup.value;
+      // Checkout identity: the subscription's custom_id was minted by OUR
+      // checkout with the guild/product/customer identity — a valid
+      // subscription id from another checkout or tenant must never verify.
+      const subscriptionIdentity = parseCustomIdentity(subscription.customId);
+      if (
+        subscriptionIdentity
+        && !customIdentityMatchesOrder(
+          subscriptionIdentity,
+          order,
+          true,
+          typeof order.customer_id === 'string'
+            ? batchCustomersById.get(order.customer_id)
+            : undefined,
+        )
+      ) {
+        return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+      }
+      // Plan identity: the provider's plan must be the HISTORICAL plan this
+      // subscription was minted on (absent history → no check, never the
+      // mutable current plans row).
+      const historicalPlanId = historicalPlanBySubscription.get(subscriptionId) ?? null;
+      // When activation history NAMES a plan, the fetched subscription must
+      // carry that plan: an omitted/malformed plan_id alongside an accepted
+      // missing custom_id would leave a misattached subscription with zero
+      // checkout identity checks.
+      if (
+        historicalPlanId !== null
+        && (subscription.planId === null || subscription.planId !== historicalPlanId)
+      ) {
+        return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+      }
+      const head = lifecycleHeads.get(subscriptionId) ?? { priority: 0, eventType: null };
+      // Reactivation: PayPal says ACTIVE while the durable head's LATEST
+      // observed event is a suspension/payment failure — the ACTIVATED (or
+      // recovering SALE.COMPLETED) webhook that would have superseded it
+      // was lost, and access remains wrongly revoked/suspended.
+      if (
+        subscription.status === 'ACTIVE'
+        && head.eventType !== null
+        && [
+          'BILLING.SUBSCRIPTION.SUSPENDED',
+          'BILLING.SUBSCRIPTION.PAYMENT.FAILED',
+          // A CANCELLED/EXPIRED head behind an ACTIVE provider means the
+          // completed lifecycle action revoked access while PayPal still
+          // bills the customer — a divergence needing replay either way.
+          'BILLING.SUBSCRIPTION.CANCELLED',
+          'BILLING.SUBSCRIPTION.EXPIRED',
+        ].includes(head.eventType)
+        // A reactivation inside the lag interval is in flight, not lost.
+        && (subscription.statusUpdateTimeMs === null
+          || subscription.statusUpdateTimeMs <= windowEndMs)
+      ) {
+        unsettledLocalPayments.push({
+          transactionId: subscriptionId,
+          guildId,
+          orderId: order.id,
+          paymentStatus: 'subscription_reactivated_unfulfilled',
+          orderStatus: order.status,
+        });
+      }
+      // A transition that happened inside the settlement lag has its
+      // lifecycle webhook legitimately in flight — the next pass owns it.
+      const transitionSettled = subscription.statusUpdateTimeMs === null
+        || subscription.statusUpdateTimeMs <= windowEndMs;
+      const expectedPriority = TERMINAL_PRIORITY_BY_STATUS[subscription.status];
+      // Divergent when the transition was never OBSERVED (head below the
+      // priority) OR observed but its fulfillment ACTION is missing, failed,
+      // or operator-held — the head is committed BEFORE the action write,
+      // so head-parity alone cannot prove access was revoked.
+      const expectedActionKey = expectedActionKeyBySubscription.get(subscriptionId);
+      // The head must match the provider's terminal FAMILY: a cancellation
+      // head (priority 60) must not satisfy a provider SUSPENSION whose
+      // distinct subscription_suspended fulfillment was never observed.
+      const HEAD_EVENTS_BY_PROVIDER_STATUS: Record<string, string[]> = {
+        SUSPENDED: ['BILLING.SUBSCRIPTION.SUSPENDED'],
+        CANCELLED: ['BILLING.SUBSCRIPTION.CANCELLED', 'BILLING.SUBSCRIPTION.EXPIRED'],
+        EXPIRED: ['BILLING.SUBSCRIPTION.EXPIRED', 'BILLING.SUBSCRIPTION.CANCELLED'],
+      };
+      const matchingHeadFamily = HEAD_EVENTS_BY_PROVIDER_STATUS[subscription.status];
+      if (
+        expectedPriority !== undefined
+        && transitionSettled
+        && (
+          (lifecycleHeads.get(subscriptionId)?.priority ?? 0) < expectedPriority
+          || (matchingHeadFamily !== undefined
+            && !matchingHeadFamily.includes(head.eventType ?? ''))
+          || expectedActionKey === undefined
+          || !healthyActionKeys.has(expectedActionKey)
+        )
+      ) {
+        // PayPal reports a terminal state the durable lifecycle head never
+        // observed: the revoke/suspend fulfillment action was lost. A head
+        // at or past this priority means the transition WAS processed and
+        // must not re-alert forever.
+        unsettledLocalPayments.push({
+          transactionId: subscriptionId,
+          guildId,
+          orderId: order.id,
+          paymentStatus: `subscription_${subscription.status.toLowerCase()}`,
+          orderStatus: order.status,
+        });
+      }
+      // The lag anchors on the provider's own transition time when it is
+      // known (activation can happen long after order creation); the order
+      // age remains the fallback guard.
+      const activationSettled = subscription.statusUpdateTimeMs !== null
+        ? subscription.statusUpdateTimeMs <= windowEndMs
+        : String(order.created_at ?? '') <= windowEnd;
+      if (
+        ['APPROVAL_PENDING', 'APPROVED', 'CREATED'].includes(subscription.status)
+        && SETTLED_ORDER_STATUSES.includes(order.status)
+        && transitionSettled
+      ) {
+        // The local order (and entitlements) claim an activated
+        // subscription PayPal says never activated — free trials have no
+        // payment rows, so no billing check would ever catch this.
+        unsettledLocalPayments.push({
+          transactionId: subscriptionId,
+          guildId,
+          orderId: order.id,
+          paymentStatus: 'subscription_never_activated',
+          orderStatus: order.status,
+        });
+      }
+      const activationCarrierStatus =
+        activationCarrierStatusBySubscription.get(subscriptionId) ?? '';
+      // In-progress only means "still working" while the carrier is younger
+      // than the settlement lag — the same age gate the terminal lifecycle
+      // carriers use. A released activation stuck pending/processing past
+      // the lag left the buyer unfulfilled behind healthy-looking rows.
+      const activationCarrierCreatedAtMs =
+        activationCarrierCreatedAtMsBySubscription.get(subscriptionId) ?? null;
+      const activationCarrierStalled =
+        ['pending', 'processing'].includes(activationCarrierStatus)
+        && !(activationCarrierCreatedAtMs !== null
+          && activationCarrierCreatedAtMs > windowEndMs);
+      if (
+        subscription.status === 'ACTIVE'
+        && order.status === 'completed'
+        && (['staged', 'failed'].includes(activationCarrierStatus) || activationCarrierStalled)
+        && activationSettled
+      ) {
+        // The activation handler completes the order BEFORE releasing the
+        // staged fulfillment: a STAGED carrier means the release never ran,
+        // and a FAILED carrier means the queue worker lost it after release
+        // — either way the buyer received nothing while the order and
+        // subscription both read healthy.
+        unsettledLocalPayments.push({
+          transactionId: subscriptionId,
+          guildId,
+          orderId: order.id,
+          paymentStatus: 'subscription_activation_unreleased',
+          orderStatus: order.status,
+        });
+      }
+      if (
+        subscription.status === 'ACTIVE'
+        && order.status === 'refunded'
+        && (subscription.statusUpdateTimeMs === null
+          || subscription.statusUpdateTimeMs <= windowEndMs)
+      ) {
+        // The refund revoked local access, but refunding a sale does not
+        // cancel the billing agreement: PayPal keeps charging a customer
+        // who has nothing. Surface for cancellation replay.
+        unsettledLocalPayments.push({
+          transactionId: subscriptionId,
+          guildId,
+          orderId: order.id,
+          paymentStatus: 'subscription_active_after_refund',
+          orderStatus: order.status,
+        });
+      }
+      if (
+        subscription.status === 'ACTIVE'
+        && (order.status === 'pending' || order.status === 'pending_review')
+        && activationSettled
+      ) {
+        // Lost BILLING.SUBSCRIPTION.ACTIVATED: PayPal activated (free trials
+        // may legitimately never show a payment) but activation fulfillment
+        // never ran. The created_at guard keeps ordinary approval→webhook
+        // latency inside the settlement lag from false-alerting.
+        unsettledLocalPayments.push({
+          transactionId: subscriptionId,
+          guildId,
+          orderId: order.id,
+          paymentStatus: 'subscription_active_unfulfilled',
+          orderStatus: order.status,
+        });
+      }
+      const lastPaymentMs = subscription.lastPaymentTime === null
+        ? Number.NaN
+        : Date.parse(subscription.lastPaymentTime);
+      const lastPaymentInWindow = Number.isFinite(lastPaymentMs)
+        && lastPaymentMs >= windowStartMs
+        && lastPaymentMs <= windowEndMs;
+      const orderWindowPayments = windowPaymentsByOrderId.get(order.id) ?? [];
+      // Only a COMPLETED local row can represent the provider's charge — a
+      // pending/failed row matching on amount is exactly the divergence this
+      // pass exists to catch (fulfillment may never have run). And the row
+      // must CORRELATE with the latest charge in time: daily plans bill
+      // several times per window, and an older renewal must not stand in for
+      // the latest charge whose webhook was lost.
+      const SETTLED_ROW_STATUSES = ['completed', 'refunded', 'reversed'];
+      const settledWindowPayments = orderWindowPayments.filter((payment) => {
+        // Refunded/reversed rows are terminal SETTLED states — the sale pass
+        // already judged their reversal ledgers; only pending/failed rows
+        // mean the charge never settled locally.
+        if (!SETTLED_ROW_STATUSES.includes(payment.status)) return false;
+        if (!lastPaymentInWindow) return true;
+        const createdMs = Date.parse(String(payment.created_at ?? ''));
+        return Number.isFinite(createdMs)
+          && createdMs >= lastPaymentMs - SUBSCRIPTION_CHARGE_TOLERANCE_MS;
+      });
+      if (lastPaymentInWindow && settledWindowPayments.length === 0) {
+        // Only a non-settled row that CORRELATES with the latest charge is
+        // evidence that THAT charge failed locally — an older failed
+        // renewal must not stand in while the enumeration reports the
+        // actual missing sale.
+        const correlatedNonSettledRows = orderWindowPayments.filter((payment) => {
+          if (SETTLED_ROW_STATUSES.includes(payment.status)) return false;
+          const createdMs = Date.parse(String(payment.created_at ?? ''));
+          return Number.isFinite(createdMs)
+            && createdMs >= lastPaymentMs - SUBSCRIPTION_CHARGE_TOLERANCE_MS;
+        });
+        if (correlatedNonSettledRows.length > 0) {
+          // Provider billed; a local row exists but never settled.
+          const latest = correlatedNonSettledRows.reduce((best, candidate) =>
+            String(candidate.created_at ?? '') > String(best.created_at ?? '') ? candidate : best,
+          );
+          unsettledLocalPayments.push({
+            transactionId: subscriptionId,
+            guildId,
+            orderId: order.id,
+            paymentStatus: latest.status,
+            orderStatus: order.status,
+          });
+        } else {
+          // A wholly missing latest charge is DISCOVERED by the transaction
+          // enumeration below and reported once, by its actual sale id —
+          // reporting it here under the subscription id double-counted the
+          // loss and handed operators an id that cannot replay the payment.
+          // The flag makes the deferral SAFE: if the enumeration turns up
+          // no money transactions at all, the last_payment evidence still
+          // reports under the subscription id.
+          latestChargeUnaccounted.set(subscriptionId, { order, subscription });
+        }
+        continue;
+      }
+      // A latest charge NEWER than the window end is not absent billing
+      // evidence — it is today's charge still inside the settlement lag
+      // (daily plans hit this naturally). Only a stale or missing latest
+      // payment makes local settled sales unevidenced.
+      const lastPaymentFresh = Number.isFinite(lastPaymentMs) && lastPaymentMs > windowEndMs;
+      // A charge just BEFORE the window start whose webhook row landed just
+      // after it belongs to the previous pass — within the same tolerance,
+      // it is not absent billing evidence.
+      const lastPaymentJustBeforeWindow = Number.isFinite(lastPaymentMs)
+        && lastPaymentMs < windowStartMs
+        && lastPaymentMs >= windowStartMs - SUBSCRIPTION_CHARGE_TOLERANCE_MS;
+      // Only money the ledger claims KEPT needs billing evidence — a
+      // refunded/reversed row's evidence is the sale object itself, which
+      // the sale pass already verified.
+      const keptWindowPayments = settledWindowPayments.filter(
+        (payment) => payment.status === 'completed',
+      );
+      if (
+        !lastPaymentInWindow
+        && !lastPaymentFresh
+        && !lastPaymentJustBeforeWindow
+        && keptWindowPayments.length > 0
+      ) {
+        const latest = keptWindowPayments.reduce((best, candidate) =>
+          String(candidate.created_at ?? '') > String(best.created_at ?? '') ? candidate : best,
+        );
+        missingProviderPayments.push({
+          kind: 'payment',
+          orderId: order.id,
+          orderNumber: order.order_number,
+          guildId,
+          paypalPaymentIds: [subscriptionId],
+          amountCents: latest.amount_cents,
+          currency: normalizeCurrency(latest.currency) as string,
+          createdAt: latest.created_at,
+        });
+      }
+    }
+    // Discovery beyond the latest charge: billing_info.last_payment names
+    // only the NEWEST transaction, so a lost webhook for an older charge
+    // (daily plans) stayed invisible whenever a newer charge matched.
+    // Enumerate every provider transaction in the window and require a
+    // local row for each money-moving one.
+    const txnMap = await mapChunkedWithHeartbeat(
+      map.results.filter((entry) => entry.lookup.ok && entry.lookup.found),
+      heartbeat,
+      async ({ subscriptionId, order }) => ({
+        subscriptionId,
+        order,
+        lookup: await fetchProviderSubscriptionTransactions(
+          config.apiBase,
+          token.token,
+          subscriptionId,
+          windowStart,
+          new Date(nowMs).toISOString(),
+        ),
+      }),
+    );
+    if (!txnMap.ok) return txnMap.failure;
+    const unknownTxns: Array<{
+      subscriptionId: string;
+      order: LocalOrderRow;
+      txn: ProviderSubscriptionTransaction;
+    }> = [];
+    for (const { subscriptionId, order, lookup } of txnMap.results) {
+      if (!lookup.ok) {
+        return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
+      }
+      const unaccounted = latestChargeUnaccounted.get(subscriptionId);
+      const unaccountedLastPaymentMs = unaccounted?.subscription.lastPaymentTime
+        ? Date.parse(unaccounted.subscription.lastPaymentTime)
+        : Number.NaN;
+      if (
+        unaccounted
+        && lookup.ok
+        && lookup.found
+        // The list must contain the ADVERTISED latest charge itself — any
+        // older in-window renewal (yesterday's known daily charge) must not
+        // suppress the fallback for today's missing one.
+        && !lookup.value.some((txn) =>
+          MONEY_TXN_STATUSES.includes(txn.status)
+          && Number.isFinite(unaccountedLastPaymentMs)
+          && txn.timeMs >= unaccountedLastPaymentMs - SUBSCRIPTION_CHARGE_TOLERANCE_MS)
+      ) {
+        // billing_info.last_payment proved an in-window charge, but the
+        // enumeration has no money transaction to name. Fall back to the
+        // subscription-keyed finding rather than completing clean against
+        // the provider's own evidence.
+        missingLocalPayments.push({
+          kind: 'payment',
+          transactionId: subscriptionId,
+          guildId: unaccounted.order.guild_id as string,
+          amountCents: unaccounted.subscription.lastPaymentAmountCents
+            ?? unaccounted.order.amount_cents,
+          currency: unaccounted.subscription.lastPaymentCurrency
+            ?? (normalizeCurrency(unaccounted.order.currency) as string),
+          initiatedAt: unaccounted.subscription.lastPaymentTime,
+          source: 'subscription',
+          referenceId: subscriptionId,
+        });
+      }
+      if (!lookup.found) {
+        // The subscription GET just succeeded; a vanished transactions
+        // subresource would silently remove the only discovery surface for
+        // non-latest charges. That is a provider anomaly, never "zero
+        // transactions".
+        return {
+          status: 'failed',
+          reason: `subscription transactions unavailable for ${subscriptionId}`,
+          retriable: true,
+        };
+      }
+      for (const txn of lookup.value) {
+        if (!MONEY_TXN_STATUSES.includes(txn.status)) continue;
+        // In-flight charges (newer than the window end) get the settlement
+        // lag; older-than-window charges belong to earlier passes.
+        if (txn.timeMs < windowStartMs || txn.timeMs > windowEndMs) continue;
+        const knownRow = localByProviderId.get(txn.id);
+        if (knownRow) {
+          // Known is not enough: the row must belong to THIS subscription's
+          // order. A sale id attached to a one-time order (or another
+          // tenant) is a provider-identity conflict, and suppressing the
+          // transaction would hide subscription A's missing money behind
+          // the wrong order's row.
+          const rowOrder = ordersById.get(knownRow.order_id as string);
+          if (!rowOrder || rowOrder.paypal_subscription_id !== subscriptionId) {
+            return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+          }
+          // Known is not JUDGED: only WINDOW rows crossed the sale pass
+          // (money, status, refund ledger). A row registered merely as the
+          // PARENT of a window refund row never met any money comparison —
+          // hand it to the fallback machinery for the same terminal-family
+          // and drift judgment instead of silently accounting the charge.
+          if (windowPaymentIds.has(knownRow.id)) continue;
+        }
+        unknownTxns.push({ subscriptionId, order, txn });
+      }
+    }
+    if (unknownTxns.length > 0) {
+      const lookupScan = await lookupPaymentsByExactColumn(
+        supabase,
+        'paypal_payment_id',
+        [...new Set(unknownTxns.map(({ txn }) => txn.id))],
+      );
+      if (!lookupScan.ok) {
+        return { status: 'failed', reason: lookupScan.reason, retriable: lookupScan.retriable };
+      }
+      // Fallback rows never crossed the window validators: run them through
+      // the same shape/guild validation, and only a SETTLED row may account
+      // for a settled provider transaction.
+      const validatedFallback = validateLocalPayments(lookupScan.rows, configuredGuildIds);
+      if (!validatedFallback.ok) {
+        return {
+          status: 'failed',
+          reason: validatedFallback.reason,
+          retriable: validatedFallback.retriable,
+        };
+      }
+      const fallbackRowsByProviderId = new Map(
+        validatedFallback.rows.map((row) => [row.paypal_payment_id as string, row]),
+      );
+      const fallbackParentScan = await lookupOrdersByExactColumn(
+        supabase,
+        'id',
+        [...new Set(
+          lookupScan.rows
+            .map((row) => row.order_id)
+            .filter((id): id is string => typeof id === 'string' && !ordersById.has(id)),
+        )],
+        configuredGuildIds,
+      );
+      if (!fallbackParentScan.ok) {
+        return {
+          status: 'failed',
+          reason: fallbackParentScan.reason,
+          retriable: fallbackParentScan.retriable,
+        };
+      }
+      for (const order of fallbackParentScan.rows) ordersById.set(order.id, order);
+      for (const { subscriptionId, order, txn } of unknownTxns) {
+        const fallbackRow = fallbackRowsByProviderId.get(txn.id);
+        if (fallbackRow) {
+          const rowOrder = ordersById.get(fallbackRow.order_id as string);
+          if (
+            !rowOrder
+            || rowOrder.paypal_subscription_id !== subscriptionId
+            || rowOrder.guild_id !== fallbackRow.guild_id
+          ) {
+            return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+          }
+          // A TERMINAL provider transaction always faces the aggregate
+          // judgment: a completed row means the refund webhook was lost,
+          // and a terminal row may sit over an INCOMPLETE ledger (one
+          // sibling lost) that status alone would bless — terminal rows are
+          // also excluded from the completed-only lookback, so this is
+          // their only ledger check. A non-settled row never accounts.
+          const terminalTxn = ['REFUNDED', 'REVERSED'].includes(txn.status);
+          if (
+            terminalTxn
+            && !['completed', 'refunded', 'reversed'].includes(fallbackRow.status)
+          ) {
+            // pending/failed behind terminal provider money: not accounted.
+            missingLocalPayments.push({
+              kind: 'payment',
+              transactionId: txn.id,
+              guildId: order.guild_id as string,
+              amountCents: txn.amountCents ?? order.amount_cents,
+              currency: txn.currency ?? (normalizeCurrency(order.currency) as string),
+              initiatedAt: new Date(txn.timeMs).toISOString(),
+              source: 'subscription',
+              referenceId: subscriptionId,
+            });
+            continue;
+          }
+          if (terminalTxn || txn.status === 'PARTIALLY_REFUNDED') {
+            if (judgedHistoricalRefundParents.has(fallbackRow.id as string)) {
+              // The historical-parent sweep already ran identity, money,
+              // and the full ledger for this row.
+              continue;
+            }
+            // Terminal or partially refunded provider money behind an
+            // out-of-window row: judge the refund ledger — a lost partial
+            // webhook leaves zero local rows and must surface.
+            const totalsFailure = await loadLocalRefundTotals([fallbackRow]);
+            if (totalsFailure) return totalsFailure;
+            judgeRefundedPayment({
+              payment: fallbackRow,
+              guildId: fallbackRow.guild_id as string,
+              providerId: txn.id,
+              providerStatusFullyRefunded: txn.status !== 'PARTIALLY_REFUNDED',
+              providerAmountCents: txn.amountCents ?? fallbackRow.amount_cents,
+              providerCurrency: txn.currency
+                ?? (normalizeCurrency(fallbackRow.currency) as string),
+              providerRefunds: null,
+            });
+            // Refund-ledger parity does not excuse PAYMENT-money drift: the
+            // out-of-window row never met the sale pass, so its own amount
+            // must still match the discovered transaction, or an offsetting
+            // refund ledger masks a drifted charge row.
+            if (
+              (txn.amountCents !== null && txn.amountCents !== fallbackRow.amount_cents)
+              || (txn.currency !== null
+                && txn.currency !== normalizeCurrency(fallbackRow.currency))
+            ) {
+              amountMismatches.push({
+                transactionId: txn.id,
+                guildId: fallbackRow.guild_id as string,
+                providerAmountCents: txn.amountCents ?? 0,
+                localAmountCents: fallbackRow.amount_cents,
+                providerCurrency: txn.currency ?? 'UNKNOWN',
+                localCurrency: normalizeCurrency(fallbackRow.currency),
+              });
+            }
+            continue;
+          }
+          if (!terminalTxn && fallbackRow.status !== 'completed') {
+            missingLocalPayments.push({
+              kind: 'payment',
+              transactionId: txn.id,
+              guildId: order.guild_id as string,
+              amountCents: txn.amountCents ?? order.amount_cents,
+              currency: txn.currency ?? (normalizeCurrency(order.currency) as string),
+              initiatedAt: new Date(txn.timeMs).toISOString(),
+              source: 'subscription',
+              referenceId: subscriptionId,
+            });
+            continue;
+          }
+          // Rows outside the window never met the sale pass: the discovered
+          // transaction's money must match or the drift surfaces here.
+          if (
+            (txn.amountCents !== null && txn.amountCents !== fallbackRow.amount_cents)
+            || (txn.currency !== null
+              && txn.currency !== normalizeCurrency(fallbackRow.currency))
+          ) {
+            amountMismatches.push({
+              transactionId: txn.id,
+              guildId: fallbackRow.guild_id as string,
+              providerAmountCents: txn.amountCents ?? 0,
+              localAmountCents: fallbackRow.amount_cents,
+              providerCurrency: txn.currency ?? 'UNKNOWN',
+              localCurrency: normalizeCurrency(fallbackRow.currency),
+            });
+          }
+          continue;
+        }
+        missingLocalPayments.push({
+          kind: 'payment',
+          transactionId: txn.id,
+          guildId: order.guild_id as string,
+          amountCents: txn.amountCents ?? order.amount_cents,
+          currency: txn.currency ?? (normalizeCurrency(order.currency) as string),
+          initiatedAt: new Date(txn.timeMs).toISOString(),
+          source: 'subscription',
+          referenceId: subscriptionId,
+        });
+      }
+    }
+    return null;
+  };
+
+  {
+    const windowFailure = await judgeSubscriptionEntries([...subscriptionTargets.entries()]);
+    if (windowFailure) return windowFailure;
   }
 
-  // Refund rows are distinct provider money events. Reconcile every sibling by
-  // paypal_refund_id; a matching refund on the same payment cannot mask another.
-  for (const refund of windowRefunds) {
-    // PayPal's balance-affecting transaction search omits a zero-amount
-    // terminal reversal witness. Keep it in the local ledger count and exact
-    // provider lookup map, but do not require a provider-side transaction.
-    if (refund.amount_cents === 0) continue;
-    if (providerRefundIds.has(refund.paypal_refund_id)) continue;
-    const order = refund.order_id ? ordersById.get(refund.order_id) : undefined;
-    missingProviderPayments.push({
-      kind: 'refund',
-      orderId: refund.order_id as string,
-      orderNumber: order?.order_number ?? null,
-      guildId: refund.guild_id as string,
-      paypalPaymentIds: [refund.paypal_refund_id],
-      amountCents: refund.amount_cents as number,
-      currency: normalizeCurrency(refund.currency) as string,
-      createdAt: refund.created_at,
-    });
-  }
-
-  // Keep a separate order-level detector only for completed commerce whose
-  // local provider-payment row/write is wholly absent. Once any local PayPal
-  // payment identity exists, the payment-level path above owns the comparison.
-  for (const order of ordersForMissingProvider.values()) {
-    if (!['completed', 'disputed', 'refunded'].includes(order.status)) continue;
-    if (
-      durablePaymentIdentityOrderIds.has(order.id)
-      || providerReferenceOrderIds.has(order.id)
-    ) continue;
-    missingProviderPayments.push({
-      kind: 'order',
-      orderId: order.id,
-      orderNumber: order.order_number,
-      guildId: order.guild_id as string,
-      paypalPaymentIds: [],
-      amountCents: order.amount_cents,
-      currency: normalizeCurrency(order.currency) as string,
-      createdAt: order.created_at,
-    });
+  // Established subscriptions, page by page: every settled subscription order
+  // is a provider target regardless of age — a monthly renewal with a lost
+  // webhook must not be invisible — and each page is judged before the next
+  // loads, so a mature merchant's history can never trip a lifetime cap.
+  for (let from = 0; ; from += LOCAL_PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from('orders')
+      .select('id, order_number, guild_id, customer_id, product_id, plan_id, amount_cents, currency, status, source, paypal_order_id, paypal_subscription_id, created_at')
+      .not('paypal_subscription_id', 'is', null)
+      .in('status', ORDER_SCAN_STATUSES)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, from + LOCAL_PAGE_SIZE - 1);
+    if (error) {
+      return {
+        status: 'failed',
+        reason: `subscription order scan failed: ${error.message}`,
+        retriable: true,
+      };
+    }
+    const pageRows = (data ?? []) as LocalOrderRow[];
+    if (pageRows.length === 0) break;
+    const validatedPage = validateLocalOrders(pageRows, configuredGuildIds);
+    if (!validatedPage.ok) {
+      return {
+        status: 'failed',
+        reason: validatedPage.reason,
+        retriable: validatedPage.retriable,
+      };
+    }
+    const entries: Array<[string, LocalOrderRow]> = [];
+    for (const order of validatedPage.rows) {
+      ordersById.set(order.id, order);
+      if (isProviderId(order.paypal_subscription_id)) {
+        entries.push([order.paypal_subscription_id, order]);
+      }
+    }
+    const pageFailure = await judgeSubscriptionEntries(entries);
+    if (pageFailure) return pageFailure;
+    if (pageRows.length < LOCAL_PAGE_SIZE) break;
   }
 
   const result: Extract<PayPalReconciliationResult, { status: 'completed' }> = {
     status: 'completed',
     windowStart,
     windowEnd,
-    providerTransactions: attributed.length,
+    providerTransactions: providerObjectsVerified,
     localPayments: payments.length,
     localRefunds: windowRefunds.length,
     missingLocalPayments,
@@ -2417,13 +5379,7 @@ async function runPass(
     alerted: false,
   };
 
-  const providerCountByGuild = new Map<string, number>();
-  for (const item of attributed) {
-    providerCountByGuild.set(
-      item.guildId,
-      (providerCountByGuild.get(item.guildId) ?? 0) + 1,
-    );
-  }
+  const providerCountByGuild = verifiedByGuild;
   const paymentCountByGuild = new Map<string, number>();
   for (const payment of payments) {
     const guildId = payment.guild_id as string;
@@ -2475,7 +5431,7 @@ async function runPass(
 
   console.log(
     `[PayPalReconcile] ${windowStart}..${windowEnd}: `
-    + `${attributed.length} attributable provider transaction(s), `
+    + `${providerObjectsVerified} provider object(s) verified, `
     + `${payments.length} local PayPal payment(s), `
     + `${windowRefunds.length} local PayPal refund(s), `
     + `${missingLocalPayments.length} missing locally, `
@@ -2502,6 +5458,7 @@ export async function runPayPalReconciliation(
   const nowMs = options.now ?? Date.now();
   const windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
   const settlementLagMs = options.settlementLagMs ?? DEFAULT_SETTLEMENT_LAG_MS;
+  const refundLookbackMs = options.refundLookbackMs ?? DEFAULT_REFUND_LOOKBACK_MS;
   const windowEndMs = nowMs - settlementLagMs;
   const windowStartMs = windowEndMs - windowMs;
   if (windowStartMs >= windowEndMs) {
@@ -2552,6 +5509,7 @@ export async function runPayPalReconciliation(
         nowMs,
         windowStartMs,
         windowEndMs,
+        refundLookbackMs,
         async () => {
           const heartbeat = await heartbeatReconcileLease(
             supabase,

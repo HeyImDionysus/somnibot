@@ -66,38 +66,7 @@ export async function runPayPalSandboxPass({
   }
   const token = tokenBody.access_token;
 
-  const end = new Date(now);
-  const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
-  const reportingQuery = new URLSearchParams({
-    start_date: start.toISOString(),
-    end_date: end.toISOString(),
-    fields: 'all',
-    page_size: '10',
-  });
-  let transactionSearchResult;
-  try {
-    const transactionSearch = await paypalRequest(
-      fetchImpl,
-      base,
-      token,
-      `/v1/reporting/transactions?${reportingQuery}`,
-    );
-    if (!Array.isArray(transactionSearch.body?.transaction_details)) {
-      throw new Error('Transaction Search response did not contain transaction_details[]');
-    }
-    transactionSearchResult = {
-      permissionVerified: true,
-      responseShapeVerified: true,
-      returnedTransactions: transactionSearch.body.transaction_details.length,
-    };
-  } catch (error) {
-    transactionSearchResult = {
-      permissionVerified: false,
-      responseShapeVerified: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-
+  void now;
   let disputesResult;
   try {
     const disputes = await paypalRequest(
@@ -166,15 +135,56 @@ export async function runPayPalSandboxPass({
     };
   }
 
-  const ok = transactionSearchResult.permissionVerified
-    && transactionSearchResult.responseShapeVerified
+  // SomniBot does PayPal per-object: prove the read rail by fetching the
+  // exact order this pass created, the same GET the webhook handler and the
+  // reconciliation pass use. This works for any bare REST app - unlike the
+  // retired Transaction Search probe, which exercised PayPal's separately
+  // entitled reporting product and returned 403 for standard operator
+  // credentials.
+  let orderReadbackResult;
+  if (typeof idempotencyResult.orderId === 'string' && idempotencyResult.orderId.length > 0) {
+    try {
+      const readback = await paypalRequest(
+        fetchImpl,
+        base,
+        token,
+        `/v2/checkout/orders/${encodeURIComponent(idempotencyResult.orderId)}`,
+      );
+      if (readback.body?.id !== idempotencyResult.orderId) {
+        throw new Error('Order readback returned a different order id');
+      }
+      if (typeof readback.body?.status !== 'string') {
+        throw new Error('Order readback did not contain a status');
+      }
+      if (!Array.isArray(readback.body?.purchase_units)) {
+        throw new Error('Order readback did not contain purchase_units[]');
+      }
+      orderReadbackResult = {
+        verified: true,
+        orderId: idempotencyResult.orderId,
+        status: readback.body.status,
+      };
+    } catch (error) {
+      orderReadbackResult = {
+        verified: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  } else {
+    orderReadbackResult = {
+      verified: false,
+      error: 'no created order available to read back',
+    };
+  }
+
+  const ok = orderReadbackResult.verified
     && disputesResult.responseShapeVerified
     && idempotencyResult.sameOrderOnReplay;
 
   return {
     ok,
     sandbox: true,
-    transactionSearch: transactionSearchResult,
+    orderReadback: orderReadbackResult,
     disputes: disputesResult,
     idempotency: idempotencyResult,
     note: 'The created sandbox order is unapproved and captures no money; PayPal expires it automatically.',
