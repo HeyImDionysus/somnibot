@@ -6479,6 +6479,139 @@ describe('runPayPalReconciliation', () => {
     });
   });
 
+  // ── PR #409 review round 28 repairs ─────────────────────────────────────
+
+  it('fails closed on an advertised last payment with no timestamp', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': {
+          status: 'ACTIVE',
+          billing_info: {
+            last_payment: {
+              amount: { currency_code: 'USD', value: '25.00' },
+            },
+          },
+        },
+      },
+    });
+
+    expect(await runPayPalReconciliation(supabase as never, OPTS)).toMatchObject({
+      status: 'failed',
+      reason: 'subscription lookup returned a malformed record',
+      retriable: false,
+    });
+  });
+
+  it('fails closed on a payment identity with no timestamp', async () => {
+    withLedger({
+      payments: [paymentRow({ created_at: null })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({});
+
+    expect(await runPayPalReconciliation(supabase as never, OPTS)).toMatchObject({
+      status: 'failed',
+      reason: 'malformed local PayPal payment identity row',
+      retriable: false,
+    });
+  });
+
+  it('defers the full-refund remainder while a sibling is in flight', async () => {
+    // RA settled long ago and is judged; RB completed seconds ago and its
+    // webhook is in flight. The uncovered remainder belongs to RB — not a
+    // missing-refund alert.
+    const JUST_NOW = '2026-07-27T11:59:30.000Z';
+    withLedger({
+      payments: [paymentRow({ status: 'refunded' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'REF-A',
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        amount_cents: 1000,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject({ status: 'REFUNDED', value: '25.00' }) },
+      refunds: { 'REF-A': refundObject({ value: '10.00' }) },
+      orders: {
+        'PP-ORDER-1': {
+          status: 'COMPLETED',
+          purchase_units: [{
+            custom_id: IDENTITY_CUSTOM_FIELD,
+            payments: {
+              captures: [{
+                id: 'CAP-1',
+                status: 'REFUNDED',
+                amount: { currency_code: 'USD', value: '25.00' },
+              }],
+              refunds: [
+                {
+                  id: 'REF-A',
+                  status: 'COMPLETED',
+                  amount: { currency_code: 'USD', value: '10.00' },
+                  create_time: IN_WINDOW,
+                  links: [{
+                    rel: 'up',
+                    href: 'https://api-m.sandbox.paypal.com/v2/payments/captures/CAP-1',
+                  }],
+                },
+                {
+                  id: 'REF-B',
+                  status: 'COMPLETED',
+                  amount: { currency_code: 'USD', value: '15.00' },
+                  create_time: JUST_NOW,
+                  links: [{
+                    rel: 'up',
+                    href: 'https://api-m.sandbox.paypal.com/v2/payments/captures/CAP-1',
+                  }],
+                },
+              ],
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(
+      supabase as never,
+      { now: NOW, settlementLagMs: 15 * 60 * 1000 },
+    ));
+
+    expect(result.missingLocalPayments).toEqual([]);
+    expect(result.amountMismatches).toEqual([]);
+  });
+
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {
     withLedger({ payments: [paymentRow()] });
     scriptProviderObjects({ captures: { 'CAP-1': { __status: 503 } } });

@@ -358,6 +358,7 @@ interface LocalPaymentIdentityRow {
   order_id: string | null;
   guild_id: string | null;
   paypal_payment_id: string | null;
+  created_at: string | null;
 }
 
 type ScanResult<T> =
@@ -881,6 +882,23 @@ export async function fetchProviderSubscription(
     { last_payment?: { time?: unknown; amount?: unknown } } | undefined;
   const lastPayment = billing?.last_payment;
   const { amountCents, currency } = readProviderAmount(lastPayment?.amount);
+  // An ADVERTISED last payment is an atomic shape: normalizing a broken
+  // time or money to null silently skips every latest-charge divergence
+  // branch downstream. Absent last_payment (trials) remains legal.
+  if (lastPayment !== undefined) {
+    if (
+      typeof lastPayment.time !== 'string'
+      || !Number.isFinite(Date.parse(lastPayment.time))
+      || amountCents === null
+      || currency === null
+    ) {
+      return {
+        ok: false,
+        retriable: false,
+        reason: 'subscription lookup returned a malformed record',
+      };
+    }
+  }
   return {
     ok: true,
     found: true,
@@ -1642,7 +1660,7 @@ async function loadOrderPaymentIdentities(
       const pageSize = Math.min(LOCAL_PAGE_SIZE, remaining);
       const { data, error } = await supabase
         .from('payments')
-        .select('id, order_id, guild_id, paypal_payment_id')
+        .select('id, order_id, guild_id, paypal_payment_id, created_at')
         .eq('provider', 'paypal')
         .not('paypal_payment_id', 'is', null)
         .in('order_id', group)
@@ -2361,6 +2379,11 @@ async function runPass(
       || !order
       || identity.guild_id !== order.guild_id
       || !isProviderId(identity.paypal_payment_id)
+      // A NULL timestamp escapes every created_at-bounded scan while its
+      // identity still suppresses the order GET — nothing would ever
+      // verify the charge. Timestamps are load-bearing; fail closed.
+      || typeof identity.created_at !== 'string'
+      || !Number.isFinite(Date.parse(identity.created_at))
     ) {
       return {
         status: 'failed',
@@ -2995,7 +3018,13 @@ async function runPass(
       // failed to enumerate.
       if (input.providerStatusFullyRefunded) {
         const covered = Math.max(coveredLocalTotal, providerTotal);
-        if (covered < input.providerAmountCents) {
+        // An attributable sibling still inside the settlement lag owns the
+        // uncovered remainder: its webhook is legitimately in flight, and
+        // reporting its amount as missing manufactures a false critical.
+        // The old siblings above were still fully judged.
+        const attributableInFlight = input.providerRefunds !== null
+          && input.providerRefunds.inFlightParentIds.some(attributable);
+        if (covered < input.providerAmountCents && !attributableInFlight) {
           missingLocalPayments.push({
             kind: 'refund',
             transactionId: input.providerId,
