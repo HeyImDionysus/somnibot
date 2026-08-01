@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 241 migration files in packages/supabase/migrations/
+ * Source: 242 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1505,6 +1505,9 @@ export interface DbAutomationMassActionHolds {
   updated_at: string;
   execution_owner_token: string | null;
   execution_lease_expires_at: string | null;
+  progress_executed: number;
+  progress_failed: number;
+  progress_errors: Json;
 }
 
 export interface DbButtonRoles {

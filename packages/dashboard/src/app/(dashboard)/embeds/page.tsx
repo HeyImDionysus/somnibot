@@ -86,6 +86,9 @@ export default function EmbedBuilderPage() {
   // Send-to-channel state
   const [sendTargetId, setSendTargetId] = useState<string | null>(null);
   const [sendChannelId, setSendChannelId] = useState<string | null>(null);
+  // Fails closed: Send Now stays disabled until the picker proves a fresh
+  // snapshot, and re-disables when the authority window lapses mid-dialog.
+  const [sendChannelAuthoritative, setSendChannelAuthoritative] = useState(false);
   const [sending, setSending] = useState(false);
 
   const fetchEmbeds = useCallback(async () => {
@@ -442,7 +445,14 @@ export default function EmbedBuilderPage() {
               placeholder="Select channel…"
               channelTypes={['text', 'announcement']}
               requiredBotPermissions={['ViewChannel', 'SendMessages', 'EmbedLinks']}
+              onAuthorityChange={setSendChannelAuthoritative}
             />
+            {!sendChannelAuthoritative && sendChannelId && (
+              <p className="mt-2 text-xs text-discord-danger">
+                The channel snapshot has expired, so the bot&apos;s send permissions can no
+                longer be verified. Close and reopen this dialog to refresh it.
+              </p>
+            )}
             <div className="mt-6 flex justify-end gap-3">
               <button
                 onClick={() => { setSendTargetId(null); setSendChannelId(null); }}
@@ -456,7 +466,7 @@ export default function EmbedBuilderPage() {
                     sendEmbed(sendTargetId, sendChannelId);
                   }
                 }}
-                disabled={!sendChannelId || sending}
+                disabled={!sendChannelId || sending || !sendChannelAuthoritative}
                 className="flex items-center gap-2 rounded-input bg-discord-success px-4 py-2 text-sm font-medium text-white hover:bg-discord-success/80 transition-standard disabled:opacity-50"
               >
                 {sending ? (

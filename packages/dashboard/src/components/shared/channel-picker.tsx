@@ -133,6 +133,13 @@ interface ChannelPickerProps {
   className?: string;
   /** Bot permissions that must be proven by the live snapshot before selection. */
   requiredBotPermissions?: RequiredChannelPermission[];
+  /**
+   * Fires with the CURRENT snapshot authority, including the flip to false
+   * when the validity window lapses while a dialog stays open. A selection
+   * made from a fresh snapshot stays set after expiry, so pages must gate
+   * irreversible sends on this instead of the mere presence of an id.
+   */
+  onAuthorityChange?: (authoritative: boolean) => void;
 }
 
 // Channel type icon mapping
@@ -234,6 +241,22 @@ export function normalizeSnapshotChannels(payload: unknown): DiscordChannel[] {
   ] as DiscordChannel[];
 }
 
+/**
+ * Authority of a loaded snapshot AS OF nowMs. The component derives its
+ * permission gating AND the value surfaced through onAuthorityChange from
+ * this single definition, so page-level send gates and tests share exactly
+ * what the picker means by "still verifiable".
+ */
+export function snapshotAuthorityAsOf(
+  snapshotAuthoritative: boolean,
+  snapshotAtMs: number,
+  nowMs: number,
+): boolean {
+  return snapshotAuthoritative
+    && snapshotAtMs > 0
+    && nowMs - snapshotAtMs <= MAX_SNAPSHOT_AGE_MS;
+}
+
 async function fetchChannels(): Promise<ChannelSnapshot> {
   if (channelCache && Date.now() - channelCache.ts < CACHE_TTL) {
     return channelCache.data;
@@ -289,6 +312,7 @@ export function ChannelPicker({
   allowNone = false,
   className,
   requiredBotPermissions = [],
+  onAuthorityChange,
 }: ChannelPickerProps) {
   const [channels, setChannels] = useState<DiscordChannel[]>([]);
   const [snapshotAuthoritative, setSnapshotAuthoritative] = useState(false);
@@ -332,9 +356,19 @@ export function ChannelPicker({
   // Authority as of NOW, not as of mount. Once the snapshot outlives its
   // validity window the picker treats permissions as unverifiable again —
   // the same state a stale fetch would have produced.
-  const liveAuthoritative = snapshotAuthoritative
-    && snapshotAtMs > 0
-    && authorityNowMs - snapshotAtMs <= MAX_SNAPSHOT_AGE_MS;
+  const liveAuthoritative = snapshotAuthorityAsOf(
+    snapshotAuthoritative,
+    snapshotAtMs,
+    authorityNowMs,
+  );
+
+  // Surface authority OUTWARD, including the flip to false when the window
+  // lapses with the dialog still open: the selected id survives expiry, so a
+  // consumer gating only on the id would happily send into a channel whose
+  // required permissions are no longer verifiable.
+  useEffect(() => {
+    onAuthorityChange?.(liveAuthoritative);
+  }, [liveAuthoritative, onAuthorityChange]);
 
   const permissionIssue = useCallback(
     (channel: DiscordChannel): string | null =>

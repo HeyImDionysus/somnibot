@@ -103,6 +103,13 @@ export class ExecutionLogger {
               return { claimed: true, rowId: (retry.data as { id: string } | null)?.id ?? null };
             }
             // Lost the re-insert race to another shard: genuinely claimed.
+          } else {
+            // The row may instead be a STARTED claim whose worker died
+            // between the actions marker and finalize. It must never re-run
+            // — the reclaim above refuses marked rows by design — but no
+            // later writer exists either, so without this it reads
+            // 'Conditions not met' forever.
+            await this.finalizeStaleStartedClaim(params);
           }
         }
         return { claimed: false, rowId: null };
@@ -151,6 +158,36 @@ export class ExecutionLogger {
       );
     }
     return removed === true;
+  }
+
+  /**
+   * Terminalize a stale STARTED claim as interrupted (Definer-rights RPC,
+   * lock-then-check, age floor, no linked hold). Actions may have reached
+   * Discord, so the occurrence is never re-executed; only the history row
+   * turns truthful. True when this call terminalized the row.
+   */
+  private async finalizeStaleStartedClaim(params: ClaimParams): Promise<boolean> {
+    const staleBefore = new Date(Date.now() - STALE_PRE_ACTION_CLAIM_MS).toISOString();
+    const { data, error } = await this.supabase.rpc(
+      'finalize_stale_started_automation_execution',
+      {
+        p_guild_id: params.guildId,
+        p_automation_id: params.automationId,
+        p_occurrence_id: params.occurrenceId,
+        p_stale_before: staleBefore,
+      },
+    );
+    if (error) {
+      log.error('Failed to finalize a stale started claim:', error.message);
+      return false;
+    }
+    if (data === true) {
+      log.warn(
+        `Terminalized an interrupted execution for automation ${params.automationId} `
+        + `occurrence ${params.occurrenceId}; its worker died after the actions marker was set.`,
+      );
+    }
+    return data === true;
   }
 
   /**

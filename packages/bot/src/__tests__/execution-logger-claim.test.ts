@@ -91,6 +91,43 @@ describe('ExecutionLogger occurrence claim', () => {
     expect(supa._update).toHaveBeenCalled();
   });
 
+  it('terminalizes a stale STARTED claim as interrupted on redelivery (round 27)', async () => {
+    // A worker that died between the actions marker and finalize leaves the
+    // row pre-action shaped forever: the reclaim refuses marked rows by
+    // design and no later writer exists. The redelivery must invoke the
+    // interrupted-finalize RPC — and still never re-run the occurrence.
+    const supa = makeSupa({ data: null, error: { code: '23505', message: 'dup' } });
+    supa.rpc = vi.fn(async (fn: string) => {
+      if (fn === 'reclaim_stale_automation_execution') return { data: false, error: null };
+      if (fn === 'finalize_stale_started_automation_execution') return { data: true, error: null };
+      return { data: null, error: null };
+    });
+    const logger = new ExecutionLogger(supa);
+
+    const res = await logger.claim(CLAIM);
+
+    expect(res).toEqual({ claimed: false, rowId: null });
+    const finalizeCall = (supa.rpc as ReturnType<typeof vi.fn>).mock.calls
+      .find((call: unknown[]) => call[0] === 'finalize_stale_started_automation_execution');
+    expect(finalizeCall).toBeDefined();
+    expect((finalizeCall![1] as Record<string, unknown>).p_occurrence_id).toBe(CLAIM.occurrenceId);
+    expect((finalizeCall![1] as Record<string, unknown>).p_automation_id).toBe(CLAIM.automationId);
+  });
+
+  it('skips started-claim finalization when the pre-action reclaim already removed the row', async () => {
+    const supa = makeSupa({ data: null, error: { code: '23505', message: 'dup' } });
+    supa.rpc = vi.fn(async (fn: string) => {
+      if (fn === 'reclaim_stale_automation_execution') return { data: true, error: null };
+      return { data: null, error: null };
+    });
+    const logger = new ExecutionLogger(supa);
+
+    await logger.claim(CLAIM);
+
+    const calls = (supa.rpc as ReturnType<typeof vi.fn>).mock.calls.map((call: unknown[]) => call[0]);
+    expect(calls).not.toContain('finalize_stale_started_automation_execution');
+  });
+
   it('releases a proven-unused occurrence claim by row id', async () => {
     const supa = makeSupa({ data: { id: 'row-1' }, error: null });
     const logger = new ExecutionLogger(supa);

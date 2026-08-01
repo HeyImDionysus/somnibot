@@ -1215,7 +1215,7 @@ export class AutomationEngine {
       if (renewalInFlight || leaseError) return;
       renewalInFlight = true;
       try {
-        await this.massActionHolds.renewExecutionLease(hold.id);
+        await this.massActionHolds.renewExecutionLease(hold.id, heldProgress);
         leaseDeadlineMs = Date.now() + AutomationEngine.HOLD_EXECUTION_LEASE_MS;
       } catch (error) {
         leaseError = error instanceof Error ? error : new Error(String(error));

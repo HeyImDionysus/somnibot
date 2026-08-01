@@ -621,7 +621,10 @@ describe('AutomationEngine', () => {
       // no skipCountBump — so approved holds advance "Fired Nx".
       expect(mockFinalizeStrict.mock.calls[0][2]).toBeUndefined();
       expect(mockMassComplete).toHaveBeenCalledWith('hold-1');
-      expect(mockMassRenewLease).toHaveBeenCalledWith('hold-1');
+      expect(mockMassRenewLease).toHaveBeenCalledWith(
+        'hold-1',
+        expect.objectContaining({ executed: 2, failed: 0 }),
+      );
       expect(eventBus.emit).toHaveBeenCalledWith(
         'automation.executed',
         'g1',

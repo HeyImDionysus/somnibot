@@ -88,6 +88,12 @@ function makeSupa(options: {
     return chain;
   });
   const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    if (name === 'finalize_stale_started_automation_execution') {
+      // Round 27: a failed reclaim legitimately falls through to the
+      // started-claim finalizer. Neutral here — these suites exercise the
+      // reclaim CAS itself.
+      return { data: false, error: null };
+    }
     if (name !== 'reclaim_stale_automation_execution') {
       throw new Error(`Unexpected RPC ${name}`);
     }

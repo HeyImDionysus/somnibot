@@ -211,13 +211,22 @@ export class MassActionHoldService {
     return (rows[0] as MassActionHoldRow | undefined) ?? null;
   }
 
-  async renewExecutionLease(holdId: string): Promise<void> {
+  async renewExecutionLease(
+    holdId: string,
+    progress?: { executed: number; failed: number; errors: string[] },
+  ): Promise<void> {
     const { data, error } = await this.supabase.rpc(
       'renew_automation_mass_action_hold_lease',
       {
         p_hold_id: holdId,
         p_guild_id: this.guild.id,
         p_owner_token: this.executionOwnerToken,
+        // Durable lower bound: lease-expiry recovery restores these instead
+        // of finalizing a crashed run as '0 actions OK'. Null leaves the
+        // last persisted values untouched.
+        p_progress_executed: progress?.executed ?? null,
+        p_progress_failed: progress?.failed ?? null,
+        p_progress_errors: progress ? progress.errors.slice(0, 20) : null,
       },
     );
     if (error) throw new Error(`Failed to renew mass-action execution lease: ${error.message}`);
