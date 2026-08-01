@@ -96,6 +96,8 @@ export interface ProviderOrderCapture {
   status: string;
   amountCents: number;
   currency: string;
+  /** Provider-side creation time; null when the API omits it. */
+  createTimeMs: number | null;
 }
 
 export interface ProviderOrderRefund {
@@ -114,6 +116,8 @@ export interface ProviderSaleObject {
   currency: string;
   /** The parent subscription (billing agreement) — cross-tenant guard. */
   billingAgreementId: string | null;
+  /** When the sale last changed state; null when the API omits it. */
+  updateTimeMs: number | null;
 }
 
 /** v1 refund object — refunds of subscription sales live on the v1 API. */
@@ -143,6 +147,8 @@ export interface ProviderSubscriptionObject {
   customId: string | null;
   /** The PayPal plan the provider says this subscription bills. */
   planId: string | null;
+  /** When the provider status last changed; null when the API omits it. */
+  statusUpdateTimeMs: number | null;
 }
 
 /** One transaction from /v1/billing/subscriptions/{id}/transactions. */
@@ -615,11 +621,15 @@ export async function fetchProviderOrder(
       ) {
         return { ok: false, retriable: false, reason: 'order lookup returned a malformed record' };
       }
+      const captureCreateMs = typeof captureRecord.create_time === 'string'
+        ? Date.parse(captureRecord.create_time)
+        : Number.NaN;
       captures.push({
         id: captureRecord.id,
         status: captureRecord.status,
         amountCents,
         currency,
+        createTimeMs: Number.isFinite(captureCreateMs) ? captureCreateMs : null,
       });
     }
   }
@@ -679,6 +689,12 @@ export async function fetchProviderSale(
       billingAgreementId: isProviderId(record.billing_agreement_id)
         ? record.billing_agreement_id
         : null,
+      updateTimeMs: (() => {
+        const parsed = typeof record.update_time === 'string'
+          ? Date.parse(record.update_time)
+          : Number.NaN;
+        return Number.isFinite(parsed) ? parsed : null;
+      })(),
     },
   };
 }
@@ -757,6 +773,12 @@ export async function fetchProviderSubscription(
         ? record.custom_id
         : null,
       planId: isProviderId(record.plan_id) ? record.plan_id : null,
+      statusUpdateTimeMs: (() => {
+        const parsed = typeof record.status_update_time === 'string'
+          ? Date.parse(record.status_update_time)
+          : Number.NaN;
+        return Number.isFinite(parsed) ? parsed : null;
+      })(),
     },
   };
 }
@@ -1371,18 +1393,27 @@ async function lookupRefundsByExactColumn(
   if (values.length === 0) return { ok: true, rows: [] };
   const found: LocalRefundRow[] = [];
   for (const group of chunks([...new Set(values)], EXACT_LOOKUP_CHUNK_SIZE)) {
-    const { data, error } = await supabase
-      .from('payment_refunds')
-      .select(LOCAL_REFUND_SELECT)
-      .in(column, group);
-    if (error) {
-      return {
-        ok: false,
-        retriable: true,
-        reason: `exact local refund lookup failed: ${error.message}`,
-      };
+    // One payment can carry MANY refund siblings: page each group with a
+    // stable order — an unpaged read silently truncates at the PostgREST
+    // response cap and a partial aggregate fakes parity.
+    for (let from = 0; ; from += LOCAL_PAGE_SIZE) {
+      const { data, error } = await supabase
+        .from('payment_refunds')
+        .select(LOCAL_REFUND_SELECT)
+        .in(column, group)
+        .order('id', { ascending: true })
+        .range(from, from + LOCAL_PAGE_SIZE - 1);
+      if (error) {
+        return {
+          ok: false,
+          retriable: true,
+          reason: `exact local refund lookup failed: ${error.message}`,
+        };
+      }
+      const page = (data ?? []) as LocalRefundRow[];
+      found.push(...page);
+      if (page.length < LOCAL_PAGE_SIZE) break;
     }
-    found.push(...(data ?? []) as LocalRefundRow[]);
   }
   return { ok: true, rows: found };
 }
@@ -2505,8 +2536,14 @@ async function runPass(
     const order = ordersById.get(payment.order_id as string);
     const guildId = payment.guild_id as string;
     const providerId = payment.paypal_payment_id as string;
+    // An order that CLAIMS settlement demands provider evidence even when
+    // its only payment row is pending/failed: entitlements follow the order,
+    // and a nonterminal row must not exempt the claim from proof.
+    const orderClaimsSettlement = Boolean(
+      order && SETTLED_ORDER_STATUSES.includes(order.status),
+    );
     if (!lookup.found) {
-      if (isSettledPair(payment, order)) {
+      if (isSettledPair(payment, order) || orderClaimsSettlement) {
         missingProviderPayments.push({
           kind: 'payment',
           orderId: payment.order_id as string,
@@ -2559,7 +2596,7 @@ async function runPass(
       });
       continue;
     }
-    if (!settledAtProvider && isSettledPair(payment, order)) {
+    if (!settledAtProvider && (isSettledPair(payment, order) || orderClaimsSettlement)) {
       // The ledger (and entitlements) claim settled money the provider says
       // is PENDING/DECLINED/etc. The window already starts a settlement lag
       // behind now, so this is a material disagreement, not ordinary lag.
@@ -2658,7 +2695,12 @@ async function runPass(
     ) {
       return { status: 'failed', reason: 'provider identity conflict', retriable: false };
     }
-    if (['refunded', 'partially_refunded', 'reversed'].includes(sale.state)) {
+    if (
+      ['refunded', 'partially_refunded', 'reversed'].includes(sale.state)
+      // A sale whose state changed inside the settlement lag has its refund
+      // webhook legitimately in flight — the next pass owns it.
+      && !(sale.updateTimeMs !== null && sale.updateTimeMs > windowEndMs)
+    ) {
       // The v1 sale exposes no refund-sibling list; the sale state bounds
       // the aggregate (documented boundary). REVERSED is a full-reversal
       // terminal state and is judged like a full refund.
@@ -2849,7 +2891,10 @@ async function runPass(
         ) {
           return { status: 'failed', reason: 'provider identity conflict', retriable: false };
         }
-        if (['refunded', 'partially_refunded', 'reversed'].includes(lookup.value.state)) {
+        if (
+          ['refunded', 'partially_refunded', 'reversed'].includes(lookup.value.state)
+          && !(lookup.value.updateTimeMs !== null && lookup.value.updateTimeMs > windowEndMs)
+        ) {
           pageRefunded.push({
             payment,
             fullyRefunded: lookup.value.state === 'refunded' || lookup.value.state === 'reversed',
@@ -3126,6 +3171,9 @@ async function runPass(
       // (settlement, amounts, refunds); reporting it again here would double
       // count. Only captures with NO local row are this path's finding.
       if (localByProviderId.has(capture.id)) continue;
+      // A capture created inside the settlement lag has its payment webhook
+      // legitimately in flight — the next pass owns it.
+      if (capture.createTimeMs !== null && capture.createTimeMs > windowEndMs) continue;
       // The buyer's money settled at PayPal and no local payment row
       // exists — the customer may have paid and received nothing.
       missingLocalPayments.push({
@@ -3379,10 +3427,16 @@ async function runPass(
           orderStatus: order.status,
         });
       }
+      // The lag anchors on the provider's own transition time when it is
+      // known (activation can happen long after order creation); the order
+      // age remains the fallback guard.
+      const activationSettled = subscription.statusUpdateTimeMs !== null
+        ? subscription.statusUpdateTimeMs <= windowEndMs
+        : String(order.created_at ?? '') <= windowEnd;
       if (
         subscription.status === 'ACTIVE'
         && (order.status === 'pending' || order.status === 'pending_review')
-        && String(order.created_at ?? '') <= windowEnd
+        && activationSettled
       ) {
         // Lost BILLING.SUBSCRIPTION.ACTIVATED: PayPal activated (free trials
         // may legitimately never show a payment) but activation fulfillment
@@ -3411,8 +3465,12 @@ async function runPass(
       // must CORRELATE with the latest charge in time: daily plans bill
       // several times per window, and an older renewal must not stand in for
       // the latest charge whose webhook was lost.
+      const SETTLED_ROW_STATUSES = ['completed', 'refunded', 'reversed'];
       const settledWindowPayments = orderWindowPayments.filter((payment) => {
-        if (payment.status !== 'completed') return false;
+        // Refunded/reversed rows are terminal SETTLED states — the sale pass
+        // already judged their reversal ledgers; only pending/failed rows
+        // mean the charge never settled locally.
+        if (!SETTLED_ROW_STATUSES.includes(payment.status)) return false;
         if (!lastPaymentInWindow) return true;
         const createdMs = Date.parse(String(payment.created_at ?? ''));
         return Number.isFinite(createdMs)
@@ -3420,7 +3478,7 @@ async function runPass(
       });
       if (lastPaymentInWindow && settledWindowPayments.length === 0) {
         const hasNonSettledRow = orderWindowPayments.some(
-          (payment) => payment.status !== 'completed',
+          (payment) => !SETTLED_ROW_STATUSES.includes(payment.status),
         );
         if (hasNonSettledRow) {
           // Provider billed; a local row exists but never settled.
@@ -3447,8 +3505,14 @@ async function runPass(
       // (daily plans hit this naturally). Only a stale or missing latest
       // payment makes local settled sales unevidenced.
       const lastPaymentFresh = Number.isFinite(lastPaymentMs) && lastPaymentMs > windowEndMs;
-      if (!lastPaymentInWindow && !lastPaymentFresh && settledWindowPayments.length > 0) {
-        const latest = settledWindowPayments.reduce((best, candidate) =>
+      // Only money the ledger claims KEPT needs billing evidence — a
+      // refunded/reversed row's evidence is the sale object itself, which
+      // the sale pass already verified.
+      const keptWindowPayments = settledWindowPayments.filter(
+        (payment) => payment.status === 'completed',
+      );
+      if (!lastPaymentInWindow && !lastPaymentFresh && keptWindowPayments.length > 0) {
+        const latest = keptWindowPayments.reduce((best, candidate) =>
           String(candidate.created_at ?? '') > String(best.created_at ?? '') ? candidate : best,
         );
         missingProviderPayments.push({
