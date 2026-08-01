@@ -2734,7 +2734,16 @@ describe('runPayPalReconciliation', () => {
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.unsettledLocalPayments).toEqual([]);
+    // Round 17: the refunded pair is settled (no pending/failed noise), and
+    // the STILL-ACTIVE billing agreement behind the refunded order is its
+    // own divergence — PayPal keeps charging a customer with nothing.
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'SUB-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'subscription_active_after_refund',
+      orderStatus: 'refunded',
+    }]);
     expect(result.missingLocalPayments).toEqual([]);
   });
 
@@ -4184,6 +4193,150 @@ describe('runPayPalReconciliation', () => {
       kind: 'refund',
       transactionId: 'SALE-MON',
     }));
+  });
+
+  // ── PR #409 review round 17 repairs ───────────────────────────────────────
+
+  it('flags a provider SUSPENSION behind a cancellation-family head', async () => {
+    // The cancellation (priority 60) outranks the suspension threshold, but
+    // it is the WRONG family: the suspension transition and its distinct
+    // fulfillment were never observed.
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    resolvers['commerce_subscription_lifecycle_heads'] = () => ({
+      data: [{
+        paypal_subscription_id: 'SUB-1',
+        last_event_priority: 60,
+        last_provider_event_type: 'BILLING.SUBSCRIPTION.CANCELLED',
+        last_webhook_event_id: 'WH-CANCEL',
+      }],
+      error: null,
+    });
+    resolvers['bot_action_queue'] = (op) => {
+      const wantsStaged = op.filters.some(
+        (f) => f.method === 'eq' && f.args[0] === 'status' && f.args[1] === 'staged',
+      );
+      return {
+        data: wantsStaged
+          ? []
+          : [{
+              idempotency_key: 'paypal:lifecycle:WH-CANCEL:subscription_cancelled',
+              status: 'completed',
+            }],
+        error: null,
+      };
+    };
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'SUSPENDED', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'SUB-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'subscription_suspended',
+      orderStatus: 'completed',
+    }]);
+  });
+
+  it('flags an ACTIVE billing agreement behind a refunded order', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'ACTIVE', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'SUB-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'subscription_active_after_refund',
+      orderStatus: 'refunded',
+    }]);
+  });
+
+  // ── PR #409 review round 17 repairs ───────────────────────────────────────
+
+  it('does not let a cancellation head satisfy a provider SUSPENSION', async () => {
+    // Priority alone (60 >= 50) and the healthy cancellation action both
+    // belong to a DIFFERENT transition: the provider's current suspension
+    // and its distinct subscription_suspended fulfillment were never
+    // observed.
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    resolvers['commerce_subscription_lifecycle_heads'] = () => ({
+      data: [{
+        paypal_subscription_id: 'SUB-1',
+        last_event_priority: 60,
+        last_provider_event_type: 'BILLING.SUBSCRIPTION.CANCELLED',
+        last_webhook_event_id: 'WH-CANCEL',
+      }],
+      error: null,
+    });
+    resolvers['bot_action_queue'] = (op) => {
+      const wantsStaged = op.filters.some(
+        (f) => f.method === 'eq' && f.args[0] === 'status' && f.args[1] === 'staged',
+      );
+      return {
+        data: wantsStaged
+          ? []
+          : [{
+              idempotency_key: 'paypal:lifecycle:WH-CANCEL:subscription_cancelled',
+              status: 'completed',
+            }],
+        error: null,
+      };
+    };
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'SUSPENDED', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'SUB-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'subscription_suspended',
+      orderStatus: 'completed',
+    }]);
   });
 
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {

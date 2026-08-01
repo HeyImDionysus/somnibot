@@ -3705,11 +3705,22 @@ async function runPass(
       // or operator-held — the head is committed BEFORE the action write,
       // so head-parity alone cannot prove access was revoked.
       const expectedActionKey = expectedActionKeyBySubscription.get(subscriptionId);
+      // The head must match the provider's terminal FAMILY: a cancellation
+      // head (priority 60) must not satisfy a provider SUSPENSION whose
+      // distinct subscription_suspended fulfillment was never observed.
+      const HEAD_EVENTS_BY_PROVIDER_STATUS: Record<string, string[]> = {
+        SUSPENDED: ['BILLING.SUBSCRIPTION.SUSPENDED'],
+        CANCELLED: ['BILLING.SUBSCRIPTION.CANCELLED', 'BILLING.SUBSCRIPTION.EXPIRED'],
+        EXPIRED: ['BILLING.SUBSCRIPTION.EXPIRED', 'BILLING.SUBSCRIPTION.CANCELLED'],
+      };
+      const matchingHeadFamily = HEAD_EVENTS_BY_PROVIDER_STATUS[subscription.status];
       if (
         expectedPriority !== undefined
         && transitionSettled
         && (
           (lifecycleHeads.get(subscriptionId)?.priority ?? 0) < expectedPriority
+          || (matchingHeadFamily !== undefined
+            && !matchingHeadFamily.includes(head.eventType ?? ''))
           || expectedActionKey === undefined
           || !healthyActionKeys.has(expectedActionKey)
         )
@@ -3766,6 +3777,23 @@ async function runPass(
           guildId,
           orderId: order.id,
           paymentStatus: 'subscription_activation_unreleased',
+          orderStatus: order.status,
+        });
+      }
+      if (
+        subscription.status === 'ACTIVE'
+        && order.status === 'refunded'
+        && (subscription.statusUpdateTimeMs === null
+          || subscription.statusUpdateTimeMs <= windowEndMs)
+      ) {
+        // The refund revoked local access, but refunding a sale does not
+        // cancel the billing agreement: PayPal keeps charging a customer
+        // who has nothing. Surface for cancellation replay.
+        unsettledLocalPayments.push({
+          transactionId: subscriptionId,
+          guildId,
+          orderId: order.id,
+          paymentStatus: 'subscription_active_after_refund',
           orderStatus: order.status,
         });
       }
