@@ -576,7 +576,7 @@ describe('AutomationEngine', () => {
 
       expect(mockMassClaimApproved).toHaveBeenCalledWith('hold-1');
       expect(mockExecuteActions).toHaveBeenCalledTimes(2);
-      expect(mockFinalize).toHaveBeenCalledWith(
+      expect(mockFinalizeStrict).toHaveBeenCalledWith(
         'exec-1',
         expect.objectContaining({ actionsExecuted: 2, actionsFailed: 0 }),
       );

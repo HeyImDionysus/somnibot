@@ -420,7 +420,10 @@ describe('StatsChannelManager — abort survivors are durably recovered (round 1
     const guild = makeGuild({ created });
     const mgr = new StatsChannelManager(guild, supabase, 60);
     await mgr.start().catch(() => {});
-    // Recovery: the database is reachable again.
+    // Recovery: the database is reachable again, and the created channel is
+    // visible in the guild cache (round 24: a VANISHED channel must raise the
+    // deleted-counter alert instead of resuming bookkeeping).
+    (guild.channels.cache as Map<string, unknown>).set('vc-maybe', created);
     options.identityWriteFails = false;
     options.identityReadBackFails = false;
     await (mgr as unknown as { updateAll(): Promise<void> }).updateAll().catch(() => {});

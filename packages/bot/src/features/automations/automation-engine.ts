@@ -1133,8 +1133,14 @@ export class AutomationEngine {
           memberCache.set(memberId, member);
         }
         if (!member) {
-          total.failed += 1;
-          total.errors.push(`member ${memberId}: target no longer belongs to the guild`);
+          // Through add() so the failure and its explanation reach the
+          // OUTWARD progress mirror — an interruption later in the run must
+          // not omit this action from execution history.
+          add({
+            executed: 0,
+            failed: 1,
+            errors: [`member ${memberId}: target no longer belongs to the guild`],
+          });
           continue;
         }
         // PROVISIONAL hint, registered before the Discord call: give/remove
@@ -1271,6 +1277,11 @@ export class AutomationEngine {
       // condition-matched targets without touching counters (a rejected hold
       // must not burn capacity), so an approval landing later still honours
       // limits filled by newer activity in the meantime.
+      // Durable point of no return FIRST — mirroring the immediate path: a
+      // marker failure must reach the catch with the Valkey counters still
+      // untouched, not after the filter consumed one-per-window budgets for
+      // an occurrence that then terminalizes without running anything.
+      await this.executionLogger.markActionsStarted(hold.execution_id);
       const loadedAutomation = this.loader
         .getForTrigger(hold.trigger_event)
         .find((candidate) => candidate.id === hold.automation_id);
@@ -1283,8 +1294,6 @@ export class AutomationEngine {
         } as LoadedAutomation),
         hold.member_ids,
       );
-      // Same durable point of no return as the immediate path.
-      await this.executionLogger.markActionsStarted(hold.execution_id);
       let result: { executed: number; failed: number; errors: string[] };
       try {
         result = await this.executeResolvedActions(
@@ -1318,7 +1327,11 @@ export class AutomationEngine {
         errors: result.errors,
         durationMs: Date.now() - startTime,
       };
-      await this.executionLogger.finalize(hold.execution_id, executionResult);
+      // Strict: a hold may only turn terminal with its history truthfully
+      // written. A transient failure here lands in the catch, which either
+      // finalizes with progress or leaves the hold executing for the
+      // lease-expiry RPC to finalize transactionally.
+      await this.executionLogger.finalizeStrict(hold.execution_id, executionResult);
       const automationName = await this.automationName(hold.automation_id);
       if (result.failed > 0) {
         const failureMessage = result.errors.join('; ') || `${result.failed} action(s) failed`;

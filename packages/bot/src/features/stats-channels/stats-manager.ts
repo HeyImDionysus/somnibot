@@ -150,14 +150,22 @@ export class StatsChannelManager {
               channelId = ambiguousId;
               const resolvedChannel =
                 this.guild.channels.cache.get(ambiguousId) as VoiceChannel | undefined;
-              if (resolvedChannel) {
-                await resolvedChannel.setName(newName).catch((renameError) => {
-                  log.warn('Recovered stats counter could not be renamed this tick:', {
-                    statsChannelId: config.id,
-                    error: String(renameError),
-                  });
-                });
+              if (!resolvedChannel) {
+                // The identity persisted but the channel was DELETED during
+                // the outage. Falling through would write last_value and
+                // resolve the failure alert, and the unchanged-value shortcut
+                // would then hide the deletion forever — raise the
+                // deleted-counter alert instead and skip this tick's
+                // bookkeeping.
+                await this.raiseChannelDeletedAlert(config);
+                continue;
               }
+              await resolvedChannel.setName(newName).catch((renameError) => {
+                log.warn('Recovered stats counter could not be renamed this tick:', {
+                  statsChannelId: config.id,
+                  error: String(renameError),
+                });
+              });
             } else if (retry.outcome === 'lost_race') {
               // Another process registered its own counter meanwhile; ours is
               // a duplicate — dispose durably, never blind-delete.
