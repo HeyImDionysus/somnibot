@@ -507,7 +507,7 @@ describe('per-object provider fetchers', () => {
     expect(result).toEqual({
       ok: true,
       found: true,
-      value: { status: 'COMPLETED', amountCents: 1999, currency: 'USD', relatedOrderId: null },
+      value: { status: 'COMPLETED', amountCents: 1999, currency: 'USD', relatedOrderId: null, updateTimeMs: null },
     });
   });
 
@@ -1654,9 +1654,10 @@ describe('runPayPalReconciliation', () => {
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
+    // Reported by the MISSING SIBLING's own id — the id operators replay.
     expect(result.missingLocalPayments).toEqual([{
       kind: 'refund',
-      transactionId: 'CAP-1',
+      transactionId: 'REF-LOST',
       guildId: GUILD_ID,
       amountCents: 1000,
       currency: 'USD',
@@ -1905,19 +1906,30 @@ describe('runPayPalReconciliation', () => {
       }],
     });
     resolvers['commerce_subscription_lifecycle_heads'] = () => ({
-      data: [{ paypal_subscription_id: 'SUB-1', last_event_priority: 60 }],
-      error: null,
-    });
-    // Round 8: the head alone is not enough — the fulfillment ACTION that
-    // revoked access must exist in a healthy state too.
-    resolvers['bot_action_queue'] = () => ({
       data: [{
-        action: 'fulfill_cancellation',
-        status: 'completed',
-        payload: { order_id: ORDER_UUID },
+        paypal_subscription_id: 'SUB-1',
+        last_event_priority: 60,
+        last_provider_event_type: 'BILLING.SUBSCRIPTION.CANCELLED',
+        last_webhook_event_id: 'WH-1',
       }],
       error: null,
     });
+    // Rounds 8-9: the head alone is not enough — the fulfillment ACTION for
+    // THIS transition (keyed by the head's webhook event) must be healthy.
+    resolvers['bot_action_queue'] = (op) => {
+      const wantsStaged = op.filters.some(
+        (f) => f.method === 'eq' && f.args[0] === 'status' && f.args[1] === 'staged',
+      );
+      return {
+        data: wantsStaged
+          ? []
+          : [{
+              idempotency_key: 'paypal:lifecycle:WH-1:subscription_cancelled',
+              status: 'completed',
+            }],
+        error: null,
+      };
+    };
     scriptProviderObjects({
       subscriptions: {
         'SUB-1': subscriptionObject({ status: 'CANCELLED', lastPaymentTime: null }),
@@ -2212,10 +2224,20 @@ describe('runPayPalReconciliation', () => {
         plan_id: PLAN_UUID,
       }],
     });
-    resolvers['plans'] = () => ({
-      data: [{ id: PLAN_UUID, paypal_plan_id: 'P-LOCAL' }],
-      error: null,
-    });
+    resolvers['bot_action_queue'] = (op) => {
+      const wantsStaged = op.filters.some(
+        (f) => f.method === 'eq' && f.args[0] === 'status' && f.args[1] === 'staged',
+      );
+      return {
+        data: wantsStaged
+          ? []
+          : [{
+              payload: { order_id: ORDER_UUID, paypal_plan_id: 'P-LOCAL' },
+              status: 'completed',
+            }],
+        error: null,
+      };
+    };
     scriptProviderObjects({
       subscriptions: {
         'SUB-1': subscriptionObject({ lastPaymentTime: null, planId: 'P-OTHER' }),
@@ -3065,6 +3087,196 @@ describe('runPayPalReconciliation', () => {
       status: 'failed',
       retriable: true,
     });
+  });
+
+  // ── PR #409 review round 9 repairs ────────────────────────────────────────
+
+  it('does not let an OLD completed action mask the current lost transition', async () => {
+    // Suspended, reactivated, suspended again: the head names the SECOND
+    // suspension's webhook, and only an action keyed by THAT event counts.
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    resolvers['commerce_subscription_lifecycle_heads'] = () => ({
+      data: [{
+        paypal_subscription_id: 'SUB-1',
+        last_event_priority: 50,
+        last_provider_event_type: 'BILLING.SUBSCRIPTION.SUSPENDED',
+        last_webhook_event_id: 'WH-SECOND',
+      }],
+      error: null,
+    });
+    resolvers['bot_action_queue'] = (op) => {
+      const wantsStaged = op.filters.some(
+        (f) => f.method === 'eq' && f.args[0] === 'status' && f.args[1] === 'staged',
+      );
+      return {
+        data: wantsStaged
+          ? []
+          // Only the FIRST suspension's action exists.
+          : [{
+              idempotency_key: 'paypal:lifecycle:WH-FIRST:subscription_suspended',
+              status: 'completed',
+            }],
+        error: null,
+      };
+    };
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'SUSPENDED', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'SUB-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'subscription_suspended',
+      orderStatus: 'completed',
+    }]);
+  });
+
+  it('reports a partially refunded sale behind a FULL reversal witness', async () => {
+    withLedger({
+      payments: [paymentRow({ paypal_payment_id: 'SALE-1', status: 'reversed' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'SALE-1',
+        event_type: 'PAYMENT.SALE.REVERSED',
+        amount_cents: 2500,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-1': saleObject({ state: 'partially_refunded', total: '25.00' }) },
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    // The witness claims a full reversal the provider does not corroborate.
+    expect(result.missingProviderPayments).toContainEqual(expect.objectContaining({
+      kind: 'refund',
+      paypalPaymentIds: ['SALE-1'],
+    }));
+  });
+
+  it('defers the status-only refund fallback while the capture is in the lag', async () => {
+    const JUST_NOW = '2026-07-27T11:59:30.000Z';
+    withLedger({
+      payments: [paymentRow()],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-1': {
+          ...captureObject({ status: 'REFUNDED', value: '25.00' }),
+          update_time: JUST_NOW,
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(
+      supabase as never,
+      { now: NOW, settlementLagMs: 15 * 60 * 1000 },
+    ));
+
+    // No parent order to enumerate and the capture just flipped: in flight.
+    expect(result.missingLocalPayments).toEqual([]);
+  });
+
+  it('catches sibling identity drift even when the totals agree', async () => {
+    withLedger({
+      payments: [paymentRow({ status: 'refunded' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'REF-WRONG',
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        amount_cents: 1000,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-1': captureObject({
+          status: 'PARTIALLY_REFUNDED',
+          value: '25.00',
+          relatedOrderId: 'PP-ORDER-1',
+        }),
+      },
+      refunds: { 'REF-WRONG': refundObject({ value: '10.00', parentCaptureId: 'CAP-1' }) },
+      orders: {
+        'PP-ORDER-1': {
+          status: 'COMPLETED',
+          purchase_units: [{
+            custom_id: IDENTITY_CUSTOM_FIELD,
+            payments: {
+              captures: [{
+                id: 'CAP-1',
+                status: 'PARTIALLY_REFUNDED',
+                amount: { currency_code: 'USD', value: '25.00' },
+              }],
+              refunds: [
+                { id: 'REF-RIGHT', status: 'COMPLETED', amount: { currency_code: 'USD', value: '10.00' } },
+              ],
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    // Same aggregate, wrong sibling id: REF-RIGHT is still reported missing.
+    expect(result.missingLocalPayments).toContainEqual(expect.objectContaining({
+      kind: 'refund',
+      transactionId: 'REF-RIGHT',
+      referenceId: 'CAP-1',
+    }));
   });
 
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {

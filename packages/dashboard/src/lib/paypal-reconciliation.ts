@@ -81,6 +81,8 @@ export interface ProviderCaptureObject {
   currency: string;
   /** Parent order from supplementary_data.related_ids — cross-tenant guard. */
   relatedOrderId: string | null;
+  /** When the capture last changed; null when the API omits it. */
+  updateTimeMs: number | null;
 }
 
 export interface ProviderRefundObject {
@@ -509,6 +511,12 @@ export async function fetchProviderCapture(
       amountCents,
       currency,
       relatedOrderId: isProviderId(related?.order_id) ? related.order_id : null,
+      updateTimeMs: (() => {
+        const parsed = typeof record.update_time === 'string'
+          ? Date.parse(record.update_time)
+          : Number.NaN;
+        return Number.isFinite(parsed) ? parsed : null;
+      })(),
     },
   };
 }
@@ -2343,6 +2351,7 @@ async function runPass(
     && ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(lookup.value.status),
   );
   const localRefundTotalsByPaymentRow = new Map<string, number>();
+  const localRefundIdsByPaymentRow = new Map<string, Set<string>>();
   const refundTotalParentById = new Map<string, LocalPaymentRow>();
   const loadLocalRefundTotals = async (parents: LocalPaymentRow[]) => {
     for (const parent of parents) refundTotalParentById.set(parent.id, parent);
@@ -2365,7 +2374,10 @@ async function runPass(
         retriable: validated.retriable,
       };
     }
-    for (const id of missing) localRefundTotalsByPaymentRow.set(id, 0);
+    for (const id of missing) {
+      localRefundTotalsByPaymentRow.set(id, 0);
+      localRefundIdsByPaymentRow.set(id, new Set());
+    }
     for (const refund of validated.rows) {
       // Symmetric with the provider aggregate: a refund row younger than the
       // window end (its provider twin deliberately excluded as in-flight)
@@ -2394,6 +2406,7 @@ async function runPass(
         (localRefundTotalsByPaymentRow.get(key) ?? 0)
           + Math.max(0, refund.amount_cents as number),
       );
+      localRefundIdsByPaymentRow.get(key)?.add(refund.paypal_refund_id);
     }
     return null;
   };
@@ -2404,10 +2417,10 @@ async function runPass(
     if (totalsFailure) return totalsFailure;
   }
 
-  const orderRefundTotals = new Map<string, number | null>();
+  const orderRefundLists = new Map<string, ProviderOrderRefund[] | null>();
   const loadOrderRefundTotals = async (orderProviderIds: string[]) => {
     const targets = [...new Set(orderProviderIds)].filter(
-      (id) => !orderRefundTotals.has(id),
+      (id) => !orderRefundLists.has(id),
     );
     if (targets.length === 0) return null;
     const map = await mapChunkedWithHeartbeat(
@@ -2427,17 +2440,16 @@ async function runPass(
           retriable: lookup.retriable,
         };
       }
-      orderRefundTotals.set(
+      orderRefundLists.set(
         providerOrderId,
         lookup.found
           ? lookup.value.refunds
             // The settlement lag applies to provider-side refunds too: a
             // refund issued moments ago has its webhook legitimately in
             // flight, so refunds younger than the window end are excluded
-            // from the aggregate (unknown times count as old).
+            // (unknown times count as old).
             .filter((refund) => refund.status === 'COMPLETED'
               && (refund.createTimeMs === null || refund.createTimeMs <= windowEndMs))
-            .reduce((sum, refund) => sum + refund.amountCents, 0)
           : null,
       );
     }
@@ -2475,26 +2487,36 @@ async function runPass(
     providerStatusFullyRefunded: boolean;
     providerAmountCents: number;
     providerCurrency: string;
-    providerRefundTotal: number | null;
+    providerRefunds: ProviderOrderRefund[] | null;
   }) => {
     const localTotal = localRefundTotalsByPaymentRow.get(input.payment.id) ?? 0;
-    if (input.providerRefundTotal !== null) {
-      if (input.providerRefundTotal > localTotal) {
+    const localIds = localRefundIdsByPaymentRow.get(input.payment.id) ?? new Set<string>();
+    if (input.providerRefunds !== null) {
+      // Per-SIBLING diff, not an aggregate: operators get the exact refund
+      // id to inspect/replay, and a same-total ledger with WRONG sibling
+      // ids cannot mask identity drift.
+      const providerTotal = input.providerRefunds
+        .reduce((sum, refund) => sum + refund.amountCents, 0);
+      for (const refund of input.providerRefunds) {
+        if (localIds.has(refund.id)) continue;
         missingLocalPayments.push({
           kind: 'refund',
-          transactionId: input.providerId,
+          transactionId: refund.id,
           guildId: input.guildId,
-          amountCents: input.providerRefundTotal - localTotal,
-          currency: input.providerCurrency,
-          initiatedAt: null,
+          amountCents: refund.amountCents,
+          currency: refund.currency,
+          initiatedAt: refund.createTimeMs !== null
+            ? new Date(refund.createTimeMs).toISOString()
+            : null,
           source: 'capture',
           referenceId: input.providerId,
         });
-      } else if (localTotal > input.providerRefundTotal) {
+      }
+      if (localTotal > providerTotal) {
         amountMismatches.push({
           transactionId: input.providerId,
           guildId: input.guildId,
-          providerAmountCents: input.providerRefundTotal,
+          providerAmountCents: providerTotal,
           localAmountCents: localTotal,
           providerCurrency: input.providerCurrency,
           localCurrency: input.providerCurrency,
@@ -2578,7 +2600,11 @@ async function runPass(
     ) {
       return { status: 'failed', reason: 'provider identity conflict', retriable: false };
     }
-    const providerRefunded = ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(capture.status);
+    const providerRefunded = ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(capture.status)
+      // A capture whose state changed inside the settlement lag has its
+      // refund webhook in flight; without the order's refund list to time-
+      // filter, the status-only fallback must defer.
+      && !(capture.updateTimeMs !== null && capture.updateTimeMs > windowEndMs);
     if (providerRefunded) {
       const parentId = parentProviderOrderId(payment, capture.relatedOrderId);
       judgeRefundedPayment({
@@ -2588,8 +2614,8 @@ async function runPass(
         providerStatusFullyRefunded: capture.status === 'REFUNDED',
         providerAmountCents: capture.amountCents,
         providerCurrency: capture.currency,
-        providerRefundTotal: parentId !== null
-          ? orderRefundTotals.get(parentId) ?? null
+        providerRefunds: parentId !== null
+          ? orderRefundLists.get(parentId) ?? null
           : null,
       });
     }
@@ -2719,7 +2745,7 @@ async function runPass(
         providerStatusFullyRefunded: sale.state === 'refunded' || sale.state === 'reversed',
         providerAmountCents: sale.amountCents,
         providerCurrency: sale.currency,
-        providerRefundTotal: null,
+        providerRefunds: null,
       });
     }
     // The same settled-pair and money checks captures get: an older daily
@@ -2935,8 +2961,8 @@ async function runPass(
             providerStatusFullyRefunded: target.fullyRefunded,
             providerAmountCents: target.providerAmountCents,
             providerCurrency: target.providerCurrency,
-            providerRefundTotal: parentId !== null
-              ? orderRefundTotals.get(parentId) ?? null
+            providerRefunds: parentId !== null
+              ? orderRefundLists.get(parentId) ?? null
               : null,
           });
         }
@@ -2990,8 +3016,10 @@ async function runPass(
           if (!saleLookup.ok || !saleLookup.found) {
             return { refund, lookup: saleLookup as ProviderFetch<ProviderRefundObject> };
           }
-          const reversed = ['reversed', 'refunded', 'partially_refunded']
-            .includes(saleLookup.value.state);
+          // Only a FULLY terminal reversal state is completed evidence: a
+          // partially_refunded sale behind a full-reversal witness means
+          // the provider disagrees with the terminal local claim.
+          const reversed = ['reversed', 'refunded'].includes(saleLookup.value.state);
           return {
             refund,
             lookup: {
@@ -3256,7 +3284,11 @@ async function runPass(
     CANCELLED: 60,
     EXPIRED: 60,
   };
-  const lifecycleHeads = new Map<string, { priority: number; eventType: string | null }>();
+  const lifecycleHeads = new Map<string, {
+    priority: number;
+    eventType: string | null;
+    lastWebhookEventId: string | null;
+  }>();
   const loadLifecycleHeads = async (subscriptionIds: string[]) => {
     const missing = [...new Set(subscriptionIds)].filter(
       (id) => !lifecycleHeads.has(id),
@@ -3265,7 +3297,7 @@ async function runPass(
       const chunk = missing.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
       const { data, error } = await supabase
         .from('commerce_subscription_lifecycle_heads')
-        .select('paypal_subscription_id, last_event_priority, last_provider_event_type')
+        .select('paypal_subscription_id, last_event_priority, last_provider_event_type, last_webhook_event_id')
         .in('paypal_subscription_id', chunk);
       if (error) {
         return {
@@ -3275,7 +3307,9 @@ async function runPass(
         };
       }
       for (const id of chunk) {
-        if (!lifecycleHeads.has(id)) lifecycleHeads.set(id, { priority: 0, eventType: null });
+        if (!lifecycleHeads.has(id)) {
+          lifecycleHeads.set(id, { priority: 0, eventType: null, lastWebhookEventId: null });
+        }
       }
       for (const row of (data ?? []) as Array<Record<string, unknown>>) {
         if (
@@ -3286,6 +3320,9 @@ async function runPass(
             priority: row.last_event_priority,
             eventType: typeof row.last_provider_event_type === 'string'
               ? row.last_provider_event_type
+              : null,
+            lastWebhookEventId: typeof row.last_webhook_event_id === 'string'
+              ? row.last_webhook_event_id
               : null,
           });
         }
@@ -3336,18 +3373,37 @@ async function runPass(
     );
     // The head only proves the transition was OBSERVED; the fulfillment
     // ACTION that actually revokes/suspends access is a separate write that
-    // can fail or stay held. Load both signals for the batch: the terminal
-    // lifecycle actions and any still-staged fulfillment rows.
-    const batchOrderIds = [...new Set(fresh.map(([, order]) => order.id))];
-    const healthyLifecycleActionOrderIds = new Set<string>();
-    const stagedFulfillmentOrderIds = new Set<string>();
-    for (let from = 0; from < batchOrderIds.length; from += EXACT_LOOKUP_CHUNK_SIZE) {
-      const chunk = batchOrderIds.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
+    // can fail or stay held — and it must be the action for the CURRENT
+    // transition, keyed by the head's webhook event id, or an old completed
+    // suspension masks a lost second one after a reactivation. Staged-row
+    // detection is likewise scoped to the ACTIVATION carrier so a held
+    // cancellation row cannot fake an unreleased activation.
+    const FULFILLMENT_TYPE_BY_HEAD_EVENT: Record<string, string> = {
+      'BILLING.SUBSCRIPTION.CANCELLED': 'subscription_cancelled',
+      'BILLING.SUBSCRIPTION.SUSPENDED': 'subscription_suspended',
+      'BILLING.SUBSCRIPTION.PAYMENT.FAILED': 'subscription_payment_failed',
+    };
+    const expectedActionKeyBySubscription = new Map<string, string>();
+    for (const [subscriptionId] of fresh) {
+      const head = lifecycleHeads.get(subscriptionId);
+      const fulfillmentType = head?.eventType
+        ? FULFILLMENT_TYPE_BY_HEAD_EVENT[head.eventType]
+        : undefined;
+      if (head?.lastWebhookEventId && fulfillmentType) {
+        expectedActionKeyBySubscription.set(
+          subscriptionId,
+          `paypal:lifecycle:${head.lastWebhookEventId}:${fulfillmentType}`,
+        );
+      }
+    }
+    const healthyActionKeys = new Set<string>();
+    const expectedKeys = [...new Set(expectedActionKeyBySubscription.values())];
+    for (let from = 0; from < expectedKeys.length; from += EXACT_LOOKUP_CHUNK_SIZE) {
+      const chunk = expectedKeys.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
       const { data: actionRows, error: actionError } = await supabase
         .from('bot_action_queue')
-        .select('payload, status, action')
-        .in('action', ['fulfill_cancellation', 'fulfill_suspension'])
-        .in('payload->>order_id', chunk);
+        .select('idempotency_key, status')
+        .in('idempotency_key', chunk);
       if (actionError) {
         return {
           status: 'failed',
@@ -3356,18 +3412,23 @@ async function runPass(
         };
       }
       for (const row of (actionRows ?? []) as Array<Record<string, unknown>>) {
-        const orderId = (row.payload as Record<string, unknown> | null)?.order_id;
         if (
-          typeof orderId === 'string'
+          typeof row.idempotency_key === 'string'
           && ['pending', 'processing', 'completed'].includes(String(row.status))
         ) {
-          healthyLifecycleActionOrderIds.add(orderId);
+          healthyActionKeys.add(row.idempotency_key);
         }
       }
+    }
+    const batchOrderIds = [...new Set(fresh.map(([, order]) => order.id))];
+    const stagedFulfillmentOrderIds = new Set<string>();
+    for (let from = 0; from < batchOrderIds.length; from += EXACT_LOOKUP_CHUNK_SIZE) {
+      const chunk = batchOrderIds.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
       const { data: stagedRows, error: stagedError } = await supabase
         .from('bot_action_queue')
         .select('payload')
         .eq('status', 'staged')
+        .eq('action', 'fulfill_subscription')
         .in('payload->>order_id', chunk);
       if (stagedError) {
         return {
@@ -3381,18 +3442,18 @@ async function runPass(
         if (typeof orderId === 'string') stagedFulfillmentOrderIds.add(orderId);
       }
     }
-    const batchPlanIds = [...new Set(
-      fresh
-        .map(([, order]) => order.plan_id)
-        .filter((id): id is string => typeof id === 'string'),
-    )];
-    const planProviderIds = new Map<string, string | null>();
-    for (let from = 0; from < batchPlanIds.length; from += EXACT_LOOKUP_CHUNK_SIZE) {
-      const chunk = batchPlanIds.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
+    // Plan identity compares against the HISTORICAL provider plan retained
+    // by the activation action's payload — the mutable plans row changes
+    // when the owner rotates paypal_plan_id for future checkouts, and old
+    // subscriptions legitimately keep billing the plan they were minted on.
+    const historicalPlanByOrderId = new Map<string, string>();
+    for (let from = 0; from < batchOrderIds.length; from += EXACT_LOOKUP_CHUNK_SIZE) {
+      const chunk = batchOrderIds.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
       const { data, error } = await supabase
-        .from('plans')
-        .select('id, paypal_plan_id')
-        .in('id', chunk);
+        .from('bot_action_queue')
+        .select('payload')
+        .eq('action', 'fulfill_subscription')
+        .in('payload->>order_id', chunk);
       if (error) {
         return {
           status: 'failed',
@@ -3401,11 +3462,11 @@ async function runPass(
         };
       }
       for (const row of (data ?? []) as Array<Record<string, unknown>>) {
-        if (typeof row.id === 'string') {
-          planProviderIds.set(
-            row.id,
-            isProviderId(row.paypal_plan_id) ? row.paypal_plan_id : null,
-          );
+        const payload = row.payload as Record<string, unknown> | null;
+        const orderId = payload?.order_id;
+        const providerPlan = payload?.paypal_plan_id;
+        if (typeof orderId === 'string' && isProviderId(providerPlan)) {
+          historicalPlanByOrderId.set(orderId, providerPlan);
         }
       }
     }
@@ -3448,14 +3509,14 @@ async function runPass(
       ) {
         return { status: 'failed', reason: 'provider identity conflict', retriable: false };
       }
-      // Plan identity: the provider's plan must be the plan this order sold.
-      const localPlanProviderId = typeof order.plan_id === 'string'
-        ? planProviderIds.get(order.plan_id) ?? null
-        : null;
+      // Plan identity: the provider's plan must be the HISTORICAL plan this
+      // subscription was minted on (absent history → no check, never the
+      // mutable current plans row).
+      const historicalPlanId = historicalPlanByOrderId.get(order.id) ?? null;
       if (
         subscription.planId !== null
-        && localPlanProviderId !== null
-        && subscription.planId !== localPlanProviderId
+        && historicalPlanId !== null
+        && subscription.planId !== historicalPlanId
       ) {
         return { status: 'failed', reason: 'provider identity conflict', retriable: false };
       }
@@ -3490,12 +3551,14 @@ async function runPass(
       // priority) OR observed but its fulfillment ACTION is missing, failed,
       // or operator-held — the head is committed BEFORE the action write,
       // so head-parity alone cannot prove access was revoked.
+      const expectedActionKey = expectedActionKeyBySubscription.get(subscriptionId);
       if (
         expectedPriority !== undefined
         && transitionSettled
         && (
           (lifecycleHeads.get(subscriptionId)?.priority ?? 0) < expectedPriority
-          || !healthyLifecycleActionOrderIds.has(order.id)
+          || expectedActionKey === undefined
+          || !healthyActionKeys.has(expectedActionKey)
         )
       ) {
         // PayPal reports a terminal state the durable lifecycle head never
