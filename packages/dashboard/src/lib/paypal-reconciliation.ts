@@ -2369,6 +2369,10 @@ async function runPass(
   );
   const localRefundTotalsByPaymentRow = new Map<string, number>();
   const localRefundIdsByPaymentRow = new Map<string, Set<string>>();
+  const localRefundRowsByProviderId = new Map<
+    string,
+    { amountCents: number; currency: string | null }
+  >();
   const refundTotalParentById = new Map<string, LocalPaymentRow>();
   const loadLocalRefundTotals = async (parents: LocalPaymentRow[]) => {
     for (const parent of parents) refundTotalParentById.set(parent.id, parent);
@@ -2402,6 +2406,20 @@ async function runPass(
       if (String(refund.created_at ?? '') > windowEnd) continue;
       const key = refund.payment_id as string;
       const parent = refundTotalParentById.get(key);
+      // Parent OWNERSHIP, exactly like the in-window relation guard: a row
+      // that references this payment while carrying another order or guild
+      // is corrupt linkage — summing it would suppress the real capture's
+      // missing-refund finding and attribute money to the wrong ledger.
+      if (
+        parent
+        && (refund.order_id !== parent.order_id || refund.guild_id !== parent.guild_id)
+      ) {
+        return {
+          status: 'failed' as const,
+          reason: 'provider refund identity conflict',
+          retriable: false,
+        };
+      }
       if (
         parent
         && normalizeCurrency(refund.currency) !== normalizeCurrency(parent.currency)
@@ -2424,6 +2442,10 @@ async function runPass(
           + Math.max(0, refund.amount_cents as number),
       );
       localRefundIdsByPaymentRow.get(key)?.add(refund.paypal_refund_id);
+      localRefundRowsByProviderId.set(refund.paypal_refund_id, {
+        amountCents: refund.amount_cents as number,
+        currency: normalizeCurrency(refund.currency),
+      });
     }
     return null;
   };
@@ -2535,7 +2557,29 @@ async function runPass(
       const providerTotal = providerRefunds
         .reduce((sum, refund) => sum + refund.amountCents, 0);
       for (const refund of providerRefunds) {
-        if (localIds.has(refund.id)) continue;
+        if (localIds.has(refund.id)) {
+          // Matched by id is not matched by MONEY: an understated historical
+          // row (or offsetting sibling errors) must still surface. The
+          // in-window refund pass owns window rows; this catches the rest.
+          const localRow = localRefundRowsByProviderId.get(refund.id);
+          if (
+            localRow
+            && (
+              localRow.amountCents !== refund.amountCents
+              || (localRow.currency !== null && localRow.currency !== refund.currency)
+            )
+          ) {
+            amountMismatches.push({
+              transactionId: refund.id,
+              guildId: input.guildId,
+              providerAmountCents: refund.amountCents,
+              localAmountCents: localRow.amountCents,
+              providerCurrency: refund.currency,
+              localCurrency: localRow.currency,
+            });
+          }
+          continue;
+        }
         missingLocalPayments.push({
           kind: 'refund',
           transactionId: refund.id,
@@ -2738,8 +2782,13 @@ async function runPass(
     const order = ordersById.get(payment.order_id as string);
     const guildId = payment.guild_id as string;
     const providerId = payment.paypal_payment_id as string;
+    // Same claim discipline as captures: an order that says settled demands
+    // provider sale evidence even when its only row is pending/failed.
+    const saleOrderClaimsSettlement = Boolean(
+      order && SETTLED_ORDER_STATUSES.includes(order.status),
+    );
     if (!lookup.found) {
-      if (isSettledPair(payment, order)) {
+      if (isSettledPair(payment, order) || saleOrderClaimsSettlement) {
         missingProviderPayments.push({
           kind: 'payment',
           orderId: payment.order_id as string,
@@ -2800,7 +2849,7 @@ async function runPass(
       });
       continue;
     }
-    if (!saleSettledAtProvider && isSettledPair(payment, order)) {
+    if (!saleSettledAtProvider && (isSettledPair(payment, order) || saleOrderClaimsSettlement)) {
       missingProviderPayments.push({
         kind: 'payment',
         orderId: payment.order_id as string,
@@ -3409,6 +3458,10 @@ async function runPass(
   };
 
   const processedSubscriptionIds = new Set<string>();
+  const latestChargeUnaccounted = new Map<string, {
+    order: LocalOrderRow;
+    subscription: ProviderSubscriptionObject;
+  }>();
   const judgeSubscriptionEntries = async (
     entries: Array<[string, LocalOrderRow]>,
   ): Promise<PayPalReconciliationFailure | null> => {
@@ -3766,12 +3819,16 @@ async function runPass(
             paymentStatus: latest.status,
             orderStatus: order.status,
           });
+        } else {
+          // A wholly missing latest charge is DISCOVERED by the transaction
+          // enumeration below and reported once, by its actual sale id —
+          // reporting it here under the subscription id double-counted the
+          // loss and handed operators an id that cannot replay the payment.
+          // The flag makes the deferral SAFE: if the enumeration turns up
+          // no money transactions at all, the last_payment evidence still
+          // reports under the subscription id.
+          latestChargeUnaccounted.set(subscriptionId, { order, subscription });
         }
-        // A wholly missing latest charge is DISCOVERED by the transaction
-        // enumeration below and reported once, by its actual sale id —
-        // reporting it here under the subscription id double-counted the
-        // loss and handed operators an id that cannot replay the payment.
-        // Per-sale money drift is likewise owned by the sale pass.
         continue;
       }
       // A latest charge NEWER than the window end is not absent billing
@@ -3831,6 +3888,33 @@ async function runPass(
     for (const { subscriptionId, order, lookup } of txnMap.results) {
       if (!lookup.ok) {
         return { status: 'failed', reason: lookup.reason, retriable: lookup.retriable };
+      }
+      const unaccounted = latestChargeUnaccounted.get(subscriptionId);
+      if (
+        unaccounted
+        && lookup.ok
+        && lookup.found
+        && !lookup.value.some((txn) =>
+          MONEY_TXN_STATUSES.includes(txn.status)
+          && txn.timeMs >= windowStartMs
+          && txn.timeMs <= windowEndMs)
+      ) {
+        // billing_info.last_payment proved an in-window charge, but the
+        // enumeration has no money transaction to name. Fall back to the
+        // subscription-keyed finding rather than completing clean against
+        // the provider's own evidence.
+        missingLocalPayments.push({
+          kind: 'payment',
+          transactionId: subscriptionId,
+          guildId: unaccounted.order.guild_id as string,
+          amountCents: unaccounted.subscription.lastPaymentAmountCents
+            ?? unaccounted.order.amount_cents,
+          currency: unaccounted.subscription.lastPaymentCurrency
+            ?? (normalizeCurrency(unaccounted.order.currency) as string),
+          initiatedAt: unaccounted.subscription.lastPaymentTime,
+          source: 'subscription',
+          referenceId: subscriptionId,
+        });
       }
       if (!lookup.found) {
         // The subscription GET just succeeded; a vanished transactions
