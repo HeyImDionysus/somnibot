@@ -3912,6 +3912,94 @@ describe('runPayPalReconciliation', () => {
     expect(result.missingProviderPayments).toEqual([]);
   });
 
+  // ── PR #409 review round 14 repairs ───────────────────────────────────────
+
+  it('surfaces money drift on an exact-lookup fallback row', async () => {
+    const MONDAY = '2026-07-23T10:00:00.000Z';
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'SALE-MON',
+        created_at: '2026-07-10T10:00:00.000Z',
+        amount_cents: 1500,
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-MON': saleObject({ total: '25.00' }) },
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: null }),
+      },
+      subscriptionTransactions: {
+        'SUB-1': {
+          transactions: [{
+            id: 'SALE-MON',
+            status: 'COMPLETED',
+            time: MONDAY,
+            amount_with_breakdown: {
+              gross_amount: { currency_code: 'USD', value: '25.00' },
+            },
+          }],
+        },
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.amountMismatches).toContainEqual(expect.objectContaining({
+      transactionId: 'SALE-MON',
+      providerAmountCents: 2500,
+      localAmountCents: 1500,
+    }));
+  });
+
+  it('surfaces an ACTIVE provider behind a CANCELLED head', async () => {
+    // Access was revoked by the completed cancellation action while PayPal
+    // still bills the customer.
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    resolvers['commerce_subscription_lifecycle_heads'] = () => ({
+      data: [{
+        paypal_subscription_id: 'SUB-1',
+        last_event_priority: 60,
+        last_provider_event_type: 'BILLING.SUBSCRIPTION.CANCELLED',
+        last_webhook_event_id: 'WH-1',
+      }],
+      error: null,
+    });
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'ACTIVE', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'SUB-1',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'subscription_reactivated_unfulfilled',
+      orderStatus: 'completed',
+    }]);
+  });
+
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {
     withLedger({ payments: [paymentRow()] });
     scriptProviderObjects({ captures: { 'CAP-1': { __status: 503 } } });

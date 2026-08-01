@@ -3656,8 +3656,15 @@ async function runPass(
       if (
         subscription.status === 'ACTIVE'
         && head.eventType !== null
-        && ['BILLING.SUBSCRIPTION.SUSPENDED', 'BILLING.SUBSCRIPTION.PAYMENT.FAILED']
-          .includes(head.eventType)
+        && [
+          'BILLING.SUBSCRIPTION.SUSPENDED',
+          'BILLING.SUBSCRIPTION.PAYMENT.FAILED',
+          // A CANCELLED/EXPIRED head behind an ACTIVE provider means the
+          // completed lifecycle action revoked access while PayPal still
+          // bills the customer — a divergence needing replay either way.
+          'BILLING.SUBSCRIPTION.CANCELLED',
+          'BILLING.SUBSCRIPTION.EXPIRED',
+        ].includes(head.eventType)
         // A reactivation inside the lag interval is in flight, not lost.
         && (subscription.statusUpdateTimeMs === null
           || subscription.statusUpdateTimeMs <= windowEndMs)
@@ -4009,6 +4016,22 @@ async function runPass(
             || rowOrder.guild_id !== fallbackRow.guild_id
           ) {
             return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+          }
+          // Rows outside the window never met the sale pass: the discovered
+          // transaction's money must match or the drift surfaces here.
+          if (
+            (txn.amountCents !== null && txn.amountCents !== fallbackRow.amount_cents)
+            || (txn.currency !== null
+              && txn.currency !== normalizeCurrency(fallbackRow.currency))
+          ) {
+            amountMismatches.push({
+              transactionId: txn.id,
+              guildId: fallbackRow.guild_id as string,
+              providerAmountCents: txn.amountCents ?? 0,
+              localAmountCents: fallbackRow.amount_cents,
+              providerCurrency: txn.currency ?? 'UNKNOWN',
+              localCurrency: normalizeCurrency(fallbackRow.currency),
+            });
           }
           continue;
         }
