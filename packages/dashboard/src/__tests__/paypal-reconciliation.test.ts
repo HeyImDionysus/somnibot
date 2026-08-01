@@ -1088,17 +1088,30 @@ describe('runPayPalReconciliation', () => {
       subscriptions: {
         'SUB-1': subscriptionObject({ lastPaymentTime: IN_WINDOW, lastPaymentValue: '25.00' }),
       },
+      subscriptionTransactions: {
+        'SUB-1': {
+          transactions: [{
+            id: 'SALE-LOST',
+            status: 'COMPLETED',
+            time: IN_WINDOW,
+            amount_with_breakdown: {
+              gross_amount: { currency_code: 'USD', value: '25.00' },
+            },
+          }],
+        },
+      },
     });
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
+    // Reported ONCE, by the actual sale id operators can replay.
     expect(result.missingLocalPayments).toEqual([{
       kind: 'payment',
-      transactionId: 'SUB-1',
+      transactionId: 'SALE-LOST',
       guildId: GUILD_ID,
       amountCents: 2500,
       currency: 'USD',
-      initiatedAt: IN_WINDOW,
+      initiatedAt: new Date(Date.parse(IN_WINDOW)).toISOString(),
       source: 'subscription',
       referenceId: 'SUB-1',
     }]);
@@ -1712,17 +1725,29 @@ describe('runPayPalReconciliation', () => {
       subscriptions: {
         'SUB-1': subscriptionObject({ lastPaymentTime: IN_WINDOW, lastPaymentValue: '25.00' }),
       },
+      subscriptionTransactions: {
+        'SUB-1': {
+          transactions: [{
+            id: 'SALE-LOST',
+            status: 'COMPLETED',
+            time: IN_WINDOW,
+            amount_with_breakdown: {
+              gross_amount: { currency_code: 'USD', value: '25.00' },
+            },
+          }],
+        },
+      },
     });
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
     expect(result.missingLocalPayments).toEqual([{
       kind: 'payment',
-      transactionId: 'SUB-1',
+      transactionId: 'SALE-LOST',
       guildId: GUILD_ID,
       amountCents: 2500,
       currency: 'USD',
-      initiatedAt: IN_WINDOW,
+      initiatedAt: new Date(Date.parse(IN_WINDOW)).toISOString(),
       source: 'subscription',
       referenceId: 'SUB-1',
     }]);
@@ -1754,17 +1779,41 @@ describe('runPayPalReconciliation', () => {
           lastPaymentValue: '25.00',
         }),
       },
+      subscriptionTransactions: {
+        'SUB-1': {
+          transactions: [
+            {
+              id: 'SALE-1',
+              status: 'COMPLETED',
+              time: EARLIER,
+              amount_with_breakdown: {
+                gross_amount: { currency_code: 'USD', value: '25.00' },
+              },
+            },
+            {
+              id: 'SALE-LATEST',
+              status: 'COMPLETED',
+              time: LATEST_CHARGE,
+              amount_with_breakdown: {
+                gross_amount: { currency_code: 'USD', value: '25.00' },
+              },
+            },
+          ],
+        },
+      },
     });
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
+    // The older completed renewal cannot stand in: the enumeration reports
+    // the LATEST charge by its own sale id.
     expect(result.missingLocalPayments).toEqual([{
       kind: 'payment',
-      transactionId: 'SUB-1',
+      transactionId: 'SALE-LATEST',
       guildId: GUILD_ID,
       amountCents: 2500,
       currency: 'USD',
-      initiatedAt: LATEST_CHARGE,
+      initiatedAt: new Date(Date.parse(LATEST_CHARGE)).toISOString(),
       source: 'subscription',
       referenceId: 'SUB-1',
     }]);
@@ -2409,6 +2458,106 @@ describe('runPayPalReconciliation', () => {
       source: 'subscription',
       referenceId: 'SUB-1',
     }]);
+  });
+
+  // ── PR #409 review round 5 repairs ────────────────────────────────────────
+
+  it('verifies a DIRECT sale reversal witness through the sale endpoint', async () => {
+    // PAYMENT.SALE.REVERSED with a direct Sale resource mints no distinct
+    // refund object: the ledger stores the SALE id as the refund id. The
+    // refund endpoint can never serve it — the sale's terminal state is the
+    // evidence, and this must not read as missing at PayPal on every pass.
+    withLedger({
+      payments: [paymentRow({ paypal_payment_id: 'SALE-1', status: 'reversed' })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'refunded',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+      refunds: [{
+        id: REF_UUID,
+        payment_id: PAY_UUID,
+        order_id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        paypal_refund_id: 'SALE-1',
+        event_type: 'PAYMENT.SALE.REVERSED',
+        amount_cents: 1200,
+        currency: 'USD',
+        created_at: IN_WINDOW,
+      }],
+    });
+    scriptProviderObjects({
+      sales: { 'SALE-1': saleObject({ state: 'reversed', total: '25.00' }) },
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingProviderPayments).toEqual([]);
+    expect(result.amountMismatches).toEqual([]);
+    expect(providerCalls.some((url) => url.includes('/v1/payments/refund/SALE-1'))).toBe(false);
+  });
+
+  it('fails closed when a subscription transaction id is attached to a foreign order', async () => {
+    // SALE-X is locally attached to a ONE-TIME order; subscription SUB-1's
+    // transaction list claims the same id. Suppressing the transaction
+    // because the id is "known" would hide SUB-1's missing money behind the
+    // wrong order's row.
+    const OTHER_ORDER = '00000000-0000-4000-8000-000000000002';
+    withLedger({
+      payments: [paymentRow({ paypal_payment_id: 'SALE-X', order_id: OTHER_ORDER })],
+      orders: [
+        {
+          id: OTHER_ORDER,
+          guild_id: GUILD_ID,
+          amount_cents: 2500,
+          status: 'completed',
+          created_at: IN_WINDOW,
+          paypal_order_id: 'PP-ORDER-OTHER',
+        },
+        {
+          id: ORDER_UUID,
+          guild_id: GUILD_ID,
+          amount_cents: 2500,
+          status: 'completed',
+          created_at: IN_WINDOW,
+          paypal_order_id: null,
+          paypal_subscription_id: 'SUB-1',
+        },
+      ],
+    });
+    scriptProviderObjects({
+      captures: { 'SALE-X': captureObject({ value: '25.00' }) },
+      subscriptions: {
+        'SUB-1': subscriptionObject({ lastPaymentTime: null }),
+      },
+      subscriptionTransactions: {
+        'SUB-1': {
+          transactions: [{
+            id: 'SALE-X',
+            status: 'COMPLETED',
+            time: IN_WINDOW,
+            amount_with_breakdown: {
+              gross_amount: { currency_code: 'USD', value: '25.00' },
+            },
+          }],
+        },
+      },
+    });
+
+    const result = await runPayPalReconciliation(supabase as never, OPTS);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'provider identity conflict',
+      retriable: false,
+    });
   });
 
   it('propagates a retriable provider fault instead of inventing a verdict', async () => {

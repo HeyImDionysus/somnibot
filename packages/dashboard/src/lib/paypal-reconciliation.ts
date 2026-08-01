@@ -2918,6 +2918,45 @@ async function runPass(
     heartbeat,
     async (refund) => {
       if (isSaleRefundRow(refund)) {
+        const parentRow = typeof refund.payment_id === 'string'
+          ? refundPaymentRowsById.get(refund.payment_id)
+          : undefined;
+        if (
+          parentRow
+          && refund.paypal_refund_id === parentRow.paypal_payment_id
+        ) {
+          // Direct Sale reversal witness: the webhook stores the SALE id as
+          // the refund id because PayPal minted no distinct refund object.
+          // The refund endpoint can never serve it — the sale's own terminal
+          // state IS the evidence.
+          const saleLookup = await fetchProviderSale(
+            config.apiBase,
+            token.token,
+            refund.paypal_refund_id,
+          );
+          if (!saleLookup.ok || !saleLookup.found) {
+            return { refund, lookup: saleLookup as ProviderFetch<ProviderRefundObject> };
+          }
+          const reversed = ['reversed', 'refunded', 'partially_refunded']
+            .includes(saleLookup.value.state);
+          return {
+            refund,
+            lookup: {
+              ok: true as const,
+              found: true as const,
+              value: {
+                // A non-reversed sale behind a reversal witness reports as
+                // missing provider evidence through the COMPLETED gate; the
+                // witness row's amount is the remaining balance, not the
+                // sale total, so the money comparison echoes the row.
+                status: reversed ? 'COMPLETED' : saleLookup.value.state.toUpperCase(),
+                amountCents: refund.amount_cents as number,
+                currency: normalizeCurrency(refund.currency) as string,
+                parentCaptureId: parentRow.paypal_payment_id,
+              },
+            },
+          };
+        }
         const saleLookup = await fetchProviderSaleRefund(
           config.apiBase,
           token.token,
@@ -3395,44 +3434,13 @@ async function runPass(
             paymentStatus: latest.status,
             orderStatus: order.status,
           });
-        } else {
-          // No row at all for the LATEST charge — older completed renewals
-          // do not stand in for it.
-          missingLocalPayments.push({
-            kind: 'payment',
-            transactionId: subscriptionId,
-            guildId,
-            amountCents: subscription.lastPaymentAmountCents ?? order.amount_cents,
-            currency: subscription.lastPaymentCurrency
-              ?? (normalizeCurrency(order.currency) as string),
-            initiatedAt: subscription.lastPaymentTime,
-            source: 'subscription',
-            referenceId: subscriptionId,
-          });
         }
+        // A wholly missing latest charge is DISCOVERED by the transaction
+        // enumeration below and reported once, by its actual sale id —
+        // reporting it here under the subscription id double-counted the
+        // loss and handed operators an id that cannot replay the payment.
+        // Per-sale money drift is likewise owned by the sale pass.
         continue;
-      }
-      if (
-        lastPaymentInWindow
-        && subscription.lastPaymentAmountCents !== null
-        && settledWindowPayments.length > 0
-      ) {
-        const latest = settledWindowPayments.reduce((best, candidate) =>
-          String(candidate.created_at ?? '') > String(best.created_at ?? '') ? candidate : best,
-        );
-        if (
-          latest.amount_cents !== subscription.lastPaymentAmountCents
-          || normalizeCurrency(latest.currency) !== subscription.lastPaymentCurrency
-        ) {
-          amountMismatches.push({
-            transactionId: subscriptionId,
-            guildId,
-            providerAmountCents: subscription.lastPaymentAmountCents,
-            localAmountCents: latest.amount_cents,
-            providerCurrency: subscription.lastPaymentCurrency ?? 'UNKNOWN',
-            localCurrency: normalizeCurrency(latest.currency),
-          });
-        }
       }
       // A latest charge NEWER than the window end is not absent billing
       // evidence — it is today's charge still inside the settlement lag
@@ -3492,7 +3500,19 @@ async function runPass(
         // In-flight charges (newer than the window end) get the settlement
         // lag; older-than-window charges belong to earlier passes.
         if (txn.timeMs < windowStartMs || txn.timeMs > windowEndMs) continue;
-        if (localByProviderId.has(txn.id)) continue;
+        const knownRow = localByProviderId.get(txn.id);
+        if (knownRow) {
+          // Known is not enough: the row must belong to THIS subscription's
+          // order. A sale id attached to a one-time order (or another
+          // tenant) is a provider-identity conflict, and suppressing the
+          // transaction would hide subscription A's missing money behind
+          // the wrong order's row.
+          const rowOrder = ordersById.get(knownRow.order_id as string);
+          if (!rowOrder || rowOrder.paypal_subscription_id !== subscriptionId) {
+            return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+          }
+          continue;
+        }
         unknownTxns.push({ subscriptionId, order, txn });
       }
     }
@@ -3505,11 +3525,36 @@ async function runPass(
       if (!lookupScan.ok) {
         return { status: 'failed', reason: lookupScan.reason, retriable: lookupScan.retriable };
       }
-      const known = new Set(
-        lookupScan.rows.map((row) => row.paypal_payment_id as string),
+      const fallbackRowsByProviderId = new Map(
+        lookupScan.rows.map((row) => [row.paypal_payment_id as string, row]),
       );
+      const fallbackParentScan = await lookupOrdersByExactColumn(
+        supabase,
+        'id',
+        [...new Set(
+          lookupScan.rows
+            .map((row) => row.order_id)
+            .filter((id): id is string => typeof id === 'string' && !ordersById.has(id)),
+        )],
+        configuredGuildIds,
+      );
+      if (!fallbackParentScan.ok) {
+        return {
+          status: 'failed',
+          reason: fallbackParentScan.reason,
+          retriable: fallbackParentScan.retriable,
+        };
+      }
+      for (const order of fallbackParentScan.rows) ordersById.set(order.id, order);
       for (const { subscriptionId, order, txn } of unknownTxns) {
-        if (known.has(txn.id)) continue;
+        const fallbackRow = fallbackRowsByProviderId.get(txn.id);
+        if (fallbackRow) {
+          const rowOrder = ordersById.get(fallbackRow.order_id as string);
+          if (!rowOrder || rowOrder.paypal_subscription_id !== subscriptionId) {
+            return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+          }
+          continue;
+        }
         missingLocalPayments.push({
           kind: 'payment',
           transactionId: txn.id,
