@@ -711,6 +711,17 @@ jobs:
           merge-multiple: true
       - name: Prove exact fleet coverage and clean results
         run: node scripts/aggregate-fleet-manifests.mjs artifacts/fleet
+      - name: Inventory every unresolved functional fleet gate
+        if: always()
+        run: node scripts/classify-fleet-gates.mjs artifacts/fleet artifacts/fleet-gate-classification.json
+      - name: Upload functional fleet gate inventory
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fleet-gate-classification
+          path: artifacts/fleet-gate-classification.json
+          if-no-files-found: error
+          retention-days: 30
 
   # ──────────────────────────────────────────────────────────────────────────
   # 8. Migration Lint
