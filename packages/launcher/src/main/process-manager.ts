@@ -18,7 +18,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { app, BrowserWindow } from 'electron';
 import { getConfig, saveConfig } from './config-store.js';
-import { shouldApplyBotReadyTimeout } from './process-manager-guards.js';
+import {
+  PROCESS_RESTART_MAX_ATTEMPTS,
+  PROCESS_RESTART_STABLE_WINDOW_MS,
+  processRestartDelayMs,
+  shouldApplyBotReadyTimeout,
+  shouldRecoverManagedProcess,
+} from './process-manager-guards.js';
 
 /**
  * V7 Audit §10.P3a — Allowlist of parent-process env vars to forward.
@@ -95,12 +101,103 @@ let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let botReadyTimeout: ReturnType<typeof setTimeout> | null = null;
 let statusCallback: ((status: StatusUpdate) => void) | null = null;
 const BOT_READY_TIMEOUT_MS = 60_000;
+type ManagedService = 'bot' | 'dashboard';
+interface RecoveryState {
+  attempts: number;
+  restartTimer: ReturnType<typeof setTimeout> | null;
+  stableTimer: ReturnType<typeof setTimeout> | null;
+}
+const recoveryState: Record<ManagedService, RecoveryState> = {
+  bot: { attempts: 0, restartTimer: null, stableTimer: null },
+  dashboard: { attempts: 0, restartTimer: null, stableTimer: null },
+};
+let desiredRunning = false;
+let lastStartEnv: Record<string, string> | null = null;
 
 function clearBotReadyTimeout(): void {
   if (botReadyTimeout) {
     clearTimeout(botReadyTimeout);
     botReadyTimeout = null;
   }
+}
+
+function activeProcess(service: ManagedService): ChildProcess | null {
+  return service === 'bot' ? botProcess : dashboardProcess;
+}
+
+function serviceStatus(service: ManagedService): ProcessStatus {
+  return service === 'bot' ? botStatus : dashboardStatus;
+}
+
+function clearRecoveryState(resetAttempts: boolean): void {
+  for (const state of Object.values(recoveryState)) {
+    if (state.restartTimer) clearTimeout(state.restartTimer);
+    if (state.stableTimer) clearTimeout(state.stableTimer);
+    state.restartTimer = null;
+    state.stableTimer = null;
+    if (resetAttempts) state.attempts = 0;
+  }
+}
+
+function markServiceStable(service: ManagedService, launchedProcess: ChildProcess): void {
+  const state = recoveryState[service];
+  if (state.stableTimer) clearTimeout(state.stableTimer);
+  state.stableTimer = setTimeout(() => {
+    state.stableTimer = null;
+    if (
+      desiredRunning
+      && activeProcess(service) === launchedProcess
+      && serviceStatus(service) === 'online'
+    ) {
+      state.attempts = 0;
+    }
+  }, PROCESS_RESTART_STABLE_WINDOW_MS);
+  state.stableTimer.unref?.();
+}
+
+function scheduleRecovery(service: ManagedService, reason: string): void {
+  const state = recoveryState[service];
+  if (!desiredRunning || !lastStartEnv || state.restartTimer || activeProcess(service)) return;
+
+  if (state.attempts >= PROCESS_RESTART_MAX_ATTEMPTS) {
+    if (service === 'bot') botStatus = 'error';
+    else dashboardStatus = 'error';
+    broadcastStatus({
+      error: `${service === 'bot' ? 'Bot' : 'Dashboard'} automatic recovery stopped after ${PROCESS_RESTART_MAX_ATTEMPTS} failed attempts. ${reason}`,
+    });
+    return;
+  }
+
+  state.attempts += 1;
+  const attempt = state.attempts;
+  const delayMs = processRestartDelayMs(attempt);
+  broadcastStatus({
+    error: `${service === 'bot' ? 'Bot' : 'Dashboard'} stopped unexpectedly. Restarting in ${Math.ceil(delayMs / 1_000)}s (attempt ${attempt}/${PROCESS_RESTART_MAX_ATTEMPTS}). ${reason}`,
+  });
+
+  state.restartTimer = setTimeout(() => {
+    state.restartTimer = null;
+    if (!desiredRunning || !lastStartEnv || activeProcess(service)) return;
+    if (service === 'bot') startBotProcess(lastStartEnv);
+    else startDashboardProcess(lastStartEnv);
+  }, delayMs);
+  state.restartTimer.unref?.();
+}
+
+function terminateForRecovery(service: ManagedService, child: ChildProcess): void {
+  if (!shouldRecoverManagedProcess(desiredRunning, activeProcess(service), child)) return;
+  child.kill('SIGTERM');
+  const pid = child.pid;
+  const forceKillTimer = setTimeout(() => {
+    if (!shouldRecoverManagedProcess(desiredRunning, activeProcess(service), child)) return;
+    try {
+      if (pid) process.kill(pid, 0);
+      if (pid) process.kill(pid, 'SIGKILL');
+    } catch {
+      // The child exited after SIGTERM.
+    }
+  }, 5_000);
+  forceKillTimer.unref?.();
 }
 
 /* ------------------------------------------------------------------ */
@@ -235,6 +332,7 @@ function getMigrationsDir(): string {
 
 function startBotProcess(envVars: Record<string, string>): void {
   const entryPath = getBotEntryPath();
+  lastHeartbeat = 0;
   botStatus = 'starting';
   broadcastStatus();
 
@@ -273,6 +371,7 @@ function startBotProcess(envVars: Record<string, string>): void {
   });
 
   botProcess.on('message', (msg: unknown) => {
+    if (botProcess !== launchedBotProcess) return;
     if (typeof msg === 'object' && msg !== null && 'type' in msg) {
       const typed = msg as { type: string };
       if (typed.type === 'heartbeat') {
@@ -280,26 +379,39 @@ function startBotProcess(envVars: Record<string, string>): void {
         if (botStatus !== 'online') {
           botStatus = 'online';
           clearBotReadyTimeout();
+          markServiceStable('bot', launchedBotProcess);
           broadcastStatus();
         }
       } else if (typed.type === 'ready') {
         botStatus = 'online';
         lastHeartbeat = Date.now();
         clearBotReadyTimeout();
+        markServiceStable('bot', launchedBotProcess);
         broadcastStatus();
       }
     }
   });
 
   botProcess.on('exit', (code, signal) => {
+    const shouldRecover = shouldRecoverManagedProcess(
+      desiredRunning,
+      botProcess,
+      launchedBotProcess,
+    );
     if (botProcess !== launchedBotProcess) return;
 
     clearBotReadyTimeout();
+    const state = recoveryState.bot;
+    if (state.stableTimer) clearTimeout(state.stableTimer);
+    state.stableTimer = null;
     const wasOnline = botStatus === 'online';
     botStatus = 'offline';
     botProcess = null;
     persistPid('bot', null);
 
+    const reason = code && code !== 0
+      ? `Bot exited with code ${code}.`
+      : `Bot exited (code: ${code}, signal: ${signal}).`;
     if (code && code !== 0) {
       broadcastStatus({
         error: wasOnline
@@ -313,16 +425,26 @@ function startBotProcess(envVars: Record<string, string>): void {
           : undefined,
       });
     }
+    if (shouldRecover) scheduleRecovery('bot', reason);
   });
 
   botProcess.on('error', (err) => {
+    const shouldRecover = shouldRecoverManagedProcess(
+      desiredRunning,
+      botProcess,
+      launchedBotProcess,
+    );
     if (botProcess !== launchedBotProcess) return;
 
     clearBotReadyTimeout();
+    const state = recoveryState.bot;
+    if (state.stableTimer) clearTimeout(state.stableTimer);
+    state.stableTimer = null;
     botStatus = 'error';
     botProcess = null;
     persistPid('bot', null);
     broadcastStatus({ error: `Bot process error: ${err.message}` });
+    if (shouldRecover) scheduleRecovery('bot', `Bot process error: ${err.message}`);
   });
 
   clearBotReadyTimeout();
@@ -332,6 +454,7 @@ function startBotProcess(envVars: Record<string, string>): void {
       broadcastStatus({
         error: `Bot did not report ready or heartbeat within ${Math.round(BOT_READY_TIMEOUT_MS / 1000)}s. Check the bot log and provider credentials before calling setup complete.`,
       });
+      terminateForRecovery('bot', launchedBotProcess);
     }
   }, BOT_READY_TIMEOUT_MS);
   botReadyTimeout.unref?.();
@@ -373,15 +496,18 @@ function startDashboardProcess(envVars: Record<string, string>): void {
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     silent: true,
   });
+  const launchedDashboardProcess = dashboardProcess;
 
   // Persist PID for stale-process cleanup
   persistPid('dashboard', dashboardProcess.pid ?? null);
 
   dashboardProcess.stdout?.on('data', (data: Buffer) => {
+    if (dashboardProcess !== launchedDashboardProcess) return;
     const line = data.toString().trim();
     if (line) {
       if (line.includes('Ready') || line.includes('started server') || line.includes('localhost:3456')) {
         dashboardStatus = 'online';
+        markServiceStable('dashboard', launchedDashboardProcess);
         broadcastStatus();
       }
       for (const win of BrowserWindow.getAllWindows()) {
@@ -393,6 +519,7 @@ function startDashboardProcess(envVars: Record<string, string>): void {
   });
 
   dashboardProcess.stderr?.on('data', (data: Buffer) => {
+    if (dashboardProcess !== launchedDashboardProcess) return;
     const line = data.toString().trim();
     if (line) {
       for (const win of BrowserWindow.getAllWindows()) {
@@ -404,6 +531,15 @@ function startDashboardProcess(envVars: Record<string, string>): void {
   });
 
   dashboardProcess.on('exit', (code, signal) => {
+    const shouldRecover = shouldRecoverManagedProcess(
+      desiredRunning,
+      dashboardProcess,
+      launchedDashboardProcess,
+    );
+    if (dashboardProcess !== launchedDashboardProcess) return;
+    const state = recoveryState.dashboard;
+    if (state.stableTimer) clearTimeout(state.stableTimer);
+    state.stableTimer = null;
     dashboardStatus = 'offline';
     dashboardProcess = null;
     persistPid('dashboard', null);
@@ -412,21 +548,38 @@ function startDashboardProcess(envVars: Record<string, string>): void {
         ? `Dashboard exited (code: ${code}, signal: ${signal})`
         : undefined,
     });
+    if (shouldRecover) {
+      scheduleRecovery('dashboard', `Dashboard exited (code: ${code}, signal: ${signal}).`);
+    }
   });
 
   dashboardProcess.on('error', (err) => {
+    const shouldRecover = shouldRecoverManagedProcess(
+      desiredRunning,
+      dashboardProcess,
+      launchedDashboardProcess,
+    );
+    if (dashboardProcess !== launchedDashboardProcess) return;
+    const state = recoveryState.dashboard;
+    if (state.stableTimer) clearTimeout(state.stableTimer);
+    state.stableTimer = null;
     dashboardStatus = 'error';
     dashboardProcess = null;
     persistPid('dashboard', null);
     broadcastStatus({ error: `Dashboard error: ${err.message}` });
+    if (shouldRecover) scheduleRecovery('dashboard', `Dashboard error: ${err.message}`);
   });
 
-  setTimeout(() => {
-    if (dashboardProcess && dashboardStatus === 'starting') {
-      dashboardStatus = 'online';
-      broadcastStatus();
+  const dashboardReadyTimeout = setTimeout(() => {
+    if (dashboardProcess === launchedDashboardProcess && dashboardStatus === 'starting') {
+      dashboardStatus = 'error';
+      broadcastStatus({
+        error: 'Dashboard did not report ready within 60s. Automatic recovery will retry with bounded backoff.',
+      });
+      terminateForRecovery('dashboard', launchedDashboardProcess);
     }
-  }, 15_000);
+  }, BOT_READY_TIMEOUT_MS);
+  dashboardReadyTimeout.unref?.();
 }
 
 /* ------------------------------------------------------------------ */
@@ -441,6 +594,7 @@ function startHeartbeatMonitor(): void {
       if (elapsed > 60_000) {
         botStatus = 'error';
         broadcastStatus({ error: 'Bot stopped responding (no heartbeat in 60s)' });
+        if (botProcess) terminateForRecovery('bot', botProcess);
       }
     }
   }, 10_000);
@@ -473,12 +627,18 @@ export function startAll(envVars: Record<string, string>): void {
     stopAll();
   }
 
+  clearRecoveryState(true);
+  desiredRunning = true;
+  lastStartEnv = { ...envVars };
   startBotProcess(envVars);
   startDashboardProcess(envVars);
   startHeartbeatMonitor();
 }
 
 export function stopAll(): void {
+  desiredRunning = false;
+  lastStartEnv = null;
+  clearRecoveryState(true);
   stopHeartbeatMonitor();
   clearBotReadyTimeout();
 
