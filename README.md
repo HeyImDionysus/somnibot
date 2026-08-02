@@ -636,7 +636,6 @@ finished. If the runner reports an error, apply migrations manually through
 Supabase and fix the runner before calling first-run setup complete.
 
 ### Further Documentation
-- **[Architecture](somnibot_architecture_v53.md)** — Full system design, 56 sections, every feature documented
 - **[Contributing](CONTRIBUTING.md)** — Coding standards, patterns, testing, migration rules
 - **[Deployment](DEPLOYMENT.md)** — Production deployment checklist with env vars and troubleshooting
 

@@ -214,6 +214,17 @@ Check: process running → Discord gateway → Valkey → Supabase → restart
 ### Automation Failures
 Check: `alerts` table → `automation_executions` errors → fix perms/channels
 
+### Credential rotation
+
+For a suspected compromise, rotate the affected credential at its provider,
+update the established deployment secret source, and restart only the services
+that consume it. Rotate `DISCORD_TOKEN` and `DISCORD_CLIENT_SECRET` in the
+Discord portal; Supabase server and publishable keys in Supabase; PayPal app
+credentials in PayPal; and application secrets with `node scripts/gen-secret.mjs`.
+Rebuild the dashboard whenever a `NEXT_PUBLIC_*` value changes. Verify bot
+login, dashboard OAuth, PayPal webhook delivery, and health after rotation;
+changing `NEXTAUTH_SECRET` invalidates existing dashboard sessions.
+
 ### Action Queue Backup
 Check stuck `processing` items → `bot_action_queue_recover_stale()` RPC → check DLQ.
 For a **commerce-lane** alert, filter on `lane = 'commerce'` in both
@@ -289,6 +300,15 @@ Requirements and knobs:
   never bypasses an active owner or the exact-owner lease checks.
 
 ## Database
+
+### Backup and restore boundary
+
+Before a production migration or deployment, take a provider-verified database
+backup and record its timestamp, the deployed Git SHA, and the
+`schema_migrations` ledger. Rehearse restores on staging first. Before customer
+writes, restore only the recorded backup when necessary; after customer writes,
+disable `store_enabled`, preserve payment evidence, and use an additive
+forward-fix instead of overwriting live data.
 
 ### Migrations
 The bot's migration runner applies files from `packages/supabase/migrations/`

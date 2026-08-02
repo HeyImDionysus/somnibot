@@ -326,7 +326,19 @@ Run the applicable checklist before calling an environment ready.
 - [ ] Lavalink is reachable from the bot only on the private network.
 - [ ] Valkey is reachable from bot/dashboard only on the private network.
 
-## 7. Monitoring
+## 7. Scaling limits
+
+The v1 launch cohort is capped at ten independently hosted owner installations.
+Each installation keeps its own credentials, database, and Valkey state; never
+point two owners at the same environment file or Supabase project.
+
+Keep one bot process per Discord token. Dashboard replicas are an operator
+scaling option only after they share Valkey and the same `NEXTAUTH_SECRET`,
+`CSRF_SECRET`, and `DOWNLOAD_SIGNING_SECRET`; use Supabase connection pooling
+when direct database clients become the connection bottleneck. Discord sharding
+and multi-node Valkey require their own load and recovery proof before use.
+
+## 8. Monitoring
 
 - **Dashboard health**: `GET /api/health` returns JSON. Alert on JSON
   `status: "degraded"` even though the route intentionally returns HTTP 200
@@ -338,7 +350,7 @@ Run the applicable checklist before calling an environment ready.
 - **DLQ**: Dashboard dead-letter queue for failed actions with retry/purge.
 - **Audit log**: `audit_log` table tracks admin actions and bot errors.
 
-## 8. Updating
+## 9. Updating
 
 ```bash
 git pull origin main
