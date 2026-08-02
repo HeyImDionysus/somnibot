@@ -51,11 +51,46 @@ export async function notifyBot(
   // V10 Audit M-1: Guard against empty/unset DISCORD_GUILD_ID.
   // Previously used a top-level non-null assertion that silently inserted
   // empty guild_id values the bot would never pick up.
-  const guildId = process.env.DISCORD_GUILD_ID;
+  const guildId = process.env.DISCORD_GUILD_ID?.split(',')[0]?.trim();
   if (!guildId) {
     console.warn('[notifyBot] DISCORD_GUILD_ID not set — skipping bot notification');
     return;
   }
+
+  await enqueueBotNotification(guildId, section, changes, changedBy, auditEvent, before);
+}
+
+/**
+ * Queue a config reload for the guild authorized by the current dashboard
+ * request. Multi-guild installations must use this path: the process-wide
+ * DISCORD_GUILD_ID can contain several guilds and cannot identify which guild
+ * the authenticated owner is editing.
+ */
+export async function notifyBotForGuild(
+  guildId: string,
+  section: ConfigSection,
+  changes?: Record<string, unknown>,
+  changedBy: string = 'dashboard',
+  auditEvent?: ConfigReloadAuditEvent,
+  before?: Record<string, unknown>,
+): Promise<void> {
+  const scopedGuildId = guildId.trim();
+  if (!scopedGuildId || scopedGuildId.includes(',')) {
+    console.warn('[notifyBot] A single guild ID is required — skipping bot notification');
+    return;
+  }
+
+  await enqueueBotNotification(scopedGuildId, section, changes, changedBy, auditEvent, before);
+}
+
+async function enqueueBotNotification(
+  guildId: string,
+  section: ConfigSection,
+  changes?: Record<string, unknown>,
+  changedBy: string = 'dashboard',
+  auditEvent?: ConfigReloadAuditEvent,
+  before?: Record<string, unknown>,
+): Promise<void> {
 
   try {
     const supabase = createAdminSupabase();

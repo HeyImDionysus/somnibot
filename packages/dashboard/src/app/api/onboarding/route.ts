@@ -4,7 +4,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { notifyBot } from '@/lib/notify-bot';
+import { notifyBotForGuild } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
@@ -68,7 +68,7 @@ export async function PUT(req: NextRequest) {
     return dbError(error, 'onboarding');
   }
 
-  await notifyBot('onboarding', allowed);
+  await notifyBotForGuild(guildId, 'onboarding', allowed);
 
   await recordGuildConfigChange({
     guildId,
