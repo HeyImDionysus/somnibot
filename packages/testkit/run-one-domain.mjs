@@ -17,16 +17,24 @@ const DEMO_ANON =
 // scenarios can sever/restore a REAL network path (ctx.faults). Importing
 // dist/fault-proxy.js alone pulls no bot code, so env can still be armed after.
 // Falls back to direct URLs if a proxy cannot start (fault scenarios then GATE).
-const DIRECT_SUPABASE = 'http://127.0.0.1:54321';
-const DIRECT_VALKEY = process.env.VALKEY_URL || 'redis://localhost:6379';
+// The child runner does not pass through Vitest's live-setup.ts, so it must
+// independently force the same explicit isolated endpoints before importing
+// production code. Ambient developer/production connection settings are never
+// a valid fleet target.
+const DIRECT_SUPABASE = process.env.SOMNIBOT_E2E_SUPABASE_URL || 'http://127.0.0.1:54321';
+const DIRECT_VALKEY = process.env.SOMNIBOT_E2E_VALKEY_URL || 'redis://127.0.0.1:6379';
+const { assertSupabaseUrlIsLocal, assertValkeyUrlIsLocal } = await import('./dist/guard.js');
+assertSupabaseUrlIsLocal(DIRECT_SUPABASE, 'SOMNIBOT_E2E_SUPABASE_URL');
+assertValkeyUrlIsLocal(DIRECT_VALKEY, 'SOMNIBOT_E2E_VALKEY_URL');
 let faultControls = null;
 let supabaseUrl = DIRECT_SUPABASE;
 let valkeyUrl = DIRECT_VALKEY;
 try {
   const { startFaultProxy } = await import('./dist/fault-proxy.js');
+  const supabaseTarget = new URL(DIRECT_SUPABASE);
   const valkeyTarget = new URL(DIRECT_VALKEY);
   const [sbProxy, vkProxy] = await Promise.all([
-    startFaultProxy('127.0.0.1', 54321, 0),
+    startFaultProxy(supabaseTarget.hostname || '127.0.0.1', Number(supabaseTarget.port) || 54321, 0),
     startFaultProxy(valkeyTarget.hostname || '127.0.0.1', Number(valkeyTarget.port) || 6379, 0),
   ]);
   faultControls = { supabase: sbProxy, valkey: vkProxy };
@@ -46,15 +54,12 @@ Object.assign(process.env, {
   SUPABASE_SECRET_KEY: process.env.SUPABASE_SECRET_KEY || DEMO_SERVICE,
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY || DEMO_SERVICE,
   SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || DEMO_ANON,
-  // Real Valkey (local docker / CI service) so cooldown/streak/rate-limit legs drive.
+  // Real, isolated Valkey so cooldown/streak/rate-limit legs drive.
   VALKEY_URL: valkeyUrl,
-  // The local Valkey container runs with --requirepass from the repo .env, so
-  // the harness must authenticate exactly like the bot does. Without this,
-  // every command failed NOAUTH, the bot raised a valkey_disconnected owner
-  // alert in every scenario, and every happy-path assertion failed on the
-  // false alarm. Passthrough only — empty stays empty (CI's service container
-  // has no auth), and the fault proxy relays AUTH bytes untouched.
-  VALKEY_PASSWORD: process.env.VALKEY_PASSWORD || '',
+  // Disposable Valkey is deliberately unauthenticated. Clearing an ambient
+  // password prevents a child from inheriting an established installation's
+  // connection shape.
+  VALKEY_PASSWORD: '',
   SOMNIBOT_LOOPBACK_E2E_CONFIRMATION:
     'I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE',
   PAYPAL_ENV: 'sandbox',
