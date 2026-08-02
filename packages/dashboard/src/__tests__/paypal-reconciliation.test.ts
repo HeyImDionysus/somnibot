@@ -5419,6 +5419,11 @@ describe('runPayPalReconciliation', () => {
           relatedOrderId: 'PP-ORDER-OLD',
         }),
       },
+      orders: {
+        'PP-ORDER-OLD': orderObject({
+          captures: [{ id: 'CAP-OLD', status: 'REFUNDED', value: '25.00' }],
+        }),
+      },
     });
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
@@ -6292,16 +6297,28 @@ describe('runPayPalReconciliation', () => {
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.missingProviderPayments).toEqual([{
-      kind: 'payment',
-      orderId: ORDER_UUID,
-      orderNumber: null,
-      guildId: GUILD_ID,
-      paypalPaymentIds: ['CAP-OLD'],
-      amountCents: 2500,
-      currency: 'USD',
-      createdAt: '2026-07-01T10:00:00.000Z',
-    }]);
+    expect(result.missingProviderPayments).toEqual([
+      {
+        kind: 'payment',
+        orderId: ORDER_UUID,
+        orderNumber: null,
+        guildId: GUILD_ID,
+        paypalPaymentIds: ['CAP-OLD'],
+        amountCents: 2500,
+        currency: 'USD',
+        createdAt: '2026-07-01T10:00:00.000Z',
+      },
+      {
+        kind: 'order',
+        orderId: ORDER_UUID,
+        orderNumber: null,
+        guildId: GUILD_ID,
+        paypalPaymentIds: [],
+        amountCents: 2500,
+        currency: 'USD',
+        createdAt: '2026-06-01T10:00:00.000Z',
+      },
+    ]);
   });
 
   // ── PR #409 review round 27 repairs ─────────────────────────────────────
@@ -6391,20 +6408,37 @@ describe('runPayPalReconciliation', () => {
           relatedOrderId: 'PP-ORDER-OLD',
         }),
       },
+      orders: {
+        'PP-ORDER-OLD': orderObject({
+          captures: [{ id: 'CAP-OLD', status: 'FAILED', value: '25.00' }],
+        }),
+      },
     });
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
 
-    expect(result.missingProviderPayments).toEqual([{
-      kind: 'payment',
-      orderId: ORDER_UUID,
-      orderNumber: null,
-      guildId: GUILD_ID,
-      paypalPaymentIds: ['CAP-OLD'],
-      amountCents: 2500,
-      currency: 'USD',
-      createdAt: '2026-07-01T10:00:00.000Z',
-    }]);
+    expect(result.missingProviderPayments).toEqual([
+      {
+        kind: 'payment',
+        orderId: ORDER_UUID,
+        orderNumber: null,
+        guildId: GUILD_ID,
+        paypalPaymentIds: ['CAP-OLD'],
+        amountCents: 2500,
+        currency: 'USD',
+        createdAt: '2026-07-01T10:00:00.000Z',
+      },
+      {
+        kind: 'order',
+        orderId: ORDER_UUID,
+        orderNumber: null,
+        guildId: GUILD_ID,
+        paypalPaymentIds: [],
+        amountCents: 2500,
+        currency: 'USD',
+        createdAt: '2026-06-01T10:00:00.000Z',
+      },
+    ]);
   });
 
   it('does not let an unlinked in-flight refund defer another capture', async () => {
@@ -6699,6 +6733,11 @@ describe('runPayPalReconciliation', () => {
           relatedOrderId: 'PP-ORDER-OLD',
         }),
       },
+      orders: {
+        'PP-ORDER-OLD': orderObject({
+          captures: [{ id: 'CAP-OLD', status: 'COMPLETED', value: '25.00' }],
+        }),
+      },
     });
 
     const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
@@ -6788,6 +6827,193 @@ describe('runPayPalReconciliation', () => {
       orderId: ORDER_UUID,
       paymentStatus: 'pending',
       orderStatus: 'pending',
+    }]);
+  });
+
+  // ── Exact merged-head review repairs ─────────────────────────────────────
+
+  it('enumerates every capture on a settled historical order', async () => {
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'CAP-OLD',
+        created_at: '2026-07-01T10:00:00.000Z',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: 'PP-ORDER-OLD',
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-OLD': captureObject({ relatedOrderId: 'PP-ORDER-OLD' }),
+      },
+      orders: {
+        'PP-ORDER-OLD': orderObject({
+          captures: [
+            { id: 'CAP-OLD', value: '25.00' },
+            { id: 'CAP-LOST', value: '10.00' },
+          ],
+        }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.missingLocalPayments).toEqual([{
+      kind: 'payment',
+      transactionId: 'CAP-LOST',
+      guildId: GUILD_ID,
+      amountCents: 1000,
+      currency: 'USD',
+      initiatedAt: null,
+      source: 'order',
+      referenceId: 'PP-ORDER-OLD',
+    }]);
+  });
+
+  it('fails retriably when a verified capture cannot enumerate its settled order', async () => {
+    withLedger({
+      payments: [paymentRow()],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: 'PP-ORDER-1',
+      }],
+    });
+    scriptProviderObjects({
+      captures: { 'CAP-1': captureObject() },
+      orders: {},
+    });
+
+    await expect(runPayPalReconciliation(supabase as never, OPTS)).resolves.toEqual({
+      status: 'failed',
+      reason: 'settled-order capture enumeration unavailable: provider order missing',
+      retriable: true,
+    });
+  });
+
+  it('fails closed when a historical capture cannot bind to its local parent order', async () => {
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'CAP-OLD',
+        status: 'pending',
+        created_at: '2026-07-01T10:00:00.000Z',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'pending',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: null,
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-OLD': captureObject({ relatedOrderId: 'PP-ORDER-FOREIGN' }),
+      },
+    });
+
+    await expect(runPayPalReconciliation(supabase as never, OPTS)).resolves.toEqual({
+      status: 'failed',
+      reason: 'provider identity conflict',
+      retriable: false,
+    });
+  });
+
+  it('reports both status and money drift on an unresolved historical capture', async () => {
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'CAP-OLD',
+        amount_cents: 1500,
+        status: 'pending',
+        created_at: '2026-07-01T10:00:00.000Z',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 1500,
+        status: 'pending',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: 'PP-ORDER-OLD',
+      }],
+    });
+    scriptProviderObjects({
+      captures: {
+        'CAP-OLD': captureObject({
+          value: '25.00',
+          relatedOrderId: 'PP-ORDER-OLD',
+        }),
+      },
+      orders: { 'PP-ORDER-OLD': orderObject({ captures: [{ id: 'CAP-OLD' }] }) },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'CAP-OLD',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'pending',
+      orderStatus: 'pending',
+    }]);
+    expect(result.amountMismatches).toEqual([{
+      transactionId: 'CAP-OLD',
+      guildId: GUILD_ID,
+      providerAmountCents: 2500,
+      localAmountCents: 1500,
+      providerCurrency: 'USD',
+      localCurrency: 'USD',
+    }]);
+  });
+
+  it('reports both status and money drift on an unresolved historical sale', async () => {
+    withLedger({
+      payments: [paymentRow({
+        paypal_payment_id: 'SALE-OLD',
+        amount_cents: 1500,
+        status: 'pending',
+        created_at: '2026-07-01T10:00:00.000Z',
+      })],
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 1500,
+        status: 'pending',
+        created_at: '2026-06-01T10:00:00.000Z',
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    scriptProviderObjects({
+      sales: {
+        'SALE-OLD': saleObject({ total: '25.00', billingAgreementId: 'SUB-1' }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(supabase as never, OPTS));
+
+    expect(result.unsettledLocalPayments).toEqual([{
+      transactionId: 'SALE-OLD',
+      guildId: GUILD_ID,
+      orderId: ORDER_UUID,
+      paymentStatus: 'pending',
+      orderStatus: 'pending',
+    }]);
+    expect(result.amountMismatches).toEqual([{
+      transactionId: 'SALE-OLD',
+      guildId: GUILD_ID,
+      providerAmountCents: 2500,
+      localAmountCents: 1500,
+      providerCurrency: 'USD',
+      localCurrency: 'USD',
     }]);
   });
 
