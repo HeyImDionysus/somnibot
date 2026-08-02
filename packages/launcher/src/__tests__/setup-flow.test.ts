@@ -56,6 +56,20 @@ describe('setup flow status', () => {
     expect(status.primaryAction.enabled).toBe(false);
   });
 
+  it('reports Windows service permission separately from Tailscale sign-in', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      tailscaleReadinessState: 'needs-permission',
+      ...completeCredentials,
+    });
+
+    const callbackStep = status.steps.find(step => step.id === 'regular-callback');
+    expect(callbackStep?.status).toBe('blocked');
+    expect(callbackStep?.summary).toContain('Windows permission');
+    expect(callbackStep?.detail).not.toContain('not signed in');
+    expect(callbackStep?.manualAction).toBe(true);
+  });
+
   it('lets regular local setup sign in to Tailscale when an auth key is saved', () => {
     const status = buildSetupStatus({
       runtimeMode: 'regular-local',

@@ -1538,6 +1538,7 @@ function tailscaleDotClass(state) {
       return 'waiting';
     case 'not-installed':
     case 'not-logged-in':
+    case 'needs-permission':
     case 'needs-policy':
     case 'unsupported-platform':
       return 'blocked';
@@ -1556,6 +1557,8 @@ function tailscaleReadinessNote(readiness) {
       return 'Install Tailscale, sign in, then check again.';
     case 'not-logged-in':
       return 'Add a Tailscale auth key, then enable Funnel again.';
+    case 'needs-permission':
+      return readiness.detail || 'Restart SomniBot with the Windows permission required to read Tailscale, then check again.';
     case 'needs-policy':
       return 'Tailnet policy must allow Funnel before SomniBot can automate this step.';
     case 'unsupported-platform':

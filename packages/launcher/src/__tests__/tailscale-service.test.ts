@@ -8,12 +8,14 @@ import {
   buildLoginWithAuthKeyArgs,
   enableSomniBotFunnel,
   getTailscaleReadiness,
+  isTailscalePermissionError,
   loginWithTailscaleAuthKey,
   parseFunnelStatusJson,
   parseFunnelStatusText,
   parseTailscaleStatusJson,
   probePublicCallbackHealth,
   redactTailscaleOutput,
+  tailscaleBinaryCandidates,
   type TailscaleRunner,
 } from '../main/tailscale-service';
 
@@ -218,6 +220,55 @@ Available on the internet:
     expect(readiness.state).toBe('not-installed');
     expect(readiness.installed).toBe(false);
     expect(readiness.commandPreview).toEqual(['tailscale', ...buildEnableFunnelArgs()]);
+  });
+
+  it('uses the standard Windows install path when Tailscale is absent from PATH', () => {
+    expect(tailscaleBinaryCandidates('win32')).toEqual([
+      'tailscale',
+      'C:\\Program Files\\Tailscale\\tailscale.exe',
+    ]);
+  });
+
+  it('classifies protected Windows service access as a permission problem', () => {
+    const error = new TailscaleCommandError('Access is denied', {
+      stderr: String.raw`failed to open \\.\pipe\ProtectedPrefix\Administrators\Tailscale\tailscaled`,
+    });
+
+    expect(isTailscalePermissionError(error)).toBe(true);
+  });
+
+  it('does not report a signed-in Tailscale service as signed out when Windows blocks status access', async () => {
+    const readiness = await getTailscaleReadiness(async (args) => {
+      if (args[0] === 'version') return { stdout: '1.98.9\n', stderr: '' };
+      throw new TailscaleCommandError('Access is denied', {
+        stderr: String.raw`failed to open \\.\pipe\ProtectedPrefix\Administrators\Tailscale\tailscaled`,
+      });
+    });
+
+    expect(readiness.state).toBe('needs-permission');
+    expect(readiness.installed).toBe(true);
+    expect(readiness.message).not.toContain('not signed in');
+    expect(readiness.commandPreview).toEqual([]);
+  });
+
+  it('keeps signed-in state when Windows blocks Funnel status access', async () => {
+    const readiness = await getTailscaleReadiness(async (args) => {
+      if (args[0] === 'version') return { stdout: '1.98.9\n', stderr: '' };
+      if (args[0] === 'status') {
+        return {
+          stdout: JSON.stringify({
+            BackendState: 'Running',
+            Self: { DNSName: 'somnibot.dionysus.ts.net.' },
+          }),
+          stderr: '',
+        };
+      }
+      throw new TailscaleCommandError('Access is denied', { code: 'EPERM' });
+    });
+
+    expect(readiness.state).toBe('needs-permission');
+    expect(readiness.loggedIn).toBe(true);
+    expect(readiness.message).toContain('signed in');
   });
 
   it('reports a signed-in machine without Funnel as not configured', async () => {

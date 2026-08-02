@@ -72,6 +72,7 @@ export interface SetupFlowInput extends RuntimeNetworkingConfig, Partial<Pick<
   tailscaleReadinessState?: 'ready'
     | 'not-installed'
     | 'not-logged-in'
+    | 'needs-permission'
     | 'not-configured'
     | 'needs-dashboard'
     | 'needs-policy'
@@ -561,6 +562,17 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
             actionLabel: 'Sign in or add auth key',
             manualAction: true,
           };
+        break;
+      case 'needs-permission':
+        callbackStep = {
+          id: 'regular-callback',
+          label: 'Tailscale public callback',
+          status: 'blocked',
+          summary: 'Tailscale status needs Windows permission.',
+          detail: 'Tailscale is installed, but Windows blocked the launcher from reading its service. Restart SomniBot with the required permission, then check Tailscale again.',
+          actionLabel: 'Restart with permission',
+          manualAction: true,
+        };
         break;
       case 'needs-policy':
         callbackStep = {
