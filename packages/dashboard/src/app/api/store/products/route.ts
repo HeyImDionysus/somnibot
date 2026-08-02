@@ -520,7 +520,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   // Notify bot about new product
-  await notifyBot('commerce', { product_created: data.id });
+  await notifyBot(guildId, 'commerce', { product_created: data.id });
 
   // Recorded only now: the product row, its PayPal catalog entry and every
   // plan are already committed, so this describes something that really exists.
@@ -701,7 +701,7 @@ export async function PUT(req: NextRequest) {
   }
 
   // Notify bot so it hot-reloads product changes
-  await notifyBot('commerce', { product_updated: id });
+  await notifyBot(guildId, 'commerce', { product_updated: id });
 
   await recordCrudChange(
     {
@@ -777,7 +777,7 @@ export async function DELETE(req: NextRequest) {
   }
 
   // Notify bot so deactivated product is no longer purchasable
-  await notifyBot('commerce', { product_deactivated: id });
+  await notifyBot(guildId, 'commerce', { product_deactivated: id });
 
   // This is an UPDATE, not a delete — the row still exists with active=false,
   // so restoring the prior flag is a real reversal, not a resurrection.

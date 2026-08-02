@@ -134,7 +134,7 @@ export async function POST(req: NextRequest) {
     return dbError(error, 'temp-channels');
   }
 
-  await notifyBot('temp-channels');
+  await notifyBot(guildId, 'temp-channels');
 
   await recordCrudChange({
     guildId: auth.ctx.guildId,
@@ -187,7 +187,7 @@ export async function PUT(req: NextRequest) {
     return dbError(error, 'temp-channels');
   }
 
-  await notifyBot('temp-channels');
+  await notifyBot(guildId, 'temp-channels');
 
   await recordCrudChange({
     guildId: auth.ctx.guildId,
@@ -235,7 +235,7 @@ export async function DELETE(req: NextRequest) {
     return dbError(error, 'temp-channels');
   }
 
-  await notifyBot('temp-channels');
+  await notifyBot(guildId, 'temp-channels');
 
   await recordCrudChange({
     guildId: auth.ctx.guildId,

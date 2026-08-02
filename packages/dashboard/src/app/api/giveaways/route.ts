@@ -168,7 +168,7 @@ export async function POST(req: NextRequest) {
     afterState: typedPick(data, ['prize', 'channel_id', 'winner_count', 'ends_at', 'required_role_id', 'required_level', 'prize_product_id', 'prize_license_count', 'status']),
   });
 
-  await notifyBot('giveaways');
+  await notifyBot(guildId, 'giveaways');
 
   await recordCrudChange({
     guildId: auth.ctx.guildId,
@@ -267,7 +267,7 @@ export async function PUT(req: NextRequest) {
     });
   }
 
-  await notifyBot('giveaways');
+  await notifyBot(guildId, 'giveaways');
 
   await recordCrudChange({
     guildId: auth.ctx.guildId,
@@ -329,7 +329,7 @@ export async function DELETE(req: NextRequest) {
     });
   }
 
-  await notifyBot('giveaways');
+  await notifyBot(guildId, 'giveaways');
 
   await recordCrudChange({
     guildId: auth.ctx.guildId,

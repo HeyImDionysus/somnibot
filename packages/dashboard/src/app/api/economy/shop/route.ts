@@ -99,7 +99,7 @@ export async function POST(request: NextRequest) {
         'An item with that name already exists (names are case-insensitive).');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -147,7 +147,7 @@ export async function PATCH(request: NextRequest) {
         'An item with that name already exists (names are case-insensitive).');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -199,7 +199,7 @@ export async function DELETE(request: NextRequest) {
       return dbError(error, 'economy/shop');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,

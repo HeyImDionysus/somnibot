@@ -177,7 +177,7 @@ describe('PUT /api/branding — happy path', () => {
       { onConflict: 'guild_id' },
     );
     // The audit payload carries the changed keys AND their prior values.
-    expect(notifyBot).toHaveBeenCalledWith('branding', payload, 'dashboard', undefined, prior);
+    expect(notifyBot).toHaveBeenCalledWith('guild-123', 'branding', payload, 'dashboard', undefined, prior);
   });
 
   it('persists a save for a pre-init guild with no guild_config row yet', async () => {
@@ -192,7 +192,7 @@ describe('PUT /api/branding — happy path', () => {
     );
     // No prior row → no before payload (bot falls back to its own snapshot).
     expect(notifyBot).toHaveBeenCalledWith(
-      'branding', { brand_voice_preset: 'professional' }, 'dashboard', undefined, undefined,
+      'guild-123', 'branding', { brand_voice_preset: 'professional' }, 'dashboard', undefined, undefined,
     );
   });
 
@@ -204,7 +204,7 @@ describe('PUT /api/branding — happy path', () => {
     expect((await res.json()).success).toBe(true);
     expect(upsertChain.upsert).toHaveBeenCalled();
     expect(notifyBot).toHaveBeenCalledWith(
-      'branding', { store_show_powered_by: true }, 'dashboard', undefined, undefined,
+      'guild-123', 'branding', { store_show_powered_by: true }, 'dashboard', undefined, undefined,
     );
   });
 

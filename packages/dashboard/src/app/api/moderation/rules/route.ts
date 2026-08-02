@@ -86,7 +86,7 @@ export async function POST(req: NextRequest) {
     return dbError(error, 'moderation/rules');
   }
 
-  await notifyBot('moderation');
+  await notifyBot(guildId, 'moderation');
 
   await recordCrudChange({
     guildId,
@@ -140,7 +140,7 @@ export async function PUT(req: NextRequest) {
     return dbError(error, 'moderation/rules');
   }
 
-  await notifyBot('moderation');
+  await notifyBot(guildId, 'moderation');
 
   await recordCrudChange({
     guildId,
@@ -189,7 +189,7 @@ export async function DELETE(req: NextRequest) {
     return dbError(error, 'moderation/rules');
   }
 
-  await notifyBot('moderation');
+  await notifyBot(guildId, 'moderation');
 
   await recordCrudChange({
     guildId,

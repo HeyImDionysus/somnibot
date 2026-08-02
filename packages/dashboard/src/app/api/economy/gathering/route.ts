@@ -107,7 +107,7 @@ export async function POST(request: NextRequest) {
         'A loot entry with that item name already exists for this source and tool tier.');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -165,7 +165,7 @@ export async function PUT(request: NextRequest) {
         'A loot entry with that item name already exists for this source and tool tier.');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -214,7 +214,7 @@ export async function DELETE(request: NextRequest) {
       return dbError(error, 'economy/gathering');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,

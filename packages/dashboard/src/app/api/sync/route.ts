@@ -118,7 +118,7 @@ export async function POST(request: NextRequest) {
     if (error) return dbError(error, 'sync');
 
     // Notify bot so it hot-reloads sync config immediately
-    await notifyBot('settings', syncUpdates);
+    await notifyBot(guildId, 'settings', syncUpdates);
 
     // Auto-repair rewrites roles/channels to match the dashboard, so a change
     // here can move real Discord objects on the next sync tick.

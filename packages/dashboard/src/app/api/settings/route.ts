@@ -221,7 +221,7 @@ export async function PUT(request: NextRequest) {
       .upsert(upsertRows, { onConflict: 'key' });
     if (upsertError) return dbError(upsertError, 'settings');
 
-    await notifyBot('settings', { section });
+    await notifyBot(auth.ctx.guildId, 'settings', { section });
 
     {
       const changedKeys = upsertRows.map((r) => r.key);

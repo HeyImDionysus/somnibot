@@ -60,7 +60,7 @@ export async function PUT(req: NextRequest) {
     return dbError(error, 'welcome');
   }
 
-  await notifyBot('welcome', allowed);
+  await notifyBot(guildId, 'welcome', allowed);
 
   await recordGuildConfigChange({
     guildId,

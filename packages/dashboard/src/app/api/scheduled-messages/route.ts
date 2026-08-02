@@ -156,7 +156,7 @@ export async function POST(req: NextRequest) {
     afterState: typedPick(data, ['name', 'channel_id', 'message', 'embed_config_id', 'cron_expression', 'timezone', 'start_date', 'end_date', 'max_sends', 'missed_run_policy', 'active']),
   });
 
-  await notifyBot('scheduled-messages');
+  await notifyBot(guildId, 'scheduled-messages');
 
   await recordCrudChange({
     guildId,
@@ -237,7 +237,7 @@ export async function PUT(req: NextRequest) {
     });
   }
 
-  await notifyBot('scheduled-messages');
+  await notifyBot(guildId, 'scheduled-messages');
 
   // Same no-op guard as the audit row above: a PUT that changed no
   // owner-visible field must not appear as a change on the page.
@@ -299,7 +299,7 @@ export async function DELETE(req: NextRequest) {
     });
   }
 
-  await notifyBot('scheduled-messages');
+  await notifyBot(guildId, 'scheduled-messages');
 
   await recordCrudChange({
     guildId,

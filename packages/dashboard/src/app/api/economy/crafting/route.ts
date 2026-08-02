@@ -94,7 +94,7 @@ export async function POST(request: NextRequest) {
         'A recipe with that name already exists (names are case-insensitive).');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -149,7 +149,7 @@ export async function PUT(request: NextRequest) {
         'A recipe with that name already exists (names are case-insensitive).');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -198,7 +198,7 @@ export async function DELETE(request: NextRequest) {
       return dbError(error, 'economy/crafting');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,

@@ -106,7 +106,7 @@ export async function POST(req: NextRequest) {
     return dbError(error, 'automations');
   }
 
-  await notifyBot('automations', undefined, 'dashboard', {
+  await notifyBot(guildId, 'automations', undefined, 'dashboard', {
     type: 'automation.created',
     data: {
       automationId: data.id,
@@ -169,7 +169,7 @@ export async function PUT(req: NextRequest) {
     return dbError(error, 'automations');
   }
 
-  await notifyBot('automations', undefined, 'dashboard', {
+  await notifyBot(guildId, 'automations', undefined, 'dashboard', {
     type: 'automation.updated',
     data: {
       automationId: data.id,
@@ -234,7 +234,7 @@ export async function DELETE(req: NextRequest) {
     return dbError(error, 'automations');
   }
 
-  await notifyBot('automations', undefined, 'dashboard', {
+  await notifyBot(guildId, 'automations', undefined, 'dashboard', {
     type: 'automation.deleted',
     data: {
       automationId: id,

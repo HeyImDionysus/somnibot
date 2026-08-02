@@ -136,7 +136,7 @@ export async function PUT(req: NextRequest) {
     success: true,
   });
 
-  await notifyBot('music');
+  await notifyBot(guildId, 'music');
 
   await recordGuildConfigChange({
     guildId,

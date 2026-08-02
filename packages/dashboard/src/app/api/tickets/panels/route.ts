@@ -129,7 +129,7 @@ export async function POST(req: NextRequest) {
     return dbError(error, 'tickets/panels');
   }
 
-  await notifyBot('tickets');
+  await notifyBot(guildId, 'tickets');
 
   await recordCrudChange({
     guildId,
@@ -178,7 +178,7 @@ export async function PUT(req: NextRequest) {
     return dbError(error, 'tickets/panels');
   }
 
-  await notifyBot('tickets');
+  await notifyBot(guildId, 'tickets');
 
   await recordCrudChange({
     guildId,
@@ -226,7 +226,7 @@ export async function DELETE(req: NextRequest) {
     return dbError(error, 'tickets/panels');
   }
 
-  await notifyBot('tickets');
+  await notifyBot(guildId, 'tickets');
 
   await recordCrudChange({
     guildId,

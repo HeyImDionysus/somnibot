@@ -107,7 +107,7 @@ export async function PUT(request: NextRequest) {
 
   // Notify bot to invalidate its brand kit cache, carrying the changed keys
   // and their prior values so the config.updated audit row isn't empty.
-  await notifyBot('branding', updates, 'dashboard', undefined, before);
+  await notifyBot(guildId, 'branding', updates, 'dashboard', undefined, before);
 
   // Make the change visible (and undoable) on the Admin Changes page. The
   // brand drives every member-facing surface, so this is a medium blast radius.

@@ -247,7 +247,7 @@ export async function PATCH(request: NextRequest) {
 
   // Notify the bot so it hot-reloads the changed config immediately.
   // Fields in this schema span multiple feature areas — use 'all' to cover them.
-  await notifyBot('all', updates);
+  await notifyBot(guildId, 'all', updates);
 
   await recordGuildConfigChange({
     guildId,

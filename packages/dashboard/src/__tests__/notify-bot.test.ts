@@ -58,10 +58,10 @@ describe('notifyBot', () => {
   });
 
   it('keeps ten concurrent owner-guild notifications isolated', async () => {
-    const { notifyBotForGuild } = await import('@/lib/notify-bot');
+    const { notifyBot } = await import('@/lib/notify-bot');
     const guildIds = Array.from({ length: 10 }, (_, index) => `guild_${index + 1}`);
 
-    await Promise.all(guildIds.map((guildId, index) => notifyBotForGuild(
+    await Promise.all(guildIds.map((guildId, index) => notifyBot(
       guildId,
       'onboarding',
       { onboarding_enabled: index % 2 === 0, marker: guildId },

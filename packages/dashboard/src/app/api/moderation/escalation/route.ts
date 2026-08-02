@@ -115,7 +115,7 @@ export async function PUT(req: NextRequest) {
   }
 
   // Notify the bot so it hot-reloads moderation config (escalation chain, mod log, expiry).
-  await notifyBot('moderation', updates);
+  await notifyBot(guildId, 'moderation', updates);
 
   // Escalation drives automatic punishments — worth a confirmation on undo.
   await recordGuildConfigChange({

@@ -160,7 +160,7 @@ describe('PUT /api/settings', () => {
 
     await putSettings({ section: 'lavalink', values: { lavalink_host: '10.0.0.1' } });
 
-    expect(notifyBot).toHaveBeenCalledWith('settings', { section: 'lavalink' });
+    expect(notifyBot).toHaveBeenCalledWith('guild-1', 'settings', { section: 'lavalink' });
   });
 
   it('returns 500 when upsert throws', async () => {

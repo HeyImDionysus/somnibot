@@ -138,7 +138,7 @@ export async function PUT(req: NextRequest) {
     return dbError(error, 'levels');
   }
 
-  await notifyBot('levels');
+  await notifyBot(guildId, 'levels');
 
   await recordGuildConfigChange({
     guildId,
@@ -191,7 +191,7 @@ export async function POST(req: NextRequest) {
       return dbError(error, 'levels');
     }
 
-    await notifyBot('levels');
+    await notifyBot(guildId, 'levels');
 
     return NextResponse.json({ success: true, data });
   }
@@ -219,7 +219,7 @@ export async function POST(req: NextRequest) {
       return dbError(error, 'levels');
     }
 
-    await notifyBot('levels');
+    await notifyBot(guildId, 'levels');
 
     return NextResponse.json({ success: true, data });
   }
@@ -259,7 +259,7 @@ export async function DELETE(req: NextRequest) {
     return dbError(error, 'levels');
   }
 
-  await notifyBot('levels');
+  await notifyBot(guildId, 'levels');
 
   return NextResponse.json({ success: true });
 }

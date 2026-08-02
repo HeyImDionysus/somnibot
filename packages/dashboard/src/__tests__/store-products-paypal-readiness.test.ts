@@ -204,7 +204,7 @@ describe('POST /api/store/products PayPal readiness', () => {
       type: 'one_time',
     }));
     expect(plansTable.insert).not.toHaveBeenCalled();
-    expect(notifyBot).toHaveBeenCalledWith('commerce', { product_created: 'product-123' });
+    expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
   });
 
   it('creates zero-price one-time products without PayPal setup', async () => {
@@ -245,7 +245,7 @@ describe('POST /api/store/products PayPal readiness', () => {
       type: 'one_time',
     }));
     expect(plansTable.insert).not.toHaveBeenCalled();
-    expect(notifyBot).toHaveBeenCalledWith('commerce', { product_created: 'product-free-123' });
+    expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-free-123' });
   });
 
   it('blocks paid product creation before database writes when PayPal catalog sync fails', async () => {
@@ -351,7 +351,7 @@ describe('POST /api/store/products PayPal readiness', () => {
       paypal_plan_id: 'PLAN-123',
       product_id: 'product-123',
     }));
-    expect(notifyBot).toHaveBeenCalledWith('commerce', { product_created: 'product-123' });
+    expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
   });
 
   it('creates PayPal plans for paid subscription plans when the parent product price is zero', async () => {
@@ -415,7 +415,7 @@ describe('POST /api/store/products PayPal readiness', () => {
       price_cents: 2500,
       product_id: 'product-123',
     }));
-    expect(notifyBot).toHaveBeenCalledWith('commerce', { product_created: 'product-123' });
+    expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
   });
 
   it('creates a default backed PayPal plan for paid subscriptions without submitted plans', async () => {
@@ -465,6 +465,6 @@ describe('POST /api/store/products PayPal readiness', () => {
       price_cents: 2500,
       product_id: 'product-123',
     }));
-    expect(notifyBot).toHaveBeenCalledWith('commerce', { product_created: 'product-123' });
+    expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
   });
 });

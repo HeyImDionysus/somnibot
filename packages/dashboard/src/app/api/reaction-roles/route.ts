@@ -121,7 +121,7 @@ export async function POST(req: NextRequest) {
     return dbError(error, 'reaction-roles');
   }
 
-  await notifyBot('reaction-roles');
+  await notifyBot(guildId, 'reaction-roles');
 
   await recordCrudChange({
     guildId,
@@ -167,7 +167,7 @@ export async function PUT(req: NextRequest) {
     return dbError(error, 'reaction-roles');
   }
 
-  await notifyBot('reaction-roles');
+  await notifyBot(guildId, 'reaction-roles');
 
   await recordCrudChange({
     guildId,
@@ -217,7 +217,7 @@ export async function DELETE(req: NextRequest) {
     return dbError(error, 'reaction-roles');
   }
 
-  await notifyBot('reaction-roles');
+  await notifyBot(guildId, 'reaction-roles');
 
   await recordCrudChange({
     guildId,

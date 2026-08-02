@@ -78,7 +78,7 @@ export async function POST(request: NextRequest) {
 
     if (error) return dbConflictOr500(error, 'economy/adventures', 'uq_economy_adventures_guild_lname',
         'An adventure with that name already exists (names are case-insensitive).');
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -133,7 +133,7 @@ export async function PUT(request: NextRequest) {
 
     if (error) return dbConflictOr500(error, 'economy/adventures', 'uq_economy_adventures_guild_lname',
         'An adventure with that name already exists (names are case-insensitive).');
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -175,7 +175,7 @@ export async function DELETE(request: NextRequest) {
       .eq('guild_id', ctx.guildId);
 
     if (error) return dbError(error, 'economy/adventures');
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
