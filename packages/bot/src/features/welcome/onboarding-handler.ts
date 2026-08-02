@@ -223,9 +223,12 @@ export async function handleMemberUpdate(
       }
     }
 
-    // Apply interest role mapping (from onboarding customization)
+    // Discord applies interest roles natively from the onboarding prompt
+    // payload synced by GuildOnboardingSync. Confirm what arrived on the
+    // completed member instead of trying to infer selections that Discord does
+    // not expose and issuing duplicate role grants.
     if (config.interest_role_mapping && Object.keys(config.interest_role_mapping).length > 0) {
-      await applyInterestRoles(newMember, config.interest_role_mapping);
+      logAppliedInterestRoles(newMember, config.interest_role_mapping);
     }
   }
 
@@ -382,22 +385,19 @@ async function restoreLevelRoles(
 }
 
 /**
- * Apply interest roles based on onboarding customization selections.
- * The interest_role_mapping maps Discord onboarding option IDs to role IDs.
+ * Record the mapped roles Discord's native onboarding already granted.
+ * The mapping keys are onboarding option titles and values are role IDs.
  */
-async function applyInterestRoles(
+function logAppliedInterestRoles(
   member: GuildMember,
   mapping: Record<string, string>,
-): Promise<void> {
-  // Discord doesn't expose which onboarding options a member selected via the API
-  // in a straightforward way. The member's roles after onboarding may include
-  // interest roles that Discord auto-granted based on onboarding prompts.
-  //
-  // For now, this is a placeholder — Discord's onboarding can auto-grant roles
-  // natively. The mapping is used to document the relationship for the dashboard.
-  //
-  // If Discord exposes selection data in a future API update, we'll populate this.
-  log.info(`Interest role mapping available (${Object.keys(mapping).length} entries)`);
+): void {
+  const applied = Object.values(mapping).filter((roleId) => member.roles.cache.has(roleId));
+  log.info(`Discord onboarding applied ${applied.length} mapped interest role(s)`, {
+    memberId: member.id,
+    configured: Object.keys(mapping).length,
+    appliedRoleIds: applied,
+  });
 }
 
 /**

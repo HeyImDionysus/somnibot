@@ -487,13 +487,36 @@ const welcomeConfig = z.object({
   goodbye_message: z.string().max(2000).optional(),
 });
 
+const nativeOnboardingOption = z.object({
+  title: z.string().trim().min(1).max(100),
+  description: z.string().trim().max(100).optional(),
+  emoji: z.string().trim().max(100).optional(),
+  role_ids: z.array(snowflake).max(25).optional(),
+  channel_ids: z.array(snowflake).max(25).optional(),
+});
+
+const nativeOnboardingPrompt = z.object({
+  title: z.string().trim().min(1).max(100),
+  type: z.enum(['multiple_choice', 'dropdown']),
+  required: z.boolean(),
+  single_select: z.boolean(),
+  options: z.array(nativeOnboardingOption).min(1).max(12),
+});
+
+const nativeOnboardingConfig = z.object({
+  enabled: z.boolean(),
+  prompts: z.array(nativeOnboardingPrompt).max(5),
+  default_channel_ids: z.array(snowflake).max(25),
+});
+
 const onboardingConfig = z.object({
   member_role_id: snowflake.optional().nullable(),
   onboarding_enabled: z.boolean().optional(),
-  interest_role_mapping: z.record(z.unknown()).optional(),
+  interest_role_mapping: z.record(snowflake).optional(),
   returning_member_skip_welcome_dm: z.boolean().optional(),
   returning_member_restore_entitlements: z.boolean().optional(),
   returning_member_restore_levels: z.boolean().optional(),
+  onboarding_config: nativeOnboardingConfig.optional().nullable(),
 });
 
 // ── Reaction role schemas ───────────────────────────

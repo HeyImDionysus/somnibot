@@ -313,9 +313,9 @@ describe('handleMemberUpdate', () => {
     expect(mockMarkOnboardingCompleted).not.toHaveBeenCalled();
   });
 
-  it('applies interest roles when mapping exists', async () => {
+  it('observes native onboarding interest roles without granting them again', async () => {
     const client = makeClient({
-      interest_role_mapping: { opt1: 'role1' },
+      interest_role_mapping: { opt1: 'role2' },
     });
     const oldMember = makeMember({
       flags: { has: vi.fn().mockReturnValue(false) },
@@ -323,11 +323,16 @@ describe('handleMemberUpdate', () => {
     });
     const newMember = makeMember({
       flags: { has: vi.fn().mockReturnValue(true) },
-      roles: { cache: new MockCollection() },
+      roles: {
+        cache: new MockCollection([['role2', { id: 'role2' }]]),
+        add: vi.fn().mockResolvedValue(undefined),
+      },
     });
     await handleMemberUpdate(client as any, oldMember as any, newMember as any);
-    // applyInterestRoles just logs for now — no assertion on it
     expect(mockMarkOnboardingCompleted).toHaveBeenCalled();
+    expect(newMember.roles.add.mock.calls).toEqual([
+      ['role1', 'Completed Discord onboarding'],
+    ]);
   });
 
   it('detects role changes and emits events', async () => {

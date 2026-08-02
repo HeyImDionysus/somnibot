@@ -63,7 +63,7 @@ export class GuildOnboardingSync {
   async syncOnboarding(): Promise<void> {
     const { data: config } = await this.supabase
       .from('guild_config')
-      .select('onboarding_config, onboarding_enabled')
+      .select('onboarding_config, onboarding_enabled, interest_role_mapping')
       .eq('guild_id', this.guild.id)
       .maybeSingle();
 
@@ -72,10 +72,13 @@ export class GuildOnboardingSync {
     }
 
     const onboardingConfig = config.onboarding_config as OnboardingConfig;
+    const interestRoleMapping = (config.interest_role_mapping ?? {}) as Record<string, string>;
 
     try {
-      // Fetch current onboarding to check if it exists
-      const currentOnboarding = await this.guild.fetchOnboarding().catch(() => null);
+      // Fail before editing if the guild cannot expose its native onboarding
+      // surface (for example, Community is not enabled or the bot lacks access).
+      // This also proves the edit is targeting a real Discord onboarding object.
+      await this.guild.fetchOnboarding();
 
       // Build prompts for Discord API
       const prompts = onboardingConfig.prompts.map((prompt) => ({
@@ -85,13 +88,16 @@ export class GuildOnboardingSync {
           : GuildOnboardingPromptType.MultipleChoice,
         singleSelect: prompt.single_select,
         required: prompt.required,
-        options: prompt.options.map((opt) => ({
-          title: opt.title,
-          description: opt.description ?? null,
-          emoji: opt.emoji ?? undefined,
-          roleIds: opt.role_ids ?? [],
-          channelIds: opt.channel_ids ?? [],
-        })),
+        options: prompt.options.map((opt) => {
+          const mappedRole = interestRoleMapping[opt.title];
+          return {
+            title: opt.title,
+            description: opt.description ?? null,
+            emoji: opt.emoji ?? undefined,
+            roles: [...new Set([...(opt.role_ids ?? []), ...(mappedRole ? [mappedRole] : [])])],
+            channels: opt.channel_ids ?? [],
+          };
+        }),
       }));
 
       // Edit guild onboarding
@@ -103,7 +109,12 @@ export class GuildOnboardingSync {
 
       log.info(`Synced ${prompts.length} onboarding prompts to Discord`);
     } catch (err) {
-      log.error('Failed to sync onboarding:', { error: String(err) });
+      const error = String(err);
+      log.error('Failed to sync onboarding:', { error });
+      this.eventBus.emit('sync.failed', this.guild.id, {
+        stage: 'discord-native-onboarding',
+        error,
+      });
     }
   }
 }

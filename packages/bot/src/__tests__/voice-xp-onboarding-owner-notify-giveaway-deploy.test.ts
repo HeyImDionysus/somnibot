@@ -204,11 +204,12 @@ describe('VoiceXP', () => {
 // GuildOnboardingSync
 // ═══════════════════════════════════════════════
 describe('GuildOnboardingSync', () => {
-  it('start and sync enabled', async () => {
+  it('syncs native roles and channels, including a deduplicated interest-role mapping', async () => {
     const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
     const supa = {
       from: vi.fn(() => chain({
         onboarding_enabled: true,
+        interest_role_mapping: { Gaming: 'r1' },
         onboarding_config: {
           enabled: true,
           prompts: [
@@ -228,9 +229,45 @@ describe('GuildOnboardingSync', () => {
       })),
     } as any;
     const g = guild();
+    g.editOnboarding = vi.fn(async () => ({}));
     const sync = new GuildOnboardingSync(g, supa, eb());
-    sync.start();
     await sync.syncOnboarding();
+
+    expect(g.fetchOnboarding).toHaveBeenCalledOnce();
+    expect(g.editOnboarding).toHaveBeenCalledWith({
+      enabled: true,
+      prompts: [{
+        title: 'What are you interested in?',
+        type: 0,
+        required: true,
+        singleSelect: false,
+        options: [
+          { title: 'Gaming', description: null, emoji: undefined, roles: ['r1'], channels: [] },
+          { title: 'Art', description: null, emoji: undefined, roles: [], channels: ['ch1'] },
+        ],
+      }],
+      defaultChannels: ['ch1'],
+    });
+  });
+
+  it('does not attempt a native onboarding edit when the preflight readback fails', async () => {
+    const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
+    const supa = { from: vi.fn(() => chain({
+      onboarding_enabled: true,
+      onboarding_config: { enabled: true, prompts: [], default_channel_ids: [] },
+    })) } as any;
+    const g = guild();
+    g.fetchOnboarding.mockRejectedValueOnce(new Error('Community onboarding unavailable'));
+    g.editOnboarding = vi.fn(async () => ({}));
+
+    const eventBus = eb();
+    await new GuildOnboardingSync(g, supa, eventBus).syncOnboarding();
+
+    expect(g.editOnboarding).not.toHaveBeenCalled();
+    expect(eventBus.emit).toHaveBeenCalledWith('sync.failed', 'g1', {
+      stage: 'discord-native-onboarding',
+      error: 'Error: Community onboarding unavailable',
+    });
   });
 
   it('syncOnboarding disabled', async () => {
