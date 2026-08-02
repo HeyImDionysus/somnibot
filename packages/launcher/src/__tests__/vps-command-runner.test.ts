@@ -78,7 +78,10 @@ describe('VPS command runner', () => {
     const result = await runner(command(process.execPath, [
       '-e',
       'setTimeout(() => require("node:fs").writeSync(1, "slow-ok"), 100)',
-    ], { executionTimeoutMs: 1_000 }), { index: 0, total: 1 });
+    // Keep the default short enough to prove command metadata wins, while
+    // allowing Windows under a parallel coverage/test load enough time to
+    // start a fresh Node child before its 100ms fixture timer runs.
+    ], { executionTimeoutMs: 5_000 }), { index: 0, total: 1 });
 
     expect(result).toMatchObject({
       ok: true,
