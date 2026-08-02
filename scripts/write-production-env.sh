@@ -50,7 +50,10 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-cat > "$temp_path"
+# Do not let the potentially long-lived stdin reader inherit the lock file
+# descriptor. If the parent shell is SIGKILLed while input is stalled, the OS
+# can then release the lock immediately instead of waiting on the child.
+cat 9>&- > "$temp_path"
 chmod 0600 "$temp_path"
 
 if [ -f "$env_path" ]; then

@@ -16,7 +16,7 @@ describe('protected VPS environment scripts', () => {
     const writerSource = readFileSync(writer, 'utf8');
     const restorerSource = readFileSync(restorer, 'utf8');
 
-    expect(writerSource).toContain('cat > "$temp_path"');
+    expect(writerSource).toContain('cat 9>&- > "$temp_path"');
     expect(writerSource).toContain('trap cleanup EXIT HUP INT TERM');
     expect(writerSource).toContain('rm -f -- "$temp_path" "$backup_temp"');
     expect(writerSource).toContain('mv -f -- "$backup_temp" "${env_path}.rollback"');
