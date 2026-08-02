@@ -7,11 +7,11 @@
  * WHY THIS DOMAIN IS MOSTLY GATED (and that is the honest verdict):
  *   The collaborative queue itself is a Valkey object — `queue:<guildId>`,
  *   `nowplaying:<guildId>`, `music:votes:<guildId>:skip` (packages/bot/src/features/
- *   music/music-queue.ts). Every queue mutation (/play, /remove, /shuffle, restore,
- *   race) reads/writes that Valkey key, so with NO Redis reachable the whole queue
- *   surface cannot run and is GATED. Audible playback + queue/now-playing embeds
- *   need a live Discord gateway and a Lavalink/Shoukaku node (`client.shoukaku`),
- *   absent gateway-less — GATED. Config writes + out-of-range rejection go through
+ *   music/music-queue.ts). The isolated runner supplies a real Valkey instance, but
+ *   queue mutations still need a live Discord gateway and a Lavalink/Shoukaku node
+ *   (`client.shoukaku`); this gateway-less harness cannot create or read back the
+ *   queue surface, so it is GATED for that real missing capability. Config writes +
+ *   out-of-range rejection go through
  *   the dashboard PUT /api/music (Zod) route — GATED. The music.* audit rows are
  *   written by those same dashboard/Valkey/config-load lanes — GATED.
  *
@@ -270,13 +270,13 @@ async function proveNoOwnerAlert(ctx: ScenarioContext, handle: LiveClientHandle)
   });
 }
 
-/** GATE the Valkey-backed queue object surface (absent Redis). */
+/** GATE the live gateway/Lavalink queue surface; isolated Valkey is available. */
 function gateQueueStore(ctx: ScenarioContext, assertionClass: AssertionClass, promise: string): void {
   ctx.gate(
     assertionClass,
-    'redis-dependency',
+    'discord-readback',
     promise,
-    'no Valkey/Redis reachable — the collaborative queue lives entirely in Valkey (queue:<guildId>/nowplaying:<guildId>/music:votes), so this queue behavior cannot be exercised in the bot-only local-Supabase harness',
+    'requires a live Discord gateway plus Lavalink/Shoukaku queue integration; isolated Valkey is reachable, but this bot-only local-Supabase harness cannot create or read back queue mutations',
   );
 }
 
