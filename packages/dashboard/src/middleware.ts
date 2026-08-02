@@ -230,7 +230,7 @@ export async function middleware(request: NextRequest) {
   // route touches remote auth before the health handler runs, a production
   // auth outage can turn the monitor endpoint into a platform 500.
   if (
-    request.nextUrl.pathname === '/api/health' &&
+    ['/api/health', '/api/health/live'].includes(request.nextUrl.pathname) &&
     (request.method === 'GET' || request.method === 'HEAD')
   ) {
     const healthResponse = nextWithNonce(request, nonce);

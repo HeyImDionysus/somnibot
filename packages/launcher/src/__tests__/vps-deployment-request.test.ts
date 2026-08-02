@@ -22,6 +22,7 @@ const completeConfig: LauncherConfig = {
   paypalClientId: 'paypal-client-id',
   paypalClientSecret: 'paypal-client-secret',
   paypalWebhookId: 'paypal-webhook-id',
+  paypalWebhookProofKey: '',
   paypalSandbox: true,
   runtimeMode: 'vps',
   publicCallbackBaseUrl: 'https://somnibot.example.com',
@@ -106,6 +107,7 @@ describe('VPS deployment run request coordinator', () => {
       'enter-deploy-path',
       'protect-env-file',
       'start-stack',
+      'install-health-recovery',
       'check-stack',
       'check-dashboard',
       'check-health',
@@ -119,7 +121,7 @@ describe('VPS deployment run request coordinator', () => {
       {
         dryRun: true,
         operatorApproved: true,
-        approvedCommandIds: ['protect-env-file', 'start-stack'],
+        approvedCommandIds: ['protect-env-file', 'start-stack', 'install-health-recovery'],
       },
       {
         confirmApproval: async () => {

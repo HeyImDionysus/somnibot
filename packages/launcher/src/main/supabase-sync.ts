@@ -21,16 +21,15 @@ export interface SyncableCredentials {
   discordGuildId: string;
   supabasePublishableKey: string;
   supabaseDbPassword: string;
-}
-
-/** Complete set of existing SomniBot connection values the launcher can restore. */
-export interface RestorableCredentials extends SyncableCredentials {
   supabaseAccessToken: string;
   paypalClientId: string;
   paypalClientSecret: string;
   paypalWebhookId: string;
   paypalSandbox: boolean;
 }
+
+/** Complete set of existing SomniBot connection values the launcher can restore. */
+export type RestorableCredentials = SyncableCredentials;
 
 export type RestoredCredentials = Partial<RestorableCredentials>;
 
@@ -78,16 +77,14 @@ const PUSH_SETTINGS_MAP: Record<keyof SyncableCredentials, string> = {
   discordGuildId: 'discord_guild_id',
   supabasePublishableKey: 'supabase_publishable_key',
   supabaseDbPassword: 'supabase_db_password',
-};
-
-const RESTORE_SETTINGS_MAP: Record<keyof RestorableCredentials, string> = {
-  ...PUSH_SETTINGS_MAP,
   supabaseAccessToken: 'supabase_access_token',
   paypalClientId: 'paypal_client_id',
   paypalClientSecret: 'paypal_client_secret',
   paypalWebhookId: 'paypal_webhook_id',
   paypalSandbox: 'paypal_sandbox',
 };
+
+const RESTORE_SETTINGS_MAP: Record<keyof RestorableCredentials, string> = PUSH_SETTINGS_MAP;
 
 /** Keys written by earlier launcher builds or the Discord setup wizard. */
 const RESTORE_ALIASES: Record<string, Exclude<keyof RestorableCredentials, 'paypalSandbox'>> = {
@@ -112,8 +109,7 @@ const SECTION = 'launcher';
  *
  * Blank local strings are deliberately omitted: a partial/older desktop cache
  * must never erase credentials that another SomniBot surface already saved in
- * Supabase. The write set remains the launcher's established six fields; the
- * broader provider set is restore-only.
+ * Supabase. Save and restore intentionally use the same connection contract.
  */
 export function buildSyncRows(
   credentials: SyncableCredentials,
@@ -122,8 +118,8 @@ export function buildSyncRows(
   return Object.entries(PUSH_SETTINGS_MAP).flatMap(([localKey, settingsKey]) => {
     const key = localKey as keyof SyncableCredentials;
     const rawValue = credentials[key];
-    if (rawValue.length === 0) return [];
-    return [{ key: settingsKey, value: rawValue, section: SECTION, updated_at: updatedAt }];
+    if (typeof rawValue === 'string' && rawValue.length === 0) return [];
+    return [{ key: settingsKey, value: String(rawValue), section: SECTION, updated_at: updatedAt }];
   });
 }
 

@@ -683,5 +683,5 @@ export function stopAll(): void {
 }
 
 export function isRunning(): boolean {
-  return botProcess !== null || dashboardProcess !== null;
+  return desiredRunning || botProcess !== null || dashboardProcess !== null;
 }

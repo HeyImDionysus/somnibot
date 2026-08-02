@@ -624,13 +624,22 @@ async function startLocalStack(
 
   const vkResult = await startValkey();
   if (!vkResult.ok) {
-    console.warn('[Launcher] Valkey/Redis failed to start:', vkResult.error);
+    stopValkey();
+    return {
+      ok: false,
+      error: `Valkey/Redis is required for production-safe local operation and did not become ready: ${vkResult.error ?? 'unknown error'}`,
+    };
   }
 
   if (config.lavalinkEnabled) {
     const llResult = await startLavalink();
     if (!llResult.ok) {
-      console.warn('[Launcher] Lavalink failed to start:', llResult.error);
+      stopLavalink();
+      stopValkey();
+      return {
+        ok: false,
+        error: `Lavalink is enabled but did not become ready: ${llResult.error ?? 'unknown error'}`,
+      };
     }
   }
 
@@ -646,6 +655,11 @@ async function startLocalStack(
     discordGuildId: config.discordGuildId,
     supabasePublishableKey: config.supabasePublishableKey,
     supabaseDbPassword: config.supabaseDbPassword,
+    supabaseAccessToken: config.supabaseAccessToken,
+    paypalClientId: config.paypalClientId,
+    paypalClientSecret: config.paypalClientSecret,
+    paypalWebhookId: config.paypalWebhookId,
+    paypalSandbox: config.paypalSandbox,
   }).catch(() => {
     // Sync is best-effort. Startup must not fail just because settings sync is unavailable.
   });
@@ -860,7 +874,7 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
   };
 }
 
-async function createWindow(): Promise<void> {
+async function createWindow(showWhenReady = true): Promise<void> {
   const config = getConfig();
   const bounds = config.windowBounds ?? { width: 760, height: 680 };
 
@@ -937,7 +951,7 @@ async function createWindow(): Promise<void> {
 
   // Show when ready to avoid white flash
   mainWindow.once('ready-to-show', () => {
-    mainWindow?.show();
+    if (showWhenReady) mainWindow?.show();
   });
 
   // Save window bounds on move/resize
@@ -1363,7 +1377,35 @@ app.whenReady().then(async () => {
   });
 
   registerIpcHandlers();
-  await createWindow();
+  const config = getConfig();
+  const shouldAutoRunLocal = config.firstRunComplete && config.runtimeMode !== 'vps';
+  if (app.isPackaged) {
+    app.setLoginItemSettings({
+      openAtLogin: shouldAutoRunLocal,
+      args: ['--background'],
+    });
+  }
+  const backgroundLaunch = shouldAutoRunLocal && process.argv.includes('--background');
+  await createWindow(!backgroundLaunch);
+
+  if (shouldAutoRunLocal) {
+    const autoStartResult = await startLocalStack(config);
+    if (!autoStartResult.ok) {
+      recordLauncherAudit({
+        action: 'launcher.autostart.failed',
+        category: 'infrastructure',
+        targetType: 'local_stack',
+        details: { runtimeMode: config.runtimeMode },
+        success: false,
+        errorMessage: autoStartResult.error ?? 'Local stack auto-start failed.',
+      });
+      mainWindow?.show();
+      mainWindow?.webContents.send('status-update', {
+        ...getStatus(),
+        error: `Automatic restart failed: ${autoStartResult.error ?? 'unknown error'}`,
+      });
+    }
+  }
 
   // macOS: re-create window when dock icon is clicked
   app.on('activate', () => {
@@ -1378,7 +1420,9 @@ app.whenReady().then(async () => {
 
 // Second instance: focus the existing window
 app.on('second-instance', () => {
-  if (mainWindow) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    void createWindow(true);
+  } else {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
   }
@@ -1395,11 +1439,8 @@ app.on('before-quit', () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
-    if (isRunning()) {
-      stopAll();
-    }
-    stopLavalink();
-    stopValkey();
-    app.quit();
+    // Closing the control window must not take a production bot offline.
+    // Use the explicit Stop action before closing when shutdown is intended.
+    if (!isRunning()) app.quit();
   }
 });

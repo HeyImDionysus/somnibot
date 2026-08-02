@@ -126,6 +126,7 @@ const SENSITIVE_KEYS: ReadonlySet<keyof LauncherConfig> = new Set([
   'supabaseAccessToken',
   'paypalClientSecret',
   'paypalWebhookId',
+  'paypalWebhookProofKey',
   'tailscaleAuthKey',
 ]);
 
@@ -221,7 +222,7 @@ export function getConfig(): LauncherConfig {
     paypalClientId: store.get('paypalClientId', ''),
     paypalClientSecret: getSensitive('paypalClientSecret'),
     paypalWebhookId: getSensitive('paypalWebhookId'),
-    paypalWebhookProofKey: store.get('paypalWebhookProofKey', ''),
+    paypalWebhookProofKey: getSensitive('paypalWebhookProofKey'),
     paypalSandbox: store.get('paypalSandbox', true),
     windowBounds: store.get('windowBounds'),
     runtimeMode: store.get('runtimeMode', 'regular-local'),

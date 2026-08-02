@@ -116,6 +116,20 @@ describe('VPS deployment plan generator', () => {
         executionTimeoutMs: VPS_DEPLOYMENT_BUILD_TIMEOUT_MS,
       }),
       expect.objectContaining({
+        id: 'install-health-recovery',
+        executable: 'ssh',
+        args: expect.arrayContaining([
+          'deploy@somnibot.example.com',
+          'sudo',
+          '-n',
+          'sh',
+          '/opt/somnibot/scripts/install-production-health-recovery.sh',
+          '/opt/somnibot',
+        ]),
+        changesRemote: true,
+        approvalRequired: true,
+      }),
+      expect.objectContaining({
         id: 'check-dashboard',
         executable: 'curl',
         args: ['-fsS', '-o', '/dev/null', 'https://somnibot.example.com'],

@@ -21,7 +21,7 @@ describe('VPS deployment approval confirmation', () => {
 
     expect(approval).toEqual({
       operatorApproved: true,
-      approvedCommandIds: ['protect-env-file', 'start-stack'],
+      approvedCommandIds: ['protect-env-file', 'start-stack', 'install-health-recovery'],
     });
     expect(showMessageBox).toHaveBeenCalledOnce();
   });

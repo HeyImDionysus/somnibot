@@ -271,6 +271,18 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
       commandCategory: 'service',
       executionTimeoutMs: VPS_DEPLOYMENT_BUILD_TIMEOUT_MS,
     }),
+    buildRemoteCommand(sshTarget, 'sudo', [
+      '-n',
+      'sh',
+      joinPath(deployPath, 'scripts/install-production-health-recovery.sh'),
+      deployPath,
+    ], {
+      id: 'install-health-recovery',
+      label: 'Install boot-persistent production health recovery',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    }),
     buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'ps'], {
       id: 'check-stack',
       label: 'Check container status',

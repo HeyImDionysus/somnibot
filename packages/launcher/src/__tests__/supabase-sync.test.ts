@@ -15,12 +15,17 @@ function pushCredentials(overrides: Partial<SyncableCredentials> = {}): Syncable
     discordGuildId: 'discord-guild',
     supabasePublishableKey: 'supabase-publishable',
     supabaseDbPassword: 'database-password',
+    supabaseAccessToken: 'supabase-access-token',
+    paypalClientId: 'paypal-client',
+    paypalClientSecret: 'paypal-secret',
+    paypalWebhookId: 'paypal-webhook',
+    paypalSandbox: true,
     ...overrides,
   };
 }
 
 describe('buildSyncRows', () => {
-  it('keeps the established launcher write set and canonical bot settings keys', () => {
+  it('writes the complete cross-surface credential set with canonical settings keys', () => {
     const rows = buildSyncRows(pushCredentials(), '2026-08-02T00:00:00.000Z');
     const rowMap = Object.fromEntries(rows.map(row => [row.key, row.value]));
 
@@ -31,6 +36,11 @@ describe('buildSyncRows', () => {
       discord_guild_id: 'discord-guild',
       supabase_publishable_key: 'supabase-publishable',
       supabase_db_password: 'database-password',
+      supabase_access_token: 'supabase-access-token',
+      paypal_client_id: 'paypal-client',
+      paypal_client_secret: 'paypal-secret',
+      paypal_webhook_id: 'paypal-webhook',
+      paypal_sandbox: 'true',
     });
     expect(rows.every(row => row.section === 'launcher')).toBe(true);
     expect(rows.every(row => row.updated_at === '2026-08-02T00:00:00.000Z')).toBe(true);
@@ -98,7 +108,7 @@ describe('parseSyncRows', () => {
     ])).toEqual({});
   });
 
-  it('round-trips the established launcher write set', () => {
+  it('round-trips the complete launcher connection set', () => {
     const original = pushCredentials();
     const rows = buildSyncRows(original);
     expect(parseSyncRows(rows)).toEqual(original);

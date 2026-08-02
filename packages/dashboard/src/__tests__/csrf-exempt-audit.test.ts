@@ -56,7 +56,7 @@ const CSRF_EXEMPT_PREFIXES = [
  * (which only checks mutating methods) doesn't apply to them.
  * These do NOT need CSRF exemptions.
  */
-const GET_ONLY_PUBLIC_ROUTES = ['/api/health'];
+const GET_ONLY_PUBLIC_ROUTES = ['/api/health', '/api/health/live'];
 
 // ── Tests ────────────────────────────────────────────
 

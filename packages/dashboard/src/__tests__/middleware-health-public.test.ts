@@ -52,6 +52,19 @@ describe('middleware health access', () => {
     expect(res.headers.get('location')).toBeNull();
   });
 
+  it('allows unauthenticated container supervision to reach /api/health/live', async () => {
+    mockCreateServerClient.mockImplementation(() => {
+      throw new Error('liveness checks must not depend on Supabase auth');
+    });
+
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/api/health/live'));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
   it('does not touch Supabase auth for /api/health', async () => {
     mockCreateServerClient.mockImplementation(() => {
       throw new Error('health checks must not depend on Supabase auth');

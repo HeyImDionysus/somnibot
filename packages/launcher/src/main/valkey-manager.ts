@@ -20,6 +20,13 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { app, BrowserWindow } from 'electron';
+import {
+  PROCESS_RESTART_MAX_ATTEMPTS,
+  PROCESS_RESTART_STABLE_WINDOW_MS,
+  processRestartDelayMs,
+  shouldRecoverManagedProcess,
+} from './process-manager-guards.js';
+import { probeValkeyReady, waitForServiceReady } from './service-readiness.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -45,6 +52,47 @@ export type ValkeyStatus = 'offline' | 'starting' | 'online' | 'error' | 'downlo
 let valkeyProcess: ChildProcess | null = null;
 let currentStatus: ValkeyStatus = 'offline';
 let lastError = '';
+let desiredRunning = false;
+let restartAttempts = 0;
+let restartTimer: ReturnType<typeof setTimeout> | null = null;
+let stableTimer: ReturnType<typeof setTimeout> | null = null;
+
+function markStable(proc: ChildProcess): void {
+  if (stableTimer) clearTimeout(stableTimer);
+  stableTimer = setTimeout(() => {
+    stableTimer = null;
+    if (desiredRunning && valkeyProcess === proc && currentStatus === 'online') {
+      restartAttempts = 0;
+    }
+  }, PROCESS_RESTART_STABLE_WINDOW_MS);
+  stableTimer.unref?.();
+}
+
+function scheduleRecovery(reason: string): void {
+  if (!desiredRunning || restartTimer || valkeyProcess) return;
+  if (restartAttempts >= PROCESS_RESTART_MAX_ATTEMPTS) {
+    setStatus(
+      'error',
+      `Valkey/Redis automatic recovery stopped after ${PROCESS_RESTART_MAX_ATTEMPTS} failed attempts. ${reason}`,
+    );
+    broadcastValkeyStatus();
+    return;
+  }
+
+  restartAttempts += 1;
+  const delayMs = processRestartDelayMs(restartAttempts);
+  setStatus(
+    'error',
+    `Valkey/Redis stopped unexpectedly. Restarting in ${Math.ceil(delayMs / 1_000)}s (attempt ${restartAttempts}/${PROCESS_RESTART_MAX_ATTEMPTS}). ${reason}`,
+  );
+  broadcastValkeyStatus();
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    if (!desiredRunning || valkeyProcess) return;
+    void startValkey();
+  }, delayMs);
+  restartTimer.unref?.();
+}
 
 /* ------------------------------------------------------------------ */
 /*  Paths                                                              */
@@ -303,6 +351,7 @@ export async function startValkey(): Promise<{
 
   setStatus('starting');
   broadcastValkeyStatus();
+  desiredRunning = true;
 
   return new Promise((resolve) => {
     // Start server with minimal, safe configuration:
@@ -351,6 +400,7 @@ export async function startValkey(): Promise<{
       )) {
         resolved = true;
         setStatus('online');
+        markStable(proc);
         broadcastValkeyStatus();
         resolve({ ok: true });
       }
@@ -364,13 +414,18 @@ export async function startValkey(): Promise<{
       if (!resolved && text.includes('Ready to accept connections')) {
         resolved = true;
         setStatus('online');
+        markStable(proc);
         broadcastValkeyStatus();
         resolve({ ok: true });
       }
     });
 
     proc.on('error', (err) => {
+      const shouldRecover = shouldRecoverManagedProcess(desiredRunning, valkeyProcess, proc);
+      if (valkeyProcess !== proc) return;
       const msg = `Valkey/Redis failed to start: ${err.message}`;
+      if (stableTimer) clearTimeout(stableTimer);
+      stableTimer = null;
       valkeyProcess = null;
       setStatus('error', msg);
       broadcastValkeyStatus();
@@ -378,9 +433,14 @@ export async function startValkey(): Promise<{
         resolved = true;
         resolve({ ok: false, error: msg });
       }
+      if (shouldRecover) scheduleRecovery(msg);
     });
 
     proc.on('exit', (code) => {
+      const shouldRecover = shouldRecoverManagedProcess(desiredRunning, valkeyProcess, proc);
+      if (valkeyProcess !== proc) return;
+      if (stableTimer) clearTimeout(stableTimer);
+      stableTimer = null;
       valkeyProcess = null;
       if (currentStatus !== 'offline') {
         const msg = code ? `Valkey/Redis exited with code ${code}` : 'Valkey/Redis stopped';
@@ -391,27 +451,41 @@ export async function startValkey(): Promise<{
         resolved = true;
         resolve({ ok: false, error: `Valkey/Redis exited with code ${code}` });
       }
+      if (shouldRecover) scheduleRecovery(`Valkey/Redis exited with code ${code}.`);
     });
 
-    // Timeout — Redis/Valkey starts fast, 10s is generous
-    setTimeout(() => {
-      if (!resolved) {
+    // Prove the Redis protocol is usable; warning-only logging may omit ready text.
+    void waitForServiceReady(
+      () => probeValkeyReady('127.0.0.1', VALKEY_PORT),
+      () => !resolved && valkeyProcess === proc,
+      10_000,
+    ).then((ready) => {
+      if (resolved || valkeyProcess !== proc) return;
+      resolved = true;
+      if (ready) {
+        setStatus('online');
+        markStable(proc);
+        broadcastValkeyStatus();
+        resolve({ ok: true });
+      } else {
         resolved = true;
-        if (currentStatus === 'starting') {
-          // If the process is still alive, assume it started successfully
-          // (some builds don't print the ready message to stdout)
-          if (valkeyProcess && !valkeyProcess.killed) {
-            setStatus('online');
-          }
-          broadcastValkeyStatus();
-        }
-        resolve({ ok: currentStatus === 'online' });
+        const msg = 'Valkey/Redis did not report ready within 10s.';
+        setStatus('error', msg);
+        broadcastValkeyStatus();
+        resolve({ ok: false, error: msg });
+        proc.kill('SIGTERM');
       }
-    }, 10_000);
+    });
   });
 }
 
 export function stopValkey(): void {
+  desiredRunning = false;
+  restartAttempts = 0;
+  if (restartTimer) clearTimeout(restartTimer);
+  if (stableTimer) clearTimeout(stableTimer);
+  restartTimer = null;
+  stableTimer = null;
   if (valkeyProcess) {
     const pid = valkeyProcess.pid;
     valkeyProcess.kill('SIGTERM');

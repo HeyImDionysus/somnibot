@@ -58,6 +58,6 @@ export async function buildHealthResponse(probe: HealthProbe | null = null) {
       },
       timestamp: new Date().toISOString(),
     },
-    { status: 200 },
+    { status: isHealthy ? 200 : 503 },
   );
 }
