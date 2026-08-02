@@ -8,6 +8,7 @@ case "$deploy_path" in
 esac
 case "$deploy_path" in
   *[!A-Za-z0-9_./-]*) echo "deploy path contains unsafe characters" >&2; exit 64 ;;
+  */../*|*/..) echo "deploy path must not contain parent traversal" >&2; exit 64 ;;
 esac
 
 compose_file="$deploy_path/docker-compose.prod.yml"

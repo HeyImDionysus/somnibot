@@ -37,7 +37,7 @@ import {
 } from './tailscale-service.js';
 import { validateAllCredentials, type FullValidationResult } from './validators.js';
 import { startAll, stopAll, getStatus, isRunning, checkPortAvailable, cleanupStaleProcesses } from './process-manager.js';
-import { maskRestoredCredentials, pushToSupabase } from './supabase-sync.js';
+import { maskRestoredCredentials, pushToSupabaseWithRetry } from './supabase-sync.js';
 import { initUpdater } from './updater.js';
 import { resolveLauncherDisplayVersion } from './launcher-version.js';
 import {
@@ -67,6 +67,10 @@ import { VpsDeploymentRunGate, redactVpsDeploymentText } from './vps-deployment-
 import { confirmVpsDeploymentApproval } from './vps-deployment-approval.js';
 import { handleVpsDeploymentRunRequest, type VpsDeploymentRunRequest } from './vps-deployment-request.js';
 import { planVpsSshPreflight } from './vps-preflight.js';
+import {
+  startLocalValkeyBackupSchedule,
+  stopLocalValkeyBackupSchedule,
+} from './local-backup-manager.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -99,6 +103,32 @@ function recordLauncherAudit(entry: LauncherAuditEntry): void {
     },
     entry,
   );
+}
+
+async function syncLauncherCredentials(config: LauncherConfig): Promise<void> {
+  const result = await pushToSupabaseWithRetry(config.supabaseUrl, config.supabaseSecretKey, {
+    discordToken: config.discordToken,
+    discordApplicationId: config.discordApplicationId,
+    discordClientSecret: config.discordClientSecret,
+    discordGuildId: config.discordGuildId,
+    supabasePublishableKey: config.supabasePublishableKey,
+    supabaseDbPassword: config.supabaseDbPassword,
+    supabaseAccessToken: config.supabaseAccessToken,
+    paypalClientId: config.paypalClientId,
+    paypalClientSecret: config.paypalClientSecret,
+    paypalWebhookId: config.paypalWebhookId,
+    paypalSandbox: config.paypalSandbox,
+  });
+  if (result.ok) return;
+
+  recordLauncherAudit({
+    action: 'launcher.credentials.sync_failed',
+    category: 'infrastructure',
+    targetType: 'instance_settings',
+    details: { attempts: result.attempts },
+    success: false,
+    errorMessage: result.error ?? 'unknown error',
+  });
 }
 const DASHBOARD_SETUP_SNAPSHOT_CACHE_MS = 5_000;
 let dashboardSetupSnapshotCache: {
@@ -630,7 +660,6 @@ async function startLocalStack(
       error: `Valkey/Redis is required for production-safe local operation and did not become ready: ${vkResult.error ?? 'unknown error'}`,
     };
   }
-
   if (config.lavalinkEnabled) {
     const llResult = await startLavalink();
     if (!llResult.ok) {
@@ -643,26 +672,24 @@ async function startLocalStack(
     }
   }
 
+  startLocalValkeyBackupSchedule((result) => {
+    if (result.ok) return;
+    recordLauncherAudit({
+      action: 'launcher.backup.valkey_failed',
+      category: 'infrastructure',
+      targetType: 'local_valkey',
+      details: { mode: 'regular-local' },
+      success: false,
+      errorMessage: result.error ?? 'Local Valkey backup failed.',
+    });
+  });
+
   sessionToken = crypto.randomBytes(32).toString('hex');
   const envVars = buildEnvVars(config, sessionToken);
   startAll(envVars);
   lastStartedPayPalConfig = snapshotPayPalRuntimeConfig(config);
 
-  pushToSupabase(config.supabaseUrl, config.supabaseSecretKey, {
-    discordToken: config.discordToken,
-    discordApplicationId: config.discordApplicationId,
-    discordClientSecret: config.discordClientSecret,
-    discordGuildId: config.discordGuildId,
-    supabasePublishableKey: config.supabasePublishableKey,
-    supabaseDbPassword: config.supabaseDbPassword,
-    supabaseAccessToken: config.supabaseAccessToken,
-    paypalClientId: config.paypalClientId,
-    paypalClientSecret: config.paypalClientSecret,
-    paypalWebhookId: config.paypalWebhookId,
-    paypalSandbox: config.paypalSandbox,
-  }).catch(() => {
-    // Sync is best-effort. Startup must not fail just because settings sync is unavailable.
-  });
+  void syncLauncherCredentials(config);
 
   return { ok: true };
 }
@@ -1117,6 +1144,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('stop-bot', () => {
+    stopLocalValkeyBackupSchedule();
     stopAll();
     stopLavalink();
     stopValkey();
@@ -1430,6 +1458,7 @@ app.on('second-instance', () => {
 
 // Clean shutdown — kill child processes before quitting
 app.on('before-quit', () => {
+  stopLocalValkeyBackupSchedule();
   if (isRunning()) {
     stopAll();
   }

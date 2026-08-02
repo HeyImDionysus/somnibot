@@ -278,7 +278,7 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
       deployPath,
     ], {
       id: 'install-health-recovery',
-      label: 'Install boot-persistent production health recovery',
+      label: 'Install boot recovery and validated daily Valkey backups',
       changesRemote: true,
       approvalRequired: true,
       commandCategory: 'service',

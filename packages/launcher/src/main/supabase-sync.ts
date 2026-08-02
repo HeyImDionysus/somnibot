@@ -213,6 +213,32 @@ export async function pushToSupabase(
   }
 }
 
+export async function pushToSupabaseWithRetry(
+  supabaseUrl: string,
+  supabaseSecretKey: string,
+  credentials: SyncableCredentials,
+  options: {
+    maxAttempts?: number;
+    wait?: (delayMs: number) => Promise<void>;
+  } = {},
+): Promise<{ ok: boolean; attempts: number; error?: string }> {
+  const maxAttempts = options.maxAttempts ?? 3;
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error('Credential sync attempts must be a positive integer.');
+  }
+  const wait = options.wait ?? ((delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  let lastError = 'unknown error';
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const result = await pushToSupabase(supabaseUrl, supabaseSecretKey, credentials);
+    if (result.ok) return { ok: true, attempts: attempt };
+    lastError = result.error ?? lastError;
+    if (attempt < maxAttempts) await wait(1_000 * (2 ** (attempt - 1)));
+  }
+
+  return { ok: false, attempts: maxAttempts, error: lastError };
+}
+
 /* ------------------------------------------------------------------ */
 /*  Pull from Supabase                                                 */
 /* ------------------------------------------------------------------ */

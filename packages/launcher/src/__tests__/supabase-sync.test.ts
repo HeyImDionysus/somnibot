@@ -4,6 +4,7 @@ import {
   maskRestoredCredentials,
   parseSyncRows,
   pullFromSupabase,
+  pushToSupabaseWithRetry,
   type SyncableCredentials,
 } from '../main/supabase-sync.js';
 
@@ -186,5 +187,45 @@ describe('pullFromSupabase', () => {
     expect(requestUrl.searchParams.get('select')).toBe('key,value');
     expect(requestUrl.searchParams.get('key')).toContain('paypal_client_id');
     expect(requestUrl.searchParams.get('key')).toContain('supabase_db_url');
+  });
+});
+
+describe('pushToSupabaseWithRetry', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('retries transient failures with bounded exponential delays', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => 'unavailable' })
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => 'unavailable' })
+      .mockResolvedValueOnce({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const delays: number[] = [];
+
+    const result = await pushToSupabaseWithRetry(
+      'https://project.example.test',
+      'service-role-test-key',
+      pushCredentials(),
+      { wait: async (delayMs) => { delays.push(delayMs); } },
+    );
+
+    expect(result).toEqual({ ok: true, attempts: 3 });
+    expect(delays).toEqual([1_000, 2_000]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('surfaces the final failure after the bounded attempt count', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
+
+    const result = await pushToSupabaseWithRetry(
+      'https://project.example.test',
+      'service-role-test-key',
+      pushCredentials(),
+      { maxAttempts: 2, wait: async () => undefined },
+    );
+
+    expect(result).toMatchObject({ ok: false, attempts: 2 });
+    expect(result.error).toContain('network down');
   });
 });
