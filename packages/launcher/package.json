@@ -21,7 +21,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "electron": "^33.0.0",
+    "electron": "^39.8.5",
     "electron-builder": "^26.15.3",
     "electron-builder-squirrel-windows": "26.15.3",
     "typescript": "^5.7.0",
