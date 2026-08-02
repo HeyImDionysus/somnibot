@@ -748,7 +748,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
   // cadence is configured (interval + channel) but its schedule switch is left OFF, so the
   // TriviaScheduleRunner tick no-ops (no post, no alert) while its config still persists —
   // proving the hosted-cadence settings toggle independently of the trivia master switch.
-  const scheduleChannelId = `${ctx.runPrefix}sched-chan`;
+  const scheduleChannelId = ctx.snowflake('trivia-schedule-channel');
   const enabled = await ctx.bootGuild({
     label: 'a',
     economyStartingBalance: 0,

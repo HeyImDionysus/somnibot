@@ -173,6 +173,8 @@ export interface ScenarioContext {
   scenarioGuildId(label?: string): string;
   /** A run-prefixed user id for a stable label (e.g. 'a', 'b'). */
   userId(label: string): string;
+  /** A deterministic 18-digit Discord snowflake for a run-scoped fixture label. */
+  snowflake(label: string): string;
   /** Create an injector bound to a booted handle (mints its own capability token). */
   injectorFor(handle: LiveClientHandle): BoundInjector;
 

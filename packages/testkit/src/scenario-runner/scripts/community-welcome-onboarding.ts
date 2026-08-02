@@ -428,12 +428,12 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
     label: 'a',
     guildConfigOverrides: {
       welcome_enabled: true,
-      welcome_channel_id: `${ctx.runPrefix}wchan`,
+      welcome_channel_id: ctx.snowflake('welcome-channel'),
       welcome_message: `${ctx.runPrefix} Welcome {member-name} to {guild-name}!`,
       welcome_card_enabled: true,
       welcome_card_background: 'https://example.test/bg.png',
-      interest_role_mapping: { 'onboard-opt-1': `${ctx.runPrefix}interest-role` },
-      member_role_id: `${ctx.runPrefix}member-role`,
+      interest_role_mapping: { 'onboard-opt-1': ctx.snowflake('interest-role') },
+      member_role_id: ctx.snowflake('member-role'),
     },
   });
   const userA = ctx.userId('a');
@@ -488,7 +488,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
       welcome_enabled: true,
       welcome_dm_enabled: false,
       goodbye_enabled: true,
-      goodbye_channel_id: `${ctx.runPrefix}gchan`,
+      goodbye_channel_id: ctx.snowflake('goodbye-channel'),
       goodbye_message: `${ctx.runPrefix} Safe travels {member-name}!`,
       returning_member_restore_levels: true,
     },
@@ -518,7 +518,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
   // Returning-member data model: recordMemberLeave PRESERVES (never deletes) the
   // member row with a left_at snapshot + roles, so a rejoin can restore state.
   // Seed a member, snapshot a leave, then prove the row survived with its roles.
-  const priorRoles = [`${ctx.runPrefix}earned-role`];
+  const priorRoles = [ctx.snowflake('earned-role')];
   await upsertMember(handle, userA, {
     memberNumber: 7,
     onboardingCompleted: true,
@@ -566,8 +566,8 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
     label: 'a',
     guildConfigOverrides: {
       welcome_enabled: true,
-      welcome_channel_id: `${ctx.runPrefix}valid-chan`,
-      interest_role_mapping: { 'opt-1': `${ctx.runPrefix}role-1` },
+      welcome_channel_id: ctx.snowflake('valid-welcome-channel'),
+      interest_role_mapping: { 'opt-1': ctx.snowflake('interest-role-1') },
     },
   });
   const userA = ctx.userId('a');
@@ -620,7 +620,7 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
 async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({
     label: 'a',
-    guildConfigOverrides: { member_role_id: `${ctx.runPrefix}member-role` },
+    guildConfigOverrides: { member_role_id: ctx.snowflake('member-role') },
   });
   const userB = ctx.userId('b');
 
@@ -725,7 +725,7 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
 async function RETRY(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({
     label: 'a',
-    guildConfigOverrides: { member_role_id: `${ctx.runPrefix}member-role` },
+    guildConfigOverrides: { member_role_id: ctx.snowflake('member-role') },
   });
   const userA = ctx.userId('a');
   await upsertMember(handle, userA, { memberNumber: 1, onboardingCompleted: false, username: 'RETRY A' });

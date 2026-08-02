@@ -30,6 +30,7 @@ import type {
   ScenarioContext,
   ScenarioEvidence,
 } from './types.js';
+import { deterministicSnowflake } from './snowflake.js';
 
 /** guild_id-scoped tables always swept in addition to a domain's own list. */
 const ALWAYS_SWEPT_GUILD_TABLES = ['guild_config'] as const;
@@ -75,6 +76,12 @@ export class ScenarioContextImpl implements ScenarioContext {
 
   userId(label: string): string {
     return `${this.runPrefix}u-${label.toLowerCase()}`;
+  }
+
+  snowflake(label: string): string {
+    return deterministicSnowflake(
+      `${this.runPrefix}${this.scenarioClass.toLowerCase()}:${label.toLowerCase()}`,
+    );
   }
 
   async bootGuild(options: BootGuildOptions = {}): Promise<LiveClientHandle> {
