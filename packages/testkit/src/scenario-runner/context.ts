@@ -250,9 +250,9 @@ export class ScenarioContextImpl implements ScenarioContext {
       }
       const status = forClass.some((r) => r.status === 'FAIL')
         ? ('FAIL' as const)
-        : forClass.some((r) => r.status === 'PASS')
-          ? ('PASS' as const)
-          : ('GATED' as const);
+        : forClass.some((r) => r.status === 'GATED')
+          ? ('GATED' as const)
+          : ('PASS' as const);
       return { assertionClass, status, records: forClass };
     });
 
