@@ -70,6 +70,10 @@ export interface VpsDeploymentExecutionResult {
   blockedReason?: string;
   redactedOutput?: string[];
   healthProof?: VpsDeploymentHealthProof;
+  recovery?: {
+    action: 'vps:run-rollback';
+    detail: string;
+  };
 }
 
 export class VpsDeploymentRunGate {
@@ -186,6 +190,15 @@ function healthProofFromCommand(command: VpsDeploymentCommand, output: string | 
   };
 }
 
+function recoveryAfterEnvironmentWrite(plan: VpsDeploymentPlan, failedIndex: number): VpsDeploymentExecutionResult['recovery'] {
+  const writeIndex = plan.commands.findIndex(command => command.id === 'write-env-file');
+  if (writeIndex < 0 || failedIndex < writeIndex) return undefined;
+  return {
+    action: 'vps:run-rollback',
+    detail: 'The protected environment write may have completed. Run the approved rollback action with an exact last-good commit SHA before retrying deployment.',
+  };
+}
+
 export async function runVpsDeployment(input: VpsDeploymentExecutionInput): Promise<VpsDeploymentExecutionResult> {
   const approvedCommandIds = new Set(input.approvedCommandIds);
   const commandStates: VpsDeploymentCommandExecutionState[] = input.plan.commands.map(commandExecutionState);
@@ -201,6 +214,19 @@ export async function runVpsDeployment(input: VpsDeploymentExecutionInput): Prom
       logs: createLogs('blocked', 'VPS deployment plan is blocked; no execution plan is available.'),
       manualBlockReasons: ['No execution plan is available until the deployment plan is ready.'],
       blockedReason: 'No execution plan is available until the deployment plan is ready.',
+      redactedOutput: [],
+    };
+  }
+
+  if (input.cancelRequested) {
+    return {
+      state: 'cancelled',
+      planStatus: input.plan.status,
+      canRetry: true,
+      commandStates,
+      logs: createLogs('cancelled', 'Execution was cancelled before commands ran.'),
+      manualBlockReasons: [],
+      blockedReason: 'Execution cancelled.',
       redactedOutput: [],
     };
   }
@@ -232,19 +258,6 @@ export async function runVpsDeployment(input: VpsDeploymentExecutionInput): Prom
       logs: createLogs('manual-blocked', manualBlockReasons.join(' ')),
       manualBlockReasons,
       blockedReason: manualBlockReasons.join(' '),
-      redactedOutput: [],
-    };
-  }
-
-  if (input.cancelRequested) {
-    return {
-      state: 'cancelled',
-      planStatus: input.plan.status,
-      canRetry: true,
-      commandStates,
-      logs: createLogs('cancelled', 'Execution was cancelled before commands ran.'),
-      manualBlockReasons: [],
-      blockedReason: 'Execution cancelled.',
       redactedOutput: [],
     };
   }
@@ -292,6 +305,7 @@ export async function runVpsDeployment(input: VpsDeploymentExecutionInput): Prom
       state.detail = redactText(result.error || 'Command failed.');
 
       const terminalState: VpsDeploymentExecutionState = retriable ? 'retry' : 'failure';
+      const recovery = recoveryAfterEnvironmentWrite(input.plan, index);
       return {
         state: terminalState,
         planStatus: input.plan.status,
@@ -308,6 +322,7 @@ export async function runVpsDeployment(input: VpsDeploymentExecutionInput): Prom
         ],
         manualBlockReasons: [],
         redactedOutput: result.output ? [redactText(result.output)] : undefined,
+        ...(recovery ? { recovery } : {}),
       };
     }
 
@@ -317,6 +332,7 @@ export async function runVpsDeployment(input: VpsDeploymentExecutionInput): Prom
     if (healthStatusError) {
       state.status = 'failed';
       state.detail = healthStatusError;
+      const recovery = recoveryAfterEnvironmentWrite(input.plan, index);
       return {
         state: 'retry',
         planStatus: input.plan.status,
@@ -333,7 +349,8 @@ export async function runVpsDeployment(input: VpsDeploymentExecutionInput): Prom
         ],
         manualBlockReasons: [],
         redactedOutput: result.output ? [redactText(result.output)] : undefined,
-      };
+        ...(recovery ? { recovery } : {}),
+        };
     }
     const commandHealthProof = healthProofFromCommand(command, result.output);
     if (commandHealthProof) {

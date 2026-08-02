@@ -136,6 +136,28 @@ export interface SomniBotAPI {
     blockedReason?: string;
     redactedOutput?: string[];
     healthProof?: Record<string, unknown>;
+    recovery?: { action: 'vps:run-rollback'; detail: string };
+  }>;
+  runVpsRollback: (payload: {
+    lastGoodCommit: string;
+    cancelRequested?: boolean;
+  }) => Promise<{
+    state: string;
+    planStatus: string;
+    canRetry: boolean;
+    commandStates: Array<{
+      commandId: string;
+      executable: string;
+      redactedDisplay: string;
+      status: 'pending' | 'running' | 'success' | 'failed' | 'skipped' | 'cancelled';
+      detail?: string;
+    }>;
+    logs: Array<{ level: string; code: string; message: string; detail?: string }>;
+    manualBlockReasons: string[];
+    blockedReason?: string;
+    redactedOutput?: string[];
+    healthProof?: Record<string, unknown>;
+    recovery?: { action: 'vps:run-rollback'; detail: string };
   }>;
   runVpsPreflight: () => Promise<{
     state: string;
@@ -231,6 +253,7 @@ contextBridge.exposeInMainWorld('somnibot', {
   // V5 Audit §10.P3a: Secret stays in main process
   pullFromSupabase: () => ipcRenderer.invoke('pull-from-supabase'),
   runVpsDeployment: (payload) => ipcRenderer.invoke('vps:run-deployment', payload),
+  runVpsRollback: (payload) => ipcRenderer.invoke('vps:run-rollback', payload),
   runVpsPreflight: () => ipcRenderer.invoke('vps:run-preflight'),
 
   // Tailscale / public callback readiness

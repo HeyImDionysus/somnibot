@@ -243,6 +243,26 @@ describe('VPS deployment execution bridge', () => {
     expect(result.commandStates.find((command) => command.commandId === 'start-stack')?.status).toBe('failed');
   });
 
+  it('returns an immediately executable approved rollback path after a post-env-write failure', async () => {
+    const plan = buildVpsDeploymentPlan(completeVpsInput);
+    const approvedCommandIds = plan.commands.filter(command => command.approvalRequired).map(command => command.id);
+    const result = await runVpsDeployment({
+      plan,
+      operatorApproved: true,
+      approvedCommandIds,
+      dryRun: false,
+      commandRunner: async (command) => command.id === 'start-stack'
+        ? { ok: false, error: 'simulated container build failure', retriable: false }
+        : { ok: true },
+    });
+
+    expect(result.state).toBe('failure');
+    expect(result.recovery).toEqual({
+      action: 'vps:run-rollback',
+      detail: 'The protected environment write may have completed. Run the approved rollback action with an exact last-good commit SHA before retrying deployment.',
+    });
+  });
+
   it('returns retry state for transient failures and allows re-run', async () => {
     const plan = buildVpsDeploymentPlan(completeVpsInput);
     const result = await runVpsDeployment({

@@ -751,6 +751,8 @@ function renderDeploymentActions(plan) {
       `<button class="btn btn-small btn-secondary" type="button" data-vps-deploy-action="preflight"${disabledAttr}>${escapeHtml(preflightLabel)}</button>` +
       `<button class="btn btn-small btn-secondary" type="button" data-vps-deploy-action="dry-run"${disabledAttr}>${escapeHtml(dryRunLabel)}</button>` +
       `<button class="btn btn-small btn-danger" type="button" data-vps-deploy-action="run-live"${disabledAttr}>${escapeHtml(liveLabel)}</button>` +
+      '<label class="deployment-rollback-sha"><span>Last-good commit SHA</span><input type="text" data-vps-last-good-commit maxlength="40" pattern="[0-9a-fA-F]{40}" placeholder="40 hexadecimal characters" autocomplete="off"></label>' +
+      `<button class="btn btn-small btn-danger" type="button" data-vps-deploy-action="rollback"${disabledAttr}>Run approved rollback</button>` +
     '</div>'
   );
 }
@@ -774,11 +776,15 @@ function renderDeploymentRunResult(result) {
   ]);
   const logLines = (result.logs || []).map(log => [log.message, log.detail || log.code]);
   const blockedLines = (result.manualBlockReasons || []).map(reason => ['Manual block', reason]);
+  const recoveryLines = result.recovery
+    ? [['Recovery action', `${result.recovery.action}: ${result.recovery.detail}`]]
+    : [];
 
   return renderRunResultPanel('Deployment run', result.state, [
     ...blockedLines,
     ...commandLines,
     ...logLines,
+    ...recoveryLines,
   ]);
 }
 
@@ -1018,6 +1024,16 @@ vpsDeploymentPlan?.addEventListener('click', async (event) => {
     }
     const actionPlanKey = getVpsDeploymentPlanKey(plan);
     renderDeploymentPlan(plan, true);
+
+    if (action === 'rollback') {
+      const commitInput = vpsDeploymentPlan.querySelector('[data-vps-last-good-commit]');
+      const lastGoodCommit = commitInput?.value?.trim() || '';
+      vpsDeploymentResult = await window.somnibot.runVpsRollback({ lastGoodCommit });
+      vpsActionResultPlanKey = actionPlanKey;
+      const ok = vpsDeploymentResult.state === 'success';
+      showMessage(ok ? 'success' : 'error', ok ? 'VPS rollback completed.' : 'VPS rollback did not complete.');
+      return;
+    }
 
     if (action === 'preflight') {
       vpsPreflightResult = await window.somnibot.runVpsPreflight();

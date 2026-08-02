@@ -15,6 +15,7 @@ export interface VpsDeploymentPlanInput extends RuntimeNetworkingConfig {
   paypalReady?: boolean;
   supabaseAccessTokenReady?: boolean;
   supabaseDiscordAuthProviderConfigured?: boolean;
+  lastGoodCommit?: string;
 }
 
 export interface VpsDeploymentEnvVar {
@@ -328,7 +329,13 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
   ];
 }
 
-function buildRollback(sshTarget: string, deployPath: string, composeFilePath: string, publicBaseUrl: string): VpsDeploymentPlan['rollback'] {
+function buildRollback(
+  sshTarget: string,
+  deployPath: string,
+  composeFilePath: string,
+  publicBaseUrl: string,
+  lastGoodCommit: string,
+): VpsDeploymentPlan['rollback'] {
   return {
     summary: 'Return the VPS checkout to a last known-good commit, rebuild containers, and verify dashboard health before calling rollback complete.',
     commands: [
@@ -337,13 +344,6 @@ function buildRollback(sshTarget: string, deployPath: string, composeFilePath: s
         label: 'Refresh remote refs',
         changesRemote: false,
         approvalRequired: false,
-        commandCategory: 'service',
-      }),
-      buildRemoteCommand(sshTarget, 'git', ['-C', deployPath, 'checkout', '<last-good-commit>'], {
-        id: 'rollback-checkout',
-        label: 'Checkout approved known-good commit',
-        changesRemote: true,
-        approvalRequired: true,
         commandCategory: 'service',
       }),
       buildRemoteCommand(sshTarget, 'sh', [
@@ -355,6 +355,13 @@ function buildRollback(sshTarget: string, deployPath: string, composeFilePath: s
         changesRemote: true,
         approvalRequired: true,
         commandCategory: 'rollback',
+      }),
+      buildRemoteCommand(sshTarget, 'git', ['-C', deployPath, 'checkout', lastGoodCommit], {
+        id: 'rollback-checkout',
+        label: 'Checkout approved known-good commit',
+        changesRemote: true,
+        approvalRequired: true,
+        commandCategory: 'service',
       }),
       buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'up', '-d', '--build'], {
         id: 'rollback-rebuild',
@@ -420,6 +427,10 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
 
   if (!hasAuthProviderSetupPath(input)) {
     blockedReasons.push('Supabase Discord auth provider setup requires a Management API token or manual provider confirmation before VPS deployment.');
+  }
+
+  if (input.lastGoodCommit !== undefined && !/^[0-9a-f]{40}$/i.test(input.lastGoodCommit)) {
+    blockedReasons.push('Rollback requires an exact 40-character hexadecimal last-good commit SHA.');
   }
 
   if (blockedReasons.length > 0) {
@@ -553,6 +564,49 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
         requiredBefore: 'Any remote process change.',
       },
     ],
-    rollback: buildRollback(`${sshUser}@${sshHost}`, deployPath, composeFilePath, profile.publicCallbackBaseUrl),
+    rollback: input.lastGoodCommit
+      ? buildRollback(`${sshUser}@${sshHost}`, deployPath, composeFilePath, profile.publicCallbackBaseUrl, input.lastGoodCommit)
+      : {
+        summary: 'Rollback requires an operator-supplied exact 40-character last-good commit before any rollback commands can be approved.',
+        commands: [],
+        notes: [
+          'No rollback command is executable until the launcher receives a validated exact commit SHA.',
+          'The protected environment must be restored before an older checkout is selected.',
+        ],
+      },
+  };
+}
+
+export function buildVpsRollbackPlan(input: VpsDeploymentPlanInput & { lastGoodCommit: string }): VpsDeploymentPlan {
+  const basePlan = buildVpsDeploymentPlan({ ...input, lastGoodCommit: undefined });
+  if (!/^[0-9a-f]{40}$/i.test(input.lastGoodCommit)) {
+    return {
+      ...basePlan,
+      status: 'blocked',
+      canApprove: false,
+      blockedReasons: [...basePlan.blockedReasons, 'Rollback requires an exact 40-character hexadecimal last-good commit SHA.'],
+      target: null,
+      environment: null,
+      serviceLayout: [],
+      reverseProxy: null,
+      commands: [],
+      approvalGates: [],
+      rollback: null,
+    };
+  }
+
+  const plan = buildVpsDeploymentPlan(input);
+  if (plan.status !== 'ready' || !plan.rollback) {
+    return plan;
+  }
+
+  return {
+    ...plan,
+    environment: null,
+    serviceLayout: [],
+    reverseProxy: null,
+    commands: plan.rollback.commands,
+    approvalGates: [],
+    rollback: null,
   };
 }

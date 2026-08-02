@@ -1,7 +1,7 @@
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { dotenvValue } from '../main/vps-env-materializer';
@@ -20,6 +20,10 @@ describe('protected VPS environment scripts', () => {
     expect(writerSource).toContain('trap cleanup EXIT HUP INT TERM');
     expect(writerSource).toContain('rm -f -- "$temp_path" "$backup_temp"');
     expect(writerSource).toContain('mv -f -- "$backup_temp" "${env_path}.rollback"');
+    expect(writerSource).toContain('flock -n 9');
+    expect(restorerSource).toContain('flock -n 9');
+    expect(writerSource).not.toContain('mkdir -- "$lock_dir"');
+    expect(restorerSource).not.toContain('mkdir -- "$lock_dir"');
     expect(restorerSource).toContain('mv -f -- "$temp_path" "$env_path"');
   });
 
@@ -53,6 +57,47 @@ describe('protected VPS environment scripts', () => {
       });
       expect(failedWrite.status).not.toBe(0);
       expect(readdirSync(root).filter((name) => name.includes('.tmp.'))).toEqual([]);
+      expect(readFileSync(envPath, 'utf8')).toBe('GENERATION=old\n');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('releases locks after SIGKILL, ignores stale lock files, serializes writers, and restores normally', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'somnibot-vps-env-lock-'));
+    const envPath = path.join(root, '.env');
+    const lockPath = `${envPath}.write.lock`;
+    try {
+      writeFileSync(envPath, 'GENERATION=old\n', { mode: 0o600 });
+
+      const heldWriter = spawn('sh', [writer, envPath], {
+        stdio: ['pipe', 'ignore', 'pipe'],
+      });
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      const concurrent = spawnSync('sh', [writer, envPath], {
+        input: 'GENERATION=blocked\n',
+        encoding: 'utf8',
+      });
+      expect(concurrent.status).toBe(75);
+
+      heldWriter.kill('SIGKILL');
+      await new Promise<void>((resolve) => {
+        heldWriter.once('close', () => resolve());
+      });
+
+      writeFileSync(lockPath, 'stale lock file is not a held lock\n');
+      const recovered = spawnSync('sh', [writer, envPath], {
+        input: 'GENERATION=recovered\n',
+        encoding: 'utf8',
+      });
+      expect(recovered.status, recovered.stderr).toBe(0);
+      expect(readFileSync(envPath, 'utf8')).toBe('GENERATION=recovered\n');
+      expect(statSync(lockPath).isFile()).toBe(true);
+      expect(readdirSync(root).filter((name) => name.includes('.tmp.'))).toEqual([]);
+
+      const restored = spawnSync('sh', [restorer, envPath], { encoding: 'utf8' });
+      expect(restored.status, restored.stderr).toBe(0);
       expect(readFileSync(envPath, 'utf8')).toBe('GENERATION=old\n');
     } finally {
       rmSync(root, { recursive: true, force: true });

@@ -165,6 +165,7 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('data-vps-deploy-action="run-live"');
     expect(renderer).toContain('window.somnibot.runVpsPreflight()');
     expect(renderer).toContain('window.somnibot.runVpsDeployment({');
+    expect(renderer).toContain('window.somnibot.runVpsRollback({ lastGoodCommit });');
     expect(renderer).toContain('window.somnibot.runSetupAutomation(config)');
     expect(renderer).toContain('result.servicesStarted');
     expect(renderer).toContain("const dryRun = action !== 'run-live';");
@@ -214,6 +215,7 @@ describe('launcher setup renderer wiring', () => {
     expect(preload).toContain('providerValidation?:');
     expect(preload).toContain("runVpsPreflight: () => ipcRenderer.invoke('vps:run-preflight')");
     expect(preload).toContain("runVpsDeployment: (payload) => ipcRenderer.invoke('vps:run-deployment', payload)");
+    expect(preload).toContain("runVpsRollback: (payload) => ipcRenderer.invoke('vps:run-rollback', payload)");
     expect(preload).toContain('healthProof?: Record<string, unknown>');
     expect(main).toContain("ipcMain.handle('get-setup-status'");
     expect(main).toContain("ipcMain.handle('run-setup-automation'");
@@ -251,6 +253,7 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('createVpsCommandRunner()');
     expect(main).toContain('redactVpsDeploymentText(result.error)');
     expect(main).toContain("ipcMain.handle('vps:run-deployment'");
+    expect(main).toContain("ipcMain.handle('vps:run-rollback'");
     expect(main).toContain('runtimeMode: input.runtimeMode ?? config.runtimeMode');
     expect(main).toContain('publicCallbackBaseUrl: input.publicCallbackBaseUrl ?? config.publicCallbackBaseUrl');
     expect(main).toContain('vpsDomain: input.vpsDomain ?? config.vpsDomain');

@@ -66,6 +66,7 @@ import { createVpsCommandRunner } from './vps-command-runner.js';
 import { VpsDeploymentRunGate, redactVpsDeploymentText } from './vps-deployment-executor.js';
 import { confirmVpsDeploymentApproval } from './vps-deployment-approval.js';
 import { handleVpsDeploymentRunRequest, type VpsDeploymentRunRequest } from './vps-deployment-request.js';
+import { handleVpsRollbackRunRequest, type VpsRollbackRunRequest } from './vps-rollback-request.js';
 import { planVpsSshPreflight } from './vps-preflight.js';
 import {
   startLocalValkeyBackupSchedule,
@@ -1254,6 +1255,18 @@ function registerIpcHandlers(): void {
         saveConfig(patch);
         await syncLauncherCredentials(getConfig());
       },
+    });
+  });
+
+  ipcMain.handle('vps:run-rollback', async (_event, request: VpsRollbackRunRequest) => {
+    const cfg = getConfig();
+    return handleVpsRollbackRunRequest(cfg, request, {
+      confirmApproval: (plan) => confirmVpsDeploymentApproval(plan, {
+        showMessageBox: (options) => dialog.showMessageBox(options),
+      }),
+      createCommandRunner: createVpsCommandRunner,
+      runGate: activeVpsDeployment,
+      recordAudit: recordLauncherAudit,
     });
   });
 

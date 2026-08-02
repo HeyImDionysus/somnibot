@@ -55,7 +55,7 @@ const EXPECTED_API_METHODS = [
   'getLavalinkEnabled', 'setLavalinkEnabled',
   'checkJava', 'downloadLavalink', 'getLavalinkInfo',
   'onLavalinkStatus', 'onLavalinkLog', 'onLavalinkDownloadProgress',
-  'runVpsDeployment', 'runVpsPreflight',
+  'runVpsDeployment', 'runVpsRollback', 'runVpsPreflight',
   'getVersion',
 ] as const;
 

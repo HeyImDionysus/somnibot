@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { buildVpsDeploymentPlan, VPS_DEPLOYMENT_BUILD_TIMEOUT_MS } from '../main/vps-deployment-plan';
+import { buildVpsDeploymentPlan, buildVpsRollbackPlan, VPS_DEPLOYMENT_BUILD_TIMEOUT_MS } from '../main/vps-deployment-plan';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(__dirname, '..');
@@ -90,6 +90,8 @@ describe('VPS deployment plan generator', () => {
 
   it('includes service commands and rollback commands as review-only plans', () => {
     const plan = buildVpsDeploymentPlan(completeVpsInput);
+    const lastGoodCommit = 'a'.repeat(40);
+    const rollbackPlan = buildVpsRollbackPlan({ ...completeVpsInput, lastGoodCommit });
 
     expect(plan.commands).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -164,12 +166,11 @@ describe('VPS deployment plan generator', () => {
         approvalRequired: false,
       }),
     ]));
-    expect(plan.rollback?.commands).toEqual(expect.arrayContaining([
+    expect(plan.rollback?.commands).toEqual([]);
+    expect(rollbackPlan.commands).toEqual([
       expect.objectContaining({
-        id: 'rollback-checkout',
-        executable: 'ssh',
-        args: expect.arrayContaining(['deploy@somnibot.example.com', 'git', '-C', '/opt/somnibot', 'checkout', '<last-good-commit>']),
-        approvalRequired: true,
+        id: 'rollback-fetch',
+        approvalRequired: false,
       }),
       expect.objectContaining({
         id: 'rollback-restore-env',
@@ -180,6 +181,12 @@ describe('VPS deployment plan generator', () => {
           '/opt/somnibot/scripts/restore-production-env.sh',
           '/opt/somnibot/.env',
         ]),
+        approvalRequired: true,
+      }),
+      expect.objectContaining({
+        id: 'rollback-checkout',
+        executable: 'ssh',
+        args: expect.arrayContaining(['deploy@somnibot.example.com', 'git', '-C', '/opt/somnibot', 'checkout', lastGoodCommit]),
         approvalRequired: true,
       }),
       expect.objectContaining({
@@ -196,7 +203,24 @@ describe('VPS deployment plan generator', () => {
         approvalRequired: false,
         expectedHealthStatus: 'healthy',
       }),
-    ]));
+    ]);
+    expect(rollbackPlan.commands.map(command => command.id)).toEqual([
+      'rollback-fetch',
+      'rollback-restore-env',
+      'rollback-checkout',
+      'rollback-rebuild',
+      'rollback-health',
+    ]);
+    expect(JSON.stringify(plan)).not.toContain('<last-good-commit>');
+  });
+
+  it('blocks rollback plans unless the last-good commit is an exact SHA and never emits a placeholder', () => {
+    const plan = buildVpsRollbackPlan({ ...completeVpsInput, lastGoodCommit: '<last-good-commit>' });
+
+    expect(plan.status).toBe('blocked');
+    expect(plan.commands).toEqual([]);
+    expect(JSON.stringify(plan)).not.toContain('<last-good-commit>');
+    expect(plan.blockedReasons).toContain('Rollback requires an exact 40-character hexadecimal last-good commit SHA.');
   });
 
   it('uses restrictive file permissions for env file steps', () => {
@@ -217,7 +241,7 @@ describe('VPS deployment plan generator', () => {
     const plan = buildVpsDeploymentPlan(completeVpsInput);
     const remoteCommands = [
       ...plan.commands.filter(command => !['check-dashboard', 'check-health'].includes(command.id)),
-      ...(plan.rollback?.commands.filter(command => command.id !== 'rollback-health') ?? []),
+      ...buildVpsRollbackPlan({ ...completeVpsInput, lastGoodCommit: 'b'.repeat(40) }).commands.filter(command => command.id !== 'rollback-health'),
     ];
 
     expect(remoteCommands).not.toHaveLength(0);

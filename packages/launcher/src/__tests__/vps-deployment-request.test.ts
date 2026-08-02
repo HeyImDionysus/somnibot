@@ -165,14 +165,19 @@ describe('VPS deployment run request coordinator', () => {
     const retryConfig: LauncherConfig = { ...completeConfig };
     const envPayloads: string[] = [];
     let persistCalls = 0;
+    const events: string[] = [];
     const runtime = {
-      confirmApproval: async (plan: VpsDeploymentPlan) => approvalFor(plan),
+      confirmApproval: async (plan: VpsDeploymentPlan) => {
+        events.push('confirm');
+        return approvalFor(plan);
+      },
       createCommandRunner: () => async (command: VpsDeploymentCommand) => {
         if (command.id === 'write-env-file') envPayloads.push(command.sensitiveStdin ?? '');
         return successfulCommand(command);
       },
       runGate: new VpsDeploymentRunGate(),
       persistGeneratedSecrets: async (patch: Partial<LauncherConfig>) => {
+        events.push('persist');
         persistCalls += 1;
         Object.assign(retryConfig, patch);
       },
@@ -182,6 +187,7 @@ describe('VPS deployment run request coordinator', () => {
     await handleVpsDeploymentRunRequest(retryConfig, { dryRun: false }, runtime);
 
     expect(persistCalls).toBe(1);
+    expect(events.slice(0, 2)).toEqual(['confirm', 'persist']);
     expect(envPayloads).toHaveLength(2);
     for (const key of ['CSRF_SECRET', 'NEXTAUTH_SECRET', 'WEBHOOK_REPLAY_SECRET', 'VALKEY_PASSWORD', 'LAVALINK_PASSWORD']) {
       const value = parseEnv(envPayloads[0] ?? '')[key];
@@ -239,9 +245,41 @@ describe('VPS deployment run request coordinator', () => {
     );
 
     expect(result.state).toBe('blocked');
-    expect(approvalCalls).toBe(0);
+    expect(approvalCalls).toBe(1);
     expect(runnerCalls).toBe(0);
     expect(JSON.stringify(result)).not.toContain('simulated local keychain failure');
+  });
+
+  it('cancelling before approval performs no persistence, sync, audit, or remote execution', async () => {
+    let confirmCalls = 0;
+    let persistCalls = 0;
+    let runnerCalls = 0;
+    const audits: unknown[] = [];
+    const result = await handleVpsDeploymentRunRequest(
+      { ...completeConfig },
+      { dryRun: false, cancelRequested: true, operatorApproved: true },
+      {
+        confirmApproval: async () => {
+          confirmCalls += 1;
+          return { operatorApproved: true, approvedCommandIds: [] };
+        },
+        createCommandRunner: () => async () => {
+          runnerCalls += 1;
+          return { ok: true };
+        },
+        runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {
+          persistCalls += 1;
+        },
+        recordAudit: (entry) => audits.push(entry),
+      },
+    );
+
+    expect(result.state).toBe('cancelled');
+    expect(confirmCalls).toBe(0);
+    expect(persistCalls).toBe(0);
+    expect(runnerCalls).toBe(0);
+    expect(audits).toEqual([]);
   });
 
   it('does not use native approval or live runners for dry-run requests', async () => {
