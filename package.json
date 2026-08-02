@@ -22,7 +22,6 @@
     "docker:down": "docker compose down",
     "launcher:build": "node scripts/build-launcher.mjs",
     "launcher:build:win": "node scripts/build-launcher.mjs --win",
-    "launcher:build:mac": "node scripts/build-launcher.mjs --mac",
     "launcher:build:linux": "node scripts/build-launcher.mjs --linux",
     "launcher:build:all": "node scripts/build-launcher.mjs --all",
     "launcher:build:dir": "node scripts/build-launcher.mjs --dir"

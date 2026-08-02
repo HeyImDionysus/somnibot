@@ -7,9 +7,8 @@
  * Usage:
  *   node scripts/build-launcher.mjs              # Build for current platform
  *   node scripts/build-launcher.mjs --win         # Build for Windows
- *   node scripts/build-launcher.mjs --mac         # Build for macOS
  *   node scripts/build-launcher.mjs --linux       # Build for Linux
- *   node scripts/build-launcher.mjs --all         # Build for all platforms
+ *   node scripts/build-launcher.mjs --all         # Build for supported Windows and Linux platforms
  *   node scripts/build-launcher.mjs --dir         # Pack to directory (no installer, for testing)
  *   node scripts/build-launcher.mjs --skip-build  # Skip package builds (use existing artifacts)
  */
@@ -27,8 +26,12 @@ const STAGING = path.join(LAUNCHER_DIR, '.resources');
 /* ── Parse CLI args ────────────────────────────────────────────────── */
 
 const args = process.argv.slice(2);
+if (args.includes('--mac')) {
+  console.error('macOS launcher builds are not supported for the v1 release.');
+  process.exit(1);
+}
 const platformArg = args.find((a) =>
-  ['--win', '--mac', '--linux', '--all', '--dir'].includes(a),
+  ['--win', '--linux', '--all', '--dir'].includes(a),
 );
 const skipBuild = args.includes('--skip-build');
 
@@ -426,9 +429,8 @@ function buildElectron() {
   const platformFlags =
     {
       '--win': '--win',
-      '--mac': '--mac',
       '--linux': '--linux',
-      '--all': '-mwl',
+      '--all': '--win --linux',
       '--dir': '--dir',
     }[platformArg] ?? '';
 

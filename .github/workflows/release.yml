@@ -1,20 +1,68 @@
-name: Build & Release
+name: Build Signed v1 Launcher Release
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'v1.0.0'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag (e.g. v0.1.0) — leave blank to skip GitHub Release'
-        required: false
+        description: 'Release tag. Only v1.0.0 is accepted.'
+        default: 'v1.0.0'
+        required: true
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
+  validate-release:
+    name: Validate approved green main tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and validate release tag
+        id: release
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="$REQUESTED_TAG"
+          if [[ "$TAG" != "v1.0.0" ]]; then
+            echo "Only the approved v1.0.0 launcher release may be published." >&2
+            exit 1
+          fi
+
+          git fetch --quiet origin main "refs/tags/${TAG}:refs/tags/${TAG}"
+
+          TAG_SHA="$(git rev-parse "${TAG}^{commit}")"
+          MAIN_SHA="$(git rev-parse origin/main)"
+          if [[ "$TAG_SHA" != "$MAIN_SHA" ]]; then
+            echo "${TAG} resolves to ${TAG_SHA}, not the current main SHA ${MAIN_SHA}." >&2
+            exit 1
+          fi
+
+          GREEN_RUNS="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${TAG_SHA}&branch=main&event=push&status=completed&per_page=100" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')"
+          if [[ "$GREEN_RUNS" == "0" ]]; then
+            echo "No successful main CI run exists for ${TAG_SHA}." >&2
+            exit 1
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha=${TAG_SHA}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: validate-release
     strategy:
       fail-fast: false
       matrix:
@@ -22,9 +70,6 @@ jobs:
           - os: windows-latest
             platform: --win
             artifact: windows
-          - os: macos-latest
-            platform: --mac
-            artifact: macos
           - os: ubuntu-latest
             platform: --linux
             artifact: linux
@@ -34,6 +79,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate-release.outputs.sha }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v5
@@ -52,23 +99,112 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Sign Windows NSIS installer
+        if: matrix.artifact == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_PFX_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_PFX_PASSWORD)) {
+            throw 'Windows code-signing credentials are required; refusing to publish an unsigned installer.'
+          }
+
+          $installer = @(Get-ChildItem 'packages/launcher/release' -Filter '*.exe' -File)
+          if ($installer.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($installer.Count)."
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'somnibot-release-signing.pfx'
+          try {
+            [System.IO.File]::WriteAllBytes($pfxPath, [System.Convert]::FromBase64String($env:WINDOWS_CODESIGN_PFX_BASE64))
+            & signtool sign /fd SHA256 /f $pfxPath /p $env:WINDOWS_CODESIGN_PFX_PASSWORD /tr 'http://timestamp.digicert.com' /td SHA256 $installer[0].FullName
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE." }
+
+            $signature = Get-AuthenticodeSignature -FilePath $installer[0].FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "Installer signature is not valid: $($signature.Status)."
+            }
+          } finally {
+            Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Create checksums and provenance
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.validate-release.outputs.tag }}
+          RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseDir = 'packages/launcher/release'
+          $files = if ('${{ matrix.artifact }}' -eq 'windows') {
+            @(Get-ChildItem $releaseDir -File | Where-Object { $_.Extension -in '.exe', '.yml', '.yaml' })
+          } else {
+            @(Get-ChildItem $releaseDir -File | Where-Object { $_.Name -like '*.AppImage' -or $_.Extension -in '.yml', '.yaml' })
+          }
+          if ($files.Count -eq 0) { throw 'No release files were produced.' }
+
+          $checksumName = "SHA256SUMS-${{ matrix.artifact }}"
+          $checksumLines = $files | Sort-Object Name | ForEach-Object {
+            "$( (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant() ) *$($_.Name)"
+          }
+          [System.IO.File]::WriteAllLines((Join-Path $releaseDir $checksumName), $checksumLines)
+
+          $provenance = [ordered]@{
+            releaseTag = $env:RELEASE_TAG
+            sourceSha = $env:RELEASE_SHA
+            platform = '${{ matrix.artifact }}'
+            workflowRunId = $env:GITHUB_RUN_ID
+            workflowRunAttempt = $env:GITHUB_RUN_ATTEMPT
+            createdAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+            files = @($files | Sort-Object Name | ForEach-Object { $_.Name })
+          }
+          $provenance | ConvertTo-Json -Depth 4 | Set-Content -NoNewline (Join-Path $releaseDir "provenance-${{ matrix.artifact }}.json")
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
           name: somnibot-${{ matrix.artifact }}
           path: |
-            packages/launcher/release/*.exe
-            packages/launcher/release/*.dmg
-            packages/launcher/release/*.AppImage
+            ${{ matrix.artifact == 'windows' && 'packages/launcher/release/*.exe' || 'packages/launcher/release/*.AppImage' }}
             packages/launcher/release/*.yml
             packages/launcher/release/*.yaml
-          if-no-files-found: warn
+            packages/launcher/release/SHA256SUMS-${{ matrix.artifact }}
+            packages/launcher/release/provenance-${{ matrix.artifact }}.json
+          if-no-files-found: error
           retention-days: 30
 
-  release:
+  verify-windows-installer:
     needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Download signed Windows artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: somnibot-windows
+          path: artifact
+
+      - name: Verify checksum and Authenticode signature after download
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = @(Get-ChildItem artifact -Filter '*.exe' -File)
+          if ($installer.Count -ne 1) { throw "Expected one Windows installer, found $($installer.Count)." }
+
+          $checksum = Get-Content 'artifact/SHA256SUMS-windows' | Where-Object { $_ -match [regex]::Escape("*$($installer[0].Name)") }
+          if (@($checksum).Count -ne 1) { throw 'Installer checksum entry is missing or ambiguous.' }
+          if ($checksum -notmatch '^([a-fA-F0-9]{64}) \*.+$') { throw 'Installer checksum entry is malformed.' }
+          $expectedHash = $Matches[1]
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer[0].FullName).Hash
+          if ($actualHash -ne $expectedHash) { throw 'Downloaded installer checksum does not match.' }
+
+          $signature = Get-AuthenticodeSignature -FilePath $installer[0].FullName
+          if ($signature.Status -ne 'Valid') { throw "Downloaded installer signature is not valid: $($signature.Status)." }
+
+  release:
+    needs: [validate-release, build, verify-windows-installer]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag != ''
 
     steps:
       - name: Download all artifacts
@@ -80,8 +216,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: SomniBot ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.validate-release.outputs.tag }}
+          target_commitish: ${{ needs.validate-release.outputs.sha }}
+          name: SomniBot ${{ needs.validate-release.outputs.tag }}
           draft: true
           generate_release_notes: true
           files: artifacts/**/*
