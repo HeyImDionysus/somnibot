@@ -44,6 +44,21 @@ describe('VPS command runner', () => {
     });
   });
 
+  it('streams protected input over stdin without adding it to command arguments', async () => {
+    const runner = createVpsCommandRunner({ timeoutMs: 5_000 });
+    const protectedInput = 'PAYPAL_CLIENT_SECRET=stdin-only-secret\n';
+    const fixture = command(process.execPath, [
+      '-e',
+      'process.stdin.setEncoding("utf8"); let value=""; process.stdin.on("data", chunk => value += chunk); process.stdin.on("end", () => process.stdout.write(String(value.length)))',
+    ], { sensitiveStdin: protectedInput });
+
+    const result = await runner(fixture, { index: 0, total: 1 });
+
+    expect(result).toMatchObject({ ok: true, output: String(protectedInput.length) });
+    expect(fixture.args.join(' ')).not.toContain('stdin-only-secret');
+    expect(JSON.stringify(result)).not.toContain('stdin-only-secret');
+  });
+
   it('returns failure output and exit code without throwing', async () => {
     const runner = createVpsCommandRunner({ timeoutMs: 5_000 });
 

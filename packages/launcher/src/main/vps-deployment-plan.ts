@@ -37,6 +37,8 @@ export interface VpsDeploymentCommand {
   commandCategory: 'env' | 'service' | 'probe' | 'rollback';
   executionTimeoutMs?: number;
   expectedHealthStatus?: 'healthy';
+  /** Main-process-only input. Never included in displays, logs, or renderer payloads. */
+  sensitiveStdin?: string;
 }
 
 export interface VpsDeploymentApprovalGate {
@@ -163,6 +165,7 @@ function buildEnvironmentVariables(
     envVar('DISCORD_GUILD_ID', '<optional-discord-guild-id>', { secret: false, required: false, source: 'placeholder' }),
     envVar('SUPABASE_URL', '<SUPABASE_PROJECT_URL>', { secret: false, required: true, source: 'placeholder' }),
     envVar('SUPABASE_SECRET_KEY', '<SUPABASE_SECRET_KEY>', { secret: true, required: true, source: 'placeholder' }),
+    envVar('SUPABASE_DB_URL', '<SUPABASE_DB_URL>', { secret: true, required: true, source: 'placeholder' }),
     envVar('SUPABASE_ACCESS_TOKEN', authProvider.supabaseAccessTokenReady ? '<SUPABASE_ACCESS_TOKEN>' : '', {
       secret: true,
       required: !authProvider.supabaseDiscordAuthProviderConfigured,
@@ -255,6 +258,18 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
       changesRemote: false,
       approvalRequired: false,
       commandCategory: 'service',
+    }),
+    buildRemoteCommand(sshTarget, 'sh', [
+      '-c',
+      'umask 077; env_path="$1"; temp_path="${env_path}.tmp.$$"; trap \'rm -f -- "$temp_path"\' EXIT HUP INT TERM; cat > "$temp_path" && chmod 0600 "$temp_path" && mv -f -- "$temp_path" "$env_path"; result=$?; trap - EXIT HUP INT TERM; exit "$result"',
+      'somnibot-env-writer',
+      envFilePath,
+    ], {
+      id: 'write-env-file',
+      label: 'Write protected VPS environment from saved launcher credentials',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'env',
     }),
     buildRemoteCommand(sshTarget, 'chmod', [ENV_FILE_PERMISSIONS, envFilePath], {
       id: 'protect-env-file',

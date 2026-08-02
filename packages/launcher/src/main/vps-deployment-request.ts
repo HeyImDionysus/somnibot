@@ -7,6 +7,7 @@ import {
   type VpsDeploymentExecutionResult,
 } from './vps-deployment-executor.js';
 import { buildVpsDeploymentPlan, type VpsDeploymentPlan } from './vps-deployment-plan.js';
+import { materializeVpsDeploymentPlan } from './vps-env-materializer.js';
 
 export interface VpsDeploymentRunRequest {
   operatorApproved?: boolean;
@@ -52,7 +53,8 @@ export function buildVpsDeploymentPlanFromConfig(config: LauncherConfig): VpsDep
       && config.discordClientSecret
       && config.supabaseUrl
       && config.supabaseSecretKey
-      && config.supabasePublishableKey,
+      && config.supabasePublishableKey
+      && config.supabaseDbPassword
     ),
     paypalReady: Boolean(
       config.paypalClientId
@@ -70,7 +72,8 @@ export async function handleVpsDeploymentRunRequest(
   runtime: VpsDeploymentRunRuntime,
 ): Promise<VpsDeploymentExecutionResult> {
   const liveRequested = request?.dryRun === false && config.runtimeMode === 'vps';
-  const plan = buildVpsDeploymentPlanFromConfig(config);
+  const displayPlan = buildVpsDeploymentPlanFromConfig(config);
+  const plan = liveRequested ? materializeVpsDeploymentPlan(displayPlan, config) : displayPlan;
 
   const execute = async (): Promise<VpsDeploymentExecutionResult> => {
     const approval = liveRequested

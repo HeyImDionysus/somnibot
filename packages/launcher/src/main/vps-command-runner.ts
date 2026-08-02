@@ -96,6 +96,14 @@ export function createVpsCommandRunner(options: VpsCommandRunnerOptions = {}): V
 
       child.stdout?.on('data', recordOutput);
       child.stderr?.on('data', recordOutput);
+      child.stdin?.on('error', (error) => {
+        settle({
+          ok: false,
+          error: `Could not send protected command input: ${error.message}`,
+          retriable: isSshExecutable(command.executable),
+        });
+      });
+      child.stdin?.end(command.sensitiveStdin);
 
       child.on('error', (error) => {
         settle({

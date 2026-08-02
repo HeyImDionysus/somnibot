@@ -4,7 +4,7 @@ import {
   type VpsCommandRunResult,
   VpsDeploymentRunGate,
 } from '../main/vps-deployment-executor';
-import { handleVpsDeploymentRunRequest } from '../main/vps-deployment-request';
+import { buildVpsDeploymentPlanFromConfig, handleVpsDeploymentRunRequest } from '../main/vps-deployment-request';
 import { type VpsDeploymentCommand, type VpsDeploymentPlan } from '../main/vps-deployment-plan';
 
 const completeConfig: LauncherConfig = {
@@ -13,10 +13,10 @@ const completeConfig: LauncherConfig = {
   discordClientSecret: 'discord-secret',
   discordGuildId: '',
   guilds: [],
-  supabaseUrl: 'https://supabase.example.com',
+  supabaseUrl: 'https://projectref.supabase.co',
   supabaseSecretKey: 'supabase-secret',
   supabasePublishableKey: 'supabase-publishable',
-  supabaseDbPassword: '',
+  supabaseDbPassword: 'database-password',
   supabaseAccessToken: 'supabase-management-token',
   supabaseDiscordAuthProviderConfigured: false,
   paypalClientId: 'paypal-client-id',
@@ -105,6 +105,7 @@ describe('VPS deployment run request coordinator', () => {
     expect(result.state).toBe('success');
     expect(executedCommandIds).toEqual([
       'enter-deploy-path',
+      'write-env-file',
       'protect-env-file',
       'start-stack',
       'install-health-recovery',
@@ -115,13 +116,47 @@ describe('VPS deployment run request coordinator', () => {
     ]);
   });
 
+  it('streams saved credentials to the VPS env writer without placing them in argv or results', async () => {
+    let envWriter: VpsDeploymentCommand | undefined;
+
+    const result = await handleVpsDeploymentRunRequest(
+      completeConfig,
+      { dryRun: false },
+      {
+        confirmApproval: async (plan) => approvalFor(plan),
+        createCommandRunner: () => async (command) => {
+          if (command.id === 'write-env-file') envWriter = command;
+          return successfulCommand(command);
+        },
+        runGate: new VpsDeploymentRunGate(),
+      },
+    );
+
+    expect(result.state).toBe('success');
+    expect(envWriter?.sensitiveStdin).toContain("DISCORD_TOKEN='discord-token'");
+    expect(envWriter?.sensitiveStdin).toContain("PAYPAL_CLIENT_SECRET='paypal-client-secret'");
+    expect(envWriter?.sensitiveStdin).toContain("SUPABASE_DB_URL='postgresql://postgres:database-password@db.projectref.supabase.co:5432/postgres'");
+    expect(envWriter?.args.join(' ')).not.toContain('discord-token');
+    expect(envWriter?.redactedDisplay).not.toContain('paypal-client-secret');
+    expect(JSON.stringify(result)).not.toContain('database-password');
+  });
+
+  it('keeps dry-run plans placeholder-only and never attaches credential stdin', async () => {
+    const plan = buildVpsDeploymentPlanFromConfig(completeConfig);
+
+    expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_DB_URL=<SUPABASE_DB_URL>');
+    expect(plan.commands.find((command) => command.id === 'write-env-file')?.sensitiveStdin).toBeUndefined();
+    expect(JSON.stringify(plan)).not.toContain(completeConfig.discordToken);
+    expect(JSON.stringify(plan)).not.toContain(completeConfig.paypalClientSecret);
+  });
+
   it('does not use native approval or live runners for dry-run requests', async () => {
     const result = await handleVpsDeploymentRunRequest(
       completeConfig,
       {
         dryRun: true,
         operatorApproved: true,
-        approvedCommandIds: ['protect-env-file', 'start-stack', 'install-health-recovery'],
+        approvedCommandIds: ['write-env-file', 'protect-env-file', 'start-stack', 'install-health-recovery'],
       },
       {
         confirmApproval: async () => {
