@@ -31,9 +31,10 @@
  *   - guild_config has NO columns for log-edits-enabled, log-deletes-enabled, or
  *     ignored-channel-ids — SET-B's contracted second configuration is
  *     unrepresentable (recorded as a real FAIL via a live schema probe).
- *   - the message-log handler keeps a MODULE-GLOBAL config cache (not per-guild)
- *     and has NO per-event dedupe key and NO retry/backoff — flagged in the
- *     RETRY / REPLAY / RACE / XGUILD gate reasons.
+ *   - the message-log handler uses a per-guild config cache, short-lived
+ *     in-process per-event replay fence, and resilient retry/backoff. Those
+ *     mechanics have focused unit coverage; the remaining gate is a real
+ *     gateway redelivery/readback (including the post-restart boundary).
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -286,7 +287,7 @@ function gateReplaySafety(ctx: ScenarioContext): void {
     'replay-safety',
     'discord-readback',
     'Re-delivering recorded messageUpdate/messageDelete events yields no duplicate log embeds (per-event dedupe key).',
-    'needs a gateway event re-delivery harness (DISCORD_TOKEN + live guild). FINDING: the message-log handler posts each event with NO per-event dedupe key, so re-delivery WOULD double-post — flagged for the owner',
+    'requires a live gateway redelivery + channel readback (DISCORD_TOKEN + live guild). The production handler has a 30-second in-process event fence for RESUME replay; this proof must still observe that boundary and the deliberate post-restart behavior against Discord.',
   );
 }
 
