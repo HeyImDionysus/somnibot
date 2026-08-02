@@ -12,7 +12,7 @@ if (!manifestDirectory) {
 }
 
 const files = readdirSync(manifestDirectory)
-  .filter((file) => file.endsWith('.json'))
+  .filter((file) => /^(?:fleet-)?shard-[1-4]\.json$/.test(file))
   .sort();
 assert.equal(files.length, 4, `expected exactly four shard manifests, found ${files.length}`);
 
@@ -49,6 +49,7 @@ for (const manifest of manifests) {
     if (
       result.fail !== 0
       || result.gated !== 0
+      || (Array.isArray(result.gates) && result.gates.length > 0)
       || result.hang
       || result.error
       || (Array.isArray(result.errored) && result.errored.length > 0)
