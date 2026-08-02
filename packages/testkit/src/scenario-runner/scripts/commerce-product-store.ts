@@ -1216,7 +1216,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
   // Boot #1: arrange a pending order (the state a checkout commits before the
   // payment link is exposed), snapshot it, then shut the stack down.
   const first = await ctx.bootGuild({ guildId, label: 'a' });
-  const { data: cust } = await first.supabase
+  const { data: cust, error: customerError } = await first.supabase
     .from('customers')
     .insert({ guild_id: guildId, discord_id: discordId, discord_username: `${ctx.runPrefix}restart` })
     .select('id')
@@ -1224,16 +1224,52 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
   const customerId = (cust as { id: string } | null)?.id ?? null;
   const productId = await insertProduct(first, { name: `${ctx.runPrefix}restart-pass`, priceCents: 500 });
   const orderNumber = `${ctx.runPrefix}restart-ord`;
-  await first.supabase.from('orders').insert({
-    order_number: orderNumber,
-    customer_id: customerId,
-    guild_id: guildId,
-    product_id: productId,
-    paypal_order_id: `${ctx.runPrefix}ppo`,
-    amount_cents: 500,
-    status: 'pending',
-    source: 'purchase',
-  });
+  const providerId = `${ctx.runPrefix}ppo`;
+  const { data: checkout, error: checkoutError } = await first.supabase.rpc(
+    'commerce_create_active_paid_checkout',
+    {
+      p_order_number: orderNumber,
+      p_guild_id: guildId,
+      p_customer_id: customerId,
+      p_product_id: productId,
+      p_plan_id: null,
+      p_provider_kind: 'capture',
+      p_provider_id: providerId,
+      p_approval_url: `https://www.sandbox.paypal.com/checkoutnow?token=${encodeURIComponent(providerId)}`,
+      p_amount_cents: 500,
+      p_currency: 'USD',
+    },
+  );
+  const arrangedCheckout = checkout as { id?: unknown; status?: unknown } | null;
+  ctx.expect(
+    customerError === null &&
+      customerId !== null &&
+      productId !== null &&
+      checkoutError === null &&
+      typeof arrangedCheckout?.id === 'string' &&
+      arrangedCheckout.status === 'pending',
+    {
+      assertionClass: 'database-RLS',
+      channel: 'db-observable',
+      promise:
+        'The restart fixture creates a real pending checkout through commerce_create_active_paid_checkout, the same sanctioned atomic path used by production.',
+      observation:
+        `customer created=${customerError === null && customerId !== null}; product created=${productId !== null}; ` +
+        `checkout RPC error=${checkoutError?.message ?? 'none'}; checkout id=${String(arrangedCheckout?.id)}; ` +
+        `status=${String(arrangedCheckout?.status)}.`,
+      impact:
+        'The restart proof could not arrange a production-valid pending checkout; persistence cannot be evaluated from a missing or bypass-created order.',
+    },
+  );
+  if (
+    customerError !== null ||
+    customerId === null ||
+    productId === null ||
+    checkoutError !== null ||
+    typeof arrangedCheckout?.id !== 'string'
+  ) {
+    return;
+  }
   const { data: snap } = await first.supabase
     .from('orders')
     .select('id, status, guild_id, order_number')
@@ -1293,6 +1329,20 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     'requires the PayPal capture webhook + fulfillment + Discord readback lanes',
   );
   gateReplayDeferredTo(ctx, 'REPLAY');
+  // Retire the sandbox approval link through the same evidence-bearing production
+  // boundary used when a provider checkout was never exposed. This happens only
+  // after the restart assertions above and leaves teardown with a safely deletable
+  // cancelled checkout plus its durable deactivation proof.
+  await second.supabase.rpc('commerce_deactivate_pending_checkout', {
+    p_order_id: arrangedCheckout.id,
+    p_guild_id: guildId,
+    p_customer_id: customerId,
+    p_product_id: productId,
+    p_provider_kind: 'capture',
+    p_provider_id: providerId,
+    p_proof_kind: 'approval_link_not_exposed',
+    p_proof_reference: `${ctx.runPrefix}restart-teardown`,
+  });
 }
 
 /** RACE — concurrent grants resolve to exactly one via database-level uniqueness. */
@@ -1569,6 +1619,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
 export const commerceProductStoreProof: DomainProof = {
   domainId: 'commerce-product-store',
   guildScopedTables: [
+    'commerce_checkout_deactivation_proofs',
     'entitlements',
     'license_keys',
     'payments',
