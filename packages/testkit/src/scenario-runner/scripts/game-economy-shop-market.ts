@@ -666,21 +666,25 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     impact: '/sell did not credit the sell_price or did not remove the sold item.',
   });
 
-  // 4) The player market ships OFF: /market replies market-disabled AND is not
-  //    even in the exposed command set (economy_market_enabled default = false).
-  const marketCaptured = await ctx.runSlash(handle, { commandName: 'market', userId: userA });
-  const marketReply = replyContent(marketCaptured).toLowerCase();
+  // 4) The player market ships OFF: its command remains registered so an owner
+  //    can hot-enable it without a restart, while the manager refuses execution.
+  const marketCaptured = await ctx.runSlash(handle, {
+    commandName: 'market',
+    subcommand: 'browse',
+    userId: userA,
+  });
+  const marketReply = (replyContent(marketCaptured) || lastEmbedDescription(marketCaptured)).toLowerCase();
   const marketExposed = handle.commands.some((c) => c.name === 'market');
   const cfg = await guildConfig(handle);
   ctx.expect(
     marketReply.includes('not enabled') &&
-      !marketExposed &&
+      marketExposed &&
       cfg?.economy_market_enabled === declaredDefault(ctx.domain, 'market-enabled'),
     {
       assertionClass: 'Discord',
       channel: 'captured-reply',
       promise:
-        'Out of the box the player market is OFF (catalog default market-enabled=false): /market replies with the branded market-disabled notice and the command is not wired.',
+        'Out of the box the player market is OFF (catalog default market-enabled=false): /market browse returns the branded disabled notice while the command remains registered for hot-enable.',
       observation:
         `/market reply="${truncate(replyContent(marketCaptured))}", market command exposed=${marketExposed}, ` +
         `guild_config.economy_market_enabled=${String(cfg?.economy_market_enabled)} (catalog default=${String(declaredDefault(ctx.domain, 'market-enabled'))}).`,
@@ -942,14 +946,20 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
   const userA = ctx.userId('a');
   const price = 150;
 
-  // Market disabled → branded market-disabled reply + command unwired.
-  const marketCaptured = await ctx.runSlash(handle, { commandName: 'market', userId: userA });
+  // Market disabled → registered command reaches the manager and returns its
+  // branded refusal without requiring a restart to hot-enable later.
+  const marketCaptured = await ctx.runSlash(handle, {
+    commandName: 'market',
+    subcommand: 'browse',
+    userId: userA,
+  });
   const marketExposed = handle.commands.some((c) => c.name === 'market');
-  ctx.expect(replyContent(marketCaptured).toLowerCase().includes('not enabled') && !marketExposed, {
+  const marketReply = replyContent(marketCaptured) || lastEmbedDescription(marketCaptured);
+  ctx.expect(marketReply.toLowerCase().includes('not enabled') && marketExposed, {
     assertionClass: 'Discord',
     channel: 'captured-reply',
-    promise: 'With the player market disabled, /market returns the branded market-disabled refusal and stays unwired.',
-    observation: `/market reply="${truncate(replyContent(marketCaptured))}", market exposed=${marketExposed}.`,
+    promise: 'With the player market disabled, /market browse returns the branded refusal while remaining registered for hot-enable.',
+    observation: `/market reply="${truncate(marketReply)}", market exposed=${marketExposed}.`,
     impact: 'The market-disabled toggle did not refuse /market.',
   });
 

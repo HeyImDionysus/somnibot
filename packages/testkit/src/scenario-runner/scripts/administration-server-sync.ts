@@ -33,12 +33,10 @@
  *     state surviving a full restart (RESTART), and the cleanup sweep (drift/id-map rows
  *     deleted, `audit_logs` retained per the anonymize-over-delete contract).
  *
- * Behavior-bug discovery (never forced green): DEF surfaces TWO real divergences of the
- * shipped defaults from the catalog's contracted defaults as FAILs — the schema/code
- * default `sync_auto_repair_everyone` is `true` (guild-init falls back to `?? true`)
- * while the catalog contracts `false` (the @everyone guard must be explicit opt-in), and
- * the default `sync_interval_minutes` is `15` while the catalog contracts `60`. Those
- * are findings for the owner to adjudicate, not softened into gates.
+ * The proof follows the current hardening contract: sync intervals are accepted only in
+ * the 5–1440 minute range at both the dashboard validation layer and the database CHECK
+ * boundary. A direct service-role write outside that range must be rejected and leave the
+ * prior configuration byte-identical.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -507,9 +505,9 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
 
 /**
  * INVALID — invalid sync configuration is rejected without partial application.
- * The 400-rejection lives in the dashboard Zod layer (gated); what runs NOW is that a
- * valid config persists in the engine-load columns AND that the DB carries NO CHECK
- * constraint — so the ONLY thing that rejects an out-of-range value is the dashboard.
+ * The dashboard's 400 response remains gated in this bot-only lane, but the underlying
+ * defense-in-depth boundary runs now: guild_config rejects an out-of-range interval and
+ * preserves the previously valid scheduler configuration.
  */
 async function INVALID(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({
@@ -527,23 +525,31 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
     impact: 'A valid sync configuration was not retained in the columns the engine reloads.',
   });
 
-  // The guild_config sync columns carry NO DB CHECK — an out-of-range interval is
-  // ACCEPTED at the DB layer, proving the ONLY rejection layer is the dashboard Zod
-  // (min 1 max 1440). This mirrors the wallet template's "guild_config has no CHECK".
+  // The database mirrors the dashboard's 5..1440 contract. This is intentionally a
+  // direct service-role write so the proof cannot pass merely because Zod rejected it.
   const { error: outOfRangeErr } = await handle.supabase
     .from('guild_config')
     .update({ sync_interval_minutes: 2000 })
     .eq('guild_id', handle.guildId);
-  ctx.expect(outOfRangeErr === null, {
+  const afterRejectedUpdate = await readSyncConfig(handle);
+  ctx.expect(
+    outOfRangeErr !== null &&
+      afterRejectedUpdate?.sync_interval_minutes === baseline?.sync_interval_minutes &&
+      afterRejectedUpdate?.sync_auto_repair === baseline?.sync_auto_repair,
+    {
     assertionClass: 'database-RLS',
     channel: 'db-observable',
     promise:
-      'Sync-config validity (interval within 5–1440, boolean toggles) is enforced ABOVE the database — guild_config has no CHECK constraint, so an out-of-range interval can only be stopped by the dashboard Zod layer.',
+      'Sync-config validity is enforced at the database boundary: an interval outside 5–1440 is rejected atomically and the prior valid scheduler configuration remains unchanged.',
     observation:
-      `a direct out-of-range update (sync_interval_minutes=2000) returned error=${outOfRangeErr ?? 'none (DB accepts it — no CHECK constraint)'}.`,
+      `direct sync_interval_minutes=2000 update rejected=${outOfRangeErr !== null} ` +
+      `(error: ${outOfRangeErr?.message ?? 'NONE — invalid value persisted'}); ` +
+      `after rejection interval=${afterRejectedUpdate?.sync_interval_minutes}, auto-repair=${afterRejectedUpdate?.sync_auto_repair} ` +
+      `(expected ${baseline?.sync_interval_minutes}/${baseline?.sync_auto_repair}).`,
     impact:
-      'If the DB unexpectedly rejected/accepted this, the validation boundary assumed by the dashboard would be wrong; today the reject path is the dashboard Zod schema (sync_interval_minutes.min(1).max(1440)) — not a DB guard.',
-  });
+      'An invalid scheduler interval crossed the database boundary or partially changed the saved configuration, allowing non-dashboard writers to create unsafe timer state.',
+    },
+  );
 
   await proveRlsIsolation(ctx, handle, 'guild_config', await guildConfigCount(handle));
   await proveNoOwnerAlert(ctx, handle, 'No owner alert fires for a validation rejection.');
