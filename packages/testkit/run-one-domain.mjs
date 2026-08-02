@@ -89,7 +89,13 @@ try {
     pass: s.pass,
     gated: s.gated,
     fail: s.fail,
-    findings: report.findings.map((f) => ({ scenario: f.scenarioClass, class: f.assertionClass, impact: f.impact })),
+    findings: report.findings.map((f) => ({
+      scenario: f.scenarioClass,
+      class: f.assertionClass,
+      promise: f.promise,
+      observation: f.observation,
+      impact: f.impact,
+    })),
     errored: report.scenarios.filter((x) => x.error).map((x) => `${x.scenarioClass}: ${x.error}`),
   });
 } catch (err) {

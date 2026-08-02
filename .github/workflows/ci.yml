@@ -556,27 +556,13 @@ jobs:
           # NB: NO DISCORD_TOKEN — Discord-side readback stays gated/pending.
           NODE_ENV: test
           SUPABASE_URL: http://127.0.0.1:54321
-          SUPABASE_SECRET_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
           # Real Valkey (service container above) so cooldown/streak/rate-limit legs drive.
           VALKEY_URL: redis://localhost:6379
           DISCORD_GUILD_ID: e2e-live-disposable-guild
           SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: e2e-live-disposable-guild
           SOMNIBOT_LOOPBACK_E2E_CONFIRMATION: I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE
           PAYPAL_ENV: sandbox
-      - name: Run A5 46-domain fleet (post-merge, once)
-        if: github.event_name == 'push' && matrix.shard == 1
-        run: >-
-          pnpm --filter @somnibot/testkit test:live --reporter=verbose
-          src/__tests__/live/all-domains-scenario.live.test.ts
-        env:
-          NODE_ENV: test
-          SUPABASE_URL: http://127.0.0.1:54321
           SUPABASE_SECRET_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
-          VALKEY_URL: redis://localhost:6379
-          DISCORD_GUILD_ID: e2e-live-disposable-guild
-          SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: e2e-live-disposable-guild
-          SOMNIBOT_LOOPBACK_E2E_CONFIRMATION: I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE
-          PAYPAL_ENV: sandbox
       # Dashboard route-driving lane: drives the REAL Next.js route handlers
       # in-process against the SAME local Supabase, with a REAL owner auth
       # session (zero production auth edits — only next/headers is mocked). See
@@ -596,6 +582,135 @@ jobs:
       - name: Stop Supabase
         if: always()
         run: cd packages && supabase stop 2>/dev/null || true
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 7c. Strict A5 Fleet — all 46 catalog domains on every candidate head.
+  #     Four independent local stacks partition the catalog; domains remain
+  #     sequential inside each shard so shared Supabase state cannot race.
+  # ──────────────────────────────────────────────────────────────────────────
+  test-fleet:
+    name: 🧭 Strict A5 Fleet (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    needs: install
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    services:
+      valkey:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Install Supabase CLI
+        run: |
+          curl -fsSL -o /tmp/supabase.tar.gz \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin
+          supabase --version
+      - name: Start Supabase local (with Realtime)
+        run: |
+          cd packages
+          for attempt in 1 2 3; do
+            if supabase start; then
+              exit 0
+            else
+              status=$?
+            fi
+
+            if [ "$attempt" -eq 3 ]; then
+              echo "supabase start failed after ${attempt} attempts (exit ${status})"
+              exit "$status"
+            fi
+
+            delay_seconds=$((attempt * 30))
+            echo "supabase start failed (attempt ${attempt}/3, exit ${status}); cleaning up and retrying in ${delay_seconds}s..."
+            supabase stop 2>/dev/null || true
+            sleep "$delay_seconds"
+          done
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Wait for Supabase REST API
+        run: |
+          echo "Waiting for Supabase REST API..."
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:54321/rest/v1/ \
+              -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"; then
+              echo "✅ Supabase REST API ready (attempt $i)"
+              exit 0
+            fi
+            echo "  attempt $i/30 — waiting..."
+            sleep 2
+          done
+          echo "❌ Supabase REST API did not respond within 60s"
+          exit 1
+      - name: Build shared + e2e + bot + testkit
+        run: |
+          pnpm --filter @somnibot/shared build
+          pnpm --filter @somnibot/e2e build
+          pnpm --filter @somnibot/bot build
+          pnpm --filter @somnibot/testkit build
+      - name: Run strict assigned fleet shard
+        run: >-
+          pnpm --filter @somnibot/testkit test:live --reporter=verbose
+          src/__tests__/live/all-domains-scenario.live.test.ts
+        env:
+          NODE_ENV: test
+          SUPABASE_URL: http://127.0.0.1:54321
+          SUPABASE_SECRET_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
+          VALKEY_URL: redis://localhost:6379
+          DISCORD_GUILD_ID: e2e-live-disposable-guild
+          SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: e2e-live-disposable-guild
+          SOMNIBOT_LOOPBACK_E2E_CONFIRMATION: I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE
+          SOMNIBOT_FLEET_SHARD: ${{ matrix.shard }}/4
+          SOMNIBOT_FLEET_MANIFEST: artifacts/fleet-shard-${{ matrix.shard }}.json
+          PAYPAL_ENV: sandbox
+      - name: Upload strict fleet manifest
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fleet-manifest-${{ matrix.shard }}
+          path: artifacts/fleet-shard-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop Supabase
+        if: always()
+        run: cd packages && supabase stop 2>/dev/null || true
+
+  aggregate-fleet:
+    name: 🧭 Aggregate strict 46-domain fleet
+    if: always()
+    needs: test-fleet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download all shard manifests
+        uses: actions/download-artifact@v5
+        with:
+          pattern: fleet-manifest-*
+          path: artifacts/fleet
+          merge-multiple: true
+      - name: Prove exact fleet coverage and clean results
+        run: node scripts/aggregate-fleet-manifests.mjs artifacts/fleet
 
   # ──────────────────────────────────────────────────────────────────────────
   # 8. Migration Lint
@@ -1082,6 +1197,8 @@ jobs:
       - test-testkit
       - test-integration
       - test-live
+      - test-fleet
+      - aggregate-fleet
       - migration-lint
       - db-security-audit
       - type-drift
@@ -1102,6 +1219,8 @@ jobs:
           echo "  test-testkit:      ${{ needs.test-testkit.result }}"
           echo "  test-integration:  ${{ needs.test-integration.result }}"
           echo "  test-live:         ${{ needs.test-live.result }}"
+          echo "  test-fleet:        ${{ needs.test-fleet.result }}"
+          echo "  aggregate-fleet:   ${{ needs.aggregate-fleet.result }}"
           echo "  migration-lint:    ${{ needs.migration-lint.result }}"
           echo "  db-security-audit: ${{ needs.db-security-audit.result }}"
           echo "  type-drift:        ${{ needs.type-drift.result }}"
@@ -1123,6 +1242,8 @@ jobs:
             "${{ needs.test-testkit.result }}" \
             "${{ needs.test-integration.result }}" \
             "${{ needs.test-live.result }}" \
+            "${{ needs.test-fleet.result }}" \
+            "${{ needs.aggregate-fleet.result }}" \
             "${{ needs.migration-lint.result }}" \
             "${{ needs.db-security-audit.result }}" \
             "${{ needs.type-drift.result }}" \
