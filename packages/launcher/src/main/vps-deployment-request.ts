@@ -7,7 +7,7 @@ import {
   type VpsDeploymentExecutionResult,
 } from './vps-deployment-executor.js';
 import { buildVpsDeploymentPlan, type VpsDeploymentPlan } from './vps-deployment-plan.js';
-import { materializeVpsDeploymentPlan } from './vps-env-materializer.js';
+import { ensurePersistedVpsSecrets, materializeVpsDeploymentPlan, type PersistedVpsSecrets } from './vps-env-materializer.js';
 
 export interface VpsDeploymentRunRequest {
   operatorApproved?: boolean;
@@ -24,6 +24,7 @@ export interface VpsDeploymentRunRuntime {
   confirmApproval: (plan: VpsDeploymentPlan) => Promise<VpsDeploymentApprovalDecision>;
   createCommandRunner: () => VpsDeploymentCommandRunner;
   runGate: VpsDeploymentRunGate;
+  persistGeneratedSecrets: (patch: Partial<PersistedVpsSecrets>) => Promise<void> | void;
   /**
    * [infrastructure-launcher] Optional sink for durable audit entries. Records
    * the operator approval decision and the deployment execution outcome (the
@@ -73,17 +74,40 @@ export async function handleVpsDeploymentRunRequest(
 ): Promise<VpsDeploymentExecutionResult> {
   const liveRequested = request?.dryRun === false && config.runtimeMode === 'vps';
   const displayPlan = buildVpsDeploymentPlanFromConfig(config);
-  const plan = liveRequested ? materializeVpsDeploymentPlan(displayPlan, config) : displayPlan;
 
   const execute = async (): Promise<VpsDeploymentExecutionResult> => {
-    const approval = liveRequested
+    let plan = displayPlan;
+    if (liveRequested && displayPlan.status === 'ready') {
+      const prepared = ensurePersistedVpsSecrets(config);
+      if (Object.keys(prepared.patch).length > 0) {
+        try {
+          await runtime.persistGeneratedSecrets(prepared.patch);
+        } catch {
+          plan = {
+            ...displayPlan,
+            status: 'blocked',
+            canApprove: false,
+            blockedReasons: [
+              ...displayPlan.blockedReasons,
+              'Generated VPS service credentials could not be persisted safely; no remote commands were run.',
+            ],
+            commands: [],
+          };
+        }
+      }
+      if (plan.status === 'ready') {
+        plan = materializeVpsDeploymentPlan(plan, prepared.config);
+      }
+    }
+
+    const approval = liveRequested && plan.status === 'ready'
       ? await runtime.confirmApproval(plan)
-      : rendererApproval(request);
+      : rendererApproval(liveRequested ? undefined : request);
 
     // [infrastructure-launcher] Audit the operator's approval decision for a
     // live run — an approved or denied VPS deployment is a security-relevant
     // event that must be durably observable.
-    if (liveRequested) {
+    if (liveRequested && plan.status === 'ready') {
       runtime.recordAudit?.({
         action: 'launcher.vps_deployment.approval_decision',
         category: 'security',

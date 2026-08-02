@@ -55,6 +55,16 @@ export interface LauncherConfig {
   paypalWebhookProofKey: string;
   paypalSandbox: boolean;
 
+  // ── Persisted VPS runtime secrets ──
+  // Generated once, encrypted locally, and synced with the rest of the
+  // instance credentials so retries, redeploys, and machine changes reuse the
+  // same service generation instead of splitting old/new containers.
+  vpsCsrfSecret?: string;
+  vpsNextAuthSecret?: string;
+  vpsWebhookReplaySecret?: string;
+  vpsValkeyPassword?: string;
+  vpsLavalinkPassword?: string;
+
   // ── UI state ──
   windowBounds?: { width: number; height: number; x?: number; y?: number };
 
@@ -94,6 +104,11 @@ const DEFAULTS: LauncherConfig = {
   paypalWebhookId: '',
   paypalWebhookProofKey: '',
   paypalSandbox: true,
+  vpsCsrfSecret: '',
+  vpsNextAuthSecret: '',
+  vpsWebhookReplaySecret: '',
+  vpsValkeyPassword: '',
+  vpsLavalinkPassword: '',
   runtimeMode: 'regular-local',
   publicCallbackBaseUrl: '',
   vpsDomain: '',
@@ -127,6 +142,11 @@ const SENSITIVE_KEYS: ReadonlySet<keyof LauncherConfig> = new Set([
   'paypalClientSecret',
   'paypalWebhookId',
   'paypalWebhookProofKey',
+  'vpsCsrfSecret',
+  'vpsNextAuthSecret',
+  'vpsWebhookReplaySecret',
+  'vpsValkeyPassword',
+  'vpsLavalinkPassword',
   'tailscaleAuthKey',
 ]);
 
@@ -224,6 +244,11 @@ export function getConfig(): LauncherConfig {
     paypalWebhookId: getSensitive('paypalWebhookId'),
     paypalWebhookProofKey: getSensitive('paypalWebhookProofKey'),
     paypalSandbox: store.get('paypalSandbox', true),
+    vpsCsrfSecret: getSensitive('vpsCsrfSecret'),
+    vpsNextAuthSecret: getSensitive('vpsNextAuthSecret'),
+    vpsWebhookReplaySecret: getSensitive('vpsWebhookReplaySecret'),
+    vpsValkeyPassword: getSensitive('vpsValkeyPassword'),
+    vpsLavalinkPassword: getSensitive('vpsLavalinkPassword'),
     windowBounds: store.get('windowBounds'),
     runtimeMode: store.get('runtimeMode', 'regular-local'),
     publicCallbackBaseUrl: store.get('publicCallbackBaseUrl', ''),

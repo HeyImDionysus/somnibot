@@ -98,7 +98,7 @@ const SSH_BASE_ARGS = [
   '-o',
   'ConnectTimeout=10',
   '-o',
-  'StrictHostKeyChecking=accept-new',
+  'StrictHostKeyChecking=yes',
 ] as const;
 const COMPOSE_FILE = 'docker-compose.prod.yml';
 const CADDY_FILE = 'services/caddy/Caddyfile';
@@ -260,9 +260,7 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
       commandCategory: 'service',
     }),
     buildRemoteCommand(sshTarget, 'sh', [
-      '-c',
-      'umask 077; env_path="$1"; temp_path="${env_path}.tmp.$$"; trap \'rm -f -- "$temp_path"\' EXIT HUP INT TERM; cat > "$temp_path" && chmod 0600 "$temp_path" && mv -f -- "$temp_path" "$env_path"; result=$?; trap - EXIT HUP INT TERM; exit "$result"',
-      'somnibot-env-writer',
+      joinPath(deployPath, 'scripts/write-production-env.sh'),
       envFilePath,
     ], {
       id: 'write-env-file',
@@ -347,6 +345,16 @@ function buildRollback(sshTarget: string, deployPath: string, composeFilePath: s
         changesRemote: true,
         approvalRequired: true,
         commandCategory: 'service',
+      }),
+      buildRemoteCommand(sshTarget, 'sh', [
+        joinPath(deployPath, 'scripts/restore-production-env.sh'),
+        joinPath(deployPath, '.env'),
+      ], {
+        id: 'rollback-restore-env',
+        label: 'Restore the protected pre-deployment environment',
+        changesRemote: true,
+        approvalRequired: true,
+        commandCategory: 'rollback',
       }),
       buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'up', '-d', '--build'], {
         id: 'rollback-rebuild',
@@ -509,6 +517,12 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
     commands: buildCommands(`${sshUser}@${sshHost}`, deployPath, profile.publicCallbackBaseUrl),
     approvalGates: [
       {
+        id: 'ssh-host-key',
+        label: 'Verified SSH host key',
+        detail: 'Verify and pin the VPS SSH host key before any preflight or credential transfer; live commands refuse unknown or changed hosts.',
+        requiredBefore: 'Any SSH connection to the VPS.',
+      },
+      {
         id: 'dns-domain',
         label: 'DNS and domain approval',
         detail: 'Confirm the public domain points at the VPS before relying on Caddy HTTPS.',
@@ -517,7 +531,7 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
       {
         id: 'env-file',
         label: 'Environment file approval',
-        detail: `Create or update ${envFilePath} with the redacted shape, then chmod ${ENV_FILE_PERMISSIONS}.`,
+        detail: `Allow the launcher to atomically back up and replace ${envFilePath} from saved credentials with mode ${ENV_FILE_PERMISSIONS}.`,
         requiredBefore: 'Starting or rebuilding containers.',
       },
       {

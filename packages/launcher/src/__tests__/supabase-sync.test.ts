@@ -21,6 +21,11 @@ function pushCredentials(overrides: Partial<SyncableCredentials> = {}): Syncable
     paypalClientSecret: 'paypal-secret',
     paypalWebhookId: 'paypal-webhook',
     paypalSandbox: true,
+    vpsCsrfSecret: 'vps-csrf',
+    vpsNextAuthSecret: 'vps-nextauth',
+    vpsWebhookReplaySecret: 'vps-replay',
+    vpsValkeyPassword: 'vps-valkey',
+    vpsLavalinkPassword: 'vps-lavalink',
     ...overrides,
   };
 }
@@ -42,6 +47,11 @@ describe('buildSyncRows', () => {
       paypal_client_secret: 'paypal-secret',
       paypal_webhook_id: 'paypal-webhook',
       paypal_sandbox: 'true',
+      vps_csrf_secret: 'vps-csrf',
+      vps_nextauth_secret: 'vps-nextauth',
+      vps_webhook_replay_secret: 'vps-replay',
+      vps_valkey_password: 'vps-valkey',
+      vps_lavalink_password: 'vps-lavalink',
     });
     expect(rows.every(row => row.section === 'launcher')).toBe(true);
     expect(rows.every(row => row.updated_at === '2026-08-02T00:00:00.000Z')).toBe(true);

@@ -13,22 +13,42 @@ const requiredCredentialFields: Array<keyof LauncherConfig> = [
   'supabaseSecretKey',
   'supabasePublishableKey',
   'supabaseDbPassword',
-  'paypalClientId',
-  'paypalClientSecret',
-  'paypalWebhookId',
 ];
+
+export type PersistedVpsSecrets = Required<Pick<LauncherConfig,
+  | 'vpsCsrfSecret'
+  | 'vpsNextAuthSecret'
+  | 'vpsWebhookReplaySecret'
+  | 'vpsValkeyPassword'
+  | 'vpsLavalinkPassword'
+>>;
 
 function generatedSecret(bytes: number): string {
   return randomBytes(bytes).toString('hex');
 }
 
-function dotenvValue(value: string): string {
+export function dotenvValue(value: string): string {
   if (/\0|\r|\n/.test(value)) {
     throw new Error('VPS environment values must be single-line strings.');
   }
   // Compose treats single-quoted .env values literally, so provider tokens
   // containing $, #, spaces, or backslashes are not interpolated or truncated.
-  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+  return `'${value.replace(/'/g, "\\'")}'`;
+}
+
+export function ensurePersistedVpsSecrets(
+  config: LauncherConfig,
+  generateSecret: SecretGenerator = generatedSecret,
+): { config: LauncherConfig & PersistedVpsSecrets; patch: Partial<PersistedVpsSecrets> } {
+  const patch: Partial<PersistedVpsSecrets> = {};
+  const resolved: PersistedVpsSecrets = {
+    vpsCsrfSecret: config.vpsCsrfSecret || (patch.vpsCsrfSecret = generateSecret(32)),
+    vpsNextAuthSecret: config.vpsNextAuthSecret || (patch.vpsNextAuthSecret = generateSecret(32)),
+    vpsWebhookReplaySecret: config.vpsWebhookReplaySecret || (patch.vpsWebhookReplaySecret = generateSecret(32)),
+    vpsValkeyPassword: config.vpsValkeyPassword || (patch.vpsValkeyPassword = generateSecret(16)),
+    vpsLavalinkPassword: config.vpsLavalinkPassword || (patch.vpsLavalinkPassword = generateSecret(16)),
+  };
+  return { config: { ...config, ...resolved }, patch };
 }
 
 function blockedPlan(plan: VpsDeploymentPlan, reasons: string[]): VpsDeploymentPlan {
@@ -48,8 +68,7 @@ function blockedPlan(plan: VpsDeploymentPlan, reasons: string[]): VpsDeploymentP
  */
 export function materializeVpsDeploymentPlan(
   plan: VpsDeploymentPlan,
-  config: LauncherConfig,
-  generateSecret: SecretGenerator = generatedSecret,
+  config: LauncherConfig & PersistedVpsSecrets,
 ): VpsDeploymentPlan {
   if (plan.status !== 'ready' || !plan.environment) return plan;
 
@@ -73,11 +92,11 @@ export function materializeVpsDeploymentPlan(
     return blockedPlan(plan, ['The saved Supabase URL and database password could not produce a direct database URL.']);
   }
 
-  const csrfSecret = generateSecret(32);
-  const nextAuthSecret = generateSecret(32);
-  const webhookReplaySecret = generateSecret(32);
-  const valkeyPassword = generateSecret(16);
-  const lavalinkPassword = generateSecret(16);
+  const csrfSecret = config.vpsCsrfSecret;
+  const nextAuthSecret = config.vpsNextAuthSecret;
+  const webhookReplaySecret = config.vpsWebhookReplaySecret;
+  const valkeyPassword = config.vpsValkeyPassword;
+  const lavalinkPassword = config.vpsLavalinkPassword;
   const guildIds = config.guilds.length > 0
     ? config.guilds.filter((guild) => guild.enabled).map((guild) => guild.discordGuildId).join(',')
     : config.discordGuildId;

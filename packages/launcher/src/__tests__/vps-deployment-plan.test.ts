@@ -79,6 +79,7 @@ describe('VPS deployment plan generator', () => {
       upstream: 'dashboard:3000',
     });
     expect(plan.approvalGates.map(gate => gate.id)).toEqual([
+      'ssh-host-key',
       'dns-domain',
       'env-file',
       'auth-provider',
@@ -92,6 +93,17 @@ describe('VPS deployment plan generator', () => {
 
     expect(plan.commands).toEqual(expect.arrayContaining([
       expect.objectContaining({
+        id: 'write-env-file',
+        executable: 'ssh',
+        args: expect.arrayContaining([
+          'deploy@somnibot.example.com',
+          'sh',
+          '/opt/somnibot/scripts/write-production-env.sh',
+          '/opt/somnibot/.env',
+        ]),
+        approvalRequired: true,
+      }),
+      expect.objectContaining({
         id: 'start-stack',
         executable: 'ssh',
         args: [
@@ -100,7 +112,7 @@ describe('VPS deployment plan generator', () => {
           '-o',
           'ConnectTimeout=10',
           '-o',
-          'StrictHostKeyChecking=accept-new',
+          'StrictHostKeyChecking=yes',
           '--',
           'deploy@somnibot.example.com',
           'docker',
@@ -157,6 +169,17 @@ describe('VPS deployment plan generator', () => {
         id: 'rollback-checkout',
         executable: 'ssh',
         args: expect.arrayContaining(['deploy@somnibot.example.com', 'git', '-C', '/opt/somnibot', 'checkout', '<last-good-commit>']),
+        approvalRequired: true,
+      }),
+      expect.objectContaining({
+        id: 'rollback-restore-env',
+        executable: 'ssh',
+        args: expect.arrayContaining([
+          'deploy@somnibot.example.com',
+          'sh',
+          '/opt/somnibot/scripts/restore-production-env.sh',
+          '/opt/somnibot/.env',
+        ]),
         approvalRequired: true,
       }),
       expect.objectContaining({

@@ -26,6 +26,11 @@ export interface SyncableCredentials {
   paypalClientSecret: string;
   paypalWebhookId: string;
   paypalSandbox: boolean;
+  vpsCsrfSecret?: string;
+  vpsNextAuthSecret?: string;
+  vpsWebhookReplaySecret?: string;
+  vpsValkeyPassword?: string;
+  vpsLavalinkPassword?: string;
 }
 
 /** Complete set of existing SomniBot connection values the launcher can restore. */
@@ -40,6 +45,11 @@ const RESTORED_SECRET_KEYS: ReadonlySet<keyof RestorableCredentials> = new Set([
   'supabaseAccessToken',
   'paypalClientSecret',
   'paypalWebhookId',
+  'vpsCsrfSecret',
+  'vpsNextAuthSecret',
+  'vpsWebhookReplaySecret',
+  'vpsValkeyPassword',
+  'vpsLavalinkPassword',
 ]);
 
 export interface LauncherSettingsRow {
@@ -82,6 +92,11 @@ const PUSH_SETTINGS_MAP: Record<keyof SyncableCredentials, string> = {
   paypalClientSecret: 'paypal_client_secret',
   paypalWebhookId: 'paypal_webhook_id',
   paypalSandbox: 'paypal_sandbox',
+  vpsCsrfSecret: 'vps_csrf_secret',
+  vpsNextAuthSecret: 'vps_nextauth_secret',
+  vpsWebhookReplaySecret: 'vps_webhook_replay_secret',
+  vpsValkeyPassword: 'vps_valkey_password',
+  vpsLavalinkPassword: 'vps_lavalink_password',
 };
 
 const RESTORE_SETTINGS_MAP: Record<keyof RestorableCredentials, string> = PUSH_SETTINGS_MAP;
@@ -118,6 +133,7 @@ export function buildSyncRows(
   return Object.entries(PUSH_SETTINGS_MAP).flatMap(([localKey, settingsKey]) => {
     const key = localKey as keyof SyncableCredentials;
     const rawValue = credentials[key];
+    if (rawValue === undefined) return [];
     if (typeof rawValue === 'string' && rawValue.length === 0) return [];
     return [{ key: settingsKey, value: String(rawValue), section: SECTION, updated_at: updatedAt }];
   });

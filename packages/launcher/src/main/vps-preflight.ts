@@ -97,7 +97,7 @@ function buildCommand(host: string, user: string, deployPath: string, privateKey
     '-o',
     'ConnectTimeout=10',
     '-o',
-    'StrictHostKeyChecking=accept-new',
+    'StrictHostKeyChecking=yes',
   ];
 
   const keyArgs = privateKeyPath

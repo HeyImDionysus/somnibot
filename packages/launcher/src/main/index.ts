@@ -118,6 +118,11 @@ async function syncLauncherCredentials(config: LauncherConfig): Promise<void> {
     paypalClientSecret: config.paypalClientSecret,
     paypalWebhookId: config.paypalWebhookId,
     paypalSandbox: config.paypalSandbox,
+    vpsCsrfSecret: config.vpsCsrfSecret,
+    vpsNextAuthSecret: config.vpsNextAuthSecret,
+    vpsWebhookReplaySecret: config.vpsWebhookReplaySecret,
+    vpsValkeyPassword: config.vpsValkeyPassword,
+    vpsLavalinkPassword: config.vpsLavalinkPassword,
   });
   if (result.ok) return;
 
@@ -1245,6 +1250,10 @@ function registerIpcHandlers(): void {
       createCommandRunner: createVpsCommandRunner,
       runGate: activeVpsDeployment,
       recordAudit: recordLauncherAudit,
+      persistGeneratedSecrets: async (patch) => {
+        saveConfig(patch);
+        await syncLauncherCredentials(getConfig());
+      },
     });
   });
 
