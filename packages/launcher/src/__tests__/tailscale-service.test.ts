@@ -6,12 +6,15 @@ import {
   TailscaleCommandError,
   buildEnableFunnelArgs,
   buildLoginWithAuthKeyArgs,
+  buildProfileListArgs,
   enableSomniBotFunnel,
   getTailscaleReadiness,
+  hasActiveTailscaleInterface,
   isTailscalePermissionError,
   loginWithTailscaleAuthKey,
   parseFunnelStatusJson,
   parseFunnelStatusText,
+  parseTailscaleProfilesJson,
   parseTailscaleStatusJson,
   probePublicCallbackHealth,
   redactTailscaleOutput,
@@ -50,6 +53,10 @@ describe('tailscale-service', () => {
       '--auth-key=file:/tmp/somnibot-authkey',
       '--timeout=30s',
     ]);
+  });
+
+  it('builds the read-only account profile command', () => {
+    expect(buildProfileListArgs()).toEqual(['switch', '--list', '--json']);
   });
 
   it('rejects unsupported Funnel listen ports', () => {
@@ -113,6 +120,22 @@ describe('tailscale-service', () => {
     }));
 
     expect(status.loggedIn).toBe(false);
+  });
+
+  it('parses selected account profiles without retaining account identity', () => {
+    const profiles = parseTailscaleProfilesJson(JSON.stringify([{
+      id: 'profile-id',
+      account: 'owner@example.com',
+      tailnet: 'example.ts.net',
+      selected: true,
+    }]));
+
+    expect(profiles).toEqual({
+      profileCount: 1,
+      hasSelectedProfile: true,
+    });
+    expect(profiles).not.toHaveProperty('account');
+    expect(profiles).not.toHaveProperty('tailnet');
   });
 
   it('parses Funnel status JSON even when Tailscale changes object shape', () => {
@@ -249,6 +272,45 @@ Available on the internet:
     expect(readiness.installed).toBe(true);
     expect(readiness.message).not.toContain('not signed in');
     expect(readiness.commandPreview).toEqual([]);
+  });
+
+  it('recognizes a selected profile and active adapter when status reports NoState', async () => {
+    const readiness = await getTailscaleReadiness(runnerFor({
+      version: { stdout: '1.98.9\n' },
+      'status --json': {
+        stdout: JSON.stringify({
+          BackendState: 'NoState',
+          Self: { HostName: 'somnibot' },
+        }),
+      },
+      'switch --list --json': {
+        stdout: JSON.stringify([{
+          id: 'profile-id',
+          account: 'owner@example.com',
+          selected: true,
+        }]),
+      },
+    }), {
+      interfaces: {
+        Tailscale: [{ internal: false }],
+      },
+    });
+
+    expect(readiness.state).toBe('not-configured');
+    expect(readiness.loggedIn).toBe(true);
+    expect(readiness.message).toContain('signed in and connected');
+    expect(readiness.detail).toContain('active Tailscale network adapter');
+  });
+
+  it('detects only active Tailscale-named network interfaces', () => {
+    expect(hasActiveTailscaleInterface({
+      Ethernet: [{ internal: false }],
+      Tailscale: [{ internal: false }],
+    })).toBe(true);
+    expect(hasActiveTailscaleInterface({
+      Ethernet: [{ internal: false }],
+      Tailscale: [{ internal: true }],
+    })).toBe(false);
   });
 
   it('keeps signed-in state when Windows blocks Funnel status access', async () => {
