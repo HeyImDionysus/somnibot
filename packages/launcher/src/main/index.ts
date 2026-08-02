@@ -39,6 +39,7 @@ import { validateAllCredentials, type FullValidationResult } from './validators.
 import { startAll, stopAll, getStatus, isRunning, checkPortAvailable, cleanupStaleProcesses } from './process-manager.js';
 import { maskRestoredCredentials, pushToSupabase } from './supabase-sync.js';
 import { initUpdater } from './updater.js';
+import { resolveLauncherDisplayVersion } from './launcher-version.js';
 import {
   checkJava,
   downloadLavalink,
@@ -1203,7 +1204,9 @@ function registerIpcHandlers(): void {
   });
 
   // ── App info ──
-  ipcMain.handle('get-version', () => app.getVersion());
+  ipcMain.handle('get-version', () => resolveLauncherDisplayVersion({
+    appVersion: app.getVersion(),
+  }));
 
   ipcMain.handle('vps:run-deployment', async (_event, request: VpsDeploymentRunRequest) => {
     const cfg = getConfig();
