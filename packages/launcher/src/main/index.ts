@@ -37,7 +37,7 @@ import {
 } from './tailscale-service.js';
 import { validateAllCredentials, type FullValidationResult } from './validators.js';
 import { startAll, stopAll, getStatus, isRunning, checkPortAvailable, cleanupStaleProcesses } from './process-manager.js';
-import { pushToSupabase } from './supabase-sync.js';
+import { maskRestoredCredentials, pushToSupabase } from './supabase-sync.js';
 import { initUpdater } from './updater.js';
 import {
   checkJava,
@@ -1154,6 +1154,10 @@ function registerIpcHandlers(): void {
     const result = await pullFromSupabase(cfg.supabaseUrl, cfg.supabaseSecretKey);
     if (result.ok && result.credentials) {
       saveConfig(result.credentials);
+      return {
+        ...result,
+        credentials: maskRestoredCredentials(result.credentials, MASKED_SECRET),
+      };
     }
     return result;
   });

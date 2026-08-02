@@ -58,6 +58,17 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('const firstSetupField = runtimeMode === \'vps\' ? runtimeFields.vpsDomain : fields.discordToken;');
   });
 
+  it('keeps cloud connection recovery available for partial established profiles', () => {
+    const html = readSourceFile('renderer/index.html');
+    const renderer = readSourceFile('renderer/renderer.js');
+
+    expect(html).toContain('Restore saved Discord, Supabase, and PayPal connections from Supabase.');
+    expect(renderer).toContain("restoreBanner.classList.toggle('hidden', !hasSupabase);");
+    expect(renderer).not.toContain('const missingDiscord = !fields.discordToken.value.trim();');
+    expect(renderer).toContain("if (fields[key].type === 'checkbox') fields[key].checked = Boolean(value);");
+    expect(renderer).toContain('else fields[key].value = String(value);');
+  });
+
   it('renders derived callback values from setup diagnostics without exposing ports in normal labels', () => {
     const renderer = readSourceFile('renderer/renderer.js');
 

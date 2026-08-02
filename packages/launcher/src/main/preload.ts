@@ -112,7 +112,7 @@ export interface SomniBotAPI {
   // V5 Audit §10.P3a: No args — main process owns the secret
   pullFromSupabase: () => Promise<{
     ok: boolean;
-    credentials?: Record<string, string>;
+    credentials?: Record<string, string | boolean>;
     error?: string;
   }>;
   runVpsDeployment: (payload: {

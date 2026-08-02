@@ -1831,8 +1831,9 @@ function escapeHtml(str) {
 
 function updateRestoreBanner() {
   const hasSupabase = fields.supabaseUrl.value.trim() && fields.supabaseSecretKey.value.trim();
-  const missingDiscord = !fields.discordToken.value.trim();
-  restoreBanner.classList.toggle('hidden', !(hasSupabase && missingDiscord));
+  // Keep recovery available even when Discord is already present: an older or
+  // partial local cache may still be missing the DB password or PayPal values.
+  restoreBanner.classList.toggle('hidden', !hasSupabase);
 }
 
 btnRestoreCloud.addEventListener('click', async () => {
@@ -1860,9 +1861,9 @@ btnRestoreCloud.addEventListener('click', async () => {
     const creds = result.credentials;
     if (creds) {
       for (const [key, value] of Object.entries(creds)) {
-        if (fields[key] && value) {
-          fields[key].value = value;
-        }
+        if (!fields[key] || value === '' || value === undefined || value === null) continue;
+        if (fields[key].type === 'checkbox') fields[key].checked = Boolean(value);
+        else fields[key].value = String(value);
       }
       updateDiscordInviteButton();
       updateRestoreBanner();

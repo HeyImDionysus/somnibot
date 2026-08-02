@@ -1,209 +1,180 @@
-/**
- * V5 Audit §13.2 — Launcher supabase-sync unit tests.
- *
- * Tests the pure data-mapping logic from supabase-sync.ts.
- * The actual push/pull functions call fetch — we replicate and test
- * the row-building and credential-parsing logic independently.
- */
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  buildSyncRows,
+  maskRestoredCredentials,
+  parseSyncRows,
+  pullFromSupabase,
+  type SyncableCredentials,
+} from '../main/supabase-sync.js';
 
-import { describe, it, expect } from 'vitest';
-
-// ── Replicated types and constants from supabase-sync.ts ──
-
-interface SyncableCredentials {
-  discordToken: string;
-  discordApplicationId: string;
-  discordClientSecret: string;
-  discordGuildId: string;
-  supabasePublishableKey: string;
-}
-
-const SETTINGS_MAP: Record<keyof SyncableCredentials, string> = {
-  discordToken: 'discord_token',
-  discordApplicationId: 'discord_application_id',
-  discordClientSecret: 'discord_client_secret',
-  discordGuildId: 'discord_guild_id',
-  supabasePublishableKey: 'supabase_publishable_key',
-};
-
-const SECTION = 'launcher';
-
-/** Builds upsert rows from credentials (from pushToSupabase). */
-function buildUpsertRows(credentials: SyncableCredentials): Array<{
-  key: string;
-  value: string;
-  section: string;
-}> {
-  return Object.entries(SETTINGS_MAP).map(([localKey, settingsKey]) => ({
-    key: settingsKey,
-    value: credentials[localKey as keyof SyncableCredentials] || '',
-    section: SECTION,
-  }));
-}
-
-/** Parses pull response rows into credentials (from pullFromSupabase). */
-function parseRows(rows: Array<{ key: string; value: string }>): SyncableCredentials {
-  const reverseMap: Record<string, keyof SyncableCredentials> = {};
-  for (const [localKey, settingsKey] of Object.entries(SETTINGS_MAP)) {
-    reverseMap[settingsKey] = localKey as keyof SyncableCredentials;
-  }
-
-  const credentials: SyncableCredentials = {
-    discordToken: '',
-    discordApplicationId: '',
-    discordClientSecret: '',
-    discordGuildId: '',
-    supabasePublishableKey: '',
+function pushCredentials(overrides: Partial<SyncableCredentials> = {}): SyncableCredentials {
+  return {
+    discordToken: 'discord-token',
+    discordApplicationId: 'discord-app',
+    discordClientSecret: 'discord-secret',
+    discordGuildId: 'discord-guild',
+    supabasePublishableKey: 'supabase-publishable',
+    supabaseDbPassword: 'database-password',
+    ...overrides,
   };
-
-  for (const row of rows) {
-    const localKey = reverseMap[row.key];
-    if (localKey) {
-      credentials[localKey] = row.value || '';
-    }
-  }
-
-  return credentials;
 }
 
-// ── Tests ────────────────────────────────────────────────────
+describe('buildSyncRows', () => {
+  it('keeps the established launcher write set and canonical bot settings keys', () => {
+    const rows = buildSyncRows(pushCredentials(), '2026-08-02T00:00:00.000Z');
+    const rowMap = Object.fromEntries(rows.map(row => [row.key, row.value]));
 
-describe('buildUpsertRows', () => {
-  it('produces one row per syncable credential', () => {
-    const creds: SyncableCredentials = {
-      discordToken: 'tok',
-      discordApplicationId: '123',
-      discordClientSecret: 'sec',
-      discordGuildId: '456',
-      supabasePublishableKey: 'pub',
-    };
-
-    const rows = buildUpsertRows(creds);
-    expect(rows).toHaveLength(5);
+    expect(rowMap).toEqual({
+      discord_bot_token: 'discord-token',
+      discord_application_id: 'discord-app',
+      discord_client_secret: 'discord-secret',
+      discord_guild_id: 'discord-guild',
+      supabase_publishable_key: 'supabase-publishable',
+      supabase_db_password: 'database-password',
+    });
+    expect(rows.every(row => row.section === 'launcher')).toBe(true);
+    expect(rows.every(row => row.updated_at === '2026-08-02T00:00:00.000Z')).toBe(true);
   });
 
-  it('maps local keys to settings keys correctly', () => {
-    const creds: SyncableCredentials = {
-      discordToken: 'my-token',
-      discordApplicationId: '999',
-      discordClientSecret: 'shh',
-      discordGuildId: '777',
-      supabasePublishableKey: 'pk',
-    };
-
-    const rows = buildUpsertRows(creds);
-    const rowMap = Object.fromEntries(rows.map(r => [r.key, r.value]));
-
-    expect(rowMap['discord_token']).toBe('my-token');
-    expect(rowMap['discord_application_id']).toBe('999');
-    expect(rowMap['discord_client_secret']).toBe('shh');
-    expect(rowMap['discord_guild_id']).toBe('777');
-    expect(rowMap['supabase_publishable_key']).toBe('pk');
-  });
-
-  it('all rows have section "launcher"', () => {
-    const creds: SyncableCredentials = {
-      discordToken: 't',
-      discordApplicationId: 'a',
-      discordClientSecret: 's',
-      discordGuildId: 'g',
-      supabasePublishableKey: 'p',
-    };
-
-    const rows = buildUpsertRows(creds);
-    for (const row of rows) {
-      expect(row.section).toBe('launcher');
-    }
-  });
-
-  it('uses empty string for falsy values', () => {
-    const creds: SyncableCredentials = {
-      discordToken: '',
-      discordApplicationId: '',
+  it('never overwrites durable credentials with blanks from a partial local cache', () => {
+    const rows = buildSyncRows(pushCredentials({
       discordClientSecret: '',
-      discordGuildId: '',
-      supabasePublishableKey: '',
-    };
+      supabaseDbPassword: '',
+    }));
+    const keys = rows.map(row => row.key);
 
-    const rows = buildUpsertRows(creds);
-    for (const row of rows) {
-      expect(row.value).toBe('');
-    }
+    expect(keys).not.toContain('discord_client_secret');
+    expect(keys).not.toContain('supabase_db_password');
   });
 });
 
-describe('parseRows', () => {
-  it('maps settings keys back to local keys', () => {
-    const rows = [
-      { key: 'discord_token', value: 'tok-123' },
-      { key: 'discord_application_id', value: 'app-456' },
-      { key: 'discord_client_secret', value: 'sec-789' },
-      { key: 'discord_guild_id', value: 'guild-000' },
-      { key: 'supabase_publishable_key', value: 'pub-abc' },
-    ];
+describe('parseSyncRows', () => {
+  it('restores Supabase and all PayPal connection fields even when Discord is absent', () => {
+    const restored = parseSyncRows([
+      { key: 'supabase_db_password', value: 'restored-db-password' },
+      { key: 'supabase_access_token', value: 'restored-management-token' },
+      { key: 'paypal_client_id', value: 'restored-client' },
+      { key: 'paypal_client_secret', value: 'restored-secret' },
+      { key: 'paypal_webhook_id', value: 'restored-webhook' },
+      { key: 'paypal_sandbox', value: 'false' },
+    ]);
 
-    const creds = parseRows(rows);
-    expect(creds.discordToken).toBe('tok-123');
-    expect(creds.discordApplicationId).toBe('app-456');
-    expect(creds.discordClientSecret).toBe('sec-789');
-    expect(creds.discordGuildId).toBe('guild-000');
-    expect(creds.supabasePublishableKey).toBe('pub-abc');
+    expect(restored).toEqual({
+      supabaseDbPassword: 'restored-db-password',
+      supabaseAccessToken: 'restored-management-token',
+      paypalClientId: 'restored-client',
+      paypalClientSecret: 'restored-secret',
+      paypalWebhookId: 'restored-webhook',
+      paypalSandbox: false,
+    });
   });
 
-  it('defaults to empty strings for missing rows', () => {
-    const rows = [
-      { key: 'discord_token', value: 'tok' },
-    ];
+  it('recognizes setup-wizard and legacy launcher connection keys across sections', () => {
+    const restored = parseSyncRows([
+      { key: 'discord_token', value: 'legacy-discord-token' },
+      { key: 'discord_app_id', value: 'legacy-app-id' },
+      {
+        key: 'supabase_db_url',
+        value: 'postgresql://postgres:encoded%20database%20password@db.example.test:5432/postgres',
+      },
+      { key: 'paypal_client_id', value: 'wizard-paypal-client' },
+      { key: 'paypal_client_secret', value: 'wizard-paypal-secret' },
+    ]);
 
-    const creds = parseRows(rows);
-    expect(creds.discordToken).toBe('tok');
-    expect(creds.discordApplicationId).toBe('');
-    expect(creds.discordClientSecret).toBe('');
-    expect(creds.discordGuildId).toBe('');
-    expect(creds.supabasePublishableKey).toBe('');
+    expect(restored).toMatchObject({
+      discordToken: 'legacy-discord-token',
+      discordApplicationId: 'legacy-app-id',
+      supabaseDbPassword: 'encoded database password',
+      paypalClientId: 'wizard-paypal-client',
+      paypalClientSecret: 'wizard-paypal-secret',
+    });
   });
 
-  it('ignores unknown keys', () => {
-    const rows = [
-      { key: 'discord_token', value: 'tok' },
+  it('ignores unknown, blank, and malformed boolean rows instead of erasing local state', () => {
+    expect(parseSyncRows([
       { key: 'unknown_setting', value: 'ignored' },
-      { key: 'another_key', value: 'also ignored' },
-    ];
-
-    const creds = parseRows(rows);
-    expect(creds.discordToken).toBe('tok');
-    expect(Object.keys(creds)).toHaveLength(5);
+      { key: 'supabase_db_password', value: '' },
+      { key: 'paypal_sandbox', value: 'not-a-boolean' },
+    ])).toEqual({});
   });
 
-  it('returns all empty strings for empty rows array', () => {
-    const creds = parseRows([]);
-    expect(creds.discordToken).toBe('');
-    expect(creds.discordApplicationId).toBe('');
-    expect(creds.discordClientSecret).toBe('');
-    expect(creds.discordGuildId).toBe('');
-    expect(creds.supabasePublishableKey).toBe('');
+  it('round-trips the established launcher write set', () => {
+    const original = pushCredentials();
+    const rows = buildSyncRows(original);
+    expect(parseSyncRows(rows)).toEqual(original);
   });
 
-  it('handles empty string values in rows', () => {
-    const rows = [
-      { key: 'discord_token', value: '' },
-    ];
+  it('does not replace an existing password from a connection URL without a password', () => {
+    expect(parseSyncRows([
+      { key: 'supabase_db_url', value: 'postgresql://postgres@db.example.test:5432/postgres' },
+    ])).toEqual({});
+  });
+});
 
-    const creds = parseRows(rows);
-    expect(creds.discordToken).toBe('');
+describe('maskRestoredCredentials', () => {
+  it('keeps restored secrets in the main process while preserving non-secret setup values', () => {
+    expect(maskRestoredCredentials({
+      discordToken: 'restored-token',
+      discordApplicationId: 'restored-app-id',
+      discordClientSecret: 'restored-discord-secret',
+      discordGuildId: 'restored-guild-id',
+      supabasePublishableKey: 'restored-publishable-key',
+      supabaseDbPassword: 'restored-db-password',
+      supabaseAccessToken: 'restored-access-token',
+      paypalClientId: 'restored-paypal-client',
+      paypalClientSecret: 'restored-paypal-secret',
+      paypalWebhookId: 'restored-webhook-id',
+      paypalSandbox: false,
+    }, 'MASK')).toEqual({
+      discordToken: 'MASK',
+      discordApplicationId: 'restored-app-id',
+      discordClientSecret: 'MASK',
+      discordGuildId: 'restored-guild-id',
+      supabasePublishableKey: 'restored-publishable-key',
+      supabaseDbPassword: 'MASK',
+      supabaseAccessToken: 'MASK',
+      paypalClientId: 'restored-paypal-client',
+      paypalClientSecret: 'MASK',
+      paypalWebhookId: 'MASK',
+      paypalSandbox: false,
+    });
+  });
+});
+
+describe('pullFromSupabase', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
-  it('roundtrips with buildUpsertRows', () => {
-    const original: SyncableCredentials = {
-      discordToken: 'roundtrip-token',
-      discordApplicationId: 'roundtrip-app',
-      discordClientSecret: 'roundtrip-secret',
-      discordGuildId: 'roundtrip-guild',
-      supabasePublishableKey: 'roundtrip-pub',
-    };
+  it('queries known connection keys across bot-owned sections and returns a partial merge', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [
+        { key: 'paypal_client_id', value: 'wizard-paypal-client' },
+        { key: 'paypal_client_secret', value: 'wizard-paypal-secret' },
+        {
+          key: 'supabase_db_url',
+          value: 'postgresql://postgres:restored-password@db.example.test:5432/postgres',
+        },
+      ],
+    });
+    vi.stubGlobal('fetch', fetchMock);
 
-    const rows = buildUpsertRows(original);
-    const parsed = parseRows(rows.map(r => ({ key: r.key, value: r.value })));
-    expect(parsed).toEqual(original);
+    const result = await pullFromSupabase('https://project.example.test/', 'service-role-test-key');
+
+    expect(result).toEqual({
+      ok: true,
+      credentials: {
+        paypalClientId: 'wizard-paypal-client',
+        paypalClientSecret: 'wizard-paypal-secret',
+        supabaseDbPassword: 'restored-password',
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const requestUrl = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(requestUrl.searchParams.has('section')).toBe(false);
+    expect(requestUrl.searchParams.get('select')).toBe('key,value');
+    expect(requestUrl.searchParams.get('key')).toContain('paypal_client_id');
+    expect(requestUrl.searchParams.get('key')).toContain('supabase_db_url');
   });
 });
