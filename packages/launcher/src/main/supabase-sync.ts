@@ -19,13 +19,18 @@ export interface SyncableCredentials {
   discordApplicationId: string;
   discordClientSecret: string;
   discordGuildId: string;
+  supabaseUrl: string;
+  supabaseSecretKey: string;
   supabasePublishableKey: string;
   supabaseDbPassword: string;
   supabaseAccessToken: string;
+  supabaseDiscordAuthProviderConfigured: boolean;
   paypalClientId: string;
   paypalClientSecret: string;
   paypalWebhookId: string;
+  paypalWebhookProofKey: string;
   paypalSandbox: boolean;
+  lavalinkEnabled: boolean;
   vpsCsrfSecret?: string;
   vpsNextAuthSecret?: string;
   vpsWebhookReplaySecret?: string;
@@ -41,10 +46,12 @@ export type RestoredCredentials = Partial<RestorableCredentials>;
 const RESTORED_SECRET_KEYS: ReadonlySet<keyof RestorableCredentials> = new Set([
   'discordToken',
   'discordClientSecret',
+  'supabaseSecretKey',
   'supabaseDbPassword',
   'supabaseAccessToken',
   'paypalClientSecret',
   'paypalWebhookId',
+  'paypalWebhookProofKey',
   'vpsCsrfSecret',
   'vpsNextAuthSecret',
   'vpsWebhookReplaySecret',
@@ -85,13 +92,18 @@ const PUSH_SETTINGS_MAP: Record<keyof SyncableCredentials, string> = {
   discordApplicationId: 'discord_application_id',
   discordClientSecret: 'discord_client_secret',
   discordGuildId: 'discord_guild_id',
+  supabaseUrl: 'supabase_url',
+  supabaseSecretKey: 'supabase_secret_key',
   supabasePublishableKey: 'supabase_publishable_key',
   supabaseDbPassword: 'supabase_db_password',
   supabaseAccessToken: 'supabase_access_token',
+  supabaseDiscordAuthProviderConfigured: 'supabase_discord_auth_provider_configured',
   paypalClientId: 'paypal_client_id',
   paypalClientSecret: 'paypal_client_secret',
   paypalWebhookId: 'paypal_webhook_id',
+  paypalWebhookProofKey: 'paypal_webhook_proof_key',
   paypalSandbox: 'paypal_sandbox',
+  lavalinkEnabled: 'lavalink_enabled',
   vpsCsrfSecret: 'vps_csrf_secret',
   vpsNextAuthSecret: 'vps_nextauth_secret',
   vpsWebhookReplaySecret: 'vps_webhook_replay_secret',
@@ -105,7 +117,14 @@ const RESTORE_SETTINGS_MAP: Record<keyof RestorableCredentials, string> = PUSH_S
 const RESTORE_ALIASES: Record<string, Exclude<keyof RestorableCredentials, 'paypalSandbox'>> = {
   discord_token: 'discordToken',
   discord_app_id: 'discordApplicationId',
+  supabase_anon_key: 'supabasePublishableKey',
 };
+
+const BOOLEAN_SETTINGS: ReadonlySet<keyof RestorableCredentials> = new Set([
+  'paypalSandbox',
+  'supabaseDiscordAuthProviderConfigured',
+  'lavalinkEnabled',
+]);
 
 const RESTORE_SETTING_KEYS = [
   ...new Set([
@@ -164,15 +183,16 @@ export function parseSyncRows(rows: Array<Pick<LauncherSettingsRow, 'key' | 'val
     const localKey = reverseMap[row.key] ?? RESTORE_ALIASES[row.key];
     if (!localKey || row.value === '') continue;
 
-    if (localKey === 'paypalSandbox') {
+    if (BOOLEAN_SETTINGS.has(localKey)) {
       const normalized = row.value.trim().toLowerCase();
       if (normalized === 'true' || normalized === 'false') {
-        credentials.paypalSandbox = normalized === 'true';
+        (credentials as Record<string, unknown>)[localKey] = normalized === 'true';
       }
       continue;
     }
 
-    const stringKey = localKey as Exclude<keyof RestorableCredentials, 'paypalSandbox'>;
+    const stringKey = localKey as Exclude<keyof RestorableCredentials,
+      'paypalSandbox' | 'supabaseDiscordAuthProviderConfigured' | 'lavalinkEnabled'>;
     credentials[stringKey] = row.value;
   }
 

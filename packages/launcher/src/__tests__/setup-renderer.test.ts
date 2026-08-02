@@ -86,6 +86,20 @@ describe('launcher setup renderer wiring', () => {
     expect(main).not.toContain('result.patch,');
   });
 
+  it('reuses one portable service generation across local restarts and VPS deployment', () => {
+    const main = readSourceFile('main/index.ts');
+    const configStore = readSourceFile('main/config-store.ts');
+
+    expect(main).toContain('const preparedSecrets = ensurePersistedVpsSecrets(config);');
+    expect(main).toContain('saveConfig(preparedSecrets.patch);');
+    expect(main).toContain('setLavalinkPassword(runtimeConfig.vpsLavalinkPassword);');
+    expect(main).toContain('buildEnvVars(runtimeConfig, sessionToken);');
+    expect(configStore).toContain('CSRF_SECRET: config.vpsCsrfSecret || randomBytes(32)');
+    expect(configStore).toContain('NEXTAUTH_SECRET: config.vpsNextAuthSecret || randomBytes(32)');
+    expect(configStore).toContain('WEBHOOK_REPLAY_SECRET: config.vpsWebhookReplaySecret || randomBytes(32)');
+    expect(configStore).toContain('LAVALINK_PASSWORD: config.vpsLavalinkPassword || getLavalinkPassword()');
+  });
+
   it('renders derived callback values from setup diagnostics without exposing ports in normal labels', () => {
     const renderer = readSourceFile('renderer/renderer.js');
 
@@ -256,7 +270,7 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('ensureConfiguredPayPalWebhook(config)');
     expect(main).toContain('const rawResult = await ensureConfiguredPayPalWebhook(cfg)');
     expect(main).toContain('startLocalStack(currentConfig, { forceRestart: true })');
-    expect(main).toContain('lastStartedPayPalConfig = snapshotPayPalRuntimeConfig(config);');
+    expect(main).toContain('lastStartedPayPalConfig = snapshotPayPalRuntimeConfig(runtimeConfig);');
     expect(main).toContain('servicesRestarted: true');
     expect(renderer).toContain('applyPayPalWebhookResult(result);\n    if (!result.ok)');
     expect(renderer).toContain('&& !isValidating');

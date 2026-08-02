@@ -316,13 +316,12 @@ export function buildEnvVars(
     // Fall back to env var for backward compatibility.
     SESSION_TOKEN: sessionToken,
 
-    // Security — CSRF protection, session signing, and internal webhook replay.
-    // Generated once per launcher session. Local-mode is CSRF-exempt,
-    // but these are still required so the dashboard env schema validates
-    // and so cloud-deploy settings pages work if configured.
-    CSRF_SECRET: randomBytes(32).toString('hex'),
-    NEXTAUTH_SECRET: randomBytes(32).toString('hex'),
-    WEBHOOK_REPLAY_SECRET: randomBytes(32).toString('hex'),
+    // Security — reuse the portable instance generation across local restarts
+    // and VPS handoffs. The fallback is only for legacy direct callers; normal
+    // launcher startup persists these before spawning any service.
+    CSRF_SECRET: config.vpsCsrfSecret || randomBytes(32).toString('hex'),
+    NEXTAUTH_SECRET: config.vpsNextAuthSecret || randomBytes(32).toString('hex'),
+    WEBHOOK_REPLAY_SECRET: config.vpsWebhookReplaySecret || randomBytes(32).toString('hex'),
 
     // Runtime networking: operator dashboard URL and public callback base
     // are intentionally separate. Regular local keeps the launcher dashboard
@@ -345,7 +344,7 @@ export function buildEnvVars(
     // LAVALINK_PASSWORD env var or a random per-launch hex, and caches the result.
     // Always pass a valid password — BotEnvSchema requires min 8 chars even
     // when Lavalink is disabled (the bot still validates all env vars at startup).
-    LAVALINK_PASSWORD: getLavalinkPassword(),
+    LAVALINK_PASSWORD: config.vpsLavalinkPassword || getLavalinkPassword(),
 
     // Database — direct Postgres access for migrations.
     // Construct the connection URL from the project ref + user-supplied password.

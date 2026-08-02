@@ -14,13 +14,18 @@ function pushCredentials(overrides: Partial<SyncableCredentials> = {}): Syncable
     discordApplicationId: 'discord-app',
     discordClientSecret: 'discord-secret',
     discordGuildId: 'discord-guild',
+    supabaseUrl: 'https://project.supabase.co',
+    supabaseSecretKey: 'supabase-secret',
     supabasePublishableKey: 'supabase-publishable',
     supabaseDbPassword: 'database-password',
     supabaseAccessToken: 'supabase-access-token',
+    supabaseDiscordAuthProviderConfigured: true,
     paypalClientId: 'paypal-client',
     paypalClientSecret: 'paypal-secret',
     paypalWebhookId: 'paypal-webhook',
+    paypalWebhookProofKey: 'paypal-webhook-proof',
     paypalSandbox: true,
+    lavalinkEnabled: true,
     vpsCsrfSecret: 'vps-csrf',
     vpsNextAuthSecret: 'vps-nextauth',
     vpsWebhookReplaySecret: 'vps-replay',
@@ -40,13 +45,18 @@ describe('buildSyncRows', () => {
       discord_application_id: 'discord-app',
       discord_client_secret: 'discord-secret',
       discord_guild_id: 'discord-guild',
+      supabase_url: 'https://project.supabase.co',
+      supabase_secret_key: 'supabase-secret',
       supabase_publishable_key: 'supabase-publishable',
       supabase_db_password: 'database-password',
       supabase_access_token: 'supabase-access-token',
+      supabase_discord_auth_provider_configured: 'true',
       paypal_client_id: 'paypal-client',
       paypal_client_secret: 'paypal-secret',
       paypal_webhook_id: 'paypal-webhook',
+      paypal_webhook_proof_key: 'paypal-webhook-proof',
       paypal_sandbox: 'true',
+      lavalink_enabled: 'true',
       vps_csrf_secret: 'vps-csrf',
       vps_nextauth_secret: 'vps-nextauth',
       vps_webhook_replay_secret: 'vps-replay',
@@ -74,19 +84,23 @@ describe('parseSyncRows', () => {
     const restored = parseSyncRows([
       { key: 'supabase_db_password', value: 'restored-db-password' },
       { key: 'supabase_access_token', value: 'restored-management-token' },
+      { key: 'supabase_discord_auth_provider_configured', value: 'true' },
       { key: 'paypal_client_id', value: 'restored-client' },
       { key: 'paypal_client_secret', value: 'restored-secret' },
       { key: 'paypal_webhook_id', value: 'restored-webhook' },
       { key: 'paypal_sandbox', value: 'false' },
+      { key: 'lavalink_enabled', value: 'true' },
     ]);
 
     expect(restored).toEqual({
       supabaseDbPassword: 'restored-db-password',
       supabaseAccessToken: 'restored-management-token',
+      supabaseDiscordAuthProviderConfigured: true,
       paypalClientId: 'restored-client',
       paypalClientSecret: 'restored-secret',
       paypalWebhookId: 'restored-webhook',
       paypalSandbox: false,
+      lavalinkEnabled: true,
     });
   });
 
@@ -116,6 +130,7 @@ describe('parseSyncRows', () => {
       { key: 'unknown_setting', value: 'ignored' },
       { key: 'supabase_db_password', value: '' },
       { key: 'paypal_sandbox', value: 'not-a-boolean' },
+      { key: 'lavalink_enabled', value: 'not-a-boolean' },
     ])).toEqual({});
   });
 
@@ -142,10 +157,15 @@ describe('maskRestoredCredentials', () => {
       supabasePublishableKey: 'restored-publishable-key',
       supabaseDbPassword: 'restored-db-password',
       supabaseAccessToken: 'restored-access-token',
+      supabaseSecretKey: 'restored-supabase-secret',
+      supabaseUrl: 'https://restored.supabase.co',
+      supabaseDiscordAuthProviderConfigured: true,
       paypalClientId: 'restored-paypal-client',
       paypalClientSecret: 'restored-paypal-secret',
       paypalWebhookId: 'restored-webhook-id',
+      paypalWebhookProofKey: 'restored-webhook-proof',
       paypalSandbox: false,
+      lavalinkEnabled: true,
     }, 'MASK')).toEqual({
       discordToken: 'MASK',
       discordApplicationId: 'restored-app-id',
@@ -154,10 +174,15 @@ describe('maskRestoredCredentials', () => {
       supabasePublishableKey: 'restored-publishable-key',
       supabaseDbPassword: 'MASK',
       supabaseAccessToken: 'MASK',
+      supabaseSecretKey: 'MASK',
+      supabaseUrl: 'https://restored.supabase.co',
+      supabaseDiscordAuthProviderConfigured: true,
       paypalClientId: 'restored-paypal-client',
       paypalClientSecret: 'MASK',
       paypalWebhookId: 'MASK',
+      paypalWebhookProofKey: 'MASK',
       paypalSandbox: false,
+      lavalinkEnabled: true,
     });
   });
 });

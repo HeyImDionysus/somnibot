@@ -97,6 +97,12 @@ export function getLavalinkPassword(): string {
   return _lavalinkPassword;
 }
 
+/** Reuse the portable instance password before starting the managed process. */
+export function setLavalinkPassword(password: string): void {
+  if (!password) throw new Error('Lavalink password cannot be empty.');
+  _lavalinkPassword = password;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Paths                                                              */
 /* ------------------------------------------------------------------ */

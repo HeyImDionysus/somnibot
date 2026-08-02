@@ -54,6 +54,7 @@ import {
   getLavalinkStatus,
   getLavalinkError,
   isLavalinkJarPresent,
+  setLavalinkPassword,
 } from './lavalink-manager.js';
 import {
   downloadValkey,
@@ -67,6 +68,7 @@ import { createVpsCommandRunner } from './vps-command-runner.js';
 import { VpsDeploymentRunGate, redactVpsDeploymentText } from './vps-deployment-executor.js';
 import { confirmVpsDeploymentApproval } from './vps-deployment-approval.js';
 import { handleVpsDeploymentRunRequest, type VpsDeploymentRunRequest } from './vps-deployment-request.js';
+import { ensurePersistedVpsSecrets } from './vps-env-materializer.js';
 import { handleVpsRollbackRunRequest, type VpsRollbackRunRequest } from './vps-rollback-request.js';
 import { planVpsSshPreflight } from './vps-preflight.js';
 import {
@@ -113,13 +115,18 @@ async function syncLauncherCredentials(config: LauncherConfig): Promise<void> {
     discordApplicationId: config.discordApplicationId,
     discordClientSecret: config.discordClientSecret,
     discordGuildId: config.discordGuildId,
+    supabaseUrl: config.supabaseUrl,
+    supabaseSecretKey: config.supabaseSecretKey,
     supabasePublishableKey: config.supabasePublishableKey,
     supabaseDbPassword: config.supabaseDbPassword,
     supabaseAccessToken: config.supabaseAccessToken,
+    supabaseDiscordAuthProviderConfigured: config.supabaseDiscordAuthProviderConfigured,
     paypalClientId: config.paypalClientId,
     paypalClientSecret: config.paypalClientSecret,
     paypalWebhookId: config.paypalWebhookId,
+    paypalWebhookProofKey: config.paypalWebhookProofKey,
     paypalSandbox: config.paypalSandbox,
+    lavalinkEnabled: config.lavalinkEnabled,
     vpsCsrfSecret: config.vpsCsrfSecret,
     vpsNextAuthSecret: config.vpsNextAuthSecret,
     vpsWebhookReplaySecret: config.vpsWebhookReplaySecret,
@@ -676,7 +683,15 @@ async function startLocalStack(
       error: `Valkey/Redis is required for production-safe local operation and did not become ready: ${vkResult.error ?? 'unknown error'}`,
     };
   }
-  if (config.lavalinkEnabled) {
+
+  const preparedSecrets = ensurePersistedVpsSecrets(config);
+  const runtimeConfig = preparedSecrets.config;
+  if (Object.keys(preparedSecrets.patch).length > 0) {
+    saveConfig(preparedSecrets.patch);
+    void queueLauncherCredentialSync(runtimeConfig);
+  }
+  setLavalinkPassword(runtimeConfig.vpsLavalinkPassword);
+  if (runtimeConfig.lavalinkEnabled) {
     const llResult = await startLavalink();
     if (!llResult.ok) {
       stopLavalink();
@@ -701,11 +716,11 @@ async function startLocalStack(
   });
 
   sessionToken = crypto.randomBytes(32).toString('hex');
-  const envVars = buildEnvVars(config, sessionToken);
+  const envVars = buildEnvVars(runtimeConfig, sessionToken);
   startAll(envVars);
-  lastStartedPayPalConfig = snapshotPayPalRuntimeConfig(config);
+  lastStartedPayPalConfig = snapshotPayPalRuntimeConfig(runtimeConfig);
 
-  void queueLauncherCredentialSync(config);
+  void queueLauncherCredentialSync(runtimeConfig);
 
   return { ok: true };
 }
