@@ -31,7 +31,11 @@
  * the live test); it keys off SOMNIBOT_LOOPBACK_E2E_DISCORD_READBACK + a live
  * gateway, NOT this placeholder.
  */
-import { LOOPBACK_E2E_CONFIRMATION } from '../../guard.js';
+import {
+  LOOPBACK_E2E_CONFIRMATION,
+  assertSupabaseUrlIsLocal,
+  assertValkeyUrlIsLocal,
+} from '../../guard.js';
 
 /** Well-known Supabase CLI local-dev service_role JWT (issuer `supabase-demo`).
  *  Valid ONLY against a local `supabase start` instance — not a secret. */
@@ -45,8 +49,14 @@ const LOCAL_DEMO_SERVICE_ROLE_KEY =
 const LOCAL_DEMO_ANON_KEY =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
 
-/** Local Supabase REST endpoint — the only host the guard accepts. */
-const LOCAL_SUPABASE_URL = 'http://127.0.0.1:54321';
+/**
+ * Isolated local service endpoints. The explicit E2E variables are the ONLY
+ * supported override: ambient production/developer variables are ignored.
+ */
+const LOCAL_SUPABASE_URL = process.env.SOMNIBOT_E2E_SUPABASE_URL ?? 'http://127.0.0.1:54321';
+const LOCAL_VALKEY_URL = process.env.SOMNIBOT_E2E_VALKEY_URL ?? 'redis://127.0.0.1:6379';
+assertSupabaseUrlIsLocal(LOCAL_SUPABASE_URL, 'SOMNIBOT_E2E_SUPABASE_URL');
+assertValkeyUrlIsLocal(LOCAL_VALKEY_URL, 'SOMNIBOT_E2E_VALKEY_URL');
 
 /** Stable disposable guild id for the local rig. TEXT everywhere it lands
  *  (guild.id, economy_wallets.guild_id), so a readable non-snowflake is fine. */
@@ -68,6 +78,8 @@ function force(key: string, value: string): void {
 // A real token / remote URL / live guild id exported in the operator's shell
 // must NOT be able to aim this real-effect runner at production.
 force('SUPABASE_URL', LOCAL_SUPABASE_URL);
+force('VALKEY_URL', LOCAL_VALKEY_URL);
+force('VALKEY_PASSWORD', '');
 force('DISCORD_GUILD_ID', DISPOSABLE_GUILD_ID);
 force('SOMNIBOT_E2E_DISPOSABLE_GUILD_ID', DISPOSABLE_GUILD_ID);
 force('DISCORD_TOKEN', 'e2e-live-no-login-dummy-token');

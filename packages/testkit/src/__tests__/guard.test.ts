@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   assertLoopbackAllowed,
+  assertValkeyUrlIsLocal,
   isLoopbackAllowed,
   LoopbackGuardError,
   LOOPBACK_E2E_CONFIRMATION,
@@ -88,5 +89,21 @@ describe('assertLoopbackAllowed', () => {
     // The unit-test process is not a configured loopback rig, so the default
     // path must fail closed rather than accidentally allow.
     expect(isLoopbackAllowed()).toBe(false);
+  });
+});
+
+describe('assertValkeyUrlIsLocal', () => {
+  it('accepts an unauthenticated loopback Valkey endpoint on any isolated port', () => {
+    expect(() => assertValkeyUrlIsLocal('redis://127.0.0.1:56379', 'VALKEY_URL')).not.toThrow();
+    expect(() => assertValkeyUrlIsLocal('redis://localhost:6379', 'VALKEY_URL')).not.toThrow();
+  });
+
+  it.each([
+    'redis://cache.example.test:6379',
+    'rediss://127.0.0.1:6379',
+    'redis://:not-allowed@127.0.0.1:6379',
+    'not a url',
+  ])('rejects a non-isolated Valkey target: %s', (url) => {
+    expect(() => assertValkeyUrlIsLocal(url, 'VALKEY_URL')).toThrow(LoopbackGuardError);
   });
 });

@@ -50,6 +50,26 @@ export function assertSupabaseUrlIsLocal(url: string, context: string): void {
   }
 }
 
+/**
+ * Reject a Valkey target unless it is an unauthenticated loopback endpoint.
+ * The live harness supplies this URL itself; accepting ambient credentials or a
+ * remote host would let a disposable test touch an established installation.
+ */
+export function assertValkeyUrlIsLocal(url: string, context: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new LoopbackGuardError(`${context} must be a valid URL`);
+  }
+  if (parsed.protocol !== 'redis:' || !LOCAL_SUPABASE_HOSTS.has(parsed.hostname)) {
+    throw new LoopbackGuardError(`${context} must be a redis:// loopback URL`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new LoopbackGuardError(`${context} must not contain credentials`);
+  }
+}
+
 export interface LoopbackEnv {
   NODE_ENV?: string;
   SUPABASE_URL?: string;
