@@ -791,22 +791,50 @@ export async function runReconciliation(
   return findings;
 }
 
+export interface ReconciliationSchedule {
+  /** Cancel the delayed startup pass, future intervals, and await any pass in flight. */
+  stop(): Promise<void>;
+}
+
 /**
  * Schedule reconciliation to run every 6 hours.
+ *
+ * Both timers belong to the same guild lifecycle. Returning only the interval
+ * leaked the delayed startup pass past guild teardown, allowing it to write
+ * against a guild that a privacy purge had already removed.
  */
 export function scheduleReconciliation(
   guild: Guild,
   supabase: SupabaseClient,
-): NodeJS.Timeout {
+): ReconciliationSchedule {
   const SIX_HOURS = 6 * 60 * 60 * 1000;
+  let stopped = false;
+  let activeRun: Promise<void> | null = null;
+
+  const run = (trigger: 'startup' | 'scheduled') => {
+    if (stopped) return;
+    let operation!: Promise<void>;
+    operation = runReconciliation(guild, supabase, trigger)
+      .then(() => undefined)
+      .catch((error: unknown) => log.error('Unhandled error', { error: String(error) }))
+      .finally(() => {
+        if (activeRun === operation) activeRun = null;
+      });
+    activeRun = operation;
+  };
 
   // Run once on startup (after a short delay for bot to fully initialize)
-  setTimeout(() => {
-    runReconciliation(guild, supabase, 'startup').catch((e) => log.error("Unhandled error", { error: String(e) }));
-  }, 30_000);
+  const startupTimer = setTimeout(() => run('startup'), 30_000);
 
   // Then every 6 hours
-  return setInterval(() => {
-    runReconciliation(guild, supabase, 'scheduled').catch((e) => log.error("Unhandled error", { error: String(e) }));
-  }, SIX_HOURS);
+  const interval = setInterval(() => run('scheduled'), SIX_HOURS);
+
+  return {
+    async stop(): Promise<void> {
+      stopped = true;
+      clearTimeout(startupTimer);
+      clearInterval(interval);
+      await activeRun;
+    },
+  };
 }

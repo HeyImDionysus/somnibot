@@ -54,7 +54,7 @@ import { MusicStatusReporter } from './services/music-status-reporter.js';
 import { HeartbeatService } from './services/heartbeat.js';
 import { AlertService } from './services/alert-service.js';
 import { CrossFeatureBridge } from './services/cross-feature-bridge.js';
-import { scheduleReconciliation } from './services/reconciliation.js';
+import { scheduleReconciliation, type ReconciliationSchedule } from './services/reconciliation.js';
 import { AutoModSync } from './features/discord-native/automod-sync.js';
 import { GuildOnboardingSync } from './features/discord-native/guild-onboarding-sync.js';
 import { startAntiRaidPruner, stopAntiRaidPruner, clearAntiRaidGuildState, resumeRaidState } from './features/anti-raid/index.js';
@@ -124,7 +124,7 @@ interface GuildServices {
     stop: () => Promise<void>;
     reconfigure: (intervalMinutes?: number, runImmediately?: boolean) => void;
   };
-  reconTimer?: ReturnType<typeof setInterval>;
+  reconciliationSchedule?: ReconciliationSchedule;
   ticketCleanupTimer?: ReturnType<typeof setInterval>;
   automationEngine?: AutomationEngine;
   configWatcher?: ConfigWatcher;
@@ -628,7 +628,7 @@ export async function initGuildFeatures(
 
   // ── Entitlement reconciliation ──
   try {
-    services.reconTimer = scheduleReconciliation(guild, supabase);
+    services.reconciliationSchedule = scheduleReconciliation(guild, supabase);
     guildLog.info('Entitlement reconciliation scheduled');
   } catch (err) {
     guildLog.error('Reconciliation scheduler failed', { error: String(err) });
@@ -828,7 +828,21 @@ export async function registerGuildCommands(
 /**
  * Destroy all services for a guild context (called on guild leave or shutdown).
  */
-export async function destroyGuildServices(ctx: GuildContext): Promise<void> {
+export interface DestroyGuildServicesOptions {
+  /**
+   * Test-only lifecycle seam for the loopback fleet: quiesce every background
+   * producer while retaining the real action-queue listener long enough for a
+   * privacy purge to settle its queued work.
+   */
+  preserveActionQueue?: boolean;
+  /** Do not unregister manager state while the retained queue is still live. */
+  preserveRegistries?: boolean;
+}
+
+export async function destroyGuildServices(
+  ctx: GuildContext,
+  options: DestroyGuildServicesOptions = {},
+): Promise<void> {
   const services = ctx.getManager<GuildServices>('_services');
   if (!services) return;
 
@@ -848,8 +862,10 @@ export async function destroyGuildServices(ctx: GuildContext): Promise<void> {
   // accepting. Any final shutdown events therefore enter its serialized drain.
   if (services.snapshotTimer) clearInterval(services.snapshotTimer);
   if (services.voiceXpTimer) clearInterval(services.voiceXpTimer);
-  if (services.actionQueueStaleTimer) clearInterval(services.actionQueueStaleTimer);
-  if (services.actionQueueStop) {
+  if (!options.preserveActionQueue && services.actionQueueStaleTimer) {
+    clearInterval(services.actionQueueStaleTimer);
+  }
+  if (!options.preserveActionQueue && services.actionQueueStop) {
     try {
       pendingProducerStops.push({
         name: 'action queue',
@@ -859,7 +875,12 @@ export async function destroyGuildServices(ctx: GuildContext): Promise<void> {
       stopFailures.push({ name: 'action queue', error });
     }
   }
-  if (services.reconTimer) clearInterval(services.reconTimer);
+  if (services.reconciliationSchedule) {
+    pendingProducerStops.push({
+      name: 'entitlement reconciliation',
+      promise: services.reconciliationSchedule.stop(),
+    });
+  }
   if (services.ticketCleanupTimer) clearInterval(services.ticketCleanupTimer);
   if (services.syncHandle) {
     try {
@@ -974,6 +995,11 @@ export async function destroyGuildServices(ctx: GuildContext): Promise<void> {
       stopFailures.map(({ error }) => error),
       `Failed to stop ${stopFailures.length} guild service(s) for ${ctx.guildId}`,
     );
+  }
+
+  if (options.preserveRegistries) {
+    guildLog.info('Guild producers quiesced while retaining action queue for privacy purge');
+    return;
   }
 
   // Phase 3: only a fully successful audit drain authorizes irreversible

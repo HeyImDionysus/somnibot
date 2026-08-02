@@ -142,6 +142,30 @@ describe('guild-init', () => {
     expect(ctx.getManager).toHaveBeenCalledWith('_services');
   });
 
+  it('quiesces producers but retains the action queue for a privacy purge', async () => {
+    const actionQueueStop = vi.fn(async () => {});
+    const producerStop = vi.fn(async () => {});
+    const auditStop = vi.fn(async () => {});
+    const ctx = {
+      guildId: 'guild-1',
+      getManager: vi.fn((name: string) => (
+        name === '_services'
+          ? { actionQueueStop, notificationService: { stop: producerStop }, auditService: { stop: auditStop } }
+          : null
+      )),
+    };
+
+    await destroyGuildServices(ctx as any, {
+      preserveActionQueue: true,
+      preserveRegistries: true,
+    });
+
+    expect(producerStop).toHaveBeenCalledOnce();
+    expect(auditStop).toHaveBeenCalledOnce();
+    expect(actionQueueStop).not.toHaveBeenCalled();
+    expect(unregisterEconomyManager).not.toHaveBeenCalled();
+  });
+
   it('awaits an asynchronous audit-service drain before destruction completes', async () => {
     let release!: () => void;
     const auditStopped = new Promise<void>((resolve) => {

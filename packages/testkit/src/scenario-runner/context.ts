@@ -284,6 +284,20 @@ export class ScenarioContextImpl implements ScenarioContext {
     for (const handle of purgeHandles) {
       if (attemptedGuildIds.has(handle.guildId)) continue;
       attemptedGuildIds.add(handle.guildId);
+
+      // The privacy RPC removes the guild row. Quiesce every background
+      // producer and drain audit first, otherwise an already-buffered write
+      // can land after the RPC and correctly fail a guild foreign key.
+      // Do not dispose the handle here: the real action-queue listener must
+      // remain running until purge_guild_data has settled its queued work.
+      try {
+        await handle.quiesceForDataPurge();
+      } catch {
+        // Normal handle.cleanup() retries the complete production teardown.
+        // Leave the purge/sweep fallback available if a bounded audit drain
+        // cannot complete here.
+      }
+
       for (let attempt = 1; attempt <= 6; attempt += 1) {
         try {
           const { data, error } = await handle.supabase.rpc('purge_guild_data', {

@@ -64,6 +64,7 @@ describe('reconciliation', () => {
     vi.useFakeTimers();
     const handle = scheduleReconciliation(makeGuild(), makeSupa());
     expect(handle).toBeDefined();
+    void handle.stop();
     vi.useRealTimers();
   });
 });

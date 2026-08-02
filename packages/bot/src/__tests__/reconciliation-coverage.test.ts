@@ -373,11 +373,11 @@ describe('runReconciliation', () => {
 });
 
 describe('scheduleReconciliation', () => {
-  it('returns a timer handle', () => {
+  it('returns a stoppable lifecycle handle', async () => {
     const guild = makeGuild();
     const supabase = makeSupabase({ reconciliation_runs: { id: 'run1' } });
-    const timer = scheduleReconciliation(guild as any, supabase as any);
-    expect(timer).toBeDefined();
-    clearInterval(timer);
+    const schedule = scheduleReconciliation(guild as any, supabase as any);
+    expect(schedule).toBeDefined();
+    await schedule.stop();
   });
 });
