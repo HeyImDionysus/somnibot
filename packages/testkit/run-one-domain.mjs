@@ -90,10 +90,24 @@ try {
   const capabilities = await mod.detectCapabilities();
   const report = await mod.runDomainProof(proof, { capabilities });
   const s = mod.summarize(report);
+  const gates = report.scenarios.flatMap((scenario) =>
+    scenario.classes.flatMap((evidence) =>
+      evidence.records
+        .filter((record) => record.status === 'GATED')
+        .map((record) => ({
+          scenario: scenario.scenarioClass,
+          class: record.assertionClass,
+          channel: record.channel,
+          promise: record.promise,
+          reason: record.gateReason ?? '(no gate reason recorded)',
+        })),
+    ),
+  );
   emit({
     pass: s.pass,
     gated: s.gated,
     fail: s.fail,
+    capabilities: report.capabilities,
     findings: report.findings.map((f) => ({
       scenario: f.scenarioClass,
       class: f.assertionClass,
@@ -101,6 +115,7 @@ try {
       observation: f.observation,
       impact: f.impact,
     })),
+    gates,
     errored: report.scenarios.filter((x) => x.error).map((x) => `${x.scenarioClass}: ${x.error}`),
   });
 } catch (err) {

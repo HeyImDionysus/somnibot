@@ -29,7 +29,7 @@ assert.deepEqual(seenShardLabels, expectedShardLabels, 'manifests must be one ea
 const domainIds = [];
 const invalidResults = [];
 for (const manifest of manifests) {
-  assert.equal(manifest.schemaVersion, 1, `unsupported manifest from shard ${manifest.shard}`);
+  assert.equal(manifest.schemaVersion, 2, `unsupported manifest from shard ${manifest.shard}`);
   assert.ok(Array.isArray(manifest.assignedDomainIds), `missing assignment for shard ${manifest.shard}`);
   assert.ok(Array.isArray(manifest.results), `missing results for shard ${manifest.shard}`);
   assert.deepEqual(
@@ -39,6 +39,13 @@ for (const manifest of manifests) {
   );
   domainIds.push(...manifest.assignedDomainIds);
   for (const result of manifest.results) {
+    if (result.gated > 0) {
+      assert.ok(Array.isArray(result.gates), `${manifest.shard}/${result.id} is gated but has no gate inventory`);
+      assert.ok(
+        result.gates.length >= result.gated,
+        `${manifest.shard}/${result.id} gate inventory is smaller than its gated class count`,
+      );
+    }
     if (
       result.fail !== 0
       || result.gated !== 0

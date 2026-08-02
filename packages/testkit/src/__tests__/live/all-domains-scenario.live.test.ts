@@ -67,6 +67,18 @@ interface DomainResult {
     observation: string;
     impact: string;
   }>;
+  gates?: Array<{
+    scenario: string;
+    class: string;
+    channel: string;
+    promise: string;
+    reason: string;
+  }>;
+  capabilities?: {
+    redis: boolean;
+    discordReadback: boolean;
+    paypalSandbox: boolean;
+  };
   errored?: string[];
   hang?: boolean;
   error?: string;
@@ -106,7 +118,10 @@ function writeShardManifest(): void {
   );
   mkdirSync(path.dirname(manifestPath), { recursive: true });
   writeFileSync(manifestPath, `${JSON.stringify({
-    schemaVersion: 1,
+    // Schema v2 retains every unresolved assertion and its precise missing
+    // capability. CI artifacts can therefore drive a real gate-closure plan
+    // rather than reducing hundreds of functional gaps to opaque counts.
+    schemaVersion: 2,
     shard: process.env.SOMNIBOT_FLEET_SHARD ?? 'all',
     assignedDomainIds: assignment.ids,
     totals,
