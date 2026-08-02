@@ -16,6 +16,7 @@ import type { SomniClient } from '../../client.js';
 import { resolveBrandKit } from '../branding/brand-kit.js';
 import { createLogger } from '@somnibot/shared';
 import { codePointSlice } from '../../utils/prize-snapshot.js';
+import { writeAuditLog } from '../../services/audit.js';
 
 const log = createLogger('GiveawayCmds');
 
@@ -75,6 +76,31 @@ export async function handleGiveawayCommand(
   manager: GiveawayManager,
 ): Promise<void> {
   const sub = interaction.options.getSubcommand();
+  const client = interaction.client as SomniClient;
+
+  // Discord's default command permission can be overridden per guild. Re-check
+  // the live member permission before any giveaway read or mutation so an
+  // integration override cannot confer giveaway administration power.
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+    const targetId = interaction.options.getString('id') ?? undefined;
+    await writeAuditLog(client.supabase, {
+      guildId: interaction.guildId!,
+      actorType: 'discord',
+      actorId: interaction.user.id,
+      action: 'giveaway.command.denied',
+      category: 'community',
+      targetType: 'giveaway',
+      targetId,
+      occurrenceKey: `giveaway.command.denied:${interaction.id}`,
+      success: false,
+      details: { subcommand: sub, reason: 'missing_manage_guild' },
+    });
+    await interaction.reply({
+      content: '🚫 You need the **Manage Server** permission to manage giveaways.',
+      ephemeral: true,
+    });
+    return;
+  }
 
   try {
     switch (sub) {
@@ -126,7 +152,7 @@ export async function handleGiveawayCommand(
           // "ended / no entries" from a failed read; degrade with the branded
           // unavailable notice (the brand read is itself outage-safe: it never
           // throws and falls back to the guild name).
-          const supabase = (interaction.client as SomniClient).supabase;
+          const supabase = client.supabase;
           const brandKit = await resolveBrandKit(supabase, interaction.guildId!, {
             fallbackName: interaction.guild?.name,
           }).catch(() => null);

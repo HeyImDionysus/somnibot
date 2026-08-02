@@ -773,7 +773,7 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
 
 /** UNAUTH — administration is denied to unprivileged members. */
 async function UNAUTH(ctx: ScenarioContext): Promise<void> {
-  const handle = await ctx.bootGuild({ label: 'a' });
+  const handle = await ctx.bootGuild({ label: 'a', guildConfigOverrides: { giveaways_enabled: true } });
   const admin = ctx.userId('admin');
   const outsider = ctx.userId('b');
 
@@ -815,17 +815,49 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   await proveGiveawayRls(ctx, handle, giveawayId);
   await proveNoOwnerAlert(ctx, handle);
   gateMemberFacingSurfaces(ctx);
+  const denied = await ctx.runSlash(handle, {
+    commandName: 'giveaway',
+    userId: outsider,
+    member: { id: outsider, roles: [], permissions: { has: () => false } },
+    subcommand: 'end',
+    options: { id: giveawayId },
+  });
+  const denial = replyContent(denied);
+  const protectedAfter = await readGiveaway(handle, giveawayId);
+  ctx.expect(
+    /Manage Server/i.test(denial) && protectedAfter?.status === 'active',
+    {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'A member without Manage Guild who runs /giveaway end gets an ephemeral denial and the giveaway remains active.',
+      observation: `captured denial=${JSON.stringify(denial)}; protected giveaway status=${protectedAfter?.status ?? '(missing)'}.`,
+      impact: 'A caller without Manage Guild reached giveaway administration or did not receive the required denial.',
+    },
+  );
+  const { data: deniedAudits } = await handle.supabase
+    .from('audit_logs')
+    .select('actor_id, action, success, details')
+    .eq('guild_id', handle.guildId)
+    .eq('actor_id', outsider)
+    .eq('action', 'giveaway.command.denied');
+  ctx.expect(
+    Array.isArray(deniedAudits)
+      && deniedAudits.length === 1
+      && deniedAudits[0]?.success === false
+      && (deniedAudits[0]?.details as { reason?: unknown } | null)?.reason === 'missing_manage_guild',
+    {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: 'Each denied /giveaway attempt lands one audit row with actor, subcommand, and reason permission-denied.',
+      observation: `matching denied audit rows=${deniedAudits?.length ?? 0}; success=${deniedAudits?.[0]?.success ?? '(missing)'}.`,
+      impact: 'A denied giveaway-administration attempt was not recorded exactly once with its actor and reason.',
+    },
+  );
   ctx.gate(
     'Discord',
     'discord-readback',
-    'A member without Manage Guild who runs /giveaway start or end gets an ephemeral denial and no giveaway is created or ended.',
-    'the Manage Guild permission is enforced by the command’s setDefaultMemberPermissions + the dispatcher; /giveaway is subcommand-based and undrivable in this harness',
-  );
-  ctx.gate(
-    'audit',
-    'audit-row',
-    'Each denied /giveaway attempt lands one audit row with actor, subcommand, and reason permission-denied.',
-    'the denial is enforced Discord-side (default member permissions) and never reaches the handler; the giveaway feature writes no audit_logs row today (flagged for owner review)',
+    'The same Manage Guild denial is read back from a real Discord test-guild interaction.',
+    'the in-handler denial and immutable database outcome are proven through the real dispatcher; the required live test-guild readback remains pending',
   );
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
