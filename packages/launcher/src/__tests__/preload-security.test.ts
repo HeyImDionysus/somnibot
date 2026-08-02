@@ -45,7 +45,7 @@ const EXPECTED_API_METHODS = [
   'getConfig', 'saveConfig', 'getSetupStatus', 'validateCredentials',
   'runSetupAutomation', 'ensurePayPalWebhook',
   'startBot', 'stopBot', 'getStatus',
-  'pullFromSupabase', 'openDashboard', 'openExternal',
+  'pullFromSupabase', 'importExistingEnv', 'openDashboard', 'openExternal',
   'getTailscaleReadiness', 'enableTailscaleFunnel', 'probeTailscaleCallback',
   'onStatusUpdate', 'onBotLog', 'onDashboardLog',
   'checkForUpdates', 'downloadUpdate', 'installUpdate',

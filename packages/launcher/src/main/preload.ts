@@ -29,6 +29,12 @@ export interface SomniBotAPI {
   // Config
   getConfig: () => Promise<Record<string, unknown>>;
   saveConfig: (config: Record<string, unknown>) => Promise<void>;
+  importExistingEnv: () => Promise<{
+    ok: boolean;
+    canceled?: boolean;
+    importedFields: string[];
+    error?: string;
+  }>;
   getSetupStatus: (input?: Record<string, unknown>) => Promise<Record<string, unknown>>;
   runSetupAutomation: (config: Record<string, unknown>) => Promise<{
     ok: boolean;
@@ -234,6 +240,7 @@ contextBridge.exposeInMainWorld('somnibot', {
   // Config
   getConfig: () => ipcRenderer.invoke('get-config'),
   saveConfig: (config: Record<string, unknown>) => ipcRenderer.invoke('save-config', config),
+  importExistingEnv: () => ipcRenderer.invoke('import-existing-env'),
   getSetupStatus: (input?: Record<string, unknown>) => ipcRenderer.invoke('get-setup-status', input),
   runSetupAutomation: (config: Record<string, unknown>) =>
     ipcRenderer.invoke('run-setup-automation', config),

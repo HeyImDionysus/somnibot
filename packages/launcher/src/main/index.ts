@@ -38,6 +38,7 @@ import {
 import { validateAllCredentials, type FullValidationResult } from './validators.js';
 import { startAll, stopAll, getStatus, isRunning, checkPortAvailable, cleanupStaleProcesses } from './process-manager.js';
 import { maskRestoredCredentials, pushToSupabaseWithRetry } from './supabase-sync.js';
+import { importExistingSomniBotEnv } from './existing-env-import.js';
 import { initUpdater } from './updater.js';
 import { resolveLauncherDisplayVersion } from './launcher-version.js';
 import {
@@ -135,6 +136,15 @@ async function syncLauncherCredentials(config: LauncherConfig): Promise<void> {
     success: false,
     errorMessage: result.error ?? 'unknown error',
   });
+}
+
+let credentialSyncTail: Promise<void> = Promise.resolve();
+
+/** Serialize snapshots so a slower older write can never overwrite a newer save. */
+function queueLauncherCredentialSync(config: LauncherConfig): Promise<void> {
+  const queued = credentialSyncTail.then(() => syncLauncherCredentials(config));
+  credentialSyncTail = queued.catch(() => undefined);
+  return queued;
 }
 const DASHBOARD_SETUP_SNAPSHOT_CACHE_MS = 5_000;
 let dashboardSetupSnapshotCache: {
@@ -695,7 +705,7 @@ async function startLocalStack(
   startAll(envVars);
   lastStartedPayPalConfig = snapshotPayPalRuntimeConfig(config);
 
-  void syncLauncherCredentials(config);
+  void queueLauncherCredentialSync(config);
 
   return { ok: true };
 }
@@ -1038,6 +1048,36 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('save-config', (_event, config: Partial<LauncherConfig>) => {
     saveConfig(sanitizePayPalConfigPatch(config));
+    void queueLauncherCredentialSync(getConfig());
+  });
+
+  ipcMain.handle('import-existing-env', async () => {
+    const selection = await dialog.showOpenDialog({
+      title: 'Import an existing SomniBot setup',
+      properties: ['openFile'],
+      filters: [
+        { name: 'SomniBot environment', extensions: ['env'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (selection.canceled || selection.filePaths.length !== 1) {
+      return { ok: false, canceled: true, importedFields: [] };
+    }
+
+    const result = await importExistingSomniBotEnv(selection.filePaths[0]!, getConfig());
+    if (!result.ok) return result;
+    if (Object.keys(result.patch).length > 0) {
+      saveConfig(result.patch);
+      await queueLauncherCredentialSync(getConfig());
+    }
+    recordLauncherAudit({
+      action: 'launcher.credentials.existing_env_imported',
+      category: 'infrastructure',
+      targetType: 'credential_store',
+      details: { importedFieldCount: result.importedFields.length },
+      success: true,
+    });
+    return { ok: true, canceled: false, importedFields: result.importedFields };
   });
 
   ipcMain.handle('get-setup-status', async (_event, input: Partial<SetupFlowInput> = {}) => {
@@ -1253,7 +1293,7 @@ function registerIpcHandlers(): void {
       recordAudit: recordLauncherAudit,
       persistGeneratedSecrets: async (patch) => {
         saveConfig(patch);
-        await syncLauncherCredentials(getConfig());
+        await queueLauncherCredentialSync(getConfig());
       },
     });
   });

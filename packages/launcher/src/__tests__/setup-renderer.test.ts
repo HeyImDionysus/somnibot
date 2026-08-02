@@ -69,6 +69,23 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('else fields[key].value = String(value);');
   });
 
+  it('imports an established SomniBot environment without asking the owner to recreate credentials', () => {
+    const html = readSourceFile('renderer/index.html');
+    const renderer = readSourceFile('renderer/renderer.js');
+    const preload = readSourceFile('main/preload.ts');
+    const main = readSourceFile('main/index.ts');
+
+    expect(html).toContain('id="btn-import-existing-env"');
+    expect(html).toContain('Only missing launcher fields are filled.');
+    expect(renderer).toContain('window.somnibot.importExistingEnv()');
+    expect(renderer).toContain('applyConfigToForm(await window.somnibot.getConfig());');
+    expect(preload).toContain("ipcRenderer.invoke('import-existing-env')");
+    expect(main).toContain("ipcMain.handle('import-existing-env'");
+    expect(main).toContain("properties: ['openFile']");
+    expect(main).toContain('saveConfig(result.patch);');
+    expect(main).not.toContain('result.patch,');
+  });
+
   it('renders derived callback values from setup diagnostics without exposing ports in normal labels', () => {
     const renderer = readSourceFile('renderer/renderer.js');
 

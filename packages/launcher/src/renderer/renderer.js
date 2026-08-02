@@ -50,6 +50,7 @@ const btnSetupPayPalWebhook = $('btn-setup-paypal-webhook');
 const btnCheckUpdates = $('btn-check-updates');
 
 const btnRestoreCloud = $('btn-restore-cloud');
+const btnImportExistingEnv = $('btn-import-existing-env');
 const restoreBanner = $('restore-banner');
 
 const botDot = $('bot-dot');
@@ -135,6 +136,25 @@ let isVpsDeploymentActionRunning = false;
 /*  Init                                                               */
 /* ================================================================== */
 
+function applyConfigToForm(config) {
+  for (const [key, input] of Object.entries(fields)) {
+    if (!input) continue;
+    if (input.type === 'checkbox') {
+      input.checked = Boolean(config[key]);
+    } else if (config[key]) {
+      input.value = config[key];
+    }
+  }
+  for (const [key, input] of Object.entries(runtimeFields)) {
+    if (config[key]) input.value = config[key];
+  }
+  tailscalePublicCallbackBaseUrl = config.publicCallbackBaseUrl || '';
+  setRuntimeMode(config.runtimeMode === 'vps' ? 'vps' : 'regular-local', { save: false });
+  updateDiscordInviteButton();
+  updatePayPalWebhookButton();
+  updateRestoreBanner();
+}
+
 async function init() {
   // Show version
   try {
@@ -147,23 +167,7 @@ async function init() {
   // Load saved config
   try {
     const config = await window.somnibot.getConfig();
-    for (const [key, input] of Object.entries(fields)) {
-      if (!input) continue;
-      if (input.type === 'checkbox') {
-        input.checked = Boolean(config[key]);
-      } else if (config[key]) {
-        input.value = config[key];
-      }
-    }
-    for (const [key, input] of Object.entries(runtimeFields)) {
-      if (config[key]) {
-        input.value = config[key];
-      }
-    }
-    tailscalePublicCallbackBaseUrl = config.publicCallbackBaseUrl || '';
-    setRuntimeMode(config.runtimeMode === 'vps' ? 'vps' : 'regular-local', { save: false });
-    updateDiscordInviteButton();
-    updatePayPalWebhookButton();
+    applyConfigToForm(config);
   } catch (err) {
     console.error('Failed to load config:', err);
   }
@@ -1847,6 +1851,34 @@ function escapeHtml(str) {
 /* ================================================================== */
 /*  Cloud Restore                                                      */
 /* ================================================================== */
+
+btnImportExistingEnv.addEventListener('click', async () => {
+  btnImportExistingEnv.disabled = true;
+  btnImportExistingEnv.textContent = 'Importing...';
+  hideMessage();
+  try {
+    const result = await window.somnibot.importExistingEnv();
+    if (result.canceled) return;
+    if (!result.ok) {
+      showMessage('error', result.error || 'SomniBot could not import the selected setup.');
+      return;
+    }
+    applyConfigToForm(await window.somnibot.getConfig());
+    await refreshSetupStatus();
+    const importedCount = Array.isArray(result.importedFields) ? result.importedFields.length : 0;
+    showMessage(
+      'success',
+      importedCount > 0
+        ? `Recovered ${importedCount} missing setup field${importedCount === 1 ? '' : 's'} from the existing SomniBot installation.`
+        : 'The launcher already has every connection value found in that SomniBot installation.',
+    );
+  } catch (err) {
+    showMessage('error', `Import failed: ${err.message || err}`);
+  } finally {
+    btnImportExistingEnv.disabled = false;
+    btnImportExistingEnv.textContent = 'Import Existing Setup';
+  }
+});
 
 function updateRestoreBanner() {
   const hasSupabase = fields.supabaseUrl.value.trim() && fields.supabaseSecretKey.value.trim();
