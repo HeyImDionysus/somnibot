@@ -236,6 +236,20 @@ function makeMinimalGuild(guildId: string, guildName: string): Guild {
     id: guildId,
     name: guildName,
     ownerId: 'e2e-live-owner',
+    // Action-queue receipt delivery resolves users through guild.client and
+    // prepares a DM channel before binding its durable outward generation.
+    // The gateway-less harness supplies that final Discord boundary locally:
+    // production payload construction, generation fencing, and settlement all
+    // still run unchanged; only the external Discord send is a deterministic
+    // synthetic success (live Discord readback remains separately gated).
+    client: {
+      users: {
+        fetch: async (userId: string) => ({
+          id: userId,
+          createDM: async () => ({ send: async () => undefined }),
+        }),
+      },
+    },
     members: { me: null, cache: empty(), fetch: async () => empty() },
     channels: { cache: empty(), fetch: async () => empty() },
     roles: { cache: empty(), fetch: async () => empty() },
