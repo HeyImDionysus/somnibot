@@ -339,7 +339,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
 
 /** SET-A — owner opt-in takes live effect; member data-rights export is self-scoped. */
 async function SET_A(ctx: ScenarioContext): Promise<void> {
-  const logChannelId = `${ctx.runPrefix}log-chan`;
+  const logChannelId = ctx.snowflake('message-log-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {
@@ -399,7 +399,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
  * contracted second configuration is UNREPRESENTABLE in the current bot.
  */
 async function SET_B(ctx: ScenarioContext): Promise<void> {
-  const logChannelId = `${ctx.runPrefix}log-chan`;
+  const logChannelId = ctx.snowflake('message-log-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {
@@ -455,7 +455,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
 
 /** INVALID — a rejected invalid config never persists (dashboard Zod layer). */
 async function INVALID(ctx: ScenarioContext): Promise<void> {
-  const logChannelId = `${ctx.runPrefix}valid-chan`;
+  const logChannelId = ctx.snowflake('valid-message-log-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {
@@ -661,7 +661,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
 
 /** REPLAY — re-delivering recorded gateway events must not double-log. */
 async function REPLAY(ctx: ScenarioContext): Promise<void> {
-  const logChannelId = `${ctx.runPrefix}log-chan`;
+  const logChannelId = ctx.snowflake('message-log-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: { message_log_enabled: true, message_log_channel_id: logChannelId },
@@ -699,7 +699,7 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
 /** RESTART — logging configuration survives a full stack restart. */
 async function RESTART(ctx: ScenarioContext): Promise<void> {
   const guildId = ctx.scenarioGuildId('a');
-  const logChannelId = `${ctx.runPrefix}log-chan`;
+  const logChannelId = ctx.snowflake('message-log-channel');
 
   // Boot #1: enable logging + pick a channel, snapshot, then shut down.
   const first = await ctx.bootGuild({
@@ -752,7 +752,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
 
 /** RACE — concurrency is safe: one embed per event; a config toggle races cleanly. */
 async function RACE(ctx: ScenarioContext): Promise<void> {
-  const logChannelId = `${ctx.runPrefix}log-chan`;
+  const logChannelId = ctx.snowflake('message-log-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: { message_log_enabled: true, message_log_channel_id: logChannelId },
@@ -790,7 +790,7 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
 async function XGUILD(ctx: ScenarioContext): Promise<void> {
   const guildA = ctx.scenarioGuildId('a');
   const guildB = ctx.scenarioGuildId('b');
-  const logChannelA = `${ctx.runPrefix}log-chan-a`;
+  const logChannelA = ctx.snowflake('message-log-channel-a');
 
   const handleA = await ctx.bootGuild({
     guildId: guildA,
@@ -846,7 +846,7 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
 
 /** CLEANUP — the suite leaves no trace and honors erasure (anonymize-over-delete). */
 async function CLEANUP(ctx: ScenarioContext): Promise<void> {
-  const logChannelId = `${ctx.runPrefix}log-chan`;
+  const logChannelId = ctx.snowflake('message-log-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: { message_log_enabled: true, message_log_channel_id: logChannelId },

@@ -317,7 +317,7 @@ function gateCleanupDeferredTo(ctx: ScenarioContext, where: string): void {
 
 /** DEF — with only the channel selected, defaults rule (threshold 3, ⭐, no self-star). */
 async function DEF(ctx: ScenarioContext): Promise<void> {
-  const channel = `${ctx.runPrefix}sb-channel`;
+  const channel = ctx.snowflake('starboard-channel');
   // Boot with ONLY the starboard channel set — exactly "the owner picks a channel."
   // Every other starboard column takes its DB default, which is what a freshly
   // configured guild really loads.
@@ -389,7 +389,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
 
 /** SET-A — dashboard config (custom emoji 🌟, threshold 2) is saved and loaded. */
 async function SET_A(ctx: ScenarioContext): Promise<void> {
-  const channel = `${ctx.runPrefix}sb-channel`;
+  const channel = ctx.snowflake('starboard-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {
@@ -442,8 +442,8 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
 
 /** SET-B — a second distinct config (self-star on, channel switched) is saved live. */
 async function SET_B(ctx: ScenarioContext): Promise<void> {
-  const oldChannel = `${ctx.runPrefix}sb-channel-old`;
-  const newChannel = `${ctx.runPrefix}sb-channel-new`;
+  const oldChannel = ctx.snowflake('starboard-channel-old');
+  const newChannel = ctx.snowflake('starboard-channel-new');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {
@@ -504,7 +504,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
 
 /** INVALID — invalid config (threshold 0, malformed emoji) never persists; prior config stands. */
 async function INVALID(ctx: ScenarioContext): Promise<void> {
-  const channel = `${ctx.runPrefix}sb-channel`;
+  const channel = ctx.snowflake('starboard-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {
@@ -564,7 +564,7 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
 
 /** UNAUTH — starboard settings are admin-only; the config table is service_role-only. */
 async function UNAUTH(ctx: ScenarioContext): Promise<void> {
-  const channel = `${ctx.runPrefix}sb-channel`;
+  const channel = ctx.snowflake('starboard-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {
@@ -643,7 +643,7 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
 
 /** DEPFAIL — a deleted starboard channel degrades gracefully (fault-lane + gateway). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  const channel = `${ctx.runPrefix}sb-channel`;
+  const channel = ctx.snowflake('starboard-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {
@@ -687,7 +687,7 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
 
 /** RETRY — a transiently-failed entry post retries to exactly one entry (keyed by source msg id). */
 async function RETRY(ctx: ScenarioContext): Promise<void> {
-  const channel = `${ctx.runPrefix}sb-channel`;
+  const channel = ctx.snowflake('starboard-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {
@@ -745,7 +745,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
 
 /** REPLAY — re-delivered reaction events never duplicate the entry or its cardinality. */
 async function REPLAY(ctx: ScenarioContext): Promise<void> {
-  const channel = `${ctx.runPrefix}sb-channel`;
+  const channel = ctx.snowflake('starboard-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {
@@ -802,7 +802,7 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
 /** RESTART — starboard entries survive a full stack reboot; no boot-time duplicates. */
 async function RESTART(ctx: ScenarioContext): Promise<void> {
   const guildId = ctx.scenarioGuildId('a');
-  const channel = `${ctx.runPrefix}sb-channel`;
+  const channel = ctx.snowflake('starboard-channel');
   const msg = `${ctx.runPrefix}sb-restart-msg`;
   const overrides = {
     starboard_enabled: true,
@@ -861,7 +861,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
 
 /** RACE — two concurrent threshold-crossing stars produce exactly one entry. */
 async function RACE(ctx: ScenarioContext): Promise<void> {
-  const channel = `${ctx.runPrefix}sb-channel`;
+  const channel = ctx.snowflake('starboard-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {
@@ -926,11 +926,11 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   const guildB = ctx.scenarioGuildId('b');
   const handleA = await ctx.bootGuild({
     guildId: guildA,
-    guildConfigOverrides: { starboard_enabled: true, starboard_channel_id: `${ctx.runPrefix}sb-a`, starboard_threshold: 3 },
+    guildConfigOverrides: { starboard_enabled: true, starboard_channel_id: ctx.snowflake('starboard-channel-a'), starboard_threshold: 3 },
   });
   const handleB = await ctx.bootGuild({
     guildId: guildB,
-    guildConfigOverrides: { starboard_enabled: true, starboard_channel_id: `${ctx.runPrefix}sb-b`, starboard_threshold: 2 },
+    guildConfigOverrides: { starboard_enabled: true, starboard_channel_id: ctx.snowflake('starboard-channel-b'), starboard_threshold: 2 },
   });
 
   // source_message_id is globally UNIQUE, so each guild uses a distinct message id.
@@ -994,7 +994,7 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
 
 /** CLEANUP — the sweep leaves no trace: run-prefixed entries removed and verified absent. */
 async function CLEANUP(ctx: ScenarioContext): Promise<void> {
-  const channel = `${ctx.runPrefix}sb-channel`;
+  const channel = ctx.snowflake('starboard-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: { starboard_enabled: true, starboard_channel_id: channel, starboard_threshold: 3 },
