@@ -33,6 +33,21 @@ assert.match(releaseWorkflow, /provenance-\$\{\{ matrix\.artifact \}\}\.json/);
 assert.doesNotMatch(releaseWorkflow, /macos-latest|\.dmg|--mac/, 'release workflow must not publish macOS');
 assert.match(builderConfig, /target: nsis/);
 assert.match(builderConfig, /target: AppImage/);
+assert.match(
+  builderConfig,
+  /^executableName: SomniBot$/m,
+  'scoped package names must not leak into Windows or Linux executable paths',
+);
+assert.match(
+  builderConfig,
+  /^  name: somnibot-launcher$/m,
+  'packaged metadata must use a filesystem-safe unscoped name',
+);
+assert.match(
+  builderConfig,
+  /^  syncDesktopName: true$/m,
+  'Linux window association must use the declared desktop name',
+);
 assert.doesNotMatch(builderConfig, /^mac:/m, 'electron-builder must not define a macOS target');
 assert.doesNotMatch(buildScript, /'--mac': '--mac'/, 'build script must not expose a macOS target');
 assert.match(buildScript, /macOS launcher builds are not supported for the v1 release\./);
