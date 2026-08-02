@@ -41,6 +41,11 @@ import { maskRestoredCredentials, pushToSupabase } from './supabase-sync.js';
 import { initUpdater } from './updater.js';
 import { resolveLauncherDisplayVersion } from './launcher-version.js';
 import {
+  MASKED_SECRET,
+  maskConfigSecrets,
+  sanitizeConfigPatchForStorage,
+} from './config-bridge.js';
+import {
   checkJava,
   downloadLavalink,
   startLavalink,
@@ -79,8 +84,6 @@ let mainWindow: BrowserWindow | null = null;
 let sessionToken: string | null = null;
 let lastStartedPayPalConfig: PayPalRuntimeConfig | null = null;
 const activeVpsDeployment = new VpsDeploymentRunGate();
-const MASKED_SECRET = '••••••••';
-
 /**
  * [infrastructure-launcher] Fire-and-forget durable audit for launcher-side
  * lifecycle/security operations. Resolves the current Supabase creds + target
@@ -163,22 +166,7 @@ interface SetupAutomationResult {
 }
 
 function sanitizeConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch {
-  const sanitized = { ...config };
-  for (const key of [
-    'supabaseSecretKey',
-    'supabaseDbPassword',
-    'supabaseAccessToken',
-    'paypalClientSecret',
-    'paypalWebhookId',
-    'discordToken',
-    'discordClientSecret',
-    'tailscaleAuthKey',
-  ] as const) {
-    if (sanitized[key] === MASKED_SECRET) {
-      delete sanitized[key];
-    }
-  }
-  return sanitized;
+  return sanitizeConfigPatchForStorage(config);
 }
 
 function sanitizePayPalConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch {
@@ -976,22 +964,20 @@ function registerIpcHandlers(): void {
   // ── Config ──
   ipcMain.handle('get-config', () => {
     const config = getConfig();
-    return {
+    return maskConfigSecrets({
       discordToken: config.discordToken,
       discordApplicationId: config.discordApplicationId,
       discordClientSecret: config.discordClientSecret,
       discordGuildId: config.discordGuildId,
       supabaseUrl: config.supabaseUrl,
-      // V5 Audit §10.P3a: Mask secret key — renderer only needs to know if it's set,
-      // not the actual value. Supabase operations are handled in the main process.
-      supabaseSecretKey: config.supabaseSecretKey ? '••••••••' : '',
+      supabaseSecretKey: config.supabaseSecretKey,
       supabasePublishableKey: config.supabasePublishableKey,
-      supabaseDbPassword: config.supabaseDbPassword ? '••••••••' : '',
-      supabaseAccessToken: config.supabaseAccessToken ? '••••••••' : '',
+      supabaseDbPassword: config.supabaseDbPassword,
+      supabaseAccessToken: config.supabaseAccessToken,
       supabaseDiscordAuthProviderConfigured: config.supabaseDiscordAuthProviderConfigured,
       paypalClientId: config.paypalClientId,
-      paypalClientSecret: config.paypalClientSecret ? '••••••••' : '',
-      paypalWebhookId: config.paypalWebhookId ? '••••••••' : '',
+      paypalClientSecret: config.paypalClientSecret,
+      paypalWebhookId: config.paypalWebhookId,
       paypalSandbox: config.paypalSandbox,
       runtimeMode: config.runtimeMode,
       publicCallbackBaseUrl: config.publicCallbackBaseUrl,
@@ -999,8 +985,8 @@ function registerIpcHandlers(): void {
       vpsSshHost: config.vpsSshHost,
       vpsSshUser: config.vpsSshUser,
       vpsDeployPath: config.vpsDeployPath,
-      tailscaleAuthKey: config.tailscaleAuthKey ? '••••••••' : '',
-    };
+      tailscaleAuthKey: config.tailscaleAuthKey,
+    });
   });
 
   ipcMain.handle('save-config', (_event, config: Partial<LauncherConfig>) => {

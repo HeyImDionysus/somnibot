@@ -1,28 +1,19 @@
 /**
  * V5 Audit §13.P3b — Launcher unit tests for config-store logic.
  *
- * Tests the pure-function parts of config-store (validation, defaults,
- * sensitive field masking, and mask-aware save filtering).
+ * Tests config validation plus the production IPC masking and save filtering.
  */
 
 import { describe, it, expect } from 'vitest';
 import { buildDbUrlEnv } from '../main/supabase-db-url.js';
+import {
+  MASKED_SECRET,
+  maskConfigSecrets,
+  sanitizeConfigPatchForStorage,
+} from '../main/config-bridge.js';
 
 // The config shape from config-store.ts (replicated here since the
 // module imports electron-store which isn't available outside Electron).
-const SENSITIVE_KEYS = [
-  'discordToken',
-  'discordClientSecret',
-  'supabaseSecretKey',
-  'supabaseDbPassword',
-  'supabaseAccessToken',
-  'paypalClientSecret',
-  'paypalWebhookId',
-  'tailscaleAuthKey',
-] as const;
-
-const MASK = '••••••••';
-
 const REQUIRED_FOR_LAUNCH = [
   'discordToken',
   'supabaseUrl',
@@ -59,27 +50,6 @@ function isReadyToLaunch(config: LauncherConfig): boolean {
     const val = config[key as keyof LauncherConfig];
     return typeof val === 'string' && val.length > 0;
   });
-}
-
-function maskSensitive(config: LauncherConfig): Record<string, unknown> {
-  const masked: Record<string, unknown> = { ...config };
-  for (const key of SENSITIVE_KEYS) {
-    if (typeof masked[key] === 'string' && (masked[key] as string).length > 0) {
-      masked[key] = MASK;
-    }
-  }
-  return masked;
-}
-
-/** Strips mask placeholders so save-config never overwrites real secrets. */
-function stripMaskedFields(config: Partial<LauncherConfig>): Partial<LauncherConfig> {
-  const sanitized = { ...config };
-  for (const key of SENSITIVE_KEYS) {
-    if (sanitized[key] === MASK) {
-      delete sanitized[key];
-    }
-  }
-  return sanitized;
 }
 
 describe('Launcher Config', () => {
@@ -143,15 +113,15 @@ describe('Launcher Config', () => {
   });
 
   it('masks sensitive fields for display', () => {
-    const masked = maskSensitive(validConfig);
-    expect(masked.discordToken).toBe(MASK);
-    expect(masked.discordClientSecret).toBe(MASK);
-    expect(masked.supabaseSecretKey).toBe(MASK);
-    expect(masked.supabaseDbPassword).toBe(MASK);
-    expect(masked.supabaseAccessToken).toBe(MASK);
-    expect(masked.paypalClientSecret).toBe(MASK);
-    expect(masked.paypalWebhookId).toBe(MASK);
-    expect(masked.tailscaleAuthKey).toBe(MASK);
+    const masked = maskConfigSecrets(validConfig);
+    expect(masked.discordToken).toBe(MASKED_SECRET);
+    expect(masked.discordClientSecret).toBe(MASKED_SECRET);
+    expect(masked.supabaseSecretKey).toBe(MASKED_SECRET);
+    expect(masked.supabaseDbPassword).toBe(MASKED_SECRET);
+    expect(masked.supabaseAccessToken).toBe(MASKED_SECRET);
+    expect(masked.paypalClientSecret).toBe(MASKED_SECRET);
+    expect(masked.paypalWebhookId).toBe(MASKED_SECRET);
+    expect(masked.tailscaleAuthKey).toBe(MASKED_SECRET);
     // Non-sensitive fields are preserved
     expect(masked.supabaseUrl).toBe(validConfig.supabaseUrl);
     expect(masked.discordGuildId).toBe(validConfig.discordGuildId);
@@ -160,7 +130,7 @@ describe('Launcher Config', () => {
 
   it('does not mask empty sensitive fields', () => {
     const emptyConfig = { ...validConfig, discordToken: '', discordClientSecret: '' };
-    const masked = maskSensitive(emptyConfig);
+    const masked = maskConfigSecrets(emptyConfig);
     expect(masked.discordToken).toBe('');
     expect(masked.discordClientSecret).toBe('');
   });
@@ -168,26 +138,26 @@ describe('Launcher Config', () => {
   it('strips mask placeholders before save so real secrets are preserved', () => {
     // Simulate what happens: renderer sends back masked values from get-config
     const fromRenderer: Partial<LauncherConfig> = {
-      discordToken: MASK,
+      discordToken: MASKED_SECRET,
       discordApplicationId: '12345',
-      discordClientSecret: MASK,
+      discordClientSecret: MASKED_SECRET,
       discordGuildId: '67890-new',
       supabaseUrl: 'https://updated.supabase.co',
-      supabaseSecretKey: MASK,
-      supabaseDbPassword: MASK,
-      supabaseAccessToken: MASK,
+      supabaseSecretKey: MASKED_SECRET,
+      supabaseDbPassword: MASKED_SECRET,
+      supabaseAccessToken: MASKED_SECRET,
       paypalClientId: 'paypal-client-id-new',
-      paypalClientSecret: MASK,
-      paypalWebhookId: MASK,
+      paypalClientSecret: MASKED_SECRET,
+      paypalWebhookId: MASKED_SECRET,
       paypalSandbox: false,
-      tailscaleAuthKey: MASK,
+      tailscaleAuthKey: MASKED_SECRET,
       supabasePublishableKey: 'new-pub-key',
       supabaseDiscordAuthProviderConfigured: true,
       runtimeMode: 'vps',
       vpsDomain: 'somnibot.example.com',
     };
 
-    const sanitized = stripMaskedFields(fromRenderer);
+    const sanitized = sanitizeConfigPatchForStorage(fromRenderer);
 
     // Masked fields should be stripped (not saved, so store keeps the real value)
     expect(sanitized).not.toHaveProperty('discordToken');
@@ -222,7 +192,7 @@ describe('Launcher Config', () => {
       tailscaleAuthKey: 'brand-new-tailscale-key',
     };
 
-    const sanitized = stripMaskedFields(fromRenderer);
+    const sanitized = sanitizeConfigPatchForStorage(fromRenderer);
 
     // Real values (not the mask) should be kept
     expect(sanitized.discordToken).toBe('brand-new-token');

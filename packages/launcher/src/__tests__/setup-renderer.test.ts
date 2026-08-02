@@ -196,6 +196,7 @@ describe('launcher setup renderer wiring', () => {
     const main = readSourceFile('main/index.ts');
     const renderer = readSourceFile('renderer/renderer.js');
     const configStore = readSourceFile('main/config-store.ts');
+    const configBridge = readSourceFile('main/config-bridge.ts');
     const validationIndex = main.indexOf('const validation = await validateAllCredentials(config);');
     const authProviderReadinessIndex = main.indexOf('const dashboardVerifiedAuthProvider = !callbackBaseUrlChanged');
     const authProviderIndex = main.indexOf('&& !dashboardVerifiedAuthProvider');
@@ -263,8 +264,12 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('paypalWebhookProofKey');
     expect(main).toContain('paypalWebhook: input.paypalWebhook ?? persistedPayPalWebhookProof');
     expect(main).toContain('callbackProbe: input.callbackProbe');
-    expect(main).toContain('paypalClientSecret: config.paypalClientSecret ?');
-    expect(main).toContain('paypalWebhookId: config.paypalWebhookId ?');
+    expect(main).toContain('return maskConfigSecrets({');
+    expect(main).toContain('paypalClientSecret: config.paypalClientSecret');
+    expect(main).toContain('paypalWebhookId: config.paypalWebhookId');
+    expect(configBridge).toContain("'discordToken'");
+    expect(configBridge).toContain("'discordClientSecret'");
+    expect(configBridge).toContain("'paypalClientSecret'");
     expect(configStore).toContain('PAYPAL_CLIENT_ID: config.paypalClientId');
     expect(configStore).toContain('PAYPAL_CLIENT_SECRET: config.paypalClientSecret');
     expect(configStore).toContain('PAYPAL_WEBHOOK_ID: config.paypalWebhookId');
