@@ -215,4 +215,30 @@ describe('full provider validation checks', () => {
       expect.any(Object),
     );
   });
+
+  it('rejects malformed non-ASCII Discord tokens before constructing an Authorization header', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({}));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await validateAllCredentials({
+      discordToken: 'valid-token→corrupted',
+      discordApplicationId: 'app-123',
+      discordClientSecret: 'client-secret',
+      discordGuildId: '',
+      supabaseUrl: 'https://project.supabase.co',
+      supabaseSecretKey: 'sb_secret_key',
+      supabasePublishableKey: 'sb_publishable_key',
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('unsupported characters');
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://project.supabase.co/rest/v1/',
+      expect.any(Object),
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      'https://discord.com/api/v10/users/@me',
+      expect.any(Object),
+    );
+  });
 });

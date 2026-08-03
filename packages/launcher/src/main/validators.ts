@@ -35,11 +35,22 @@ export interface ProviderValidationCheck {
 /* ------------------------------------------------------------------ */
 
 export async function validateDiscordToken(token: string): Promise<ValidationResult> {
-  if (!token.trim()) return { ok: false, code: 'invalid', error: 'Discord token is required.' };
+  const normalized = token.trim();
+  if (!normalized) return { ok: false, code: 'invalid', error: 'Discord token is required.' };
+  if (![...normalized].every((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint >= 0x21 && codePoint <= 0x7e;
+  })) {
+    return {
+      ok: false,
+      code: 'invalid',
+      error: 'Discord bot token contains unsupported characters. Re-copy only the token from Discord Developer Portal → Bot → Token.',
+    };
+  }
 
   try {
     const res = await fetch('https://discord.com/api/v10/users/@me', {
-      headers: { Authorization: `Bot ${token.trim()}` },
+      headers: { Authorization: `Bot ${normalized}` },
       signal: AbortSignal.timeout(10_000),
     });
 
