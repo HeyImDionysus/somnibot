@@ -1,5 +1,41 @@
 import type { VpsDeploymentExecutionResult } from './vps-deployment-executor.js';
 
+interface LocalBotStatus {
+  bot: string;
+  botPid?: number;
+  lastHeartbeat?: number;
+}
+
+export async function waitForFreshLocalBotReady(
+  options: {
+    readStatus: () => LocalBotStatus;
+    startedAfter: number;
+    previousBotPid?: number;
+    wait?: (delayMs: number) => Promise<void>;
+    now?: () => number;
+    timeoutMs?: number;
+  },
+): Promise<void> {
+  const wait = options.wait ?? ((delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  const now = options.now ?? Date.now;
+  const deadline = now() + (options.timeoutMs ?? 65_000);
+
+  while (true) {
+    const status = options.readStatus();
+    const hasFreshProcess = Number.isInteger(status.botPid)
+      && status.botPid !== undefined
+      && (options.previousBotPid === undefined || status.botPid !== options.previousBotPid);
+    const hasFreshReadySignal = status.lastHeartbeat !== undefined
+      && status.lastHeartbeat >= options.startedAfter;
+    if (status.bot === 'online' && hasFreshProcess && hasFreshReadySignal) return;
+
+    if (now() >= deadline) {
+      throw new Error('The restored local bot did not report a fresh Discord-ready signal before the recovery deadline.');
+    }
+    await wait(100);
+  }
+}
+
 export async function waitForProcessIdsToExit(
   processIds: Array<number | undefined>,
   options: {

@@ -72,7 +72,11 @@ import { handleVpsDeploymentRunRequest, type VpsDeploymentRunRequest } from './v
 import { ensurePersistedVpsSecrets } from './vps-env-materializer.js';
 import { handleVpsRollbackRunRequest, type VpsRollbackRunRequest } from './vps-rollback-request.js';
 import { planVpsSshPreflight } from './vps-preflight.js';
-import { runLocalToVpsHandoff, waitForProcessIdsToExit } from './local-vps-handoff.js';
+import {
+  runLocalToVpsHandoff,
+  waitForFreshLocalBotReady,
+  waitForProcessIdsToExit,
+} from './local-vps-handoff.js';
 import {
   startLocalValkeyBackupSchedule,
   stopLocalValkeyBackupSchedule,
@@ -1321,6 +1325,7 @@ function registerIpcHandlers(): void {
       runApprovedDeployment: (executeDeployment, plan) => {
         const localWasRunning = isRunning();
         const localProcessIds = getStatus();
+        let localStopCompleted = false;
         const cleanupRunner = createVpsCommandRunner();
         return runLocalToVpsHandoff({
           localWasRunning,
@@ -1332,6 +1337,7 @@ function registerIpcHandlers(): void {
             sessionToken = null;
             lastStartedPayPalConfig = null;
             await waitForProcessIdsToExit([localProcessIds.botPid, localProcessIds.dashboardPid]);
+            localStopCompleted = true;
           },
           quiesceVpsAfterFailure: async (result) => {
             const startAttempted = !result || result.commandStates.some((command) => (
@@ -1351,11 +1357,17 @@ function registerIpcHandlers(): void {
             return stopped.ok;
           },
           restoreLocal: async () => {
+            const restoreStartedAt = Date.now();
             const restored = await runLocalSetupAutomation({
               runtimeMode: 'regular-local',
               publicCallbackBaseUrl: cfg.publicCallbackBaseUrl,
             });
             if (!restored.ok) throw new Error(restored.error || 'Local SomniBot and its provider callbacks could not be restored.');
+            await waitForFreshLocalBotReady({
+              readStatus: getStatus,
+              startedAfter: restoreStartedAt,
+              previousBotPid: localStopCompleted ? localProcessIds.botPid : undefined,
+            });
           },
           executeDeployment,
         });

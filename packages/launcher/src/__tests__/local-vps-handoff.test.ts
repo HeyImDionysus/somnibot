@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { runLocalToVpsHandoff, waitForProcessIdsToExit } from '../main/local-vps-handoff.js';
+import {
+  runLocalToVpsHandoff,
+  waitForFreshLocalBotReady,
+  waitForProcessIdsToExit,
+} from '../main/local-vps-handoff.js';
 import type { VpsDeploymentExecutionResult } from '../main/vps-deployment-executor.js';
 
 function result(state: VpsDeploymentExecutionResult['state']): VpsDeploymentExecutionResult {
@@ -14,6 +18,38 @@ function result(state: VpsDeploymentExecutionResult['state']): VpsDeploymentExec
 }
 
 describe('local to VPS runtime handoff', () => {
+  it('requires a new bot process and a fresh Discord-ready IPC signal', async () => {
+    let now = 2_000;
+    const statuses = [
+      { bot: 'online', botPid: 10, lastHeartbeat: 1_900 },
+      { bot: 'online', botPid: 20, lastHeartbeat: 1_900 },
+      { bot: 'online', botPid: 20, lastHeartbeat: 2_000 },
+    ];
+    let statusIndex = 0;
+
+    await waitForFreshLocalBotReady({
+      readStatus: () => statuses[Math.min(statusIndex++, statuses.length - 1)]!,
+      startedAfter: 2_000,
+      previousBotPid: 10,
+      now: () => now,
+      wait: async () => { now += 100; },
+    });
+
+    expect(statusIndex).toBe(3);
+  });
+
+  it('rejects stale online state instead of treating it as a restored bot', async () => {
+    let now = 2_000;
+    await expect(waitForFreshLocalBotReady({
+      readStatus: () => ({ bot: 'online', botPid: 10, lastHeartbeat: 1_999 }),
+      startedAfter: 2_000,
+      previousBotPid: 10,
+      timeoutMs: 200,
+      now: () => now,
+      wait: async () => { now += 100; },
+    })).rejects.toThrow('fresh Discord-ready signal');
+  });
+
   it('waits until every managed local process has exited', async () => {
     let now = 0;
     let checks = 0;
