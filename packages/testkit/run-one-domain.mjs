@@ -109,18 +109,24 @@ try {
     },
   });
   const s = mod.summarize(report);
+  // The fleet aggregate closes functional assertion cells, not every internal
+  // facet record. A class is GATED when any of its records is gated; emit one
+  // deterministic inventory entry per scenario/class so the manifest count
+  // matches summarize(report).gated and external receipts cannot be duplicated
+  // or silently hidden behind raw facet multiplicity.
   const gates = report.scenarios.flatMap((scenario) =>
-    scenario.classes.flatMap((evidence) =>
-      evidence.records
-        .filter((record) => record.status === 'GATED')
-        .map((record) => ({
-          scenario: scenario.scenarioClass,
-          class: record.assertionClass,
-          channel: record.channel,
-          promise: record.promise,
-          reason: record.gateReason ?? '(no gate reason recorded)',
-        })),
-    ),
+    scenario.classes.flatMap((evidence) => {
+      if (evidence.status !== 'GATED') return [];
+      const record = evidence.records.find((candidate) => candidate.status === 'GATED')
+        ?? evidence.records[0];
+      return [{
+        scenario: scenario.scenarioClass,
+        class: evidence.assertionClass,
+        channel: record.channel,
+        promise: record.promise,
+        reason: record.gateReason ?? '(no gate reason recorded)',
+      }];
+    }),
   );
   emit({
     pass: s.pass,
