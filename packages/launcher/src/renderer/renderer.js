@@ -52,6 +52,8 @@ const supabaseProjectPicker = $('supabase-project-picker');
 const supabaseProjectSelect = $('supabase-project-select');
 const btnSelectSupabaseProject = $('btn-select-supabase-project');
 const supabaseProjectStatus = $('supabase-project-status');
+const btnGenerateSupabaseDbPassword = $('btn-generate-supabase-db-password');
+const supabaseDbPasswordStatus = $('supabase-db-password-status');
 const btnSetupPayPalWebhook = $('btn-setup-paypal-webhook');
 const btnCheckUpdates = $('btn-check-updates');
 
@@ -1306,6 +1308,37 @@ btnSelectSupabaseProject.addEventListener('click', async () => {
   } finally {
     btnSelectSupabaseProject.disabled = false;
     btnSelectSupabaseProject.textContent = 'Use Selected Project';
+  }
+});
+
+btnGenerateSupabaseDbPassword.addEventListener('click', async () => {
+  btnGenerateSupabaseDbPassword.disabled = true;
+  btnGenerateSupabaseDbPassword.textContent = 'Generating...';
+  supabaseDbPasswordStatus.textContent = 'Waiting for confirmation, then updating Supabase and saving the new password.';
+  hideMessage();
+
+  try {
+    const result = await window.somnibot.generateSupabaseDatabasePassword();
+    if (result.canceled) {
+      supabaseDbPasswordStatus.textContent = 'Password generation canceled.';
+      return;
+    }
+    if (!result.ok) {
+      supabaseDbPasswordStatus.textContent = result.error || 'Could not generate a Supabase database password.';
+      showMessage('error', result.error || 'Could not generate a Supabase database password.');
+      return;
+    }
+
+    applyConfigToForm(await window.somnibot.getConfig());
+    await refreshSetupStatus();
+    supabaseDbPasswordStatus.textContent = 'A new database password was generated and saved. Restart or redeploy any direct Postgres installation.';
+    showMessage('success', 'Supabase database password generated and saved to SomniBot.');
+  } catch (err) {
+    supabaseDbPasswordStatus.textContent = `Password generation failed: ${err.message || err}`;
+    showMessage('error', `Password generation failed: ${err.message || err}`);
+  } finally {
+    btnGenerateSupabaseDbPassword.disabled = false;
+    btnGenerateSupabaseDbPassword.textContent = 'Generate database password';
   }
 });
 

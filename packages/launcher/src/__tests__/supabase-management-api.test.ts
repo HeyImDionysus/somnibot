@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   getSupabaseProjectCredentials,
   listSupabaseProjects,
+  updateSupabaseDatabasePassword,
 } from '../main/supabase-management-api.js';
 
 function response(body: unknown, status = 200): Response {
@@ -107,5 +108,28 @@ describe('Supabase Management API project discovery', () => {
       ok: false,
       error: 'Supabase project reference is invalid.',
     });
+  });
+
+  it('updates a database password without returning the password material', async () => {
+    let request: { url: string; method: string | undefined; body: string | undefined } | undefined;
+    const result = await updateSupabaseDatabasePassword('sbp-test-token', 'project-ref', 'a'.repeat(32), {
+      baseUrl: 'https://management.test',
+      fetchImpl: async (input, init) => {
+        request = {
+          url: String(input),
+          method: init?.method,
+          body: typeof init?.body === 'string' ? init.body : undefined,
+        };
+        return response({ message: 'updated' });
+      },
+    });
+
+    expect(result).toEqual({ ok: true, updated: true });
+    expect(request).toEqual({
+      url: 'https://management.test/v1/projects/project-ref/database/password',
+      method: 'PATCH',
+      body: JSON.stringify({ password: 'a'.repeat(32) }),
+    });
+    expect(JSON.stringify(result)).not.toContain('a'.repeat(32));
   });
 });

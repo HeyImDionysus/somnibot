@@ -145,6 +145,12 @@ export interface SomniBotAPI {
     publishableKeyReady?: boolean;
     error?: string;
   }>;
+  generateSupabaseDatabasePassword: () => Promise<{
+    ok: boolean;
+    canceled?: boolean;
+    databasePasswordReady?: boolean;
+    error?: string;
+  }>;
   runVpsDeployment: (payload: {
     operatorApproved: boolean;
     approvedCommandIds: string[];
@@ -285,6 +291,7 @@ contextBridge.exposeInMainWorld('somnibot', {
   pullFromSupabase: () => ipcRenderer.invoke('pull-from-supabase'),
   discoverSupabaseProjects: () => ipcRenderer.invoke('supabase:discover-projects'),
   selectSupabaseProject: (ref: string) => ipcRenderer.invoke('supabase:select-project', ref),
+  generateSupabaseDatabasePassword: () => ipcRenderer.invoke('supabase:generate-db-password'),
   runVpsDeployment: (payload) => ipcRenderer.invoke('vps:run-deployment', payload),
   runVpsRollback: (payload) => ipcRenderer.invoke('vps:run-rollback', payload),
   runVpsPreflight: () => ipcRenderer.invoke('vps:run-preflight'),

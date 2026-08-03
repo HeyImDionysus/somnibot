@@ -42,6 +42,7 @@ import { maskRestoredCredentials, pushToSupabaseWithRetry } from './supabase-syn
 import {
   getSupabaseProjectCredentials,
   listSupabaseProjects,
+  updateSupabaseDatabasePassword,
 } from './supabase-management-api.js';
 import { importExistingSomniBotEnv } from './existing-env-import.js';
 import { restoreMissingCredentialsOnStartup } from './credential-bootstrap.js';
@@ -1751,6 +1752,52 @@ function registerIpcHandlers(): void {
       secretKeyReady: Boolean(result.credentials.secretKey),
       publishableKeyReady: Boolean(result.credentials.publishableKey),
     };
+  });
+
+  ipcMain.handle('supabase:generate-db-password', async () => {
+    const current = getConfig();
+    const ref = getSupabaseProjectRef(current.supabaseUrl);
+    if (!ref) return { ok: false, error: 'Select a valid Supabase project before generating its database password.' };
+    if (!current.supabaseAccessToken.trim()) {
+      return { ok: false, error: 'Save a Supabase Management API token before generating a database password.' };
+    }
+
+    const confirmation = await dialog.showMessageBox({
+      type: 'warning',
+      title: 'Generate a new Supabase database password?',
+      message: 'This changes the password on the selected Supabase project.',
+      detail: [
+        'Any existing direct Postgres connection using the old password will stop working immediately.',
+        'SomniBot will save the new password locally and in its shared instance settings so a later local/VPS setup can use it.',
+        'Continue only if you control the project and are ready to restart or redeploy any existing installation.',
+      ].join('\n\n'),
+      buttons: ['Cancel', 'Generate and save'],
+      cancelId: 0,
+      defaultId: 0,
+    });
+    if (confirmation.response !== 1) return { ok: false, canceled: true };
+
+    const newPassword = crypto.randomBytes(32).toString('hex');
+    const result = await updateSupabaseDatabasePassword(
+      current.supabaseAccessToken,
+      ref,
+      newPassword,
+    );
+    if (!result.ok) return result;
+
+    try {
+      saveConfig({ supabaseDbPassword: newPassword });
+      await queueLauncherCredentialSync(getConfig());
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error
+          ? `Supabase accepted the new password, but SomniBot could not persist it locally: ${error.message}`
+          : 'Supabase accepted the new password, but SomniBot could not persist it locally.',
+      };
+    }
+
+    return { ok: true, databasePasswordReady: true };
   });
 
   // ── Tailscale / public callback readiness ──

@@ -39,6 +39,11 @@ interface ManagementApiOptions {
   timeoutMs?: number;
 }
 
+interface ManagementRequestOptions {
+  method?: string;
+  body?: unknown;
+}
+
 interface RawProject {
   id?: unknown;
   ref?: unknown;
@@ -91,6 +96,7 @@ async function requestJson<T>(
   path: string,
   action: string,
   options: ManagementApiOptions,
+  request: ManagementRequestOptions = {},
 ): Promise<SupabaseManagementResult<{ data: T }>> {
   const normalized = normalizedToken(token);
   if (!normalized) return { ok: false, error: 'Enter a Supabase Management API token first.' };
@@ -100,10 +106,13 @@ async function requestJson<T>(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   try {
     const response = await fetchImpl(`${baseUrl}${path}`, {
+      ...(request.method ? { method: request.method } : {}),
       headers: {
         Accept: 'application/json',
+        ...(request.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         Authorization: `Bearer ${normalized}`,
       },
+      ...(request.body !== undefined ? { body: JSON.stringify(request.body) } : {}),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) return managementError(response, action);
@@ -186,6 +195,36 @@ export async function getSupabaseProjectCredentials(
       ...(publishableKey ? { publishableKey } : {}),
     },
   };
+}
+
+/**
+ * Rotate the selected project's database password after an explicit operator
+ * action. Supabase never returns the old password; the caller supplies the
+ * newly generated value and receives only success/readiness metadata back.
+ */
+export async function updateSupabaseDatabasePassword(
+  token: string,
+  ref: string,
+  password: string,
+  options: ManagementApiOptions = {},
+): Promise<SupabaseManagementResult<{ updated: true }>> {
+  const normalizedRef = projectRef(ref);
+  if (!normalizedRef) return { ok: false, error: 'Supabase project reference is invalid.' };
+
+  const normalizedPassword = password.trim();
+  if (normalizedPassword.length < 16 || normalizedPassword.length > 128 || /[\r\n]/.test(normalizedPassword)) {
+    return { ok: false, error: 'Generated Supabase database password did not meet the safety requirements.' };
+  }
+
+  const response = await requestJson<{ message?: string }>(
+    token,
+    `/v1/projects/${encodeURIComponent(normalizedRef)}/database/password`,
+    'updating the database password',
+    options,
+    { method: 'PATCH', body: { password: normalizedPassword } },
+  );
+  if (!response.ok) return response;
+  return { ok: true, updated: true };
 }
 
 export const __private__ = { keyKind, projectFromRaw, projectRef };

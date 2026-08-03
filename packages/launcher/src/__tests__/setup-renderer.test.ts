@@ -20,6 +20,8 @@ describe('launcher setup renderer wiring', () => {
     expect(html).toContain('id="summary-paypal-webhook"');
     expect(html).toContain('id="vps-deployment-plan"');
     expect(html).toContain('id="supabaseAccessToken"');
+    expect(html).toContain('id="btn-generate-supabase-db-password"');
+    expect(html).toContain('invalidates existing direct database connections');
     expect(html).toContain('id="btn-discover-supabase"');
     expect(html).toContain('id="supabase-project-picker"');
     expect(html).toContain('id="supabase-project-select"');
@@ -70,10 +72,12 @@ describe('launcher setup renderer wiring', () => {
 
     expect(renderer).toContain('window.somnibot.discoverSupabaseProjects()');
     expect(renderer).toContain('window.somnibot.selectSupabaseProject(ref)');
+    expect(renderer).toContain('window.somnibot.generateSupabaseDatabasePassword()');
     expect(renderer).toContain('if (!result.secretKeyReady) fields.supabaseSecretKey.value = \'\';');
     expect(renderer).toContain('if (!result.publishableKeyReady) fields.supabasePublishableKey.value = \'\';');
     expect(preload).toContain("ipcRenderer.invoke('supabase:discover-projects')");
     expect(preload).toContain("ipcRenderer.invoke('supabase:select-project', ref)");
+    expect(preload).toContain("ipcRenderer.invoke('supabase:generate-db-password')");
     expect(main).toContain("ipcMain.handle('supabase:discover-projects'");
     expect(main).toContain("ipcMain.handle('supabase:select-project'");
     expect(main).toContain('secretKeyReady: Boolean(result.credentials.secretKey)');

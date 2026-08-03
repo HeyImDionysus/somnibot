@@ -61,7 +61,7 @@
         <ol class="onboarding-steps-list">
           <li>Create a Discord application and bot, then copy the token, application ID, and client secret.</li>
           <li>Create a Supabase project, then copy the project URL, publishable key, and secret key.</li>
-          <li>Use the database password only for local migrations.</li>
+          <li>Leave the database password blank unless direct Postgres access is needed; the launcher can generate one when required.</li>
         </ol>
         <div class="onboarding-actions">
           <button class="btn btn-secondary" id="onboarding-open-discord">Open Discord ↗</button>
@@ -269,8 +269,13 @@
           </div>
           <div class="field">
             <label for="supabaseDbPassword">Database Password <small>(for migrations)</small></label>
-            <input type="password" id="supabaseDbPassword" placeholder="The password you set when creating the Supabase project" autocomplete="off" />
+            <input type="password" id="supabaseDbPassword" placeholder="Existing password, or generate one below" autocomplete="off" />
             <button class="toggle-vis" data-target="supabaseDbPassword" title="Show/hide">👁</button>
+            <div class="field-actions">
+              <button class="btn btn-secondary" id="btn-generate-supabase-db-password" type="button">Generate database password</button>
+            </div>
+            <p class="field-help">Use this only when direct Postgres access is needed for VPS or migrations. It rotates the Supabase password and invalidates existing direct database connections.</p>
+            <p id="supabase-db-password-status" class="field-help"></p>
           </div>
           <div class="field">
             <label for="supabaseAccessToken">Management API Token <span class="opt">(optional)</span></label>
