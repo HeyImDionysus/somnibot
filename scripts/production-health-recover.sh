@@ -27,6 +27,9 @@ exec 9>"$lock_file"
 if ! flock -n 9; then
   exit 0
 fi
+if [ -f "$state_dir/maintenance" ]; then
+  exit 0
+fi
 
 log() {
   logger -t somnibot-health-recovery -- "$*"

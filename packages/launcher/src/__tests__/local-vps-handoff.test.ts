@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   runLocalToVpsHandoff,
+  shouldTransferLocalValkeyState,
   waitForFreshLocalBotReady,
   waitForProcessIdsToExit,
 } from '../main/local-vps-handoff.js';
@@ -16,6 +17,15 @@ function result(state: VpsDeploymentExecutionResult['state']): VpsDeploymentExec
     manualBlockReasons: [],
   };
 }
+
+describe('local state transfer selection', () => {
+  it('transfers persisted local state after a launcher restart but never uploads stale VPS-era state', () => {
+    expect(shouldTransferLocalValkeyState(true, 'vps')).toBe(true);
+    expect(shouldTransferLocalValkeyState(false, 'regular-local')).toBe(true);
+    expect(shouldTransferLocalValkeyState(false, 'vps')).toBe(false);
+    expect(shouldTransferLocalValkeyState(false, undefined)).toBe(false);
+  });
+});
 
 describe('local to VPS runtime handoff', () => {
   it('requires a new bot process and a fresh Discord-ready IPC signal', async () => {
@@ -66,12 +76,26 @@ describe('local to VPS runtime handoff', () => {
     const output = await runLocalToVpsHandoff({
       localWasRunning: true,
       stopLocal: async () => { events.push('stop-local'); },
+      prepareVpsState: async () => { events.push('snapshot-local'); },
       quiesceVpsAfterFailure: async () => true,
       restoreLocal: async () => { events.push('restore-local'); },
       executeDeployment: async () => { events.push('start-vps'); return result('success'); },
     });
     expect(output.state).toBe('success');
-    expect(events).toEqual(['stop-local', 'start-vps']);
+    expect(events).toEqual(['stop-local', 'snapshot-local', 'start-vps']);
+  });
+
+  it('restores local without touching the VPS when state preparation fails', async () => {
+    const events: string[] = [];
+    await expect(runLocalToVpsHandoff({
+      localWasRunning: true,
+      stopLocal: async () => { events.push('stop-local'); },
+      prepareVpsState: async () => { events.push('snapshot-local'); throw new Error('snapshot invalid'); },
+      quiesceVpsAfterFailure: async () => true,
+      restoreLocal: async () => { events.push('restore-local'); },
+      executeDeployment: async () => { events.push('start-vps'); return result('success'); },
+    })).rejects.toThrow('snapshot invalid');
+    expect(events).toEqual(['stop-local', 'snapshot-local', 'restore-local']);
   });
 
   it('restores the prior local runtime when VPS deployment fails', async () => {

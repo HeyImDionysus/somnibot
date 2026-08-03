@@ -6,6 +6,13 @@ interface LocalBotStatus {
   lastHeartbeat?: number;
 }
 
+export function shouldTransferLocalValkeyState(
+  localWasRunning: boolean,
+  lastSuccessfulRuntimeMode: 'regular-local' | 'vps' | undefined,
+): boolean {
+  return localWasRunning || lastSuccessfulRuntimeMode === 'regular-local';
+}
+
 export async function waitForFreshLocalBotReady(
   options: {
     readStatus: () => LocalBotStatus;
@@ -68,14 +75,19 @@ export async function waitForProcessIdsToExit(
 export async function runLocalToVpsHandoff(options: {
   localWasRunning: boolean;
   stopLocal: () => Promise<void>;
+  prepareVpsState?: () => Promise<void>;
   quiesceVpsAfterFailure: (result?: VpsDeploymentExecutionResult) => Promise<boolean>;
   restoreLocal: () => Promise<void>;
   executeDeployment: () => Promise<VpsDeploymentExecutionResult>;
 }): Promise<VpsDeploymentExecutionResult> {
-  if (!options.localWasRunning) return options.executeDeployment();
+  if (!options.localWasRunning) {
+    await options.prepareVpsState?.();
+    return options.executeDeployment();
+  }
 
   try {
     await options.stopLocal();
+    await options.prepareVpsState?.();
   } catch (error) {
     await options.restoreLocal();
     throw error;

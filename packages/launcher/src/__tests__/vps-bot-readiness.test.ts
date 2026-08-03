@@ -1,11 +1,32 @@
 import { describe, expect, it, vi } from 'vitest';
-import { readVpsBotBootProof, waitForFreshVpsBotReady } from '../main/vps-bot-readiness.js';
+import {
+  readVpsBotBootProof,
+  waitForFreshVpsBotReady,
+  waitForVpsBotReadyAfter,
+} from '../main/vps-bot-readiness.js';
 
 function health(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
 describe('VPS bot boot readiness', () => {
+  it('rejects persisted heartbeats and accepts only proof created after recovery began', async () => {
+    let now = 5_000;
+    const proofs = [
+      { bootId: '11111111-1111-4111-8111-111111111111', heartbeatAt: 4_999 },
+      { bootId: '22222222-2222-4222-8222-222222222222', heartbeatAt: 5_000 },
+    ];
+    let index = 0;
+
+    const result = await waitForVpsBotReadyAfter('https://somnibot.example.com', 5_000, {
+      readProof: async () => proofs[Math.min(index++, proofs.length - 1)]!,
+      now: () => now,
+      wait: async () => { now += 100; },
+    });
+
+    expect(result).toEqual(proofs[1]);
+    expect(index).toBe(2);
+  });
   it('reads monitor-safe boot proof only from a healthy HTTPS VPS', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(health({
       status: 'healthy',

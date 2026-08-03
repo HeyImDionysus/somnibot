@@ -117,12 +117,17 @@ describe('VPS deployment run request coordinator', () => {
       'enter-deploy-path',
       'write-env-file',
       'protect-env-file',
+      'stage-local-valkey-state',
+      'quiesce-vps-state-consumers',
+      'start-vps-valkey',
+      'restore-transferred-valkey',
       'start-stack',
       'install-health-recovery',
       'check-stack',
       'check-dashboard',
       'check-health',
       'check-lavalink',
+      'end-vps-maintenance',
     ]);
   });
 
@@ -297,7 +302,17 @@ describe('VPS deployment run request coordinator', () => {
       {
         dryRun: true,
         operatorApproved: true,
-        approvedCommandIds: ['write-env-file', 'protect-env-file', 'start-stack', 'install-health-recovery'],
+        approvedCommandIds: [
+          'write-env-file',
+          'protect-env-file',
+          'stage-local-valkey-state',
+          'quiesce-vps-state-consumers',
+          'start-vps-valkey',
+          'restore-transferred-valkey',
+          'start-stack',
+          'install-health-recovery',
+          'end-vps-maintenance',
+        ],
       },
       {
         confirmApproval: async () => {

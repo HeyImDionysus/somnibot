@@ -10,6 +10,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..', '..', '..');
 const writer = path.join(repoRoot, 'scripts', 'write-production-env.sh');
 const restorer = path.join(repoRoot, 'scripts', 'restore-production-env.sh');
+const handoffStager = path.join(repoRoot, 'scripts', 'stage-handoff-valkey.sh');
+const handoffRestorer = path.join(repoRoot, 'scripts', 'restore-handoff-valkey.sh');
+const handoffExporter = path.join(repoRoot, 'scripts', 'export-handoff-valkey.sh');
+const maintenanceEnter = path.join(repoRoot, 'scripts', 'enter-runtime-maintenance.sh');
+const maintenanceExit = path.join(repoRoot, 'scripts', 'exit-runtime-maintenance.sh');
+const healthRecovery = path.join(repoRoot, 'scripts', 'production-health-recover.sh');
 
 describe('protected VPS environment scripts', () => {
   it('keeps credential input out of SSH shell strings and cleans temp files on every exit', () => {
@@ -25,6 +31,63 @@ describe('protected VPS environment scripts', () => {
     expect(writerSource).not.toContain('mkdir -- "$lock_dir"');
     expect(restorerSource).not.toContain('mkdir -- "$lock_dir"');
     expect(restorerSource).toContain('mv -f -- "$temp_path" "$env_path"');
+  });
+
+  it('keeps automatic health recovery paused throughout an intentional runtime handoff', () => {
+    const enterSource = readFileSync(maintenanceEnter, 'utf8');
+    const exitSource = readFileSync(maintenanceExit, 'utf8');
+    const recoverySource = readFileSync(healthRecovery, 'utf8');
+
+    expect(enterSource).toContain('flock 8');
+    expect(enterSource).toContain('> "$maintenance_file.partial"');
+    expect(enterSource).toContain('stop bot dashboard');
+    expect(enterSource).toContain('docker compose -f "$compose_file" stop');
+    expect(exitSource).toContain('flock 8');
+    expect(exitSource).toContain('rm -f "$state_dir/maintenance"');
+    expect(recoverySource).toContain('if [ -f "$state_dir/maintenance" ]');
+  });
+
+  it('stages and restores handoff snapshots through fixed protected paths', () => {
+    const stagerSource = readFileSync(handoffStager, 'utf8');
+    const restorerSource = readFileSync(handoffRestorer, 'utf8');
+    const exporterSource = readFileSync(handoffExporter, 'utf8');
+
+    expect(stagerSource).toContain('umask 077');
+    expect(stagerSource).toContain('cat > "$partial_file"');
+    expect(stagerSource).toContain('[ "$header" = "REDIS" ]');
+    expect(restorerSource).toContain('sha256sum -c');
+    expect(restorerSource).toContain('valkey-check-rdb');
+    expect(restorerSource).toContain('valkey-cli --rdb "$recovery_container_file"');
+    expect(restorerSource).toContain('sha256sum "$recovery_backup"');
+    expect(restorerSource).toContain('stop valkey');
+    expect(restorerSource).toContain('docker cp "$snapshot_file" "$container_id:/data/dump.rdb"');
+    expect(restorerSource).toContain('docker cp "$recovery_backup" "$container_id:/data/dump.rdb"');
+    expect(restorerSource.indexOf('valkey-cli --rdb "$recovery_container_file"'))
+      .toBeLessThan(restorerSource.indexOf('docker cp "$snapshot_file" "$container_id:/data/dump.rdb"'));
+    expect(restorerSource.indexOf('stop valkey')).toBeLessThan(restorerSource.indexOf(':/data/dump.rdb'));
+    expect(exporterSource).toContain('flock 9');
+    expect(exporterSource).toContain('valkey-cli --rdb');
+    expect(exporterSource).toContain('valkey-check-rdb');
+    expect(exporterSource).toContain('cat "$snapshot_file"');
+    expect(exporterSource).not.toContain('printf \'%s\\n\' "$snapshot_file"');
+  });
+
+  it.skipIf(process.platform === 'win32')('atomically stages binary RDB input and clears stale state on empty input', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'somnibot-handoff-stage-'));
+    try {
+      const first = spawnSync('sh', [handoffStager, root], {
+        input: Buffer.concat([Buffer.from('REDIS0011'), Buffer.from([0, 1, 2, 255])]),
+      });
+      expect(first.status, first.stderr.toString()).toBe(0);
+      expect(readFileSync(path.join(root, '.runtime-handoff', 'valkey.rdb')).subarray(0, 5).toString()).toBe('REDIS');
+      expect(statSync(path.join(root, '.runtime-handoff', 'valkey.rdb')).mode & 0o777).toBe(0o600);
+
+      const cleared = spawnSync('sh', [handoffStager, root], { input: Buffer.alloc(0) });
+      expect(cleared.status, cleared.stderr.toString()).toBe(0);
+      expect(() => statSync(path.join(root, '.runtime-handoff', 'valkey.rdb'))).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it.skipIf(process.platform === 'win32')('atomically writes, backs up, restores, and cleans failed writes', () => {

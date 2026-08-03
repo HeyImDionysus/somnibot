@@ -7,6 +7,9 @@ import {
   buildVpsDeploymentPlan,
   buildVpsRollbackPlan,
   buildVpsRuntimeStartCommand,
+  buildVpsMaintenanceExitCommand,
+  buildVpsStateConsumersStopCommand,
+  buildVpsValkeyExportCommand,
   VPS_DEPLOYMENT_BUILD_TIMEOUT_MS,
 } from '../main/vps-deployment-plan';
 
@@ -172,6 +175,26 @@ describe('VPS deployment plan generator', () => {
         approvalRequired: false,
       }),
     ]));
+    const commandIds = plan.commands.map((command) => command.id);
+    expect(commandIds).toEqual(expect.arrayContaining([
+      'stage-local-valkey-state',
+      'quiesce-vps-state-consumers',
+      'start-vps-valkey',
+      'restore-transferred-valkey',
+      'end-vps-maintenance',
+    ]));
+    expect(commandIds.indexOf('stage-local-valkey-state')).toBeLessThan(commandIds.indexOf('quiesce-vps-state-consumers'));
+    expect(commandIds.indexOf('quiesce-vps-state-consumers')).toBeLessThan(commandIds.indexOf('start-vps-valkey'));
+    expect(commandIds.indexOf('start-vps-valkey')).toBeLessThan(commandIds.indexOf('restore-transferred-valkey'));
+    expect(commandIds.indexOf('restore-transferred-valkey')).toBeLessThan(commandIds.indexOf('start-stack'));
+    expect(commandIds.indexOf('check-lavalink')).toBeLessThan(commandIds.indexOf('end-vps-maintenance'));
+    expect(plan.commands.find((command) => command.id === 'stage-local-valkey-state')).toMatchObject({
+      executable: 'ssh',
+      approvalRequired: true,
+    });
+    expect(plan.commands.find((command) => command.id === 'stage-local-valkey-state')?.sensitiveStdinFile).toBeUndefined();
+    expect(plan.commands.find((command) => command.id === 'restore-transferred-valkey')?.args)
+      .toEqual(expect.arrayContaining(['sudo', '-n', 'sh', '/opt/somnibot/scripts/restore-handoff-valkey.sh']));
     expect(plan.rollback?.commands).toEqual([]);
     expect(rollbackPlan.commands).toEqual([
       expect.objectContaining({
@@ -355,8 +378,8 @@ describe('VPS deployment plan generator', () => {
     const command = buildFailedVpsQuiesceCommand(plan);
     expect(command.id).toBe('quiesce-failed-stack');
     expect(command.args).toContain('StrictHostKeyChecking=yes');
-    expect(command.args.slice(-5)).toEqual([
-      'docker', 'compose', '-f', '/opt/somnibot/docker-compose.prod.yml', 'stop',
+    expect(command.args.slice(-6)).toEqual([
+      'sudo', '-n', 'sh', '/opt/somnibot/scripts/enter-runtime-maintenance.sh', '/opt/somnibot', 'all',
     ]);
     expect(command.commandCategory).toBe('rollback');
 
@@ -367,5 +390,23 @@ describe('VPS deployment plan generator', () => {
       'docker', 'compose', '-f', '/opt/somnibot/docker-compose.prod.yml', 'start',
     ]);
     expect(restart.commandCategory).toBe('rollback');
+
+    const endMaintenance = buildVpsMaintenanceExitCommand(plan);
+    expect(endMaintenance.args.slice(-5)).toEqual([
+      'sudo', '-n', 'sh', '/opt/somnibot/scripts/exit-runtime-maintenance.sh', '/opt/somnibot',
+    ]);
+
+    const stopConsumers = buildVpsStateConsumersStopCommand(plan);
+    expect(stopConsumers.args.slice(-6)).toEqual([
+      'sudo', '-n', 'sh', '/opt/somnibot/scripts/enter-runtime-maintenance.sh', '/opt/somnibot', 'consumers',
+    ]);
+
+    const exportPath = 'C:\\private\\incoming.rdb';
+    const exportState = buildVpsValkeyExportCommand(plan, exportPath);
+    expect(exportState.args.slice(-5)).toEqual([
+      'sudo', '-n', 'sh', '/opt/somnibot/scripts/export-handoff-valkey.sh', '/opt/somnibot',
+    ]);
+    expect(exportState.sensitiveStdoutFile).toBe(exportPath);
+    expect(exportState.redactedDisplay).not.toContain(exportPath);
   });
 });

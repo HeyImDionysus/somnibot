@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, linkSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,6 +57,49 @@ describe('VPS command runner', () => {
     expect(result).toMatchObject({ ok: true, output: String(protectedInput.length) });
     expect(fixture.args.join(' ')).not.toContain('stdin-only-secret');
     expect(JSON.stringify(result)).not.toContain('stdin-only-secret');
+  });
+
+  it('streams a protected binary snapshot file over stdin without retaining its contents', async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'somnibot-vps-input-'));
+    const snapshotPath = path.join(tempDir, 'snapshot.rdb');
+    const snapshot = Buffer.concat([Buffer.from('REDIS0011'), Buffer.from([0, 1, 2, 255])]);
+    try {
+      writeFileSync(snapshotPath, snapshot);
+      const runner = createVpsCommandRunner({ timeoutMs: 5_000 });
+      const fixture = command(process.execPath, [
+        '-e',
+        'const chunks=[]; process.stdin.on("data", chunk => chunks.push(chunk)); process.stdin.on("end", () => process.stdout.write(String(Buffer.concat(chunks).length)))',
+      ], { sensitiveStdinFile: snapshotPath });
+
+      const result = await runner(fixture, { index: 0, total: 1 });
+
+      expect(result).toMatchObject({ ok: true, output: String(snapshot.length) });
+      expect(JSON.stringify(result)).not.toContain(snapshot.toString('base64'));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('streams protected binary stdout directly to a private file without logging it', async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'somnibot-vps-output-'));
+    const snapshotPath = path.join(tempDir, 'snapshot.rdb');
+    const snapshot = Buffer.concat([Buffer.from('REDIS0011'), Buffer.from([0, 1, 2, 255])]);
+    try {
+      const runner = createVpsCommandRunner({ timeoutMs: 5_000 });
+      const fixture = command(process.execPath, [
+        '-e',
+        'require("node:fs").writeSync(1, Buffer.from(process.argv[1], "base64")); require("node:fs").writeSync(2, "snapshot-exported")',
+        snapshot.toString('base64'),
+      ], { sensitiveStdoutFile: snapshotPath });
+
+      const result = await runner(fixture, { index: 0, total: 1 });
+
+      expect(result).toMatchObject({ ok: true, output: 'snapshot-exported' });
+      expect(readFileSync(snapshotPath)).toEqual(snapshot);
+      expect(JSON.stringify(result)).not.toContain(snapshot.toString('base64'));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('returns failure output and exit code without throwing', async () => {

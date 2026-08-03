@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createReadStream, createWriteStream } from 'node:fs';
 import path from 'node:path';
 import { type VpsCommandRunResult, type VpsDeploymentCommandRunner } from './vps-deployment-executor.js';
 
@@ -49,6 +50,8 @@ export function createVpsCommandRunner(options: VpsCommandRunnerOptions = {}): V
       let outputTruncated = false;
       let settled = false;
       let timedOut = false;
+      let protectedOutputFinished = !command.sensitiveStdoutFile;
+      let pendingCloseResult: VpsCommandRunResult | undefined;
       let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
       let timeoutKillHandle: ReturnType<typeof setTimeout> | undefined;
 
@@ -94,7 +97,32 @@ export function createVpsCommandRunner(options: VpsCommandRunnerOptions = {}): V
         outputTruncated = outputTruncated || next.truncated;
       };
 
-      child.stdout?.on('data', recordOutput);
+      const settleAfterProtectedOutput = (result: VpsCommandRunResult): void => {
+        if (protectedOutputFinished) settle(result);
+        else pendingCloseResult = result;
+      };
+
+      if (command.sensitiveStdoutFile && child.stdout) {
+        const destination = createWriteStream(command.sensitiveStdoutFile, {
+          flags: 'wx',
+          mode: 0o600,
+        });
+        destination.on('finish', () => {
+          protectedOutputFinished = true;
+          if (pendingCloseResult) settle(pendingCloseResult);
+        });
+        destination.on('error', (error) => {
+          child.kill('SIGTERM');
+          settle({
+            ok: false,
+            error: `Could not write protected command output: ${error.message}`,
+            retriable: false,
+          });
+        });
+        child.stdout.pipe(destination);
+      } else {
+        child.stdout?.on('data', recordOutput);
+      }
       child.stderr?.on('data', recordOutput);
       child.stdin?.on('error', (error) => {
         settle({
@@ -103,7 +131,20 @@ export function createVpsCommandRunner(options: VpsCommandRunnerOptions = {}): V
           retriable: isSshExecutable(command.executable),
         });
       });
-      child.stdin?.end(command.sensitiveStdin);
+      if (command.sensitiveStdinFile && child.stdin) {
+        const input = createReadStream(command.sensitiveStdinFile);
+        input.on('error', (error) => {
+          child.stdin?.destroy();
+          settle({
+            ok: false,
+            error: `Could not read protected command input: ${error.message}`,
+            retriable: false,
+          });
+        });
+        input.pipe(child.stdin);
+      } else {
+        child.stdin?.end(command.sensitiveStdin);
+      }
 
       child.on('error', (error) => {
         settle({
@@ -116,12 +157,12 @@ export function createVpsCommandRunner(options: VpsCommandRunnerOptions = {}): V
       child.on('close', (code, signal) => {
         const retainedOutput = formatOutput(output, outputTruncated, outputLimitChars);
         if (timedOut) {
-          settle(timeoutResult());
+          settleAfterProtectedOutput(timeoutResult());
           return;
         }
 
         if (code === 0) {
-          settle({
+          settleAfterProtectedOutput({
             ok: true,
             ...(retainedOutput ? { output: retainedOutput } : {}),
           });
@@ -131,7 +172,7 @@ export function createVpsCommandRunner(options: VpsCommandRunnerOptions = {}): V
         const failure = signal
           ? `Command exited with signal ${signal}.`
           : `Command exited with code ${code ?? 'unknown'}.`;
-        settle({
+        settleAfterProtectedOutput({
           ok: false,
           error: retainedOutput || failure,
           exitCode: typeof code === 'number' ? code : undefined,

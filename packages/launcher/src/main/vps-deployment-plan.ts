@@ -40,6 +40,10 @@ export interface VpsDeploymentCommand {
   expectedHealthStatus?: 'healthy';
   /** Main-process-only input. Never included in displays, logs, or renderer payloads. */
   sensitiveStdin?: string;
+  /** Main-process-only binary/file input streamed over stdin. Never exposed to the renderer. */
+  sensitiveStdinFile?: string;
+  /** Main-process-only binary output destination. Contents never enter logs or renderer payloads. */
+  sensitiveStdoutFile?: string;
 }
 
 export interface VpsDeploymentApprovalGate {
@@ -278,6 +282,48 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
       approvalRequired: true,
       commandCategory: 'env',
     }),
+    buildRemoteCommand(sshTarget, 'sh', [
+      joinPath(deployPath, 'scripts/stage-handoff-valkey.sh'),
+      deployPath,
+    ], {
+      id: 'stage-local-valkey-state',
+      label: 'Transfer a protected local Valkey snapshot when switching from local runtime',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    }),
+    buildRemoteCommand(sshTarget, 'sudo', [
+      '-n',
+      'sh',
+      joinPath(deployPath, 'scripts/enter-runtime-maintenance.sh'),
+      deployPath,
+      'consumers',
+    ], {
+      id: 'quiesce-vps-state-consumers',
+      label: 'Stop VPS state consumers before restoring transferred runtime state',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    }),
+    buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'up', '-d', 'valkey'], {
+      id: 'start-vps-valkey',
+      label: 'Start private VPS Valkey for state validation',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    }),
+    buildRemoteCommand(sshTarget, 'sudo', [
+      '-n',
+      'sh',
+      joinPath(deployPath, 'scripts/restore-handoff-valkey.sh'),
+      deployPath,
+    ], {
+      id: 'restore-transferred-valkey',
+      label: 'Validate and restore transferred local runtime state before bot startup',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    }),
     buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'up', '-d', '--build'], {
       id: 'start-stack',
       label: 'Build and start production stack',
@@ -326,6 +372,18 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
       changesRemote: false,
       approvalRequired: false,
       commandCategory: 'probe',
+    }),
+    buildRemoteCommand(sshTarget, 'sudo', [
+      '-n',
+      'sh',
+      joinPath(deployPath, 'scripts/exit-runtime-maintenance.sh'),
+      deployPath,
+    ], {
+      id: 'end-vps-maintenance',
+      label: 'Re-enable VPS self-maintenance after all startup checks pass',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
     }),
   ];
 }
@@ -582,8 +640,8 @@ export function buildVpsRuntimeStopCommand(plan: VpsDeploymentPlan): VpsDeployme
   if (!plan.target) throw new Error('A ready VPS target is required before failed-stack cleanup can run.');
   return buildRemoteCommand(
     plan.target.sshTarget,
-    'docker',
-    ['compose', '-f', plan.target.composeFilePath, 'stop'],
+    'sudo',
+    ['-n', 'sh', joinPath(plan.target.deployPath, 'scripts/enter-runtime-maintenance.sh'), plan.target.deployPath, 'all'],
     {
       id: 'quiesce-failed-stack',
       label: 'Stop the VPS stack before transferring runtime ownership to local',
@@ -595,6 +653,38 @@ export function buildVpsRuntimeStopCommand(plan: VpsDeploymentPlan): VpsDeployme
 }
 
 export const buildFailedVpsQuiesceCommand = buildVpsRuntimeStopCommand;
+
+export function buildVpsStateConsumersStopCommand(plan: VpsDeploymentPlan): VpsDeploymentCommand {
+  if (!plan.target) throw new Error('A ready VPS target is required before runtime state can be quiesced.');
+  return buildRemoteCommand(
+    plan.target.sshTarget,
+    'sudo',
+    ['-n', 'sh', joinPath(plan.target.deployPath, 'scripts/enter-runtime-maintenance.sh'), plan.target.deployPath, 'consumers'],
+    {
+      id: 'quiesce-vps-state-consumers-for-local',
+      label: 'Stop VPS state consumers before exporting runtime state',
+      changesRemote: true,
+      approvalRequired: false,
+      commandCategory: 'service',
+    },
+  );
+}
+
+export function buildVpsMaintenanceExitCommand(plan: VpsDeploymentPlan): VpsDeploymentCommand {
+  if (!plan.target) throw new Error('A ready VPS target is required before runtime maintenance can end.');
+  return buildRemoteCommand(
+    plan.target.sshTarget,
+    'sudo',
+    ['-n', 'sh', joinPath(plan.target.deployPath, 'scripts/exit-runtime-maintenance.sh'), plan.target.deployPath],
+    {
+      id: 'end-vps-maintenance',
+      label: 'Re-enable VPS self-maintenance after verified runtime recovery',
+      changesRemote: true,
+      approvalRequired: false,
+      commandCategory: 'rollback',
+    },
+  );
+}
 
 export function buildVpsRuntimeStartCommand(plan: VpsDeploymentPlan): VpsDeploymentCommand {
   if (!plan.target) throw new Error('A ready VPS target is required before runtime recovery can run.');
@@ -610,6 +700,27 @@ export function buildVpsRuntimeStartCommand(plan: VpsDeploymentPlan): VpsDeploym
       commandCategory: 'rollback',
     },
   );
+}
+
+export function buildVpsValkeyExportCommand(
+  plan: VpsDeploymentPlan,
+  sensitiveStdoutFile: string,
+): VpsDeploymentCommand {
+  if (!plan.target) throw new Error('A ready VPS target is required before runtime state can be exported.');
+  const command = buildRemoteCommand(
+    plan.target.sshTarget,
+    'sudo',
+    ['-n', 'sh', joinPath(plan.target.deployPath, 'scripts/export-handoff-valkey.sh'), plan.target.deployPath],
+    {
+      id: 'export-vps-valkey-state',
+      label: 'Create and securely transfer a validated VPS Valkey snapshot',
+      changesRemote: true,
+      approvalRequired: false,
+      commandCategory: 'service',
+    },
+  );
+  command.sensitiveStdoutFile = sensitiveStdoutFile;
+  return command;
 }
 
 export function buildVpsRollbackPlan(input: VpsDeploymentPlanInput & { lastGoodCommit: string }): VpsDeploymentPlan {

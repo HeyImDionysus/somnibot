@@ -273,6 +273,9 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('sanitizedPatch = sanitizeRendererConfigPatch(configPatch);');
     expect(main).toContain('saveConfig(sanitizeRendererConfigPatch(config))');
     expect(main).toContain("savedConfig.lastSuccessfulRuntimeMode === 'vps'");
+    expect(main).toContain("!leaseStatus.active && savedConfig.lastSuccessfulRuntimeMode !== 'vps'");
+    expect(main).toContain('waitForVpsBotReadyAfter(vpsPlan.target.publicBaseUrl, recoveryStartedAt)');
+    expect(main).toContain('installIncomingLocalValkeySnapshot(transferredValkeyPath!)');
     expect(main).toContain('type PayPalRuntimeConfig = Pick<');
     expect(main).toContain('let lastStartedPayPalConfig: PayPalRuntimeConfig | null = null;');
     expect(main).toContain('function snapshotPayPalRuntimeConfig(config: LauncherConfig): PayPalRuntimeConfig');

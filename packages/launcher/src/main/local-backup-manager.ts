@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -47,7 +47,7 @@ async function hasValidRdbHeader(filePath: string): Promise<boolean> {
   }
 }
 
-async function validateRdbFile(filePath: string): Promise<boolean> {
+export async function validateRdbFile(filePath: string): Promise<boolean> {
   if (!await hasValidRdbHeader(filePath)) return false;
   const candidates = process.platform === 'win32'
     ? [
@@ -67,6 +67,78 @@ async function validateRdbFile(filePath: string): Promise<boolean> {
     }
   }
   return false;
+}
+
+export async function prepareIncomingLocalValkeySnapshotPath(): Promise<string> {
+  const directory = path.join(app.getPath('userData'), '.runtime-handoff');
+  await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
+  await fsp.chmod(directory, 0o700);
+  for (const entry of await fsp.readdir(directory, { withFileTypes: true })) {
+    if (entry.isFile() && /^vps-valkey-[0-9a-f-]+\.rdb\.partial$/i.test(entry.name)) {
+      await fsp.rm(path.join(directory, entry.name), { force: true });
+    }
+  }
+  return path.join(directory, `vps-valkey-${randomUUID()}.rdb.partial`);
+}
+
+export async function discardIncomingLocalValkeySnapshot(filePath: string): Promise<void> {
+  await fsp.rm(filePath, { force: true });
+  await fsp.rmdir(path.dirname(filePath)).catch(() => undefined);
+}
+
+export async function installIncomingLocalValkeySnapshot(
+  incomingPath: string,
+  validate = validateRdbFile,
+): Promise<LocalBackupResult> {
+  const finalPath = valkeySnapshotPath();
+  const dataDirectory = path.dirname(finalPath);
+  const transferId = randomUUID();
+  const partialPath = path.join(dataDirectory, `.dump-${transferId}.rdb.partial`);
+  const previousPath = path.join(dataDirectory, `.dump-${transferId}.rdb.previous`);
+  let movedPrevious = false;
+  let previousWasValid = false;
+
+  try {
+    if (!await validate(incomingPath)) {
+      return { ok: false, error: 'Transferred VPS Valkey snapshot failed local RDB validation.' };
+    }
+    await fsp.mkdir(dataDirectory, { recursive: true, mode: 0o700 });
+    await fsp.copyFile(incomingPath, partialPath);
+    await fsp.chmod(partialPath, 0o600);
+    if (!await validate(partialPath)) {
+      return { ok: false, error: 'Copied VPS Valkey snapshot failed local RDB validation.' };
+    }
+
+    try {
+      await fsp.access(finalPath);
+      previousWasValid = await validate(finalPath);
+      if (previousWasValid) {
+        const backup = await backupLocalValkeySnapshot(new Date(), validate);
+        if (!backup.ok) {
+          return { ok: false, error: backup.error || 'Existing local Valkey state could not be backed up before handoff.' };
+        }
+      }
+      await fsp.rename(finalPath, previousPath);
+      movedPrevious = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+
+    try {
+      await fsp.rename(partialPath, finalPath);
+    } catch (error) {
+      if (movedPrevious) await fsp.rename(previousPath, finalPath).catch(() => undefined);
+      throw error;
+    }
+    await fsp.chmod(finalPath, 0o600);
+    if (movedPrevious && previousWasValid) await fsp.rm(previousPath, { force: true });
+    await discardIncomingLocalValkeySnapshot(incomingPath);
+    return { ok: true, path: finalPath };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  } finally {
+    await fsp.rm(partialPath, { force: true }).catch(() => undefined);
+  }
 }
 
 async function pruneExpiredBackups(directory: string, nowMs: number): Promise<void> {

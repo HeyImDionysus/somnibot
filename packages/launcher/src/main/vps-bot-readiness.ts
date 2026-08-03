@@ -86,3 +86,32 @@ export async function waitForFreshVpsBotReady(
     await wait(1_000);
   }
 }
+
+export async function waitForVpsBotReadyAfter(
+  publicBaseUrl: string,
+  startedAfter: number,
+  options: {
+    readProof?: () => Promise<VpsBotBootProof>;
+    wait?: (delayMs: number) => Promise<void>;
+    now?: () => number;
+    timeoutMs?: number;
+  } = {},
+): Promise<VpsBotBootProof> {
+  const readProof = options.readProof ?? (() => readVpsBotBootProof(publicBaseUrl));
+  const wait = options.wait ?? ((delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  const now = options.now ?? Date.now;
+  const deadline = now() + (options.timeoutMs ?? 90_000);
+
+  while (true) {
+    try {
+      const proof = await readProof();
+      if (proof.heartbeatAt >= startedAfter) return proof;
+    } catch {
+      // The dashboard and bot may still be starting. Retry to the bounded deadline.
+    }
+    if (now() >= deadline) {
+      throw new Error('The recovered VPS did not report a Discord-ready heartbeat created after recovery began.');
+    }
+    await wait(1_000);
+  }
+}

@@ -60,6 +60,7 @@ import {
   downloadValkey,
   startValkey,
   stopValkey,
+  getValkeyPid,
   getValkeyStatus,
   getValkeyError,
   isValkeyBinaryPresent,
@@ -68,8 +69,11 @@ import { createVpsCommandRunner } from './vps-command-runner.js';
 import { VpsDeploymentRunGate, redactVpsDeploymentText } from './vps-deployment-executor.js';
 import {
   buildFailedVpsQuiesceCommand,
+  buildVpsMaintenanceExitCommand,
   buildVpsRuntimeStartCommand,
   buildVpsRuntimeStopCommand,
+  buildVpsStateConsumersStopCommand,
+  buildVpsValkeyExportCommand,
 } from './vps-deployment-plan.js';
 import { confirmVpsDeploymentApproval } from './vps-deployment-approval.js';
 import {
@@ -82,12 +86,18 @@ import { handleVpsRollbackRunRequest, type VpsRollbackRunRequest } from './vps-r
 import { planVpsSshPreflight } from './vps-preflight.js';
 import {
   runLocalToVpsHandoff,
+  shouldTransferLocalValkeyState,
   waitForFreshLocalBotReady,
   waitForProcessIdsToExit,
 } from './local-vps-handoff.js';
 import {
+  backupLocalValkeySnapshot,
+  discardIncomingLocalValkeySnapshot,
+  installIncomingLocalValkeySnapshot,
+  prepareIncomingLocalValkeySnapshotPath,
   startLocalValkeyBackupSchedule,
   stopLocalValkeyBackupSchedule,
+  validateRdbFile,
 } from './local-backup-manager.js';
 import {
   hasSupabaseProjectOriginChanged,
@@ -100,6 +110,7 @@ import { runVpsToLocalHandoff } from './vps-local-handoff.js';
 import {
   readVpsBotBootProof,
   waitForFreshVpsBotReady,
+  waitForVpsBotReadyAfter,
   type VpsBotBootProof,
 } from './vps-bot-readiness.js';
 
@@ -1077,6 +1088,10 @@ async function restoreVpsAfterLocalHandoffFailure(
       { timeoutMessage: 'The restarted VPS did not reacquire runtime ownership.' },
     );
     await waitForFreshVpsBotReady(vpsPlan.target!.publicBaseUrl, previousVpsBoot, { requireNewBoot });
+    const maintenanceEnded = await runner(buildVpsMaintenanceExitCommand(vpsPlan), { index: 0, total: 1 });
+    if (!maintenanceEnded.ok) {
+      throw new Error(maintenanceEnded.error || 'The VPS recovered, but automatic health maintenance could not be re-enabled.');
+    }
   } catch (error) {
     return {
       ok: false,
@@ -1127,7 +1142,7 @@ async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch)
     };
   }
 
-  if (!leaseStatus.active) {
+  if (!leaseStatus.active && savedConfig.lastSuccessfulRuntimeMode !== 'vps') {
     const localResult = await runLocalSetupAutomation(sanitizedPatch);
     if (localResult.ok) saveConfig({ lastSuccessfulRuntimeMode: 'regular-local' });
     return localResult;
@@ -1172,7 +1187,7 @@ async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch)
     noLink: true,
     title: 'Switch SomniBot from VPS to this PC?',
     message: 'SomniBot is currently active on the VPS.',
-    detail: 'The launcher will stop the saved VPS stack, verify that it released runtime ownership, start this local bot, and update provider callbacks. If local startup fails, it will restore the VPS.',
+    detail: 'The launcher will quiesce the VPS, transfer its validated runtime state to this PC, verify that it released ownership, start this local bot, and update provider callbacks. If transfer or local startup fails, it will restore the VPS.',
   });
   if (confirmation.response !== 0) {
     saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
@@ -1184,21 +1199,84 @@ async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch)
     };
   }
 
+  const runner = createVpsCommandRunner();
   let previousVpsBoot: VpsBotBootProof;
   try {
     previousVpsBoot = await readVpsBotBootProof(vpsPlan.target.publicBaseUrl);
   } catch (error) {
-    saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
+    const recoveryStartedAt = Date.now();
+    const started = await runner(buildVpsRuntimeStartCommand(vpsPlan), { index: 0, total: 1 });
+    if (!started.ok) {
+      saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
+      return {
+        ok: false,
+        stage: 'runtime-handoff',
+        message: 'The interrupted or unhealthy VPS could not be recovered before switching local.',
+        error: `${error instanceof Error ? error.message : String(error)} ${started.error || 'The VPS stack did not start.'}`,
+      };
+    }
+    try {
+      await waitForRuntimeLease(
+        () => readRuntimeLeaseStatus(vpsConfig.supabaseUrl, vpsConfig.supabaseSecretKey),
+        (status) => status.active && status.activeMode === 'vps',
+        { timeoutMessage: 'The recovered VPS did not reacquire runtime ownership.' },
+      );
+      previousVpsBoot = await waitForVpsBotReadyAfter(vpsPlan.target.publicBaseUrl, recoveryStartedAt);
+      const maintenanceEnded = await runner(buildVpsMaintenanceExitCommand(vpsPlan), { index: 0, total: 1 });
+      if (!maintenanceEnded.ok) {
+        throw new Error(maintenanceEnded.error || 'VPS self-maintenance could not be re-enabled after recovery.');
+      }
+    } catch (recoveryError) {
+      saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
+      return {
+        ok: false,
+        stage: 'runtime-handoff',
+        message: 'The interrupted or unhealthy VPS could not be proven recovered.',
+        error: recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
+      };
+    }
+  }
+
+  let incomingValkeyPath: string | undefined;
+  try {
+    const quiesced = await runner(buildVpsStateConsumersStopCommand(vpsPlan), { index: 0, total: 1 });
+    if (!quiesced.ok) {
+      const recovery = await restoreVpsAfterLocalHandoffFailure(vpsConfig, runner, vpsPlan, previousVpsBoot, true);
+      return {
+        ok: false,
+        stage: 'runtime-handoff',
+        message: 'The VPS could not be quiesced for a consistent state transfer.',
+        error: `${quiesced.error || 'The state-consumer stop result was ambiguous.'} ${recovery.detail}`,
+      };
+    }
+
+    incomingValkeyPath = await prepareIncomingLocalValkeySnapshotPath();
+    const exported = await runner(buildVpsValkeyExportCommand(vpsPlan, incomingValkeyPath), { index: 0, total: 1 });
+    if (!exported.ok || !await validateRdbFile(incomingValkeyPath)) {
+      await discardIncomingLocalValkeySnapshot(incomingValkeyPath);
+      const recovery = await restoreVpsAfterLocalHandoffFailure(vpsConfig, runner, vpsPlan, previousVpsBoot, true);
+      return {
+        ok: false,
+        stage: 'runtime-handoff',
+        message: 'The VPS runtime state could not be transferred safely.',
+        error: `${exported.error || 'The transferred Valkey snapshot failed validation.'} ${recovery.detail}`,
+      };
+    }
+  } catch (error) {
+    if (incomingValkeyPath) await discardIncomingLocalValkeySnapshot(incomingValkeyPath);
+    const recovery = await restoreVpsAfterLocalHandoffFailure(vpsConfig, runner, vpsPlan, previousVpsBoot, true);
     return {
       ok: false,
       stage: 'runtime-handoff',
-      message: 'The active VPS is not healthy enough to begin a reversible switch.',
-      error: error instanceof Error ? error.message : String(error),
+      message: 'The VPS runtime state could not be prepared for local use.',
+      error: `${error instanceof Error ? error.message : String(error)} ${recovery.detail}`,
     };
   }
 
-  const runner = createVpsCommandRunner();
-  const handoff = await runVpsToLocalHandoff({
+  const transferredValkeyPath = incomingValkeyPath;
+  const handoff = await (async () => {
+    try {
+      return await runVpsToLocalHandoff({
     stopVps: async () => {
       const stopped = await runner(buildVpsRuntimeStopCommand(vpsPlan), { index: 0, total: 1 });
       return stopped.ok;
@@ -1210,7 +1288,13 @@ async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch)
         { timeoutMessage: 'The VPS did not release runtime ownership after its stack stopped.' },
       );
     },
-    startLocal: () => runLocalSetupAutomation(sanitizedPatch),
+    startLocal: async () => {
+      const installed = await installIncomingLocalValkeySnapshot(transferredValkeyPath!);
+      if (!installed.ok) {
+        throw new Error(installed.error || 'Transferred VPS Valkey state could not be installed locally.');
+      }
+      return runLocalSetupAutomation(sanitizedPatch);
+    },
     isLocalReady: (result) => result.ok,
     restoreVps: (reason) => restoreVpsAfterLocalHandoffFailure(
       vpsConfig,
@@ -1219,7 +1303,11 @@ async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch)
       previousVpsBoot,
       reason === 'local-failed',
     ),
-  });
+      });
+    } finally {
+      await discardIncomingLocalValkeySnapshot(transferredValkeyPath!);
+    }
+  })();
 
   if (handoff.state === 'vps-stop-unproven') {
     return {
@@ -1650,7 +1738,12 @@ function registerIpcHandlers(): void {
       },
       runApprovedDeployment: (executeDeployment, plan) => {
         const localWasRunning = isRunning();
+        const transferLocalValkeyState = shouldTransferLocalValkeyState(
+          localWasRunning,
+          cfg.lastSuccessfulRuntimeMode,
+        );
         const localProcessIds = getStatus();
+        const localValkeyPid = getValkeyPid() ?? undefined;
         let localStopCompleted = false;
         const cleanupRunner = createVpsCommandRunner();
         return runLocalToVpsHandoff({
@@ -1662,12 +1755,27 @@ function registerIpcHandlers(): void {
             stopValkey();
             sessionToken = null;
             lastStartedPayPalConfig = null;
-            await waitForProcessIdsToExit([localProcessIds.botPid, localProcessIds.dashboardPid]);
+            await waitForProcessIdsToExit([
+              localProcessIds.botPid,
+              localProcessIds.dashboardPid,
+              localValkeyPid,
+            ]);
             localStopCompleted = true;
+          },
+          prepareVpsState: async () => {
+            if (!transferLocalValkeyState) return;
+            const backup = await backupLocalValkeySnapshot();
+            if (!backup.ok || !backup.path) {
+              throw new Error(backup.error || 'Local Valkey state could not be snapshotted for VPS transfer.');
+            }
+            const stageCommand = plan.commands.find((command) => command.id === 'stage-local-valkey-state');
+            if (!stageCommand) throw new Error('The approved VPS plan is missing the runtime-state transfer step.');
+            stageCommand.sensitiveStdinFile = backup.path;
           },
           quiesceVpsAfterFailure: async (result) => {
             const startAttempted = !result || result.commandStates.some((command) => (
-              command.commandId === 'start-stack'
+              ['stage-local-valkey-state', 'quiesce-vps-state-consumers', 'start-vps-valkey', 'restore-transferred-valkey', 'start-stack']
+                .includes(command.commandId)
               && ['running', 'success', 'failed'].includes(command.status)
             ));
             if (!startAttempted) return true;

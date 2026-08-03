@@ -21,7 +21,17 @@ describe('VPS deployment approval confirmation', () => {
 
     expect(approval).toEqual({
       operatorApproved: true,
-      approvedCommandIds: ['write-env-file', 'protect-env-file', 'start-stack', 'install-health-recovery'],
+      approvedCommandIds: [
+        'write-env-file',
+        'protect-env-file',
+        'stage-local-valkey-state',
+        'quiesce-vps-state-consumers',
+        'start-vps-valkey',
+        'restore-transferred-valkey',
+        'start-stack',
+        'install-health-recovery',
+        'end-vps-maintenance',
+      ],
     });
     expect(showMessageBox).toHaveBeenCalledOnce();
   });

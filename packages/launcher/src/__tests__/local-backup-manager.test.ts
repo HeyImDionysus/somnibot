@@ -10,7 +10,11 @@ vi.mock('electron', () => ({
   app: { getPath: () => testState.userDataPath },
 }));
 
-import { backupLocalValkeySnapshot } from '../main/local-backup-manager';
+import {
+  backupLocalValkeySnapshot,
+  installIncomingLocalValkeySnapshot,
+  prepareIncomingLocalValkeySnapshotPath,
+} from '../main/local-backup-manager';
 
 describe('local Valkey backup manager', () => {
   beforeEach(async () => {
@@ -51,5 +55,55 @@ describe('local Valkey backup manager', () => {
 
     expect(result.ok).toBe(false);
     await expect(fsp.access(path.join(testState.userDataPath, 'backups'))).rejects.toThrow();
+  });
+
+  it('validates and atomically installs VPS state while backing up existing local state', async () => {
+    const dataDir = path.join(testState.userDataPath, 'valkey', 'data');
+    await fsp.mkdir(dataDir, { recursive: true });
+    const oldSnapshot = Buffer.from('REDIS0011old-local-state');
+    const vpsSnapshot = Buffer.from('REDIS0011current-vps-state');
+    await fsp.writeFile(path.join(dataDir, 'dump.rdb'), oldSnapshot);
+    const incomingPath = await prepareIncomingLocalValkeySnapshotPath();
+    await fsp.writeFile(incomingPath, vpsSnapshot);
+    const validate = async (filePath: string) => (await fsp.readFile(filePath)).subarray(0, 5).toString() === 'REDIS';
+
+    const result = await installIncomingLocalValkeySnapshot(incomingPath, validate);
+
+    expect(result.ok).toBe(true);
+    expect(await fsp.readFile(path.join(dataDir, 'dump.rdb'))).toEqual(vpsSnapshot);
+    await expect(fsp.access(incomingPath)).rejects.toThrow();
+    const backups = await fsp.readdir(path.join(testState.userDataPath, 'backups', 'valkey'));
+    const backupFile = backups.find((name) => name.endsWith('.rdb'))!;
+    expect(await fsp.readFile(path.join(testState.userDataPath, 'backups', 'valkey', backupFile))).toEqual(oldSnapshot);
+  });
+
+  it('removes only managed orphaned handoff files before reserving a new transfer path', async () => {
+    const directory = path.join(testState.userDataPath, '.runtime-handoff');
+    await fsp.mkdir(directory, { recursive: true });
+    const orphan = path.join(directory, 'vps-valkey-11111111-1111-4111-8111-111111111111.rdb.partial');
+    const unrelated = path.join(directory, 'owner-note.txt');
+    await fsp.writeFile(orphan, 'stale');
+    await fsp.writeFile(unrelated, 'preserve');
+
+    const reserved = await prepareIncomingLocalValkeySnapshotPath();
+
+    await expect(fsp.access(orphan)).rejects.toThrow();
+    expect(await fsp.readFile(unrelated, 'utf8')).toBe('preserve');
+    expect(path.dirname(reserved)).toBe(directory);
+  });
+
+  it('refuses an invalid VPS snapshot without changing the existing local state', async () => {
+    const dataDir = path.join(testState.userDataPath, 'valkey', 'data');
+    await fsp.mkdir(dataDir, { recursive: true });
+    const oldSnapshot = Buffer.from('REDIS0011old-local-state');
+    await fsp.writeFile(path.join(dataDir, 'dump.rdb'), oldSnapshot);
+    const incomingPath = await prepareIncomingLocalValkeySnapshotPath();
+    await fsp.writeFile(incomingPath, 'not-an-rdb');
+    const validate = async (filePath: string) => (await fsp.readFile(filePath)).subarray(0, 5).toString() === 'REDIS';
+
+    const result = await installIncomingLocalValkeySnapshot(incomingPath, validate);
+
+    expect(result.ok).toBe(false);
+    expect(await fsp.readFile(path.join(dataDir, 'dump.rdb'))).toEqual(oldSnapshot);
   });
 });
