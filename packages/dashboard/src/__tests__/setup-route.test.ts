@@ -413,6 +413,42 @@ describe('POST /api/setup finalize', () => {
     });
   });
 
+  it('persists the database password when a launcher or setup client supplies it', async () => {
+    process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
+    process.env.SESSION_TOKEN = 'local-session-token';
+    process.env.SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    const instanceSettingsTable = registerTable(mock, 'instance_settings');
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: {
+        action: 'finalize',
+        credentials: { supabase_db_password: 'database-password' },
+      },
+    }));
+
+    expect(res.status).toBe(200);
+    expect(instanceSettingsTable.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'supabase_db_password',
+        value: 'database-password',
+        section: 'supabase',
+      }),
+      { onConflict: 'key' },
+    );
+  });
+
   it('records the webhook reachability outcome during finalize without blocking setup', async () => {
     configureReadyPayPalEnv();
     configureFinalizeOwnerProof(mock);

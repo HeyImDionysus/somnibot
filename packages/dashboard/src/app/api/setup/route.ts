@@ -927,6 +927,7 @@ export async function POST(request: NextRequest) {
       'supabase_secret_key',
       'supabase_access_token',
       'supabase_db_url',
+      'supabase_db_password',
       'dashboard_url',
     ]);
 

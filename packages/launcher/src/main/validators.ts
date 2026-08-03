@@ -4,6 +4,8 @@
  * Each validator returns { ok: true } or { ok: false, error: string }.
  */
 
+import { normalizeDiscordToken } from './credential-normalization.js';
+
 export interface ValidationResult {
   ok: boolean;
   error?: string;
@@ -35,7 +37,7 @@ export interface ProviderValidationCheck {
 /* ------------------------------------------------------------------ */
 
 export async function validateDiscordToken(token: string): Promise<ValidationResult> {
-  const normalized = token.trim();
+  const normalized = normalizeDiscordToken(token);
   if (!normalized) return { ok: false, code: 'invalid', error: 'Discord token is required.' };
   if (![...normalized].every((character) => {
     const codePoint = character.codePointAt(0) ?? 0;
@@ -83,7 +85,7 @@ export async function validateDiscordAppId(
 
   try {
     const res = await fetch('https://discord.com/api/v10/applications/@me', {
-      headers: { Authorization: `Bot ${token.trim()}` },
+      headers: { Authorization: `Bot ${normalizeDiscordToken(token)}` },
       signal: AbortSignal.timeout(10_000),
     });
 
@@ -128,7 +130,7 @@ export async function validateGuildId(
   for (const id of guildIds) {
     try {
       const res = await fetch(`https://discord.com/api/v10/guilds/${id}`, {
-        headers: { Authorization: `Bot ${token.trim()}` },
+        headers: { Authorization: `Bot ${normalizeDiscordToken(token)}` },
         signal: AbortSignal.timeout(10_000),
       });
 

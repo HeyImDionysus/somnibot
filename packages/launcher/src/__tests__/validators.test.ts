@@ -8,6 +8,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { validateAllCredentials } from '../main/validators';
+import { normalizeDiscordToken } from '../main/credential-normalization';
 
 beforeEach(() => {
   vi.unstubAllGlobals();
@@ -108,6 +109,13 @@ describe('Required field validation', () => {
   });
 });
 
+describe('Discord token normalization', () => {
+  it('removes only boundary whitespace and invisible format characters', () => {
+    expect(normalizeDiscordToken(' \u200Btoken-value\uFEFF\n')).toBe('token-value');
+    expect(normalizeDiscordToken('token→corrupted')).toBe('token→corrupted');
+  });
+});
+
 describe('Guild ID parser', () => {
   it('parses single guild ID', () => {
     expect(parseGuildIds('123456789')).toEqual(['123456789']);
@@ -142,6 +150,33 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe('full provider validation checks', () => {
+  it('uses the normalized token for Discord API authorization', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/users/@me')) {
+        expect((init?.headers as Record<string, string>).Authorization).toBe('Bot token');
+        return jsonResponse({ username: 'SomniBot', id: 'bot-123' });
+      }
+      if (url.includes('/applications/@me')) return jsonResponse({ id: 'app-123' });
+      if (url.endsWith('/rest/v1/')) return jsonResponse({});
+      if (url.endsWith('/auth/v1/settings')) return jsonResponse({});
+      return jsonResponse({}, 404);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await validateAllCredentials({
+      discordToken: '\u200Btoken\uFEFF',
+      discordApplicationId: 'app-123',
+      discordClientSecret: 'client-secret',
+      discordGuildId: '',
+      supabaseUrl: 'https://project.supabase.co',
+      supabaseSecretKey: 'sb_secret_key',
+      supabasePublishableKey: 'sb_publishable_key',
+    });
+
+    expect(result.valid).toBe(true);
+  });
+
   it('returns first-class Discord and Supabase readiness checks on success', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

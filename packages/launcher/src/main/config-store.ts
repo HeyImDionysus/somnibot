@@ -25,6 +25,7 @@ import {
   LEGACY_CONFIG_RELATIVE_PATHS,
   selectMissingLegacyConfig,
 } from './legacy-config-migration.js';
+import { normalizeDiscordToken } from './credential-normalization.js';
 
 /** V53 Phase 4 (4.3.3): Per-guild config for multi-guild support */
 export interface GuildEntry {
@@ -382,10 +383,13 @@ export function getConfig(): LauncherConfig {
 export function saveConfig(config: Partial<LauncherConfig>): void {
   for (const [key, value] of Object.entries(config)) {
     if (value !== undefined) {
+      const normalizedValue = key === 'discordToken' && typeof value === 'string'
+        ? normalizeDiscordToken(value)
+        : value;
       if (SENSITIVE_KEYS.has(key as keyof LauncherConfig) && typeof value === 'string') {
-        setSensitive(key as keyof LauncherConfig, value);
+        setSensitive(key as keyof LauncherConfig, normalizedValue as string);
       } else {
-        store.set(key as keyof LauncherConfig, value);
+        store.set(key as keyof LauncherConfig, normalizedValue);
       }
     }
   }
