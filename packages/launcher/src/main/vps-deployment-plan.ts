@@ -6,6 +6,10 @@ import {
   type RuntimeNetworkingConfig,
 } from './runtime-profile.js';
 import { planVpsSshPreflight } from './vps-preflight.js';
+import {
+  SOMNIBOT_REPOSITORY_REF,
+  SOMNIBOT_REPOSITORY_URL,
+} from './vps-bootstrap.js';
 
 export type VpsDeploymentPlanStatus = 'blocked' | 'ready';
 export const VPS_DEPLOYMENT_BUILD_TIMEOUT_MS = 45 * 60 * 1000;
@@ -61,6 +65,8 @@ export interface VpsDeploymentPlan {
   target: {
     domain: string;
     publicBaseUrl: string;
+    repositoryUrl: string;
+    repositoryRef: string;
     sshHost: string;
     sshUser: string;
     sshTarget: string;
@@ -258,12 +264,19 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
   ].map(shellDisplayArg).join(' ');
 
   return [
-    buildRemoteCommand(sshTarget, 'test', ['-d', deployPath], {
-      id: 'enter-deploy-path',
-      label: 'Verify deployment directory',
-      changesRemote: false,
-      approvalRequired: false,
+    buildRemoteCommand(sshTarget, 'sh', [
+      '-s',
+      '--',
+      deployPath,
+      SOMNIBOT_REPOSITORY_URL,
+      SOMNIBOT_REPOSITORY_REF,
+    ], {
+      id: 'prepare-vps-checkout',
+      label: 'Provision or update the VPS checkout from the authoritative GitHub source',
+      changesRemote: true,
+      approvalRequired: true,
       commandCategory: 'service',
+      executionTimeoutMs: 10 * 60 * 1000,
     }),
     buildRemoteCommand(sshTarget, 'sh', [
       joinPath(deployPath, 'scripts/write-production-env.sh'),
@@ -528,6 +541,8 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
     target: {
       domain,
       publicBaseUrl: profile.publicCallbackBaseUrl,
+      repositoryUrl: SOMNIBOT_REPOSITORY_URL,
+      repositoryRef: SOMNIBOT_REPOSITORY_REF,
       sshHost,
       sshUser,
       sshTarget: `${sshUser}@${sshHost}`,

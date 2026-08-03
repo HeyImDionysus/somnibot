@@ -12,6 +12,7 @@ import {
   buildVpsValkeyExportCommand,
   VPS_DEPLOYMENT_BUILD_TIMEOUT_MS,
 } from '../main/vps-deployment-plan';
+import { SOMNIBOT_REPOSITORY_REF, SOMNIBOT_REPOSITORY_URL } from '../main/vps-bootstrap';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(__dirname, '..');
@@ -36,6 +37,8 @@ describe('VPS deployment plan generator', () => {
     expect(plan.target).toMatchObject({
       domain: 'somnibot.example.com',
       publicBaseUrl: 'https://somnibot.example.com',
+      repositoryUrl: SOMNIBOT_REPOSITORY_URL,
+      repositoryRef: SOMNIBOT_REPOSITORY_REF,
       sshTarget: 'deploy@somnibot.example.com',
       envFilePath: '/opt/somnibot/.env',
       envFilePermissions: '0600',
@@ -103,6 +106,21 @@ describe('VPS deployment plan generator', () => {
     const rollbackPlan = buildVpsRollbackPlan({ ...completeVpsInput, lastGoodCommit });
 
     expect(plan.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'prepare-vps-checkout',
+        executable: 'ssh',
+        args: expect.arrayContaining([
+          'deploy@somnibot.example.com',
+          'sh',
+          '-s',
+          '--',
+          '/opt/somnibot',
+          SOMNIBOT_REPOSITORY_URL,
+          SOMNIBOT_REPOSITORY_REF,
+        ]),
+        changesRemote: true,
+        approvalRequired: true,
+      }),
       expect.objectContaining({
         id: 'write-env-file',
         executable: 'ssh',

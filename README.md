@@ -440,10 +440,18 @@ PayPal return links must use the public HTTPS URL.
 Use this when SomniBot should run 24/7 on a hosted Linux machine.
 
 The launcher/setup GUI is the primary VPS setup surface. It records the
-non-secret domain and SSH target details, builds a redacted deployment plan, and
-offers read-only preflight, dry-run deployment, and approval-gated deployment
-actions. Manual Docker commands remain a fallback path for operators who choose
-to run them directly.
+non-secret domain and SSH target details, checks a fresh or existing target,
+provisions or updates the SomniBot checkout from the authoritative GitHub
+repository, builds a redacted deployment plan, and offers read-only preflight,
+dry-run deployment, and approval-gated deployment actions. Manual Docker
+commands remain a fallback path for operators who choose to run them directly.
+
+For a first-time VPS, the SSH user must be able to create the selected deploy
+path and the host must already have `git`, Docker, and Docker Compose v2. The
+launcher does not install OS packages or overwrite a non-empty unrelated
+directory: it reports that prerequisite as a blocked step so the operator can
+fix the host and retry. Existing SomniBot checkouts must point at
+`https://github.com/HeyImDionysus/somnibot.git` and have no local changes.
 
 | Piece | VPS value |
 |---|---|

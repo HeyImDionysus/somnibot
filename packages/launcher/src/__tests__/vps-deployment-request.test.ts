@@ -114,7 +114,7 @@ describe('VPS deployment run request coordinator', () => {
     expect(result.state).toBe('success');
     expect(handoffCalls).toBe(1);
     expect(executedCommandIds).toEqual([
-      'enter-deploy-path',
+      'prepare-vps-checkout',
       'write-env-file',
       'protect-env-file',
       'stage-local-valkey-state',
@@ -155,6 +155,29 @@ describe('VPS deployment run request coordinator', () => {
     expect(envWriter?.args.join(' ')).not.toContain('discord-token');
     expect(envWriter?.redactedDisplay).not.toContain('paypal-client-secret');
     expect(JSON.stringify(result)).not.toContain('database-password');
+  });
+
+  it('streams the fixed checkout bootstrap script only on the live main-process plan', async () => {
+    let bootstrap: VpsDeploymentCommand | undefined;
+    const result = await handleVpsDeploymentRunRequest(
+      completeConfig,
+      { dryRun: false },
+      {
+        confirmApproval: async (plan) => approvalFor(plan),
+        createCommandRunner: () => async (command) => {
+          if (command.id === 'prepare-vps-checkout') bootstrap = command;
+          return successfulCommand(command);
+        },
+        runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {},
+      },
+    );
+
+    expect(result.state).toBe('success');
+    expect(bootstrap?.sensitiveStdin).toContain('git clone --origin origin');
+    expect(bootstrap?.sensitiveStdin).toContain('refusing to overwrite');
+    expect(bootstrap?.args.join(' ')).not.toContain('discord-token');
+    expect(bootstrap?.redactedDisplay).not.toContain('SomniBot VPS checkout');
   });
 
   it('keeps dry-run plans placeholder-only and never attaches credential stdin', async () => {
@@ -303,6 +326,7 @@ describe('VPS deployment run request coordinator', () => {
         dryRun: true,
         operatorApproved: true,
         approvedCommandIds: [
+          'prepare-vps-checkout',
           'write-env-file',
           'protect-env-file',
           'stage-local-valkey-state',

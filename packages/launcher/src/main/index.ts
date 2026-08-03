@@ -92,6 +92,7 @@ import {
 import { ensurePersistedVpsSecrets } from './vps-env-materializer.js';
 import { handleVpsRollbackRunRequest, type VpsRollbackRunRequest } from './vps-rollback-request.js';
 import { planVpsSshPreflight } from './vps-preflight.js';
+import { VPS_PREFLIGHT_SCRIPT } from './vps-bootstrap.js';
 import {
   runLocalToVpsHandoff,
   shouldTransferLocalValkeyState,
@@ -2108,7 +2109,7 @@ function registerIpcHandlers(): void {
     const runner = createVpsCommandRunner();
     const command = {
       id: 'ssh-preflight',
-      label: 'Verify deployment directory',
+      label: 'Verify writable target and VPS prerequisites',
       executable: plan.command.executable,
       args: plan.command.args,
       redactedArgs: plan.command.redactedArgs,
@@ -2116,6 +2117,7 @@ function registerIpcHandlers(): void {
       changesRemote: false,
       approvalRequired: false,
       commandCategory: 'probe' as const,
+      sensitiveStdin: VPS_PREFLIGHT_SCRIPT,
     };
     const result = await runner(command, { index: 0, total: 1 });
     const state = result.ok ? 'success' : result.retriable ? 'retry' : 'failure';
@@ -2134,8 +2136,8 @@ function registerIpcHandlers(): void {
         {
           level: result.ok ? 'info' : 'error',
           code: result.ok ? 'vps-preflight-success' : 'vps-preflight-failure',
-          message: result.ok ? 'Read-only SSH preflight passed.' : 'Read-only SSH preflight failed.',
-          detail: result.ok ? 'The deployment directory exists and SSH returned success.' : redactedError,
+          message: result.ok ? 'Read-only SSH/prerequisite preflight passed.' : 'Read-only SSH/prerequisite preflight failed.',
+          detail: result.ok ? 'The target is writable (or can be created) and git/Docker Compose are available.' : redactedError,
         },
       ],
     };

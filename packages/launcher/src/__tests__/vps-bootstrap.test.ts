@@ -1,0 +1,33 @@
+import { describe, expect, it } from 'vitest';
+import {
+  SOMNIBOT_REPOSITORY_REF,
+  SOMNIBOT_REPOSITORY_URL,
+  VPS_BOOTSTRAP_SCRIPT,
+  VPS_PREFLIGHT_SCRIPT,
+} from '../main/vps-bootstrap';
+
+describe('VPS first-time bootstrap contract', () => {
+  it('pins the authoritative repository and release ref', () => {
+    expect(SOMNIBOT_REPOSITORY_URL).toBe('https://github.com/HeyImDionysus/somnibot.git');
+    expect(SOMNIBOT_REPOSITORY_REF).toBe('main');
+    expect(VPS_BOOTSTRAP_SCRIPT).toContain(SOMNIBOT_REPOSITORY_URL);
+    expect(VPS_BOOTSTRAP_SCRIPT).toContain(SOMNIBOT_REPOSITORY_REF);
+  });
+
+  it('checks a fresh parent path and host prerequisites without mutating the VPS', () => {
+    expect(VPS_PREFLIGHT_SCRIPT).toContain('test -w "$parent_dir"');
+    expect(VPS_PREFLIGHT_SCRIPT).toContain('command -v git');
+    expect(VPS_PREFLIGHT_SCRIPT).toContain('docker compose version');
+    expect(VPS_PREFLIGHT_SCRIPT).not.toContain('git clone');
+    expect(VPS_PREFLIGHT_SCRIPT).not.toContain('mkdir -p');
+  });
+
+  it('refuses unsafe or dirty targets before checkout replacement', () => {
+    expect(VPS_BOOTSTRAP_SCRIPT).toContain('deployment path contains unsupported characters');
+    expect(VPS_BOOTSTRAP_SCRIPT).toContain('refusing an unapproved SomniBot repository URL');
+    expect(VPS_BOOTSTRAP_SCRIPT).toContain('deployment path is not empty and is not a SomniBot git checkout; refusing to overwrite it');
+    expect(VPS_BOOTSTRAP_SCRIPT).toContain('deployment checkout origin is not the authoritative SomniBot repository');
+    expect(VPS_BOOTSTRAP_SCRIPT).toContain('deployment checkout has local changes; refusing to overwrite them');
+    expect(VPS_BOOTSTRAP_SCRIPT).toContain('git -C "$deploy_path" checkout --detach --force');
+  });
+});

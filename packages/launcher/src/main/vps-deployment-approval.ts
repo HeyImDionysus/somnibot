@@ -52,6 +52,7 @@ export async function confirmVpsDeploymentApproval(
     message: 'Run the VPS deployment commands now?',
     detail: [
       `Target: ${target?.sshTarget ?? 'unknown'} (${target?.publicBaseUrl ?? 'unknown'})`,
+      `Source: ${target?.repositoryUrl ?? 'unknown'} @ ${target?.repositoryRef ?? 'unknown'}`,
       '',
       'This approval is handled in the launcher main process. Review the commands below before continuing.',
       '',

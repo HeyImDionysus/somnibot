@@ -22,6 +22,7 @@ describe('VPS deployment approval confirmation', () => {
     expect(approval).toEqual({
       operatorApproved: true,
       approvedCommandIds: [
+        'prepare-vps-checkout',
         'write-env-file',
         'protect-env-file',
         'stage-local-valkey-state',
@@ -76,6 +77,7 @@ describe('VPS deployment approval confirmation', () => {
       title: 'Confirm VPS deployment',
     });
     expect(options?.detail).toContain('Target: deploy@somnibot.example.com (https://somnibot.example.com)');
+    expect(options?.detail).toContain('Source: https://github.com/HeyImDionysus/somnibot.git @ main');
     expect(options?.detail).toContain('[approval required] ssh ');
     expect(options?.detail).toContain('docker compose');
     expect(options?.detail).not.toContain('sb_secret_');

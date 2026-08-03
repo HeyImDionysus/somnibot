@@ -134,7 +134,7 @@
           <button class="runtime-choice" id="runtime-vps" data-runtime="vps" type="button" aria-pressed="false">
             <div>
               <strong>VPS</strong>
-              <p>Run on a server. Domain, SSH target, and deploy readiness come first.</p>
+              <p>Run on a server. The launcher can provision or update the GitHub checkout, then deploy it.</p>
             </div>
           </button>
         </div>
@@ -166,7 +166,7 @@
             <label for="vpsDeployPath">Deploy Path <span class="req">*</span></label>
             <input type="text" id="vpsDeployPath" placeholder="/opt/somnibot" autocomplete="off" />
           </div>
-          <p class="runtime-hint">The launcher records non-secret readiness details only. Use read-only preflight, dry-run deploy, or approval-gated deployment from the deployment plan.</p>
+          <p class="runtime-hint">The launcher records non-secret readiness details, checks a fresh or existing target, provisions the authoritative GitHub checkout, and then runs the disclosed deployment plan after explicit approval.</p>
         </div>
 
         <div class="runtime-summary" id="runtime-summary" aria-live="polite">

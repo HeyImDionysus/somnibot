@@ -30,8 +30,9 @@ describe('VPS SSH preflight planner', () => {
         'StrictHostKeyChecking=yes',
         '--',
         'deploy@somnibot.example.com',
-        'test',
-        '-d',
+        'sh',
+        '-s',
+        '--',
         '/opt/somnibot',
       ],
       redactedArgs: [
@@ -43,11 +44,12 @@ describe('VPS SSH preflight planner', () => {
         'StrictHostKeyChecking=yes',
         '--',
         'deploy@somnibot.example.com',
-        'test',
-        '-d',
+        'sh',
+        '-s',
+        '--',
         '/opt/somnibot',
       ],
-      redactedDisplay: 'ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -- deploy@somnibot.example.com test -d /opt/somnibot',
+      redactedDisplay: 'ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -- deploy@somnibot.example.com sh -s -- /opt/somnibot',
       readOnly: true,
     });
     expect(plan.warnings).toContain('No private key path was provided; preflight will rely on the local SSH agent or default SSH keys.');
