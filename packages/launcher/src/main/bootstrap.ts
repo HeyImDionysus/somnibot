@@ -10,5 +10,8 @@ removeHostDebugSwitches(app.commandLine);
 
 await bootstrapLauncher({
   setAppName: name => app.setName(name),
+  setUserDataPath: userDataPath => app.setPath('userData', userDataPath),
+  getAppDataPath: () => app.getPath('appData'),
+  getUserDataPath: () => app.getPath('userData'),
   loadMain: () => import('./index.js'),
 });
