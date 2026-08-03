@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { ALL_DOMAIN_PROOFS } from '../../scenario-runner/index.js';
+import { resolveFleetCandidateSha } from '../../fleet-manifest.js';
 
 const execFileP = promisify(execFile);
 const TESTKIT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -128,7 +129,7 @@ function writeShardManifest(): void {
     // capability. CI artifacts can therefore drive a real gate-closure plan
     // rather than reducing hundreds of functional gaps to opaque counts.
     schemaVersion: 2,
-    candidateSha: process.env.GITHUB_SHA ?? 'local',
+    candidateSha: resolveFleetCandidateSha(),
     shard: process.env.SOMNIBOT_FLEET_SHARD ?? 'all',
     assignedDomainIds: assignment.ids,
     totals,

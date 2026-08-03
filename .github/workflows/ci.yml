@@ -38,6 +38,9 @@ permissions:
 env:
   NODE_VERSION: "22"
   PNPM_VERSION: "9.15.4"
+  # GITHUB_SHA is a temporary merge ref on pull_request events. Release proof
+  # must name the actual PR head so receipts cannot be carried across heads.
+  SOMNIBOT_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   # 2.110+ executes CREATE INDEX CONCURRENTLY outside the per-migration
   # transaction, which the online fraud-observation index migration requires.
   SUPABASE_CLI_VERSION: "2.110.0"
