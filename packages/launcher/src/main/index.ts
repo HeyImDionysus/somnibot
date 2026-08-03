@@ -132,11 +132,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
+  // Do not continue registering lifecycle handlers or starting renderer work
+  // in a losing instance. A second Electron process that keeps executing can
+  // leave a hidden process holding the profile lock after its window exits.
+  process.exit(0);
 }
 
 let mainWindow: BrowserWindow | null = null;
 let sessionToken: string | null = null;
 let lastStartedPayPalConfig: PayPalRuntimeConfig | null = null;
+let launcherQuitRequested = false;
+let closeDecisionInFlight = false;
 const activeVpsDeployment = new VpsDeploymentRunGate();
 /**
  * [infrastructure-launcher] Fire-and-forget durable audit for launcher-side
@@ -1435,6 +1441,17 @@ async function createWindow(showWhenReady = true): Promise<void> {
   // Log renderer load failures
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
     console.error(`[Launcher] Renderer failed to load: ${errorCode} ${errorDescription} (${validatedURL})`);
+    if (showWhenReady && mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+  });
+
+  mainWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
+    console.error(`[Launcher] Preload failed: ${preloadPath}`, error);
+    if (showWhenReady && mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+  });
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error(`[Launcher] Renderer process exited: ${details.reason} (code ${details.exitCode})`);
+    if (showWhenReady && mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
   });
 
   // Log renderer console messages to main process stdout for debugging
@@ -1448,6 +1465,19 @@ async function createWindow(showWhenReady = true): Promise<void> {
     if (showWhenReady) mainWindow?.show();
   });
 
+  // A renderer crash or preload failure can prevent ready-to-show forever.
+  // Surface the window after a bounded delay so the operator sees the real
+  // failure state instead of a hidden Electron process holding the lock.
+  const showFallbackTimer = showWhenReady
+    ? setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+        console.error('[Launcher] Renderer did not become ready within 5s; showing the window for diagnosis.');
+        mainWindow.show();
+      }
+    }, 5_000)
+    : null;
+  showFallbackTimer?.unref?.();
+
   // Save window bounds on move/resize
   const saveBounds = () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1460,7 +1490,45 @@ async function createWindow(showWhenReady = true): Promise<void> {
   mainWindow.on('move', saveBounds);
 
   mainWindow.on('closed', () => {
+    if (showFallbackTimer) clearTimeout(showFallbackTimer);
     mainWindow = null;
+  });
+
+  // Closing the control window must be an explicit lifecycle decision. If
+  // managed services are running, silently leaving the launcher hidden makes
+  // the process look leaked and prevents a later instance from starting.
+  mainWindow.on('close', (event) => {
+    if (launcherQuitRequested || !isRunning() || closeDecisionInFlight) return;
+
+    event.preventDefault();
+    closeDecisionInFlight = true;
+    const window = mainWindow;
+    void (async () => {
+      try {
+        if (!window || window.isDestroyed()) return;
+        const decision = await dialog.showMessageBox(window, {
+          type: 'question',
+          title: 'SomniBot is still running',
+          message: 'The bot or dashboard is still running.',
+          detail: 'Keep SomniBot running in the background, or stop the managed services and quit completely?',
+          buttons: ['Cancel', 'Keep running in background', 'Stop services and quit'],
+          cancelId: 0,
+          defaultId: 0,
+        });
+
+        if (decision.response === 1) {
+          window.hide();
+        } else if (decision.response === 2) {
+          launcherQuitRequested = true;
+          stopAll();
+          stopLavalink();
+          stopValkey();
+          app.quit();
+        }
+      } finally {
+        closeDecisionInFlight = false;
+      }
+    })();
   });
 }
 
@@ -2283,12 +2351,14 @@ app.on('second-instance', () => {
     void createWindow(true);
   } else {
     if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
     mainWindow.focus();
   }
 });
 
 // Clean shutdown — kill child processes before quitting
 app.on('before-quit', () => {
+  launcherQuitRequested = true;
   stopLocalValkeyBackupSchedule();
   if (isRunning()) {
     stopAll();

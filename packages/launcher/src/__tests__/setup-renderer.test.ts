@@ -85,6 +85,16 @@ describe('launcher setup renderer wiring', () => {
     expect(main).not.toContain('secretKey: result.credentials.secretKey');
   });
 
+  it('makes launcher lifecycle decisions explicit instead of leaving hidden stale processes', () => {
+    const main = readSourceFile('main/index.ts');
+
+    expect(main).toContain('process.exit(0);');
+    expect(main).toContain("mainWindow.on('close'");
+    expect(main).toContain("Keep running in background");
+    expect(main).toContain("Stop services and quit");
+    expect(main).toContain('mainWindow.show();');
+  });
+
   it('preserves the local callback profile while the owner configures VPS mode', () => {
     const renderer = readSourceFile('renderer/renderer.js');
     const collectRuntimeConfig = renderer.slice(
