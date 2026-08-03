@@ -11,6 +11,10 @@ describe('runtime lease', () => {
     )), 'utf8');
     expect(migration).toContain('REVOKE ALL ON TABLE public.runtime_leases FROM PUBLIC, anon, authenticated, service_role;');
     expect(migration).not.toMatch(/GRANT\s+(?:SELECT|INSERT|UPDATE|DELETE|ALL).*runtime_leases\s+TO\s+service_role/i);
+    expect(migration).toContain('REVOKE ALL ON FUNCTION public.get_somnibot_runtime() FROM PUBLIC, anon, authenticated;');
+    expect(migration).toContain('GRANT EXECUTE ON FUNCTION public.get_somnibot_runtime() TO service_role;');
+    expect(migration).not.toContain('holder_id AS');
+    expect(migration).not.toContain('session_id AS');
     expect(migration.match(/GRANT EXECUTE ON FUNCTION public\.(?:claim|heartbeat|release)_somnibot_runtime/g)).toHaveLength(3);
   });
 

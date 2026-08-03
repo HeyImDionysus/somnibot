@@ -66,9 +66,17 @@ import {
 } from './valkey-manager.js';
 import { createVpsCommandRunner } from './vps-command-runner.js';
 import { VpsDeploymentRunGate, redactVpsDeploymentText } from './vps-deployment-executor.js';
-import { buildFailedVpsQuiesceCommand } from './vps-deployment-plan.js';
+import {
+  buildFailedVpsQuiesceCommand,
+  buildVpsRuntimeStartCommand,
+  buildVpsRuntimeStopCommand,
+} from './vps-deployment-plan.js';
 import { confirmVpsDeploymentApproval } from './vps-deployment-approval.js';
-import { handleVpsDeploymentRunRequest, type VpsDeploymentRunRequest } from './vps-deployment-request.js';
+import {
+  buildVpsDeploymentPlanFromConfig,
+  handleVpsDeploymentRunRequest,
+  type VpsDeploymentRunRequest,
+} from './vps-deployment-request.js';
 import { ensurePersistedVpsSecrets } from './vps-env-materializer.js';
 import { handleVpsRollbackRunRequest, type VpsRollbackRunRequest } from './vps-rollback-request.js';
 import { planVpsSshPreflight } from './vps-preflight.js';
@@ -81,6 +89,8 @@ import {
   startLocalValkeyBackupSchedule,
   stopLocalValkeyBackupSchedule,
 } from './local-backup-manager.js';
+import { readRuntimeLeaseStatus, waitForRuntimeLease } from './runtime-lease-client.js';
+import { runVpsToLocalHandoff } from './vps-local-handoff.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -737,6 +747,17 @@ async function startLocalStack(
   return { ok: true };
 }
 
+async function stopManagedLocalStack(): Promise<void> {
+  const status = getStatus();
+  stopLocalValkeyBackupSchedule();
+  stopAll();
+  stopLavalink();
+  stopValkey();
+  sessionToken = null;
+  lastStartedPayPalConfig = null;
+  await waitForProcessIdsToExit([status.botPid, status.dashboardPid]);
+}
+
 async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promise<SetupAutomationResult> {
   const previousPublicCallbackBaseUrl = getConfig().publicCallbackBaseUrl.trim();
   saveConfig(sanitizePayPalConfigPatch(configPatch));
@@ -803,6 +824,8 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
     };
   }
 
+  const botBeforeStart = getStatus();
+  const localStartBeganAt = Date.now();
   const startResult = await startLocalStack(config, { forceRestart: true });
   if (!startResult.ok) {
     return {
@@ -824,6 +847,27 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       message: 'Bot and dashboard were started, but dashboard readiness could not be verified yet.',
       error: dashboardReady.error,
       servicesStarted: true,
+      meta: validation.meta,
+      providerValidation: validation,
+      warnings,
+      publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+    };
+  }
+
+  try {
+    await waitForFreshLocalBotReady({
+      readStatus: getStatus,
+      startedAfter: localStartBeganAt,
+      previousBotPid: botBeforeStart.botPid,
+    });
+  } catch (error) {
+    await stopManagedLocalStack().catch(() => undefined);
+    return {
+      ok: false,
+      stage: 'bot-ready',
+      message: 'Local services started, but the bot did not acquire ownership and reach Discord ready.',
+      error: error instanceof Error ? error.message : String(error),
+      servicesStarted: false,
       meta: validation.meta,
       providerValidation: validation,
       warnings,
@@ -905,6 +949,8 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       };
     }
 
+    const botBeforePayPalRestart = getStatus();
+    const paypalRestartBeganAt = Date.now();
     const restartResult = await restartRunningLocalStackForPayPalChange(previousPayPalConfig);
     if (!restartResult.ok) {
       return {
@@ -922,6 +968,28 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       };
     }
     if (restartResult.restarted) {
+      try {
+        await waitForFreshLocalBotReady({
+          readStatus: getStatus,
+          startedAfter: paypalRestartBeganAt,
+          previousBotPid: botBeforePayPalRestart.botPid,
+        });
+      } catch (error) {
+        await stopManagedLocalStack().catch(() => undefined);
+        return {
+          ok: false,
+          stage: 'bot-ready',
+          message: 'PayPal settings were applied, but the restarted local bot did not reach Discord ready.',
+          error: error instanceof Error ? error.message : String(error),
+          servicesStarted: false,
+          meta: validation.meta,
+          providerValidation: validation,
+          warnings,
+          publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+          paypalWebhook,
+          ...(callbackProbe ? { callbackProbe } : {}),
+        };
+      }
       paypalWebhook = {
         ...paypalWebhook,
         servicesRestarted: true,
@@ -941,6 +1009,167 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
     publicCallbackBaseUrl: config.publicCallbackBaseUrl,
     ...(paypalWebhook ? { paypalWebhook } : {}),
     ...(callbackProbe ? { callbackProbe } : {}),
+  };
+}
+
+async function restoreVpsAfterLocalHandoffFailure(
+  vpsConfig: LauncherConfig,
+  runner: ReturnType<typeof createVpsCommandRunner>,
+  vpsPlan: ReturnType<typeof buildVpsDeploymentPlanFromConfig>,
+): Promise<{ ok: boolean; detail: string }> {
+  let paypalDetail = '';
+  if (vpsConfig.paypalClientId.trim() && vpsConfig.paypalClientSecret.trim()) {
+    const paypal = await ensureConfiguredPayPalWebhook(vpsConfig);
+    if (!paypal.ok) {
+      paypalDetail = ` PayPal callback restoration failed: ${paypal.error || paypal.message}`;
+    }
+  }
+
+  await stopManagedLocalStack().catch(() => undefined);
+  saveConfig({ runtimeMode: 'vps' });
+  await queueLauncherCredentialSync(getConfig());
+
+  const started = await runner(buildVpsRuntimeStartCommand(vpsPlan), { index: 0, total: 1 });
+  if (!started.ok) {
+    return {
+      ok: false,
+      detail: `The local handoff failed and the previous VPS stack could not be restarted.${paypalDetail}`,
+    };
+  }
+
+  try {
+    await waitForRuntimeLease(
+      () => readRuntimeLeaseStatus(vpsConfig.supabaseUrl, vpsConfig.supabaseSecretKey),
+      (status) => status.active && status.activeMode === 'vps',
+      { timeoutMessage: 'The restarted VPS did not reacquire runtime ownership.' },
+    );
+  } catch (error) {
+    return {
+      ok: false,
+      detail: `${error instanceof Error ? error.message : String(error)}${paypalDetail}`,
+    };
+  }
+
+  return {
+    ok: paypalDetail.length === 0,
+    detail: paypalDetail
+      ? `The VPS bot was restored, but provider callback recovery is incomplete.${paypalDetail}`
+      : 'The previous VPS stack and provider callback were restored after the local handoff failed.',
+  };
+}
+
+async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch): Promise<SetupAutomationResult> {
+  const sanitizedPatch = sanitizePayPalConfigPatch(configPatch);
+  const localConfig = { ...getConfig(), ...sanitizedPatch, runtimeMode: 'regular-local' as const };
+  let leaseStatus;
+  try {
+    leaseStatus = await readRuntimeLeaseStatus(localConfig.supabaseUrl, localConfig.supabaseSecretKey);
+  } catch (error) {
+    return {
+      ok: false,
+      stage: 'runtime-ownership',
+      message: 'Active runtime ownership could not be verified.',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  if (!leaseStatus.active || leaseStatus.activeMode !== 'vps') {
+    return runLocalSetupAutomation(sanitizedPatch);
+  }
+
+  const vpsConfig: LauncherConfig = { ...localConfig, runtimeMode: 'vps' };
+  const vpsPlan = buildVpsDeploymentPlanFromConfig(vpsConfig);
+  if (vpsPlan.status !== 'ready' || !vpsPlan.target) {
+    return {
+      ok: false,
+      stage: 'runtime-handoff',
+      message: 'The active VPS cannot be transferred to local safely.',
+      error: vpsPlan.blockedReasons.join(' ') || 'Saved VPS connection details are incomplete.',
+    };
+  }
+
+  const confirmation = await dialog.showMessageBox({
+    type: 'warning',
+    buttons: ['Switch to Local', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    title: 'Switch SomniBot from VPS to this PC?',
+    message: 'SomniBot is currently active on the VPS.',
+    detail: 'The launcher will stop the saved VPS stack, verify that it released runtime ownership, start this local bot, and update provider callbacks. If local startup fails, it will restore the VPS.',
+  });
+  if (confirmation.response !== 0) {
+    return {
+      ok: false,
+      stage: 'runtime-handoff',
+      message: 'VPS to local switch cancelled.',
+      error: 'No runtime or provider changes were made.',
+    };
+  }
+
+  const runner = createVpsCommandRunner();
+  const handoff = await runVpsToLocalHandoff({
+    stopVps: async () => {
+      const stopped = await runner(buildVpsRuntimeStopCommand(vpsPlan), { index: 0, total: 1 });
+      return stopped.ok;
+    },
+    waitForVpsStopped: async () => {
+      await waitForRuntimeLease(
+        () => readRuntimeLeaseStatus(vpsConfig.supabaseUrl, vpsConfig.supabaseSecretKey),
+        (status) => !status.active,
+        { timeoutMessage: 'The VPS did not release runtime ownership after its stack stopped.' },
+      );
+    },
+    startLocal: () => runLocalSetupAutomation(sanitizedPatch),
+    isLocalReady: (result) => result.ok,
+    restoreVps: () => restoreVpsAfterLocalHandoffFailure(vpsConfig, runner, vpsPlan),
+  });
+
+  if (handoff.state === 'vps-stop-failed') {
+    return {
+      ok: false,
+      stage: 'runtime-handoff',
+      message: 'The VPS could not be stopped safely.',
+      error: 'Local SomniBot was not started, so duplicate Discord connections were prevented.',
+    };
+  }
+  if (handoff.state === 'vps-release-unproven') {
+    return {
+      ok: false,
+      stage: 'runtime-handoff',
+      message: 'VPS ownership release could not be proven.',
+      error: `${handoff.error instanceof Error ? handoff.error.message : String(handoff.error)} ${handoff.recovery.detail}`,
+    };
+  }
+  if (handoff.state === 'success') {
+    recordLauncherAudit({
+      action: 'launcher.runtime.vps_to_local_completed',
+      category: 'infrastructure',
+      targetType: 'runtime_handoff',
+      details: { from: 'vps', to: 'regular-local' },
+      success: true,
+    });
+    return handoff.localResult;
+  }
+
+  const localResult = handoff.localResult ?? {
+    ok: false,
+    stage: 'runtime-handoff',
+    message: 'Local setup failed during the VPS handoff.',
+    error: handoff.error instanceof Error ? handoff.error.message : String(handoff.error),
+  };
+  recordLauncherAudit({
+    action: 'launcher.runtime.vps_to_local_failed',
+    category: 'infrastructure',
+    targetType: 'runtime_handoff',
+    details: { from: 'vps', to: 'regular-local', vpsRestored: handoff.recovery.ok },
+    success: false,
+    errorMessage: localResult.error || localResult.message,
+  });
+  return {
+    ...localResult,
+    servicesStarted: false,
+    error: `${localResult.error || localResult.message} ${handoff.recovery.detail}`,
   };
 }
 
@@ -1172,7 +1401,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('run-setup-automation', async (_event, config: Partial<LauncherConfig>) => {
-    return runLocalSetupAutomation(config);
+    return runLocalSetupWithRuntimeHandoff(config);
   });
 
   ipcMain.handle('paypal:ensure-webhook', async (_event, config: Partial<LauncherConfig>) => {

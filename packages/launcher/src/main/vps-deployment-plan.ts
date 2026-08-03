@@ -578,7 +578,7 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
   };
 }
 
-export function buildFailedVpsQuiesceCommand(plan: VpsDeploymentPlan): VpsDeploymentCommand {
+export function buildVpsRuntimeStopCommand(plan: VpsDeploymentPlan): VpsDeploymentCommand {
   if (!plan.target) throw new Error('A ready VPS target is required before failed-stack cleanup can run.');
   return buildRemoteCommand(
     plan.target.sshTarget,
@@ -586,7 +586,25 @@ export function buildFailedVpsQuiesceCommand(plan: VpsDeploymentPlan): VpsDeploy
     ['compose', '-f', plan.target.composeFilePath, 'stop'],
     {
       id: 'quiesce-failed-stack',
-      label: 'Stop a partially started VPS stack before restoring local',
+      label: 'Stop the VPS stack before transferring runtime ownership to local',
+      changesRemote: true,
+      approvalRequired: false,
+      commandCategory: 'rollback',
+    },
+  );
+}
+
+export const buildFailedVpsQuiesceCommand = buildVpsRuntimeStopCommand;
+
+export function buildVpsRuntimeStartCommand(plan: VpsDeploymentPlan): VpsDeploymentCommand {
+  if (!plan.target) throw new Error('A ready VPS target is required before runtime recovery can run.');
+  return buildRemoteCommand(
+    plan.target.sshTarget,
+    'docker',
+    ['compose', '-f', plan.target.composeFilePath, 'start'],
+    {
+      id: 'restore-vps-stack',
+      label: 'Restore the previously stopped VPS stack after a failed local handoff',
       changesRemote: true,
       approvalRequired: false,
       commandCategory: 'rollback',

@@ -2,7 +2,13 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { buildFailedVpsQuiesceCommand, buildVpsDeploymentPlan, buildVpsRollbackPlan, VPS_DEPLOYMENT_BUILD_TIMEOUT_MS } from '../main/vps-deployment-plan';
+import {
+  buildFailedVpsQuiesceCommand,
+  buildVpsDeploymentPlan,
+  buildVpsRollbackPlan,
+  buildVpsRuntimeStartCommand,
+  VPS_DEPLOYMENT_BUILD_TIMEOUT_MS,
+} from '../main/vps-deployment-plan';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(__dirname, '..');
@@ -345,12 +351,21 @@ describe('VPS deployment plan generator', () => {
   });
 
   it('builds a strict-host-key cleanup command for a partially started VPS stack', () => {
-    const command = buildFailedVpsQuiesceCommand(buildVpsDeploymentPlan(completeVpsInput));
+    const plan = buildVpsDeploymentPlan(completeVpsInput);
+    const command = buildFailedVpsQuiesceCommand(plan);
     expect(command.id).toBe('quiesce-failed-stack');
     expect(command.args).toContain('StrictHostKeyChecking=yes');
     expect(command.args.slice(-5)).toEqual([
       'docker', 'compose', '-f', '/opt/somnibot/docker-compose.prod.yml', 'stop',
     ]);
     expect(command.commandCategory).toBe('rollback');
+
+    const restart = buildVpsRuntimeStartCommand(plan);
+    expect(restart.id).toBe('restore-vps-stack');
+    expect(restart.args).toContain('StrictHostKeyChecking=yes');
+    expect(restart.args.slice(-5)).toEqual([
+      'docker', 'compose', '-f', '/opt/somnibot/docker-compose.prod.yml', 'start',
+    ]);
+    expect(restart.commandCategory).toBe('rollback');
   });
 });

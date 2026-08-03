@@ -113,9 +113,35 @@ BEGIN
 END;
 $function$;
 
+CREATE OR REPLACE FUNCTION public.get_somnibot_runtime()
+RETURNS TABLE(active boolean, active_mode text, lease_expires_at timestamptz)
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ''
+AS $function$
+  WITH current_lease AS (
+    SELECT lease.runtime_mode, lease.expires_at,
+           lease.expires_at > clock_timestamp() AS is_active
+    FROM public.runtime_leases AS lease
+    WHERE lease.lease_name = 'primary-bot'
+  )
+  SELECT
+    lease.is_active AS active,
+    CASE WHEN lease.is_active THEN lease.runtime_mode ELSE NULL END AS active_mode,
+    CASE WHEN lease.is_active THEN lease.expires_at ELSE NULL END AS lease_expires_at
+  FROM current_lease AS lease
+  UNION ALL
+  SELECT false, NULL::text, NULL::timestamptz
+  WHERE NOT EXISTS (SELECT 1 FROM current_lease)
+  LIMIT 1;
+$function$;
+
 REVOKE ALL ON FUNCTION public.claim_somnibot_runtime(text, uuid, text, integer) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.heartbeat_somnibot_runtime(text, uuid, integer) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.release_somnibot_runtime(text, uuid) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.get_somnibot_runtime() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.claim_somnibot_runtime(text, uuid, text, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.heartbeat_somnibot_runtime(text, uuid, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.release_somnibot_runtime(text, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_somnibot_runtime() TO service_role;
