@@ -273,23 +273,62 @@ export function checkPortAvailable(port: number): Promise<boolean> {
  * Kill any leftover processes from a previous launcher crash.
  * Called once on app startup before the user can press Start.
  */
-export function cleanupStaleProcesses(): void {
+/**
+ * Wait until a PID is no longer alive, then force-kill it if the graceful
+ * window expires. This is used only for PIDs persisted by this launcher after
+ * a previous crash; clearing the record before the process is gone can leave
+ * the next instance racing a stale listener/port owner.
+ */
+async function waitForStaleProcessExit(pid: number): Promise<void> {
+  const graceDeadline = Date.now() + 5_000;
+  const isAlive = (): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  while (isAlive() && Date.now() < graceDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  if (isAlive()) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // It exited between the liveness check and the force-kill.
+    }
+    const killDeadline = Date.now() + 2_000;
+    while (isAlive() && Date.now() < killDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
+
+export async function cleanupStaleProcesses(): Promise<void> {
   const cfg = getConfig();
   const pids = cfg.lastPids ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
 
+  const stalePids: Array<[string, number]> = [];
   for (const [name, pid] of Object.entries(pids)) {
     if (pid && typeof pid === 'number') {
       try {
         process.kill(pid, 0); // Throws if process doesn't exist
         console.log(`[ProcessMgr] Killing stale ${name} process (PID ${pid})`);
         process.kill(pid, 'SIGTERM');
+        stalePids.push([name, pid]);
       } catch {
         // Process doesn't exist — that's fine
       }
     }
   }
 
-  // Clear stored PIDs
+  await Promise.all(stalePids.map(([, pid]) => waitForStaleProcessExit(pid)));
+
+  // Clear stored PIDs only after every reachable stale process has exited or
+  // exhausted the bounded force-kill window.
   saveConfig({ lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null } });
 }
 

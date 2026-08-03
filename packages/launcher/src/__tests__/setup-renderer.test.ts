@@ -100,6 +100,10 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('event.preventDefault();');
     expect(main).toContain('await stopAll();');
     expect(processManager).toContain('function stopManagedChild');
+    expect(processManager).toContain('async function waitForStaleProcessExit');
+    expect(processManager).toContain('export async function cleanupStaleProcesses');
+    expect(processManager).toContain('await Promise.all(stalePids.map');
+    expect(main).toContain('await cleanupStaleProcesses();');
     expect(processManager).toContain('let stopPromise: Promise<void> | null = null;');
     expect(lavalink).toContain('export function stopLavalink(): Promise<void>');
     expect(valkey).toContain('export function stopValkey(): Promise<void>');

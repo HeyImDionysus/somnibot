@@ -2211,7 +2211,7 @@ function registerIpcHandlers(): void {
 
 app.whenReady().then(async () => {
   // Phase 6: Clean up stale processes from a previous crash
-  cleanupStaleProcesses();
+  await cleanupStaleProcesses();
 
   // [infrastructure-launcher] Persist a durable audit row if the OS keychain is
   // unavailable and credentials fall back to plaintext storage.
