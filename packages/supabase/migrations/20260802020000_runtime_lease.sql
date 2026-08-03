@@ -13,8 +13,7 @@ CREATE TABLE IF NOT EXISTS public.runtime_leases (
 );
 
 ALTER TABLE public.runtime_leases ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON TABLE public.runtime_leases FROM PUBLIC, anon, authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.runtime_leases TO service_role;
+REVOKE ALL ON TABLE public.runtime_leases FROM PUBLIC, anon, authenticated, service_role;
 
 CREATE OR REPLACE FUNCTION public.claim_somnibot_runtime(
   p_holder_id text,

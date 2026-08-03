@@ -66,6 +66,7 @@ import {
 } from './valkey-manager.js';
 import { createVpsCommandRunner } from './vps-command-runner.js';
 import { VpsDeploymentRunGate, redactVpsDeploymentText } from './vps-deployment-executor.js';
+import { buildFailedVpsQuiesceCommand } from './vps-deployment-plan.js';
 import { confirmVpsDeploymentApproval } from './vps-deployment-approval.js';
 import { handleVpsDeploymentRunRequest, type VpsDeploymentRunRequest } from './vps-deployment-request.js';
 import { ensurePersistedVpsSecrets } from './vps-env-materializer.js';
@@ -1317,9 +1318,10 @@ function registerIpcHandlers(): void {
         saveConfig(patch);
         await queueLauncherCredentialSync(getConfig());
       },
-      runApprovedDeployment: (executeDeployment) => {
+      runApprovedDeployment: (executeDeployment, plan) => {
         const localWasRunning = isRunning();
         const localProcessIds = getStatus();
+        const cleanupRunner = createVpsCommandRunner();
         return runLocalToVpsHandoff({
           localWasRunning,
           stopLocal: async () => {
@@ -1330,6 +1332,23 @@ function registerIpcHandlers(): void {
             sessionToken = null;
             lastStartedPayPalConfig = null;
             await waitForProcessIdsToExit([localProcessIds.botPid, localProcessIds.dashboardPid]);
+          },
+          quiesceVpsAfterFailure: async (result) => {
+            const startAttempted = !result || result.commandStates.some((command) => (
+              command.commandId === 'start-stack'
+              && ['running', 'success', 'failed'].includes(command.status)
+            ));
+            if (!startAttempted) return true;
+            const stopped = await cleanupRunner(buildFailedVpsQuiesceCommand(plan), { index: 0, total: 1 });
+            recordLauncherAudit({
+              action: 'launcher.vps_handoff.failed_stack_quiesced',
+              category: 'infrastructure',
+              targetType: 'vps_deployment',
+              targetId: plan.target?.sshTarget,
+              details: { deploymentState: result?.state ?? 'execution-error' },
+              success: stopped.ok,
+            });
+            return stopped.ok;
           },
           restoreLocal: async () => {
             const restored = await runLocalSetupAutomation({

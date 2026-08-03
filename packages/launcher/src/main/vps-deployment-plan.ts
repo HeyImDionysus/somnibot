@@ -578,6 +578,22 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
   };
 }
 
+export function buildFailedVpsQuiesceCommand(plan: VpsDeploymentPlan): VpsDeploymentCommand {
+  if (!plan.target) throw new Error('A ready VPS target is required before failed-stack cleanup can run.');
+  return buildRemoteCommand(
+    plan.target.sshTarget,
+    'docker',
+    ['compose', '-f', plan.target.composeFilePath, 'stop'],
+    {
+      id: 'quiesce-failed-stack',
+      label: 'Stop a partially started VPS stack before restoring local',
+      changesRemote: true,
+      approvalRequired: false,
+      commandCategory: 'rollback',
+    },
+  );
+}
+
 export function buildVpsRollbackPlan(input: VpsDeploymentPlanInput & { lastGoodCommit: string }): VpsDeploymentPlan {
   const basePlan = buildVpsDeploymentPlan({ ...input, lastGoodCommit: undefined });
   if (!/^[0-9a-f]{40}$/i.test(input.lastGoodCommit)) {

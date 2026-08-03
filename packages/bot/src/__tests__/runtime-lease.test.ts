@@ -1,7 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { acquireRuntimeLease, resolveRuntimeHolderId } from '../services/runtime-lease.js';
 
 describe('runtime lease', () => {
+  it('exposes only guarded service-role functions, never direct lease-table writes', () => {
+    const migration = readFileSync(fileURLToPath(new URL(
+      '../../../supabase/migrations/20260802020000_runtime_lease.sql',
+      import.meta.url,
+    )), 'utf8');
+    expect(migration).toContain('REVOKE ALL ON TABLE public.runtime_leases FROM PUBLIC, anon, authenticated, service_role;');
+    expect(migration).not.toMatch(/GRANT\s+(?:SELECT|INSERT|UPDATE|DELETE|ALL).*runtime_leases\s+TO\s+service_role/i);
+    expect(migration.match(/GRANT EXECUTE ON FUNCTION public\.(?:claim|heartbeat|release)_somnibot_runtime/g)).toHaveLength(3);
+  });
+
   it('derives stable host ownership that differs between local and VPS', () => {
     const local = resolveRuntimeHolderId('', 'application-123', 'regular-local');
     const vps = resolveRuntimeHolderId('', 'application-123', 'vps');

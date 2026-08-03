@@ -32,30 +32,57 @@ export async function waitForProcessIdsToExit(
 export async function runLocalToVpsHandoff(options: {
   localWasRunning: boolean;
   stopLocal: () => Promise<void>;
+  quiesceVpsAfterFailure: (result?: VpsDeploymentExecutionResult) => Promise<boolean>;
   restoreLocal: () => Promise<void>;
   executeDeployment: () => Promise<VpsDeploymentExecutionResult>;
 }): Promise<VpsDeploymentExecutionResult> {
   if (!options.localWasRunning) return options.executeDeployment();
 
-  await options.stopLocal();
   try {
-    const result = await options.executeDeployment();
-    if (result.state === 'success') return result;
-
-    await options.restoreLocal();
-    return {
-      ...result,
-      logs: [
-        ...result.logs,
-        {
-          level: 'warn',
-          code: 'local-runtime-restored',
-          message: 'Local SomniBot was restored after the VPS deployment did not complete.',
-        },
-      ],
-    };
+    await options.stopLocal();
   } catch (error) {
     await options.restoreLocal();
     throw error;
   }
+
+  let result: VpsDeploymentExecutionResult;
+  try {
+    result = await options.executeDeployment();
+  } catch (error) {
+    const remoteQuiesced = await options.quiesceVpsAfterFailure().catch(() => false);
+    if (remoteQuiesced) await options.restoreLocal();
+    throw error;
+  }
+  if (result.state === 'success') return result;
+
+  const remoteQuiesced = await options.quiesceVpsAfterFailure(result).catch(() => false);
+  if (!remoteQuiesced) {
+    return {
+      ...result,
+      state: 'failure',
+      canRetry: false,
+      blockedReason: 'The failed VPS stack could not be proven stopped. Local SomniBot was not restarted to prevent duplicate runtimes.',
+      logs: [
+        ...result.logs,
+        {
+          level: 'error',
+          code: 'vps-runtime-quiesce-unproven',
+          message: 'The failed VPS runtime may still be active; local restoration was blocked.',
+        },
+      ],
+    };
+  }
+
+  await options.restoreLocal();
+  return {
+    ...result,
+    logs: [
+      ...result.logs,
+      {
+        level: 'warn',
+        code: 'local-runtime-restored',
+        message: 'Local SomniBot was restored after the VPS deployment did not complete.',
+      },
+    ],
+  };
 }

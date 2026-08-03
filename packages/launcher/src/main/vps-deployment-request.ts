@@ -27,6 +27,7 @@ export interface VpsDeploymentRunRuntime {
   persistGeneratedSecrets: (patch: Partial<PersistedVpsSecrets>) => Promise<void> | void;
   runApprovedDeployment?: (
     execute: () => Promise<VpsDeploymentExecutionResult>,
+    plan: VpsDeploymentPlan,
   ) => Promise<VpsDeploymentExecutionResult>;
   /**
    * [infrastructure-launcher] Optional sink for durable audit entries. Records
@@ -142,7 +143,7 @@ export async function handleVpsDeploymentRunRequest(
         ...(approvedForExecution && plan.status === 'ready' ? { commandRunner: runtime.createCommandRunner() } : {}),
       });
     const result = approvedForExecution && plan.status === 'ready' && runtime.runApprovedDeployment
-      ? await runtime.runApprovedDeployment(executeDeployment)
+      ? await runtime.runApprovedDeployment(executeDeployment, plan)
       : await executeDeployment();
 
     // [infrastructure-launcher] Audit the remote-execution outcome for live

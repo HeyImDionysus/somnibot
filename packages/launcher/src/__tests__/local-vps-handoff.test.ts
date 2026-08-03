@@ -30,6 +30,7 @@ describe('local to VPS runtime handoff', () => {
     const output = await runLocalToVpsHandoff({
       localWasRunning: true,
       stopLocal: async () => { events.push('stop-local'); },
+      quiesceVpsAfterFailure: async () => true,
       restoreLocal: async () => { events.push('restore-local'); },
       executeDeployment: async () => { events.push('start-vps'); return result('success'); },
     });
@@ -42,10 +43,53 @@ describe('local to VPS runtime handoff', () => {
     const output = await runLocalToVpsHandoff({
       localWasRunning: true,
       stopLocal: vi.fn().mockResolvedValue(undefined),
+      quiesceVpsAfterFailure: vi.fn().mockResolvedValue(true),
       restoreLocal,
       executeDeployment: async () => result('failure'),
     });
     expect(restoreLocal).toHaveBeenCalledOnce();
     expect(output.logs.at(-1)?.code).toBe('local-runtime-restored');
+  });
+
+  it('attempts to restore local when stopping it only partially succeeds', async () => {
+    const restoreLocal = vi.fn().mockResolvedValue(undefined);
+    const executeDeployment = vi.fn();
+    await expect(runLocalToVpsHandoff({
+      localWasRunning: true,
+      stopLocal: vi.fn().mockRejectedValue(new Error('shutdown deadline exceeded')),
+      quiesceVpsAfterFailure: vi.fn().mockResolvedValue(true),
+      restoreLocal,
+      executeDeployment,
+    })).rejects.toThrow('shutdown deadline exceeded');
+    expect(restoreLocal).toHaveBeenCalledOnce();
+    expect(executeDeployment).not.toHaveBeenCalled();
+  });
+
+  it('fails closed without restoring local when a partial VPS stack cannot be stopped', async () => {
+    const restoreLocal = vi.fn();
+    const output = await runLocalToVpsHandoff({
+      localWasRunning: true,
+      stopLocal: vi.fn().mockResolvedValue(undefined),
+      quiesceVpsAfterFailure: vi.fn().mockResolvedValue(false),
+      restoreLocal,
+      executeDeployment: async () => result('failure'),
+    });
+    expect(output.state).toBe('failure');
+    expect(output.canRetry).toBe(false);
+    expect(output.blockedReason).toContain('could not be proven stopped');
+    expect(restoreLocal).not.toHaveBeenCalled();
+  });
+
+  it('does not restore local when failed-stack cleanup itself errors', async () => {
+    const restoreLocal = vi.fn();
+    const output = await runLocalToVpsHandoff({
+      localWasRunning: true,
+      stopLocal: vi.fn().mockResolvedValue(undefined),
+      quiesceVpsAfterFailure: vi.fn().mockRejectedValue(new Error('SSH unavailable')),
+      restoreLocal,
+      executeDeployment: async () => result('failure'),
+    });
+    expect(output.blockedReason).toContain('could not be proven stopped');
+    expect(restoreLocal).not.toHaveBeenCalled();
   });
 });

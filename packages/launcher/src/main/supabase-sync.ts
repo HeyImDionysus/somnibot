@@ -166,7 +166,7 @@ export function buildSyncRows(
     const key = localKey as keyof SyncableCredentials;
     const rawValue = credentials[key];
     if (rawValue === undefined) return [];
-    if (typeof rawValue === 'string' && rawValue.length === 0) return [];
+    if (typeof rawValue === 'string' && rawValue.trim().length === 0) return [];
     return [{ key: settingsKey, value: String(rawValue), section: SECTION, updated_at: updatedAt }];
   });
 }

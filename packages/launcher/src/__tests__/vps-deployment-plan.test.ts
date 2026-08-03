@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { buildVpsDeploymentPlan, buildVpsRollbackPlan, VPS_DEPLOYMENT_BUILD_TIMEOUT_MS } from '../main/vps-deployment-plan';
+import { buildFailedVpsQuiesceCommand, buildVpsDeploymentPlan, buildVpsRollbackPlan, VPS_DEPLOYMENT_BUILD_TIMEOUT_MS } from '../main/vps-deployment-plan';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(__dirname, '..');
@@ -342,5 +342,15 @@ describe('VPS deployment plan generator', () => {
     expect(source).not.toContain('node:child_process');
     expect(source).not.toContain('execFile');
     expect(source).not.toContain('spawn(');
+  });
+
+  it('builds a strict-host-key cleanup command for a partially started VPS stack', () => {
+    const command = buildFailedVpsQuiesceCommand(buildVpsDeploymentPlan(completeVpsInput));
+    expect(command.id).toBe('quiesce-failed-stack');
+    expect(command.args).toContain('StrictHostKeyChecking=yes');
+    expect(command.args.slice(-5)).toEqual([
+      'docker', 'compose', '-f', '/opt/somnibot/docker-compose.prod.yml', 'stop',
+    ]);
+    expect(command.commandCategory).toBe('rollback');
   });
 });

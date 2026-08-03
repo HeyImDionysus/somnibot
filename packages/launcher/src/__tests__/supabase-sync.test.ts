@@ -82,12 +82,14 @@ describe('buildSyncRows', () => {
   it('never overwrites durable credentials with blanks from a partial local cache', () => {
     const rows = buildSyncRows(pushCredentials({
       discordClientSecret: '',
-      supabaseDbPassword: '',
+      supabaseDbPassword: '   ',
+      publicCallbackBaseUrl: '\t',
     }));
     const keys = rows.map(row => row.key);
 
     expect(keys).not.toContain('discord_client_secret');
     expect(keys).not.toContain('supabase_db_password');
+    expect(keys).not.toContain('local_public_callback_base_url');
   });
 });
 
