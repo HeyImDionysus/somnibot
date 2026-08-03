@@ -69,6 +69,7 @@ describe('launcher setup renderer wiring', () => {
     const renderer = readSourceFile('renderer/renderer.js');
     const preload = readSourceFile('main/preload.ts');
     const main = readSourceFile('main/index.ts');
+    const configBridge = readSourceFile('main/config-bridge.ts');
 
     expect(renderer).toContain('window.somnibot.discoverSupabaseProjects()');
     expect(renderer).toContain('window.somnibot.selectSupabaseProject(ref)');
@@ -90,6 +91,7 @@ describe('launcher setup renderer wiring', () => {
     const processManager = readSourceFile('main/process-manager.ts');
     const lavalink = readSourceFile('main/lavalink-manager.ts');
     const valkey = readSourceFile('main/valkey-manager.ts');
+    const configBridge = readSourceFile('main/config-bridge.ts');
 
     expect(main).toContain('process.exit(0);');
     expect(main).toContain("mainWindow.on('close'");
@@ -101,10 +103,15 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('await stopAll();');
     expect(processManager).toContain('function stopManagedChild');
     expect(processManager).toContain('async function waitForStaleProcessExit');
-    expect(processManager).toContain('export async function cleanupStaleProcesses');
+    expect(processManager).toContain('export async function cleanupStaleProcesses(): Promise<StaleProcessCleanupResult>');
     expect(processManager).toContain('await Promise.all(stalePids.map');
     expect(processManager).toContain('typeof pid === \'number\' && Number.isSafeInteger(pid) && pid > 0');
-    expect(main).toContain('await cleanupStaleProcesses();');
+    expect(processManager).toContain('processMatchesExpectedIdentity');
+    expect(processManager).toContain('identity is ambiguous');
+    expect(main).toContain('staleCleanup.ok');
+    expect(main).toContain('dialog.showErrorBox(');
+    expect(main).toContain('const staleCleanup = await cleanupStaleProcesses();');
+    expect(configBridge).toContain('delete sanitized.lastPids;');
     expect(processManager).toContain('let stopPromise: Promise<void> | null = null;');
     expect(lavalink).toContain('export function stopLavalink(): Promise<void>');
     expect(valkey).toContain('export function stopValkey(): Promise<void>');

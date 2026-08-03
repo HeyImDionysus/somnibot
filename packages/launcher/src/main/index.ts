@@ -2211,7 +2211,14 @@ function registerIpcHandlers(): void {
 
 app.whenReady().then(async () => {
   // Phase 6: Clean up stale processes from a previous crash
-  await cleanupStaleProcesses();
+  const staleCleanup = await cleanupStaleProcesses();
+  if (!staleCleanup.ok) {
+    dialog.showErrorBox(
+      'SomniBot could not reclaim a previous service',
+      `Startup was stopped because these persisted service processes could not be safely identified or terminated: ${staleCleanup.unresolved.join(', ')}. Close the conflicting process and retry.`,
+    );
+    return;
+  }
 
   // [infrastructure-launcher] Persist a durable audit row if the OS keychain is
   // unavailable and credentials fall back to plaintext storage.

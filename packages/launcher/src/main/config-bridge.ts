@@ -27,6 +27,10 @@ export function maskConfigSecrets<T extends Partial<LauncherConfig>>(config: T):
 /** Drop unchanged mask placeholders so a renderer round-trip cannot erase stored secrets. */
 export function sanitizeConfigPatchForStorage<T extends Partial<LauncherConfig>>(config: T): T {
   const sanitized = { ...config };
+  // Runtime process ownership is main-process state. Never accept it from a
+  // renderer round-trip: a compromised page must not be able to plant a PID
+  // that startup cleanup will later consider launcher-owned.
+  delete sanitized.lastPids;
   for (const key of SENSITIVE_CONFIG_KEYS) {
     if (sanitized[key] === MASKED_SECRET) {
       delete sanitized[key];

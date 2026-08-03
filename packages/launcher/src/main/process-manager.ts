@@ -11,11 +11,13 @@
  * - Lavalink status included in getStatus()
  */
 
-import { fork, type ChildProcess } from 'node:child_process';
+import { execFile, fork, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import os from 'node:os';
+import { promisify } from 'node:util';
 import { app, BrowserWindow } from 'electron';
 import { getConfig, saveConfig } from './config-store.js';
 import {
@@ -25,6 +27,8 @@ import {
   shouldApplyBotReadyTimeout,
   shouldRecoverManagedProcess,
 } from './process-manager-guards.js';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * V7 Audit §10.P3a — Allowlist of parent-process env vars to forward.
@@ -279,7 +283,7 @@ export function checkPortAvailable(port: number): Promise<boolean> {
  * a previous crash; clearing the record before the process is gone can leave
  * the next instance racing a stale listener/port owner.
  */
-async function waitForStaleProcessExit(pid: number): Promise<void> {
+async function waitForStaleProcessExit(pid: number): Promise<boolean> {
   const graceDeadline = Date.now() + 5_000;
   const isAlive = (): boolean => {
     try {
@@ -305,33 +309,120 @@ async function waitForStaleProcessExit(pid: number): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
+
+  return !isAlive();
 }
 
-export async function cleanupStaleProcesses(): Promise<void> {
+type StaleProcessName = 'bot' | 'dashboard' | 'lavalink' | 'valkey';
+
+function normalizeProcessIdentity(value: string): string {
+  return value.replaceAll('\\', '/').replaceAll(/\/+/g, '/').toLowerCase();
+}
+
+async function readProcessCommandLine(pid: number): Promise<string | null> {
+  try {
+    if (process.platform === 'win32') {
+      const filter = `ProcessId = ${pid}`;
+      const { stdout } = await execFileAsync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-CimInstance Win32_Process -Filter '${filter}').CommandLine`,
+        ],
+        { timeout: 3_000, maxBuffer: 64 * 1024 },
+      );
+      return String(stdout).trim() || null;
+    }
+
+    const procCmdline = await fsp.readFile(`/proc/${pid}/cmdline`, 'utf8');
+    return procCmdline.replaceAll('\0', ' ').trim() || null;
+  } catch {
+    // A process may exit during inspection, or the host may not expose a
+    // command-line API. Ambiguous identity is handled fail-closed by caller.
+    return null;
+  }
+}
+
+function expectedProcessIdentityMarker(name: StaleProcessName): string {
+  switch (name) {
+    case 'bot':
+      return getBotEntryPath();
+    case 'dashboard':
+      return getDashboardEntryPath();
+    case 'lavalink':
+      return path.join(app.getPath('userData'), 'lavalink', 'Lavalink.jar');
+    case 'valkey':
+      return path.join(app.getPath('userData'), 'valkey', 'data');
+  }
+}
+
+async function processMatchesExpectedIdentity(
+  name: StaleProcessName,
+  pid: number,
+): Promise<boolean> {
+  const commandLine = await readProcessCommandLine(pid);
+  if (!commandLine) return false;
+
+  const normalizedCommand = normalizeProcessIdentity(commandLine);
+  const normalizedMarker = normalizeProcessIdentity(expectedProcessIdentityMarker(name));
+  if (!normalizedCommand.includes(normalizedMarker)) return false;
+
+  if (name === 'lavalink') return normalizedCommand.includes('lavalink.jar');
+  if (name === 'valkey') return /(?:^|\/)redis-server(?:\.exe)?(?:\s|$)/.test(normalizedCommand)
+    || /(?:^|\/)valkey-server(?:\.exe)?(?:\s|$)/.test(normalizedCommand);
+  return true;
+}
+
+export interface StaleProcessCleanupResult {
+  ok: boolean;
+  unresolved: string[];
+}
+
+export async function cleanupStaleProcesses(): Promise<StaleProcessCleanupResult> {
   const cfg = getConfig();
   const pids = cfg.lastPids ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+  const nextPids = { ...pids };
 
-  const stalePids: Array<[string, number]> = [];
+  const stalePids: Array<[StaleProcessName, number]> = [];
+  const unresolved: string[] = [];
   for (const [name, pid] of Object.entries(pids)) {
     // Legacy stores may contain sentinel/invalid values (for example -1).
     // Never pass those to process.kill: negative PIDs target process groups.
     if (typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0) {
       try {
         process.kill(pid, 0); // Throws if process doesn't exist
+        if (!await processMatchesExpectedIdentity(name as StaleProcessName, pid)) {
+          console.warn(`[ProcessMgr] Refusing to signal stale ${name} PID ${pid}: process identity is ambiguous.`);
+          unresolved.push(name);
+          continue;
+        }
         console.log(`[ProcessMgr] Killing stale ${name} process (PID ${pid})`);
         process.kill(pid, 'SIGTERM');
-        stalePids.push([name, pid]);
+        stalePids.push([name as StaleProcessName, pid]);
       } catch {
-        // Process doesn't exist — that's fine
+        // Process doesn't exist — clear its stale record.
+        nextPids[name as StaleProcessName] = null;
       }
+    } else if (pid !== null) {
+      nextPids[name as StaleProcessName] = null;
     }
   }
 
-  await Promise.all(stalePids.map(([, pid]) => waitForStaleProcessExit(pid)));
+  const exited = await Promise.all(stalePids.map(async ([name, pid]) => ({
+    name,
+    exited: await waitForStaleProcessExit(pid),
+  })));
+  for (const result of exited) {
+    if (result.exited) nextPids[result.name] = null;
+    else unresolved.push(result.name);
+  }
 
-  // Clear stored PIDs only after every reachable stale process has exited or
-  // exhausted the bounded force-kill window.
-  saveConfig({ lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null } });
+  // Clear only records proven dead. Ambiguous or unkillable records remain so
+  // the next launch cannot silently forget a service it failed to reclaim.
+  saveConfig({ lastPids: nextPids });
+  return { ok: unresolved.length === 0, unresolved: [...new Set(unresolved)] };
 }
 
 /* ------------------------------------------------------------------ */

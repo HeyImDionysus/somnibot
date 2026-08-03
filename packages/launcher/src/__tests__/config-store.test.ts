@@ -155,6 +155,7 @@ describe('Launcher Config', () => {
       supabaseDiscordAuthProviderConfigured: true,
       runtimeMode: 'vps',
       vpsDomain: 'somnibot.example.com',
+      lastPids: { bot: 1234, dashboard: 5678, lavalink: 9012, valkey: 3456 },
     };
 
     const sanitized = sanitizeConfigPatchForStorage(fromRenderer);
@@ -179,6 +180,7 @@ describe('Launcher Config', () => {
     expect(sanitized.paypalSandbox).toBe(false);
     expect(sanitized.runtimeMode).toBe('vps');
     expect(sanitized.vpsDomain).toBe('somnibot.example.com');
+    expect(sanitized).not.toHaveProperty('lastPids');
   });
 
   it('preserves real values when user enters a new secret (not the mask)', () => {
