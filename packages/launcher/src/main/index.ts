@@ -1332,8 +1332,11 @@ function registerIpcHandlers(): void {
             await waitForProcessIdsToExit([localProcessIds.botPid, localProcessIds.dashboardPid]);
           },
           restoreLocal: async () => {
-            const restored = await startLocalStack({ ...cfg, runtimeMode: 'regular-local' });
-            if (!restored.ok) throw new Error(restored.error || 'Local SomniBot could not be restored.');
+            const restored = await runLocalSetupAutomation({
+              runtimeMode: 'regular-local',
+              publicCallbackBaseUrl: cfg.publicCallbackBaseUrl,
+            });
+            if (!restored.ok) throw new Error(restored.error || 'Local SomniBot and its provider callbacks could not be restored.');
           },
           executeDeployment,
         });

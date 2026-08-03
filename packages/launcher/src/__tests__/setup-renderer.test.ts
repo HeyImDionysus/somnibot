@@ -111,6 +111,12 @@ describe('launcher setup renderer wiring', () => {
     expect(configStore).toContain('LAVALINK_PASSWORD: config.vpsLavalinkPassword || getLavalinkPassword()');
   });
 
+  it('restores local provider callbacks as well as processes after a failed VPS handoff', () => {
+    const main = readSourceFile('main/index.ts');
+    expect(main).toContain("runLocalSetupAutomation({\n              runtimeMode: 'regular-local'");
+    expect(main).toContain('Local SomniBot and its provider callbacks could not be restored.');
+  });
+
   it('renders derived callback values from setup diagnostics without exposing ports in normal labels', () => {
     const renderer = readSourceFile('renderer/renderer.js');
 
