@@ -58,6 +58,17 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('const firstSetupField = runtimeMode === \'vps\' ? runtimeFields.vpsDomain : fields.discordToken;');
   });
 
+  it('preserves the local callback profile while the owner configures VPS mode', () => {
+    const renderer = readSourceFile('renderer/renderer.js');
+    const collectRuntimeConfig = renderer.slice(
+      renderer.indexOf('function collectRuntimeConfig()'),
+      renderer.indexOf('function collectConfig()'),
+    );
+
+    expect(collectRuntimeConfig).toContain('config[key] = input.value;');
+    expect(collectRuntimeConfig).not.toContain("config.publicCallbackBaseUrl = '';");
+  });
+
   it('keeps cloud connection recovery available for partial established profiles', () => {
     const html = readSourceFile('renderer/index.html');
     const renderer = readSourceFile('renderer/renderer.js');

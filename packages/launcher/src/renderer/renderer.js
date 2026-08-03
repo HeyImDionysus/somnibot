@@ -262,9 +262,6 @@ function collectRuntimeConfig() {
   for (const [key, input] of Object.entries(runtimeFields)) {
     config[key] = input.value;
   }
-  if (runtimeMode === 'vps') {
-    config.publicCallbackBaseUrl = '';
-  }
   return config;
 }
 

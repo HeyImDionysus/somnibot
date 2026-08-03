@@ -25,6 +25,9 @@ export interface VpsDeploymentRunRuntime {
   createCommandRunner: () => VpsDeploymentCommandRunner;
   runGate: VpsDeploymentRunGate;
   persistGeneratedSecrets: (patch: Partial<PersistedVpsSecrets>) => Promise<void> | void;
+  runApprovedDeployment?: (
+    execute: () => Promise<VpsDeploymentExecutionResult>,
+  ) => Promise<VpsDeploymentExecutionResult>;
   /**
    * [infrastructure-launcher] Optional sink for durable audit entries. Records
    * the operator approval decision and the deployment execution outcome (the
@@ -130,14 +133,17 @@ export async function handleVpsDeploymentRunRequest(
       });
     }
 
-    const result = await runVpsDeployment({
-      plan,
-      operatorApproved: approval.operatorApproved,
-      approvedCommandIds: approval.approvedCommandIds,
-      dryRun: request?.dryRun !== false,
-      cancelRequested: Boolean(request?.cancelRequested),
-      ...(approvedForExecution && plan.status === 'ready' ? { commandRunner: runtime.createCommandRunner() } : {}),
-    });
+    const executeDeployment = () => runVpsDeployment({
+        plan,
+        operatorApproved: approval.operatorApproved,
+        approvedCommandIds: approval.approvedCommandIds,
+        dryRun: request?.dryRun !== false,
+        cancelRequested: Boolean(request?.cancelRequested),
+        ...(approvedForExecution && plan.status === 'ready' ? { commandRunner: runtime.createCommandRunner() } : {}),
+      });
+    const result = approvedForExecution && plan.status === 'ready' && runtime.runApprovedDeployment
+      ? await runtime.runApprovedDeployment(executeDeployment)
+      : await executeDeployment();
 
     // [infrastructure-launcher] Audit the remote-execution outcome for live
     // runs (VPS remote execute). Dry-runs never touch the host, so they are

@@ -31,6 +31,12 @@ export interface SyncableCredentials {
   paypalWebhookProofKey: string;
   paypalSandbox: boolean;
   lavalinkEnabled: boolean;
+  publicCallbackBaseUrl: string;
+  vpsDomain: string;
+  vpsSshHost: string;
+  vpsSshUser: string;
+  vpsDeployPath: string;
+  tailscaleAuthKey?: string;
   vpsCsrfSecret?: string;
   vpsNextAuthSecret?: string;
   vpsWebhookReplaySecret?: string;
@@ -52,6 +58,7 @@ const RESTORED_SECRET_KEYS: ReadonlySet<keyof RestorableCredentials> = new Set([
   'paypalClientSecret',
   'paypalWebhookId',
   'paypalWebhookProofKey',
+  'tailscaleAuthKey',
   'vpsCsrfSecret',
   'vpsNextAuthSecret',
   'vpsWebhookReplaySecret',
@@ -104,6 +111,12 @@ const PUSH_SETTINGS_MAP: Record<keyof SyncableCredentials, string> = {
   paypalWebhookProofKey: 'paypal_webhook_proof_key',
   paypalSandbox: 'paypal_sandbox',
   lavalinkEnabled: 'lavalink_enabled',
+  publicCallbackBaseUrl: 'local_public_callback_base_url',
+  vpsDomain: 'vps_domain',
+  vpsSshHost: 'vps_ssh_host',
+  vpsSshUser: 'vps_ssh_user',
+  vpsDeployPath: 'vps_deploy_path',
+  tailscaleAuthKey: 'tailscale_auth_key',
   vpsCsrfSecret: 'vps_csrf_secret',
   vpsNextAuthSecret: 'vps_nextauth_secret',
   vpsWebhookReplaySecret: 'vps_webhook_replay_secret',

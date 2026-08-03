@@ -71,6 +71,7 @@ import { handleVpsDeploymentRunRequest, type VpsDeploymentRunRequest } from './v
 import { ensurePersistedVpsSecrets } from './vps-env-materializer.js';
 import { handleVpsRollbackRunRequest, type VpsRollbackRunRequest } from './vps-rollback-request.js';
 import { planVpsSshPreflight } from './vps-preflight.js';
+import { runLocalToVpsHandoff, waitForProcessIdsToExit } from './local-vps-handoff.js';
 import {
   startLocalValkeyBackupSchedule,
   stopLocalValkeyBackupSchedule,
@@ -127,6 +128,12 @@ async function syncLauncherCredentials(config: LauncherConfig): Promise<void> {
     paypalWebhookProofKey: config.paypalWebhookProofKey,
     paypalSandbox: config.paypalSandbox,
     lavalinkEnabled: config.lavalinkEnabled,
+    publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+    vpsDomain: config.vpsDomain,
+    vpsSshHost: config.vpsSshHost,
+    vpsSshUser: config.vpsSshUser,
+    vpsDeployPath: config.vpsDeployPath,
+    tailscaleAuthKey: config.tailscaleAuthKey,
     vpsCsrfSecret: config.vpsCsrfSecret,
     vpsNextAuthSecret: config.vpsNextAuthSecret,
     vpsWebhookReplaySecret: config.vpsWebhookReplaySecret,
@@ -1309,6 +1316,27 @@ function registerIpcHandlers(): void {
       persistGeneratedSecrets: async (patch) => {
         saveConfig(patch);
         await queueLauncherCredentialSync(getConfig());
+      },
+      runApprovedDeployment: (executeDeployment) => {
+        const localWasRunning = isRunning();
+        const localProcessIds = getStatus();
+        return runLocalToVpsHandoff({
+          localWasRunning,
+          stopLocal: async () => {
+            stopLocalValkeyBackupSchedule();
+            stopAll();
+            stopLavalink();
+            stopValkey();
+            sessionToken = null;
+            lastStartedPayPalConfig = null;
+            await waitForProcessIdsToExit([localProcessIds.botPid, localProcessIds.dashboardPid]);
+          },
+          restoreLocal: async () => {
+            const restored = await startLocalStack({ ...cfg, runtimeMode: 'regular-local' });
+            if (!restored.ok) throw new Error(restored.error || 'Local SomniBot could not be restored.');
+          },
+          executeDeployment,
+        });
       },
     });
   });

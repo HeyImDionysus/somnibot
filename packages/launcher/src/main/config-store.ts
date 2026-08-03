@@ -17,7 +17,7 @@ import Store from 'electron-store';
 import { safeStorage } from 'electron';
 import { randomBytes } from 'crypto';
 import { getLavalinkPassword } from './lavalink-manager.js';
-import { buildRuntimeEnvVars, type RuntimeMode } from './runtime-profile.js';
+import { buildRuntimeEnvVars, getRuntimeHolderId, type RuntimeMode } from './runtime-profile.js';
 import { buildDbUrlEnv } from './supabase-db-url.js';
 
 /** V53 Phase 4 (4.3.3): Per-guild config for multi-guild support */
@@ -322,6 +322,10 @@ export function buildEnvVars(
     CSRF_SECRET: config.vpsCsrfSecret || randomBytes(32).toString('hex'),
     NEXTAUTH_SECRET: config.vpsNextAuthSecret || randomBytes(32).toString('hex'),
     WEBHOOK_REPLAY_SECRET: config.vpsWebhookReplaySecret || randomBytes(32).toString('hex'),
+    SOMNIBOT_RUNTIME_HOLDER_ID: getRuntimeHolderId(
+      'regular-local',
+      config.vpsWebhookReplaySecret || config.discordApplicationId,
+    ),
 
     // Runtime networking: operator dashboard URL and public callback base
     // are intentionally separate. Regular local keeps the launcher dashboard

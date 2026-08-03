@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export const REGULAR_LOCAL_DASHBOARD_PORT = 3456;
 export const REGULAR_LOCAL_DASHBOARD_HOSTNAME = '127.0.0.1';
 export const REGULAR_LOCAL_OPERATOR_DASHBOARD_URL = `http://localhost:${REGULAR_LOCAL_DASHBOARD_PORT}`;
@@ -7,6 +9,11 @@ export const VPS_DASHBOARD_HOSTNAME = '0.0.0.0';
 export const VPS_FALLBACK_OPERATOR_DASHBOARD_URL = `http://localhost:${VPS_DASHBOARD_PORT}`;
 
 export type RuntimeMode = 'regular-local' | 'vps';
+
+export function getRuntimeHolderId(mode: RuntimeMode, portableSecret: string): string {
+  if (!portableSecret) throw new Error('Runtime ownership needs a persisted portable secret.');
+  return createHash('sha256').update(`somnibot-runtime:${mode}:${portableSecret}`).digest('hex');
+}
 
 export interface RuntimeNetworkingConfig {
   runtimeMode?: RuntimeMode | string;

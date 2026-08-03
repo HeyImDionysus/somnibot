@@ -2506,3 +2506,17 @@ export interface DbCommerceAdminRefundOperation {
   provider_outcome_at: string | null;
   completed_at: string | null;
 }
+
+// ── Runtime Ownership (runtime_leases) ───────────────────────────
+// Service-role-only coordination row used to prevent a local and VPS bot from
+// connecting concurrently during an owner-controlled runtime handoff.
+
+export interface DbRuntimeLease {
+  lease_name: string;
+  holder_id: string;
+  session_id: string;
+  runtime_mode: 'regular-local' | 'vps';
+  acquired_at: string;
+  heartbeat_at: string;
+  expires_at: string;
+}

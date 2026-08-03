@@ -3,6 +3,7 @@ import {
   buildRuntimeEnvVars,
   getLauncherLocalStartBlocker,
   getProviderCallbackUrls,
+  getRuntimeHolderId,
   normalizeBaseUrl,
   normalizeRuntimeMode,
   normalizeVpsDomain,
@@ -11,6 +12,17 @@ import {
 } from '../main/runtime-profile';
 
 describe('runtime profile model', () => {
+  it('derives stable but mode-distinct runtime owners without exposing the portable secret', () => {
+    const secret = 'portable-replay-secret';
+    const local = getRuntimeHolderId('regular-local', secret);
+    const vps = getRuntimeHolderId('vps', secret);
+    expect(local).toHaveLength(64);
+    expect(vps).toHaveLength(64);
+    expect(local).not.toBe(vps);
+    expect(local).not.toContain(secret);
+    expect(getRuntimeHolderId('regular-local', secret)).toBe(local);
+  });
+
   it('defaults unknown and missing runtime modes to regular local', () => {
     expect(normalizeRuntimeMode(undefined)).toBe('regular-local');
     expect(normalizeRuntimeMode('regular-local')).toBe('regular-local');

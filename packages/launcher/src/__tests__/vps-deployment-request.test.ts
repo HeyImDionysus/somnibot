@@ -87,6 +87,7 @@ describe('VPS deployment run request coordinator', () => {
 
   it('executes live commands when main-process approval confirms them', async () => {
     const executedCommandIds: string[] = [];
+    let handoffCalls = 0;
 
     const result = await handleVpsDeploymentRunRequest(
       completeConfig,
@@ -103,10 +104,15 @@ describe('VPS deployment run request coordinator', () => {
         },
         runGate: new VpsDeploymentRunGate(),
         persistGeneratedSecrets: async () => {},
+        runApprovedDeployment: async (execute) => {
+          handoffCalls += 1;
+          return execute();
+        },
       },
     );
 
     expect(result.state).toBe('success');
+    expect(handoffCalls).toBe(1);
     expect(executedCommandIds).toEqual([
       'enter-deploy-path',
       'write-env-file',
@@ -194,6 +200,9 @@ describe('VPS deployment run request coordinator', () => {
       expect(value).toBeTruthy();
       expect(parseEnv(envPayloads[1] ?? '')[key]).toBe(value);
     }
+    const firstHolder = parseEnv(envPayloads[0] ?? '').SOMNIBOT_RUNTIME_HOLDER_ID;
+    expect(firstHolder).toMatch(/^[a-f0-9]{64}$/);
+    expect(parseEnv(envPayloads[1] ?? '').SOMNIBOT_RUNTIME_HOLDER_ID).toBe(firstHolder);
   });
 
   it('allows VPS mechanics without PayPal while leaving payments disabled', async () => {
@@ -299,6 +308,9 @@ describe('VPS deployment run request coordinator', () => {
         },
         runGate: new VpsDeploymentRunGate(),
         persistGeneratedSecrets: async () => {},
+        runApprovedDeployment: async () => {
+          throw new Error('runtime handoff should not run for dry-runs');
+        },
       },
     );
 

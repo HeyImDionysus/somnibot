@@ -26,6 +26,12 @@ function pushCredentials(overrides: Partial<SyncableCredentials> = {}): Syncable
     paypalWebhookProofKey: 'paypal-webhook-proof',
     paypalSandbox: true,
     lavalinkEnabled: true,
+    publicCallbackBaseUrl: 'https://somnibot-laptop.tailnet.ts.net',
+    vpsDomain: 'somnibot.example.com',
+    vpsSshHost: '203.0.113.10',
+    vpsSshUser: 'somnibot',
+    vpsDeployPath: '/opt/somnibot',
+    tailscaleAuthKey: 'tskey-auth-portable',
     vpsCsrfSecret: 'vps-csrf',
     vpsNextAuthSecret: 'vps-nextauth',
     vpsWebhookReplaySecret: 'vps-replay',
@@ -57,6 +63,12 @@ describe('buildSyncRows', () => {
       paypal_webhook_proof_key: 'paypal-webhook-proof',
       paypal_sandbox: 'true',
       lavalink_enabled: 'true',
+      local_public_callback_base_url: 'https://somnibot-laptop.tailnet.ts.net',
+      vps_domain: 'somnibot.example.com',
+      vps_ssh_host: '203.0.113.10',
+      vps_ssh_user: 'somnibot',
+      vps_deploy_path: '/opt/somnibot',
+      tailscale_auth_key: 'tskey-auth-portable',
       vps_csrf_secret: 'vps-csrf',
       vps_nextauth_secret: 'vps-nextauth',
       vps_webhook_replay_secret: 'vps-replay',
@@ -90,6 +102,7 @@ describe('parseSyncRows', () => {
       { key: 'paypal_webhook_id', value: 'restored-webhook' },
       { key: 'paypal_sandbox', value: 'false' },
       { key: 'lavalink_enabled', value: 'true' },
+      { key: 'tailscale_auth_key', value: 'restored-tailscale-auth-key' },
     ]);
 
     expect(restored).toEqual({
@@ -101,6 +114,7 @@ describe('parseSyncRows', () => {
       paypalWebhookId: 'restored-webhook',
       paypalSandbox: false,
       lavalinkEnabled: true,
+      tailscaleAuthKey: 'restored-tailscale-auth-key',
     });
   });
 
@@ -166,6 +180,7 @@ describe('maskRestoredCredentials', () => {
       paypalWebhookProofKey: 'restored-webhook-proof',
       paypalSandbox: false,
       lavalinkEnabled: true,
+      tailscaleAuthKey: 'restored-tailscale-auth-key',
     }, 'MASK')).toEqual({
       discordToken: 'MASK',
       discordApplicationId: 'restored-app-id',
@@ -183,6 +198,7 @@ describe('maskRestoredCredentials', () => {
       paypalWebhookProofKey: 'MASK',
       paypalSandbox: false,
       lavalinkEnabled: true,
+      tailscaleAuthKey: 'MASK',
     });
   });
 });

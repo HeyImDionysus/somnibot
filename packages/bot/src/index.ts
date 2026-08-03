@@ -47,6 +47,7 @@ import {
 import { startPortalRequestNotifier } from './features/commerce/portal-request-notifier.js';
 import { BotPresenceManager } from './features/discord-ux/index.js';
 import { shutdownBot, type BotLevelServices } from './services/bot-shutdown.js';
+import { acquireRuntimeLease, resolveRuntimeHolderId } from './services/runtime-lease.js';
 import { EmbedBuilder, Events } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 
@@ -252,13 +253,51 @@ async function main(): Promise<void> {
     stopAntiRaidPruner,
     stopTeamInvitationSweeper,
   };
+  let shutdownStarted = false;
+  const shutdown = async (signal: string, exitCode: 0 | 1 = 0) => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    stopSetupCompletionWatcher();
+    stopAwaitingSetupWatcher();
+    stopLauncherIpcHeartbeat();
+    await stopDashboardSupervisor();
+    await shutdownBot({ signal, client, botLevelServices, exitCode, dependencies: { log } });
+  };
 
-  // 4. Register events
-  registerEvents(client);
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-  // 5. Login
-  log.info('Connecting to Discord gateway...');
-  await client.login(config.DISCORD_TOKEN);
+  const runtimeHolderId = resolveRuntimeHolderId(
+    config.SOMNIBOT_RUNTIME_HOLDER_ID,
+    config.DISCORD_APPLICATION_ID,
+    config.SOMNIBOT_RUNTIME_MODE,
+  );
+  const runtimeLease = await acquireRuntimeLease({
+    supabase: client.supabase,
+    holderId: runtimeHolderId,
+    mode: config.SOMNIBOT_RUNTIME_MODE,
+    onLost: (reason) => {
+      log.error(reason);
+      // Stop Discord intake before draining services. The lease may expire
+      // while cleanup runs, so a successor must not overlap gateway work.
+      client.destroy();
+      void shutdown('RUNTIME_LEASE_LOST', 1);
+    },
+  });
+  botLevelServices.runtimeLease = runtimeLease;
+
+  try {
+    // 4. Register events
+    registerEvents(client);
+
+    // 5. Login
+    log.info('Connecting to Discord gateway...');
+    await client.login(config.DISCORD_TOKEN);
+  } catch (error) {
+    // A failed boot never leaves the alternate runtime waiting for TTL expiry.
+    await runtimeLease.release();
+    throw error;
+  }
 
   // 5.5. Start health check HTTP server (V5 audit remediation — Finding 9.1)
   startHealthServer(client);
@@ -410,17 +449,6 @@ async function main(): Promise<void> {
     }
   });
 
-  // ── Graceful shutdown ──
-  const shutdown = async (signal: string) => {
-    stopSetupCompletionWatcher();
-    stopAwaitingSetupWatcher();
-    stopLauncherIpcHeartbeat();
-    await stopDashboardSupervisor();
-    await shutdownBot({ signal, client, botLevelServices, dependencies: { log } });
-  };
-
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
   } // end runConfiguredBoot
 } // end main
 

@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { LauncherConfig } from './config-store.js';
 import { buildDbUrlEnv } from './supabase-db-url.js';
 import type { VpsDeploymentPlan } from './vps-deployment-plan.js';
+import { getRuntimeHolderId } from './runtime-profile.js';
 
 type SecretGenerator = (bytes: number) => string;
 
@@ -119,6 +120,7 @@ export function materializeVpsDeploymentPlan(
     CSRF_SECRET: csrfSecret,
     NEXTAUTH_SECRET: nextAuthSecret,
     WEBHOOK_REPLAY_SECRET: webhookReplaySecret,
+    SOMNIBOT_RUNTIME_HOLDER_ID: getRuntimeHolderId('vps', webhookReplaySecret),
     VALKEY_PASSWORD: valkeyPassword,
     VALKEY_URL: `redis://:${valkeyPassword}@valkey:6379`,
     LAVALINK_PASSWORD: lavalinkPassword,

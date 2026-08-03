@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 245 migration files in packages/supabase/migrations/
+ * Source: 246 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -2417,6 +2417,16 @@ export interface DbPredictions {
   created_at: string;
   locked_at: string | null;
   resolved_at: string | null;
+}
+
+export interface DbRuntimeLeases {
+  lease_name: string;
+  holder_id: string;
+  session_id: string;
+  runtime_mode: 'regular-local' | 'vps';
+  acquired_at: string;
+  heartbeat_at: string;
+  expires_at: string;
 }
 
 export interface DbStarboardEntries {

@@ -152,6 +152,7 @@ function buildEnvironmentVariables(
     envVar('DOMAIN', domain, { secret: false, required: true, source: 'derived' }),
     envVar('NODE_ENV', 'production', { secret: false, required: true, source: 'derived' }),
     envVar('SOMNIBOT_RUNTIME_MODE', 'vps', { secret: false, required: true, source: 'derived' }),
+    envVar('SOMNIBOT_RUNTIME_HOLDER_ID', '<SOMNIBOT_RUNTIME_HOLDER_ID>', { secret: false, required: true, source: 'derived' }),
     envVar('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true', { secret: false, required: true, source: 'derived' }),
     envVar('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', publicBaseUrl, { secret: false, required: true, source: 'derived' }),
     envVar('DASHBOARD_URL', publicBaseUrl, { secret: false, required: true, source: 'derived' }),

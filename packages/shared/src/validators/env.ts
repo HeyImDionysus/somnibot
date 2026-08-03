@@ -20,6 +20,10 @@ export const BotEnvSchema = z.object({
   DISCORD_GUILD_ID: z.string().optional().default(''),
   DISCORD_PERMISSIONS: z.coerce.number().default(8),
 
+  // ─── Runtime ownership (local/VPS handoff) ───
+  SOMNIBOT_RUNTIME_MODE: z.enum(['regular-local', 'vps']).default('regular-local'),
+  SOMNIBOT_RUNTIME_HOLDER_ID: z.string().optional().default(''),
+
   // ─── Supabase (user-provided) ───
   SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL'),
   // Set either new or legacy name — transform resolves both.
