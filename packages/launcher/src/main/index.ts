@@ -92,6 +92,7 @@ import {
 import {
   readRuntimeLeaseStatus,
   RuntimeLeaseStatusUnavailableError,
+  validateSupabaseCredentialPairing,
   waitForRuntimeLease,
 } from './runtime-lease-client.js';
 import { runVpsToLocalHandoff } from './vps-local-handoff.js';
@@ -1078,6 +1079,24 @@ async function restoreVpsAfterLocalHandoffFailure(
 async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch): Promise<SetupAutomationResult> {
   const sanitizedPatch = sanitizePayPalConfigPatch(configPatch);
   const savedConfig = getConfig();
+  try {
+    const pairingError = validateSupabaseCredentialPairing(savedConfig.supabaseUrl, sanitizedPatch);
+    if (pairingError) {
+      return {
+        ok: false,
+        stage: 'runtime-ownership',
+        message: 'Supabase project credentials must be updated together.',
+        error: pairingError,
+      };
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      stage: 'runtime-ownership',
+      message: 'The Supabase project URL is not safe for runtime ownership checks.',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
   const localConfig = { ...savedConfig, ...sanitizedPatch, runtimeMode: 'regular-local' as const };
   let leaseStatus;
   try {

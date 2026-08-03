@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  canonicalSupabaseProjectOrigin,
   readRuntimeLeaseStatus,
   RuntimeLeaseStatusUnavailableError,
+  validateSupabaseCredentialPairing,
   waitForRuntimeLease,
 } from '../main/runtime-lease-client.js';
 
@@ -79,8 +81,40 @@ describe('launcher runtime lease client', () => {
     const fetchImpl = vi.fn();
     await expect(readRuntimeLeaseStatus('http://127.0.0.1:54321', 'stored-service-key', {
       fetch: fetchImpl,
-    })).rejects.toThrow('require an HTTPS Supabase project domain');
+    })).rejects.toThrow('canonical HTTPS Supabase project origin');
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('rejects Supabase-domain URLs with credential-routing components', async () => {
+    const fetchImpl = vi.fn();
+    for (const url of [
+      'https://attacker.supabase.co/functions/v1/collector?x=',
+      'https://attacker.supabase.co:444',
+      'https://user@attacker.supabase.co',
+      'https://attacker.supabase.co/#fragment',
+    ]) {
+      await expect(readRuntimeLeaseStatus(url, 'stored-service-key', {
+        fetch: fetchImpl,
+      })).rejects.toThrow('canonical HTTPS Supabase project origin');
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(canonicalSupabaseProjectOrigin('https://example.supabase.co/'))
+      .toBe('https://example.supabase.co');
+  });
+
+  it('requires a matching new secret key when the renderer changes Supabase projects', () => {
+    expect(validateSupabaseCredentialPairing(
+      'https://first.supabase.co',
+      { supabaseUrl: 'https://second.supabase.co' },
+    )).toContain('matching secret key');
+    expect(validateSupabaseCredentialPairing(
+      'https://first.supabase.co',
+      { supabaseUrl: 'https://second.supabase.co', supabaseSecretKey: 'new-project-key' },
+    )).toBeUndefined();
+    expect(validateSupabaseCredentialPairing(
+      'https://first.supabase.co',
+      { supabaseUrl: 'https://first.supabase.co/' },
+    )).toBeUndefined();
   });
 
   it('waits for the requested ownership state and times out closed', async () => {

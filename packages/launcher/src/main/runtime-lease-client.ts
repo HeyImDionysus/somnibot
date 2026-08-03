@@ -21,6 +21,48 @@ interface RuntimeLeaseRow {
   lease_expires_at?: unknown;
 }
 
+export function canonicalSupabaseProjectOrigin(supabaseUrl: string): string {
+  const url = supabaseUrl.trim();
+  const urlValidation = validateSupabaseUrl(url);
+  if (!urlValidation.ok) {
+    throw new Error(urlValidation.error || 'Supabase URL is not trusted for active runtime ownership checks.');
+  }
+
+  const parsedUrl = new URL(url);
+  const isSupabaseProject = parsedUrl.protocol === 'https:'
+    && (parsedUrl.hostname.endsWith('.supabase.co') || parsedUrl.hostname.endsWith('.supabase.com'));
+  const isCanonicalOrigin = !parsedUrl.username
+    && !parsedUrl.password
+    && !parsedUrl.port
+    && parsedUrl.pathname === '/'
+    && !parsedUrl.search
+    && !parsedUrl.hash;
+  if (!isSupabaseProject || !isCanonicalOrigin) {
+    throw new Error('Active runtime ownership checks require a canonical HTTPS Supabase project origin.');
+  }
+  return parsedUrl.origin;
+}
+
+export function validateSupabaseCredentialPairing(
+  savedSupabaseUrl: string,
+  patch: { supabaseUrl?: string; supabaseSecretKey?: string },
+): string | undefined {
+  if (typeof patch.supabaseUrl !== 'string') return undefined;
+
+  const nextOrigin = canonicalSupabaseProjectOrigin(patch.supabaseUrl);
+  let savedOrigin = '';
+  if (savedSupabaseUrl.trim()) {
+    try {
+      savedOrigin = canonicalSupabaseProjectOrigin(savedSupabaseUrl);
+    } catch {
+      // An invalid legacy URL is never considered the same credential target.
+    }
+  }
+  if (nextOrigin === savedOrigin) return undefined;
+  if (typeof patch.supabaseSecretKey === 'string' && patch.supabaseSecretKey.trim()) return undefined;
+  return 'Changing the Supabase project requires its matching secret key.';
+}
+
 function parseRuntimeLeaseStatus(payload: unknown): RuntimeLeaseStatus {
   const row = Array.isArray(payload) ? payload[0] : payload;
   if (!row || typeof row !== 'object') {
@@ -56,19 +98,10 @@ export async function readRuntimeLeaseStatus(
   if (!url || !secretKey) {
     throw new Error('Supabase URL and secret key are required to check active runtime ownership.');
   }
-  const urlValidation = validateSupabaseUrl(url);
-  if (!urlValidation.ok) {
-    throw new Error(urlValidation.error || 'Supabase URL is not trusted for active runtime ownership checks.');
-  }
-  const parsedUrl = new URL(url);
-  const isSupabaseProject = parsedUrl.protocol === 'https:'
-    && (parsedUrl.hostname.endsWith('.supabase.co') || parsedUrl.hostname.endsWith('.supabase.com'));
-  if (!isSupabaseProject) {
-    throw new Error('Active runtime ownership checks require an HTTPS Supabase project domain.');
-  }
+  const projectOrigin = canonicalSupabaseProjectOrigin(url);
 
   const fetchImpl = options.fetch ?? fetch;
-  const response = await fetchImpl(`${url}/rest/v1/rpc/get_somnibot_runtime`, {
+  const response = await fetchImpl(`${projectOrigin}/rest/v1/rpc/get_somnibot_runtime`, {
     method: 'POST',
     headers: {
       apikey: secretKey,
