@@ -292,14 +292,18 @@ function collectConfig() {
 }
 
 function isCredentialFormComplete() {
-  return [
+  const discordReady = [
     'discordToken',
     'discordApplicationId',
     'discordClientSecret',
+  ].every((key) => fields[key].value.trim().length > 0);
+  const supabaseKeysReady = [
     'supabaseUrl',
     'supabaseSecretKey',
     'supabasePublishableKey',
   ].every((key) => fields[key].value.trim().length > 0);
+  const supabaseTokenReady = fields.supabaseAccessToken.value.trim().length > 0;
+  return discordReady && (supabaseKeysReady || supabaseTokenReady);
 }
 
 function isPayPalFormComplete() {
@@ -919,8 +923,16 @@ btnStart.addEventListener('click', async () => {
 
   const currentSetup = await refreshSetupStatus();
 
-  // Quick local check for required fields
-  const required = ['discordToken', 'discordApplicationId', 'discordClientSecret', 'supabaseUrl', 'supabaseSecretKey', 'supabasePublishableKey'];
+  // Quick local check for required fields. A Supabase Personal Access Token
+  // (`sbp_…`) is the single bootstrap input; project URL/API keys hydrate in
+  // the main process. Existing key fields remain a supported manual fallback.
+  const required = ['discordToken', 'discordApplicationId', 'discordClientSecret'];
+  const supabaseTokenReady = config.supabaseAccessToken?.trim();
+  const supabaseKeysReady = ['supabaseUrl', 'supabaseSecretKey', 'supabasePublishableKey']
+    .every((key) => config[key]);
+  if (!supabaseTokenReady && !supabaseKeysReady) {
+    required.push('supabaseAccessToken');
+  }
   const missing = required.filter((k) => !config[k]);
   if (!currentSetup?.primaryAction.enabled) {
     const blockedReason = currentSetup?.primaryAction.blockedReason || '';

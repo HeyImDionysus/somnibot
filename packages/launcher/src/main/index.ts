@@ -839,6 +839,71 @@ async function startLocalStack(
   return { ok: true };
 }
 
+type SupabaseBootstrapResult =
+  | { ok: true; config: LauncherConfig; hydrated: boolean }
+  | {
+    ok: false;
+    error: string;
+    projects?: Array<{ ref: string; name: string; region?: string; status?: string; url: string }>;
+  };
+
+/**
+ * The bot setup contract accepts one Supabase Personal Access Token (`sbp_…`)
+ * and derives the project/API values it needs. Keep the launcher on that same
+ * path. Existing URL/key values remain a supported advanced/manual fallback;
+ * the token is only used when one of those values is missing.
+ */
+async function bootstrapSupabaseFromManagementToken(
+  config: LauncherConfig,
+): Promise<SupabaseBootstrapResult> {
+  const token = config.supabaseAccessToken.trim();
+  const needsHydration = !config.supabaseUrl.trim()
+    || !config.supabaseSecretKey.trim()
+    || !config.supabasePublishableKey.trim();
+  if (!token || !needsHydration) return { ok: true, config, hydrated: false };
+
+  const projectRef = getSupabaseProjectRef(config.supabaseUrl);
+  let selectedProject: { ref: string; name: string; region?: string; status?: string; url: string } | undefined;
+  if (projectRef) {
+    selectedProject = {
+      ref: projectRef,
+      name: projectRef,
+      url: `https://${projectRef}.supabase.co`,
+    };
+  } else {
+    const projects = await listSupabaseProjects(token);
+    if (!projects.ok) return projects;
+    if (projects.projects.length === 0) {
+      return { ok: false, error: 'The Supabase Personal Access Token returned no projects.' };
+    }
+    if (projects.projects.length > 1) {
+      return {
+        ok: false,
+        error: 'The Supabase Personal Access Token can see multiple projects. Use Discover Supabase Projects and select the SomniBot project once.',
+        projects: projects.projects,
+      };
+    }
+    selectedProject = projects.projects[0];
+  }
+
+  const credentials = await getSupabaseProjectCredentials(token, selectedProject.ref);
+  if (!credentials.ok) return credentials;
+  if (!credentials.credentials.secretKey || !credentials.credentials.publishableKey) {
+    return {
+      ok: false,
+      error: 'The Supabase Personal Access Token could not read both project API keys. Grant project API-key read access or use the existing project keys as the manual fallback.',
+    };
+  }
+
+  const patch: Partial<LauncherConfig> = {
+    supabaseUrl: credentials.credentials.project.url,
+    supabaseSecretKey: credentials.credentials.secretKey,
+    supabasePublishableKey: credentials.credentials.publishableKey,
+  };
+  saveConfig(patch);
+  return { ok: true, config: getConfig(), hydrated: true };
+}
+
 async function stopManagedLocalStack(): Promise<void> {
   const status = getStatus();
   stopLocalValkeyBackupSchedule();
@@ -856,6 +921,17 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
   let config = getConfig();
   const warnings: string[] = [];
   let callbackBaseUrlChanged = previousPublicCallbackBaseUrl !== config.publicCallbackBaseUrl.trim();
+
+  const supabaseBootstrap = await bootstrapSupabaseFromManagementToken(config);
+  if (!supabaseBootstrap.ok) {
+    return {
+      ok: false,
+      stage: 'supabase-bootstrap',
+      message: 'Supabase project setup needs one more step.',
+      error: supabaseBootstrap.error,
+    };
+  }
+  config = supabaseBootstrap.config;
 
   if (config.runtimeMode !== 'regular-local') {
     return {
@@ -1737,7 +1813,22 @@ function registerIpcHandlers(): void {
     // genuine edits, so startup health checks never test the mask itself.
     const current = getConfig();
     const supplied = sanitizeConfigPatchForStorage(config);
-    return validateAllCredentials({ ...current, ...supplied });
+    const bootstrap = await bootstrapSupabaseFromManagementToken({ ...current, ...supplied });
+    if (!bootstrap.ok) {
+      return {
+        valid: false,
+        errors: [bootstrap.error],
+        meta: {},
+        checks: [{
+          id: 'supabase-project',
+          label: 'Supabase project',
+          status: 'failed',
+          summary: 'Supabase project values could not be hydrated from the Personal Access Token.',
+          detail: bootstrap.error,
+        }],
+      } satisfies FullValidationResult;
+    }
+    return validateAllCredentials(bootstrap.config);
   });
 
   // ── Process control ──

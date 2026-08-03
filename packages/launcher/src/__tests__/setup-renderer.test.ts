@@ -149,7 +149,8 @@ describe('launcher setup renderer wiring', () => {
 
     expect(renderer).toContain('latestProviderValidation = await window.somnibot.validateCredentials(collectCredentialConfig())');
     expect(main).toContain('const supplied = sanitizeConfigPatchForStorage(config);');
-    expect(main).toContain('validateAllCredentials({ ...current, ...supplied })');
+    expect(main).toContain('const bootstrap = await bootstrapSupabaseFromManagementToken({ ...current, ...supplied });');
+    expect(main).toContain('return validateAllCredentials(bootstrap.config);');
   });
 
   it('lets the owner revalidate saved connections without starting the local stack', () => {
