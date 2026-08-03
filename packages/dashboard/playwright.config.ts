@@ -71,6 +71,7 @@ export default defineConfig({
             env: {
               ...process.env,
               NEXT_PUBLIC_APP_URL: 'http://localhost:3001',
+              NEXT_DIST_DIR: '.next-playwright-local',
               NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
               NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'playwright-placeholder-supabase-publishable-key',
               SUPABASE_SECRET_KEY: 'playwright-placeholder-supabase-secret-key',

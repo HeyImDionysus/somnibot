@@ -30,6 +30,10 @@ try {
 }
 
 const nextConfig: NextConfig = {
+  // Playwright runs remote-auth and launcher-local servers concurrently. Give
+  // each process its own build directory so Linux does not contend on Next's
+  // single dev-server lock or overwrite the other server's generated assets.
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   env: {
     SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL || '',
     SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '',
