@@ -143,7 +143,42 @@ let sessionToken: string | null = null;
 let lastStartedPayPalConfig: PayPalRuntimeConfig | null = null;
 let launcherQuitRequested = false;
 let closeDecisionInFlight = false;
+let shutdownPromise: Promise<void> | null = null;
+let shutdownComplete = false;
+let quitRequestInFlight = false;
 const activeVpsDeployment = new VpsDeploymentRunGate();
+
+/**
+ * Quiesce every launcher-owned process before allowing Electron to exit.
+ * Electron's before-quit event is synchronous by design, so callers prevent
+ * the first quit attempt and call app.quit() again only after all child
+ * shutdown promises have settled.
+ */
+function shutdownManagedServices(): Promise<void> {
+  if (shutdownPromise) return shutdownPromise;
+
+  shutdownPromise = (async () => {
+    stopLocalValkeyBackupSchedule();
+    await stopAll();
+    await stopLavalink();
+    await stopValkey();
+    sessionToken = null;
+    lastStartedPayPalConfig = null;
+  })().catch((error) => {
+    console.error('[Launcher] Managed-service shutdown failed:', error);
+  });
+
+  return shutdownPromise;
+}
+
+function requestQuitAfterManagedShutdown(): void {
+  if (quitRequestInFlight || shutdownComplete) return;
+  quitRequestInFlight = true;
+  void shutdownManagedServices().then(() => {
+    shutdownComplete = true;
+    app.quit();
+  });
+}
 /**
  * [infrastructure-launcher] Fire-and-forget durable audit for launcher-side
  * lifecycle/security operations. Resolves the current Supabase creds + target
@@ -739,7 +774,7 @@ async function startLocalStack(
   }
 
   if (running) {
-    stopAll();
+    await stopAll();
     lastStartedPayPalConfig = null;
   }
 
@@ -755,7 +790,7 @@ async function startLocalStack(
 
   const vkResult = await startValkey();
   if (!vkResult.ok) {
-    stopValkey();
+    await stopValkey();
     return {
       ok: false,
       error: `Valkey/Redis is required for production-safe local operation and did not become ready: ${vkResult.error ?? 'unknown error'}`,
@@ -772,8 +807,8 @@ async function startLocalStack(
   if (runtimeConfig.lavalinkEnabled) {
     const llResult = await startLavalink();
     if (!llResult.ok) {
-      stopLavalink();
-      stopValkey();
+      await stopLavalink();
+      await stopValkey();
       return {
         ok: false,
         error: `Lavalink is enabled but did not become ready: ${llResult.error ?? 'unknown error'}`,
@@ -795,7 +830,7 @@ async function startLocalStack(
 
   sessionToken = crypto.randomBytes(32).toString('hex');
   const envVars = buildEnvVars(runtimeConfig, sessionToken);
-  startAll(envVars);
+  await startAll(envVars);
   lastStartedPayPalConfig = snapshotPayPalRuntimeConfig(runtimeConfig);
 
   void queueLauncherCredentialSync(runtimeConfig);
@@ -806,9 +841,9 @@ async function startLocalStack(
 async function stopManagedLocalStack(): Promise<void> {
   const status = getStatus();
   stopLocalValkeyBackupSchedule();
-  stopAll();
-  stopLavalink();
-  stopValkey();
+  await stopAll();
+  await stopLavalink();
+  await stopValkey();
   sessionToken = null;
   lastStartedPayPalConfig = null;
   await waitForProcessIdsToExit([status.botPid, status.dashboardPid]);
@@ -1520,10 +1555,7 @@ async function createWindow(showWhenReady = true): Promise<void> {
           window.hide();
         } else if (decision.response === 2) {
           launcherQuitRequested = true;
-          stopAll();
-          stopLavalink();
-          stopValkey();
-          app.quit();
+          requestQuitAfterManagedShutdown();
         }
       } finally {
         closeDecisionInFlight = false;
@@ -1713,11 +1745,11 @@ function registerIpcHandlers(): void {
     return startLocalStack(config);
   });
 
-  ipcMain.handle('stop-bot', () => {
+  ipcMain.handle('stop-bot', async () => {
     stopLocalValkeyBackupSchedule();
-    stopAll();
-    stopLavalink();
-    stopValkey();
+    await stopAll();
+    await stopLavalink();
+    await stopValkey();
     sessionToken = null;
     lastStartedPayPalConfig = null;
   });
@@ -1962,9 +1994,9 @@ function registerIpcHandlers(): void {
           localWasRunning,
           stopLocal: async () => {
             stopLocalValkeyBackupSchedule();
-            stopAll();
-            stopLavalink();
-            stopValkey();
+            await stopAll();
+            await stopLavalink();
+            await stopValkey();
             sessionToken = null;
             lastStartedPayPalConfig = null;
             await waitForProcessIdsToExit([
@@ -2356,15 +2388,13 @@ app.on('second-instance', () => {
   }
 });
 
-// Clean shutdown — kill child processes before quitting
-app.on('before-quit', () => {
+// Clean shutdown — prevent Electron from exiting until every managed child
+// has closed. A second app.quit() is allowed once shutdownComplete is true.
+app.on('before-quit', (event) => {
   launcherQuitRequested = true;
-  stopLocalValkeyBackupSchedule();
-  if (isRunning()) {
-    stopAll();
-  }
-  stopLavalink();
-  stopValkey();
+  if (shutdownComplete) return;
+  event.preventDefault();
+  requestQuitAfterManagedShutdown();
 });
 
 app.on('window-all-closed', () => {

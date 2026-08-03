@@ -46,6 +46,7 @@ let desiredRunning = false;
 let restartAttempts = 0;
 let restartTimer: ReturnType<typeof setTimeout> | null = null;
 let stableTimer: ReturnType<typeof setTimeout> | null = null;
+let stopPromise: Promise<void> | null = null;
 
 function markStable(proc: ChildProcess): void {
   if (stableTimer) clearTimeout(stableTimer);
@@ -414,31 +415,54 @@ export async function startLavalink(): Promise<{
   });
 }
 
-export function stopLavalink(): void {
+export function stopLavalink(): Promise<void> {
+  if (stopPromise) return stopPromise;
+
   desiredRunning = false;
   restartAttempts = 0;
   if (restartTimer) clearTimeout(restartTimer);
   if (stableTimer) clearTimeout(stableTimer);
   restartTimer = null;
   stableTimer = null;
-  if (lavalinkProcess) {
-    const pid = lavalinkProcess.pid;
-    lavalinkProcess.kill('SIGTERM');
-    // Force kill after 5s
-    if (pid) {
-      setTimeout(() => {
-        try {
-          process.kill(pid, 0); // Check if alive
-          process.kill(pid, 'SIGKILL');
-        } catch {
-          // Already dead — good
-        }
-      }, 5_000);
-    }
-    lavalinkProcess = null;
-  }
+  const processToStop = lavalinkProcess;
   setStatus('offline');
   broadcastLavalinkStatus();
+
+  if (!processToStop) return Promise.resolve();
+
+  stopPromise = new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(forceKillTimer);
+      processToStop.removeListener('exit', onExit);
+      processToStop.removeListener('error', onError);
+      if (lavalinkProcess === processToStop) lavalinkProcess = null;
+      resolve();
+    };
+    const onExit = () => finish();
+    const onError = () => finish();
+    const forceKillTimer = setTimeout(() => {
+      try {
+        processToStop.kill('SIGKILL');
+      } catch {
+        // The process may have exited between SIGTERM and the force kill.
+      }
+      finish();
+    }, 5_000);
+    processToStop.once('exit', onExit);
+    processToStop.once('error', onError);
+    try {
+      processToStop.kill('SIGTERM');
+    } catch {
+      finish();
+    }
+  }).finally(() => {
+    stopPromise = null;
+  });
+
+  return stopPromise;
 }
 
 /* ------------------------------------------------------------------ */

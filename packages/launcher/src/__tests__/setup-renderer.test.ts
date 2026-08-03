@@ -87,12 +87,22 @@ describe('launcher setup renderer wiring', () => {
 
   it('makes launcher lifecycle decisions explicit instead of leaving hidden stale processes', () => {
     const main = readSourceFile('main/index.ts');
+    const processManager = readSourceFile('main/process-manager.ts');
+    const lavalink = readSourceFile('main/lavalink-manager.ts');
+    const valkey = readSourceFile('main/valkey-manager.ts');
 
     expect(main).toContain('process.exit(0);');
     expect(main).toContain("mainWindow.on('close'");
     expect(main).toContain("Keep running in background");
     expect(main).toContain("Stop services and quit");
     expect(main).toContain('mainWindow.show();');
+    expect(main).toContain("app.on('before-quit', (event)");
+    expect(main).toContain('event.preventDefault();');
+    expect(main).toContain('await stopAll();');
+    expect(processManager).toContain('function stopManagedChild');
+    expect(processManager).toContain('let stopPromise: Promise<void> | null = null;');
+    expect(lavalink).toContain('export function stopLavalink(): Promise<void>');
+    expect(valkey).toContain('export function stopValkey(): Promise<void>');
   });
 
   it('preserves the local callback profile while the owner configures VPS mode', () => {

@@ -113,6 +113,53 @@ const recoveryState: Record<ManagedService, RecoveryState> = {
 };
 let desiredRunning = false;
 let lastStartEnv: Record<string, string> | null = null;
+let stopPromise: Promise<void> | null = null;
+
+/**
+ * Stop a managed child deterministically. SIGTERM is given a bounded grace
+ * period, then the child is force-killed and the promise resolves only after
+ * the process has exited (or the OS has accepted the force-kill).
+ *
+ * Keeping the promise in the shutdown path prevents Electron from exiting
+ * while a bot/dashboard child is still listening on a port or holding the
+ * launcher-owned resources.
+ */
+function stopManagedChild(child: ChildProcess | null): Promise<void> {
+  if (!child) return Promise.resolve();
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+
+  // Recovery and log listeners belong to the normal running lifecycle. They
+  // must not restart the child or race the shutdown promise once termination
+  // has been requested.
+  child.removeAllListeners();
+
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(forceKillTimer);
+      child.removeListener('close', onClose);
+      resolve();
+    };
+    const onClose = () => finish();
+    const forceKillTimer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // The child may have exited between the liveness check and the kill.
+      }
+      finish();
+    }, 5_000);
+
+    child.once('close', onClose);
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      finish();
+    }
+  });
+}
 
 function clearBotReadyTimeout(): void {
   if (botReadyTimeout) {
@@ -622,9 +669,9 @@ function persistPid(name: 'bot' | 'dashboard', pid: number | null): void {
 /*  Public API                                                         */
 /* ------------------------------------------------------------------ */
 
-export function startAll(envVars: Record<string, string>): void {
+export async function startAll(envVars: Record<string, string>): Promise<void> {
   if (botProcess || dashboardProcess) {
-    stopAll();
+    await stopAll();
   }
 
   clearRecoveryState(true);
@@ -635,51 +682,41 @@ export function startAll(envVars: Record<string, string>): void {
   startHeartbeatMonitor();
 }
 
-export function stopAll(): void {
+export function stopAll(): Promise<void> {
+  if (stopPromise) return stopPromise;
+
   desiredRunning = false;
   lastStartEnv = null;
   clearRecoveryState(true);
   stopHeartbeatMonitor();
   clearBotReadyTimeout();
 
-  if (botProcess) {
-    botProcess.removeAllListeners();
-    botProcess.kill('SIGTERM');
-    const pid = botProcess.pid;
-    setTimeout(() => {
-      try {
-        if (pid) process.kill(pid, 0);
-        if (pid) process.kill(pid, 'SIGKILL');
-      } catch {
-        // Already dead — good
-      }
-    }, 5_000);
-    botProcess = null;
-  }
+  const botToStop = botProcess;
+  const dashboardToStop = dashboardProcess;
 
-  if (dashboardProcess) {
-    dashboardProcess.removeAllListeners();
-    dashboardProcess.kill('SIGTERM');
-    const pid = dashboardProcess.pid;
-    setTimeout(() => {
-      try {
-        if (pid) process.kill(pid, 0);
-        if (pid) process.kill(pid, 'SIGKILL');
-      } catch {
-        // Already dead
-      }
-    }, 5_000);
-    dashboardProcess = null;
-  }
-
+  // Stop restart/recovery logic immediately, but keep the child references
+  // until their close events arrive so isRunning() remains truthful during
+  // the grace period.
   botStatus = 'offline';
   dashboardStatus = 'offline';
   lastHeartbeat = 0;
-
-  // Clear stored PIDs
-  saveConfig({ lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null } });
-
   broadcastStatus();
+
+  stopPromise = Promise.all([
+    stopManagedChild(botToStop),
+    stopManagedChild(dashboardToStop),
+  ]).then(() => {
+    if (botProcess === botToStop) botProcess = null;
+    if (dashboardProcess === dashboardToStop) dashboardProcess = null;
+
+    // Clear stored PIDs only after both children have actually stopped.
+    saveConfig({ lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null } });
+    broadcastStatus();
+  }).finally(() => {
+    stopPromise = null;
+  });
+
+  return stopPromise;
 }
 
 export function isRunning(): boolean {
