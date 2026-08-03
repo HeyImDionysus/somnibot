@@ -60,6 +60,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -92,6 +94,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -124,6 +128,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -152,6 +158,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -180,6 +188,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -219,6 +229,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -259,6 +271,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -289,6 +303,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -315,6 +331,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -342,6 +360,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -372,6 +392,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -409,6 +431,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -514,6 +538,8 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -652,6 +678,8 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -746,6 +774,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - name: Download all shard manifests
         uses: actions/download-artifact@v5
         with:
@@ -784,6 +814,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -895,6 +927,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - name: Install Supabase CLI
         run: |
           curl -fsSL -o /tmp/supabase.tar.gz \
@@ -1082,6 +1116,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -1103,6 +1139,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}

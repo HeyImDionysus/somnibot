@@ -42,7 +42,9 @@ function writeFleetProofReceipt(): void {
     path.join(directory, 'fleet-proof-administration-team-management-def-audit.json'),
     `${JSON.stringify({
       schemaVersion: 1,
-      candidateSha: process.env.GITHUB_SHA ?? 'local',
+      candidateSha: process.env.SOMNIBOT_CANDIDATE_SHA?.trim()
+        || process.env.GITHUB_SHA?.trim()
+        || 'local',
       domainId: 'administration-team-management',
       proofs: [{
         scenario: 'DEF',
