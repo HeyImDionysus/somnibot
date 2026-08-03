@@ -1622,7 +1622,12 @@ function registerIpcHandlers(): void {
 
   // ── Validation ──
   ipcMain.handle('validate-credentials', async (_event, config) => {
-    return validateAllCredentials(config);
+    // Renderer password fields contain a fixed mask for unchanged secrets.
+    // Validate against the main-process credential store, overlaid only with
+    // genuine edits, so startup health checks never test the mask itself.
+    const current = getConfig();
+    const supplied = sanitizeConfigPatchForStorage(config);
+    return validateAllCredentials({ ...current, ...supplied });
   });
 
   // ── Process control ──
@@ -1996,7 +2001,8 @@ app.whenReady().then(async () => {
       details: { restoredFieldCount: credentialBootstrap.restoredFields.length },
       success: true,
     });
-  } else if (credentialBootstrap.attempted && credentialBootstrap.error) {
+  }
+  if (credentialBootstrap.attempted && credentialBootstrap.error) {
     recordLauncherAudit({
       action: 'launcher.credentials.cloud_restore_failed_on_startup',
       category: 'infrastructure',

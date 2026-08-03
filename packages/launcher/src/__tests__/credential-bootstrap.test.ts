@@ -37,12 +37,15 @@ function config(overrides: Partial<LauncherConfig> = {}): LauncherConfig {
   };
 }
 
+const validDiscord = vi.fn().mockResolvedValue({ ok: true });
+
 describe('startup credential bootstrap', () => {
   it('skips cloud access when the bootstrap identity is absent', async () => {
     const pull = vi.fn();
     const result = await restoreMissingCredentialsOnStartup(
       config({ supabaseSecretKey: '', paypalClientSecret: '' }),
       pull,
+      validDiscord,
     );
 
     expect(result).toEqual({ attempted: false, patch: {}, restoredFields: [] });
@@ -53,7 +56,7 @@ describe('startup credential bootstrap', () => {
     const pull = vi.fn();
     expect(needsCloudCredentialRestore(config())).toBe(false);
 
-    const result = await restoreMissingCredentialsOnStartup(config(), pull);
+    const result = await restoreMissingCredentialsOnStartup(config(), pull, validDiscord);
 
     expect(result.attempted).toBe(false);
     expect(pull).not.toHaveBeenCalled();
@@ -77,7 +80,7 @@ describe('startup credential bootstrap', () => {
       },
     });
 
-    const result = await restoreMissingCredentialsOnStartup(current, pull);
+    const result = await restoreMissingCredentialsOnStartup(current, pull, validDiscord);
 
     expect(pull).toHaveBeenCalledWith(current.supabaseUrl, current.supabaseSecretKey);
     expect(result.patch).toEqual({
@@ -93,6 +96,7 @@ describe('startup credential bootstrap', () => {
     const result = await restoreMissingCredentialsOnStartup(
       config({ paypalClientSecret: '' }),
       vi.fn().mockResolvedValue({ ok: false, error: 'offline' }),
+      validDiscord,
     );
 
     expect(result).toEqual({
@@ -101,5 +105,49 @@ describe('startup credential bootstrap', () => {
       restoredFields: [],
       error: 'offline',
     });
+  });
+
+  it('replaces a definitively rejected local token with a different valid cloud token', async () => {
+    const current = config();
+    const validate = vi.fn()
+      .mockResolvedValueOnce({ ok: false, code: 'invalid', error: 'rejected' })
+      .mockResolvedValueOnce({ ok: true });
+    const pull = vi.fn().mockResolvedValue({
+      ok: true,
+      credentials: { discordToken: 'new-cloud-discord-token' },
+    });
+
+    const result = await restoreMissingCredentialsOnStartup(current, pull, validate);
+
+    expect(result).toEqual({
+      attempted: true,
+      patch: { discordToken: 'new-cloud-discord-token' },
+      restoredFields: ['discordToken'],
+    });
+  });
+
+  it('preserves a rejected local token when no different cloud credential exists', async () => {
+    const current = config();
+    const result = await restoreMissingCredentialsOnStartup(
+      current,
+      vi.fn().mockResolvedValue({ ok: true, credentials: { paypalClientId: 'cloud-paypal' } }),
+      vi.fn().mockResolvedValue({ ok: false, code: 'invalid', error: 'rejected' }),
+    );
+
+    expect(result.patch).toEqual({});
+    expect(result.restoredFields).toEqual([]);
+    expect(result.error).toMatch(/no different cloud token/i);
+  });
+
+  it('does not replace a local token when Discord validation is temporarily unavailable', async () => {
+    const pull = vi.fn();
+    const result = await restoreMissingCredentialsOnStartup(
+      config(),
+      pull,
+      vi.fn().mockResolvedValue({ ok: false, code: 'unavailable', error: 'offline' }),
+    );
+
+    expect(result).toEqual({ attempted: false, patch: {}, restoredFields: [] });
+    expect(pull).not.toHaveBeenCalled();
   });
 });

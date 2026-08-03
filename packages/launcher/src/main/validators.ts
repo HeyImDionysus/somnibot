@@ -7,6 +7,8 @@
 export interface ValidationResult {
   ok: boolean;
   error?: string;
+  /** Machine-readable failure class for safe startup reconciliation. */
+  code?: 'invalid' | 'unavailable' | 'mismatch';
   /** Extra data returned on success (e.g. bot username, guild name). */
   meta?: Record<string, string>;
 }
@@ -33,7 +35,7 @@ export interface ProviderValidationCheck {
 /* ------------------------------------------------------------------ */
 
 export async function validateDiscordToken(token: string): Promise<ValidationResult> {
-  if (!token.trim()) return { ok: false, error: 'Discord token is required.' };
+  if (!token.trim()) return { ok: false, code: 'invalid', error: 'Discord token is required.' };
 
   try {
     const res = await fetch('https://discord.com/api/v10/users/@me', {
@@ -42,10 +44,10 @@ export async function validateDiscordToken(token: string): Promise<ValidationRes
     });
 
     if (res.status === 401) {
-      return { ok: false, error: 'Invalid bot token. Make sure you copied the full token from Discord Developer Portal → Bot → Token.' };
+      return { ok: false, code: 'invalid', error: 'Invalid bot token. Make sure you copied the full token from Discord Developer Portal → Bot → Token.' };
     }
     if (!res.ok) {
-      return { ok: false, error: `Discord API returned HTTP ${res.status}. Try again in a moment.` };
+      return { ok: false, code: 'unavailable', error: `Discord API returned HTTP ${res.status}. Try again in a moment.` };
     }
 
     const data = await res.json() as { username: string; id: string };
@@ -54,7 +56,7 @@ export async function validateDiscordToken(token: string): Promise<ValidationRes
       meta: { botUsername: data.username, botId: data.id },
     };
   } catch (err) {
-    return { ok: false, error: `Could not reach Discord API. Check your internet connection.\n${String(err)}` };
+    return { ok: false, code: 'unavailable', error: `Could not reach Discord API. Check your internet connection.\n${String(err)}` };
   }
 }
 

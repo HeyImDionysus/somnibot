@@ -80,6 +80,15 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('else fields[key].value = String(value);');
   });
 
+  it('validates saved provider credentials automatically without testing masked secrets', () => {
+    const renderer = readSourceFile('renderer/renderer.js');
+    const main = readSourceFile('main/index.ts');
+
+    expect(renderer).toContain('latestProviderValidation = await window.somnibot.validateCredentials(collectCredentialConfig())');
+    expect(main).toContain('const supplied = sanitizeConfigPatchForStorage(config);');
+    expect(main).toContain('validateAllCredentials({ ...current, ...supplied })');
+  });
+
   it('imports an established SomniBot environment without asking the owner to recreate credentials', () => {
     const html = readSourceFile('renderer/index.html');
     const renderer = readSourceFile('renderer/renderer.js');

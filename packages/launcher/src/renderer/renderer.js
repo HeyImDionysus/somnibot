@@ -168,6 +168,13 @@ async function init() {
   try {
     const config = await window.somnibot.getConfig();
     applyConfigToForm(config);
+    if (isCredentialFormComplete() && navigator.onLine) {
+      try {
+        latestProviderValidation = await window.somnibot.validateCredentials(collectCredentialConfig());
+      } catch (err) {
+        console.warn('Provider startup validation was unavailable:', err);
+      }
+    }
   } catch (err) {
     console.error('Failed to load config:', err);
   }
