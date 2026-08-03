@@ -174,6 +174,29 @@ describe('PayPal webhook service', () => {
     );
   });
 
+  it('recovers a stale saved webhook id by matching the existing callback URL', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(jsonResponse({ name: 'INVALID_RESOURCE_ID' }, 400))
+      .mockResolvedValueOnce(jsonResponse({
+        webhooks: [webhook('WH-RECOVERED', baseInput.webhookUrl, ['CHECKOUT.ORDER.APPROVED'])],
+      }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    const result = await ensurePayPalWebhook({
+      ...baseInput,
+      webhookId: 'WH-STALE',
+    }, { fetch: fetchImpl as unknown as typeof fetch });
+
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe('updated');
+    expect(result.webhookId).toBe('WH-RECOVERED');
+    expect(fetchImpl).toHaveBeenLastCalledWith(
+      `${PAYPAL_SANDBOX_API_BASE}/v1/notifications/webhooks/WH-RECOVERED`,
+      expect.objectContaining({ method: 'PATCH' }),
+    );
+  });
+
   it('reuses an already-correct webhook without patching it', async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(tokenResponse())

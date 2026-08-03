@@ -211,7 +211,10 @@ async function getWebhookById(
       fetchImpl,
     );
   } catch (err) {
-    if (err instanceof PayPalApiError && err.status === 404) return null;
+    // PayPal returns INVALID_RESOURCE_ID as HTTP 400 (not 404) for a stale or
+    // malformed saved webhook id. Treat both as a missing reference so the
+    // URL-based lookup can recover the app's existing webhook automatically.
+    if (err instanceof PayPalApiError && (err.status === 400 || err.status === 404)) return null;
     throw err;
   }
 }

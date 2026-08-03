@@ -27,6 +27,7 @@ import {
   ensurePayPalWebhook,
   type EnsurePayPalWebhookResult,
 } from './paypal-webhook-service.js';
+import { reconcileSandboxPayPalWebhookOnStartup } from './paypal-webhook-startup.js';
 import { buildSetupStatus, type PayPalWebhookProofStatus, type SetupFlowInput } from './setup-flow.js';
 import {
   SOMNIBOT_FUNNEL_TARGET,
@@ -2011,6 +2012,35 @@ app.whenReady().then(async () => {
       success: false,
       errorMessage: credentialBootstrap.error,
     });
+  }
+  const startupPayPalWebhook = await reconcileSandboxPayPalWebhookOnStartup(
+    config,
+    resolvePayPalWebhookUrl(config),
+    () => ensureConfiguredPayPalWebhook(config),
+  );
+  if (startupPayPalWebhook.attempted) {
+    const result = startupPayPalWebhook.result;
+    if (result?.ok) {
+      config = getConfig();
+      await queueLauncherCredentialSync(config);
+      recordLauncherAudit({
+        action: 'launcher.paypal_webhook.reconciled_on_startup',
+        category: 'commerce',
+        targetType: 'paypal_webhook',
+        targetId: result.webhookId,
+        details: { status: result.status, sandbox: true },
+        success: true,
+      });
+    } else {
+      recordLauncherAudit({
+        action: 'launcher.paypal_webhook.reconcile_failed_on_startup',
+        category: 'commerce',
+        targetType: 'paypal_webhook',
+        details: { sandbox: true },
+        success: false,
+        errorMessage: result?.error ?? result?.message ?? 'PayPal sandbox webhook reconciliation failed.',
+      });
+    }
   }
   let startupLeaseStatus: Awaited<ReturnType<typeof readRuntimeLeaseStatus>> | undefined;
   let runtimeStatusNotInstalled = false;
