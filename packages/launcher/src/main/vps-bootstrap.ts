@@ -12,8 +12,15 @@
  * actionable message before any unrelated files are overwritten.
  */
 
+import { SOMNIBOT_REPOSITORY_REF } from './release-source.js';
+
 export const SOMNIBOT_REPOSITORY_URL = 'https://github.com/HeyImDionysus/somnibot.git' as const;
-export const SOMNIBOT_REPOSITORY_REF = 'main' as const;
+export { SOMNIBOT_REPOSITORY_REF } from './release-source.js';
+
+// Keep the generated shell syntactically valid when a non-packaged build has
+// no release resource. The deployment-plan layer blocks that build before any
+// command can be approved or receive credentials.
+const APPROVED_REPOSITORY_REF = SOMNIBOT_REPOSITORY_REF || '__missing_release_sha__';
 
 /**
  * Idempotent host-runtime bootstrap for supported Ubuntu/Debian VPS hosts.
@@ -58,14 +65,24 @@ docker_ready=0
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   docker_ready=1
 fi
+git_ready=0
+if command -v git >/dev/null 2>&1; then
+  git_ready=1
+fi
 
-if [ "$docker_ready" -eq 0 ]; then
+if [ "$docker_ready" -eq 0 ] || [ "$git_ready" -eq 0 ]; then
   run_privileged apt-get update
+  runtime_packages='ca-certificates'
   if ! command -v docker >/dev/null 2>&1; then
-    run_privileged env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates docker.io docker-compose-v2
-  elif ! docker compose version >/dev/null 2>&1; then
-    run_privileged env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker-compose-v2
+    runtime_packages="$runtime_packages docker.io"
   fi
+  if ! docker compose version >/dev/null 2>&1; then
+    runtime_packages="$runtime_packages docker-compose-v2"
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    runtime_packages="$runtime_packages git"
+  fi
+  run_privileged env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $runtime_packages
 fi
 
 run_privileged systemctl enable --now docker
@@ -142,7 +159,7 @@ case "$repo_url" in
   *) echo 'refusing an unapproved SomniBot repository URL' >&2; exit 64 ;;
 esac
 case "$repo_ref" in
-  ${SOMNIBOT_REPOSITORY_REF}) ;;
+  ${APPROVED_REPOSITORY_REF}) ;;
   *) echo 'refusing an unapproved SomniBot repository ref' >&2; exit 64 ;;
 esac
 

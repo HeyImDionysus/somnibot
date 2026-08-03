@@ -10,6 +10,7 @@ import {
   SOMNIBOT_REPOSITORY_REF,
   SOMNIBOT_REPOSITORY_URL,
 } from './vps-bootstrap.js';
+import { isImmutableRepositoryRef } from './release-source.js';
 
 export type VpsDeploymentPlanStatus = 'blocked' | 'ready';
 export const VPS_DEPLOYMENT_BUILD_TIMEOUT_MS = 45 * 60 * 1000;
@@ -511,6 +512,10 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
 
   if (!hasAuthProviderSetupPath(input)) {
     blockedReasons.push('Supabase Discord auth provider setup requires a Management API token or manual provider confirmation before VPS deployment.');
+  }
+
+  if (!isImmutableRepositoryRef(SOMNIBOT_REPOSITORY_REF)) {
+    blockedReasons.push('This launcher build has no embedded approved release commit SHA; rebuild it from the exact release candidate before VPS deployment.');
   }
 
   if (input.lastGoodCommit !== undefined && !/^[0-9a-f]{40}$/i.test(input.lastGoodCommit)) {

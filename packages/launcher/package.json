@@ -6,6 +6,7 @@
   "main": "dist/main/bootstrap.js",
   "type": "module",
   "scripts": {
+    "prebuild": "node -e \"require('node:fs').rmSync('dist/main/release-source.json',{force:true})\"",
     "build": "tsc && tsc -p tsconfig.preload.json && node -e \"require('node:fs').cpSync('src/renderer','dist/renderer',{recursive:true})\"",
     "start": "electron dist/main/bootstrap.js",
     "dev": "tsc && electron dist/main/bootstrap.js",

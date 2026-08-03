@@ -2225,15 +2225,15 @@ app.whenReady().then(async () => {
   }
 
   // [infrastructure-launcher] Persist a durable audit row if the OS keychain is
-  // unavailable and credentials fall back to plaintext storage.
+  // unavailable and credential access is refused fail-closed.
   setKeychainFallbackListener(() => {
     recordLauncherAudit({
       action: 'launcher.keychain.unavailable',
       category: 'security',
       targetType: 'credential_store',
-      details: { fallback: 'plaintext', platform: process.platform },
+      details: { fallback: 'refused', platform: process.platform },
       success: false,
-      errorMessage: 'OS keychain (safeStorage) unavailable — sensitive credentials stored in plaintext.',
+      errorMessage: 'OS keychain (safeStorage) unavailable — credential access was refused.',
     });
   });
 

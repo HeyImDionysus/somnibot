@@ -161,51 +161,57 @@ const SENSITIVE_KEYS: ReadonlySet<keyof LauncherConfig> = new Set([
 
 /**
  * Encrypt a string using the OS keychain (DPAPI on Windows, Keychain on macOS,
- * libsecret on Linux). Falls back to plaintext if safeStorage is unavailable
- * (e.g., CI, headless Linux without a keyring).
+ * libsecret on Linux). Credential writes fail closed if safeStorage is
+ * unavailable; the launcher must never create a new plaintext secret store.
  */
-// V5 Audit §10.5 — Track whether we've already warned about safeStorage
+// V5 Audit §10.5 — Track whether we've already reported a keychain failure
 let _safeStorageWarned = false;
 
 /**
  * [infrastructure-launcher] Keychain-failure audit hook. When the OS keychain
- * (safeStorage) is unavailable and we fall back to plaintext credential
- * storage, we notify this listener (once) so the main process can write a
- * durable audit_logs row — a plaintext-credential fallback is a security-
- * relevant degradation that must be observable, not just a console warning.
+ * (safeStorage) is unavailable, credential access fails closed and we notify
+ * this listener (once) so the main process can write a durable audit_logs row.
  */
-let _keychainFallbackListener: (() => void) | undefined;
+let _keychainFailureListener: (() => void) | undefined;
 
 export function setKeychainFallbackListener(listener: () => void): void {
-  _keychainFallbackListener = listener;
+  _keychainFailureListener = listener;
+}
+
+function notifyKeychainUnavailable(): void {
+  if (_safeStorageWarned) return;
+  _safeStorageWarned = true;
+  console.warn(
+    '[ConfigStore] OS keychain (safeStorage) is unavailable; refusing to read or write launcher credentials. ' +
+    'On Linux, install a keyring daemon (gnome-keyring, kwallet, or keepassxc).',
+  );
+  try {
+    _keychainFailureListener?.();
+  } catch {
+    // Audit is best-effort and must not change the fail-closed behavior.
+  }
+}
+
+function isSafeStorageAvailable(): boolean {
+  try {
+    return safeStorage.isEncryptionAvailable();
+  } catch {
+    return false;
+  }
 }
 
 function encryptSensitive(value: string): string {
   if (!value) return '';
+  if (!isSafeStorageAvailable()) {
+    notifyKeychainUnavailable();
+    throw new Error('OS keychain is unavailable; launcher credentials were not saved. Install or unlock a supported keychain and retry.');
+  }
   try {
-    if (safeStorage.isEncryptionAvailable()) {
-      return safeStorage.encryptString(value).toString('base64');
-    }
+    return safeStorage.encryptString(value).toString('base64');
   } catch {
-    // safeStorage threw — treat as unavailable
+    notifyKeychainUnavailable();
+    throw new Error('OS keychain encryption failed; launcher credentials were not saved.');
   }
-  // V5 Audit §10.5 — Warn loudly when falling back to plaintext storage
-  if (!_safeStorageWarned) {
-    _safeStorageWarned = true;
-    console.warn(
-      '[ConfigStore] WARNING: OS keychain (safeStorage) is not available. ' +
-      'Sensitive credentials will be stored in plaintext. ' +
-      'On Linux, install a keyring daemon (gnome-keyring, kwallet, or keepassxc) ' +
-      'to enable encrypted credential storage.',
-    );
-    // Fire the durable-audit hook once per process for the degradation.
-    try {
-      _keychainFallbackListener?.();
-    } catch {
-      // Audit is best-effort — never let it break credential storage.
-    }
-  }
-  return value;
 }
 
 /**
@@ -214,11 +220,13 @@ function encryptSensitive(value: string): string {
  */
 function decryptSensitive(stored: string): string {
   if (!stored) return '';
+  if (!isSafeStorageAvailable()) {
+    notifyKeychainUnavailable();
+    return '';
+  }
   try {
-    if (safeStorage.isEncryptionAvailable()) {
-      const buf = Buffer.from(stored, 'base64');
-      return safeStorage.decryptString(buf);
-    }
+    const buf = Buffer.from(stored, 'base64');
+    return safeStorage.decryptString(buf);
   } catch {
     // If decryption fails, the value is likely a legacy plaintext string
     // (from before safeStorage migration). Return as-is.

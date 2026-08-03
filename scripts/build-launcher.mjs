@@ -13,7 +13,8 @@
  *   node scripts/build-launcher.mjs --skip-build  # Skip package builds (use existing artifacts)
  */
 
-import { cpSync, mkdirSync, rmSync, existsSync, readdirSync, statSync, readFileSync, lstatSync, realpathSync } from 'node:fs';
+import { cpSync, mkdirSync, rmSync, existsSync, readdirSync, statSync, readFileSync, lstatSync, realpathSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runPnpm } from './lib/pnpm.mjs';
@@ -424,6 +425,19 @@ function buildElectron() {
 
   // Build launcher TypeScript (src/main/*.ts → dist/main/*.js)
   runPnpm(['--filter', '@somnibot/launcher', 'run', 'build']);
+
+  const configuredReleaseSha = process.env.RELEASE_SHA?.trim()
+    || process.env.SOMNIBOT_RELEASE_SHA?.trim()
+    || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
+  if (!/^[0-9a-f]{40}$/i.test(configuredReleaseSha)) {
+    throw new Error('Launcher packaging requires an exact 40-character release commit SHA.');
+  }
+  writeFileSync(
+    path.join(LAUNCHER_DIR, 'dist', 'main', 'release-source.json'),
+    `${JSON.stringify({ repositoryRef: configuredReleaseSha.toLowerCase() }, null, 2)}\n`,
+    'utf8',
+  );
+  console.log(`   Embedded immutable VPS source SHA: ${configuredReleaseSha.toLowerCase()}`);
 
   // Determine platform flags for electron-builder
   const platformFlags =

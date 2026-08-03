@@ -98,6 +98,7 @@ jobs:
         run: node scripts/build-launcher.mjs ${{ matrix.platform }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
 
       - name: Record Windows Authenticode status (optional)
         if: matrix.artifact == 'windows'

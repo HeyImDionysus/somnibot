@@ -10,7 +10,7 @@ import {
 describe('VPS first-time bootstrap contract', () => {
   it('pins the authoritative repository and release ref', () => {
     expect(SOMNIBOT_REPOSITORY_URL).toBe('https://github.com/HeyImDionysus/somnibot.git');
-    expect(SOMNIBOT_REPOSITORY_REF).toBe('main');
+    expect(SOMNIBOT_REPOSITORY_REF).toMatch(/^[0-9a-f]{40}$/);
     expect(VPS_BOOTSTRAP_SCRIPT).toContain(SOMNIBOT_REPOSITORY_URL);
     expect(VPS_BOOTSTRAP_SCRIPT).toContain(SOMNIBOT_REPOSITORY_REF);
   });
@@ -26,7 +26,10 @@ describe('VPS first-time bootstrap contract', () => {
   it('uses a fixed, idempotent Ubuntu/Debian runtime bootstrap contract', () => {
     expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('ubuntu|debian');
     expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('apt-get update');
-    expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('docker.io docker-compose-v2');
+    expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('docker.io');
+    expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('docker-compose-v2');
+    expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('runtime_packages="$runtime_packages git"');
+    expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('command -v git');
     expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('systemctl enable --now docker');
     expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('usermod -aG docker');
     expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).not.toContain('DISCORD_TOKEN');
