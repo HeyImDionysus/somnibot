@@ -43,6 +43,7 @@ import { importExistingSomniBotEnv } from './existing-env-import.js';
 import { restoreMissingCredentialsOnStartup } from './credential-bootstrap.js';
 import { initUpdater } from './updater.js';
 import { resolveLauncherDisplayVersion } from './launcher-version.js';
+import { shouldOpenDevTools } from './devtools-policy.js';
 import {
   MASKED_SECRET,
   maskConfigSecrets,
@@ -1419,8 +1420,10 @@ async function createWindow(showWhenReady = true): Promise<void> {
     console.error('[Launcher] Failed to load renderer:', err);
   });
 
-  // Open DevTools only in development — never in packaged builds
-  if (!app.isPackaged) {
+  // DevTools are opt-in even in development. Chromium's DevTools frontend
+  // probes unsupported CDP domains (including Autofill), which otherwise
+  // appears as misleading console errors during normal launcher startup.
+  if (shouldOpenDevTools(app.isPackaged)) {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   }
 
