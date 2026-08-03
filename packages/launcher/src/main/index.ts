@@ -1725,6 +1725,25 @@ function registerIpcHandlers(): void {
     const nextOrigin = result.credentials.project.url;
     const currentOrigin = current.supabaseUrl.trim().replace(/\/+$/, '').toLowerCase();
     const projectChanged = currentOrigin !== nextOrigin;
+    let generatedDatabasePassword: string | undefined;
+    let databasePasswordGenerationError: string | undefined;
+    // A first-time launcher profile has no direct database credential to
+    // preserve. Generate one as part of project selection so VPS setup does
+    // not add another manual copy/paste step. Existing saved credentials are
+    // never rotated implicitly; the separate button remains explicit for that
+    // case.
+    const firstProjectSelection = !current.supabaseUrl.trim();
+    if (firstProjectSelection && !current.supabaseDbPassword.trim()) {
+      const candidate = crypto.randomBytes(32).toString('hex');
+      const passwordResult = await updateSupabaseDatabasePassword(
+        current.supabaseAccessToken,
+        result.credentials.project.ref,
+        candidate,
+      );
+      if (passwordResult.ok) generatedDatabasePassword = candidate;
+      else databasePasswordGenerationError = passwordResult.error;
+    }
+
     const patch: Partial<LauncherConfig> = {
       supabaseUrl: nextOrigin,
       supabaseSecretKey: result.credentials.secretKey,
@@ -1733,7 +1752,8 @@ function registerIpcHandlers(): void {
       // entered manually after discovery without leaking the old key.
       supabasePublishableKey: result.credentials.publishableKey
         ?? (projectChanged ? '' : current.supabasePublishableKey),
-      ...(projectChanged ? { supabaseDbPassword: '' } : {}),
+      supabaseDbPassword: generatedDatabasePassword
+        ?? (projectChanged ? '' : current.supabaseDbPassword),
     };
 
     try {
@@ -1751,6 +1771,8 @@ function registerIpcHandlers(): void {
       project: result.credentials.project,
       secretKeyReady: Boolean(result.credentials.secretKey),
       publishableKeyReady: Boolean(result.credentials.publishableKey),
+      databasePasswordReady: Boolean(generatedDatabasePassword || patch.supabaseDbPassword),
+      ...(databasePasswordGenerationError ? { databasePasswordGenerationError } : {}),
     };
   });
 

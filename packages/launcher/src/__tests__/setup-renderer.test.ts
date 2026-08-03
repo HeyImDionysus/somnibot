@@ -73,6 +73,7 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('window.somnibot.discoverSupabaseProjects()');
     expect(renderer).toContain('window.somnibot.selectSupabaseProject(ref)');
     expect(renderer).toContain('window.somnibot.generateSupabaseDatabasePassword()');
+    expect(renderer).toContain('result.databasePasswordReady ?');
     expect(renderer).toContain('if (!result.secretKeyReady) fields.supabaseSecretKey.value = \'\';');
     expect(renderer).toContain('if (!result.publishableKeyReady) fields.supabasePublishableKey.value = \'\';');
     expect(preload).toContain("ipcRenderer.invoke('supabase:discover-projects')");

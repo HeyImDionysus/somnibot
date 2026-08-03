@@ -1299,9 +1299,15 @@ btnSelectSupabaseProject.addEventListener('click', async () => {
     const readiness = [
       result.secretKeyReady ? 'secret key loaded' : 'secret key not available',
       result.publishableKeyReady ? 'publishable key loaded' : 'publishable key not available',
+      result.databasePasswordReady ? 'database password generated and saved' : 'database password still needed for VPS/direct migrations',
     ].join('; ');
     setSupabaseProjectStatus(`${result.project.name} selected (${result.project.ref}); ${readiness}.`);
-    showMessage('success', `Supabase project selected: ${result.project.name} (${result.project.ref}).`);
+    showMessage(
+      result.databasePasswordGenerationError ? 'info' : 'success',
+      result.databasePasswordGenerationError
+        ? `Supabase project selected: ${result.project.name} (${result.project.ref}). The database password was not generated automatically: ${result.databasePasswordGenerationError}`
+        : `Supabase project selected: ${result.project.name} (${result.project.ref}).`,
+    );
   } catch (err) {
     setSupabaseProjectStatus(`Project selection failed: ${err.message || err}`, 'error');
     showMessage('error', `Project selection failed: ${err.message || err}`);

@@ -143,6 +143,8 @@ export interface SomniBotAPI {
     };
     secretKeyReady?: boolean;
     publishableKeyReady?: boolean;
+    databasePasswordReady?: boolean;
+    databasePasswordGenerationError?: string;
     error?: string;
   }>;
   generateSupabaseDatabasePassword: () => Promise<{
