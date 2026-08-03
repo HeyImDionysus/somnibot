@@ -247,6 +247,35 @@ jobs:
           retention-days: 14
 
   # ──────────────────────────────────────────────────────────────────────────
+  # 6a. Dashboard Browser Tests — rendered Chromium behavior
+  # ──────────────────────────────────────────────────────────────────────────
+  test-dashboard-browser:
+    name: 🌐 Browser Tests (Dashboard)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: install
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Install Chromium runtime
+        run: pnpm --filter @somnibot/dashboard exec playwright install --with-deps chromium
+      - name: Run rendered dashboard browser tests
+        run: pnpm --filter @somnibot/dashboard test:e2e
+        env:
+          PLAYWRIGHT_START_SERVER: '1'
+
+  # ──────────────────────────────────────────────────────────────────────────
   # 6b. Shared Package Tests (V5 Audit §13.6)
   # ──────────────────────────────────────────────────────────────────────────
   test-shared:
@@ -1202,6 +1231,7 @@ jobs:
       - build
       - test-unit
       - test-dashboard
+      - test-dashboard-browser
       - test-shared
       - test-launcher
       - test-e2e-contract
@@ -1224,6 +1254,7 @@ jobs:
           echo "  build:             ${{ needs.build.result }}"
           echo "  test-unit:         ${{ needs.test-unit.result }}"
           echo "  test-dashboard:    ${{ needs.test-dashboard.result }}"
+          echo "  dashboard-browser: ${{ needs.test-dashboard-browser.result }}"
           echo "  test-shared:       ${{ needs.test-shared.result }}"
           echo "  test-launcher:     ${{ needs.test-launcher.result }}"
           echo "  test-e2e-contract: ${{ needs.test-e2e-contract.result }}"
@@ -1247,6 +1278,7 @@ jobs:
             "${{ needs.build.result }}" \
             "${{ needs.test-unit.result }}" \
             "${{ needs.test-dashboard.result }}" \
+            "${{ needs.test-dashboard-browser.result }}" \
             "${{ needs.test-shared.result }}" \
             "${{ needs.test-launcher.result }}" \
             "${{ needs.test-e2e-contract.result }}" \

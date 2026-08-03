@@ -1,20 +1,27 @@
 /**
  * V5-Audit §13.1 — Smoke E2E tests.
  *
- * These tests validate the dashboard is reachable and core endpoints
- * work. They're designed to catch deployment-level regressions
- * (misconfigured env, broken builds, missing middleware) that unit
- * tests can't detect.
+ * These tests validate the dashboard is reachable and core endpoints work.
+ * The local Playwright server deliberately has no bot heartbeat or Valkey, so
+ * its health contract is a truthful degraded 503. Hosted/VPS smoke tests own
+ * the separate production requirement for a healthy 200 response.
  */
 import { test, expect } from '@playwright/test';
 
 test.describe('Health & Smoke', () => {
-  test('GET /api/health returns 200 with valid JSON', async ({ request }) => {
+  test('GET /api/health reports the intentionally dependency-free browser server as degraded', async ({ request }) => {
     const res = await request.get('/api/health');
-    expect(res.status()).toBe(200);
+    expect(res.status()).toBe(503);
 
     const body = await res.json();
-    expect(body).toHaveProperty('status');
+    expect(body).toMatchObject({
+      status: 'degraded',
+      services: {
+        valkey: 'fallback',
+        bot: 'unknown',
+      },
+    });
+    expect(typeof body.timestamp).toBe('string');
   });
 
   test('GET /api/csrf returns a CSRF token', async ({ request }) => {
