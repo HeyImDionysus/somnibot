@@ -885,6 +885,64 @@ main::-webkit-scrollbar-thumb:hover {
   border-color: var(--text-success);
 }
 
+.field select {
+  width: 100%;
+  min-width: 0;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.field select:focus {
+  border-color: var(--border-focus);
+  background: var(--bg-input-focus);
+}
+
+.field-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.field-help {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.supabase-project-picker {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+}
+
+.supabase-project-picker.hidden {
+  display: none;
+}
+
+.supabase-project-picker > label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+
+.supabase-project-picker .field-row {
+  align-items: stretch;
+}
+
+.supabase-project-picker .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .toggle-vis {
   position: absolute;
   right: 8px;

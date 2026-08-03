@@ -276,6 +276,18 @@
             <label for="supabaseAccessToken">Management API Token <span class="opt">(optional)</span></label>
             <input type="password" id="supabaseAccessToken" placeholder="Supabase account token for automatic auth setup" autocomplete="off" />
             <button class="toggle-vis" data-target="supabaseAccessToken" title="Show/hide">👁</button>
+            <div class="field-actions">
+              <button class="btn btn-secondary" id="btn-discover-supabase" type="button">Discover Supabase Projects</button>
+            </div>
+            <p class="field-help">Uses the Management API token to list your projects and load the selected project URL and API keys. The database password is only needed for direct Postgres migrations or VPS database operations.</p>
+            <div id="supabase-project-picker" class="supabase-project-picker hidden" aria-live="polite">
+              <label for="supabase-project-select">Supabase project</label>
+              <div class="field-row">
+                <select id="supabase-project-select" aria-label="Supabase project"></select>
+                <button class="btn btn-primary" id="btn-select-supabase-project" type="button">Use Selected Project</button>
+              </div>
+              <p id="supabase-project-status" class="field-help"></p>
+            </div>
           </div>
           <label class="toggle-label setup-confirmation-row" for="supabaseDiscordAuthProviderConfigured">
             <input type="checkbox" id="supabaseDiscordAuthProviderConfigured" />

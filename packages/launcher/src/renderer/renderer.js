@@ -47,6 +47,11 @@ const btnOpenDiscord = $('btn-open-discord');
 const btnOpenDiscordInvite = $('btn-open-discord-invite');
 const btnVerifyDiscord = $('btn-verify-discord');
 const btnOpenSupabase = $('btn-open-supabase');
+const btnDiscoverSupabase = $('btn-discover-supabase');
+const supabaseProjectPicker = $('supabase-project-picker');
+const supabaseProjectSelect = $('supabase-project-select');
+const btnSelectSupabaseProject = $('btn-select-supabase-project');
+const supabaseProjectStatus = $('supabase-project-status');
 const btnSetupPayPalWebhook = $('btn-setup-paypal-webhook');
 const btnCheckUpdates = $('btn-check-updates');
 
@@ -132,6 +137,8 @@ let vpsPreflightResult = null;
 let vpsDeploymentResult = null;
 let vpsActionResultPlanKey = '';
 let isVpsDeploymentActionRunning = false;
+let isSupabaseDiscoveryRunning = false;
+let supabaseProjects = [];
 
 /* ================================================================== */
 /*  Init                                                               */
@@ -1187,6 +1194,119 @@ runtimeSteps.addEventListener('click', (event) => {
 
 btnOpenSupabase.addEventListener('click', () => {
   window.somnibot.openExternal('https://supabase.com/dashboard');
+});
+
+function setSupabaseProjectStatus(text, type = '') {
+  supabaseProjectStatus.textContent = text;
+  supabaseProjectStatus.className = `field-help${type ? ` ${type}` : ''}`;
+}
+
+function renderSupabaseProjectOptions(projects) {
+  supabaseProjects = Array.isArray(projects) ? projects : [];
+  supabaseProjectSelect.replaceChildren();
+
+  for (const project of supabaseProjects) {
+    const option = document.createElement('option');
+    option.value = project.ref;
+    const details = [project.region, project.status].filter(Boolean).join(' · ');
+    option.textContent = details ? `${project.name} (${project.ref}) — ${details}` : `${project.name} (${project.ref})`;
+    supabaseProjectSelect.appendChild(option);
+  }
+
+  const currentRef = (() => {
+    try {
+      const hostname = new URL(fields.supabaseUrl.value.trim()).hostname;
+      return hostname.endsWith('.supabase.co') ? hostname.slice(0, -'.supabase.co'.length) : '';
+    } catch {
+      return '';
+    }
+  })();
+  if (currentRef && supabaseProjects.some((project) => project.ref === currentRef)) {
+    supabaseProjectSelect.value = currentRef;
+  }
+  supabaseProjectPicker.classList.toggle('hidden', supabaseProjects.length === 0);
+}
+
+btnDiscoverSupabase.addEventListener('click', async () => {
+  if (isSupabaseDiscoveryRunning) return;
+  isSupabaseDiscoveryRunning = true;
+  btnDiscoverSupabase.disabled = true;
+  btnDiscoverSupabase.textContent = 'Discovering...';
+  setSupabaseProjectStatus('Listing projects visible to the saved Management API token.');
+  hideMessage();
+
+  try {
+    // Persist the token through the normal main-process credential path before
+    // asking the main process to use it. Masked values are ignored safely.
+    await saveConfig();
+    const result = await window.somnibot.discoverSupabaseProjects();
+    if (!result.ok) {
+      supabaseProjectPicker.classList.add('hidden');
+      setSupabaseProjectStatus(result.error || 'Could not discover Supabase projects.', 'error');
+      showMessage('error', result.error || 'Could not discover Supabase projects.');
+      return;
+    }
+    renderSupabaseProjectOptions(result.projects || []);
+    if (!result.projects?.length) {
+      setSupabaseProjectStatus('No Supabase projects were returned for this token.', 'error');
+      showMessage('error', 'No Supabase projects were returned for this token.');
+      return;
+    }
+    setSupabaseProjectStatus(`${result.projects.length} project${result.projects.length === 1 ? '' : 's'} found. Select the project SomniBot should use.`);
+  } catch (err) {
+    supabaseProjectPicker.classList.add('hidden');
+    setSupabaseProjectStatus(`Project discovery failed: ${err.message || err}`, 'error');
+    showMessage('error', `Project discovery failed: ${err.message || err}`);
+  } finally {
+    isSupabaseDiscoveryRunning = false;
+    btnDiscoverSupabase.disabled = false;
+    btnDiscoverSupabase.textContent = 'Discover Supabase Projects';
+  }
+});
+
+btnSelectSupabaseProject.addEventListener('click', async () => {
+  const ref = supabaseProjectSelect.value.trim();
+  if (!ref) {
+    setSupabaseProjectStatus('Choose a Supabase project first.', 'error');
+    return;
+  }
+
+  btnSelectSupabaseProject.disabled = true;
+  btnSelectSupabaseProject.textContent = 'Loading...';
+  setSupabaseProjectStatus('Loading the selected project credentials into the launcher.');
+  hideMessage();
+
+  try {
+    const result = await window.somnibot.selectSupabaseProject(ref);
+    if (!result.ok || !result.project) {
+      setSupabaseProjectStatus(result.error || 'Could not select that Supabase project.', 'error');
+      showMessage('error', result.error || 'Could not select that Supabase project.');
+      return;
+    }
+
+    // The main process never returns key material. Refreshing the masked
+    // config keeps the existing safe renderer contract while the readiness
+    // flags let us clear stale values when a project lacks a key.
+    applyConfigToForm(await window.somnibot.getConfig());
+    fields.supabaseUrl.value = result.project.url;
+    if (!result.secretKeyReady) fields.supabaseSecretKey.value = '';
+    if (!result.publishableKeyReady) fields.supabasePublishableKey.value = '';
+    await saveConfig();
+    await refreshSetupStatus();
+
+    const readiness = [
+      result.secretKeyReady ? 'secret key loaded' : 'secret key not available',
+      result.publishableKeyReady ? 'publishable key loaded' : 'publishable key not available',
+    ].join('; ');
+    setSupabaseProjectStatus(`${result.project.name} selected (${result.project.ref}); ${readiness}.`);
+    showMessage('success', `Supabase project selected: ${result.project.name} (${result.project.ref}).`);
+  } catch (err) {
+    setSupabaseProjectStatus(`Project selection failed: ${err.message || err}`, 'error');
+    showMessage('error', `Project selection failed: ${err.message || err}`);
+  } finally {
+    btnSelectSupabaseProject.disabled = false;
+    btnSelectSupabaseProject.textContent = 'Use Selected Project';
+  }
 });
 
 btnSetupPayPalWebhook.addEventListener('click', async () => {

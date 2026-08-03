@@ -586,8 +586,10 @@ Slash commands can take up to an hour to register with Discord the first time. I
 
 ### "Login redirects back to login"
 The Supabase Discord auth provider needs to match the URLs SomniBot is actually
-using. Run the setup wizard at `/setup`; it can configure Supabase automatically
-when `SUPABASE_ACCESS_TOKEN` is set. If you turned the provider on manually,
+using. For a first install or a local/VPS runtime change, use the Electron
+launcher/setup GUI first. If the bot is already running, the owner-only `/setup`
+Discord flow remains available for recovery and credential reconfiguration; it
+can configure Supabase automatically when `SUPABASE_ACCESS_TOKEN` is set. If you turned the provider on manually,
 also set `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` and make sure the
 Supabase redirect allow-list includes:
 

@@ -39,6 +39,10 @@ import {
 import { validateAllCredentials, type FullValidationResult } from './validators.js';
 import { startAll, stopAll, getStatus, isRunning, checkPortAvailable, cleanupStaleProcesses } from './process-manager.js';
 import { maskRestoredCredentials, pushToSupabaseWithRetry } from './supabase-sync.js';
+import {
+  getSupabaseProjectCredentials,
+  listSupabaseProjects,
+} from './supabase-management-api.js';
 import { importExistingSomniBotEnv } from './existing-env-import.js';
 import { restoreMissingCredentialsOnStartup } from './credential-bootstrap.js';
 import { initUpdater } from './updater.js';
@@ -1686,6 +1690,67 @@ function registerIpcHandlers(): void {
       };
     }
     return result;
+  });
+
+  // ── Supabase control-plane discovery ──
+  // The Management API token is owned by the main process. The renderer only
+  // receives project metadata and readiness flags; API key values never cross
+  // the IPC boundary in plaintext.
+  ipcMain.handle('supabase:discover-projects', async () => {
+    const cfg = getConfig();
+    const result = await listSupabaseProjects(cfg.supabaseAccessToken);
+    if (!result.ok) return result;
+    return {
+      ok: true,
+      projects: result.projects,
+    };
+  });
+
+  ipcMain.handle('supabase:select-project', async (_event, ref: unknown) => {
+    if (typeof ref !== 'string' || !ref.trim()) {
+      return { ok: false, error: 'Choose a Supabase project first.' };
+    }
+
+    const current = getConfig();
+    const result = await getSupabaseProjectCredentials(current.supabaseAccessToken, ref);
+    if (!result.ok) return result;
+    if (!result.credentials.secretKey) {
+      return {
+        ok: false,
+        error: 'The selected project did not return a secret API key. Grant the token API-key read permission or enter the project key manually.',
+      };
+    }
+
+    const nextOrigin = result.credentials.project.url;
+    const currentOrigin = current.supabaseUrl.trim().replace(/\/+$/, '').toLowerCase();
+    const projectChanged = currentOrigin !== nextOrigin;
+    const patch: Partial<LauncherConfig> = {
+      supabaseUrl: nextOrigin,
+      supabaseSecretKey: result.credentials.secretKey,
+      // Never carry API/database credentials from a different Supabase
+      // project into the selected project. A missing publishable key can be
+      // entered manually after discovery without leaking the old key.
+      supabasePublishableKey: result.credentials.publishableKey
+        ?? (projectChanged ? '' : current.supabasePublishableKey),
+      ...(projectChanged ? { supabaseDbPassword: '' } : {}),
+    };
+
+    try {
+      saveConfig(sanitizeRendererConfigPatch(patch));
+      await queueLauncherCredentialSync(getConfig());
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : 'The selected Supabase project could not be saved safely.',
+      };
+    }
+
+    return {
+      ok: true,
+      project: result.credentials.project,
+      secretKeyReady: Boolean(result.credentials.secretKey),
+      publishableKeyReady: Boolean(result.credentials.publishableKey),
+    };
   });
 
   // ── Tailscale / public callback readiness ──

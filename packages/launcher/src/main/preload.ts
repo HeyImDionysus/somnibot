@@ -121,6 +121,30 @@ export interface SomniBotAPI {
     credentials?: Record<string, string | boolean>;
     error?: string;
   }>;
+  discoverSupabaseProjects: () => Promise<{
+    ok: boolean;
+    projects?: Array<{
+      ref: string;
+      name: string;
+      region?: string;
+      status?: string;
+      url: string;
+    }>;
+    error?: string;
+  }>;
+  selectSupabaseProject: (ref: string) => Promise<{
+    ok: boolean;
+    project?: {
+      ref: string;
+      name: string;
+      region?: string;
+      status?: string;
+      url: string;
+    };
+    secretKeyReady?: boolean;
+    publishableKeyReady?: boolean;
+    error?: string;
+  }>;
   runVpsDeployment: (payload: {
     operatorApproved: boolean;
     approvedCommandIds: string[];
@@ -259,6 +283,8 @@ contextBridge.exposeInMainWorld('somnibot', {
   // Cloud sync
   // V5 Audit §10.P3a: Secret stays in main process
   pullFromSupabase: () => ipcRenderer.invoke('pull-from-supabase'),
+  discoverSupabaseProjects: () => ipcRenderer.invoke('supabase:discover-projects'),
+  selectSupabaseProject: (ref: string) => ipcRenderer.invoke('supabase:select-project', ref),
   runVpsDeployment: (payload) => ipcRenderer.invoke('vps:run-deployment', payload),
   runVpsRollback: (payload) => ipcRenderer.invoke('vps:run-rollback', payload),
   runVpsPreflight: () => ipcRenderer.invoke('vps:run-preflight'),

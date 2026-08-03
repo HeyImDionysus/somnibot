@@ -14,7 +14,7 @@ describe('/setup Discord surfaces', () => {
     const command = buildSetupCommand().toJSON();
 
     expect(command.name).toBe('setup');
-    expect(command.description).toContain('guided step by step');
+    expect(command.description).toContain('use the launcher for first-time local/VPS setup');
     expect(command.dm_permission).toBe(false);
   });
 

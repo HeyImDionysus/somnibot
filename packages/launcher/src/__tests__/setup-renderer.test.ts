@@ -20,6 +20,10 @@ describe('launcher setup renderer wiring', () => {
     expect(html).toContain('id="summary-paypal-webhook"');
     expect(html).toContain('id="vps-deployment-plan"');
     expect(html).toContain('id="supabaseAccessToken"');
+    expect(html).toContain('id="btn-discover-supabase"');
+    expect(html).toContain('id="supabase-project-picker"');
+    expect(html).toContain('id="supabase-project-select"');
+    expect(html).toContain('id="btn-select-supabase-project"');
     expect(html).toContain('id="supabaseDiscordAuthProviderConfigured"');
     expect(html).toContain('id="paypalClientId"');
     expect(html).toContain('id="paypalClientSecret"');
@@ -57,6 +61,23 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('tailscaleAuthKeyReady: fields.tailscaleAuthKey.value.trim().length > 0');
     expect(renderer).toContain('latestTailscaleReadiness = readiness;');
     expect(renderer).toContain('const firstSetupField = runtimeMode === \'vps\' ? runtimeFields.vpsDomain : fields.discordToken;');
+  });
+
+  it('keeps Supabase project discovery in the main process and applies only readiness to the renderer', () => {
+    const renderer = readSourceFile('renderer/renderer.js');
+    const preload = readSourceFile('main/preload.ts');
+    const main = readSourceFile('main/index.ts');
+
+    expect(renderer).toContain('window.somnibot.discoverSupabaseProjects()');
+    expect(renderer).toContain('window.somnibot.selectSupabaseProject(ref)');
+    expect(renderer).toContain('if (!result.secretKeyReady) fields.supabaseSecretKey.value = \'\';');
+    expect(renderer).toContain('if (!result.publishableKeyReady) fields.supabasePublishableKey.value = \'\';');
+    expect(preload).toContain("ipcRenderer.invoke('supabase:discover-projects')");
+    expect(preload).toContain("ipcRenderer.invoke('supabase:select-project', ref)");
+    expect(main).toContain("ipcMain.handle('supabase:discover-projects'");
+    expect(main).toContain("ipcMain.handle('supabase:select-project'");
+    expect(main).toContain('secretKeyReady: Boolean(result.credentials.secretKey)');
+    expect(main).not.toContain('secretKey: result.credentials.secretKey');
   });
 
   it('preserves the local callback profile while the owner configures VPS mode', () => {

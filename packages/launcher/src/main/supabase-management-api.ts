@@ -1,0 +1,191 @@
+/**
+ * Small, main-process-only client for the Supabase Management API.
+ *
+ * A personal/fine-grained Supabase token is a control-plane credential.  It
+ * can enumerate projects and, when granted `api_gateway_keys_read`, retrieve
+ * the project's publishable/secret API keys.  It cannot reveal an existing
+ * Postgres password; that remains a separate direct-database credential.
+ */
+
+const MANAGEMENT_API_ORIGIN = 'https://api.supabase.com';
+const DEFAULT_TIMEOUT_MS = 10_000;
+const PROJECT_REF_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+export interface SupabaseProjectSummary {
+  ref: string;
+  name: string;
+  region?: string;
+  status?: string;
+  url: string;
+}
+
+export interface SupabaseProjectCredentials {
+  project: SupabaseProjectSummary;
+  secretKey?: string;
+  publishableKey?: string;
+}
+
+export interface SupabaseManagementError {
+  ok: false;
+  error: string;
+  code?: number;
+}
+
+export type SupabaseManagementResult<T> = ({ ok: true } & T) | SupabaseManagementError;
+
+interface ManagementApiOptions {
+  fetchImpl?: typeof fetch;
+  baseUrl?: string;
+  timeoutMs?: number;
+}
+
+interface RawProject {
+  id?: unknown;
+  ref?: unknown;
+  name?: unknown;
+  region?: unknown;
+  status?: unknown;
+}
+
+interface RawApiKey {
+  id?: unknown;
+  type?: unknown;
+  name?: unknown;
+  api_key?: unknown;
+  key?: unknown;
+}
+
+function normalizedToken(token: string): string {
+  return token.trim();
+}
+
+function projectRef(value: unknown): string | null {
+  const ref = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return PROJECT_REF_PATTERN.test(ref) ? ref : null;
+}
+
+function projectFromRaw(raw: RawProject): SupabaseProjectSummary | null {
+  const ref = projectRef(raw.ref ?? raw.id);
+  if (!ref) return null;
+  const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : ref;
+  const region = typeof raw.region === 'string' && raw.region.trim() ? raw.region.trim() : undefined;
+  const status = typeof raw.status === 'string' && raw.status.trim() ? raw.status.trim() : undefined;
+  return {
+    ref,
+    name,
+    ...(region ? { region } : {}),
+    ...(status ? { status } : {}),
+    url: `https://${ref}.supabase.co`,
+  };
+}
+
+function managementError(response: Response, action: string): SupabaseManagementError {
+  const detail = response.status === 401 || response.status === 403
+    ? 'The Supabase Management API token is missing the required permission or is not accepted.'
+    : `Supabase Management API returned HTTP ${response.status} while ${action}.`;
+  return { ok: false, error: detail, code: response.status };
+}
+
+async function requestJson<T>(
+  token: string,
+  path: string,
+  action: string,
+  options: ManagementApiOptions,
+): Promise<SupabaseManagementResult<{ data: T }>> {
+  const normalized = normalizedToken(token);
+  if (!normalized) return { ok: false, error: 'Enter a Supabase Management API token first.' };
+
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const baseUrl = options.baseUrl ?? MANAGEMENT_API_ORIGIN;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  try {
+    const response = await fetchImpl(`${baseUrl}${path}`, {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${normalized}`,
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) return managementError(response, action);
+    return { ok: true, data: await response.json() as T };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Supabase Management API could not be reached while ${action}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+/** List projects visible to the supplied Management API token. */
+export async function listSupabaseProjects(
+  token: string,
+  options: ManagementApiOptions = {},
+): Promise<SupabaseManagementResult<{ projects: SupabaseProjectSummary[] }>> {
+  const response = await requestJson<RawProject[]>(token, '/v1/projects', 'listing projects', options);
+  if (!response.ok) return response;
+  const projects = Array.isArray(response.data)
+    ? response.data.map(projectFromRaw).filter((project): project is SupabaseProjectSummary => project !== null)
+    : [];
+  return { ok: true, projects };
+}
+
+function keyValue(raw: RawApiKey): string | undefined {
+  const value = typeof raw.api_key === 'string' ? raw.api_key : raw.key;
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function keyKind(raw: RawApiKey): 'secret' | 'publishable' | null {
+  const type = typeof raw.type === 'string' ? raw.type.trim().toLowerCase() : '';
+  const name = typeof raw.name === 'string' ? raw.name.trim().toLowerCase() : '';
+  if (type === 'secret' || type === 'service_role' || name === 'service_role' || name === 'secret') return 'secret';
+  if (type === 'publishable' || type === 'anon' || name === 'anon' || name === 'publishable') return 'publishable';
+  return null;
+}
+
+function projectFromRef(ref: string): SupabaseProjectSummary {
+  return { ref, name: ref, url: `https://${ref}.supabase.co` };
+}
+
+/**
+ * Retrieve the project's API keys and normalize both current and legacy key
+ * formats.  Values stay in the main process; callers should only expose the
+ * readiness booleans to the renderer.
+ */
+export async function getSupabaseProjectCredentials(
+  token: string,
+  ref: string,
+  options: ManagementApiOptions = {},
+): Promise<SupabaseManagementResult<{ credentials: SupabaseProjectCredentials }>> {
+  const normalizedRef = projectRef(ref);
+  if (!normalizedRef) return { ok: false, error: 'Supabase project reference is invalid.' };
+
+  const response = await requestJson<RawApiKey[]>(
+    token,
+    `/v1/projects/${encodeURIComponent(normalizedRef)}/api-keys?reveal=true`,
+    'retrieving project API keys',
+    options,
+  );
+  if (!response.ok) return response;
+
+  const keys = Array.isArray(response.data) ? response.data : [];
+  let secretKey: string | undefined;
+  let publishableKey: string | undefined;
+  for (const key of keys) {
+    const value = keyValue(key);
+    const kind = keyKind(key);
+    if (!value || !kind) continue;
+    if (kind === 'secret' && !secretKey) secretKey = value;
+    if (kind === 'publishable' && !publishableKey) publishableKey = value;
+  }
+
+  return {
+    ok: true,
+    credentials: {
+      project: projectFromRef(normalizedRef),
+      ...(secretKey ? { secretKey } : {}),
+      ...(publishableKey ? { publishableKey } : {}),
+    },
+  };
+}
+
+export const __private__ = { keyKind, projectFromRaw, projectRef };

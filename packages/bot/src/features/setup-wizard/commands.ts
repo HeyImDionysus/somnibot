@@ -50,7 +50,7 @@ const log = createLogger('SetupWizard');
 export function buildSetupCommand() {
   return new SlashCommandBuilder()
     .setName('setup')
-    .setDescription('Set up SomniBot — database, hosting and payments, guided step by step')
+    .setDescription('Review or recover SomniBot setup in Discord; use the launcher for first-time local/VPS setup')
     .setDMPermission(false);
 }
 
@@ -122,7 +122,10 @@ export async function handleSetupCommand(
     .setColor(SOMNI_PALETTE.HOT_PINK)
     .setTitle(allConfigured ? '🔧 Setup — All Services Connected' : '🔧 Setup')
     .setDescription(
-      `${statusLines}\n\n`
+      '**Setup surface:** The Electron launcher is the primary path for a first install, '
+      + 'switching between regular-local and VPS operation, and machine-level deployment. '
+      + 'This Discord flow is the owner-only recovery/reconfiguration path for a bot that '
+      + `is already running.\n\n${statusLines}\n\n`
       + (allConfigured
         ? 'Everything is configured. Pick any service below to review or change it.'
         : 'Pick any service below to configure it — including ones already marked '
