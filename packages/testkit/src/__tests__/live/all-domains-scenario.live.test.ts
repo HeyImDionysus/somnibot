@@ -27,7 +27,11 @@ import { ALL_DOMAIN_PROOFS } from '../../scenario-runner/index.js';
 const execFileP = promisify(execFile);
 const TESTKIT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const RUNNER = path.join(TESTKIT_ROOT, 'run-one-domain.mjs');
-const PER_DOMAIN_TIMEOUT_MS = 170_000;
+// The heist proof boots and tears down the complete production stack repeatedly
+// across restart and race lanes. Keep a hard bound, but leave enough room for
+// all 12 lanes on a loaded hosted runner. The child emits the active lane if it
+// reaches its own 300-second stop, so a larger budget never hides a stall.
+const PER_DOMAIN_TIMEOUT_MS = 320_000;
 // Sequential: a fresh process per domain already removes cross-domain connection
 // accumulation (the hang cause); running one at a time additionally avoids
 // concurrent domains colliding on shared Supabase state (e.g. two commerce
@@ -82,6 +86,8 @@ interface DomainResult {
   errored?: string[];
   hang?: boolean;
   error?: string;
+  activeScenario?: string;
+  completedScenarios?: Array<{ scenarioClass: string; elapsedMs: number }>;
 }
 
 async function runDomain(id: string): Promise<DomainResult> {
@@ -155,7 +161,7 @@ beforeAll(async () => {
   console.warn(
     `\n═══ FLEET: ${assignment.label} (${ids.length} domains) ═══  PASS=${totals.pass} GATED=${totals.gated} FAIL=${totals.fail}  findings=${findings.length}\n` +
       results
-        .map((r) => `  ${r.id.padEnd(40)} P=${String(r.pass).padStart(3)} G=${String(r.gated).padStart(3)} F=${String(r.fail).padStart(2)}${r.hang ? '  HANG' : r.error ? `  ERR:${r.error}` : ''}`)
+        .map((r) => `  ${r.id.padEnd(40)} P=${String(r.pass).padStart(3)} G=${String(r.gated).padStart(3)} F=${String(r.fail).padStart(2)}${r.hang ? `  HANG:${r.activeScenario ?? 'unknown'}` : r.error ? `  ERR:${r.error}` : ''}`)
         .join('\n') +
       `\n\n─── STRICT FINDINGS (${findings.length}) ───\n` +
       findings.map((f) => `• ${f.id} / ${f.scenario} / ${f.class}: ${f.impact}`).join('\n'),
@@ -167,7 +173,7 @@ describe(`LIVE fleet scenario runner — ${assignment.label}`, () => {
     expect(results).toHaveLength(assignment.ids.length);
     const broken = results
       .filter((r) => r.hang || r.error || (r.errored && r.errored.length))
-      .map((r) => `${r.id}: ${r.hang ? 'HANG' : r.error ? r.error : `scenario-threw(${r.errored!.length})`}`);
+      .map((r) => `${r.id}: ${r.hang ? `HANG in ${r.activeScenario ?? 'unknown'} after [${(r.completedScenarios ?? []).map((scenario) => `${scenario.scenarioClass}=${scenario.elapsedMs}ms`).join(', ')}]` : r.error ? r.error : `scenario-threw(${r.errored!.length})`}`);
     expect(broken, `domains that hung / errored / threw:\n${broken.join('\n')}`).toEqual([]);
   });
 

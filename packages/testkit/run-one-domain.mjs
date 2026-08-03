@@ -67,11 +67,21 @@ Object.assign(process.env, {
 
 const id = process.argv[2];
 const emit = (o) => console.log('RESULT ' + JSON.stringify({ id, ...o }));
+let activeScenario = 'initialization';
+const completedScenarios = [];
 
 const hardTimeout = setTimeout(() => {
-  emit({ hang: true, pass: 0, gated: 0, fail: 0, findings: [] });
+  emit({
+    hang: true,
+    pass: 0,
+    gated: 0,
+    fail: 0,
+    findings: [],
+    activeScenario,
+    completedScenarios,
+  });
   process.exit(0);
-}, 150_000);
+}, 300_000);
 hardTimeout.unref?.();
 
 try {
@@ -88,7 +98,16 @@ try {
     process.exit(0);
   }
   const capabilities = await mod.detectCapabilities();
-  const report = await mod.runDomainProof(proof, { capabilities });
+  const report = await mod.runDomainProof(proof, {
+    capabilities,
+    onScenarioStart(scenarioClass) {
+      activeScenario = scenarioClass;
+    },
+    onScenarioComplete(scenarioClass, elapsedMs) {
+      completedScenarios.push({ scenarioClass, elapsedMs });
+      activeScenario = 'report-assembly';
+    },
+  });
   const s = mod.summarize(report);
   const gates = report.scenarios.flatMap((scenario) =>
     scenario.classes.flatMap((evidence) =>
@@ -108,6 +127,7 @@ try {
     gated: s.gated,
     fail: s.fail,
     capabilities: report.capabilities,
+    completedScenarios,
     findings: report.findings.map((f) => ({
       scenario: f.scenarioClass,
       class: f.assertionClass,

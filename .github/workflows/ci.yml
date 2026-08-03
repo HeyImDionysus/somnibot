@@ -682,7 +682,7 @@ jobs:
           SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: e2e-live-disposable-guild
           SOMNIBOT_LOOPBACK_E2E_CONFIRMATION: I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE
           SOMNIBOT_FLEET_SHARD: ${{ matrix.shard }}/4
-          SOMNIBOT_FLEET_MANIFEST: artifacts/fleet-shard-${{ matrix.shard }}.json
+          SOMNIBOT_FLEET_MANIFEST: ${{ github.workspace }}/artifacts/fleet-shard-${{ matrix.shard }}.json
           PAYPAL_ENV: sandbox
       - name: Upload strict fleet manifest
         if: always()
