@@ -40,6 +40,9 @@ extraResources:
       - "**/*"
 
 win:
+  # Windows signing is intentionally optional for this release. Keep resource
+  # editing/metadata enabled while producing a verifiably unsigned artifact.
+  signExecutable: false
   target:
     - target: nsis
       arch: [x64]
