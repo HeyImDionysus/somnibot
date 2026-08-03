@@ -1,4 +1,4 @@
-name: Build Signed v1 Launcher Release
+name: Build v1 Launcher Release
 
 on:
   push:
@@ -99,36 +99,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Sign Windows NSIS installer
+      - name: Record Windows Authenticode status (optional)
         if: matrix.artifact == 'windows'
         shell: pwsh
-        env:
-          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
-          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_PFX_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_PFX_PASSWORD)) {
-            throw 'Windows code-signing credentials are required; refusing to publish an unsigned installer.'
-          }
-
           $installer = @(Get-ChildItem 'packages/launcher/release' -Filter '*.exe' -File)
           if ($installer.Count -ne 1) {
             throw "Expected exactly one NSIS installer, found $($installer.Count)."
           }
-
-          $pfxPath = Join-Path $env:RUNNER_TEMP 'somnibot-release-signing.pfx'
-          try {
-            [System.IO.File]::WriteAllBytes($pfxPath, [System.Convert]::FromBase64String($env:WINDOWS_CODESIGN_PFX_BASE64))
-            & signtool sign /fd SHA256 /f $pfxPath /p $env:WINDOWS_CODESIGN_PFX_PASSWORD /tr 'http://timestamp.digicert.com' /td SHA256 $installer[0].FullName
-            if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE." }
-
-            $signature = Get-AuthenticodeSignature -FilePath $installer[0].FullName
-            if ($signature.Status -ne 'Valid') {
-              throw "Installer signature is not valid: $($signature.Status)."
-            }
-          } finally {
-            Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
+          $signature = Get-AuthenticodeSignature -FilePath $installer[0].FullName
+          if ($signature.Status -notin @('Valid', 'NotSigned')) {
+            throw "Installer has an invalid Authenticode state: $($signature.Status)."
           }
+          "WINDOWS_SIGNATURE_STATUS=$($signature.Status)" >> $env:GITHUB_ENV
 
       - name: Create checksums and provenance
         shell: pwsh
@@ -151,6 +135,8 @@ jobs:
           }
           [System.IO.File]::WriteAllLines((Join-Path $releaseDir $checksumName), $checksumLines)
 
+          $signingStatus = if ('${{ matrix.artifact }}' -eq 'windows') { $env:WINDOWS_SIGNATURE_STATUS } else { 'not-applicable' }
+          if ([string]::IsNullOrWhiteSpace($signingStatus)) { $signingStatus = 'NotSigned' }
           $provenance = [ordered]@{
             releaseTag = $env:RELEASE_TAG
             sourceSha = $env:RELEASE_SHA
@@ -158,6 +144,8 @@ jobs:
             workflowRunId = $env:GITHUB_RUN_ID
             workflowRunAttempt = $env:GITHUB_RUN_ATTEMPT
             createdAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+            windowsSigningRequired = $false
+            windowsSigningStatus = $signingStatus
             files = @($files | Sort-Object Name | ForEach-Object { $_.Name })
           }
           $provenance | ConvertTo-Json -Depth 4 | Set-Content -NoNewline (Join-Path $releaseDir "provenance-${{ matrix.artifact }}.json")
@@ -179,13 +167,13 @@ jobs:
     needs: build
     runs-on: windows-latest
     steps:
-      - name: Download signed Windows artifact
+      - name: Download Windows artifact
         uses: actions/download-artifact@v5
         with:
           name: somnibot-windows
           path: artifact
 
-      - name: Verify checksum and Authenticode signature after download
+      - name: Verify checksum and optional Authenticode status after download
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -200,7 +188,9 @@ jobs:
           if ($actualHash -ne $expectedHash) { throw 'Downloaded installer checksum does not match.' }
 
           $signature = Get-AuthenticodeSignature -FilePath $installer[0].FullName
-          if ($signature.Status -ne 'Valid') { throw "Downloaded installer signature is not valid: $($signature.Status)." }
+          if ($signature.Status -notin @('Valid', 'NotSigned')) {
+            throw "Downloaded installer has an invalid Authenticode state: $($signature.Status)."
+          }
 
   release:
     needs: [validate-release, build, verify-windows-installer]

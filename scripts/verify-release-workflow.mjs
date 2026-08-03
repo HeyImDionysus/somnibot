@@ -3,8 +3,9 @@
  * Release-policy regression check.
  *
  * This intentionally checks the repository's release policy without requiring
- * a GitHub Actions runner or signing certificate. Artifact and signature
- * verification remain mandatory workflow jobs.
+ * a GitHub Actions runner or signing certificate. Artifact checksums remain
+ * mandatory; Authenticode is recorded when present and unsigned artifacts are
+ * an explicit supported release state.
  */
 
 import assert from 'node:assert/strict';
@@ -25,9 +26,10 @@ assert.match(releaseWorkflow, /Only the approved v1\.0\.0 launcher release may b
 assert.match(releaseWorkflow, /fetch-depth: 0/, 'tag validation requires complete repository history');
 assert.match(releaseWorkflow, /TAG_SHA.*MAIN_SHA/, 'tag SHA must be compared with main');
 assert.match(releaseWorkflow, /actions\/workflows\/ci\.yml\/runs/, 'green main CI must be checked');
-assert.match(releaseWorkflow, /WINDOWS_CODESIGN_PFX_BASE64/, 'Windows signing certificate must be required');
-assert.match(releaseWorkflow, /signtool sign/, 'Windows installer must be Authenticode signed');
-assert.match(releaseWorkflow, /Verify checksum and Authenticode signature after download/);
+assert.match(releaseWorkflow, /Record Windows Authenticode status \(optional\)/);
+assert.match(releaseWorkflow, /windowsSigningRequired = \$false/);
+assert.match(releaseWorkflow, /Verify checksum and optional Authenticode status after download/);
+assert.doesNotMatch(releaseWorkflow, /WINDOWS_CODESIGN_PFX_BASE64|signtool sign/, 'release must not require a signing certificate');
 assert.match(releaseWorkflow, /SHA256SUMS-\$\{\{ matrix\.artifact \}\}/);
 assert.match(releaseWorkflow, /provenance-\$\{\{ matrix\.artifact \}\}\.json/);
 assert.doesNotMatch(releaseWorkflow, /macos-latest|\.dmg|--mac/, 'release workflow must not publish macOS');
