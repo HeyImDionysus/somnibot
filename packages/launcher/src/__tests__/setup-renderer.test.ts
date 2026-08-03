@@ -219,7 +219,7 @@ describe('launcher setup renderer wiring', () => {
     const styles = readSourceFile('renderer/styles.css');
     const main = readSourceFile('main/index.ts');
 
-    expect(html).toContain('The launcher records non-secret readiness details, checks a fresh or existing target, provisions the authoritative GitHub checkout, and then runs the disclosed deployment plan after explicit approval.');
+    expect(html).toContain('The launcher checks a fresh or existing target, can install the supported Ubuntu/Debian Docker runtime, provisions the authoritative GitHub checkout, and then runs the disclosed deployment plan after explicit approval.');
     expect(html).not.toContain('SSH automation is not run from this setup screen');
     expect(renderer).toContain("const vpsDeploymentPlan = $('vps-deployment-plan');");
     expect(renderer).toContain("const vpsHealthVerification = $('vps-health-verification');");
@@ -289,9 +289,9 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain("btnSetupPayPalWebhook.textContent = 'Create/Update Webhook';");
     expect(renderer).toContain('latestProviderValidation = result.providerValidation;');
     expect(renderer).toContain('Finish VPS readiness fields before SSH preflight or deployment actions are available.');
-    expect(renderer).toContain('The launcher can check a fresh target, provision or update the GitHub checkout, show the dry-run, and execute the approved deployment with redacted output.');
+    expect(renderer).toContain('The launcher can check a fresh target, install the supported runtime, provision or update the GitHub checkout, show the dry-run, and execute the approved deployment with redacted output.');
     expect(renderer).not.toContain('does not run SSH or deploy commands in this build');
-    expect(renderer).toContain('Review the plan, run the read-only SSH/prerequisite preflight, then use explicit approval before checkout, credential, or container changes.');
+    expect(renderer).toContain('Review the plan, run the read-only SSH/prerequisite preflight, then use explicit approval before runtime installation, checkout, credential, or container changes.');
     expect(renderer).toContain('data-vps-deploy-action="preflight"');
     expect(renderer).toContain('data-vps-deploy-action="dry-run"');
     expect(renderer).toContain('data-vps-deploy-action="run-live"');

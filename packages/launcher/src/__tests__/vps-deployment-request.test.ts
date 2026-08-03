@@ -114,6 +114,7 @@ describe('VPS deployment run request coordinator', () => {
     expect(result.state).toBe('success');
     expect(handoffCalls).toBe(1);
     expect(executedCommandIds).toEqual([
+      'ensure-vps-runtime',
       'prepare-vps-checkout',
       'write-env-file',
       'protect-env-file',
@@ -178,6 +179,29 @@ describe('VPS deployment run request coordinator', () => {
     expect(bootstrap?.sensitiveStdin).toContain('refusing to overwrite');
     expect(bootstrap?.args.join(' ')).not.toContain('discord-token');
     expect(bootstrap?.redactedDisplay).not.toContain('SomniBot VPS checkout');
+  });
+
+  it('streams the fixed runtime bootstrap script only on the live main-process plan', async () => {
+    let runtimeBootstrap: VpsDeploymentCommand | undefined;
+    const result = await handleVpsDeploymentRunRequest(
+      completeConfig,
+      { dryRun: false },
+      {
+        confirmApproval: async (plan) => approvalFor(plan),
+        createCommandRunner: () => async (command) => {
+          if (command.id === 'ensure-vps-runtime') runtimeBootstrap = command;
+          return successfulCommand(command);
+        },
+        runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {},
+      },
+    );
+
+    expect(result.state).toBe('success');
+    expect(runtimeBootstrap?.sensitiveStdin).toContain('apt-get update');
+    expect(runtimeBootstrap?.sensitiveStdin).toContain('docker-compose-v2');
+    expect(runtimeBootstrap?.args.join(' ')).not.toContain('discord-token');
+    expect(runtimeBootstrap?.redactedDisplay).not.toContain('apt-get update');
   });
 
   it('keeps dry-run plans placeholder-only and never attaches credential stdin', async () => {
@@ -326,6 +350,7 @@ describe('VPS deployment run request coordinator', () => {
         dryRun: true,
         operatorApproved: true,
         approvedCommandIds: [
+          'ensure-vps-runtime',
           'prepare-vps-checkout',
           'write-env-file',
           'protect-env-file',

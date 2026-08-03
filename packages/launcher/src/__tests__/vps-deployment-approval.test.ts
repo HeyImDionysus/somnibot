@@ -22,6 +22,7 @@ describe('VPS deployment approval confirmation', () => {
     expect(approval).toEqual({
       operatorApproved: true,
       approvedCommandIds: [
+        'ensure-vps-runtime',
         'prepare-vps-checkout',
         'write-env-file',
         'protect-env-file',

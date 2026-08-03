@@ -247,7 +247,7 @@ function buildRemoteCommand(
   return buildCommand('ssh', [...SSH_BASE_ARGS, '--', sshTarget, remoteExecutable, ...remoteArgs], options);
 }
 
-function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: string): VpsDeploymentCommand[] {
+function buildCommands(sshTarget: string, sshUser: string, deployPath: string, publicBaseUrl: string): VpsDeploymentCommand[] {
   const composeFilePath = joinPath(deployPath, COMPOSE_FILE);
   const envFilePath = joinPath(deployPath, '.env');
   const lavalinkProbeScript = [
@@ -264,6 +264,18 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
   ].map(shellDisplayArg).join(' ');
 
   return [
+    buildRemoteCommand(sshTarget, 'sh', [
+      '-s',
+      '--',
+      sshUser,
+    ], {
+      id: 'ensure-vps-runtime',
+      label: 'Install or verify the supported VPS Docker runtime',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+      executionTimeoutMs: 15 * 60 * 1000,
+    }),
     buildRemoteCommand(sshTarget, 'sh', [
       '-s',
       '--',
@@ -599,7 +611,7 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
         'Valkey and Lavalink stay on the private Docker network and are never exposed publicly.',
       ],
     },
-    commands: buildCommands(`${sshUser}@${sshHost}`, deployPath, profile.publicCallbackBaseUrl),
+    commands: buildCommands(`${sshUser}@${sshHost}`, sshUser, deployPath, profile.publicCallbackBaseUrl),
     approvalGates: [
       {
         id: 'ssh-host-key',

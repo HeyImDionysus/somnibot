@@ -447,11 +447,14 @@ dry-run deployment, and approval-gated deployment actions. Manual Docker
 commands remain a fallback path for operators who choose to run them directly.
 
 For a first-time VPS, the SSH user must be able to create the selected deploy
-path and the host must already have `git`, Docker, and Docker Compose v2. The
-launcher does not install OS packages or overwrite a non-empty unrelated
-directory: it reports that prerequisite as a blocked step so the operator can
-fix the host and retry. Existing SomniBot checkouts must point at
-`https://github.com/HeyImDionysus/somnibot.git` and have no local changes.
+path. The approved plan can install the fixed Ubuntu/Debian distro packages
+`docker.io` and `docker-compose-v2`, enable Docker through systemd, and grant
+the SSH user Docker-group access when the host is missing Docker. Unsupported
+operating systems, missing root/passwordless-sudo access, and unavailable apt
+repositories are reported as blocked prerequisites. The launcher never
+overwrites a non-empty unrelated directory. Existing SomniBot checkouts must
+point at `https://github.com/HeyImDionysus/somnibot.git` and have no local
+changes.
 
 | Piece | VPS value |
 |---|---|

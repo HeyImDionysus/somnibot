@@ -4,6 +4,7 @@ import {
   SOMNIBOT_REPOSITORY_URL,
   VPS_BOOTSTRAP_SCRIPT,
   VPS_PREFLIGHT_SCRIPT,
+  VPS_RUNTIME_BOOTSTRAP_SCRIPT,
 } from '../main/vps-bootstrap';
 
 describe('VPS first-time bootstrap contract', () => {
@@ -20,6 +21,16 @@ describe('VPS first-time bootstrap contract', () => {
     expect(VPS_PREFLIGHT_SCRIPT).toContain('docker compose version');
     expect(VPS_PREFLIGHT_SCRIPT).not.toContain('git clone');
     expect(VPS_PREFLIGHT_SCRIPT).not.toContain('mkdir -p');
+  });
+
+  it('uses a fixed, idempotent Ubuntu/Debian runtime bootstrap contract', () => {
+    expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('ubuntu|debian');
+    expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('apt-get update');
+    expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('docker.io docker-compose-v2');
+    expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('systemctl enable --now docker');
+    expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).toContain('usermod -aG docker');
+    expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).not.toContain('DISCORD_TOKEN');
+    expect(VPS_RUNTIME_BOOTSTRAP_SCRIPT).not.toContain('PAYPAL_CLIENT_SECRET');
   });
 
   it('refuses unsafe or dirty targets before checkout replacement', () => {

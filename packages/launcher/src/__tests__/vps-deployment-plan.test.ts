@@ -107,6 +107,19 @@ describe('VPS deployment plan generator', () => {
 
     expect(plan.commands).toEqual(expect.arrayContaining([
       expect.objectContaining({
+        id: 'ensure-vps-runtime',
+        executable: 'ssh',
+        args: expect.arrayContaining([
+          'deploy@somnibot.example.com',
+          'sh',
+          '-s',
+          '--',
+          'deploy',
+        ]),
+        changesRemote: true,
+        approvalRequired: true,
+      }),
+      expect.objectContaining({
         id: 'prepare-vps-checkout',
         executable: 'ssh',
         args: expect.arrayContaining([

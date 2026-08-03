@@ -2137,7 +2137,9 @@ function registerIpcHandlers(): void {
           level: result.ok ? 'info' : 'error',
           code: result.ok ? 'vps-preflight-success' : 'vps-preflight-failure',
           message: result.ok ? 'Read-only SSH/prerequisite preflight passed.' : 'Read-only SSH/prerequisite preflight failed.',
-          detail: result.ok ? 'The target is writable (or can be created) and git/Docker Compose are available.' : redactedError,
+          detail: result.ok
+            ? 'The target is writable (or can be created) and git/Docker Compose are available.'
+            : `${redactedError ?? 'The VPS prerequisite preflight failed.'} The approved deployment plan includes a supported runtime-bootstrap step when Docker is missing.`,
         },
       ],
     };

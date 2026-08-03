@@ -6,14 +6,89 @@
  * checkout from the authoritative GitHub repository before it writes the
  * protected environment or starts Docker.
  *
- * These scripts intentionally install no OS packages and never receive
- * credentials. They fail with an actionable prerequisite message when git or
- * Docker is missing, leaving the host untouched so the operator can install
- * the provider-supported versions and retry safely.
+ * The runtime script installs only fixed distro packages on supported
+ * Ubuntu/Debian hosts; the checkout and preflight scripts never receive
+ * application credentials. Unsupported hosts and unsafe targets fail with an
+ * actionable message before any unrelated files are overwritten.
  */
 
 export const SOMNIBOT_REPOSITORY_URL = 'https://github.com/HeyImDionysus/somnibot.git' as const;
 export const SOMNIBOT_REPOSITORY_REF = 'main' as const;
+
+/**
+ * Idempotent host-runtime bootstrap for supported Ubuntu/Debian VPS hosts.
+ *
+ * The script is streamed over the approved SSH command and never receives
+ * application credentials. It installs only distro packages when Docker or
+ * Compose is missing, enables the Docker service, and leaves unsupported
+ * operating systems untouched.
+ */
+export const VPS_RUNTIME_BOOTSTRAP_SCRIPT = `#!/bin/sh
+set -eu
+
+operator_user="\${1:-}"
+case "$operator_user" in
+  [a-z_][a-z0-9_-]*|[a-z_][a-z0-9_-]*$) ;;
+  *) echo 'SSH user is not a supported Linux account name' >&2; exit 64 ;;
+esac
+
+run_privileged() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    command -v sudo >/dev/null 2>&1 || { echo 'root or passwordless sudo is required to install the VPS runtime' >&2; exit 77; }
+    sudo -n "$@"
+  fi
+}
+
+if [ ! -r /etc/os-release ]; then
+  echo 'VPS runtime bootstrap requires /etc/os-release' >&2
+  exit 69
+fi
+. /etc/os-release
+case "\${ID:-}" in
+  ubuntu|debian) ;;
+  *) echo "unsupported VPS operating system: \${ID:-unknown}; supported systems are Ubuntu and Debian" >&2; exit 69 ;;
+esac
+
+command -v apt-get >/dev/null 2>&1 || { echo 'apt-get is required on Ubuntu/Debian VPS hosts' >&2; exit 69; }
+command -v systemctl >/dev/null 2>&1 || { echo 'systemd is required to manage the Docker service' >&2; exit 69; }
+
+docker_ready=0
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  docker_ready=1
+fi
+
+if [ "$docker_ready" -eq 0 ]; then
+  run_privileged apt-get update
+  if ! command -v docker >/dev/null 2>&1; then
+    run_privileged env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates docker.io docker-compose-v2
+  elif ! docker compose version >/dev/null 2>&1; then
+    run_privileged env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker-compose-v2
+  fi
+fi
+
+run_privileged systemctl enable --now docker
+
+if [ "$(id -u)" -ne 0 ]; then
+  if ! id -nG "$operator_user" 2>/dev/null | tr ' ' '\\n' | grep -qx docker; then
+    run_privileged usermod -aG docker "$operator_user"
+    echo 'Docker access was granted to the SSH user; subsequent SSH commands will use the new group membership.'
+  fi
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
+  docker compose version >/dev/null 2>&1 || { echo 'Docker Compose v2 is still unavailable after runtime bootstrap' >&2; exit 69; }
+else
+  if id -nG | tr ' ' '\\n' | grep -qx docker; then
+    docker compose version >/dev/null 2>&1 || { echo 'Docker Compose v2 is still unavailable after runtime bootstrap' >&2; exit 69; }
+  else
+    sudo -n docker compose version >/dev/null 2>&1 || { echo 'Docker was installed, but the SSH user needs a new login before Docker access is available' >&2; exit 75; }
+  fi
+fi
+
+printf '%s\\n' 'VPS runtime is ready: Docker service enabled and Docker Compose v2 available.'
+`;
 
 /** Read-only probe that supports both an existing checkout and a new path. */
 export const VPS_PREFLIGHT_SCRIPT = `#!/bin/sh

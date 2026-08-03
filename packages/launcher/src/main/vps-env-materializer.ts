@@ -3,7 +3,7 @@ import type { LauncherConfig } from './config-store.js';
 import { buildDbUrlEnv } from './supabase-db-url.js';
 import type { VpsDeploymentPlan } from './vps-deployment-plan.js';
 import { getRuntimeHolderId } from './runtime-profile.js';
-import { VPS_BOOTSTRAP_SCRIPT } from './vps-bootstrap.js';
+import { VPS_BOOTSTRAP_SCRIPT, VPS_RUNTIME_BOOTSTRAP_SCRIPT } from './vps-bootstrap.js';
 
 type SecretGenerator = (bytes: number) => string;
 
@@ -145,6 +145,9 @@ export function materializeVpsDeploymentPlan(
   return {
     ...plan,
     commands: plan.commands.map((command) => {
+      if (command.id === 'ensure-vps-runtime') {
+        return { ...command, sensitiveStdin: VPS_RUNTIME_BOOTSTRAP_SCRIPT };
+      }
       if (command.id === 'prepare-vps-checkout') {
         return { ...command, sensitiveStdin: VPS_BOOTSTRAP_SCRIPT };
       }

@@ -615,7 +615,7 @@ function renderDeploymentPlan(plan, isVpsStatus) {
     '<div class="deployment-plan-header">' +
       '<div>' +
         '<h3>VPS deployment plan</h3>' +
-        '<p>Review the plan, run the read-only SSH/prerequisite preflight, then use explicit approval before checkout, credential, or container changes.</p>' +
+      '<p>Review the plan, run the read-only SSH/prerequisite preflight, then use explicit approval before runtime installation, checkout, credential, or container changes.</p>' +
       '</div>' +
       '<span class="deployment-plan-badge ready">Ready</span>' +
     '</div>' +
@@ -1589,7 +1589,7 @@ function renderOnboardingRuntimeStep() {
     ? [
       ['Domain', 'Use the HTTPS domain that will serve the dashboard and receive provider callbacks.'],
       ['SSH target', 'Enter host, user, and deploy path on the setup screen. Do not enter private keys or passwords.'],
-      ['Guided deploy', 'The launcher can check a fresh target, provision or update the GitHub checkout, show the dry-run, and execute the approved deployment with redacted output.'],
+      ['Guided deploy', 'The launcher can check a fresh target, install the supported runtime, provision or update the GitHub checkout, show the dry-run, and execute the approved deployment with redacted output.'],
     ]
     : [
       ['Tailscale check', 'The launcher detects whether Tailscale is installed, signed in, and allowed to use Funnel.'],
