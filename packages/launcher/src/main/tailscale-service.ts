@@ -378,6 +378,10 @@ export async function getFunnelStatus(runner: TailscaleRunner = defaultTailscale
   return parseFunnelStatusText(`${result.stdout}\n${result.stderr}`);
 }
 
+function funnelTargetsCurrentRuntime(target: string): boolean {
+  return normalizeBaseUrl(target) === normalizeBaseUrl(SOMNIBOT_FUNNEL_TARGET);
+}
+
 function platformWarningMessage(): string {
   if (process.platform === 'darwin') {
     return 'Tailscale Funnel on macOS requires a Tailscale app variant that exposes the CLI Funnel feature.';
@@ -525,7 +529,10 @@ export async function getTailscaleReadiness(
 
   try {
     const funnel = await getFunnelStatus(runner);
-    if (!funnel.enabled) {
+    if (!funnel.enabled || !funnelTargetsCurrentRuntime(funnel.target)) {
+      const targetMismatch = funnel.enabled && funnel.target
+        ? `Funnel currently proxies ${funnel.target}, but regular-local SomniBot requires ${SOMNIBOT_FUNNEL_TARGET}.`
+        : undefined;
       return readinessBase({
         state: 'not-configured',
         installed: true,
@@ -533,8 +540,10 @@ export async function getTailscaleReadiness(
         version,
         status,
         funnel,
-        message: 'Tailscale is signed in. Funnel is not enabled for SomniBot yet.',
-        detail: platformWarning,
+        message: targetMismatch
+          ? 'Tailscale Funnel is enabled for a different dashboard target.'
+          : 'Tailscale is signed in. Funnel is not enabled for SomniBot yet.',
+        detail: targetMismatch || platformWarning,
       });
     }
 

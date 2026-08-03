@@ -389,6 +389,35 @@ Available on the internet:
     expect(readiness.dnsPropagationWaitMs).toBe(TAILSCALE_DNS_PROPAGATION_WAIT_MS);
   });
 
+  it('does not treat a stale port-3000 Funnel as ready for regular-local mode', async () => {
+    const readiness = await getTailscaleReadiness(runnerFor({
+      version: { stdout: '1.84.0\n' },
+      'status --json': {
+        stdout: JSON.stringify({
+          BackendState: 'Running',
+          Self: { DNSName: 'somni.tailbd9d28.ts.net.' },
+        }),
+      },
+      'funnel status --json': {
+        stdout: JSON.stringify({
+          Web: {
+            'somni.tailbd9d28.ts.net:443': {
+              Handlers: { '/': { Proxy: 'http://127.0.0.1:3000' } },
+            },
+          },
+          AllowFunnel: { 'somni.tailbd9d28.ts.net:443': true },
+        }),
+      },
+    }));
+
+    expect(readiness.state).toBe('not-configured');
+    expect(readiness.funnelEnabled).toBe(false);
+    expect(readiness.publicCallbackBaseUrl).toBe('');
+    expect(readiness.message).toContain('different dashboard target');
+    expect(readiness.detail).toContain(':3000');
+    expect(readiness.detail).toContain(':3456');
+  });
+
   it('enables Funnel only through the explicit enable command and returns the public URL', async () => {
     const calls: string[] = [];
     const runner: TailscaleRunner = async (args) => {
