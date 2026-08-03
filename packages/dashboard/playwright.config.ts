@@ -30,7 +30,16 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
+      testIgnore: /team-invitations\.spec\.ts/,
       use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'chromium-local-launcher',
+      testMatch: /team-invitations\.spec\.ts/,
+      use: {
+        ...devices['Desktop Chrome'],
+        baseURL: 'http://localhost:3001',
+      },
     },
   ],
 
@@ -38,24 +47,46 @@ export default defineConfig({
   // In CI, the server is started separately before tests run.
   ...(startLocalServer
     ? {
-        webServer: {
-          command: 'corepack pnpm dev',
-          env: {
-            ...process.env,
-            NEXT_PUBLIC_APP_URL: 'http://localhost:3000',
-            NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
-            NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'playwright-placeholder-supabase-publishable-key',
-            SUPABASE_SECRET_KEY: 'playwright-placeholder-supabase-secret-key',
-            DISCORD_APPLICATION_ID: '123456789012345678',
-            DISCORD_CLIENT_SECRET: 'discord-client-secret-playwright',
-            CSRF_SECRET: 'csrf-secret-playwright-32chars-minimum',
-            NEXTAUTH_SECRET: 'nextauth-secret-playwright-32chars-minimum',
-            WEBHOOK_REPLAY_SECRET: 'webhook-replay-secret-playwright-32chars',
+        webServer: [
+          {
+            command: 'corepack pnpm dev',
+            env: {
+              ...process.env,
+              NEXT_PUBLIC_APP_URL: 'http://localhost:3000',
+              NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
+              NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'playwright-placeholder-supabase-publishable-key',
+              SUPABASE_SECRET_KEY: 'playwright-placeholder-supabase-secret-key',
+              DISCORD_APPLICATION_ID: '123456789012345678',
+              DISCORD_CLIENT_SECRET: 'discord-client-secret-playwright',
+              CSRF_SECRET: 'csrf-secret-playwright-32chars-minimum',
+              NEXTAUTH_SECRET: 'nextauth-secret-playwright-32chars-minimum',
+              WEBHOOK_REPLAY_SECRET: 'webhook-replay-secret-playwright-32chars',
+            },
+            port: 3000,
+            reuseExistingServer: true,
+            timeout: 120_000,
           },
-          port: 3000,
-          reuseExistingServer: true,
-          timeout: 120_000,
-        },
+          {
+            command: 'corepack pnpm exec next dev --turbopack -p 3001',
+            env: {
+              ...process.env,
+              NEXT_PUBLIC_APP_URL: 'http://localhost:3001',
+              NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
+              NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'playwright-placeholder-supabase-publishable-key',
+              SUPABASE_SECRET_KEY: 'playwright-placeholder-supabase-secret-key',
+              DISCORD_APPLICATION_ID: '123456789012345678',
+              DISCORD_CLIENT_SECRET: 'discord-client-secret-playwright',
+              CSRF_SECRET: 'csrf-secret-playwright-32chars-minimum',
+              NEXTAUTH_SECRET: 'nextauth-secret-playwright-32chars-minimum',
+              WEBHOOK_REPLAY_SECRET: 'webhook-replay-secret-playwright-32chars',
+              SOMNIBOT_DASHBOARD_LOCAL_MODE: '1',
+              SESSION_TOKEN: 'playwright-local-session-token',
+            },
+            port: 3001,
+            reuseExistingServer: true,
+            timeout: 120_000,
+          },
+        ],
       }
     : {}),
 });

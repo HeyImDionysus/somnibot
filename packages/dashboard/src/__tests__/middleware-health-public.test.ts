@@ -220,7 +220,16 @@ describe('middleware health access', () => {
     }));
 
     expect(mockCreateServerClient).not.toHaveBeenCalled();
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(307);
+    expect(res.headers.get('location')).toBe('http://localhost:3000/dashboard');
     expect(res.cookies.get('somnibot-local-session')?.value).toBe('launcher-token');
+
+    const bound = await middleware(new NextRequest('http://localhost:3000/dashboard', {
+      headers: {
+        host: 'localhost:3000',
+        cookie: 'somnibot-local-session=launcher-token',
+      },
+    }));
+    expect(bound.status).toBe(200);
   });
 });

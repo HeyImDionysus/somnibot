@@ -1,4 +1,5 @@
 import { redirect } from 'next/navigation';
+import { cookies, headers } from 'next/headers';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { Sidebar } from '@/components/layout/sidebar';
 import { DashboardProviders } from '@/components/layout/dashboard-providers';
@@ -15,11 +16,22 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const supabase = await createServerSupabase();
-  const { data: { user } } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect('/login');
+  const localMode = process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE === '1';
+  const localToken = process.env.SESSION_TOKEN;
+  if (localMode && localToken) {
+    const requestHeaders = await headers();
+    const host = requestHeaders.get('host') ?? '';
+    const localHost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?$/.test(host);
+    const localSession = (await cookies()).get('somnibot-local-session')?.value;
+    if (!localHost || localSession !== localToken) {
+      redirect('/login');
+    }
+  } else {
+    const supabase = await createServerSupabase();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      redirect('/login');
+    }
   }
 
   return (

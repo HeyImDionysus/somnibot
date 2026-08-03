@@ -143,10 +143,11 @@ function handleLocalAuth(request: NextRequest, nonce: string): NextResponse | nu
     return nextWithNonce(request, nonce);
   }
 
-  // First visit or mismatched token — set the cookie and continue
-  // The launcher sets SESSION_TOKEN and only serves on localhost,
-  // so anyone who can reach the server IS the operator.
-  const response = nextWithNonce(request, nonce);
+  // First visit or mismatched token — bind the browser, then repeat the same
+  // protected request. Continuing immediately would render the server layout
+  // before the response cookie exists; the layout would see no local session
+  // and redirect to /login, creating a login/dashboard loop.
+  const response = NextResponse.redirect(request.nextUrl.clone());
   response.cookies.set(COOKIE_NAME, LOCAL_SESSION_TOKEN!, {
     httpOnly: true,
     sameSite: 'lax',
