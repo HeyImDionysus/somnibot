@@ -108,6 +108,10 @@ describe('launcher setup renderer wiring', () => {
     expect(processManager).toContain('typeof pid === \'number\' && Number.isSafeInteger(pid) && pid > 0');
     expect(processManager).toContain('processMatchesExpectedIdentity');
     expect(processManager).toContain('identity is ambiguous');
+    expect(processManager).toContain("code === 'ESRCH'");
+    expect(processManager).toContain("? 'dead' : 'unknown'");
+    expect(processManager).toContain("liveness === 'unknown'");
+    expect(processManager).toContain("(?:[\"']|\\s|$)");
     expect(main).toContain('staleCleanup.ok');
     expect(main).toContain('dialog.showErrorBox(');
     expect(main).toContain('const staleCleanup = await cleanupStaleProcesses();');

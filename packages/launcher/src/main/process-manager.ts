@@ -285,38 +285,52 @@ export function checkPortAvailable(port: number): Promise<boolean> {
  */
 async function waitForStaleProcessExit(pid: number): Promise<boolean> {
   const graceDeadline = Date.now() + 5_000;
-  const isAlive = (): boolean => {
+  type PidLiveness = 'alive' | 'dead' | 'unknown';
+  const liveness = (): PidLiveness => {
     try {
       process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
+      return 'alive';
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ESRCH' ? 'dead' : 'unknown';
     }
   };
 
-  while (isAlive() && Date.now() < graceDeadline) {
+  let state = liveness();
+  while (state === 'alive' && Date.now() < graceDeadline) {
     await new Promise((resolve) => setTimeout(resolve, 100));
+    state = liveness();
   }
 
-  if (isAlive()) {
+  if (state === 'dead') return true;
+  if (state === 'unknown') return false;
+
+  if (state === 'alive') {
     try {
       process.kill(pid, 'SIGKILL');
-    } catch {
-      // It exited between the liveness check and the force-kill.
+    } catch (error) {
+      // ESRCH means it exited between the liveness check and force-kill;
+      // permission/other failures are ambiguous and must remain unresolved.
+      return (error as NodeJS.ErrnoException).code === 'ESRCH';
     }
     const killDeadline = Date.now() + 2_000;
-    while (isAlive() && Date.now() < killDeadline) {
+    state = liveness();
+    while (state === 'alive' && Date.now() < killDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 100));
+      state = liveness();
     }
   }
 
-  return !isAlive();
+  return state === 'dead';
 }
 
 type StaleProcessName = 'bot' | 'dashboard' | 'lavalink' | 'valkey';
 
 function normalizeProcessIdentity(value: string): string {
   return value.replaceAll('\\', '/').replaceAll(/\/+/g, '/').toLowerCase();
+}
+
+function processErrorCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException).code;
 }
 
 async function readProcessCommandLine(pid: number): Promise<string | null> {
@@ -370,8 +384,8 @@ async function processMatchesExpectedIdentity(
   if (!normalizedCommand.includes(normalizedMarker)) return false;
 
   if (name === 'lavalink') return normalizedCommand.includes('lavalink.jar');
-  if (name === 'valkey') return /(?:^|\/)redis-server(?:\.exe)?(?:\s|$)/.test(normalizedCommand)
-    || /(?:^|\/)valkey-server(?:\.exe)?(?:\s|$)/.test(normalizedCommand);
+  if (name === 'valkey') return /(?:^|\/)redis-server(?:\.exe)?(?:["']|\s|$)/.test(normalizedCommand)
+    || /(?:^|\/)valkey-server(?:\.exe)?(?:["']|\s|$)/.test(normalizedCommand);
   return true;
 }
 
@@ -391,19 +405,38 @@ export async function cleanupStaleProcesses(): Promise<StaleProcessCleanupResult
     // Legacy stores may contain sentinel/invalid values (for example -1).
     // Never pass those to process.kill: negative PIDs target process groups.
     if (typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0) {
+      let liveness: 'alive' | 'dead' | 'unknown';
       try {
-        process.kill(pid, 0); // Throws if process doesn't exist
-        if (!await processMatchesExpectedIdentity(name as StaleProcessName, pid)) {
-          console.warn(`[ProcessMgr] Refusing to signal stale ${name} PID ${pid}: process identity is ambiguous.`);
-          unresolved.push(name);
-          continue;
-        }
-        console.log(`[ProcessMgr] Killing stale ${name} process (PID ${pid})`);
+        process.kill(pid, 0);
+        liveness = 'alive';
+      } catch (error) {
+        liveness = processErrorCode(error) === 'ESRCH' ? 'dead' : 'unknown';
+      }
+      if (liveness === 'dead') {
+        nextPids[name as StaleProcessName] = null;
+        continue;
+      }
+      if (liveness === 'unknown') {
+        console.warn(`[ProcessMgr] Refusing to inspect stale ${name} PID ${pid}: liveness is ambiguous.`);
+        unresolved.push(name);
+        continue;
+      }
+      if (!await processMatchesExpectedIdentity(name as StaleProcessName, pid)) {
+        console.warn(`[ProcessMgr] Refusing to signal stale ${name} PID ${pid}: process identity is ambiguous.`);
+        unresolved.push(name);
+        continue;
+      }
+      console.log(`[ProcessMgr] Killing stale ${name} process (PID ${pid})`);
+      try {
         process.kill(pid, 'SIGTERM');
         stalePids.push([name as StaleProcessName, pid]);
-      } catch {
-        // Process doesn't exist — clear its stale record.
-        nextPids[name as StaleProcessName] = null;
+      } catch (error) {
+        if (processErrorCode(error) === 'ESRCH') {
+          nextPids[name as StaleProcessName] = null;
+        } else {
+          console.warn(`[ProcessMgr] Could not terminate stale ${name} PID ${pid}; preserving it.`);
+          unresolved.push(name);
+        }
       }
     } else if (pid !== null) {
       nextPids[name as StaleProcessName] = null;
