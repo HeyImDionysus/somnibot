@@ -148,6 +148,9 @@ const RESTORE_SETTING_KEYS = [
     // The setup wizard stores the complete connection URL; the launcher keeps
     // only its decoded password and reconstructs the URL for child processes.
     'supabase_db_url',
+    // Older setup flows stored the derived callback but not the launcher's
+    // local public base. Recover the base from this exact endpoint contract.
+    'paypal_webhook_url',
   ]),
 ];
 
@@ -182,6 +185,22 @@ export function parseSyncRows(rows: Array<Pick<LauncherSettingsRow, 'key' | 'val
 
   const credentials: RestoredCredentials = {};
   for (const row of rows) {
+    if (row.key === 'paypal_webhook_url' && row.value) {
+      try {
+        const webhookUrl = new URL(row.value);
+        const suffix = '/api/paypal/webhook';
+        if (webhookUrl.protocol === 'https:' && webhookUrl.pathname.endsWith(suffix)) {
+          webhookUrl.pathname = webhookUrl.pathname.slice(0, -suffix.length) || '/';
+          webhookUrl.search = '';
+          webhookUrl.hash = '';
+          credentials.publicCallbackBaseUrl = webhookUrl.toString().replace(/\/$/, '');
+        }
+      } catch {
+        // Ignore malformed legacy callback rows instead of replacing local state.
+      }
+      continue;
+    }
+
     if (row.key === 'supabase_db_url' && row.value) {
       try {
         const databaseUrl = new URL(row.value);

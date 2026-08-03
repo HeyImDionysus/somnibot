@@ -6,16 +6,29 @@ import {
 } from './supabase-sync.js';
 import { validateDiscordToken, type ValidationResult } from './validators.js';
 
-const CORE_RECOVERABLE_FIELDS = [
+const RECOVERABLE_STRING_FIELDS = [
   'discordToken',
   'discordApplicationId',
   'discordClientSecret',
   'discordGuildId',
   'supabasePublishableKey',
   'supabaseDbPassword',
+  'supabaseAccessToken',
   'paypalClientId',
   'paypalClientSecret',
   'paypalWebhookId',
+  'paypalWebhookProofKey',
+  'publicCallbackBaseUrl',
+  'vpsDomain',
+  'vpsSshHost',
+  'vpsSshUser',
+  'vpsDeployPath',
+  'tailscaleAuthKey',
+  'vpsCsrfSecret',
+  'vpsNextAuthSecret',
+  'vpsWebhookReplaySecret',
+  'vpsValkeyPassword',
+  'vpsLavalinkPassword',
 ] as const satisfies ReadonlyArray<keyof LauncherConfig>;
 
 export interface CredentialBootstrapResult {
@@ -33,7 +46,7 @@ type PullCredentials = (
 type ValidateDiscordCredential = (token: string) => Promise<ValidationResult>;
 
 export function needsCloudCredentialRestore(config: LauncherConfig): boolean {
-  return CORE_RECOVERABLE_FIELDS.some((field) => {
+  return RECOVERABLE_STRING_FIELDS.some((field) => {
     const value = config[field];
     return typeof value === 'string' && value.trim().length === 0;
   });

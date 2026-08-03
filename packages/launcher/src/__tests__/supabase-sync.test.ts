@@ -130,6 +130,7 @@ describe('parseSyncRows', () => {
       },
       { key: 'paypal_client_id', value: 'wizard-paypal-client' },
       { key: 'paypal_client_secret', value: 'wizard-paypal-secret' },
+      { key: 'paypal_webhook_url', value: 'https://somni.tailnet.ts.net/api/paypal/webhook' },
     ]);
 
     expect(restored).toMatchObject({
@@ -138,6 +139,7 @@ describe('parseSyncRows', () => {
       supabaseDbPassword: 'encoded database password',
       paypalClientId: 'wizard-paypal-client',
       paypalClientSecret: 'wizard-paypal-secret',
+      publicCallbackBaseUrl: 'https://somni.tailnet.ts.net',
     });
   });
 
