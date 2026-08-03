@@ -279,7 +279,11 @@ function extractTsNetEndpoint(value: string): TsNetEndpoint | null {
 }
 
 function extractDashboardTarget(value: string): string {
-  const targetMatch = value.match(/https?:\/\/(?:127\.0\.0\.1|localhost):3456(?:\/[^\s|"'\\]*)?/i);
+  // Funnel state persists across runtime modes: Regular local uses 3456,
+  // while the VPS/standalone dashboard uses 3000. Recognize either supported
+  // loopback target so an existing Funnel is not reported as disabled merely
+  // because the other mode was used last.
+  const targetMatch = value.match(/https?:\/\/(?:127\.0\.0\.1|localhost):(?:3000|3456)(?:\/[^\s|"'\\]*)?/i);
   return targetMatch?.[0] ?? '';
 }
 

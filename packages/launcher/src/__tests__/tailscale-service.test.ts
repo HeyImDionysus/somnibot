@@ -160,6 +160,27 @@ describe('tailscale-service', () => {
     expect(status.target).toBe('http://127.0.0.1:3456');
   });
 
+  it('recognizes a persisted VPS/standalone dashboard Funnel target on port 3000', () => {
+    const status = parseFunnelStatusJson(JSON.stringify({
+      Web: {
+        'somni.tailbd9d28.ts.net:443': {
+          Handlers: {
+            '/': {
+              Proxy: 'http://127.0.0.1:3000',
+            },
+          },
+        },
+      },
+      AllowFunnel: {
+        'somni.tailbd9d28.ts.net:443': true,
+      },
+    }));
+
+    expect(status.enabled).toBe(true);
+    expect(status.publicUrl).toBe('https://somni.tailbd9d28.ts.net');
+    expect(status.target).toBe('http://127.0.0.1:3000');
+  });
+
   it('does not treat tailnet-only Serve JSON as public Funnel readiness', () => {
     const status = parseFunnelStatusJson(JSON.stringify({
       Web: {
@@ -233,6 +254,18 @@ Available on the internet:
     expect(status.enabled).toBe(true);
     expect(status.publicUrl).toBe('https://somnibot.dionysus.ts.net');
     expect(status.target).toBe('http://127.0.0.1:3456');
+  });
+
+  it('recognizes a persisted port-3000 Funnel target in CLI text', () => {
+    const status = parseFunnelStatusText([
+      'Available on the internet:',
+      '|-- https://somni.tailbd9d28.ts.net',
+      '|--> http://127.0.0.1:3000',
+    ].join('\n'));
+
+    expect(status.enabled).toBe(true);
+    expect(status.publicUrl).toBe('https://somni.tailbd9d28.ts.net');
+    expect(status.target).toBe('http://127.0.0.1:3000');
   });
 
   it('maps a missing Tailscale CLI to a not-installed readiness state', async () => {
