@@ -48,14 +48,22 @@ describe('VPS bot boot readiness', () => {
     expect(index).toBe(3);
   });
 
-  it('accepts the same healthy boot only for ambiguous-stop recovery after a newer heartbeat', async () => {
+  it('requires two advancing same-boot heartbeats for ambiguous-stop recovery', async () => {
     const previous = {
       bootId: '11111111-1111-4111-8111-111111111111',
       heartbeatAt: 2_000,
     };
+    const proofs = [
+      { ...previous, heartbeatAt: 2_001 },
+      { ...previous, heartbeatAt: 2_001 },
+      { ...previous, heartbeatAt: 2_002 },
+    ];
+    let index = 0;
     await expect(waitForFreshVpsBotReady('https://bot.example.com', previous, {
-      readProof: async () => ({ ...previous, heartbeatAt: 2_001 }),
+      readProof: async () => proofs[Math.min(index++, proofs.length - 1)]!,
+      wait: async () => undefined,
       requireNewBoot: false,
-    })).resolves.toEqual({ ...previous, heartbeatAt: 2_001 });
+    })).resolves.toEqual({ ...previous, heartbeatAt: 2_002 });
+    expect(index).toBe(3);
   });
 });

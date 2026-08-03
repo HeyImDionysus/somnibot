@@ -250,7 +250,12 @@ interface SetupAutomationResult {
 }
 
 function sanitizeConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch {
-  return sanitizeConfigPatchForStorage(config);
+  const sanitized = sanitizeConfigPatchForStorage(config);
+  // This field is lifecycle evidence owned by the main process. A renderer
+  // round-trip or compromised page must never be able to declare a runtime
+  // successful and influence restart behavior.
+  delete sanitized.lastSuccessfulRuntimeMode;
+  return sanitized;
 }
 
 function sanitizePayPalConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch {

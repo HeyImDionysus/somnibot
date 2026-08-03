@@ -60,6 +60,12 @@ export async function readRuntimeLeaseStatus(
   if (!urlValidation.ok) {
     throw new Error(urlValidation.error || 'Supabase URL is not trusted for active runtime ownership checks.');
   }
+  const parsedUrl = new URL(url);
+  const isSupabaseProject = parsedUrl.protocol === 'https:'
+    && (parsedUrl.hostname.endsWith('.supabase.co') || parsedUrl.hostname.endsWith('.supabase.com'));
+  if (!isSupabaseProject) {
+    throw new Error('Active runtime ownership checks require an HTTPS Supabase project domain.');
+  }
 
   const fetchImpl = options.fetch ?? fetch;
   const response = await fetchImpl(`${url}/rest/v1/rpc/get_somnibot_runtime`, {

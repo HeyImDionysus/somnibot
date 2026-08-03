@@ -75,6 +75,14 @@ describe('launcher runtime lease client', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it('never sends the service key to a renderer-selected loopback URL', async () => {
+    const fetchImpl = vi.fn();
+    await expect(readRuntimeLeaseStatus('http://127.0.0.1:54321', 'stored-service-key', {
+      fetch: fetchImpl,
+    })).rejects.toThrow('require an HTTPS Supabase project domain');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('waits for the requested ownership state and times out closed', async () => {
     let now = 0;
     const states = [

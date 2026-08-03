@@ -54,13 +54,26 @@ export async function waitForFreshVpsBotReady(
   const wait = options.wait ?? ((delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
   const now = options.now ?? Date.now;
   const deadline = now() + (options.timeoutMs ?? 90_000);
+  let sameBootHeartbeat: number | undefined;
 
   while (true) {
     try {
       const proof = await readProof();
-      const acceptableBoot = options.requireNewBoot === false || proof.bootId !== previous.bootId;
-      if (acceptableBoot && proof.heartbeatAt > previous.heartbeatAt) {
+      const isNewBoot = proof.bootId !== previous.bootId;
+      if (isNewBoot && proof.heartbeatAt > previous.heartbeatAt) {
         return proof;
+      }
+      if (options.requireNewBoot === false
+        && !isNewBoot
+        && proof.heartbeatAt > previous.heartbeatAt) {
+        if (sameBootHeartbeat === undefined) {
+          // A single newer value may have been written before an ambiguous
+          // stop and persisted in Valkey. Require the same live process to
+          // advance it again after compensation starts.
+          sameBootHeartbeat = proof.heartbeatAt;
+        } else if (proof.heartbeatAt > sameBootHeartbeat) {
+          return proof;
+        }
       }
     } catch {
       // The dashboard and bot may still be starting. Retry to the bounded deadline.
