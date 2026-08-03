@@ -1,17 +1,20 @@
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { bootstrapLauncher, LAUNCHER_APP_NAME } from './launcher-bootstrap.js';
 
 describe('bootstrapLauncher', () => {
   it('sets the stable SomniBot app name before loading the main process', async () => {
     const calls: string[] = [];
+    const appDataPath = path.join('test-app-data');
+    const stableUserDataPath = path.join(appDataPath, LAUNCHER_APP_NAME);
     const setAppName = vi.fn((name: string) => {
       calls.push(`name:${name}`);
     });
     const setUserDataPath = vi.fn((userDataPath: string) => {
       calls.push(`userData:${userDataPath}`);
     });
-    const getAppDataPath = vi.fn(() => 'C:\\Users\\test\\AppData\\Roaming');
-    const getUserDataPath = vi.fn(() => 'C:\\Users\\test\\AppData\\Roaming\\Electron');
+    const getAppDataPath = vi.fn(() => appDataPath);
+    const getUserDataPath = vi.fn(() => path.join(appDataPath, 'Electron'));
     const loadMain = vi.fn(async () => {
       calls.push('main');
     });
@@ -19,11 +22,11 @@ describe('bootstrapLauncher', () => {
     await bootstrapLauncher({ setAppName, setUserDataPath, getAppDataPath, getUserDataPath, loadMain });
 
     expect(setAppName).toHaveBeenCalledWith(LAUNCHER_APP_NAME);
-    expect(setUserDataPath).toHaveBeenCalledWith('C:\\Users\\test\\AppData\\Roaming\\@somnibot\\launcher');
+    expect(setUserDataPath).toHaveBeenCalledWith(stableUserDataPath);
     expect(loadMain).toHaveBeenCalledOnce();
     expect(calls).toEqual([
       `name:${LAUNCHER_APP_NAME}`,
-      'userData:C:\\Users\\test\\AppData\\Roaming\\@somnibot\\launcher',
+      `userData:${stableUserDataPath}`,
       'main',
     ]);
   });
@@ -35,8 +38,8 @@ describe('bootstrapLauncher', () => {
     await bootstrapLauncher({
       setAppName: vi.fn(),
       setUserDataPath,
-      getAppDataPath: () => 'C:\\Users\\test\\AppData\\Roaming',
-      getUserDataPath: () => 'C:\\Users\\test\\AppData\\Local\\somnibot-smoke',
+      getAppDataPath: () => path.join('test-app-data'),
+      getUserDataPath: () => path.join('test-local-data', 'somnibot-smoke'),
       loadMain,
     });
 
