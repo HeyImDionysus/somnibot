@@ -103,6 +103,7 @@ describe('launcher setup renderer wiring', () => {
     expect(processManager).toContain('async function waitForStaleProcessExit');
     expect(processManager).toContain('export async function cleanupStaleProcesses');
     expect(processManager).toContain('await Promise.all(stalePids.map');
+    expect(processManager).toContain('typeof pid === \'number\' && Number.isSafeInteger(pid) && pid > 0');
     expect(main).toContain('await cleanupStaleProcesses();');
     expect(processManager).toContain('let stopPromise: Promise<void> | null = null;');
     expect(lavalink).toContain('export function stopLavalink(): Promise<void>');

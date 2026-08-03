@@ -313,7 +313,9 @@ export async function cleanupStaleProcesses(): Promise<void> {
 
   const stalePids: Array<[string, number]> = [];
   for (const [name, pid] of Object.entries(pids)) {
-    if (pid && typeof pid === 'number') {
+    // Legacy stores may contain sentinel/invalid values (for example -1).
+    // Never pass those to process.kill: negative PIDs target process groups.
+    if (typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0) {
       try {
         process.kill(pid, 0); // Throws if process doesn't exist
         console.log(`[ProcessMgr] Killing stale ${name} process (PID ${pid})`);
