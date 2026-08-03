@@ -49,7 +49,19 @@ export function validateSupabaseCredentialPairing(
 ): string | undefined {
   if (typeof patch.supabaseUrl !== 'string') return undefined;
 
-  const nextOrigin = canonicalSupabaseProjectOrigin(patch.supabaseUrl);
+  const nextSupabaseUrl = patch.supabaseUrl.trim();
+  const nextSecretKey = typeof patch.supabaseSecretKey === 'string'
+    ? patch.supabaseSecretKey.trim()
+    : '';
+
+  // A fresh launcher autosaves its still-empty form while the owner is
+  // entering credentials. Preserve that first-run flow, but never allow a
+  // service key to be persisted without the project it belongs to.
+  if (!nextSupabaseUrl) {
+    return nextSecretKey ? 'Supabase URL is required when setting a Supabase secret key.' : undefined;
+  }
+
+  const nextOrigin = canonicalSupabaseProjectOrigin(nextSupabaseUrl);
   let savedOrigin = '';
   if (savedSupabaseUrl.trim()) {
     try {
@@ -59,12 +71,15 @@ export function validateSupabaseCredentialPairing(
     }
   }
   if (nextOrigin === savedOrigin) return undefined;
-  if (typeof patch.supabaseSecretKey === 'string' && patch.supabaseSecretKey.trim()) return undefined;
+  if (nextSecretKey) return undefined;
   return 'Changing the Supabase project requires its matching secret key.';
 }
 
 export function hasSupabaseProjectOriginChanged(savedSupabaseUrl: string, nextSupabaseUrl: string): boolean {
-  const nextOrigin = canonicalSupabaseProjectOrigin(nextSupabaseUrl);
+  const nextUrl = nextSupabaseUrl.trim();
+  if (!nextUrl) return savedSupabaseUrl.trim().length > 0;
+
+  const nextOrigin = canonicalSupabaseProjectOrigin(nextUrl);
   if (!savedSupabaseUrl.trim()) return true;
   try {
     return canonicalSupabaseProjectOrigin(savedSupabaseUrl) !== nextOrigin;

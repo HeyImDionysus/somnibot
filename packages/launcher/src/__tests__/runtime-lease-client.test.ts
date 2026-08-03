@@ -126,6 +126,17 @@ describe('launcher runtime lease client', () => {
     )).toBe(true);
   });
 
+  it('allows an empty first-run form to autosave without accepting an orphaned secret', () => {
+    expect(validateSupabaseCredentialPairing('', { supabaseUrl: '' })).toBeUndefined();
+    expect(validateSupabaseCredentialPairing('', { supabaseUrl: '   ' })).toBeUndefined();
+    expect(validateSupabaseCredentialPairing('', {
+      supabaseUrl: '',
+      supabaseSecretKey: 'service-key',
+    })).toContain('URL is required');
+    expect(hasSupabaseProjectOriginChanged('', '')).toBe(false);
+    expect(hasSupabaseProjectOriginChanged('https://saved.supabase.co', '')).toBe(true);
+  });
+
   it('waits for the requested ownership state and times out closed', async () => {
     let now = 0;
     const states = [
