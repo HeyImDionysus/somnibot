@@ -27,6 +27,7 @@ describe('launcher setup renderer wiring', () => {
     expect(html).toContain('id="paypalSandbox"');
     expect(html).toContain('id="btn-setup-paypal-webhook"');
     expect(html).toContain('id="btn-open-discord-invite"');
+    expect(html).toContain('id="btn-verify-discord"');
     expect(html).toContain('Discord/Supabase callback');
     expect(html).toContain('PayPal webhook');
     expect(html).toContain('id="runtime-summary" aria-live="polite"');
@@ -87,6 +88,18 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('latestProviderValidation = await window.somnibot.validateCredentials(collectCredentialConfig())');
     expect(main).toContain('const supplied = sanitizeConfigPatchForStorage(config);');
     expect(main).toContain('validateAllCredentials({ ...current, ...supplied })');
+  });
+
+  it('lets the owner revalidate saved connections without starting the local stack', () => {
+    const html = readSourceFile('renderer/index.html');
+    const renderer = readSourceFile('renderer/renderer.js');
+
+    expect(html).toContain('Verify Saved Connection');
+    expect(renderer).toContain("const btnVerifyDiscord = $('btn-verify-discord');");
+    expect(renderer).toContain('window.somnibot.validateCredentials(collectCredentialConfig())');
+    expect(renderer).toContain('latestProviderValidation = result;');
+    expect(renderer).toContain('Saved Discord and Supabase connections verified.');
+    expect(renderer).toContain('without starting services');
   });
 
   it('imports an established SomniBot environment without asking the owner to recreate credentials', () => {

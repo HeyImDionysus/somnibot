@@ -45,6 +45,7 @@ const btnCloseLogs = $('btn-close-logs');
 const btnHelp = $('btn-help');
 const btnOpenDiscord = $('btn-open-discord');
 const btnOpenDiscordInvite = $('btn-open-discord-invite');
+const btnVerifyDiscord = $('btn-verify-discord');
 const btnOpenSupabase = $('btn-open-supabase');
 const btnSetupPayPalWebhook = $('btn-setup-paypal-webhook');
 const btnCheckUpdates = $('btn-check-updates');
@@ -196,6 +197,7 @@ async function init() {
       latestVpsHealthProof = null;
       updateRestoreBanner();
       updateDiscordInviteButton();
+      updateDiscordVerifyButton();
       updatePayPalWebhookButton();
       refreshSetupStatus();
     });
@@ -225,6 +227,7 @@ async function init() {
 
   // Show restore banner if appropriate
   updateRestoreBanner();
+  updateDiscordVerifyButton();
   await refreshSetupStatus();
 
   // Phase 6: Network status
@@ -1135,6 +1138,39 @@ btnOpenDiscordInvite.addEventListener('click', () => {
   window.somnibot.openExternal(inviteState.url);
 });
 
+btnVerifyDiscord.addEventListener('click', async () => {
+  if (isValidating || isRunning) return;
+
+  if (!isCredentialFormComplete()) {
+    showMessage('error', 'Fill the required Discord and Supabase fields before verifying the saved connection.');
+    updateDiscordVerifyButton();
+    return;
+  }
+
+  isValidating = true;
+  btnVerifyDiscord.disabled = true;
+  btnVerifyDiscord.textContent = 'Verifying...';
+  hideMessage();
+
+  try {
+    const result = await window.somnibot.validateCredentials(collectCredentialConfig());
+    latestProviderValidation = result;
+    if (result.valid) {
+      showMessage('success', 'Saved Discord and Supabase connections verified.');
+    } else {
+      const detail = result.errors?.filter(Boolean).join(' ') || 'Provider verification failed.';
+      showMessage('error', detail);
+    }
+  } catch (err) {
+    showMessage('error', `Saved connection verification failed: ${err.message || err}`);
+  } finally {
+    isValidating = false;
+    btnVerifyDiscord.textContent = 'Verify Saved Connection';
+    updateDiscordVerifyButton();
+    await refreshSetupStatus();
+  }
+});
+
 runtimeSteps.addEventListener('click', (event) => {
   const button = event.target.closest('[data-setup-action]');
   if (!button || button.disabled) return;
@@ -1759,6 +1795,7 @@ function setFieldsDisabled(disabled) {
     btn.disabled = disabled;
   });
   setTailscaleActionsDisabled(disabled);
+  updateDiscordVerifyButton();
   updatePayPalWebhookButton();
 }
 
@@ -1824,6 +1861,15 @@ function updateDiscordInviteButton() {
   btnOpenDiscordInvite.title = inviteState.url
     ? 'Open the Discord bot invite for this Application ID'
     : inviteState.error || 'Enter a valid Discord Application ID first';
+}
+
+function updateDiscordVerifyButton() {
+  if (!btnVerifyDiscord) return;
+  const ready = isCredentialFormComplete();
+  btnVerifyDiscord.disabled = !ready || isValidating || isRunning;
+  btnVerifyDiscord.title = ready
+    ? 'Revalidate the saved Discord and Supabase connections without starting services'
+    : 'Fill the required Discord and Supabase fields first';
 }
 
 function fieldLabel(key) {
