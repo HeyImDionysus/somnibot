@@ -14,7 +14,26 @@ if (!manifestDirectory || !outputPath) {
   throw new Error('Usage: node scripts/classify-fleet-gates.mjs <manifest-directory> <output-json>');
 }
 
-function routeGate(channel) {
+function routeGate({ channel, reason = '', promise = '' }, domainId) {
+  const detail = `${domainId} ${reason} ${promise}`.toLowerCase();
+
+  // Route by the surface that must actually be exercised before falling back
+  // to the recorder's observation channel. Several scenario scripts use a
+  // placeholder channel for an unavailable surface; channel-only routing sent
+  // dashboard, SDK, Lavalink, and known implementation gaps to Discord.
+  if (/unimplemented|code gap|no backing|not backed|contract is unmet|does not exist|writes no audit|no audit_logs row/.test(detail)) {
+    return 'product-implementation';
+  }
+  if (/dashboard|browser|oauth session|rendered portal|portal render|http api|\/api\//.test(detail)) {
+    return 'dashboard-browser';
+  }
+  if (/license-sdk|@somnibot\/license-sdk/.test(detail)) {
+    return 'license-sdk';
+  }
+  if (/lavalink|shoukaku|voice channel|audible playback/.test(detail)) {
+    return 'lavalink-voice';
+  }
+
   switch (channel) {
     case 'discord-readback':
       return 'live-discord-readback';
@@ -55,7 +74,7 @@ for (const file of files) {
         assertionClass: gate.class,
         channel: gate.channel,
         reason: gate.reason,
-        route: routeGate(gate.channel),
+        route: routeGate(gate, result.id),
         status: 'unresolved',
       });
     }

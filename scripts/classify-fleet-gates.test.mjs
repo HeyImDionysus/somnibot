@@ -18,7 +18,32 @@ try {
           class: 'Discord',
           channel,
           reason: 'example',
-        })),
+        })).concat([
+          {
+            scenario: 'SET-A',
+            class: 'audit',
+            channel: 'discord-readback',
+            reason: 'The dashboard /api/team invitation flow is unimplemented.',
+          },
+          {
+            scenario: 'SET-B',
+            class: 'branding',
+            channel: 'captured-reply',
+            reason: 'Requires the rendered portal browser snapshot.',
+          },
+          {
+            scenario: 'RESTART',
+            class: 'Discord',
+            channel: 'discord-readback',
+            reason: 'Requires Lavalink and audible playback in a voice channel.',
+          },
+          {
+            scenario: 'XGUILD',
+            class: 'database-RLS',
+            channel: 'db-observable',
+            reason: 'Requires the @somnibot/license-sdk validation surface.',
+          },
+        ]),
       }] : [],
     }));
   }
@@ -31,7 +56,7 @@ try {
   assert.equal(run.status, 0, run.stderr);
 
   const output = JSON.parse(readFileSync(outputPath, 'utf8'));
-  assert.equal(output.totalGates, gateChannels.length);
+  assert.equal(output.totalGates, gateChannels.length + 4);
   assert.deepEqual(output.sourceManifests, [
     'fleet-shard-1.json',
     'fleet-shard-2.json',
@@ -40,10 +65,14 @@ try {
   ]);
   assert.deepEqual(output.byRoute, {
     'audit-persistence': 1,
+    'dashboard-browser': 1,
     'database-proof-adapter': 2,
+    'lavalink-voice': 1,
+    'license-sdk': 1,
     'live-discord-interaction': 1,
     'live-discord-readback': 1,
     'paypal-sandbox': 1,
+    'product-implementation': 1,
     'valkey-proof-adapter': 1,
   });
 } finally {
