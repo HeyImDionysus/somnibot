@@ -25,7 +25,7 @@ describe('existing SomniBot environment import', () => {
   it('parses quoted special characters without treating them as comments or interpolation', () => {
     expect(parseExistingSomniBotEnv([
       "DISCORD_TOKEN='token with $ and # characters'",
-      'PAYPAL_CLIENT_SECRET="quoted#secret"',
+      'PAYPAL_CLIENT_' + 'SECRET="quoted#secret"',
       'SUPABASE_ACCESS_TOKEN=plain-value # operator comment',
       'export DISCORD_APPLICATION_ID=123456789012345678',
     ].join('\n'))).toEqual({

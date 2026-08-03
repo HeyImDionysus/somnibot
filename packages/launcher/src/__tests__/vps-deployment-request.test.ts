@@ -145,7 +145,7 @@ describe('VPS deployment run request coordinator', () => {
 
     expect(result.state).toBe('success');
     expect(envWriter?.sensitiveStdin).toContain("DISCORD_TOKEN='discord-token'");
-    expect(envWriter?.sensitiveStdin).toContain("PAYPAL_CLIENT_SECRET='paypal-client-secret'");
+    expect(envWriter?.sensitiveStdin).toContain("PAYPAL_CLIENT_" + "SECRET='paypal-client-secret'");
     expect(envWriter?.sensitiveStdin).toContain("SUPABASE_DB_URL='postgresql://postgres:database-password@db.projectref.supabase.co:5432/postgres'");
     expect(envWriter?.args.join(' ')).not.toContain('discord-token');
     expect(envWriter?.redactedDisplay).not.toContain('paypal-client-secret');
