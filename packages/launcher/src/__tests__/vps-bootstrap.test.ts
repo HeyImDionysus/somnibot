@@ -42,6 +42,13 @@ describe('VPS first-time bootstrap contract', () => {
     expect(VPS_BOOTSTRAP_SCRIPT).toContain('deployment path is not empty and is not a SomniBot git checkout; refusing to overwrite it');
     expect(VPS_BOOTSTRAP_SCRIPT).toContain('deployment checkout origin is not the authoritative SomniBot repository');
     expect(VPS_BOOTSTRAP_SCRIPT).toContain('deployment checkout has local changes; refusing to overwrite them');
+    expect(VPS_BOOTSTRAP_SCRIPT).toContain('git init "$deploy_path"');
+    expect(VPS_BOOTSTRAP_SCRIPT).toContain('git -C "$deploy_path" remote add origin "$repo_url"');
+    expect(VPS_BOOTSTRAP_SCRIPT).toContain('git -C "$deploy_path" cat-file -e "$repo_ref^{commit}"');
     expect(VPS_BOOTSTRAP_SCRIPT).toContain('git -C "$deploy_path" checkout --detach --force');
+    expect(VPS_BOOTSTRAP_SCRIPT).toContain('checked_out_ref="$(git -C "$deploy_path" rev-parse HEAD)"');
+    expect(VPS_BOOTSTRAP_SCRIPT).toContain('checked-out SomniBot commit does not match the approved immutable release ref');
+    expect(VPS_BOOTSTRAP_SCRIPT).not.toContain('--branch "$repo_ref"');
+    expect(VPS_BOOTSTRAP_SCRIPT).not.toContain('origin/$repo_ref');
   });
 });

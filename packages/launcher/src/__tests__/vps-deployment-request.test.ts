@@ -175,7 +175,10 @@ describe('VPS deployment run request coordinator', () => {
     );
 
     expect(result.state).toBe('success');
-    expect(bootstrap?.sensitiveStdin).toContain('git clone --origin origin');
+    expect(bootstrap?.sensitiveStdin).toContain('git -C "$deploy_path" fetch --prune --depth 1 origin "$repo_ref"');
+    expect(bootstrap?.sensitiveStdin).toContain('git -C "$deploy_path" checkout --detach --force "$repo_ref"');
+    expect(bootstrap?.sensitiveStdin).toContain('checked-out SomniBot commit does not match the approved immutable release ref');
+    expect(bootstrap?.sensitiveStdin).not.toContain('--branch "$repo_ref"');
     expect(bootstrap?.sensitiveStdin).toContain('refusing to overwrite');
     expect(bootstrap?.args.join(' ')).not.toContain('discord-token');
     expect(bootstrap?.redactedDisplay).not.toContain('SomniBot VPS checkout');

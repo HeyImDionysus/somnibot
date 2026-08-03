@@ -175,7 +175,8 @@ if [ -e "$deploy_path" ]; then
       echo 'deployment path is not empty and is not a SomniBot git checkout; refusing to overwrite it' >&2
       exit 73
     fi
-    git clone --origin origin --depth 1 --branch "$repo_ref" -- "$repo_url" "$deploy_path"
+    git init "$deploy_path"
+    git -C "$deploy_path" remote add origin "$repo_url"
   else
     actual_origin="$(git -C "$deploy_path" remote get-url origin 2>/dev/null || true)"
     test "$actual_origin" = "$repo_url" || { echo 'deployment checkout origin is not the authoritative SomniBot repository' >&2; exit 73; }
@@ -186,11 +187,15 @@ if [ -e "$deploy_path" ]; then
   fi
 else
   mkdir -p -- "$parent_dir"
-  git clone --origin origin --depth 1 --branch "$repo_ref" -- "$repo_url" "$deploy_path"
+  git init "$deploy_path"
+  git -C "$deploy_path" remote add origin "$repo_url"
 fi
 
 git -C "$deploy_path" fetch --prune --depth 1 origin "$repo_ref"
-git -C "$deploy_path" checkout --detach --force "origin/$repo_ref"
+git -C "$deploy_path" cat-file -e "$repo_ref^{commit}" 2>/dev/null || { echo 'approved SomniBot release commit was not fetched from the authoritative repository' >&2; exit 78; }
+git -C "$deploy_path" checkout --detach --force "$repo_ref"
+checked_out_ref="$(git -C "$deploy_path" rev-parse HEAD)"
+test "$checked_out_ref" = "$repo_ref" || { echo 'checked-out SomniBot commit does not match the approved immutable release ref' >&2; exit 78; }
 
 test -f "$deploy_path/docker-compose.prod.yml" || { echo 'SomniBot production compose file is missing from the checkout' >&2; exit 78; }
 test -f "$deploy_path/scripts/write-production-env.sh" || { echo 'SomniBot environment writer is missing from the checkout' >&2; exit 78; }
