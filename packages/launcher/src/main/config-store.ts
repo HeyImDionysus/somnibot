@@ -14,11 +14,17 @@
  */
 
 import Store from 'electron-store';
-import { safeStorage } from 'electron';
+import { app, safeStorage } from 'electron';
 import { randomBytes } from 'crypto';
+import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { getLavalinkPassword } from './lavalink-manager.js';
 import { buildRuntimeEnvVars, getRuntimeHolderId, type RuntimeMode } from './runtime-profile.js';
 import { buildDbUrlEnv } from './supabase-db-url.js';
+import {
+  LEGACY_CONFIG_RELATIVE_PATHS,
+  selectMissingLegacyConfig,
+} from './legacy-config-migration.js';
 
 /** V53 Phase 4 (4.3.3): Per-guild config for multi-guild support */
 export interface GuildEntry {
@@ -227,6 +233,113 @@ function getSensitive(key: keyof LauncherConfig): string {
 function setSensitive(key: keyof LauncherConfig, value: string): void {
   store.set(key, encryptSensitive(value));
 }
+
+/**
+ * Migrate connection state from the pre-bootstrap Electron/SomniBot store.
+ *
+ * The launcher now sets a stable package identity before loading this module,
+ * which correctly prevents future generic-Electron collisions but also moves
+ * the electron-store path. Read the old path only when it already exists and
+ * merge missing values into the current store; never delete or overwrite the
+ * legacy file. Both the current safeStorage format and the older electron-
+ * store encryptionKey format are supported.
+ */
+function migrateLegacyConfig(): void {
+  try {
+    const appDataPath = app.getPath('appData');
+    const current = getConfigSnapshot();
+
+    for (const [relativeDirectory, fileName] of LEGACY_CONFIG_RELATIVE_PATHS) {
+      const legacyDirectory = path.join(appDataPath, relativeDirectory);
+      const legacyPath = path.join(legacyDirectory, fileName);
+      if (!existsSync(legacyPath)) continue;
+
+      let legacy: Record<string, unknown> | undefined;
+      try {
+        const candidate = new Store<Record<string, unknown>>({
+          name: 'config',
+          cwd: legacyDirectory,
+          clearInvalidConfig: false,
+        }).store;
+        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+          throw new Error('legacy config is not an object');
+        }
+        legacy = candidate;
+      } catch {
+        // Older builds encrypted the whole electron-store with this key.
+        try {
+          const candidate = new Store<Record<string, unknown>>({
+            name: 'config',
+            cwd: legacyDirectory,
+            encryptionKey: 'somnibot-launcher-v1',
+            clearInvalidConfig: false,
+          }).store;
+          if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+            throw new Error('legacy config is not an object');
+          }
+          legacy = candidate;
+        } catch {
+          legacy = undefined;
+        }
+      }
+      if (!legacy) continue;
+
+      const patch = selectMissingLegacyConfig(current, legacy);
+      if (Object.keys(patch).length === 0) continue;
+      saveConfig(patch);
+      Object.assign(current, patch);
+    }
+  } catch {
+    // A malformed or inaccessible legacy store must never prevent the current
+    // launcher from starting with its own store. Do not log paths or values.
+    console.warn('[ConfigStore] Legacy config migration skipped.');
+  }
+}
+
+/** Read current values without decrypting sensitive fields twice. */
+function getConfigSnapshot(): Partial<LauncherConfig> {
+  const storedOrUndefined = <T>(key: keyof LauncherConfig, fallback: T): T | undefined => (
+    store.has(key) ? store.get(key as never, fallback as never) as T : undefined
+  );
+
+  return {
+    discordToken: getSensitive('discordToken'),
+    discordApplicationId: store.get('discordApplicationId', ''),
+    discordClientSecret: getSensitive('discordClientSecret'),
+    discordGuildId: store.get('discordGuildId', ''),
+    guilds: store.get('guilds', []),
+    supabaseUrl: store.get('supabaseUrl', ''),
+    supabaseSecretKey: getSensitive('supabaseSecretKey'),
+    supabasePublishableKey: store.get('supabasePublishableKey', ''),
+    supabaseDbPassword: getSensitive('supabaseDbPassword'),
+    supabaseAccessToken: getSensitive('supabaseAccessToken'),
+    supabaseDiscordAuthProviderConfigured: storedOrUndefined('supabaseDiscordAuthProviderConfigured', false),
+    paypalClientId: store.get('paypalClientId', ''),
+    paypalClientSecret: getSensitive('paypalClientSecret'),
+    paypalWebhookId: getSensitive('paypalWebhookId'),
+    paypalWebhookProofKey: getSensitive('paypalWebhookProofKey'),
+    paypalSandbox: storedOrUndefined('paypalSandbox', true),
+    vpsCsrfSecret: getSensitive('vpsCsrfSecret'),
+    vpsNextAuthSecret: getSensitive('vpsNextAuthSecret'),
+    vpsWebhookReplaySecret: getSensitive('vpsWebhookReplaySecret'),
+    vpsValkeyPassword: getSensitive('vpsValkeyPassword'),
+    vpsLavalinkPassword: getSensitive('vpsLavalinkPassword'),
+    windowBounds: store.get('windowBounds'),
+    runtimeMode: storedOrUndefined('runtimeMode', 'regular-local'),
+    lastSuccessfulRuntimeMode: store.get('lastSuccessfulRuntimeMode'),
+    publicCallbackBaseUrl: store.get('publicCallbackBaseUrl', ''),
+    vpsDomain: store.get('vpsDomain', ''),
+    vpsSshHost: store.get('vpsSshHost', ''),
+    vpsSshUser: store.get('vpsSshUser', ''),
+    vpsDeployPath: store.get('vpsDeployPath', ''),
+    tailscaleAuthKey: getSensitive('tailscaleAuthKey'),
+    firstRunComplete: storedOrUndefined('firstRunComplete', false),
+    lavalinkEnabled: storedOrUndefined('lavalinkEnabled', false),
+    lastPids: storedOrUndefined('lastPids', { bot: null, dashboard: null, lavalink: null, valkey: null }),
+  };
+}
+
+migrateLegacyConfig();
 
 export function getConfig(): LauncherConfig {
   return {
