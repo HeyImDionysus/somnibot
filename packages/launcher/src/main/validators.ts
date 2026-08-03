@@ -143,6 +143,27 @@ export async function validateGuildId(
 /*  Supabase                                                           */
 /* ------------------------------------------------------------------ */
 
+export function validateSupabaseUrl(url: string): ValidationResult {
+  if (!url.trim()) return { ok: false, error: 'Supabase URL is required.' };
+  try {
+    const parsed = new URL(url.trim());
+    const isLocalDev = ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(parsed.hostname);
+    if (parsed.protocol !== 'https:' && !isLocalDev) {
+      return { ok: false, error: 'Supabase URL must use HTTPS.' };
+    }
+    const isSupabaseDomain = parsed.hostname.endsWith('.supabase.co') || parsed.hostname.endsWith('.supabase.com');
+    if (!isSupabaseDomain && !isLocalDev) {
+      return {
+        ok: false,
+        error: 'Supabase URL must be a *.supabase.co domain or localhost. Got: ' + parsed.hostname,
+      };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'Invalid Supabase URL. Expected something like "https://your-project.supabase.co".' };
+  }
+}
+
 export async function validateSupabase(
   url: string,
   secretKey: string,
@@ -152,27 +173,8 @@ export async function validateSupabase(
   if (!secretKey.trim()) return { ok: false, error: 'Supabase Secret Key is required.' };
   if (!publishableKey.trim()) return { ok: false, error: 'Supabase Publishable Key is required.' };
 
-  // Validate URL format — V6 Audit §10.3: enforce HTTPS + valid domain
-  try {
-    const parsed = new URL(url.trim());
-
-    // Must use HTTPS (except localhost for local development)
-    const isLocalDev = ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(parsed.hostname);
-    if (parsed.protocol !== 'https:' && !isLocalDev) {
-      return { ok: false, error: 'Supabase URL must use HTTPS.' };
-    }
-
-    // Must be a Supabase domain or localhost
-    const isSupabaseDomain = parsed.hostname.endsWith('.supabase.co') || parsed.hostname.endsWith('.supabase.com');
-    if (!isSupabaseDomain && !isLocalDev) {
-      return {
-        ok: false,
-        error: 'Supabase URL must be a *.supabase.co domain or localhost. Got: ' + parsed.hostname,
-      };
-    }
-  } catch {
-    return { ok: false, error: 'Invalid Supabase URL. Expected something like "https://your-project.supabase.co".' };
-  }
+  const urlValidation = validateSupabaseUrl(url);
+  if (!urlValidation.ok) return urlValidation;
 
   // Verify secret key by calling the health endpoint with auth
   try {

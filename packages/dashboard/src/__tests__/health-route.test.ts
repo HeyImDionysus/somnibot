@@ -26,7 +26,11 @@ beforeEach(() => {
 describe('GET /api/health', () => {
   it('returns healthy with bot online when heartbeat is fresh', async () => {
     mockCheckHealth.mockResolvedValue(true);
-    mockReadKey.mockResolvedValue(JSON.stringify({ timestamp: Date.now() - 30_000 }));
+    const heartbeatAt = Date.now() - 30_000;
+    mockReadKey.mockResolvedValue(JSON.stringify({
+      bootId: '11111111-1111-4111-8111-111111111111',
+      timestamp: heartbeatAt,
+    }));
 
     const res = await buildHealthResponse(probe);
     const body = await res.json();
@@ -36,6 +40,10 @@ describe('GET /api/health', () => {
     expect(body.services.config).toBe('unknown');
     expect(body.services.valkey).toBe('connected');
     expect(body.services.bot).toBe('online');
+    expect(body.botRuntime).toEqual({
+      bootId: '11111111-1111-4111-8111-111111111111',
+      heartbeatAt,
+    });
     expect(body.timestamp).toBeTruthy();
   });
 

@@ -1,9 +1,18 @@
+import { validateSupabaseUrl } from './validators.js';
+
 export type ActiveRuntimeMode = 'regular-local' | 'vps';
 
 export interface RuntimeLeaseStatus {
   active: boolean;
   activeMode?: ActiveRuntimeMode;
   leaseExpiresAt?: string;
+}
+
+export class RuntimeLeaseStatusUnavailableError extends Error {
+  constructor(readonly reason: 'not-installed' | 'unavailable', message: string) {
+    super(message);
+    this.name = 'RuntimeLeaseStatusUnavailableError';
+  }
 }
 
 interface RuntimeLeaseRow {
@@ -47,6 +56,10 @@ export async function readRuntimeLeaseStatus(
   if (!url || !secretKey) {
     throw new Error('Supabase URL and secret key are required to check active runtime ownership.');
   }
+  const urlValidation = validateSupabaseUrl(url);
+  if (!urlValidation.ok) {
+    throw new Error(urlValidation.error || 'Supabase URL is not trusted for active runtime ownership checks.');
+  }
 
   const fetchImpl = options.fetch ?? fetch;
   const response = await fetchImpl(`${url}/rest/v1/rpc/get_somnibot_runtime`, {
@@ -60,7 +73,12 @@ export async function readRuntimeLeaseStatus(
     signal: AbortSignal.timeout(10_000),
   });
   if (!response.ok) {
-    throw new Error(`Active runtime ownership check failed with HTTP ${response.status}.`);
+    const body = await response.json().catch(() => null) as { code?: unknown } | null;
+    const notInstalled = response.status === 404 || body?.code === 'PGRST202';
+    throw new RuntimeLeaseStatusUnavailableError(
+      notInstalled ? 'not-installed' : 'unavailable',
+      `Active runtime ownership check failed with HTTP ${response.status}.`,
+    );
   }
 
   return parseRuntimeLeaseStatus(await response.json());

@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { readRuntimeLeaseStatus, waitForRuntimeLease } from '../main/runtime-lease-client.js';
+import {
+  readRuntimeLeaseStatus,
+  RuntimeLeaseStatusUnavailableError,
+  waitForRuntimeLease,
+} from '../main/runtime-lease-client.js';
 
 function response(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
@@ -50,7 +54,25 @@ describe('launcher runtime lease client', () => {
     const deniedFetch = vi.fn().mockResolvedValue(response({ message: 'denied' }, 403));
     await expect(readRuntimeLeaseStatus('https://example.supabase.co', 'service-key', {
       fetch: deniedFetch,
-    })).rejects.toThrow('HTTP 403');
+    })).rejects.toMatchObject({
+      name: 'RuntimeLeaseStatusUnavailableError',
+      reason: 'unavailable',
+    });
+
+    const missingFetch = vi.fn().mockResolvedValue(response({ code: 'PGRST202' }, 404));
+    await expect(readRuntimeLeaseStatus('https://example.supabase.co', 'service-key', {
+      fetch: missingFetch,
+    })).rejects.toEqual(expect.objectContaining<Partial<RuntimeLeaseStatusUnavailableError>>({
+      reason: 'not-installed',
+    }));
+  });
+
+  it('never sends the service key to an untrusted renderer-supplied URL', async () => {
+    const fetchImpl = vi.fn();
+    await expect(readRuntimeLeaseStatus('https://attacker.example', 'stored-service-key', {
+      fetch: fetchImpl,
+    })).rejects.toThrow('must be a *.supabase.co domain');
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it('waits for the requested ownership state and times out closed', async () => {

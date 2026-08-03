@@ -89,8 +89,17 @@ import {
   startLocalValkeyBackupSchedule,
   stopLocalValkeyBackupSchedule,
 } from './local-backup-manager.js';
-import { readRuntimeLeaseStatus, waitForRuntimeLease } from './runtime-lease-client.js';
+import {
+  readRuntimeLeaseStatus,
+  RuntimeLeaseStatusUnavailableError,
+  waitForRuntimeLease,
+} from './runtime-lease-client.js';
 import { runVpsToLocalHandoff } from './vps-local-handoff.js';
+import {
+  readVpsBotBootProof,
+  waitForFreshVpsBotReady,
+  type VpsBotBootProof,
+} from './vps-bot-readiness.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1016,6 +1025,8 @@ async function restoreVpsAfterLocalHandoffFailure(
   vpsConfig: LauncherConfig,
   runner: ReturnType<typeof createVpsCommandRunner>,
   vpsPlan: ReturnType<typeof buildVpsDeploymentPlanFromConfig>,
+  previousVpsBoot: VpsBotBootProof,
+  requireNewBoot: boolean,
 ): Promise<{ ok: boolean; detail: string }> {
   let paypalDetail = '';
   if (vpsConfig.paypalClientId.trim() && vpsConfig.paypalClientSecret.trim()) {
@@ -1026,7 +1037,7 @@ async function restoreVpsAfterLocalHandoffFailure(
   }
 
   await stopManagedLocalStack().catch(() => undefined);
-  saveConfig({ runtimeMode: 'vps' });
+  saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
   await queueLauncherCredentialSync(getConfig());
 
   const started = await runner(buildVpsRuntimeStartCommand(vpsPlan), { index: 0, total: 1 });
@@ -1043,6 +1054,7 @@ async function restoreVpsAfterLocalHandoffFailure(
       (status) => status.active && status.activeMode === 'vps',
       { timeoutMessage: 'The restarted VPS did not reacquire runtime ownership.' },
     );
+    await waitForFreshVpsBotReady(vpsPlan.target!.publicBaseUrl, previousVpsBoot, { requireNewBoot });
   } catch (error) {
     return {
       ok: false,
@@ -1060,11 +1072,21 @@ async function restoreVpsAfterLocalHandoffFailure(
 
 async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch): Promise<SetupAutomationResult> {
   const sanitizedPatch = sanitizePayPalConfigPatch(configPatch);
-  const localConfig = { ...getConfig(), ...sanitizedPatch, runtimeMode: 'regular-local' as const };
+  const savedConfig = getConfig();
+  const localConfig = { ...savedConfig, ...sanitizedPatch, runtimeMode: 'regular-local' as const };
   let leaseStatus;
   try {
     leaseStatus = await readRuntimeLeaseStatus(localConfig.supabaseUrl, localConfig.supabaseSecretKey);
   } catch (error) {
+    if (
+      error instanceof RuntimeLeaseStatusUnavailableError
+      && error.reason === 'not-installed'
+      && savedConfig.lastSuccessfulRuntimeMode !== 'vps'
+    ) {
+      const freshResult = await runLocalSetupAutomation(sanitizedPatch);
+      if (freshResult.ok) saveConfig({ lastSuccessfulRuntimeMode: 'regular-local' });
+      return freshResult;
+    }
     return {
       ok: false,
       stage: 'runtime-ownership',
@@ -1073,13 +1095,35 @@ async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch)
     };
   }
 
-  if (!leaseStatus.active || leaseStatus.activeMode !== 'vps') {
-    return runLocalSetupAutomation(sanitizedPatch);
+  if (!leaseStatus.active) {
+    const localResult = await runLocalSetupAutomation(sanitizedPatch);
+    if (localResult.ok) saveConfig({ lastSuccessfulRuntimeMode: 'regular-local' });
+    return localResult;
+  }
+  if (leaseStatus.activeMode === 'regular-local') {
+    try {
+      await waitForRuntimeLease(
+        () => readRuntimeLeaseStatus(localConfig.supabaseUrl, localConfig.supabaseSecretKey),
+        (status) => !status.active,
+        { timeoutMessage: 'Another local SomniBot runtime is still active for this installation.' },
+      );
+    } catch (error) {
+      return {
+        ok: false,
+        stage: 'runtime-ownership',
+        message: 'Local runtime ownership is still active elsewhere.',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    const localResult = await runLocalSetupAutomation(sanitizedPatch);
+    if (localResult.ok) saveConfig({ lastSuccessfulRuntimeMode: 'regular-local' });
+    return localResult;
   }
 
   const vpsConfig: LauncherConfig = { ...localConfig, runtimeMode: 'vps' };
   const vpsPlan = buildVpsDeploymentPlanFromConfig(vpsConfig);
   if (vpsPlan.status !== 'ready' || !vpsPlan.target) {
+    saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
     return {
       ok: false,
       stage: 'runtime-handoff',
@@ -1099,11 +1143,25 @@ async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch)
     detail: 'The launcher will stop the saved VPS stack, verify that it released runtime ownership, start this local bot, and update provider callbacks. If local startup fails, it will restore the VPS.',
   });
   if (confirmation.response !== 0) {
+    saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
     return {
       ok: false,
       stage: 'runtime-handoff',
       message: 'VPS to local switch cancelled.',
       error: 'No runtime or provider changes were made.',
+    };
+  }
+
+  let previousVpsBoot: VpsBotBootProof;
+  try {
+    previousVpsBoot = await readVpsBotBootProof(vpsPlan.target.publicBaseUrl);
+  } catch (error) {
+    saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
+    return {
+      ok: false,
+      stage: 'runtime-handoff',
+      message: 'The active VPS is not healthy enough to begin a reversible switch.',
+      error: error instanceof Error ? error.message : String(error),
     };
   }
 
@@ -1122,15 +1180,21 @@ async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch)
     },
     startLocal: () => runLocalSetupAutomation(sanitizedPatch),
     isLocalReady: (result) => result.ok,
-    restoreVps: () => restoreVpsAfterLocalHandoffFailure(vpsConfig, runner, vpsPlan),
+    restoreVps: (reason) => restoreVpsAfterLocalHandoffFailure(
+      vpsConfig,
+      runner,
+      vpsPlan,
+      previousVpsBoot,
+      reason === 'local-failed',
+    ),
   });
 
-  if (handoff.state === 'vps-stop-failed') {
+  if (handoff.state === 'vps-stop-unproven') {
     return {
       ok: false,
       stage: 'runtime-handoff',
-      message: 'The VPS could not be stopped safely.',
-      error: 'Local SomniBot was not started, so duplicate Discord connections were prevented.',
+      message: 'The VPS stop result was ambiguous, so local startup was cancelled.',
+      error: `Local SomniBot was not started. ${handoff.recovery.detail}`,
     };
   }
   if (handoff.state === 'vps-release-unproven') {
@@ -1142,6 +1206,7 @@ async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch)
     };
   }
   if (handoff.state === 'success') {
+    saveConfig({ lastSuccessfulRuntimeMode: 'regular-local' });
     recordLauncherAudit({
       action: 'launcher.runtime.vps_to_local_completed',
       category: 'infrastructure',
@@ -1599,6 +1664,11 @@ function registerIpcHandlers(): void {
             });
           },
           executeDeployment,
+        }).then((result) => {
+          if (result.state === 'success') {
+            saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
+          }
+          return result;
         });
       },
     });
@@ -1773,11 +1843,69 @@ app.whenReady().then(async () => {
   });
 
   registerIpcHandlers();
-  const config = getConfig();
-  const shouldAutoRunLocal = config.firstRunComplete && config.runtimeMode !== 'vps';
+  let config = getConfig();
+  let startupLeaseStatus: Awaited<ReturnType<typeof readRuntimeLeaseStatus>> | undefined;
+  let runtimeStatusNotInstalled = false;
+  if (config.supabaseUrl.trim() && config.supabaseSecretKey.trim()) {
+    try {
+      startupLeaseStatus = await readRuntimeLeaseStatus(config.supabaseUrl, config.supabaseSecretKey);
+    } catch (error) {
+      runtimeStatusNotInstalled = error instanceof RuntimeLeaseStatusUnavailableError
+        && error.reason === 'not-installed';
+      if (!runtimeStatusNotInstalled) {
+        recordLauncherAudit({
+          action: 'launcher.runtime.startup_ownership_check_failed',
+          category: 'infrastructure',
+          targetType: 'runtime_lease',
+          details: {},
+          success: false,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  if (!config.lastSuccessfulRuntimeMode && config.firstRunComplete) {
+    saveConfig({
+      lastSuccessfulRuntimeMode: startupLeaseStatus?.active
+        ? startupLeaseStatus.activeMode
+        : config.runtimeMode,
+    });
+    config = getConfig();
+  }
+  if (startupLeaseStatus?.active && startupLeaseStatus.activeMode === 'vps') {
+    saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
+    config = getConfig();
+  }
+
+  const wantsLocalAutoStart = config.firstRunComplete
+    && config.lastSuccessfulRuntimeMode === 'regular-local';
+  let shouldAutoRunLocal = wantsLocalAutoStart
+    && (startupLeaseStatus?.active !== true)
+    && (startupLeaseStatus !== undefined || runtimeStatusNotInstalled);
+
+  if (wantsLocalAutoStart && startupLeaseStatus?.activeMode === 'regular-local') {
+    try {
+      await waitForRuntimeLease(
+        () => readRuntimeLeaseStatus(config.supabaseUrl, config.supabaseSecretKey),
+        (status) => !status.active,
+        { timeoutMessage: 'The prior local runtime lease did not expire before automatic restart.' },
+      );
+      shouldAutoRunLocal = true;
+    } catch (error) {
+      recordLauncherAudit({
+        action: 'launcher.autostart.runtime_ownership_blocked',
+        category: 'infrastructure',
+        targetType: 'runtime_lease',
+        details: { expectedMode: 'regular-local' },
+        success: false,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   if (app.isPackaged) {
     app.setLoginItemSettings({
-      openAtLogin: shouldAutoRunLocal,
+      openAtLogin: wantsLocalAutoStart,
       args: ['--background'],
     });
   }

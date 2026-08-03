@@ -12,6 +12,10 @@ export interface VpsDashboardHealthPayload {
     valkey?: 'connected' | 'fallback' | string;
     bot?: 'online' | 'offline' | 'unknown' | string;
   };
+  botRuntime?: {
+    bootId?: string | null;
+    heartbeatAt?: number | null;
+  };
   timestamp?: string;
 }
 

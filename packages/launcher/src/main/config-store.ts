@@ -70,6 +70,8 @@ export interface LauncherConfig {
 
   // ── Runtime networking ──
   runtimeMode: RuntimeMode;
+  /** Last runtime that completed its full readiness proof; UI selection alone never changes this. */
+  lastSuccessfulRuntimeMode?: RuntimeMode;
   publicCallbackBaseUrl: string;
   vpsDomain: string;
   vpsSshHost: string;
@@ -251,6 +253,7 @@ export function getConfig(): LauncherConfig {
     vpsLavalinkPassword: getSensitive('vpsLavalinkPassword'),
     windowBounds: store.get('windowBounds'),
     runtimeMode: store.get('runtimeMode', 'regular-local'),
+    lastSuccessfulRuntimeMode: store.get('lastSuccessfulRuntimeMode'),
     publicCallbackBaseUrl: store.get('publicCallbackBaseUrl', ''),
     vpsDomain: store.get('vpsDomain', ''),
     vpsSshHost: store.get('vpsSshHost', ''),

@@ -1,6 +1,6 @@
 export type VpsToLocalHandoffResult<LocalResult, RecoveryResult> =
   | { state: 'success'; localResult: LocalResult }
-  | { state: 'vps-stop-failed' }
+  | { state: 'vps-stop-unproven'; recovery: RecoveryResult }
   | { state: 'vps-release-unproven'; error: unknown; recovery: RecoveryResult }
   | { state: 'local-failed'; localResult?: LocalResult; error?: unknown; recovery: RecoveryResult };
 
@@ -9,10 +9,15 @@ export async function runVpsToLocalHandoff<LocalResult, RecoveryResult>(options:
   waitForVpsStopped: () => Promise<void>;
   startLocal: () => Promise<LocalResult>;
   isLocalReady: (result: LocalResult) => boolean;
-  restoreVps: () => Promise<RecoveryResult>;
+  restoreVps: (reason: 'stop-unproven' | 'release-unproven' | 'local-failed') => Promise<RecoveryResult>;
 }): Promise<VpsToLocalHandoffResult<LocalResult, RecoveryResult>> {
   const stopped = await options.stopVps();
-  if (!stopped) return { state: 'vps-stop-failed' };
+  if (!stopped) {
+    return {
+      state: 'vps-stop-unproven',
+      recovery: await options.restoreVps('stop-unproven'),
+    };
+  }
 
   try {
     await options.waitForVpsStopped();
@@ -20,7 +25,7 @@ export async function runVpsToLocalHandoff<LocalResult, RecoveryResult>(options:
     return {
       state: 'vps-release-unproven',
       error,
-      recovery: await options.restoreVps(),
+      recovery: await options.restoreVps('release-unproven'),
     };
   }
 
@@ -32,13 +37,13 @@ export async function runVpsToLocalHandoff<LocalResult, RecoveryResult>(options:
     return {
       state: 'local-failed',
       localResult,
-      recovery: await options.restoreVps(),
+      recovery: await options.restoreVps('local-failed'),
     };
   } catch (error) {
     return {
       state: 'local-failed',
       error,
-      recovery: await options.restoreVps(),
+      recovery: await options.restoreVps('local-failed'),
     };
   }
 }
