@@ -39,6 +39,7 @@ import { validateAllCredentials, type FullValidationResult } from './validators.
 import { startAll, stopAll, getStatus, isRunning, checkPortAvailable, cleanupStaleProcesses } from './process-manager.js';
 import { maskRestoredCredentials, pushToSupabaseWithRetry } from './supabase-sync.js';
 import { importExistingSomniBotEnv } from './existing-env-import.js';
+import { restoreMissingCredentialsOnStartup } from './credential-bootstrap.js';
 import { initUpdater } from './updater.js';
 import { resolveLauncherDisplayVersion } from './launcher-version.js';
 import {
@@ -1984,6 +1985,27 @@ app.whenReady().then(async () => {
 
   registerIpcHandlers();
   let config = getConfig();
+  const credentialBootstrap = await restoreMissingCredentialsOnStartup(config);
+  if (credentialBootstrap.restoredFields.length > 0) {
+    saveConfig(credentialBootstrap.patch);
+    config = getConfig();
+    recordLauncherAudit({
+      action: 'launcher.credentials.cloud_restored_on_startup',
+      category: 'infrastructure',
+      targetType: 'credential_store',
+      details: { restoredFieldCount: credentialBootstrap.restoredFields.length },
+      success: true,
+    });
+  } else if (credentialBootstrap.attempted && credentialBootstrap.error) {
+    recordLauncherAudit({
+      action: 'launcher.credentials.cloud_restore_failed_on_startup',
+      category: 'infrastructure',
+      targetType: 'instance_settings',
+      details: {},
+      success: false,
+      errorMessage: credentialBootstrap.error,
+    });
+  }
   let startupLeaseStatus: Awaited<ReturnType<typeof readRuntimeLeaseStatus>> | undefined;
   let runtimeStatusNotInstalled = false;
   if (config.supabaseUrl.trim() && config.supabaseSecretKey.trim()) {

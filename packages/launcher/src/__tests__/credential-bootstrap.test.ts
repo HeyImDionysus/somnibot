@@ -1,0 +1,105 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { LauncherConfig } from '../main/config-store.js';
+import {
+  needsCloudCredentialRestore,
+  restoreMissingCredentialsOnStartup,
+} from '../main/credential-bootstrap.js';
+
+function config(overrides: Partial<LauncherConfig> = {}): LauncherConfig {
+  return {
+    discordToken: 'local-discord-token',
+    discordApplicationId: 'local-app-id',
+    discordClientSecret: 'local-client-secret',
+    discordGuildId: 'local-guild',
+    guilds: [],
+    supabaseUrl: 'https://project.supabase.co',
+    supabaseSecretKey: 'local-secret-key',
+    supabasePublishableKey: 'local-publishable-key',
+    supabaseDbPassword: 'local-db-password',
+    supabaseAccessToken: '',
+    supabaseDiscordAuthProviderConfigured: false,
+    paypalClientId: 'local-paypal-client',
+    paypalClientSecret: 'local-paypal-secret',
+    paypalWebhookId: 'local-webhook',
+    paypalWebhookProofKey: '',
+    paypalSandbox: true,
+    runtimeMode: 'regular-local',
+    publicCallbackBaseUrl: '',
+    vpsDomain: '',
+    vpsSshHost: '',
+    vpsSshUser: '',
+    vpsDeployPath: '',
+    tailscaleAuthKey: '',
+    firstRunComplete: false,
+    lavalinkEnabled: false,
+    lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null },
+    ...overrides,
+  };
+}
+
+describe('startup credential bootstrap', () => {
+  it('skips cloud access when the bootstrap identity is absent', async () => {
+    const pull = vi.fn();
+    const result = await restoreMissingCredentialsOnStartup(
+      config({ supabaseSecretKey: '', paypalClientSecret: '' }),
+      pull,
+    );
+
+    expect(result).toEqual({ attempted: false, patch: {}, restoredFields: [] });
+    expect(pull).not.toHaveBeenCalled();
+  });
+
+  it('skips cloud access when all core connection fields are already present', async () => {
+    const pull = vi.fn();
+    expect(needsCloudCredentialRestore(config())).toBe(false);
+
+    const result = await restoreMissingCredentialsOnStartup(config(), pull);
+
+    expect(result.attempted).toBe(false);
+    expect(pull).not.toHaveBeenCalled();
+  });
+
+  it('restores only missing values and never overwrites established local credentials', async () => {
+    const current = config({
+      supabaseDbPassword: '',
+      paypalClientId: '',
+      paypalClientSecret: '',
+      paypalWebhookId: '',
+    });
+    const pull = vi.fn().mockResolvedValue({
+      ok: true,
+      credentials: {
+        discordToken: 'older-cloud-discord-token',
+        supabaseDbPassword: 'cloud-db-password',
+        paypalClientId: 'cloud-paypal-client',
+        paypalClientSecret: 'cloud-paypal-secret',
+        paypalWebhookId: 'cloud-webhook',
+      },
+    });
+
+    const result = await restoreMissingCredentialsOnStartup(current, pull);
+
+    expect(pull).toHaveBeenCalledWith(current.supabaseUrl, current.supabaseSecretKey);
+    expect(result.patch).toEqual({
+      supabaseDbPassword: 'cloud-db-password',
+      paypalClientId: 'cloud-paypal-client',
+      paypalClientSecret: 'cloud-paypal-secret',
+      paypalWebhookId: 'cloud-webhook',
+    });
+    expect(result.patch).not.toHaveProperty('discordToken');
+  });
+
+  it('surfaces a failed restore without changing local state', async () => {
+    const result = await restoreMissingCredentialsOnStartup(
+      config({ paypalClientSecret: '' }),
+      vi.fn().mockResolvedValue({ ok: false, error: 'offline' }),
+    );
+
+    expect(result).toEqual({
+      attempted: true,
+      patch: {},
+      restoredFields: [],
+      error: 'offline',
+    });
+  });
+});
