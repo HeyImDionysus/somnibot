@@ -46,4 +46,17 @@ describe('selectMissingLegacyConfig', () => {
       windowBounds: { width: 800, height: 600 },
     });
   });
+
+  it('rejects malformed legacy state instead of writing it into the current store', () => {
+    const patch = selectMissingLegacyConfig(
+      { windowBounds: undefined, lastPids: undefined, paypalSandbox: undefined },
+      {
+        windowBounds: { width: 'wide', height: 600 },
+        lastPids: { bot: -1, dashboard: null, lavalink: null, valkey: null },
+        paypalSandbox: 'false',
+      },
+    );
+
+    expect(patch).toEqual({});
+  });
 });
