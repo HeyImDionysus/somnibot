@@ -610,9 +610,18 @@ jobs:
           SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
           VALKEY_URL: redis://localhost:6379
+          SOMNIBOT_FLEET_PROOF_DIR: ${{ github.workspace }}/artifacts/proofs
       - name: Stop Supabase
         if: always()
         run: cd packages && supabase stop 2>/dev/null || true
+      - name: Upload external fleet proof receipts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fleet-proof-${{ matrix.shard }}
+          path: artifacts/proofs/*.json
+          if-no-files-found: ignore
+          retention-days: 30
 
   # ──────────────────────────────────────────────────────────────────────────
   # 7c. Strict A5 Fleet — all 46 catalog domains on every candidate head.
@@ -740,8 +749,18 @@ jobs:
           pattern: fleet-manifest-*
           path: artifacts/fleet
           merge-multiple: true
+      - name: Prepare external fleet proof directory
+        run: mkdir -p artifacts/proofs
+      - name: Download external fleet proof receipts
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v5
+        with:
+          pattern: fleet-proof-*
+          path: artifacts/proofs
+          merge-multiple: true
       - name: Prove exact fleet coverage and clean results
-        run: node scripts/aggregate-fleet-manifests.mjs artifacts/fleet
+        run: node scripts/aggregate-fleet-manifests.mjs artifacts/fleet artifacts/proofs
       - name: Inventory every unresolved functional fleet gate
         if: always()
         run: node scripts/classify-fleet-gates.mjs artifacts/fleet artifacts/fleet-gate-classification.json

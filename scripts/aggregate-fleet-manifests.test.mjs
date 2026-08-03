@@ -10,21 +10,24 @@ const domainIds = catalog.categories.flatMap((category) =>
   category.domains.map((domain) => domain.id),
 );
 
-function writeFleet(directory, hiddenGate = false) {
+const candidateSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+function writeFleet(directory, gateMode = 'none') {
   writeFileSync(path.join(directory, 'unrelated-diagnostic.json'), '{}');
   for (let shard = 1; shard <= 4; shard += 1) {
     const assignedDomainIds = domainIds.filter((_id, position) => position % 4 === shard - 1);
     writeFileSync(path.join(directory, `fleet-shard-${shard}.json`), JSON.stringify({
       schemaVersion: 2,
+      candidateSha,
       shard: `${shard}/4`,
       assignedDomainIds,
       results: assignedDomainIds.map((id, position) => ({
         id,
-        pass: 84,
-        gated: 0,
+        pass: gateMode === 'declared' && shard === 1 && position === 0 ? 83 : 84,
+        gated: gateMode === 'declared' && shard === 1 && position === 0 ? 1 : 0,
         fail: 0,
         findings: [],
-        gates: hiddenGate && shard === 1 && position === 0
+        gates: gateMode !== 'none' && shard === 1 && position === 0
           ? [{ scenario: 'DEF', class: 'Discord', channel: 'discord-readback', reason: 'pending live proof' }]
           : [],
       })),
@@ -32,8 +35,26 @@ function writeFleet(directory, hiddenGate = false) {
   }
 }
 
-function runAggregate(directory) {
-  return spawnSync(process.execPath, ['scripts/aggregate-fleet-manifests.mjs', directory], {
+function writeReceipt(directory, sha = candidateSha) {
+  writeFileSync(path.join(directory, 'fleet-proof-dashboard.json'), JSON.stringify({
+    schemaVersion: 1,
+    candidateSha: sha,
+    domainId: domainIds[0],
+    proofs: [{
+      scenario: 'DEF',
+      assertionClass: 'Discord',
+      sensor: 'dashboard-live-route',
+      observation: 'The exact candidate produced and read back the contracted dashboard effect.',
+    }],
+  }));
+}
+
+function runAggregate(directory, proofDirectory) {
+  return spawnSync(process.execPath, [
+    'scripts/aggregate-fleet-manifests.mjs',
+    directory,
+    ...(proofDirectory ? [proofDirectory] : []),
+  ], {
     cwd: process.cwd(),
     encoding: 'utf8',
   });
@@ -45,7 +66,7 @@ test('accepts exactly 46 clean domain manifests across four shards', () => {
     writeFleet(directory);
     const run = runAggregate(directory);
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, /Fleet aggregate passed: 46 unique domains across 4 shards\./);
+    assert.match(run.stdout, /Fleet aggregate passed: 46 unique domains across 4 shards with 0 external proof receipt\(s\)\./);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -54,10 +75,48 @@ test('accepts exactly 46 clean domain manifests across four shards', () => {
 test('rejects a hidden gate record even when the class-level gated count is zero', () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'somnibot-fleet-aggregate-gated-'));
   try {
-    writeFleet(directory, true);
+    writeFleet(directory, 'hidden');
+    const run = runAggregate(directory);
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /gate inventory does not match its gated class count/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('rejects a declared gate until an exact external receipt exists', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'somnibot-fleet-aggregate-unproven-'));
+  try {
+    writeFleet(directory, 'declared');
     const run = runAggregate(directory);
     assert.notEqual(run.status, 0);
     assert.match(run.stderr, /fleet has failed, gated, errored, or unresolved domains/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('accepts an exact-candidate external receipt for a declared gate', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'somnibot-fleet-aggregate-proof-'));
+  try {
+    writeFleet(directory, 'declared');
+    writeReceipt(directory);
+    const run = runAggregate(directory, directory);
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /with 1 external proof receipt\(s\)/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('rejects a proof receipt from a different candidate', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'somnibot-fleet-aggregate-wrong-head-'));
+  try {
+    writeFleet(directory, 'declared');
+    writeReceipt(directory, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+    const run = runAggregate(directory, directory);
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /proof receipt candidate mismatch/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
