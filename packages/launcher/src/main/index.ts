@@ -90,6 +90,7 @@ import {
   stopLocalValkeyBackupSchedule,
 } from './local-backup-manager.js';
 import {
+  hasSupabaseProjectOriginChanged,
   readRuntimeLeaseStatus,
   RuntimeLeaseStatusUnavailableError,
   validateSupabaseCredentialPairing,
@@ -265,6 +266,21 @@ function sanitizePayPalConfigPatch(config: LauncherConfigPatch): LauncherConfigP
     if (typeof sanitized[key] === 'string') {
       sanitized[key] = sanitized[key].trim();
     }
+  }
+  return sanitized;
+}
+
+function sanitizeRendererConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch {
+  const sanitized = sanitizePayPalConfigPatch(config);
+  const savedConfig = getConfig();
+  const pairingError = validateSupabaseCredentialPairing(savedConfig.supabaseUrl, sanitized);
+  if (pairingError) throw new Error(pairingError);
+  if (
+    typeof sanitized.supabaseUrl === 'string'
+    && hasSupabaseProjectOriginChanged(savedConfig.supabaseUrl, sanitized.supabaseUrl)
+    && savedConfig.lastSuccessfulRuntimeMode === 'vps'
+  ) {
+    throw new Error('Switch the active VPS runtime to local before changing its Supabase project.');
   }
   return sanitized;
 }
@@ -1077,23 +1093,15 @@ async function restoreVpsAfterLocalHandoffFailure(
 }
 
 async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch): Promise<SetupAutomationResult> {
-  const sanitizedPatch = sanitizePayPalConfigPatch(configPatch);
   const savedConfig = getConfig();
+  let sanitizedPatch: LauncherConfigPatch;
   try {
-    const pairingError = validateSupabaseCredentialPairing(savedConfig.supabaseUrl, sanitizedPatch);
-    if (pairingError) {
-      return {
-        ok: false,
-        stage: 'runtime-ownership',
-        message: 'Supabase project credentials must be updated together.',
-        error: pairingError,
-      };
-    }
+    sanitizedPatch = sanitizeRendererConfigPatch(configPatch);
   } catch (error) {
     return {
       ok: false,
       stage: 'runtime-ownership',
-      message: 'The Supabase project URL is not safe for runtime ownership checks.',
+      message: 'The Supabase project change could not be applied safely.',
       error: error instanceof Error ? error.message : String(error),
     };
   }
@@ -1392,7 +1400,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('save-config', (_event, config: Partial<LauncherConfig>) => {
-    saveConfig(sanitizePayPalConfigPatch(config));
+    saveConfig(sanitizeRendererConfigPatch(config));
     void queueLauncherCredentialSync(getConfig());
   });
 
@@ -1495,7 +1503,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('paypal:ensure-webhook', async (_event, config: Partial<LauncherConfig>) => {
     const previousConfig = getConfig();
-    saveConfig(sanitizePayPalConfigPatch(config));
+    saveConfig(sanitizeRendererConfigPatch(config));
     const cfg = getConfig();
     const rawResult = await ensureConfiguredPayPalWebhook(cfg);
     if (rawResult.ok) {

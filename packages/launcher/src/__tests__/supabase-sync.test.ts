@@ -224,7 +224,7 @@ describe('pullFromSupabase', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const result = await pullFromSupabase('https://project.example.test/', 'service-role-test-key');
+    const result = await pullFromSupabase('https://project.supabase.co/', 'service-role-test-key');
 
     expect(result).toEqual({
       ok: true,
@@ -257,7 +257,7 @@ describe('pushToSupabaseWithRetry', () => {
     const delays: number[] = [];
 
     const result = await pushToSupabaseWithRetry(
-      'https://project.example.test',
+      'https://project.supabase.co',
       'service-role-test-key',
       pushCredentials(),
       { wait: async (delayMs) => { delays.push(delayMs); } },
@@ -272,7 +272,7 @@ describe('pushToSupabaseWithRetry', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
 
     const result = await pushToSupabaseWithRetry(
-      'https://project.example.test',
+      'https://project.supabase.co',
       'service-role-test-key',
       pushCredentials(),
       { maxAttempts: 2, wait: async () => undefined },
@@ -280,5 +280,25 @@ describe('pushToSupabaseWithRetry', () => {
 
     expect(result).toMatchObject({ ok: false, attempts: 2 });
     expect(result.error).toContain('network down');
+  });
+
+  it('never sends credentials or synchronized rows to a custom Supabase-domain path', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pushResult = await pushToSupabaseWithRetry(
+      'https://project.supabase.co/functions/v1/collector?x=',
+      'stored-service-key',
+      pushCredentials(),
+      { maxAttempts: 1 },
+    );
+    const pullResult = await pullFromSupabase(
+      'https://project.supabase.co/functions/v1/collector?x=',
+      'stored-service-key',
+    );
+
+    expect(pushResult.ok).toBe(false);
+    expect(pullResult.ok).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

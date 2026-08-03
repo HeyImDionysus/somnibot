@@ -270,8 +270,9 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain("ipcMain.handle('paypal:ensure-webhook'");
     expect(main).toContain('function sanitizePayPalConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch');
     expect(main).toContain('delete sanitized.lastSuccessfulRuntimeMode;');
-    expect(main).toContain('saveConfig(sanitizePayPalConfigPatch(configPatch))');
-    expect(main).toContain('saveConfig(sanitizePayPalConfigPatch(config))');
+    expect(main).toContain('sanitizedPatch = sanitizeRendererConfigPatch(configPatch);');
+    expect(main).toContain('saveConfig(sanitizeRendererConfigPatch(config))');
+    expect(main).toContain("savedConfig.lastSuccessfulRuntimeMode === 'vps'");
     expect(main).toContain('type PayPalRuntimeConfig = Pick<');
     expect(main).toContain('let lastStartedPayPalConfig: PayPalRuntimeConfig | null = null;');
     expect(main).toContain('function snapshotPayPalRuntimeConfig(config: LauncherConfig): PayPalRuntimeConfig');

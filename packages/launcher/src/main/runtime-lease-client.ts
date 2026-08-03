@@ -63,6 +63,16 @@ export function validateSupabaseCredentialPairing(
   return 'Changing the Supabase project requires its matching secret key.';
 }
 
+export function hasSupabaseProjectOriginChanged(savedSupabaseUrl: string, nextSupabaseUrl: string): boolean {
+  const nextOrigin = canonicalSupabaseProjectOrigin(nextSupabaseUrl);
+  if (!savedSupabaseUrl.trim()) return true;
+  try {
+    return canonicalSupabaseProjectOrigin(savedSupabaseUrl) !== nextOrigin;
+  } catch {
+    return true;
+  }
+}
+
 function parseRuntimeLeaseStatus(payload: unknown): RuntimeLeaseStatus {
   const row = Array.isArray(payload) ? payload[0] : payload;
   if (!row || typeof row !== 'object') {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   canonicalSupabaseProjectOrigin,
+  hasSupabaseProjectOriginChanged,
   readRuntimeLeaseStatus,
   RuntimeLeaseStatusUnavailableError,
   validateSupabaseCredentialPairing,
@@ -115,6 +116,14 @@ describe('launcher runtime lease client', () => {
       'https://first.supabase.co',
       { supabaseUrl: 'https://first.supabase.co/' },
     )).toBeUndefined();
+    expect(hasSupabaseProjectOriginChanged(
+      'https://first.supabase.co',
+      'https://first.supabase.co/',
+    )).toBe(false);
+    expect(hasSupabaseProjectOriginChanged(
+      'https://first.supabase.co',
+      'https://second.supabase.co',
+    )).toBe(true);
   });
 
   it('waits for the requested ownership state and times out closed', async () => {

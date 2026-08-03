@@ -9,6 +9,8 @@
  * Uses direct REST calls (no SDK dependency in the launcher).
  */
 
+import { canonicalSupabaseProjectOrigin } from './runtime-lease-client.js';
+
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
@@ -244,7 +246,8 @@ export async function pushToSupabase(
   if (rows.length === 0) return { ok: true };
 
   try {
-    const res = await fetch(`${supabaseUrl.replace(/\/+$/, '')}/rest/v1/instance_settings`, {
+    const projectOrigin = canonicalSupabaseProjectOrigin(supabaseUrl);
+    const res = await fetch(`${projectOrigin}/rest/v1/instance_settings`, {
       method: 'POST',
       headers: headers(supabaseSecretKey),
       body: JSON.stringify(rows),
@@ -301,12 +304,13 @@ export async function pullFromSupabase(
   supabaseSecretKey: string,
 ): Promise<{ ok: boolean; credentials?: RestoredCredentials; error?: string }> {
   try {
+    const projectOrigin = canonicalSupabaseProjectOrigin(supabaseUrl);
     const query = new URLSearchParams({
       select: 'key,value',
       key: `in.(${RESTORE_SETTING_KEYS.join(',')})`,
     });
     const res = await fetch(
-      `${supabaseUrl.replace(/\/+$/, '')}/rest/v1/instance_settings?${query.toString()}`,
+      `${projectOrigin}/rest/v1/instance_settings?${query.toString()}`,
       {
         headers: {
           apikey: supabaseSecretKey,
