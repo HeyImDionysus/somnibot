@@ -109,7 +109,7 @@ function paypalFetch(mode: 'subscription' | 'one-time', fail?: 'timeout') {
   });
 }
 
-beforeEach(() => { process.env.PAYPAL_CLIENT_SECRET = 'test-signing-secret'; });
+beforeEach(() => { process.env['PAYPAL_CLIENT_SECRET'] = 'test-signing-secret'; });
 afterEach(() => { delete process.env.PAYPAL_CLIENT_SECRET; vi.restoreAllMocks(); });
 
 describe('payment checkout durability regressions', () => {

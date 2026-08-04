@@ -34,7 +34,7 @@ import { invalidateBrandKitCache } from '../features/branding/brand-kit.js';
 // must therefore provide the same non-secret fixture key the durability suite
 // uses; otherwise the handler correctly stops at "signing unavailable".
 beforeEach(() => {
-  process.env.PAYPAL_CLIENT_SECRET = 'test-signing-secret';
+  process.env['PAYPAL_CLIENT_SECRET'] = 'test-signing-secret';
 });
 afterEach(() => {
   delete process.env.PAYPAL_CLIENT_SECRET;
