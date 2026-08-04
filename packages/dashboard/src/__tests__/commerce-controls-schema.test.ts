@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { guildConfigPatchSchema } from '../app/api/guild/route';
+import { guildConfigPatchSchema } from '../lib/guild-config-schema';
 
 describe('portal/store guild controls', () => {
   it('accepts the documented control values', () => {
