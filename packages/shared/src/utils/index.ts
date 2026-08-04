@@ -76,6 +76,8 @@ export function truncate(str: string, maxLength: number): string {
   return str.slice(0, maxLength - 1) + '…';
 }
 
+export * from './paypal-environment.js';
+
 /**
  * Default payment-failure grace window (days). Mirrors the
  * `guild_config.grace_period_days` column default in the initial schema —

@@ -591,6 +591,7 @@ export async function POST(req: NextRequest) {
       case 'CHECKOUT.ORDER.APPROVED':
         await handleOrderApproved(supabase, event.resource, {
           webhookEventId: resolvedEventId,
+          paypalEnvironment: paypalPolicy.environment,
         });
         break;
       case 'PAYMENT.CAPTURE.COMPLETED':

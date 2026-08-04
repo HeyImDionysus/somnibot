@@ -48,6 +48,7 @@ import { applyBrand, brandedEmbed, resolveBrandKit } from '../features/branding/
 // Feature handler imports — slash commands
 import { handleStoreCommand } from '../features/commerce/store-command.js';
 import { handleLicenseCommand } from '../features/commerce/license-commands.js';
+import { resolveGuildPayPalRuntime } from '../services/paypal-runtime.js';
 import { handleMusicCommand } from '../features/music/commands.js';
 import { handleTempChannelCommand } from '../features/temp-channels/commands.js';
 import { handleGiveawayCommand } from '../features/giveaways/commands.js';
@@ -197,14 +198,14 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
           await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
           return;
         }
-        const paypalApiBase = process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com';
-        const paypalClientId = process.env.PAYPAL_CLIENT_ID || '';
-        const paypalClientSecret = process.env.PAYPAL_CLIENT_SECRET || '';
+        const paypalRuntime = await resolveGuildPayPalRuntime(client.supabase, guildId);
         const dashboardUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.DASHBOARD_URL || 'https://dashboard.somnibot.com';
-        if (paypalClientId) {
-          await handleBuyButton(interaction, client.supabase, guildId, paypalApiBase, paypalClientId, paypalClientSecret, dashboardUrl);
+        if (paypalRuntime.configured) {
+          await handleBuyButton(interaction, client.supabase, guildId, paypalRuntime.apiBase, paypalRuntime.clientId, paypalRuntime.clientSecret, dashboardUrl);
           return;
         }
+        await interaction.reply({ content: '❌ Payment service is not configured for this server.', ephemeral: true });
+        return;
       }
 
       // Music buttons
@@ -475,7 +476,8 @@ async function handleSlashCommand(
       return;
     }
     if (interaction.commandName === SLASH.store) {
-      await handleStoreCommand(interaction, client.supabase, guildId, process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com');
+      const paypalRuntime = await resolveGuildPayPalRuntime(client.supabase, guildId);
+      await handleStoreCommand(interaction, client.supabase, guildId, paypalRuntime.apiBase);
       return;
     }
     await handleLicenseCommand(interaction, client.supabase, guildId);

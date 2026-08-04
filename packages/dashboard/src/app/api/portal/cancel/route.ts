@@ -23,6 +23,7 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { getPayPalRuntimeConfig, getPayPalToken } from '@/lib/paypal';
+import { applyPayPalPolicyEnvironment, loadPayPalPolicy } from '@/lib/paypal-policy';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -165,7 +166,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const config = await getPayPalRuntimeConfig();
+    const runtimeConfig = await getPayPalRuntimeConfig();
+    const paypalPolicy = await loadPayPalPolicy(admin, session.guild_id);
+    const config = applyPayPalPolicyEnvironment(runtimeConfig, paypalPolicy.environment);
     const paypalToken = await getPayPalToken(config);
     if (!paypalToken) {
       return NextResponse.json(

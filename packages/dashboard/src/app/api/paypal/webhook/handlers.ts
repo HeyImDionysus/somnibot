@@ -8,6 +8,7 @@
 import { createHash } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { getPayPalRuntimeConfig, getPayPalToken, getSubscriptionAmount } from '@/lib/paypal';
+import { applyPayPalPolicyEnvironment, type PayPalEnvironment } from '@/lib/paypal-policy';
 import { isCanonicalPayPalResourceId } from '@/lib/paypal-resource-id';
 import {
   paypalCaptureResourceSchema,
@@ -171,6 +172,7 @@ type SubscriptionLifecycleEventType =
 export interface ProviderMoneyHandlerOptions {
   webhookEventId: string;
   providerOccurredAt?: string;
+  paypalEnvironment?: PayPalEnvironment;
 }
 
 type ProviderMoneyEventType =
@@ -1397,7 +1399,10 @@ export async function handleOrderApproved(
     throw new Error('Approved PayPal order has no exact resumable local carrier');
   }
 
-  const paypalConfig = await getPayPalRuntimeConfig();
+  const runtimeConfig = await getPayPalRuntimeConfig();
+  const paypalConfig = options.paypalEnvironment
+    ? applyPayPalPolicyEnvironment(runtimeConfig, options.paypalEnvironment)
+    : runtimeConfig;
   const token = await getPayPalToken(paypalConfig);
   if (!token) {
     throw new Error('Could not get PayPal token to capture order');

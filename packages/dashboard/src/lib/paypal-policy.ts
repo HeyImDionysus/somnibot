@@ -1,6 +1,11 @@
 import type { createAdminSupabase } from '@/lib/supabase/admin';
+import {
+  paypalApiBaseForEnvironment as sharedPaypalApiBaseForEnvironment,
+  resolvePayPalEnvironment,
+  type PayPalEnvironment as SharedPayPalEnvironment,
+} from '@somnibot/shared';
 
-export type PayPalEnvironment = 'sandbox' | 'live';
+export type PayPalEnvironment = SharedPayPalEnvironment;
 export type PayPalRefundStrategy = 'provider-first' | 'local-first';
 
 export interface PayPalPolicy {
@@ -28,9 +33,20 @@ interface PayPalPolicyRow {
 }
 
 export function paypalApiBaseForEnvironment(environment: PayPalPolicy['environment']): string {
-  return environment === 'live'
-    ? 'https://api-m.paypal.com'
-    : 'https://api-m.sandbox.paypal.com';
+  return sharedPaypalApiBaseForEnvironment(environment);
+}
+
+/** Apply a tenant-selected provider mode to a process-level credential set. */
+export function applyPayPalPolicyEnvironment<T extends { apiBase: string; sandbox: boolean }>(
+  config: T,
+  environment: unknown,
+): T {
+  const resolved = resolvePayPalEnvironment(environment);
+  return {
+    ...config,
+    apiBase: paypalApiBaseForEnvironment(resolved),
+    sandbox: resolved === 'sandbox',
+  };
 }
 
 /** Load tenant-scoped PayPal controls, preserving pre-migration behavior. */
@@ -58,7 +74,7 @@ export async function loadPayPalPolicy(
     legacyUsdSaleTolerance: typeof data.paypal_legacy_usd_sale_tolerance === 'boolean'
       ? data.paypal_legacy_usd_sale_tolerance
       : DEFAULT_PAYPAL_POLICY.legacyUsdSaleTolerance,
-    environment: data.paypal_environment === 'live' ? 'live' : 'sandbox',
+    environment: resolvePayPalEnvironment(data.paypal_environment),
     refundStrategy: data.paypal_refund_strategy === 'local-first'
       ? 'local-first'
       : 'provider-first',
