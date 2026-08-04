@@ -59,6 +59,21 @@ assert.match(
 );
 assert.match(
   builderConfig,
+  /from: \.resources\/bot\/runtime_modules[\s\S]*to: bot\/node_modules/,
+  'bot runtime dependencies must be mapped explicitly into packaged node_modules',
+);
+assert.match(
+  buildScript,
+  /verifyPackagedBotRuntime\(\)/,
+  'launcher packaging must smoke-test the final unpacked bot runtime',
+);
+assert.match(
+  buildScript,
+  /Packaged @somnibot\/shared runtime dependency/,
+  'packaged runtime smoke must require the bot workspace dependency',
+);
+assert.match(
+  builderConfig,
   /^executableName: SomniBot$/m,
   'scoped package names must not leak into Windows or Linux executable paths',
 );

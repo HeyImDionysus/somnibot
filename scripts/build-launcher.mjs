@@ -13,8 +13,8 @@
  *   node scripts/build-launcher.mjs --skip-build  # Skip package builds (use existing artifacts)
  */
 
-import { cpSync, mkdirSync, rmSync, existsSync, readdirSync, statSync, readFileSync, lstatSync, realpathSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { cpSync, mkdirSync, rmSync, existsSync, readdirSync, statSync, readFileSync, lstatSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runPnpm } from './lib/pnpm.mjs';
@@ -333,13 +333,39 @@ function stageBot() {
   // dereference:true to ensure everything is a real file.
   dereferenceNodeModules(path.join(botStaging, 'node_modules'));
 
-  // ── Fix transitive / peer dependencies ──────────────────────────
-  // pnpm deploy --prod can miss transitive deps of scoped packages and
-  // peer deps (e.g. ws is a peer of shoukaku, @supabase/* sub-packages
-  // are transitive deps of @supabase/supabase-js).
-  // Scan all installed packages' declared deps and copy any missing ones
-  // from the monorepo.
-  fixAllMissingDeps(botStaging, [], 'bot');
+  // ── Materialize direct, transitive, and peer dependencies ────────
+  // On Windows, pnpm deploy can leave only its hidden .pnpm virtual store
+  // in the deployment root. electron-builder does not copy that hidden
+  // store through extraResources, so an apparently successful installer
+  // can contain no usable bot node_modules at all. Seed every direct
+  // production dependency as a real top-level directory, then walk the
+  // resulting packages to materialize the transitive closure.
+  const botPackageJson = path.join(botStaging, 'package.json');
+  const botDirectDependencies = getRequiredDeps(botPackageJson);
+  fixAllMissingDeps(botStaging, botDirectDependencies, 'bot');
+
+  for (const dependency of botDirectDependencies) {
+    assertExists(
+      path.join(botStaging, 'node_modules', ...dependency.split('/'), 'package.json'),
+      `Bot runtime dependency (${dependency})`,
+    );
+  }
+
+  // electron-builder applies its node_modules exclusions even inside a
+  // generic extraResources tree. Keep the materialized packages under a
+  // neutral staging name and map that directory explicitly back to the
+  // runtime's required bot/node_modules destination in electron-builder.yml.
+  const stagedNodeModules = path.join(botStaging, 'node_modules');
+  const stagedRuntimeModules = path.join(botStaging, 'runtime_modules');
+  // The flat real-package copies above are authoritative. pnpm's virtual
+  // store and command shims are build-time implementation details; their
+  // internal links become invalid after the neutral-directory rename.
+  rmSync(path.join(stagedNodeModules, '.pnpm'), { recursive: true, force: true });
+  rmSync(path.join(stagedNodeModules, '.bin'), { recursive: true, force: true });
+  if (existsSync(stagedRuntimeModules)) {
+    rmSync(stagedRuntimeModules, { recursive: true, force: true });
+  }
+  renameSync(stagedNodeModules, stagedRuntimeModules);
 
   // ── Copy Supabase migrations alongside bot ─────────────────────
   // The migration-runner looks for migrations via process.resourcesPath.
@@ -463,6 +489,53 @@ function buildElectron() {
   console.log('✅ Electron build complete');
 }
 
+function verifyPackagedBotRuntime() {
+  const unpackedRoots = ['win-unpacked', 'linux-unpacked']
+    .map((name) => path.join(RELEASE_DIR, name))
+    .filter((candidate) => existsSync(candidate));
+
+  if (unpackedRoots.length === 0) {
+    throw new Error('Launcher packaging did not leave an unpacked runtime for smoke verification.');
+  }
+
+  for (const unpackedRoot of unpackedRoots) {
+    const botRoot = path.join(unpackedRoot, 'resources', 'bot');
+    const botEntry = path.join(botRoot, 'dist', 'index.js');
+    assertExists(botEntry, 'Packaged bot entry');
+    assertExists(
+      path.join(botRoot, 'node_modules', '@somnibot', 'shared', 'package.json'),
+      'Packaged @somnibot/shared runtime dependency',
+    );
+
+    const smokeEnv = { ...process.env };
+    for (const key of [
+      'DISCORD_TOKEN',
+      'DISCORD_APPLICATION_ID',
+      'SUPABASE_URL',
+      'SUPABASE_SECRET_KEY',
+      'NEXT_PUBLIC_SUPABASE_URL',
+    ]) {
+      delete smokeEnv[key];
+    }
+
+    const smoke = spawnSync(process.execPath, [botEntry], {
+      cwd: botRoot,
+      env: smokeEnv,
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+    const output = `${smoke.stdout ?? ''}\n${smoke.stderr ?? ''}`;
+    if (smoke.error || /ERR_MODULE_NOT_FOUND|Cannot find package/.test(output)) {
+      throw new Error(`Packaged bot module-resolution smoke failed: ${smoke.error?.message ?? output.trim()}`);
+    }
+    if (!output.includes('[Boot]') || !output.includes('Invalid environment configuration')) {
+      throw new Error('Packaged bot did not reach its expected isolated configuration gate.');
+    }
+  }
+
+  console.log('✅ Packaged bot runtime dependencies verified');
+}
+
 /* ── Step 5: Summary ───────────────────────────────────────────────── */
 
 function printSummary() {
@@ -494,6 +567,7 @@ try {
   stageBot();
   stageDashboard();
   buildElectron();
+  verifyPackagedBotRuntime();
   printSummary();
 
   // Clean staging directory (large, not needed after build)

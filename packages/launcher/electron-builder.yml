@@ -30,6 +30,11 @@ extraResources:
     to: bot
     filter:
       - "**/*"
+      - "!runtime_modules/**/*"
+  - from: .resources/bot/runtime_modules
+    to: bot/node_modules
+    filter:
+      - "**/*"
   - from: .resources/dashboard
     to: dashboard
     filter:
