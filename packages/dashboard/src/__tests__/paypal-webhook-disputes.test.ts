@@ -39,6 +39,13 @@ vi.mock('@/lib/paypal', () => ({
   PAYPAL_API_BASE: 'https://api-m.sandbox.paypal.com',
 }));
 vi.mock('@/lib/paypal-policy', () => ({
+  DEFAULT_PAYPAL_POLICY: {
+    legacyUsdSaleTolerance: true,
+    environment: 'sandbox',
+    refundStrategy: 'provider-first',
+    webhookStaleProcessingMs: 300_000,
+    webhookVerifyAttempts: 3,
+  },
   loadPayPalPolicy: vi.fn().mockResolvedValue({ environment: 'sandbox' }),
   applyPayPalPolicyEnvironment: (config: Record<string, unknown>, environment: string) => ({
     ...config,
@@ -595,9 +602,9 @@ describe('route dispatch', () => {
     expect(res.status).toBe(200);
     expect(opsFor('orders', 'update')).toHaveLength(0);
     expect(opsFor('alerts')).toHaveLength(0);
-    // Route attribution performs the exact global order lookup; the handler
-    // uses the exact-identity database transition RPC.
-    expect(opsFor('orders', 'select')).toHaveLength(1);
+    // Route attribution and the denied-capture handler each perform their own
+    // exact order lookup before the identity-bound transition RPC.
+    expect(opsFor('orders', 'select')).toHaveLength(2);
     expect(opsFor('webhook_events', 'upsert')[0]!.payload)
       .not.toHaveProperty('guild_id');
   });
