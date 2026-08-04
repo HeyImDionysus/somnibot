@@ -20,6 +20,7 @@ interface MarketConfig {
   economy_market_fee_pct: number;
   economy_market_listing_days: number;
   economy_market_max_listings: number;
+  economy_market_max_price_per_unit: number;
 }
 
 const DEFAULT_CONFIG: MarketConfig = {
@@ -27,6 +28,7 @@ const DEFAULT_CONFIG: MarketConfig = {
   economy_market_fee_pct: 5,
   economy_market_listing_days: 7,
   economy_market_max_listings: 10,
+  economy_market_max_price_per_unit: 1000000000,
 };
 
 // ── Page ──────────────────────────────────────────────────
@@ -167,6 +169,19 @@ export default function MarketPage() {
               }
               min={1}
               max={50}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-sm text-discord-text-secondary">Maximum Price per Unit (coins)</span>
+            <input
+              type="number"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              value={config.economy_market_max_price_per_unit}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                saveConfig({ economy_market_max_price_per_unit: parseInt(e.target.value, 10) || 1000000000 })
+              }
+              min={1}
+              max={2147483647}
             />
           </label>
         </div>

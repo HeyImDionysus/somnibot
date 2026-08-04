@@ -33,6 +33,8 @@ interface FishingConfig {
   economy_fishing_cooldown_seconds: number;
   economy_fishing_junk_chance_pct: number;
   economy_fishing_treasure_chance_pct: number;
+  economy_fishing_collection_reward_enabled: boolean;
+  economy_fishing_collection_reward_coins: number;
 }
 
 const DEFAULT_CONFIG: FishingConfig = {
@@ -40,6 +42,8 @@ const DEFAULT_CONFIG: FishingConfig = {
   economy_fishing_cooldown_seconds: 30,
   economy_fishing_junk_chance_pct: 15,
   economy_fishing_treasure_chance_pct: 5,
+  economy_fishing_collection_reward_enabled: true,
+  economy_fishing_collection_reward_coins: 5000,
 };
 
 const RARITIES = ['common', 'uncommon', 'rare', 'epic', 'legendary'] as const;
@@ -228,6 +232,35 @@ export default function FishingPage() {
               }
               min={0}
               max={100}
+            />
+          </label>
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-discord-text-primary">Collection Completion Reward</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={config.economy_fishing_collection_reward_enabled}
+              onClick={() => saveConfig({ economy_fishing_collection_reward_enabled: !config.economy_fishing_collection_reward_enabled })}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
+                config.economy_fishing_collection_reward_enabled ? 'bg-discord-blurple' : 'bg-discord-bg-tertiary'
+              }`}
+            >
+              <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                config.economy_fishing_collection_reward_enabled ? 'translate-x-6' : 'translate-x-1'
+              }`} />
+            </button>
+          </div>
+          <label className="flex flex-col gap-1">
+            <span className="text-sm text-discord-text-secondary">Collection Reward (coins)</span>
+            <input
+              type="number"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              value={config.economy_fishing_collection_reward_coins}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                saveConfig({ economy_fishing_collection_reward_coins: parseInt(e.target.value, 10) || 5000 })
+              }
+              min={1}
+              max={2147483647}
             />
           </label>
         </div>

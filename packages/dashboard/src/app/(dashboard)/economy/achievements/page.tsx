@@ -29,6 +29,7 @@ interface AchConfig {
   economy_prestige_multiplier_pct: number;
   economy_prestige_min_level: number;
   economy_prestige_min_net_worth: number;
+  economy_prestige_max_level: number;
 }
 
 const DEFAULT_CONFIG: AchConfig = {
@@ -37,6 +38,7 @@ const DEFAULT_CONFIG: AchConfig = {
   economy_prestige_multiplier_pct: 10,
   economy_prestige_min_level: 50,
   economy_prestige_min_net_worth: 1000000,
+  economy_prestige_max_level: 10,
 };
 
 const BLANK_ACH: Omit<AchievementDef, 'id'> & { id?: string } = {
@@ -162,7 +164,7 @@ export default function AchievementsPage() {
       {config.economy_prestige_enabled && (
         <div className="bg-discord-secondary rounded-lg p-4">
           <h3 className="font-semibold text-discord-text-primary mb-3">⭐ Prestige Settings</h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div>
               <label className="text-sm text-discord-text-secondary">Multiplier Per Level (%)</label>
               <input type="number" min={1} max={100} value={config.economy_prestige_multiplier_pct}
@@ -179,6 +181,12 @@ export default function AchievementsPage() {
               <label className="text-sm text-discord-text-secondary">Min Net Worth</label>
               <input type="number" min={0} value={config.economy_prestige_min_net_worth}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_prestige_min_net_worth: parseInt(e.target.value) || 1000000 })}
+                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+            </div>
+            <div>
+              <label className="text-sm text-discord-text-secondary">Maximum Prestige Level</label>
+              <input type="number" min={1} max={2147483647} value={config.economy_prestige_max_level}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_prestige_max_level: parseInt(e.target.value, 10) || 10 })}
                 className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
           </div>

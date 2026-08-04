@@ -127,6 +127,8 @@ const guildConfigPatchSchema = z.object({
   economy_fishing_cooldown_seconds: z.number().int().min(5).max(3600).optional(),
   economy_fishing_junk_chance_pct: z.number().int().min(0).max(100).optional(),
   economy_fishing_treasure_chance_pct: z.number().int().min(0).max(100).optional(),
+  economy_fishing_collection_reward_enabled: z.boolean().optional(),
+  economy_fishing_collection_reward_coins: z.number().int().min(1).max(2_147_483_647).optional(),
   // Adventures
   economy_adventures_enabled: z.boolean().optional(),
   economy_adventure_daily_limit: z.number().int().min(1).max(50).optional(),
@@ -137,6 +139,7 @@ const guildConfigPatchSchema = z.object({
   economy_market_fee_pct: z.number().int().min(0).max(50).optional(),
   economy_market_listing_days: z.number().int().min(1).max(30).optional(),
   economy_market_max_listings: z.number().int().min(1).max(50).optional(),
+  economy_market_max_price_per_unit: z.number().int().min(1).max(2_147_483_647).optional(),
   // PR #45 — Trivia
   economy_trivia_enabled: z.boolean().optional(),
   economy_trivia_cooldown_seconds: z.number().int().min(5).max(3600).optional(),
@@ -183,6 +186,7 @@ const guildConfigPatchSchema = z.object({
   economy_prestige_multiplier_pct: z.number().int().min(1).max(100).optional(),
   economy_prestige_min_level: z.number().int().min(1).optional(),
   economy_prestige_min_net_worth: z.number().int().min(0).optional(),
+  economy_prestige_max_level: z.number().int().min(1).max(2_147_483_647).optional(),
 }).strict();
 
 export async function GET() {

@@ -334,6 +334,8 @@ export interface DbGuildConfig {
   economy_fishing_cooldown_seconds: number;
   economy_fishing_junk_chance_pct: number;
   economy_fishing_treasure_chance_pct: number;
+  economy_fishing_collection_reward_enabled: boolean;
+  economy_fishing_collection_reward_coins: number;
   // Adventures
   economy_adventures_enabled: boolean;
   economy_adventure_daily_limit: number;
@@ -344,6 +346,7 @@ export interface DbGuildConfig {
   economy_market_fee_pct: number;
   economy_market_listing_days: number;
   economy_market_max_listings: number;
+  economy_market_max_price_per_unit: number;
   // PR #45 — Trivia
   economy_trivia_enabled: boolean;
   economy_trivia_cooldown_seconds: number;
@@ -391,6 +394,7 @@ export interface DbGuildConfig {
   economy_prestige_multiplier_pct: number;
   economy_prestige_min_level: number;
   economy_prestige_min_net_worth: number;
+  economy_prestige_max_level: number;
 
   // V53 Phase 2 Observability / retention / ticketing additions
   alert_channel_id: string | null;
