@@ -67,7 +67,7 @@ import { handleButtonRoleInteraction, handleSelectMenuRoleInteraction, deployBut
 
 function chainBuilder(resolveValue: any = { data: null, error: null }) {
   const chain: any = {};
-  for (const m of ['select', 'eq', 'neq', 'order', 'limit', 'maybeSingle', 'update']) {
+  for (const m of ['select', 'eq', 'neq', 'in', 'order', 'limit', 'maybeSingle', 'update']) {
     chain[m] = vi.fn().mockReturnValue(chain);
   }
   chain.then = (res: any, rej?: any) => Promise.resolve(resolveValue).then(res, rej);
