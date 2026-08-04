@@ -171,7 +171,7 @@ describe('music audit events', () => {
   it('emits music.capacity_rejected when the queue is full', async () => {
     queueSpies.getQueue.mockResolvedValue({
       guildId: 'g1',
-      entries: new Array(500).fill({ ...TRACK }),
+      entries: new Array(5000).fill({ ...TRACK }),
       currentIndex: 0,
     });
 
@@ -181,7 +181,7 @@ describe('music audit events', () => {
     expect(eventBus.emit).toHaveBeenCalledWith(
       'music.capacity_rejected',
       'g1',
-      expect.objectContaining({ userId: 'u1', reason: 'queue_full', limit: 500 }),
+      expect.objectContaining({ userId: 'u1', reason: 'queue_full', limit: 5000 }),
     );
   });
 
