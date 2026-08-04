@@ -38,7 +38,16 @@ function makeSupabase(opts: {
   const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
     if (name === 'commerce_select_checkout_plan') return { data: [plan], error: null };
     if (name === 'generate_order_number') return { data: 'ORD-1', error: null };
-    if (name === 'commerce_create_active_paid_checkout') {
+    if (name === 'commerce_create_and_bind_active_paid_checkout') {
+      // The atomic reservation is the current persistence boundary.  Allow
+      // each regression to force either a bind error or a zero-row response
+      // without reviving the removed multi-step plan/order update sequence.
+      if (opts.planBind?.error) {
+        return { data: null, error: opts.planBind.error };
+      }
+      if (opts.orderBind && opts.orderBind.data === null && !opts.orderBind.error) {
+        return { data: null, error: null };
+      }
       return {
         data: {
           disposition: 'created', id: '12000000-0000-4000-8000-000000000001', order_number: args?.p_order_number,
@@ -112,13 +121,17 @@ describe('payment checkout durability regressions', () => {
     expect(migration).toContain('FOR UPDATE');
   });
 
-  it('cancels the intent and never creates a subscription when plan persistence fails', async () => {
-    const { supabase, updates } = makeSupabase({ planBind: { data: null, error: { message: 'db write failed' } } });
+  it('reaps the unexposed provider checkout when atomic plan persistence fails', async () => {
+    const { supabase, updates, rpc } = makeSupabase({ planBind: { data: null, error: { message: 'db write failed' } } });
     const fetchMock = paypalFetch('subscription');
     vi.stubGlobal('fetch', fetchMock);
     await handleBuyButton(interaction(), supabase, 'guild-1', 'https://api.paypal.example', 'id', 'secret', 'https://dashboard.example');
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/v1/billing/subscriptions'))).toBe(false);
-    expect(updates.some((entry) => entry.table === 'commerce_checkout_intents' && entry.values.status === 'cancelled')).toBe(true);
+    // PayPal is created before the atomic bind; a failed bind must never mark
+    // the approval as exposed and must invoke the unexposed-checkout reaper.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/v1/billing/subscriptions'))).toBe(true);
+    expect(updates.some((entry) => entry.table === 'commerce_checkout_intents' && entry.values.status === 'cancelled')).toBe(false);
+    expect(rpc.mock.calls.some(([name]) => name === 'commerce_reap_unexposed_paid_checkout')).toBe(true);
+    expect(rpc.mock.calls.some(([name]) => name === 'commerce_mark_paid_checkout_exposed')).toBe(false);
   });
 
   it('cancels the intent when PayPal order creation times out', async () => {
@@ -137,15 +150,16 @@ describe('payment checkout durability regressions', () => {
     expect(updates.some((entry) => entry.table === 'commerce_checkout_intents' && entry.values.status === 'cancelled')).toBe(true);
   });
 
-  it('deactivates a pending order when the checkout-intent order bind updates zero rows', async () => {
+  it('reaps a provider checkout when the atomic order bind returns zero rows', async () => {
     const { supabase, rpc } = makeSupabase({ orderBind: { data: null, error: null } });
     vi.stubGlobal('fetch', paypalFetch('subscription'));
     await handleBuyButton(interaction(), supabase, 'guild-1', 'https://api.paypal.example', 'id', 'secret', 'https://dashboard.example');
-    const deactivation = rpc.mock.calls.find(([name]) => name === 'commerce_deactivate_pending_checkout');
-    expect(deactivation?.[1]).toMatchObject({
-      p_order_id: '12000000-0000-4000-8000-000000000001', p_guild_id: 'guild-1',
-      p_customer_id: 'cust-1', p_product_id: 'prod-1', p_provider_kind: 'subscription',
-      p_provider_id: 'SUB-1', p_proof_kind: 'approval_link_not_exposed',
+    const reaping = rpc.mock.calls.find(([name]) => name === 'commerce_reap_unexposed_paid_checkout');
+    expect(reaping?.[1]).toMatchObject({
+      p_checkout_token: expect.any(String), p_guild_id: 'guild-1',
+      p_customer_id: 'cust-1', p_product_id: 'prod-1', p_plan_id: 'plan-1',
+      p_provider_kind: 'subscription', p_provider_id: 'SUB-1', p_order_id: null,
+      p_reason: 'atomic subscription response uncertain',
     });
   });
 });
