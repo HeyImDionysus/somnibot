@@ -728,6 +728,10 @@ export class CommerceFulfillmentService {
         throw new Error('Terminal paid role cleanup remains unresolved');
       }
     }
+    // Terminal refund/dispute/expiry carriers freeze the channel vector on the
+    // same fulfillment payload as roles. Revoke it after durable role cleanup
+    // so a replay is safe and a Discord failure remains queue-retryable.
+    await this.revokeGrantedChannelAccess(payload);
     throw new PurchaseRoleDeliveryTerminalNoopError(entitlementId);
   }
 

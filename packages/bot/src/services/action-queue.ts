@@ -1769,10 +1769,10 @@ async function validateRevokeOrigin(
   identity: RevokeOwnershipIdentity,
   roleIds: string[],
   tempRoleGrantIds: string[],
-): Promise<void> {
+): Promise<string[]> {
   const { data, error } = await supabase
     .from('entitlements')
-    .select('id, guild_id, customer_id, order_id, product_id, plan_id, type, status, source, granted_role_ids')
+    .select('id, guild_id, customer_id, order_id, product_id, plan_id, type, status, source, granted_role_ids, granted_channel_ids')
     .eq('id', identity.entitlementId)
     .eq('guild_id', identity.guildId)
     .eq('customer_id', identity.customerId)
@@ -1786,6 +1786,10 @@ async function validateRevokeOrigin(
   const grantedRoleIds = Array.isArray(origin?.granted_role_ids)
     ? origin.granted_role_ids
     : null;
+  const grantedChannelIds = Array.isArray(origin?.granted_channel_ids)
+    ? origin.granted_channel_ids
+    : [];
+  const grantedChannelIdSet = new Set(grantedChannelIds);
   const grantedRoleIdSet = grantedRoleIds ? new Set(grantedRoleIds) : null;
   const hasExpectedStatus = origin?.status === identity.terminalStatus
     || (
@@ -1805,13 +1809,16 @@ async function validateRevokeOrigin(
     || !grantedRoleIds.every((roleId) =>
       typeof roleId === 'string' && roleId.length > 0 && roleId.trim() === roleId)
     || grantedRoleIdSet?.size !== grantedRoleIds.length
+    || !grantedChannelIds.every((channelId) =>
+      typeof channelId === 'string' && TEMP_ROLE_ID_PATTERN.test(channelId))
+    || grantedChannelIdSet.size !== grantedChannelIds.length
   ) {
     throw new Error('revoke origin lookup returned a malformed or mismatched entitlement');
   }
 
   const { data: orderData, error: orderError } = await supabase
     .from('orders')
-    .select('id, guild_id, customer_id, product_id, temporary_role_grants_snapshot, grant_snapshot_frozen_at')
+    .select('id, guild_id, customer_id, product_id, granted_channel_ids_snapshot, temporary_role_grants_snapshot, grant_snapshot_frozen_at')
     .eq('id', identity.orderId)
     .eq('guild_id', identity.guildId)
     .eq('customer_id', identity.customerId)
@@ -1839,6 +1846,24 @@ async function validateRevokeOrigin(
     || !Array.isArray(frozenSnapshot)
   ) {
     throw new Error('revoke order contract lookup returned malformed or mismatched data');
+  }
+
+  // Channel access is a frozen order contract, just like permanent roles.
+  // Older rows predate channel snapshots; they are treated as an empty vector
+  // only when the entitlement itself also has no channel grants.
+  const frozenChannelIds = Array.isArray(order?.granted_channel_ids_snapshot)
+    ? order.granted_channel_ids_snapshot
+    : [];
+  if (
+    !frozenChannelIds.every((channelId) =>
+      typeof channelId === 'string' && TEMP_ROLE_ID_PATTERN.test(channelId))
+    || new Set(frozenChannelIds).size !== frozenChannelIds.length
+    || (frozenAt !== null
+      && (frozenChannelIds.length !== grantedChannelIds.length
+        || !frozenChannelIds.every((channelId) => grantedChannelIdSet.has(channelId))))
+    || (frozenAt === null && grantedChannelIds.length !== 0)
+  ) {
+    throw new Error('revoke order channel snapshot does not match the exact entitlement contract');
   }
 
   const frozenDurations = new Map<string, number>();
@@ -1935,6 +1960,7 @@ async function validateRevokeOrigin(
   ) {
     throw new Error('revoke role set does not match the exact entitlement and temporary-role contract');
   }
+  return frozenChannelIds as string[];
 }
 
 async function classifyRoleOwner(
@@ -2051,6 +2077,7 @@ async function handlePaidRevokeRoles(
   supabase: SupabaseClient,
   identity: RevokeOwnershipIdentity,
   roleIds: string[],
+  channelIds: string[],
   reason: string,
 ): Promise<ActionResult> {
   const target: ClassifiedRoleOwnerTarget = {
@@ -2059,17 +2086,45 @@ async function handlePaidRevokeRoles(
     entitlementId: identity.entitlementId,
   };
   const retained = new Set<string>();
-  const memberAbsentResult = (): ActionResult => ({
-    success: true,
-    data: {
-      discordId: identity.discordId,
-      removed: [],
-      retained: [],
-      absent: [...roleIds],
-      failed: [],
-      reason,
-    },
-  });
+  const revokeChannels = async (): Promise<void> => {
+    if (channelIds.length === 0) return;
+    const me = guild.members.me ?? await guild.members.fetchMe();
+    if (!me.permissions.has('ManageChannels')) {
+      throw new Error('Bot lacks Manage Channels for commerce channel revocation');
+    }
+    for (const channelId of channelIds) {
+      const channel = guild.channels.cache.get(channelId);
+      if (!channel || !('permissionOverwrites' in channel)) continue;
+      await (channel as GuildChannel).permissionOverwrites.delete(
+        identity.discordId,
+        `SomniBot — commerce channel access revoked (${reason})`,
+      );
+    }
+  };
+  const memberAbsentResult = async (): Promise<ActionResult> => {
+    try {
+      await revokeChannels();
+      return {
+        success: true,
+        data: {
+          discordId: identity.discordId,
+          removed: [],
+          retained: [],
+          absent: [...roleIds],
+          failed: [],
+          revokedChannelIds: channelIds,
+          reason,
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: `Failed to converge ${channelIds.length} commerce channel cleanup(s): ${error instanceof Error ? error.message : String(error)}`,
+        retryable: true,
+        data: { discordId: identity.discordId, removed: [], retained: [], absent: [...roleIds], failed: [], revokedChannelIds: [], reason },
+      };
+    }
+  };
   try {
     // Complete the full owner preflight before Discord access. The classifier
     // intentionally remains non-excluding so a reactivated origin is visible.
@@ -2094,7 +2149,7 @@ async function handlePaidRevokeRoles(
         `SomniBot — repair confirmed paid role owner (${reason})`,
         true,
       );
-      if (repairedState === 'member_absent') return memberAbsentResult();
+      if (repairedState === 'member_absent') return await memberAbsentResult();
       if (repairedState === 'pending') {
         return {
           success: false,
@@ -2124,7 +2179,7 @@ async function handlePaidRevokeRoles(
       retryable: true,
     };
   }
-  if (!member) return memberAbsentResult();
+  if (!member) return await memberAbsentResult();
   const removed: string[] = [];
   const absent: string[] = [];
   const failed: string[] = [];
@@ -2145,7 +2200,7 @@ async function handlePaidRevokeRoles(
           `SomniBot — repair concurrent paid role owner (${reason})`,
           true,
         );
-        if (repairedState === 'member_absent') return memberAbsentResult();
+        if (repairedState === 'member_absent') return await memberAbsentResult();
         if (repairedState === 'pending') {
           failed.push(roleId);
           continue;
@@ -2153,7 +2208,7 @@ async function handlePaidRevokeRoles(
         if (repairedState === 'confirmed') {
           retained.add(roleId);
           member = await fetchCleanupMember(guild, identity.discordId);
-          if (!member) return memberAbsentResult();
+          if (!member) return await memberAbsentResult();
           continue;
         }
       }
@@ -2163,13 +2218,13 @@ async function handlePaidRevokeRoles(
       continue;
     }
 
-    if (!member) return memberAbsentResult();
+    if (!member) return await memberAbsentResult();
     const currentMember = member;
     if (currentMember.roles.cache.has(roleId)) {
       try {
         await currentMember.roles.remove(roleId, `SomniBot — ${reason}`);
         member = await fetchCleanupMember(guild, identity.discordId);
-        if (!member) return memberAbsentResult();
+        if (!member) return await memberAbsentResult();
         if (member.roles.cache.has(roleId)) {
           throw new Error('Discord still reports paid role after removal');
         }
@@ -2186,11 +2241,11 @@ async function handlePaidRevokeRoles(
             `SomniBot — repair paid removal uncertainty for confirmed owner (${reason})`,
             true,
           );
-          if (recoveryState === 'member_absent') return memberAbsentResult();
+          if (recoveryState === 'member_absent') return await memberAbsentResult();
           if (recoveryState === 'confirmed') {
             retained.add(roleId);
             member = await fetchCleanupMember(guild, identity.discordId);
-            if (!member) return memberAbsentResult();
+            if (!member) return await memberAbsentResult();
             continue;
           }
         } catch {
@@ -2228,7 +2283,7 @@ async function handlePaidRevokeRoles(
         failed.push(roleId);
         continue;
       }
-      if (postRemovalState === 'member_absent') return memberAbsentResult();
+      if (postRemovalState === 'member_absent') return await memberAbsentResult();
       if (postRemovalState === 'pending') {
         failed.push(roleId);
         continue;
@@ -2240,7 +2295,7 @@ async function handlePaidRevokeRoles(
         const absentIndex = absent.indexOf(roleId);
         if (absentIndex >= 0) absent.splice(absentIndex, 1);
         member = await fetchCleanupMember(guild, identity.discordId);
-        if (!member) return memberAbsentResult();
+        if (!member) return await memberAbsentResult();
       }
     }
   }
@@ -2253,9 +2308,42 @@ async function handlePaidRevokeRoles(
       data: { discordId: identity.discordId, removed, retained: [...retained], absent, failed, reason },
     };
   }
+
+  // Channel overwrites are an independent, frozen access vector. Apply the
+  // same at-least-once/retry semantics as role cleanup: a missing channel or
+  // already-absent overwrite is success, while a Discord/API error remains
+  // retryable and is recorded by the queue's audit finalizer.
+  if (channelIds.length > 0) {
+    try {
+      await revokeChannels();
+    } catch (error) {
+      return {
+        success: false,
+        error: `Failed to converge ${channelIds.length} commerce channel cleanup(s): ${error instanceof Error ? error.message : String(error)}`,
+        retryable: true,
+        data: {
+          discordId: identity.discordId,
+          removed,
+          retained: [...retained],
+          absent,
+          failed: [],
+          revokedChannelIds: [],
+          reason,
+        },
+      };
+    }
+  }
   return {
     success: true,
-    data: { discordId: identity.discordId, removed, retained: [...retained], absent, failed, reason },
+    data: {
+      discordId: identity.discordId,
+      removed,
+      retained: [...retained],
+      absent,
+      failed,
+      revokedChannelIds: channelIds,
+      reason,
+    },
   };
 }
 
@@ -2710,8 +2798,9 @@ export async function handleRevokeRoles(
   if (!parsedIdentity.identity) {
     return { success: false, error: 'Invalid revoke_roles identity payload', retryable: true };
   }
+  let channelIds: string[];
   try {
-    await validateRevokeOrigin(
+    channelIds = await validateRevokeOrigin(
       supabase,
       parsedIdentity.identity,
       roleIds,
@@ -2731,6 +2820,7 @@ export async function handleRevokeRoles(
     supabase,
     parsedIdentity.identity,
     roleIds,
+    channelIds,
     reason,
   );
 }
