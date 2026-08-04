@@ -148,6 +148,33 @@ export async function POST(req: NextRequest) {
     return dbError(error, 'reaction-roles');
   }
 
+  // The guild default controls the newly-created Discord surface. Keep the
+  // legacy reaction row for compatibility, and mirror it into the existing
+  // button_roles panel table when buttons/select menus are selected.
+  if (default_style !== 'reaction') {
+    const { error: surfaceError } = await supabase.from('button_roles').insert({
+      guild_id: guildId,
+      panel_id: message_id,
+      channel_id,
+      // Keep the legacy source message untouched; the bot deploys a dedicated
+      // role panel in the same channel and records its message id.
+      message_id: null,
+      label: emoji,
+      emoji,
+      role_id,
+      style: 'primary',
+      sort_order: 0,
+      exclusive_group: exclusive_group ?? null,
+      require_role: require_role ?? null,
+      require_level: require_level ?? null,
+      active: true,
+    });
+    if (surfaceError) {
+      await supabase.from('reaction_roles').delete().eq('id', data?.id ?? '').eq('guild_id', guildId);
+      return dbError(surfaceError, 'button-role surface');
+    }
+  }
+
   await notifyBot(guildId, 'reaction-roles');
 
   await recordCrudChange({
@@ -192,6 +219,19 @@ export async function PUT(req: NextRequest) {
 
   if (error) {
     return dbError(error, 'reaction-roles');
+  }
+
+  if (before?.message_id && before?.role_id) {
+    await supabase.from('button_roles').update({
+      channel_id: updates.channel_id ?? before.channel_id,
+      label: updates.emoji ?? before.emoji,
+      emoji: updates.emoji ?? before.emoji,
+      role_id: updates.role_id ?? before.role_id,
+      exclusive_group: updates.exclusive_group ?? before.exclusive_group,
+      require_role: updates.require_role ?? before.require_role,
+      require_level: updates.require_level ?? before.require_level,
+      active: updates.active ?? before.active,
+    }).eq('guild_id', guildId).eq('panel_id', before.message_id).eq('role_id', before.role_id);
   }
 
   await notifyBot(guildId, 'reaction-roles');
@@ -243,6 +283,11 @@ export async function DELETE(req: NextRequest) {
 
   if (error) {
     return dbError(error, 'reaction-roles');
+  }
+
+  if (before?.message_id && before?.role_id) {
+    await supabase.from('button_roles').delete()
+      .eq('guild_id', guildId).eq('panel_id', before.message_id).eq('role_id', before.role_id);
   }
 
   await notifyBot(guildId, 'reaction-roles');

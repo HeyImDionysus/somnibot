@@ -147,6 +147,22 @@ describe('loadReactionRoles', () => {
     });
   });
 
+  it('refreshes the persisted style on a restart/reload instead of retaining stale cache state', async () => {
+    const valkey = makeValkey();
+    const config = { reaction_roles_enabled: true, default_style: 'buttons' };
+    const supabase = makeSupabase({
+      guild_config: [config],
+      reaction_roles: [{ id: 'rr-reload', message_id: 'msg-reload', emoji: '🧭', role_id: 'r1',
+        exclusive_group: null, require_role: null, require_level: null, max_per_group: null,
+        remove_on_unreact: true, log_actions: false }],
+    });
+    await loadReactionRoles(supabase, valkey, 'g1');
+    expect(JSON.parse(valkey._store.get('reactionRoles:g1:msg-reload:🧭')!).default_style).toBe('buttons');
+    config.default_style = 'reaction';
+    await loadReactionRoles(supabase, valkey, 'g1');
+    expect(JSON.parse(valkey._store.get('reactionRoles:g1:msg-reload:🧭')!).default_style).toBe('reaction');
+  });
+
   it('does nothing when no active configs', async () => {
     const valkey = makeValkey();
     const supabase = makeSupabase({ reaction_roles: [] });

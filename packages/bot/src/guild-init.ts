@@ -26,7 +26,7 @@ import { createLogger } from '@somnibot/shared';
 // ── Feature managers ──
 import { AutomationEngine } from './features/automations/index.js';
 import { initVoiceTracking, startVoiceXpTicker, buildLevelCommands } from './features/levels/index.js';
-import { loadReactionRoles } from './features/reaction-roles/index.js';
+import { loadReactionRoles, deployButtonRolePanelsForGuild } from './features/reaction-roles/index.js';
 import { loadCustomCommands } from './features/custom-commands/index.js';
 import { TempChannelManager } from './features/temp-channels/temp-channel-manager.js';
 import { buildTempChannelCommands } from './features/temp-channels/commands.js';
@@ -348,6 +348,7 @@ export async function initGuildFeatures(
     await initVoiceTracking(guild);
     services.voiceXpTimer = await startVoiceXpTicker(guild, supabase, valkey, eventBus);
     await loadReactionRoles(supabase, valkey, guildId);
+    await deployButtonRolePanelsForGuild(guild, supabase);
 
     const rest = new REST({ version: '10' }).setToken(client.env.DISCORD_TOKEN);
     // FIX #15: loadCustomCommands now returns command JSON bodies to merge

@@ -34,7 +34,7 @@ import {
 // Feature handler imports — buttons & UI
 import { handleTicketInteraction } from '../features/tickets/index.js';
 import { handleSetupButton, handleSetupModal, handleReconfigureSelect } from '../features/setup-wizard/index.js';
-import { handleButtonRoleInteraction } from '../features/reaction-roles/button-roles.js';
+import { handleButtonRoleInteraction, handleSelectMenuRoleInteraction } from '../features/reaction-roles/button-roles.js';
 import { handleBuyButton } from '../features/commerce/payment-handler.js';
 import { handleAdventureButton } from '../features/adventures/adventure-buttons.js';
 
@@ -185,6 +185,9 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
 
       if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.buttonRole)) {
         if (await handleButtonRoleInteraction(interaction, client.supabase)) return;
+      }
+      if (interaction.isStringSelectMenu() && interaction.customId.startsWith('selrole:')) {
+        if (await handleSelectMenuRoleInteraction(interaction, client.supabase)) return;
       }
 
       // Commerce buy buttons — gated by store_enabled

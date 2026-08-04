@@ -51,6 +51,8 @@ import { invalidateProfilesCache } from '../features/profiles/index.js';
 import { invalidateHeistCache } from '../features/heist/index.js';
 import { invalidateBrandKitCache } from '../features/branding/index.js';
 import { invalidateAlertChannelCache } from './alert-service.js';
+import { loadReactionRoles } from '../features/reaction-roles/reaction-engine.js';
+import { deployButtonRolePanelsForGuild } from '../features/reaction-roles/button-roles.js';
 import { createLogger } from '@somnibot/shared';
 import type { ConfigChangedData, PlatformEvent } from '@somnibot/shared';
 
@@ -329,6 +331,8 @@ export class ConfigWatcher {
         if (batch.length > 0) await this.valkey.del(...batch);
       } while (cursor !== '0');
     } catch (e: unknown) { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); }
+    await loadReactionRoles(this.supabase, this.valkey, this.guild.id);
+    await deployButtonRolePanelsForGuild(this.guild, this.supabase);
     log.info('Reaction roles reloaded');
   }
 

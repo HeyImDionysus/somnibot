@@ -35,6 +35,22 @@ vi.mock('discord.js', () => ({
       setEmoji: vi.fn().mockReturnThis(),
     };
   }),
+  StringSelectMenuBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setCustomId: vi.fn().mockReturnThis(),
+      setPlaceholder: vi.fn().mockReturnThis(),
+      setMinValues: vi.fn().mockReturnThis(),
+      setMaxValues: vi.fn().mockReturnThis(),
+      addOptions: vi.fn().mockReturnThis(),
+    };
+  }),
+  StringSelectMenuOptionBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setLabel: vi.fn().mockReturnThis(),
+      setValue: vi.fn().mockReturnThis(),
+      setEmoji: vi.fn().mockReturnThis(),
+    };
+  }),
 }));
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
@@ -47,7 +63,7 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
   }),
 }));
 
-import { handleButtonRoleInteraction, deployButtonRolesPanel } from '../features/reaction-roles/button-roles.js';
+import { handleButtonRoleInteraction, handleSelectMenuRoleInteraction, deployButtonRolesPanel } from '../features/reaction-roles/button-roles.js';
 
 function chainBuilder(resolveValue: any = { data: null, error: null }) {
   const chain: any = {};
@@ -290,5 +306,47 @@ describe('deployButtonRolesPanel', () => {
     const result = await deployButtonRolesPanel(guild as any, supabase as any, 'p1');
     expect(result.success).toBe(true);
     expect(editFn).toHaveBeenCalled();
+  });
+
+  it('renders a select-menu surface when the guild default selects it', async () => {
+    const channel = {
+      send: vi.fn().mockResolvedValue({ id: 'msg-select' }),
+      messages: { fetch: vi.fn().mockRejectedValue(new Error('not found')) },
+    };
+    const guild = { id: 'g1', channels: { cache: new Map([['ch1', channel]]) } };
+    const supabase = makeSupabase({
+      guild_config: { data: { default_style: 'select-menu' }, error: null },
+      button_roles: {
+        data: [{ id: 'br1', guild_id: 'g1', panel_id: 'p1', channel_id: 'ch1', message_id: null, label: 'Red', emoji: '🔴', role_id: 'r1', style: 'primary', sort_order: 0, active: true }],
+        error: null,
+      },
+    });
+
+    const result = await deployButtonRolesPanel(guild as any, supabase as any, 'p1');
+    expect(result.success).toBe(true);
+    expect(channel.send).toHaveBeenCalledWith(expect.objectContaining({
+      components: expect.any(Array),
+    }));
+  });
+});
+
+describe('handleSelectMenuRoleInteraction', () => {
+  it('dispatches selected role assignments', async () => {
+    const interaction = {
+      customId: 'selrole:p1',
+      values: ['r1'],
+      user: { id: 'u1' },
+      guild: {
+        id: 'g1',
+        members: { fetch: vi.fn().mockResolvedValue({ id: 'u1', roles: { cache: new Map(), add: vi.fn().mockResolvedValue(undefined), remove: vi.fn().mockResolvedValue(undefined) } }) },
+        roles: { cache: new Map([['r1', { name: 'Red' }]]) },
+      },
+      reply: vi.fn().mockResolvedValue(undefined),
+    };
+    const supabase = makeSupabase({ button_roles: { data: [{ role_id: 'r1', active: true, require_role: null, require_level: null, exclusive_group: null }], error: null } });
+    const eventBus = { emit: vi.fn() } as any;
+
+    expect(await handleSelectMenuRoleInteraction(interaction as any, supabase as any, eventBus)).toBe(true);
+    expect(eventBus.emit).toHaveBeenCalledWith('role.gained', 'g1', expect.objectContaining({ roleId: 'r1' }));
   });
 });
