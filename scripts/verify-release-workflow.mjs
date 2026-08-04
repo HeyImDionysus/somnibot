@@ -20,6 +20,7 @@ const releaseWorkflow = read('.github/workflows/release.yml');
 const builderConfig = read('packages/launcher/electron-builder.yml');
 const buildScript = read('scripts/build-launcher.mjs');
 const rootPackage = JSON.parse(read('package.json'));
+const npmrc = read('.npmrc');
 
 assert.match(releaseWorkflow, /- 'v1\.0\.0'/, 'release trigger must be limited to v1.0.0');
 assert.match(releaseWorkflow, /Only the approved v1\.0\.0 launcher release may be published\./);
@@ -91,5 +92,12 @@ assert.doesNotMatch(builderConfig, /^mac:/m, 'electron-builder must not define a
 assert.doesNotMatch(buildScript, /'--mac': '--mac'/, 'build script must not expose a macOS target');
 assert.match(buildScript, /macOS launcher builds are not supported for the v1 release\./);
 assert.equal(rootPackage.scripts['launcher:build:mac'], undefined, 'root package scripts must not expose a macOS build');
+
+const virtualStoreLength = npmrc.match(/^\s*virtual-store-dir-max-length\s*=\s*(\d+)\s*$/m);
+assert.ok(virtualStoreLength, 'pnpm virtual-store-dir-max-length must be pinned in the repository');
+assert.ok(
+  Number(virtualStoreLength[1]) <= 60,
+  'pnpm virtual-store-dir-max-length must stay at or below 60 for Windows NSIS paths',
+);
 
 console.log('Release workflow policy checks passed.');
