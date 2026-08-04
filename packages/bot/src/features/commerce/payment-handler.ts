@@ -646,6 +646,7 @@ export async function handleBuyButton(
     const me = liveGuild.members.me;
     const botHighest = me?.roles.highest.position ?? 0;
     const canManageRoles = me?.permissions.has('ManageRoles') ?? false;
+    const canManageChannels = me?.permissions.has('ManageChannels') ?? false;
     for (const roleId of grantedRoleIds) {
       const role = liveGuild.roles.cache.get(roleId);
       if (!role) {
@@ -674,10 +675,8 @@ export async function handleBuyButton(
       const grantedChannel = liveGuild.channels.cache.get(channelId);
       if (!grantedChannel) {
         problems.push(`granted channel ${channelId} no longer exists`);
-      } else if (!canManageRoles) {
-        // Channel access is granted through permission overwrites, which
-        // require Manage Roles.
-        problems.push('the bot is missing the Manage Roles permission needed to grant channel access');
+      } else if (!canManageChannels) {
+        problems.push('the bot is missing the Manage Channels permission needed to grant channel access');
       }
     }
     if (problems.length > 0) {
@@ -921,11 +920,17 @@ export async function handleBuyButton(
     if (!orderRes.ok) {
       const err = await orderRes.text();
       log.error('PayPal order creation failed:', { error: String(err) });
+      await cancelCheckoutIntent('provider order creation failed');
       await interaction.editReply({ content: '❌ Failed to create payment. Please try again.' });
       return;
     }
 
-    const orderData = await orderRes.json() as { id: string; links?: Array<{ rel: string; href: string }> };
+    const orderData = await orderRes.json().catch(() => null) as { id?: unknown; links?: Array<{ rel: string; href: string }> } | null;
+    if (!orderData || typeof orderData.id !== 'string' || orderData.id.length === 0) {
+      await cancelCheckoutIntent('provider order response malformed');
+      await interaction.editReply({ content: '❌ Failed to create payment. Please try again.' });
+      return;
+    }
     const { error: providerBindError } = await supabase
       .from('commerce_checkout_intents')
       .update({ provider_id: orderData.id, status: 'bound' })
@@ -1117,11 +1122,17 @@ export async function handleBuyButton(
     if (!subRes.ok) {
       const err = await subRes.text();
       log.error('PayPal subscription creation failed:', { error: String(err) });
+      await cancelCheckoutIntent('provider subscription creation failed');
       await interaction.editReply({ content: '❌ Failed to create subscription. Please try again.' });
       return;
     }
 
-    const subData = await subRes.json() as { id: string; links?: Array<{ rel: string; href: string }> };
+    const subData = await subRes.json().catch(() => null) as { id?: unknown; links?: Array<{ rel: string; href: string }> } | null;
+    if (!subData || typeof subData.id !== 'string' || subData.id.length === 0) {
+      await cancelCheckoutIntent('provider subscription response malformed');
+      await interaction.editReply({ content: '❌ Failed to create subscription. Please try again.' });
+      return;
+    }
     const { error: providerBindError } = await supabase
       .from('commerce_checkout_intents')
       .update({ provider_id: subData.id, status: 'bound' })
