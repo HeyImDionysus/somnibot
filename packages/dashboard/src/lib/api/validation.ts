@@ -521,6 +521,8 @@ const onboardingConfig = z.object({
   returning_member_restore_entitlements: z.boolean().optional(),
   returning_member_restore_levels: z.boolean().optional(),
   onboarding_config: nativeOnboardingConfig.optional().nullable(),
+  fallback_mode: z.enum(['grant-after-timeout', 'manual-review']).optional(),
+  fallback_timeout_minutes: z.number().int().min(1).max(1440).optional(),
 });
 
 // ── Reaction role schemas ───────────────────────────

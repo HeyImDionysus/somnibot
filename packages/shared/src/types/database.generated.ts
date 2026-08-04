@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 251 migration files in packages/supabase/migrations/
+ * Source: 252 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -428,6 +428,19 @@ export interface DbGuildConfig {
   webhook_error_rate_threshold: number;
   diagnostics_guided_mode: boolean;
   automation_mass_action_threshold: number;
+  level_curve: Json;
+  max_poll_options: number;
+  allow_multiple_default: boolean;
+  reaction_roles_enabled: boolean;
+  default_style: 'reaction' | 'buttons' | 'select-menu';
+  default_max_per_group: number;
+  default_require_level: number;
+  default_remove_on_unreact: boolean;
+  max_schedules_per_guild: number;
+  default_timezone: string;
+  missed_run_policy: 'skip-missed' | 'send-latest';
+  allow_embeds: boolean;
+  variables_enabled: boolean;
   economy_market_max_price_per_unit: number;
   anti_raid_containment_ladder: Json;
   anti_raid_raid_cooldown_minutes: number;

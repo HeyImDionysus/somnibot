@@ -35,6 +35,7 @@ interface LevelConfig {
   rank_card_accent_color: number | null;
   rank_card_background: string | null;
   no_xp_role_id: string | null;
+  level_curve: { base: number; exponent: number };
 }
 
 interface LevelReward {
@@ -79,6 +80,7 @@ const DEFAULT_CONFIG: LevelConfig = {
   rank_card_accent_color: null,
   rank_card_background: null,
   no_xp_role_id: null,
+  level_curve: { base: 100, exponent: 1.9 },
 };
 
 function numToHex(n: number | null): string {
@@ -511,6 +513,16 @@ export default function LevelsPage() {
                 multi
                 placeholder="Select channels…"
               />
+            </div>
+          </div>
+
+          {/* No-XP Role */}
+          <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-5">
+            <h2 className="mb-4 text-lg font-semibold text-discord-text-primary">Level Curve</h2>
+            <p className="mb-3 text-xs text-discord-text-muted">Tune the cumulative XP curve. Higher exponents make later levels take longer.</p>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="text-xs text-discord-text-muted">Base XP<input type="number" min={1} max={1000000} step="any" value={config.level_curve.base} onChange={(e) => setConfig({ ...config, level_curve: { ...config.level_curve, base: Number(e.target.value) } })} className="mt-1 w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary" /></label>
+              <label className="text-xs text-discord-text-muted">Exponent<input type="number" min={0.1} max={5} step="0.1" value={config.level_curve.exponent} onChange={(e) => setConfig({ ...config, level_curve: { ...config.level_curve, exponent: Number(e.target.value) } })} className="mt-1 w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary" /></label>
             </div>
           </div>
 

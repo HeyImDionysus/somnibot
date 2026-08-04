@@ -32,8 +32,43 @@ import { executeWelcomeFlow } from './welcome-service.js';
 import { executeGoodbyeFlow } from './goodbye-service.js';
 import { writeAuditLog } from '../../services/audit.js';
 import { createLogger } from '@somnibot/shared';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('Onboarding');
+const fallbackTimers = new Map<string, NodeJS.Timeout>();
+
+function clearFallbackTimer(guildId: string, memberId: string): void {
+  const key = `${guildId}:${memberId}`;
+  const timer = fallbackTimers.get(key);
+  if (timer) clearTimeout(timer);
+  fallbackTimers.delete(key);
+}
+
+function scheduleFallback(client: SomniClient, member: GuildMember, config: DbGuildConfig): void {
+  if (config.fallback_mode !== 'grant-after-timeout' || !config.member_role_id) return;
+  const key = `${member.guild.id}:${member.id}`;
+  clearFallbackTimer(member.guild.id, member.id);
+  const timer = setTimeout(async () => {
+    fallbackTimers.delete(key);
+    const current = await member.guild.members.fetch(member.id).catch(() => null);
+    if (!current || current.flags.has(GuildMemberFlags.CompletedOnboarding) || current.roles.cache.has(config.member_role_id!)) return;
+    try {
+      await current.roles.add(config.member_role_id!, 'Onboarding fallback timeout');
+      await markOnboardingCompleted(client.supabase, member.guild.id, member.id);
+      await executeWelcomeFlow(current, { supabase: client.supabase, config });
+      await raiseOwnerAlert(client.supabase, member.guild.id, {
+        alertType: 'onboarding_fallback_granted', severity: 'info',
+        title: 'Onboarding fallback granted access',
+        message: `${current.user.tag} was granted the Member role after the configured onboarding timeout.`,
+        metadata: { member_id: member.id, timeout_minutes: config.fallback_timeout_minutes }, guild: member.guild,
+      });
+    } catch (err) {
+      log.error('Onboarding fallback failed:', { error: String(err) });
+    }
+  }, Math.max(1, config.fallback_timeout_minutes ?? 10) * 60_000);
+  timer.unref?.();
+  fallbackTimers.set(key, timer);
+}
 
 /**
  * Get the guild config, cached in Valkey for 60s.
@@ -160,6 +195,7 @@ export async function handleMemberJoin(
   }
   // For non-returning members, we wait for onboarding completion
   // (handled in handleMemberUpdate below)
+  if (!lookup.isReturning) scheduleFallback(client, member, config);
 }
 
 /**
@@ -177,6 +213,7 @@ export async function handleMemberUpdate(
     newMember.flags?.has(GuildMemberFlags.CompletedOnboarding) === true;
 
   if (wasOnboarding && isCompleted) {
+    clearFallbackTimer(newMember.guild.id, newMember.id);
     log.info(`${newMember.user.tag} completed onboarding`);
 
     const config = await getGuildConfig(client, newMember.guild.id);

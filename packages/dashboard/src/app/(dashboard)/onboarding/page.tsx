@@ -43,6 +43,8 @@ interface OnboardingConfig {
   returning_member_skip_welcome_dm: boolean;
   returning_member_restore_entitlements: boolean;
   returning_member_restore_levels: boolean;
+  fallback_mode: 'grant-after-timeout' | 'manual-review';
+  fallback_timeout_minutes: number;
   onboarding_config: NativeOnboardingConfig | null;
 }
 
@@ -60,6 +62,8 @@ const DEFAULT_CONFIG: OnboardingConfig = {
   returning_member_skip_welcome_dm: true,
   returning_member_restore_entitlements: true,
   returning_member_restore_levels: true,
+  fallback_mode: 'grant-after-timeout',
+  fallback_timeout_minutes: 10,
   onboarding_config: null,
 };
 
@@ -553,6 +557,14 @@ export default function OnboardingPage() {
               Auto-restore level reward roles
             </span>
           </label>
+        </div>
+        <div className="mt-6 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary p-4">
+          <h3 className="text-sm font-semibold text-discord-text-primary">Safe fallback</h3>
+          <p className="mt-1 text-xs text-discord-text-muted">Recover members when DMs are closed or native onboarding is unavailable.</p>
+          <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-discord-text-primary">
+            <label>Mode <select value={config.fallback_mode} onChange={(e) => { setConfig((prev) => ({ ...prev, fallback_mode: e.target.value as OnboardingConfig['fallback_mode'] })); setDirty(true); }} className="ml-2 rounded bg-discord-bg-secondary px-2 py-1"><option value="grant-after-timeout">Grant after timeout</option><option value="manual-review">Manual review</option></select></label>
+            <label>Timeout (minutes) <input type="number" min={1} max={1440} value={config.fallback_timeout_minutes} onChange={(e) => { setConfig((prev) => ({ ...prev, fallback_timeout_minutes: Number(e.target.value) })); setDirty(true); }} className="ml-2 w-20 rounded bg-discord-bg-secondary px-2 py-1" /></label>
+          </div>
         </div>
       </section>
 

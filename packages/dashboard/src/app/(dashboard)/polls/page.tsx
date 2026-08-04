@@ -32,6 +32,10 @@ interface Prediction {
 interface PollsConfig {
   polls_enabled: boolean;
   predictions_enabled: boolean;
+  max_poll_options: number;
+  allow_multiple_default: boolean;
+  prediction_min_bet: number;
+  prediction_max_bet: number;
 }
 
 // ── Helpers ───────────────────────────────────────────────
@@ -63,7 +67,7 @@ const STATUS_BADGE: Record<string, string> = {
 
 export default function PollsPage() {
   const { toast } = useToast();
-  const [config, setConfig] = useState<PollsConfig>({ polls_enabled: false, predictions_enabled: false });
+  const [config, setConfig] = useState<PollsConfig>({ polls_enabled: false, predictions_enabled: false, max_poll_options: 10, allow_multiple_default: false, prediction_min_bet: 1, prediction_max_bet: 0 });
   const [polls, setPolls] = useState<Poll[]>([]);
   const [predictions, setPredictions] = useState<Prediction[]>([]);
   const [loading, setLoading] = useState(true);
@@ -80,6 +84,10 @@ export default function PollsPage() {
         setConfig({
           polls_enabled: gc.polls_enabled ?? false,
           predictions_enabled: gc.predictions_enabled ?? false,
+          max_poll_options: gc.max_poll_options ?? 10,
+          allow_multiple_default: gc.allow_multiple_default ?? false,
+          prediction_min_bet: gc.prediction_min_bet ?? 1,
+          prediction_max_bet: gc.prediction_max_bet ?? 0,
         });
       }
       if (pollsRes.ok) {
@@ -124,6 +132,14 @@ export default function PollsPage() {
       <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-3">
         <Toggle label="Enable Polls" checked={config.polls_enabled} onChange={(v) => saveConfig({ polls_enabled: v })} />
         <Toggle label="Enable Predictions (currency bets)" checked={config.predictions_enabled} onChange={(v) => saveConfig({ predictions_enabled: v })} />
+        <label className="flex items-center gap-3 text-sm text-discord-text-primary">Max poll options
+          <input type="number" min={2} max={10} value={config.max_poll_options} onChange={(e) => saveConfig({ max_poll_options: Number(e.target.value) })} className="w-20 rounded bg-discord-bg-tertiary px-2 py-1" />
+        </label>
+        <Toggle label="Allow multiple selections by default" checked={config.allow_multiple_default} onChange={(v) => saveConfig({ allow_multiple_default: v })} />
+        <div className="flex flex-wrap gap-4 text-sm text-discord-text-primary">
+          <label>Minimum prediction bet <input type="number" min={1} value={config.prediction_min_bet} onChange={(e) => saveConfig({ prediction_min_bet: Number(e.target.value) })} className="ml-2 w-28 rounded bg-discord-bg-tertiary px-2 py-1" /></label>
+          <label>Maximum (0 = uncapped) <input type="number" min={0} value={config.prediction_max_bet} onChange={(e) => saveConfig({ prediction_max_bet: Number(e.target.value) })} className="ml-2 w-28 rounded bg-discord-bg-tertiary px-2 py-1" /></label>
+        </div>
       </div>
 
       {/* Polls List */}

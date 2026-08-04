@@ -26,6 +26,8 @@ interface CachedReactionRole {
   log_actions: boolean;
 }
 
+interface ReactionDefaults { enabled: boolean; maxPerGroup: number; requireLevel: number; removeOnUnreact: boolean }
+
 /**
  * Load all reaction role configs from Supabase and populate Valkey cache.
  */
@@ -34,6 +36,20 @@ export async function loadReactionRoles(
   valkey: Valkey,
   guildId: string,
 ): Promise<void> {
+  const { data: guildConfig } = await supabase.from('guild_config').select('reaction_roles_enabled, default_max_per_group, default_require_level, default_remove_on_unreact').eq('guild_id', guildId).maybeSingle();
+  const defaults: ReactionDefaults = {
+    enabled: guildConfig?.reaction_roles_enabled !== false,
+    maxPerGroup: Number(guildConfig?.default_max_per_group ?? 0),
+    requireLevel: Number(guildConfig?.default_require_level ?? 0),
+    removeOnUnreact: guildConfig?.default_remove_on_unreact !== false,
+  };
+  // Clear old cache entries for this guild before applying the master switch.
+  let cursor = '0';
+  do {
+    const [next, batch] = await valkey.scan(cursor, 'MATCH', `${CACHE_PREFIX}:${guildId}:*`, 'COUNT', '100');
+    cursor = next;
+    if (batch.length > 0) await valkey.del(...batch);
+  } while (cursor !== '0');
   const { data } = await supabase
     .from('reaction_roles')
     .select('*')
@@ -41,18 +57,10 @@ export async function loadReactionRoles(
     .eq('active', true)
     .limit(1000);
 
-  if (!data || data.length === 0) {
+  if (!defaults.enabled || !data || data.length === 0) {
     log.info('No active reaction role configs found');
     return;
   }
-
-  // Clear old cache entries for this guild (SCAN instead of KEYS — V5 audit 6.1)
-  let cursor = '0';
-  do {
-    const [next, batch] = await valkey.scan(cursor, 'MATCH', `${CACHE_PREFIX}:${guildId}:*`, 'COUNT', '100');
-    cursor = next;
-    if (batch.length > 0) await valkey.del(...batch);
-  } while (cursor !== '0');
 
   // Cache each reaction role config by messageId:emoji
   for (const rr of data as DbReactionRole[]) {
@@ -62,9 +70,9 @@ export async function loadReactionRoles(
       role_id: rr.role_id,
       exclusive_group: rr.exclusive_group,
       require_role: rr.require_role,
-      require_level: rr.require_level,
-      max_per_group: rr.max_per_group,
-      remove_on_unreact: rr.remove_on_unreact,
+      require_level: rr.require_level ?? (defaults.requireLevel || null),
+      max_per_group: rr.max_per_group ?? (defaults.maxPerGroup || null),
+      remove_on_unreact: rr.remove_on_unreact ?? defaults.removeOnUnreact,
       log_actions: rr.log_actions,
     };
     await valkey.set(cacheKey, JSON.stringify(cached), 'EX', CACHE_TTL);

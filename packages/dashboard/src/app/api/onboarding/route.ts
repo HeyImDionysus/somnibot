@@ -22,7 +22,7 @@ export async function GET() {
     .select(
       'member_role_id, onboarding_enabled, interest_role_mapping, ' +
       'returning_member_skip_welcome_dm, returning_member_restore_entitlements, returning_member_restore_levels, ' +
-      'onboarding_config',
+      'onboarding_config, fallback_mode, fallback_timeout_minutes',
     )
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -56,6 +56,8 @@ export async function PUT(req: NextRequest) {
     'returning_member_restore_entitlements',
     'returning_member_restore_levels',
     'onboarding_config',
+    'fallback_mode',
+    'fallback_timeout_minutes',
   ]);
 
   const before = await readGuildConfigBefore(supabase, guildId, Object.keys(allowed));

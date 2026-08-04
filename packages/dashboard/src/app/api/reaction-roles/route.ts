@@ -30,6 +30,7 @@ const reactionRoleUpdate = z.object({
   max_per_group: z.number().int().min(0).max(100).optional().nullable(),
   remove_on_unreact: z.boolean().optional(),
   log_actions: z.boolean().optional(),
+  active: z.boolean().optional(),
 });
 export async function GET() {
   const auth = await requireGuildOwner();
@@ -151,7 +152,7 @@ export async function PUT(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  const updates = typedPick(body, ['channel_id', 'message_id', 'emoji', 'role_id', 'exclusive_group', 'require_role', 'require_level', 'max_per_group', 'remove_on_unreact', 'log_actions']);
+  const updates = typedPick(body, ['channel_id', 'message_id', 'emoji', 'role_id', 'exclusive_group', 'require_role', 'require_level', 'max_per_group', 'remove_on_unreact', 'log_actions', 'active']);
 
   const before = await readRowBefore(supabase, 'reaction_roles', { id: body.id, guild_id: guildId });
 

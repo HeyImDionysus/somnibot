@@ -29,6 +29,11 @@ const guildConfigPatchSchema = z.object({
   stats_enabled: z.boolean().optional(),
   temp_channels_enabled: z.boolean().optional(),
   scheduled_messages_enabled: z.boolean().optional(),
+  max_schedules_per_guild: z.number().int().min(1).max(200).optional(),
+  default_timezone: z.string().min(1).max(64).optional(),
+  missed_run_policy: z.enum(['skip-missed', 'send-latest']).optional(),
+  allow_embeds: z.boolean().optional(),
+  variables_enabled: z.boolean().optional(),
   giveaways_enabled: z.boolean().optional(),
   // Diagnostics alert thresholds. Ranges MUST mirror the guild_config CHECK
   // constraints (migration 20260727000000) or a valid-looking payload dies as
@@ -210,6 +215,16 @@ const guildConfigPatchSchema = z.object({
   // PR #45 — Polls & Predictions
   polls_enabled: z.boolean().optional(),
   predictions_enabled: z.boolean().optional(),
+  max_poll_options: z.number().int().min(2).max(10).optional(),
+  allow_multiple_default: z.boolean().optional(),
+  prediction_min_bet: z.number().int().min(1).max(1_000_000).optional(),
+  prediction_max_bet: z.number().int().min(0).max(100_000_000).optional(),
+  reaction_roles_enabled: z.boolean().optional(),
+  default_style: z.enum(['reaction', 'buttons', 'select-menu']).optional(),
+  default_max_per_group: z.number().int().min(0).max(25).optional(),
+  default_require_level: z.number().int().min(0).max(1000).optional(),
+  default_remove_on_unreact: z.boolean().optional(),
+  level_curve: z.object({ base: z.number().finite().positive().max(1_000_000), exponent: z.number().finite().min(0.1).max(5) }).optional(),
 
   // PR #46 — Pets, Quests, Achievements, Prestige
   economy_pets_enabled: z.boolean().optional(),

@@ -400,6 +400,25 @@ export interface DbGuildConfig {
   economy_prestige_min_level: number;
   economy_prestige_min_net_worth: number;
   economy_prestige_max_level: number;
+  prediction_min_bet: number;
+  prediction_max_bet: number;
+  fallback_mode: 'grant-after-timeout' | 'manual-review';
+  fallback_timeout_minutes: number;
+
+  // Community runtime controls
+  level_curve: { base: number; exponent: number };
+  max_poll_options: number;
+  allow_multiple_default: boolean;
+  reaction_roles_enabled: boolean;
+  default_style: 'reaction' | 'buttons' | 'select-menu';
+  default_max_per_group: number;
+  default_require_level: number;
+  default_remove_on_unreact: boolean;
+  max_schedules_per_guild: number;
+  default_timezone: string;
+  missed_run_policy: 'skip-missed' | 'send-latest';
+  allow_embeds: boolean;
+  variables_enabled: boolean;
 
   // V53 Phase 2 Observability / retention / ticketing additions
   alert_channel_id: string | null;

@@ -35,6 +35,10 @@ const levelsConfigUpdate = z.object({
   rank_card_accent_color: z.number().int().min(0).max(0xFFFFFF).optional().nullable(),
   rank_card_background: optionalHttpUrlSchema,
   no_xp_role_id: snowflake.optional().nullable(),
+  level_curve: z.object({
+    base: z.number().finite().positive().max(1_000_000),
+    exponent: z.number().finite().min(0.1).max(5),
+  }).optional(),
 });
 export async function GET(req: NextRequest) {
   const auth = await requireGuildOwner();
@@ -73,7 +77,7 @@ export async function GET(req: NextRequest) {
     supabase
       .from('guild_config')
       .select(
-        'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, rank_card_accent_color, rank_card_background, no_xp_role_id',
+        'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, rank_card_accent_color, rank_card_background, no_xp_role_id, level_curve',
       )
       .eq('guild_id', guildId)
       .maybeSingle(),

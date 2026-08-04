@@ -71,7 +71,7 @@ export class PollsManager {
     interaction: ChatInputCommandInteraction,
     title: string,
     options: string[],
-    allowMultiple: boolean,
+    allowMultiple?: boolean,
   ): Promise<void> {
     const guildId = interaction.guildId!;
     const config = await this.getConfig(guildId);
@@ -82,10 +82,12 @@ export class PollsManager {
       return;
     }
 
-    if (options.length < 2 || options.length > 10) {
-      await interaction.reply({ content: '❌ Polls need 2-10 options.', ephemeral: true });
+    const maxOptions = Math.min(10, Math.max(2, Number(config.max_poll_options ?? 10)));
+    if (options.length < 2 || options.length > maxOptions) {
+      await interaction.reply({ content: `❌ Polls need 2-${maxOptions} options.`, ephemeral: true });
       return;
     }
+    const effectiveAllowMultiple = allowMultiple ?? Boolean(config.allow_multiple_default ?? false);
 
     // Create poll
     const { data: poll } = await this.supabase
@@ -95,7 +97,7 @@ export class PollsManager {
         channel_id: interaction.channelId,
         creator_user_id: interaction.user.id,
         title,
-        allow_multiple: allowMultiple,
+        allow_multiple: effectiveAllowMultiple,
       })
       .select()
       .single();
@@ -127,7 +129,7 @@ export class PollsManager {
           (insertedOptions ?? []).map((opt: any, i: number) =>
             `${numberEmojis[i]} **${opt.label}** — 0 votes`
           ).join('\n') +
-          `\n\n*${allowMultiple ? 'Multiple votes allowed' : 'One vote per person'}*`
+          `\n\n*${effectiveAllowMultiple ? 'Multiple votes allowed' : 'One vote per person'}*`
         )
         .setFooter({ text: `Poll ID: ${poll.id}` }),
       kit,
@@ -163,7 +165,7 @@ export class PollsManager {
       pollId: poll.id,
       title,
       optionCount: options.length,
-      allowMultiple,
+      allowMultiple: effectiveAllowMultiple,
       creatorId: interaction.user.id,
       channelId: interaction.channelId,
     });
@@ -363,8 +365,9 @@ export class PollsManager {
     // White-label: use the owner-configured currency name (never the stock 'coins').
     const currency = config?.currency_name ?? 'coins';
 
-    if (options.length < 2 || options.length > 10) {
-      await interaction.reply({ content: '❌ Predictions need 2-10 outcomes.', ephemeral: true });
+    const maxOptions = Math.min(10, Math.max(2, Number(config.max_poll_options ?? 10)));
+    if (options.length < 2 || options.length > maxOptions) {
+      await interaction.reply({ content: `❌ Predictions need 2-${maxOptions} outcomes.`, ephemeral: true });
       return;
     }
 

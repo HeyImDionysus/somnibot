@@ -70,14 +70,17 @@ export default function ReactionRolesPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; emoji: string } | null>(null);
   const [form, setForm] = useState(emptyForm);
+  const [defaults, setDefaults] = useState({ reaction_roles_enabled: true, default_style: 'buttons', default_max_per_group: 0, default_require_level: 0, default_remove_on_unreact: true });
 
 
   const fetchRoles = useCallback(async () => {
     try {
-      const res = await fetch('/api/reaction-roles');
+      const [res, guildRes] = await Promise.all([fetch('/api/reaction-roles'), fetch('/api/guild')]);
       const json = await res.json();
       if (json.success) setRoles(json.data);
       else setError(json.error);
+      const guildJson = await guildRes.json();
+      if (guildJson.success) setDefaults((d) => ({ ...d, ...Object.fromEntries(Object.keys(d).map((k) => [k, guildJson.config?.[k] ?? d[k as keyof typeof d]])) } as typeof d));
     } catch {
       setError('Failed to load reaction roles');
     } finally {
@@ -108,7 +111,7 @@ export default function ReactionRolesPage() {
       });
     } else {
       setEditingId(null);
-      setForm({ ...emptyForm });
+      setForm({ ...emptyForm, remove_on_unreact: defaults.default_remove_on_unreact, max_per_group: defaults.default_max_per_group ? String(defaults.default_max_per_group) : '', require_level: defaults.default_require_level ? String(defaults.default_require_level) : '' });
     }
     setShowForm(true);
   };
@@ -155,6 +158,13 @@ export default function ReactionRolesPage() {
     } catch {
       setError('Failed to save reaction role');
     }
+  };
+
+  const saveDefaults = async (patch: Partial<typeof defaults>) => {
+    const next = { ...defaults, ...patch };
+    setDefaults(next);
+    const res = await fetch('/api/guild', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+    if (!res.ok) toast({ title: 'Failed to save defaults', variant: 'error' });
   };
 
   const toggleActive = async (rr: ReactionRole) => {
@@ -218,6 +228,15 @@ export default function ReactionRolesPage() {
       {error && (
         <div className="rounded-card bg-discord-danger/10 border border-discord-danger/30 px-4 py-3 text-sm text-discord-danger">{error}</div>
       )}
+
+      <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-3">
+        <label className="flex items-center gap-2 text-sm text-discord-text-primary"><input type="checkbox" checked={defaults.reaction_roles_enabled} onChange={(e) => saveDefaults({ reaction_roles_enabled: e.target.checked })} /> Enable reaction roles</label>
+        <div className="flex flex-wrap gap-3 text-sm text-discord-text-primary">
+          <label>Default style <select value={defaults.default_style} onChange={(e) => saveDefaults({ default_style: e.target.value as typeof defaults.default_style })} className="ml-2 rounded bg-discord-bg-tertiary px-2 py-1"><option value="buttons">Buttons</option><option value="reaction">Reaction</option><option value="select-menu">Select menu</option></select></label>
+          <label>Max per group <input type="number" min={0} max={25} value={defaults.default_max_per_group} onChange={(e) => saveDefaults({ default_max_per_group: Number(e.target.value) })} className="ml-2 w-16 rounded bg-discord-bg-tertiary px-2 py-1" /></label>
+          <label>Required level <input type="number" min={0} max={1000} value={defaults.default_require_level} onChange={(e) => saveDefaults({ default_require_level: Number(e.target.value) })} className="ml-2 w-16 rounded bg-discord-bg-tertiary px-2 py-1" /></label>
+        </div>
+      </div>
 
       {/* ── Editor Modal ───────────────────────────────── */}
       {showForm && (

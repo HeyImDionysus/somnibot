@@ -166,6 +166,9 @@ function replaceVariables(text: string, guild: Guild): string {
 export class ScheduledMessageRunner {
   private schedules: ScheduledMessage[] = [];
   private timer: NodeJS.Timeout | null = null;
+  private allowEmbeds = true;
+  private variablesEnabled = true;
+  private defaultMissedPolicy: 'skip-missed' | 'send-latest' = 'skip-missed';
 
   constructor(
     private guild: Guild,
@@ -220,6 +223,14 @@ export class ScheduledMessageRunner {
   private schedulesLoadAuthoritative = false;
 
   private async loadSchedules(): Promise<void> {
+    const { data: config } = await this.supabase
+      .from('guild_config')
+      .select('allow_embeds, variables_enabled, missed_run_policy')
+      .eq('guild_id', this.guild.id)
+      .maybeSingle();
+    this.allowEmbeds = config?.allow_embeds !== false;
+    this.variablesEnabled = config?.variables_enabled !== false;
+    this.defaultMissedPolicy = config?.missed_run_policy === 'send-latest' ? 'send-latest' : 'skip-missed';
     const { data, error } = await this.supabase
       .from('scheduled_messages')
       .select('*')
@@ -229,7 +240,10 @@ export class ScheduledMessageRunner {
       .limit(1000);
 
     this.schedulesLoadAuthoritative = !error;
-    this.schedules = (data ?? []) as ScheduledMessage[];
+    this.schedules = (data ?? []).map((row) => ({
+      ...(row as ScheduledMessage),
+      missed_run_policy: (row as ScheduledMessage).missed_run_policy ?? this.defaultMissedPolicy,
+    }));
   }
 
   private async tick(): Promise<void> {
@@ -602,7 +616,7 @@ export class ScheduledMessageRunner {
     let embed: EmbedBuilder | null = null;
 
     // Load embed config if referenced
-    if (schedule.embed_config_id) {
+    if (schedule.embed_config_id && this.allowEmbeds) {
       const { data } = await this.supabase
         .from('embed_configs')
         .select('*')
@@ -613,19 +627,19 @@ export class ScheduledMessageRunner {
       if (data) {
         const cfg = data as EmbedConfig;
         embed = new EmbedBuilder();
-        if (cfg.title) embed.setTitle(replaceVariables(cfg.title, this.guild));
-        if (cfg.description) embed.setDescription(replaceVariables(cfg.description, this.guild));
+        if (cfg.title) embed.setTitle(this.variablesEnabled ? replaceVariables(cfg.title, this.guild) : cfg.title);
+        if (cfg.description) embed.setDescription(this.variablesEnabled ? replaceVariables(cfg.description, this.guild) : cfg.description);
         if (cfg.color != null) embed.setColor(cfg.color);
         if (cfg.image_url) embed.setImage(cfg.image_url);
         if (cfg.thumbnail_url) embed.setThumbnail(cfg.thumbnail_url);
-        if (cfg.footer_text) embed.setFooter({ text: replaceVariables(cfg.footer_text, this.guild), iconURL: cfg.footer_icon_url ?? undefined });
-        if (cfg.author_name) embed.setAuthor({ name: replaceVariables(cfg.author_name, this.guild), url: cfg.author_url ?? undefined, iconURL: cfg.author_icon_url ?? undefined });
+        if (cfg.footer_text) embed.setFooter({ text: this.variablesEnabled ? replaceVariables(cfg.footer_text, this.guild) : cfg.footer_text, iconURL: cfg.footer_icon_url ?? undefined });
+        if (cfg.author_name) embed.setAuthor({ name: this.variablesEnabled ? replaceVariables(cfg.author_name, this.guild) : cfg.author_name, url: cfg.author_url ?? undefined, iconURL: cfg.author_icon_url ?? undefined });
         if (cfg.include_timestamp) embed.setTimestamp();
         if (cfg.fields?.length) {
           for (const field of cfg.fields) {
             embed.addFields({
-              name: replaceVariables(field.name, this.guild),
-              value: replaceVariables(field.value, this.guild),
+              name: this.variablesEnabled ? replaceVariables(field.name, this.guild) : field.name,
+              value: this.variablesEnabled ? replaceVariables(field.value, this.guild) : field.value,
               inline: field.inline ?? false,
             });
           }
@@ -633,7 +647,9 @@ export class ScheduledMessageRunner {
       }
     }
 
-    const content = schedule.message ? replaceVariables(schedule.message, this.guild) : undefined;
+    const content = schedule.message
+      ? (this.variablesEnabled ? replaceVariables(schedule.message, this.guild) : schedule.message)
+      : undefined;
 
     // Send-boundary ownership recheck: reserving can predate the send by an
     // arbitrary stall (the embed-config query above, an event-loop pause).
@@ -792,7 +808,7 @@ export class ScheduledMessageRunner {
         const lastOcc = this.lastOccurrenceBefore(schedule, now);
         if (!lastOcc || lastOcc.getTime() <= baseline.getTime()) continue;
 
-        if (schedule.missed_run_policy === 'send-latest') {
+        if ((schedule.missed_run_policy ?? this.defaultMissedPolicy) === 'send-latest') {
           // Fire exactly one catch-up now; sendMessage's atomic claim prevents a
           // double-post if another instance also recovers.
           await this.sendMessage(schedule, lastOcc);
