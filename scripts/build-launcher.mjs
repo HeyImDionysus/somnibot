@@ -18,6 +18,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runPnpm } from './lib/pnpm.mjs';
+import { assertPackagedLauncherRuntime } from './launcher-runtime-verification.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -430,6 +431,10 @@ function stageDashboard() {
   // "extras" are packages that aren't declared in any dep list but are
   // loaded dynamically at runtime.
   const dashPkgDir = path.join(dashStaging, 'packages', 'dashboard');
+  // Next standalone emits absolute symlinks into the build workspace. They
+  // resolve during staging but break once the runtime is moved into an
+  // AppImage, so materialize every dashboard dependency before packaging.
+  dereferenceNodeModules(path.join(dashPkgDir, 'node_modules'));
   fixAllMissingDeps(dashPkgDir, ['styled-jsx', '@swc/helpers'], 'dashboard');
 
   // Also fix root-level node_modules (standalone has two: root + per-package)
@@ -501,6 +506,7 @@ function verifyPackagedBotRuntime() {
   for (const unpackedRoot of unpackedRoots) {
     const botRoot = path.join(unpackedRoot, 'resources', 'bot');
     const botEntry = path.join(botRoot, 'dist', 'index.js');
+    assertPackagedLauncherRuntime(unpackedRoot);
     assertExists(botEntry, 'Packaged bot entry');
     assertExists(
       path.join(botRoot, 'node_modules', '@somnibot', 'shared', 'package.json'),
