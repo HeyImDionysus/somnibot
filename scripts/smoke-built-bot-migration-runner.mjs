@@ -162,17 +162,27 @@ let failed = false;
 try {
   const { planMigrationSql, runMigrations } = await import(migrationRunnerUrl);
   const plannedBatches = planMigrationSql(migrationSource, migrationName);
-  if (plannedBatches.length !== 3) {
-    throw new Error(`Built migration runner planned ${plannedBatches.length} migration batches instead of 3`);
+  if (plannedBatches.length !== 1) {
+    throw new Error(`Built migration runner planned ${plannedBatches.length} migration batches instead of 1`);
   }
-  if (!plannedBatches[0].includes('DO $fraud_index_recovery$')) {
+  const plannedSql = plannedBatches[0];
+  if (!plannedSql.includes('DO $fraud_index_recovery$')) {
     throw new Error('Built migration runner did not preserve the recovery DO batch');
   }
-  if (!plannedBatches[1].trimStart().startsWith('CREATE INDEX CONCURRENTLY')) {
-    throw new Error('Built migration runner did not isolate CREATE INDEX CONCURRENTLY');
+  if (!plannedSql.includes('CREATE INDEX IF NOT EXISTS')) {
+    throw new Error('Built migration runner did not preserve the transaction-compatible index build');
   }
-  if (!plannedBatches[2].includes('DO $fraud_index_postflight$')) {
+  if (!plannedSql.includes('DO $fraud_index_postflight$')) {
     throw new Error('Built migration runner did not preserve the postflight DO batch');
+  }
+  const recoveryOffset = plannedSql.indexOf('DO $fraud_index_recovery$');
+  const createOffset = plannedSql.indexOf('CREATE INDEX IF NOT EXISTS');
+  const postflightOffset = plannedSql.indexOf('DO $fraud_index_postflight$');
+  if (!(recoveryOffset < createOffset && createOffset < postflightOffset)) {
+    throw new Error('Built migration runner changed recovery/index/postflight statement ordering');
+  }
+  if (/CREATE\s+INDEX\s+CONCURRENTLY/i.test(plannedSql)) {
+    throw new Error('Built migration runner introduced CREATE INDEX CONCURRENTLY into the transaction-compatible migration');
   }
 
   for (const unsupportedSql of [
