@@ -1,14 +1,31 @@
 import type { createAdminSupabase } from '@/lib/supabase/admin';
 
-export const DEFAULT_PAYPAL_POLICY = {
+export type PayPalEnvironment = 'sandbox' | 'live';
+export type PayPalRefundStrategy = 'provider-first' | 'local-first';
+
+export interface PayPalPolicy {
+  legacyUsdSaleTolerance: boolean;
+  environment: PayPalEnvironment;
+  refundStrategy: PayPalRefundStrategy;
+  webhookStaleProcessingMs: number;
+  webhookVerifyAttempts: number;
+}
+
+export const DEFAULT_PAYPAL_POLICY: PayPalPolicy = {
   legacyUsdSaleTolerance: true,
-  environment: 'sandbox' as const,
-  refundStrategy: 'provider-first' as const,
+  environment: 'sandbox',
+  refundStrategy: 'provider-first',
   webhookStaleProcessingMs: 300_000,
   webhookVerifyAttempts: 3,
 };
 
-export type PayPalPolicy = typeof DEFAULT_PAYPAL_POLICY;
+interface PayPalPolicyRow {
+  paypal_legacy_usd_sale_tolerance: boolean | null;
+  paypal_environment: string | null;
+  paypal_refund_strategy: string | null;
+  paypal_webhook_stale_processing_ms: number | null;
+  paypal_webhook_verify_attempts: number | null;
+}
 
 export function paypalApiBaseForEnvironment(environment: PayPalPolicy['environment']): string {
   return environment === 'live'
@@ -23,14 +40,17 @@ export async function loadPayPalPolicy(
 ): Promise<PayPalPolicy> {
   if (!guildId) return DEFAULT_PAYPAL_POLICY;
 
-  const { data, error } = await supabase
+  const { data, error } = await (supabase
     .from('guild_config')
     .select(
       'paypal_legacy_usd_sale_tolerance, paypal_environment, paypal_refund_strategy, '
       + 'paypal_webhook_stale_processing_ms, paypal_webhook_verify_attempts',
     )
     .eq('guild_id', guildId)
-    .maybeSingle();
+    .maybeSingle() as unknown as PromiseLike<{
+      data: PayPalPolicyRow | null;
+      error: { message?: string } | null;
+    }>);
 
   if (error || !data) return DEFAULT_PAYPAL_POLICY;
 
@@ -42,10 +62,12 @@ export async function loadPayPalPolicy(
     refundStrategy: data.paypal_refund_strategy === 'local-first'
       ? 'local-first'
       : 'provider-first',
-    webhookStaleProcessingMs: Number.isInteger(data.paypal_webhook_stale_processing_ms)
+    webhookStaleProcessingMs: typeof data.paypal_webhook_stale_processing_ms === 'number'
+      && Number.isInteger(data.paypal_webhook_stale_processing_ms)
       ? Math.min(86_400_000, Math.max(60_000, data.paypal_webhook_stale_processing_ms))
       : DEFAULT_PAYPAL_POLICY.webhookStaleProcessingMs,
-    webhookVerifyAttempts: Number.isInteger(data.paypal_webhook_verify_attempts)
+    webhookVerifyAttempts: typeof data.paypal_webhook_verify_attempts === 'number'
+      && Number.isInteger(data.paypal_webhook_verify_attempts)
       ? Math.min(10, Math.max(1, data.paypal_webhook_verify_attempts))
       : DEFAULT_PAYPAL_POLICY.webhookVerifyAttempts,
   };

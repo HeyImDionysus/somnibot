@@ -435,7 +435,7 @@ export async function POST(req: NextRequest) {
     if (claimCheckError || claimIsCurrent !== true) {
       return NextResponse.json({ error: 'Replay claim is no longer current' }, { status: 409 });
     }
-    paypalPolicy = await loadPayPalPolicy(supabase, parsedReplayGuildId.success
+    paypalPolicy = await loadPayPalPolicy(supabase, parsedReplayGuildId?.success
       ? parsedReplayGuildId.data
       : null);
   }
