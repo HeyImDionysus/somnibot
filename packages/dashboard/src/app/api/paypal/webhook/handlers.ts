@@ -186,6 +186,7 @@ type ProviderIncidentReason =
   | 'product_identity_missing_or_mismatched'
   | 'plan_identity_missing_or_mismatched'
   | 'financial_identity_malformed'
+  | 'gift_intent_invalid_or_replayed'
   | 'subscription_sale_router_failed';
 
 function isNonEmptyString(value: unknown): value is string {
