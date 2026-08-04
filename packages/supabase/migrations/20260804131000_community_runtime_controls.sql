@@ -19,8 +19,16 @@ ALTER TABLE public.guild_config
 UPDATE public.guild_config
 SET level_curve = '{"base":100,"exponent":1.9}'::jsonb
 WHERE jsonb_typeof(level_curve) <> 'object'
-   OR COALESCE((level_curve->>'base')::numeric, 0) <= 0
-   OR COALESCE((level_curve->>'exponent')::numeric, 0) <= 0;
+   OR CASE
+        WHEN (level_curve->>'base') ~ '^[0-9]+(\.[0-9]+)?$'
+        THEN (level_curve->>'base')::numeric
+        ELSE 0
+      END <= 0
+   OR CASE
+        WHEN (level_curve->>'exponent') ~ '^[0-9]+(\.[0-9]+)?$'
+        THEN (level_curve->>'exponent')::numeric
+        ELSE 0
+      END <= 0;
 
 ALTER TABLE public.guild_config
   DROP CONSTRAINT IF EXISTS guild_config_level_curve_shape_check,
@@ -28,8 +36,16 @@ ALTER TABLE public.guild_config
     jsonb_typeof(level_curve) = 'object'
     AND (level_curve->>'base') ~ '^[0-9]+(\.[0-9]+)?$'
     AND (level_curve->>'exponent') ~ '^[0-9]+(\.[0-9]+)?$'
-    AND ((level_curve->>'base')::numeric BETWEEN 1 AND 1000000)
-    AND ((level_curve->>'exponent')::numeric BETWEEN 0.1 AND 5)
+    AND (CASE
+      WHEN (level_curve->>'base') ~ '^[0-9]+(\.[0-9]+)?$'
+      THEN (level_curve->>'base')::numeric
+      ELSE NULL
+    END BETWEEN 1 AND 1000000)
+    AND (CASE
+      WHEN (level_curve->>'exponent') ~ '^[0-9]+(\.[0-9]+)?$'
+      THEN (level_curve->>'exponent')::numeric
+      ELSE NULL
+    END BETWEEN 0.1 AND 5)
   );
 
 -- Dynamic curve helper used by XP writers. The legacy helper remains available

@@ -1376,6 +1376,8 @@ export class AuditService {
   private activeGapWindows = new Map<AuditGapKind, MutableAuditGapWindow>();
   private pendingGapWindows = new Map<AuditGapKind, FrozenAuditGapWindow>();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private flushIntervalMs = 5_000;
+  private flushIntervalRefresh: Promise<void> | null = null;
   private flushInProgress: Promise<boolean> | null = null;
   private stopInProgress: Promise<void> | null = null;
   private acceptingEntries = true;
@@ -1475,14 +1477,59 @@ export class AuditService {
     };
     this.eventBus.onAny(this.eventHandler, { backpressureExempt: true });
 
-    // Flush queue every 5 seconds to batch inserts
+    // Start with the safe default immediately, then replace the timer once
+    // the guild-scoped control has been read. Replacing the timer through one
+    // helper keeps hot reloads/restarts from accumulating duplicate timers.
+    this.scheduleFlushTimer(this.flushIntervalMs);
+    void this.refreshFlushInterval();
+
+    log.info('Started — listening to all platform events (with before/after diffs)');
+  }
+
+  /**
+   * Reload the guild-scoped audit cadence. Invalid/stale values fail closed
+   * to the near-real-time default and never create a second active timer.
+   */
+  async refreshFlushInterval(): Promise<void> {
+    if (this.flushIntervalRefresh) return this.flushIntervalRefresh;
+    this.flushIntervalRefresh = (async () => {
+      try {
+        const { data, error } = await this.supabase
+          .from('guild_config')
+          .select('audit_flush_interval_ms')
+          .eq('guild_id', this.guildId)
+          .maybeSingle();
+        if (error) throw new Error(error.message);
+        const candidate = Number(data?.audit_flush_interval_ms);
+        const interval = Number.isInteger(candidate) && candidate >= 1_000 && candidate <= 60_000
+          ? candidate
+          : 5_000;
+        this.flushIntervalMs = interval;
+        if (this.eventHandler) this.scheduleFlushTimer(interval);
+      } catch (error) {
+        log.warn('Using default audit flush interval:', error);
+        this.flushIntervalMs = 5_000;
+        if (this.eventHandler) this.scheduleFlushTimer(this.flushIntervalMs);
+      } finally {
+        this.flushIntervalRefresh = null;
+      }
+    })();
+    return this.flushIntervalRefresh;
+  }
+
+  /** Exposed for focused runtime tests and diagnostics. */
+  getFlushIntervalMs(): number {
+    return this.flushIntervalMs;
+  }
+
+  private scheduleFlushTimer(intervalMs: number): void {
+    if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushTimer = setInterval(() => {
       void this.flush().catch((err: unknown) => {
         log.error('Unexpected audit flush failure:', err);
       });
-    }, 5000);
-
-    log.info('Started — listening to all platform events (with before/after diffs)');
+    }, intervalMs);
+    this.flushTimer.unref?.();
   }
 
   private trackPendingEnqueue(

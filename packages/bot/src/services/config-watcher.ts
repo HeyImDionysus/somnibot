@@ -78,6 +78,7 @@ export class ConfigWatcher {
       intervalMinutes?: number,
       runImmediately?: boolean,
     ) => void,
+    private onAuditConfigChange?: () => void,
   ) {}
 
   /**
@@ -92,6 +93,12 @@ export class ConfigWatcher {
       const section = event.data.section;
       const changedInterval = event.data.changes?.sync_interval_minutes;
       const changedEnabled = event.data.changes?.sync_enabled;
+      if (section === 'settings' || section === 'all') {
+        // Audit cadence is a runtime timer, not merely cached config. Refresh
+        // it on the same config event so the new value takes effect without a
+        // restart and the old timer is replaced exactly once.
+        this.onAuditConfigChange?.();
+      }
       if (
         (section === 'settings' || section === 'all')
         && (
