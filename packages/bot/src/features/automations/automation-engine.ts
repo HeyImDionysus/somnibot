@@ -151,7 +151,7 @@ export class AutomationEngine {
    * object and remains a legitimate new occurrence.
    */
   private _specializedEventData = new WeakSet<object>();
-  private maxChainDepth = AUTOMATION_LIMITS.MAX_CHAIN_DEPTH;
+  private maxChainDepth: number = AUTOMATION_LIMITS.MAX_CHAIN_DEPTH;
 
   constructor(
     private guild: Guild,
