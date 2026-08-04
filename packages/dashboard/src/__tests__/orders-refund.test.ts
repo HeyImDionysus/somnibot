@@ -42,8 +42,8 @@ const INVALID_PROVIDER_IDS: Array<[string, string]> = [
   ['overlong', 'R'.repeat(256)],
 ];
 
-/** The only tables the refund route may reach for change-history bookkeeping. */
-const BOOKKEEPING_TABLES = ['orders', 'admin_changes'];
+/** The route also reads the tenant-scoped PayPal policy before money work. */
+const BOOKKEEPING_TABLES = ['orders', 'admin_changes', 'guild_config'];
 
 type RpcResult = { data: unknown; error: null | { code?: string; message: string } };
 type RefundSupabaseMock = {
@@ -173,6 +173,18 @@ async function post(
 beforeEach(() => {
   vi.clearAllMocks();
   mock = { rpc: vi.fn(), from: vi.fn() };
+  // Tenant PayPal policy is read before the attempt RPCs. Keep the harness
+  // fail-closed (no policy row means the production default) while still
+  // allowing the bookkeeping reads/writes exercised by the state machine.
+  mock.from.mockImplementation((table: string) => {
+    const chain: Record<string, unknown> = {};
+    for (const method of ['select', 'eq', 'order', 'limit']) {
+      chain[method] = vi.fn(() => chain);
+    }
+    chain.maybeSingle = vi.fn(async () => ({ data: null, error: null }));
+    chain.insert = vi.fn(async () => ({ error: null }));
+    return chain;
+  });
   configureRpc();
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
   (getPayPalRuntimeConfig as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -319,7 +331,7 @@ describe('POST /api/orders/[id]/refund — attempt state machine', () => {
       p_reason: 'Caller reason',
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://api.sandbox.paypal.com/v2/payments/captures/CAPTURE-123/refund',
+      'https://api-m.sandbox.paypal.com/v2/payments/captures/CAPTURE-123/refund',
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({
@@ -400,7 +412,7 @@ describe('POST /api/orders/[id]/refund — attempt state machine', () => {
     const response = await post();
     expect(response.status).toBe(202);
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://api.sandbox.paypal.com/v2/payments/refunds/REFUND-123',
+      'https://api-m.sandbox.paypal.com/v2/payments/refunds/REFUND-123',
       expect.objectContaining({ method: 'GET' }),
     );
     expect(fetchMock.mock.calls[0][1]).not.toHaveProperty('body');
