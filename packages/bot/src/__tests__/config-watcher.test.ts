@@ -76,6 +76,9 @@ vi.mock('../features/reaction-roles/index.js', () => ({
 vi.mock('../features/reaction-roles/button-roles.js', () => ({
   deployButtonRolePanelsForGuild: vi.fn(),
 }));
+vi.mock('../features/reaction-roles/reaction-engine.js', () => ({
+  loadReactionRoles: vi.fn(),
+}));
 vi.mock('../features/giveaways/index.js', () => ({ GiveawayManager: class {} }));
 vi.mock('../features/temp-channels/index.js', () => ({ TempChannelManager: class {} }));
 vi.mock('../features/scheduled-messages/index.js', () => ({ ScheduledMessageRunner: class {} }));
