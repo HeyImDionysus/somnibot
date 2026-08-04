@@ -19,7 +19,6 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
 import { brandedEmbed, resolveBrandKit } from '../branding/index.js';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
-import { deterministicUuidV8 } from '../../utils/deterministic-uuid.js';
 
 const log = createLogger('PaymentHandler');
 
@@ -79,44 +78,6 @@ const CHECKOUT_DELIVERY_TYPES = new Set([
   'mixed',
 ]);
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
-
-/** Claim a free product through the dedicated idempotent $0 RPC. */
-export async function handleFreeClaimButton(
-  interaction: ButtonInteraction,
-  supabase: SupabaseClient,
-  guildId: string,
-): Promise<void> {
-  await interaction.deferReply({ ephemeral: true });
-  const productId = interaction.customId.replace('store:claim:', '');
-  const discordId = interaction.user.id;
-  let { data: customer } = await supabase.from('customers').select('id').eq('guild_id', guildId).eq('discord_id', discordId).maybeSingle();
-  if (!customer) {
-    const inserted = await supabase.from('customers').insert({ guild_id: guildId, discord_id: discordId, username: interaction.user.username }).select('id').single();
-    customer = inserted.data;
-  }
-  if (!customer?.id) {
-    await interaction.editReply({ content: '❌ Free claim is temporarily unavailable. Please try again.' });
-    return;
-  }
-  const requestId = deterministicUuidV8('somnibot:free-claim:v1', [guildId, discordId, productId]);
-  const { data, error } = await supabase.rpc('commerce_claim_free_product', {
-    p_request_id: requestId, p_guild_id: guildId, p_customer_id: customer.id, p_product_id: productId,
-  });
-  if (error) {
-    await interaction.editReply({ content: '❌ This free claim could not be completed. Please try again later.' });
-    return;
-  }
-  const row = Array.isArray(data) ? data[0] as Record<string, unknown> | undefined : undefined;
-  if (row?.disposition === 'already-claimed') {
-    await interaction.editReply({ content: 'ℹ️ You have already claimed this product.' });
-    return;
-  }
-  if (row?.disposition !== 'claimed' || typeof row.entitlement_id !== 'string') {
-    await interaction.editReply({ content: '❌ Free claim evidence was incomplete; nothing was granted.' });
-    return;
-  }
-  await interaction.editReply({ content: '✅ Free product claimed. Your entitlement is now active.' });
-}
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TIMESTAMPTZ_PATTERN =

@@ -8,7 +8,7 @@
  * and slash commands (via command-registry + inline feature-gated dispatch).
  */
 
-import { ActionRowBuilder, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } from 'discord.js';
+import { EmbedBuilder } from 'discord.js';
 import type { Interaction } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 import type { SomniClient } from '../client.js';
@@ -34,7 +34,7 @@ import {
 import { handleTicketInteraction } from '../features/tickets/index.js';
 import { handleSetupButton, handleSetupModal, handleReconfigureSelect } from '../features/setup-wizard/index.js';
 import { handleButtonRoleInteraction } from '../features/reaction-roles/button-roles.js';
-import { handleBuyButton, handleFreeClaimButton } from '../features/commerce/payment-handler.js';
+import { handleBuyButton } from '../features/commerce/payment-handler.js';
 import { handleAdventureButton } from '../features/adventures/adventure-buttons.js';
 
 // Feature handler imports — context menus & modals
@@ -205,23 +205,6 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
           return;
         }
       }
-      if (interaction.isButton() && interaction.customId.startsWith('store:claim:')) {
-        const { data: storeCfg } = await client.supabase.from('guild_config').select('store_enabled').eq('guild_id', guildId).maybeSingle();
-        if (storeCfg?.store_enabled === false) {
-          await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
-          return;
-        }
-        await handleFreeClaimButton(interaction, client.supabase, guildId);
-        return;
-      }
-      if (interaction.isButton() && interaction.customId.startsWith('store:gift:')) {
-        const productId = interaction.customId.replace('store:gift:', '');
-        const modal = new ModalBuilder().setCustomId(`store:gift-submit:${productId}`).setTitle('Gift this product');
-        const recipient = new TextInputBuilder().setCustomId('recipient_discord_id').setLabel('Recipient Discord ID').setStyle(TextInputStyle.Short).setMinLength(17).setMaxLength(20).setRequired(true);
-        modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(recipient));
-        await interaction.showModal(modal);
-        return;
-      }
 
       // Music buttons
       if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.music)) {
@@ -314,24 +297,6 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
     if (interaction.isModalSubmit()) {
       if (interaction.customId.startsWith(MODAL_PREFIX.setup)) {
         await handleSetupModal(interaction, client);
-        return;
-      }
-      if (interaction.customId.startsWith('store:gift-submit:')) {
-        const productId = interaction.customId.replace('store:gift-submit:', '');
-        const recipientId = interaction.fields.getTextInputValue('recipient_discord_id').trim();
-        if (!/^\d{17,20}$/.test(recipientId) || recipientId === interaction.user.id) {
-          await interaction.reply({ content: '❌ Enter a different valid Discord user ID.', ephemeral: true });
-          return;
-        }
-        const customer = await client.supabase.from('customers').select('id').eq('guild_id', guildId).eq('discord_id', interaction.user.id).maybeSingle();
-        if (!customer.data?.id) {
-          await interaction.reply({ content: '❌ Start a store purchase first so your buyer account can be verified.', ephemeral: true });
-          return;
-        }
-        const { deterministicUuidV8 } = await import('../utils/deterministic-uuid.js');
-        const giftId = deterministicUuidV8('somnibot:gift-intent:v1', [guildId, interaction.user.id, recipientId, productId]);
-        const { error } = await client.supabase.rpc('commerce_create_gift_intent', { p_id: giftId, p_guild_id: guildId, p_buyer_customer_id: customer.data.id, p_product_id: productId, p_recipient_discord_id: recipientId });
-        await interaction.reply({ content: error ? '❌ Gifting is unavailable for this product.' : '✅ Gift recipient verified and intent recorded. Complete the associated checkout to deliver it.', ephemeral: true });
         return;
       }
       const guild = interaction.guild;
