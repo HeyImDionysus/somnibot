@@ -1118,6 +1118,7 @@ export interface DbProductLicenseConfig {
   rotation_policy: string;
   self_service_device_removal: boolean;
   sdk_cache_ttl_ms: number;
+  key_prefix: string;
 }
 
 export interface DbLicenseSession {

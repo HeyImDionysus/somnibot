@@ -180,6 +180,19 @@ describe('SomniLicense', () => {
       });
     });
 
+    it('consumes product cache policy delivered by the validation server', async () => {
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk({ sdk_cache_ttl_ms: 1_000, offline_grace_period_seconds: 2 }))
+        .mockResolvedValueOnce(validationOk({ sdk_cache_ttl_ms: 1_000, offline_grace_period_seconds: 2 }));
+      const client = sdk({ cacheTtlMs: 60_000, offlineGraceMs: 60_000 });
+
+      await client.validate();
+      // The server's 1s policy replaces the local 60s fallback.
+      vi.advanceTimersByTime(1_001);
+      await client.validate();
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
     it('exposes valid state, features, tier, and session after success', async () => {
       vi.mocked(fetch).mockResolvedValueOnce(validationOk());
       const client = sdk();

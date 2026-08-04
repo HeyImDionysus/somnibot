@@ -1280,6 +1280,7 @@ export interface DbEntitlement {
 export interface DbProductLicenseConfig {
   product_id: string;
   license_mode: 'portal_only' | 'portal_watermark' | 'embedded' | 'access_pass';
+  key_prefix: string;
   max_devices: number;
   heartbeat_interval_seconds: number;
   sdk_cache_ttl_ms: number;

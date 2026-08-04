@@ -53,11 +53,14 @@ interface Plan {
 interface LicenseConfig {
   product_id: string;
   license_mode: string;
+  key_prefix: string;
   max_devices: number;
   heartbeat_interval_seconds: number;
+  sdk_cache_ttl_ms: number;
   offline_grace_period_seconds: number;
   feature_flags: string[];
   require_discord_guild_membership: boolean;
+  store_keys_hashed: boolean;
   rotation_policy: 'rotate-and-invalidate' | 'disabled';
   self_service_device_removal: boolean;
 }
@@ -136,6 +139,13 @@ export default function StorePage() {
   const [savingGrace, setSavingGrace] = useState(false);
   const [rotationPolicy, setRotationPolicy] = useState<'rotate-and-invalidate' | 'disabled'>('rotate-and-invalidate');
   const [selfServiceDeviceRemoval, setSelfServiceDeviceRemoval] = useState(true);
+  const [licenseKeyPrefix, setLicenseKeyPrefix] = useState('SMNI');
+  const [licenseMaxDevices, setLicenseMaxDevices] = useState(3);
+  const [licenseHeartbeatMs, setLicenseHeartbeatMs] = useState(300000);
+  const [licenseOfflineGraceSeconds, setLicenseOfflineGraceSeconds] = useState(86400);
+  const [licenseSdkCacheTtlMs, setLicenseSdkCacheTtlMs] = useState(60000);
+  const [licenseFeatureFlags, setLicenseFeatureFlags] = useState('');
+  const [licenseRequireMembership, setLicenseRequireMembership] = useState(true);
   const [paypalLegacyTolerance, setPaypalLegacyTolerance] = useState(true);
   const [paypalEnvironment, setPaypalEnvironment] = useState<'sandbox' | 'live'>('sandbox');
   const [paypalRefundStrategy, setPaypalRefundStrategy] = useState<'provider-first' | 'local-first'>('provider-first');
@@ -334,6 +344,13 @@ export default function StorePage() {
     setForm(emptyForm);
     setRotationPolicy('rotate-and-invalidate');
     setSelfServiceDeviceRemoval(true);
+    setLicenseKeyPrefix('SMNI');
+    setLicenseMaxDevices(3);
+    setLicenseHeartbeatMs(300000);
+    setLicenseOfflineGraceSeconds(86400);
+    setLicenseSdkCacheTtlMs(60000);
+    setLicenseFeatureFlags('');
+    setLicenseRequireMembership(true);
     setEditingId(null);
     setShowForm(true);
   };
@@ -352,6 +369,13 @@ export default function StorePage() {
     const licenseConfig = p.product_license_config?.[0];
     setRotationPolicy(licenseConfig?.rotation_policy ?? 'rotate-and-invalidate');
     setSelfServiceDeviceRemoval(licenseConfig?.self_service_device_removal ?? true);
+    setLicenseKeyPrefix(licenseConfig?.key_prefix ?? 'SMNI');
+    setLicenseMaxDevices(licenseConfig?.max_devices ?? 3);
+    setLicenseHeartbeatMs((licenseConfig?.heartbeat_interval_seconds ?? 300) * 1000);
+    setLicenseOfflineGraceSeconds(licenseConfig?.offline_grace_period_seconds ?? 86400);
+    setLicenseSdkCacheTtlMs(licenseConfig?.sdk_cache_ttl_ms ?? 60000);
+    setLicenseFeatureFlags((licenseConfig?.feature_flags ?? []).join(', '));
+    setLicenseRequireMembership(licenseConfig?.require_discord_guild_membership ?? true);
     setEditingId(p.id);
     setShowForm(true);
   };
@@ -399,7 +423,20 @@ export default function StorePage() {
         const configRes = await fetch(`/api/license/config/${productId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ rotation_policy: rotationPolicy, self_service_device_removal: selfServiceDeviceRemoval }),
+          body: JSON.stringify({
+            key_prefix: licenseKeyPrefix,
+            max_devices: licenseMaxDevices,
+            heartbeat_interval_ms: licenseHeartbeatMs,
+            sdk_cache_ttl_ms: licenseSdkCacheTtlMs,
+            offline_grace_period_seconds: licenseOfflineGraceSeconds,
+            feature_flags: licenseFeatureFlags
+              .split(',')
+              .map((flag) => flag.trim())
+              .filter(Boolean),
+            require_discord_guild_membership: licenseRequireMembership,
+            rotation_policy: rotationPolicy,
+            self_service_device_removal: selfServiceDeviceRemoval,
+          }),
         });
         if (!configRes.ok) {
           toast({ title: 'Product saved, but license policy was not saved', variant: 'error' });
@@ -763,7 +800,39 @@ export default function StorePage() {
               <div className="sm:col-span-2 rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary/40 p-4">
                 <h3 className="text-sm font-semibold text-discord-text-primary">License recovery controls</h3>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <label className="text-xs text-discord-text-muted">
+                  <label data-control-id="key-prefix" className="text-xs text-discord-text-muted">
+                    Key prefix
+                    <input
+                      value={licenseKeyPrefix}
+                      maxLength={8}
+                      pattern="[A-Z]{2,8}"
+                      onChange={(e) => setLicenseKeyPrefix(e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 8))}
+                      className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary"
+                      aria-describedby="license-key-prefix-help"
+                    />
+                    <span id="license-key-prefix-help" className="mt-1 block text-[11px]">2–8 uppercase letters; applied to future keys and rotations.</span>
+                  </label>
+                  <label data-control-id="max-devices" className="text-xs text-discord-text-muted">
+                    Maximum devices
+                    <input type="number" min={1} max={100} value={licenseMaxDevices} onChange={(e) => setLicenseMaxDevices(Math.max(1, Math.min(100, Number(e.target.value) || 1)))} className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
+                  </label>
+                  <label data-control-id="heartbeat-interval-ms" className="text-xs text-discord-text-muted">
+                    Heartbeat interval (ms)
+                    <input type="number" min={60000} max={86400000} step={1000} value={licenseHeartbeatMs} onChange={(e) => setLicenseHeartbeatMs(Math.max(60000, Math.min(86400000, Number(e.target.value) || 60000)))} className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
+                  </label>
+                  <label data-control-id="sdk-cache-ttl-ms" className="text-xs text-discord-text-muted">
+                    SDK cache TTL (ms)
+                    <input type="number" min={1000} max={3600000} step={1000} value={licenseSdkCacheTtlMs} onChange={(e) => setLicenseSdkCacheTtlMs(Math.max(1000, Math.min(3600000, Number(e.target.value) || 1000)))} className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
+                  </label>
+                  <label data-control-id="offline-grace-period-seconds" className="text-xs text-discord-text-muted">
+                    Offline grace (seconds)
+                    <input type="number" min={0} max={604800} value={licenseOfflineGraceSeconds} onChange={(e) => setLicenseOfflineGraceSeconds(Math.max(0, Math.min(604800, Number(e.target.value) || 0)))} className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
+                  </label>
+                  <label data-control-id="feature-flags" className="text-xs text-discord-text-muted">
+                    SDK feature flags
+                    <input value={licenseFeatureFlags} onChange={(e) => setLicenseFeatureFlags(e.target.value)} placeholder="pro-mode, exports" className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
+                  </label>
+                  <label data-control-id="rotation-policy" className="text-xs text-discord-text-muted">
                     Rotation policy
                     <select
                       value={rotationPolicy}
@@ -774,10 +843,18 @@ export default function StorePage() {
                       <option value="disabled">Disable self-service rotation</option>
                     </select>
                   </label>
-                  <label className="flex items-center gap-2 pt-5 text-sm text-discord-text-secondary">
+                  <label data-control-id="self-service-device-removal" className="flex items-center gap-2 pt-5 text-sm text-discord-text-secondary">
                     <input type="checkbox" checked={selfServiceDeviceRemoval} onChange={(e) => setSelfServiceDeviceRemoval(e.target.checked)} />
                     Allow buyers to remove their own devices
                   </label>
+                  <label data-control-id="require-discord-guild-membership" className="flex items-center gap-2 pt-5 text-sm text-discord-text-secondary">
+                    <input type="checkbox" checked={licenseRequireMembership} onChange={(e) => setLicenseRequireMembership(e.target.checked)} />
+                    Require Discord guild membership during validation
+                  </label>
+                  <div data-control-id="store-keys-hashed" className="rounded-input border border-discord-border-subtle bg-discord-bg-primary/60 px-3 py-2 text-xs text-discord-text-muted">
+                    <strong className="text-discord-text-secondary">Store keys hashed: locked on</strong>
+                    <p className="mt-1">Only SHA-256 hashes plus prefix/suffix are persisted. Plaintext is delivered once and never recoverable.</p>
+                  </div>
                 </div>
               </div>
             )}

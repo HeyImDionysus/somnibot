@@ -648,11 +648,21 @@ const guildConfigUpdate = z.object({
 
 const licenseConfig = z.object({
   license_mode: z.string().max(32).optional(),
+  /** White-label key prefix; issuance still stores only SHA-256 hashes. */
+  key_prefix: z.string().regex(/^[A-Z]{2,8}$/).optional(),
   max_devices: z.number().int().min(1).max(100).optional(),
   heartbeat_interval_seconds: z.number().int().min(0).max(86400).optional(),
+  /** Convenience owner-surface unit; persisted canonically as seconds. */
+  heartbeat_interval_ms: z.number().int().min(60000).max(86400000).refine((value) => value % 1000 === 0, 'heartbeat_interval_ms must be a whole number of seconds').optional(),
   sdk_cache_ttl_ms: z.number().int().min(1000).max(3600000).optional(),
   offline_grace_period_seconds: z.number().int().min(0).max(604800).optional(),
-  feature_flags: z.record(z.unknown()).optional(),
+  // String-list is the shipped SDK contract. Accept the historical object
+  // shape only for backwards-compatible reads/writes, normalizing it in the
+  // route before it reaches the TEXT[] column.
+  feature_flags: z.union([
+    z.array(z.string().min(1).max(64)).max(100),
+    z.record(z.unknown()),
+  ]).optional(),
   tier: z.string().max(64).optional(),
   watermark_config: z.record(z.unknown()).optional().nullable(),
   require_discord_guild_membership: z.boolean().optional(),

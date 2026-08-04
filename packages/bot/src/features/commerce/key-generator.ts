@@ -6,7 +6,7 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 
-const KEY_PREFIX = 'SMNI';
+const DEFAULT_KEY_PREFIX = 'SMNI';
 const CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No 0/O/1/I confusion
 
 /**
@@ -24,7 +24,7 @@ function randomGroup(bytes: Buffer, offset: number): string {
  * Generate a new license key in SMNI-XXXX-XXXX-XXXX-XXXX format.
  * Returns both the plaintext key and its SHA-256 hash.
  */
-export function generateLicenseKey(): {
+export function generateLicenseKey(prefix = DEFAULT_KEY_PREFIX): {
   plaintext: string;
   hash: string;
   prefix: string;
@@ -36,13 +36,16 @@ export function generateLicenseKey(): {
   const group3 = randomGroup(bytes, 8);
   const group4 = randomGroup(bytes, 12);
 
-  const plaintext = `${KEY_PREFIX}-${group1}-${group2}-${group3}-${group4}`;
+  if (!/^[A-Z]{2,8}$/.test(prefix)) {
+    throw new Error('Invalid license key prefix');
+  }
+  const plaintext = `${prefix}-${group1}-${group2}-${group3}-${group4}`;
   const hash = createHash('sha256').update(plaintext).digest('hex');
 
   return {
     plaintext,
     hash,
-    prefix: KEY_PREFIX,
+    prefix,
     suffix: group4, // Last 4 chars for customer identification
   };
 }

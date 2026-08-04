@@ -43,6 +43,24 @@ function requireSupabaseSuccess(error: unknown, operation: string) {
 
 type AdminSupabase = ReturnType<typeof createAdminSupabase>;
 const LIFECYCLE_SCAN_PAGE_SIZE = 500;
+const DEFAULT_LICENSE_KEY_PREFIX = 'SMNI';
+
+async function loadLicenseKeyPrefix(
+  supabase: AdminSupabase,
+  productId: string,
+): Promise<string> {
+  const { data, error } = await supabase
+    .from('product_license_config')
+    .select('key_prefix')
+    .eq('product_id', productId)
+    .maybeSingle();
+  requireSupabaseSuccess(error, 'Failed to load product license key prefix');
+  const prefix = typeof data?.key_prefix === 'string' ? data.key_prefix : DEFAULT_LICENSE_KEY_PREFIX;
+  if (!/^[A-Z]{2,8}$/.test(prefix)) {
+    throw new Error('Product license key prefix is malformed');
+  }
+  return prefix;
+}
 const DELIVERY_TYPES = [
   'file',
   'link',
@@ -1127,7 +1145,15 @@ async function ensureStagedLicenseKey(
   }
 
   const groups = plaintext.split('-');
-  if (groups.length !== 5 || groups[0] !== 'SMNI' || groups.slice(1).some((group) => group.length !== 4)) {
+  const payloadPrefix = payload.license_key_prefix;
+  const prefix = typeof payloadPrefix === 'string' ? payloadPrefix : groups[0];
+  if (
+    groups.length !== 5
+    || typeof prefix !== 'string'
+    || !/^[A-Z]{2,8}$/.test(prefix)
+    || groups[0] !== prefix
+    || groups.slice(1).some((group) => !/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/.test(group))
+  ) {
     throw new Error('Staged license key plaintext is malformed');
   }
   const keyHash = createHash('sha256').update(plaintext).digest('hex');
@@ -1138,7 +1164,7 @@ async function ensureStagedLicenseKey(
     product_id: order.product_id,
     guild_id: order.guild_id,
     key_hash: keyHash,
-    key_prefix: 'SMNI',
+    key_prefix: prefix,
     key_suffix: groups[4]!,
     bound_discord_id: String(payload.discord_id ?? ''),
     status: 'pending_activation',
@@ -1891,7 +1917,7 @@ export async function handlePaymentCaptured(
     );
 
     const license = snapshot.delivery_type_snapshot === 'license_key'
-      ? generateLicenseKey()
+      ? generateLicenseKey(await loadLicenseKeyPrefix(supabase, order.product_id))
       : null;
     staged = await stageFulfillment(supabase, expected, {
       fulfillment_type: 'one_time_purchase',
@@ -1913,6 +1939,7 @@ export async function handlePaymentCaptured(
         ? {
             license_key_id: crypto.randomUUID(),
             license_key_plaintext: license.plaintext,
+            license_key_prefix: license.prefix,
           }
         : {}),
       entitlement_type: 'one_time',
@@ -2513,7 +2540,7 @@ export async function handleSubscriptionActivated(
     }
     const productName = product.name;
     const license = deliveryTypeSnapshot === 'license_key'
-      ? generateLicenseKey()
+      ? generateLicenseKey(await loadLicenseKeyPrefix(supabase, order.product_id))
       : null;
 
     staged = await stageFulfillment(supabase, expected, {
@@ -2541,6 +2568,7 @@ export async function handleSubscriptionActivated(
         ? {
             license_key_id: crypto.randomUUID(),
             license_key_plaintext: license.plaintext,
+            license_key_prefix: license.prefix,
           }
         : {}),
       entitlement_type: 'subscription',

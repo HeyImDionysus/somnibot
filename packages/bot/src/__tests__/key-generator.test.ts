@@ -36,6 +36,18 @@ describe('generateLicenseKey', () => {
     expect(prefix).toBe('SMNI');
   });
 
+  it('uses a validated product prefix for white-label keys', () => {
+    const { plaintext, prefix, hash } = generateLicenseKey('ACME');
+    expect(prefix).toBe('ACME');
+    expect(plaintext).toMatch(/^ACME-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+    expect(hashLicenseKey(plaintext)).toBe(hash);
+  });
+
+  it('rejects prefixes that could alter the key grammar', () => {
+    expect(() => generateLicenseKey('bad-prefix')).toThrow('Invalid license key prefix');
+    expect(() => generateLicenseKey('A')).toThrow('Invalid license key prefix');
+  });
+
   it('suffix matches last 4 characters of plaintext', () => {
     const { plaintext, suffix } = generateLicenseKey();
     const parts = plaintext.split('-');

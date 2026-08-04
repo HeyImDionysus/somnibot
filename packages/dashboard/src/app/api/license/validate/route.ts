@@ -37,6 +37,10 @@ interface LookupResult {
   config_feature_flags?: string[];
   config_tier?: string;
   config_heartbeat_interval_seconds?: number;
+  config_sdk_cache_ttl_ms?: number;
+  config_offline_grace_period_seconds?: number;
+  config_require_discord_guild_membership?: boolean;
+  config_license_mode?: string;
   customer_discord_username?: string;
   customer_discord_id?: string;
   product_guild_id?: string;
@@ -144,6 +148,36 @@ export async function POST(req: NextRequest) {
       status: 'revoked',
       error: 'License is not valid for this product',
     });
+  }
+
+  // Membership is a live entitlement prerequisite when the owner enables it.
+  // The members table is the bot's durable Discord roster snapshot; only an
+  // active row satisfies the check, so a departed member cannot keep a key
+  // alive indefinitely.
+  if (
+    result.config_require_discord_guild_membership === true
+    && result.product_guild_id
+    && result.customer_discord_id
+  ) {
+    const { data: member, error: memberError } = await supabase
+      .from('members')
+      .select('discord_id')
+      .eq('guild_id', result.product_guild_id)
+      .eq('discord_id', result.customer_discord_id)
+      .is('left_at', null)
+      .maybeSingle();
+    if (memberError) {
+      await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+      return licenseUnavailable('License/validate guild membership', memberError);
+    }
+    if (!member) {
+      await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'guild_membership_required', clientIp, app_version);
+      return NextResponse.json({
+        valid: false,
+        status: 'guild_membership_required',
+        error: 'Join the product Discord server before using this license.',
+      });
+    }
   }
 
   // 4. Check entitlement
@@ -368,6 +402,10 @@ export async function POST(req: NextRequest) {
     grace_period_ends_at: inGracePeriod ? graceEndsAt : null,
     session_id: sessionId ?? null,
     heartbeat_interval_seconds: result.config_heartbeat_interval_seconds ?? 0,
+    sdk_cache_ttl_ms: result.config_sdk_cache_ttl_ms ?? 60000,
+    offline_grace_period_seconds: result.config_offline_grace_period_seconds ?? 86400,
+    require_discord_guild_membership: result.config_require_discord_guild_membership ?? true,
+    license_mode: result.config_license_mode ?? 'portal_only',
   });
 }
 
