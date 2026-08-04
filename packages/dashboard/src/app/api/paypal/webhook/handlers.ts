@@ -440,7 +440,11 @@ export async function executeProviderMoneyRecovery(
     body: JSON.stringify({}),
     signal: AbortSignal.timeout(10_000),
   });
-  if (response.ok || response.status === 409) {
+  // PayPal uses 409 RESOURCE_CONFLICT for an in-flight duplicate request
+  // (for example PREVIOUS_REQUEST_IN_PROGRESS). That response does not prove
+  // the refund completed. Keep it on the retry path below so we never close
+  // the recovery row or emit a refunded audit event without confirmation.
+  if (response.ok) {
     const transitioned = await finish({ status: 'refunded', resolved_at: new Date().toISOString(), leased_until: null });
     if (!transitioned) return 'retry';
     if (typeof row.guild_id === 'string' && row.guild_id.length > 0) {

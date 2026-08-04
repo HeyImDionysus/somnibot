@@ -812,6 +812,59 @@ describe('provider money recovery consumer', () => {
       .resolves.toBe('manual_review');
   });
 
+  it('keeps an ambiguous PayPal 409 retryable without a refunded audit', async () => {
+    configureClaim(recoveryRow({ attempts: 1, max_attempts: 5 }));
+    vi.mocked(loadPayPalPolicy).mockResolvedValueOnce({ environment: 'sandbox' } as never);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            name: 'RESOURCE_CONFLICT',
+            details: [{ issue: 'PREVIOUS_REQUEST_IN_PROGRESS' }],
+          }),
+          { status: 409 },
+        ),
+      ),
+    );
+
+    await expect(executeProviderMoneyRecovery(supabase as never, 'evt-recovery-1'))
+      .resolves.toBe('retry');
+    expect(opsFor('commerce_provider_money_recovery', 'update')[0]?.payload).toMatchObject({
+      status: 'pending',
+      leased_until: null,
+      resolved_at: null,
+    });
+    expect(opsFor('audit_logs', 'insert')).toHaveLength(0);
+  });
+
+  it('retries a conflict and records refunded only after a confirmed success', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ name: 'RESOURCE_CONFLICT' }), { status: 409 }),
+      )
+      .mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    configureClaim(recoveryRow({ attempts: 1, max_attempts: 5 }));
+    vi.mocked(loadPayPalPolicy).mockResolvedValueOnce({ environment: 'sandbox' } as never);
+    await expect(executeProviderMoneyRecovery(supabase as never, 'evt-recovery-1'))
+      .resolves.toBe('retry');
+    expect(opsFor('audit_logs', 'insert')).toHaveLength(0);
+
+    // A later worker replay may claim the pending row and receives the
+    // provider's successful, idempotent confirmation.
+    configureClaim(recoveryRow({ attempts: 2, max_attempts: 5 }));
+    vi.mocked(loadPayPalPolicy).mockResolvedValueOnce({ environment: 'sandbox' } as never);
+    await expect(executeProviderMoneyRecovery(supabase as never, 'evt-recovery-1'))
+      .resolves.toBe('refunded');
+    expect(opsFor('commerce_provider_money_recovery', 'update').at(-1)?.payload)
+      .toMatchObject({ status: 'refunded', leased_until: null });
+    expect(opsFor('audit_logs', 'insert')).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('marks a malformed capture with no provider id for manual review without refunding', async () => {
     configureClaim(recoveryRow({ provider_resource_id: null }));
     const fetchMock = vi.fn();
