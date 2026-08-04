@@ -174,6 +174,11 @@ export class AutomationEngine {
     this.alertService = alertService;
   }
 
+  /** Refresh guild safety controls after a dashboard settings change. */
+  async refreshPreviewRequirement(): Promise<void> {
+    await this.loader.refreshPreviewRequirement();
+  }
+
   /**
    * Initialize: load automations, subscribe to changes, wire event bus.
    */
@@ -1365,6 +1370,11 @@ export class AutomationEngine {
       // marker failure must reach the catch with the Valkey counters still
       // untouched, not after the filter consumed one-per-window budgets for
       // an occurrence that then terminalizes without running anything.
+      if (!this.loader.isPreviewCurrent(hold.automation_id)) {
+        const reason = 'Automation preview is stale or missing; edit and preview the rule before releasing this hold';
+        await this.massActionHolds.fail(hold.id, reason);
+        return;
+      }
       await this.executionLogger.markActionsStarted(hold.execution_id);
       const loadedAutomation = this.loader
         .getForTrigger(hold.trigger_event)

@@ -115,6 +115,7 @@ const automationCreate = z.object({
   target_channel_ids: uniqueSnowflakeArray,
   exclude_user_ids: uniqueSnowflakeArray,
   exclude_channel_ids: uniqueSnowflakeArray,
+  preview_hash: z.string().regex(/^[0-9a-f]{64}$/i).optional(),
 });
 
 const automationUpdate = z.object({
@@ -134,6 +135,7 @@ const automationUpdate = z.object({
   target_channel_ids: optionalUniqueSnowflakeArray,
   exclude_user_ids: optionalUniqueSnowflakeArray,
   exclude_channel_ids: optionalUniqueSnowflakeArray,
+  preview_hash: z.string().regex(/^[0-9a-f]{64}$/i).optional(),
 });
 
 const automationTemplateDeploySchema = z.object({

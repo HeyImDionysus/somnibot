@@ -79,6 +79,7 @@ export class ConfigWatcher {
       runImmediately?: boolean,
     ) => void,
     private onAuditConfigChange?: () => void,
+    private onAutomationConfigChange?: () => void,
   ) {}
 
   /**
@@ -98,6 +99,7 @@ export class ConfigWatcher {
         // it on the same config event so the new value takes effect without a
         // restart and the old timer is replaced exactly once.
         this.onAuditConfigChange?.();
+        this.onAutomationConfigChange?.();
       }
       if (
         (section === 'settings' || section === 'all')

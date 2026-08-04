@@ -719,6 +719,7 @@ export async function initGuildFeatures(
       (intervalMinutes, runImmediately) =>
         services.syncHandle?.reconfigure(intervalMinutes, runImmediately),
       () => { void services.auditService?.refreshFlushInterval(); },
+      () => { void services.automationEngine?.refreshPreviewRequirement(); },
     );
     services.configWatcher.start();
     ctx.setManager('configWatcher', services.configWatcher);

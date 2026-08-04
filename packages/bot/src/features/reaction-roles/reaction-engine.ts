@@ -24,9 +24,11 @@ interface CachedReactionRole {
   max_per_group: number | null;
   remove_on_unreact: boolean;
   log_actions: boolean;
+  /** Guild default interaction surface, retained for runtime dispatch/audit. */
+  default_style: 'reaction' | 'buttons' | 'select-menu';
 }
 
-interface ReactionDefaults { enabled: boolean; maxPerGroup: number; requireLevel: number; removeOnUnreact: boolean }
+interface ReactionDefaults { enabled: boolean; defaultStyle: 'reaction' | 'buttons' | 'select-menu'; maxPerGroup: number; requireLevel: number; removeOnUnreact: boolean }
 
 /**
  * Load all reaction role configs from Supabase and populate Valkey cache.
@@ -36,9 +38,12 @@ export async function loadReactionRoles(
   valkey: Valkey,
   guildId: string,
 ): Promise<void> {
-  const { data: guildConfig } = await supabase.from('guild_config').select('reaction_roles_enabled, default_max_per_group, default_require_level, default_remove_on_unreact').eq('guild_id', guildId).maybeSingle();
+  const { data: guildConfig } = await supabase.from('guild_config').select('reaction_roles_enabled, default_style, default_max_per_group, default_require_level, default_remove_on_unreact').eq('guild_id', guildId).maybeSingle();
   const defaults: ReactionDefaults = {
     enabled: guildConfig?.reaction_roles_enabled !== false,
+    defaultStyle: guildConfig?.default_style === 'reaction' || guildConfig?.default_style === 'select-menu'
+      ? guildConfig.default_style
+      : 'buttons',
     maxPerGroup: Number(guildConfig?.default_max_per_group ?? 0),
     requireLevel: Number(guildConfig?.default_require_level ?? 0),
     removeOnUnreact: guildConfig?.default_remove_on_unreact !== false,
@@ -74,6 +79,7 @@ export async function loadReactionRoles(
       max_per_group: rr.max_per_group ?? (defaults.maxPerGroup || null),
       remove_on_unreact: rr.remove_on_unreact ?? defaults.removeOnUnreact,
       log_actions: rr.log_actions,
+      default_style: defaults.defaultStyle,
     };
     await valkey.set(cacheKey, JSON.stringify(cached), 'EX', CACHE_TTL);
   }
@@ -120,6 +126,14 @@ export async function handleReactionAdd(
     config = await getCachedConfig(valkey, guild.id, messageId, reaction.emoji.name);
   }
   if (!config) return false;
+
+  // Reaction-role rows are the explicit legacy reaction surface. The guild
+  // default is still carried in the cache so panel builders and audit output
+  // can select buttons/select menus for newly-created controls without
+  // rewriting existing reaction mappings.
+  if (config.default_style !== 'reaction') {
+    log.debug(`Using explicit reaction mapping while guild default is ${config.default_style}`);
+  }
 
   const member = await guild.members.fetch(user.id).catch(() => null);
   if (!member) return false;

@@ -180,6 +180,7 @@ export default function AutomationsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [previewSummary, setPreviewSummary] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<'automations' | 'holds' | 'templates' | 'logs'>('automations');
   const [showEditor, setShowEditor] = useState(false);
@@ -255,7 +256,20 @@ export default function AutomationsPage() {
 
     try {
       const method = editingId ? 'PUT' : 'POST';
-      const body = editingId ? { id: editingId, ...draft } : draft;
+      const previewResponse = await fetch('/api/automations/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(draft),
+      });
+      const previewJson = await previewResponse.json();
+      if (!previewResponse.ok || !previewJson.success) {
+        setError(previewJson.error ?? 'Preview failed');
+        return;
+      }
+      setPreviewSummary(previewJson.preview?.message ?? null);
+      const body = editingId
+        ? { id: editingId, ...draft, preview_hash: previewJson.preview_hash }
+        : { ...draft, preview_hash: previewJson.preview_hash };
 
       const res = await fetch('/api/automations', {
         method,
@@ -421,6 +435,11 @@ export default function AutomationsPage() {
         <div className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
           {error}
           <button onClick={() => setError(null)} className="ml-2 text-red-300 hover:text-red-200">✕</button>
+        </div>
+      )}
+      {previewSummary && (
+        <div className="mb-4 rounded-md border border-discord-accent/30 bg-discord-accent/10 px-4 py-3 text-sm text-discord-text-secondary" data-testid="automation-preview-summary">
+          {previewSummary}
         </div>
       )}
 

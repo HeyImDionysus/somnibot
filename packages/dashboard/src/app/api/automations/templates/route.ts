@@ -158,6 +158,18 @@ export async function POST(req: NextRequest) {
 
   const { template_id, overrides } = body;
 
+  let requiresPreview = false;
+  try {
+    const { data: config } = await supabase
+      .from('guild_config')
+      .select('automation_preview_required')
+      .eq('guild_id', guildId)
+      .maybeSingle();
+    requiresPreview = config?.automation_preview_required === true;
+  } catch {
+    // Setup/test databases without guild_config retain legacy behavior.
+  }
+
   const template = AUTOMATION_TEMPLATES.find((t) => t.id === template_id);
   if (!template) {
     return NextResponse.json({ success: false, error: 'Template not found' }, { status: 404 });
@@ -186,7 +198,9 @@ export async function POST(req: NextRequest) {
       trigger_config: template.trigger_config,
       conditions,
       actions,
-      enabled: true,
+      enabled: !requiresPreview,
+      preview_hash: null,
+      previewed_at: null,
       target_user_ids: overrides?.target_user_ids ?? [],
       target_channel_ids: overrides?.target_channel_ids ?? [],
       exclude_user_ids: overrides?.exclude_user_ids ?? [],

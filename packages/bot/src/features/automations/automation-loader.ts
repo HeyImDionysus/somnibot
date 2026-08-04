@@ -2,6 +2,7 @@
  * Automation loader — loads automations from Supabase and subscribes to Realtime.
  */
 import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
+import { createHash } from 'node:crypto';
 import type {
   ActionType,
   ConditionType,
@@ -32,6 +33,51 @@ export interface LoadedAutomation {
   scopeExcludeChannelIds: string[];
   rateLimitPerUser: number | null;
   rateLimitWindowSeconds: number | null;
+  /** SHA-256 of the definition last shown in the dashboard dry-run preview. */
+  previewHash: string | null;
+}
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, entry]) => [key, stableValue(entry)]),
+    );
+  }
+  return value;
+}
+
+export function automationPreviewHash(row: {
+  name: string;
+  description: string | null;
+  description?: string | null;
+  trigger_type: string;
+  trigger_config: Record<string, unknown>;
+  conditions: Record<string, unknown>[];
+  actions: Record<string, unknown>[];
+  target_user_ids?: string[];
+  target_channel_ids?: string[];
+  exclude_user_ids?: string[];
+  exclude_channel_ids?: string[];
+}): string {
+  const payload = {
+    name: row.name,
+    description: row.description ?? null,
+    description: row.description ?? null,
+    trigger_type: row.trigger_type,
+    trigger_config: row.trigger_config ?? {},
+    conditions: row.conditions ?? [],
+    actions: row.actions ?? [],
+    target_user_ids: row.target_user_ids ?? [],
+    target_channel_ids: row.target_channel_ids ?? [],
+    exclude_user_ids: row.exclude_user_ids ?? [],
+    exclude_channel_ids: row.exclude_channel_ids ?? [],
+  };
+  return createHash('sha256')
+    .update(JSON.stringify(stableValue(payload)))
+    .digest('hex');
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -107,6 +153,9 @@ function toLoaded(row: DbAutomation): LoadedAutomation | null {
     scopeExcludeChannelIds: row.exclude_channel_ids ?? [],
     rateLimitPerUser: row.rate_limit_per_user ?? null,
     rateLimitWindowSeconds: row.rate_limit_window_seconds ?? null,
+    previewHash: typeof (row as unknown as { preview_hash?: unknown }).preview_hash === 'string'
+      ? (row as unknown as { preview_hash: string }).preview_hash
+      : null,
   };
 }
 
@@ -114,6 +163,7 @@ export class AutomationLoader {
   private automations: Map<string, LoadedAutomation> = new Map();
   private onChange: (() => void) | null = null;
   private channel: RealtimeChannel | null = null;
+  private previewRequired = false;
 
   constructor(
     private supabase: SupabaseClient,
@@ -124,6 +174,7 @@ export class AutomationLoader {
    * Load all automations from Supabase.
    */
   async load(): Promise<void> {
+    await this.refreshPreviewRequirement();
     const { data, error } = await this.supabase
       .from('automations')
       .select('*')
@@ -146,6 +197,24 @@ export class AutomationLoader {
     }
 
     log.info(`Loaded ${this.automations.size} automations`);
+  }
+
+  async refreshPreviewRequirement(): Promise<void> {
+    try {
+      const { data, error } = await this.supabase
+        .from('guild_config')
+        .select('automation_preview_required')
+        .eq('guild_id', this.guildId)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      // A deployed guild_config row carries the migration default (true).
+      // Missing config is treated as legacy/test mode rather than disabling
+      // every pre-migration automation unexpectedly.
+      this.previewRequired = data?.automation_preview_required === true;
+    } catch (error) {
+      this.previewRequired = false;
+      log.warn('Could not read automation preview requirement; keeping legacy mode:', error);
+    }
   }
 
   /**
@@ -213,7 +282,22 @@ export class AutomationLoader {
     if (!isTriggerType(triggerType)) return [];
     const results: LoadedAutomation[] = [];
     for (const auto of this.automations.values()) {
-      if (auto.enabled && auto.triggerType === triggerType) {
+      if (
+        auto.enabled
+        && auto.triggerType === triggerType
+        && (!this.previewRequired || auto.previewHash === automationPreviewHash({
+          name: auto.name,
+          description: auto.description,
+          trigger_type: auto.triggerType,
+          trigger_config: auto.triggerConfig,
+          conditions: auto.conditions,
+          actions: auto.actions,
+          target_user_ids: auto.scopeTargetUserIds,
+          target_channel_ids: auto.scopeTargetChannelIds,
+          exclude_user_ids: auto.scopeExcludeUserIds,
+          exclude_channel_ids: auto.scopeExcludeChannelIds,
+        }))
+      ) {
         results.push(auto);
       }
     }
@@ -225,6 +309,24 @@ export class AutomationLoader {
    */
   getAll(): LoadedAutomation[] {
     return Array.from(this.automations.values());
+  }
+
+  isPreviewCurrent(automationId: string): boolean {
+    const auto = this.automations.get(automationId);
+    if (!auto) return false;
+    if (!this.previewRequired) return true;
+    return auto.previewHash === automationPreviewHash({
+      name: auto.name,
+      description: auto.description,
+      trigger_type: auto.triggerType,
+      trigger_config: auto.triggerConfig,
+      conditions: auto.conditions,
+      actions: auto.actions,
+      target_user_ids: auto.scopeTargetUserIds,
+      target_channel_ids: auto.scopeTargetChannelIds,
+      exclude_user_ids: auto.scopeExcludeUserIds,
+      exclude_channel_ids: auto.scopeExcludeChannelIds,
+    });
   }
 
   /**
