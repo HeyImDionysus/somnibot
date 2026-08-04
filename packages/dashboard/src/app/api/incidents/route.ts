@@ -69,7 +69,7 @@ async function mirrorIncidentToOwner(
 const incidentCreate = z.object({
   title: z.string().min(1).max(256).trim(),
   description: z.string().max(4000).optional().nullable(),
-  severity: z.enum(['info', 'warning', 'critical', 'outage']).default('warning'),
+  severity: z.enum(['info', 'warning', 'critical', 'outage']).optional(),
   source: z.string().max(64).default('manual'),
   source_ref_id: z.string().max(256).optional().nullable(),
   assigned_to: snowflake.optional().nullable(),
@@ -91,6 +91,11 @@ export async function GET(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_incidents');
     const { searchParams } = new URL(request.url);
+    const configResult = await createAdminSupabase()
+      .from('guild_config')
+      .select('incidents_list_page_size')
+      .eq('guild_id', ctx.guildId)
+      .maybeSingle();
     const status = searchParams.get('status');
     const severity = searchParams.get('severity');
     const rawPage = parseInt(searchParams.get('page') || '1', 10);
@@ -99,7 +104,9 @@ export async function GET(request: NextRequest) {
     // Clamped: an unbounded pageSize (pageSize=100000 was accepted) lets one
     // request pull the entire incident history in a single range scan, and a
     // NaN from a non-numeric value produced a broken range.
-    const rawPageSize = parseInt(searchParams.get('pageSize') || '50', 10);
+    const configuredPageSize = Number(configResult.data?.incidents_list_page_size);
+    const defaultPageSize = Number.isInteger(configuredPageSize) ? Math.min(100, Math.max(1, configuredPageSize)) : 50;
+    const rawPageSize = parseInt(searchParams.get('pageSize') || String(defaultPageSize), 10);
     const pageSize = Number.isFinite(rawPageSize)
       ? Math.min(100, Math.max(1, rawPageSize))
       : 50;
@@ -165,6 +172,13 @@ export async function POST(request: NextRequest) {
     if (!parsed.ok) return parsed.response;
     const body = parsed.data;
     const admin = createAdminSupabase();
+    const { data: config } = await admin
+      .from('guild_config')
+      .select('incidents_default_severity')
+      .eq('guild_id', ctx.guildId)
+      .maybeSingle();
+    const configuredSeverity = config?.incidents_default_severity;
+    const effectiveSeverity = body.severity ?? (configuredSeverity === 'info' || configuredSeverity === 'warning' || configuredSeverity === 'critical' || configuredSeverity === 'outage' ? configuredSeverity : 'warning');
 
     // Get next incident number (atomic sequence — no race condition)
     const { data: seqVal } = await admin.rpc('nextval_incident');
@@ -177,7 +191,7 @@ export async function POST(request: NextRequest) {
         incident_number: nextNumber,
         title: body.title,
         description: body.description || null,
-        severity: body.severity || 'warning',
+        severity: effectiveSeverity,
         status: 'open',
         source: body.source || 'manual',
         source_ref_id: body.source_ref_id || null,
@@ -195,7 +209,7 @@ export async function POST(request: NextRequest) {
       event_type: 'created',
       actor_id: ctx.discordId,
       message: `Incident created: ${body.title}`,
-      metadata: { severity: body.severity || 'warning', source: body.source || 'manual' },
+      metadata: { severity: effectiveSeverity, source: body.source || 'manual' },
     });
 
     // Mirror to the owner: append-only audit trail + an owner-facing alert row.
@@ -209,7 +223,7 @@ export async function POST(request: NextRequest) {
       details: {
         incident_number: nextNumber,
         title: body.title,
-        severity: body.severity || 'warning',
+        severity: effectiveSeverity,
         source: body.source || 'manual',
       },
     });
@@ -217,9 +231,9 @@ export async function POST(request: NextRequest) {
       await admin.from('alerts').insert({
         guild_id: ctx.guildId,
         alert_type: 'incident_reported',
-        severity: toAlertSeverity(body.severity || 'warning'),
+        severity: toAlertSeverity(effectiveSeverity),
         title: `Incident #${nextNumber}: ${body.title}`,
-        message: body.description || `A ${body.severity || 'warning'} incident was reported.`,
+        message: body.description || `A ${effectiveSeverity} incident was reported.`,
         metadata: { incident_id: incident.id, incident_number: nextNumber, source: body.source || 'manual' },
       });
     } catch {
@@ -233,11 +247,11 @@ export async function POST(request: NextRequest) {
       targetType: 'incident',
       targetId: incident.id,
       description:
-        `Opened incident #${nextNumber} "${body.title}" at ${body.severity || 'warning'} severity`,
+        `Opened incident #${nextNumber} "${body.title}" at ${effectiveSeverity} severity`,
       after: {
         incident_number: nextNumber,
         title: body.title,
-        severity: body.severity || 'warning',
+        severity: effectiveSeverity,
         status: 'open',
         source: body.source || 'manual',
         assigned_to: body.assigned_to || null,

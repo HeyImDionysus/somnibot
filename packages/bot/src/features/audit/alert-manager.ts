@@ -90,6 +90,7 @@ export class AlertManager {
    * picked up on the next evaluation without adding a read to every call.
    */
   private thresholdCache = new Map<string, { value: AlertThresholds; time: number }>();
+  private autoIncidentCache = new Map<string, { value: boolean; time: number }>();
 
   /**
    * Thresholds for one guild: the owner's configured values over the shipped
@@ -106,7 +107,7 @@ export class AlertManager {
     try {
       const { data, error } = await this.supabase
         .from('guild_config')
-        .select('memory_alert_threshold_mb, ws_ping_alert_threshold_ms, webhook_error_rate_threshold')
+        .select('memory_alert_threshold_mb, ws_ping_alert_threshold_ms, webhook_error_rate_threshold, incidents_auto_create_from_critical_alerts')
         .eq('guild_id', guildId)
         .maybeSingle();
       if (!error && data) {
@@ -116,6 +117,10 @@ export class AlertManager {
           wsPingMs: numberOr(row.ws_ping_alert_threshold_ms, this.thresholds.wsPingMs),
           webhookErrorRate: numberOr(row.webhook_error_rate_threshold, this.thresholds.webhookErrorRate),
         };
+        this.autoIncidentCache.set(guildId, {
+          value: row.incidents_auto_create_from_critical_alerts !== false,
+          time: now,
+        });
       }
     } catch (err) {
       log.warn('Could not read alert thresholds; using defaults', { guildId, error: String(err) });
@@ -127,8 +132,13 @@ export class AlertManager {
 
   /** Drop a guild's cached thresholds so the next evaluation re-reads them. */
   invalidateThresholds(guildId?: string): void {
-    if (guildId) this.thresholdCache.delete(guildId);
-    else this.thresholdCache.clear();
+    if (guildId) {
+      this.thresholdCache.delete(guildId);
+      this.autoIncidentCache.delete(guildId);
+    } else {
+      this.thresholdCache.clear();
+      this.autoIncidentCache.clear();
+    }
   }
 
   /**
@@ -265,7 +275,8 @@ export class AlertManager {
 
         // A critical diagnostics alert automatically opens a LINKED incident with
         // its source reference set to the alert, deduplicated per alert reference.
-        if (alert.severity === 'critical' && alertId) {
+        const autoIncident = this.autoIncidentCache.get(alert.guild_id)?.value ?? true;
+        if (alert.severity === 'critical' && alertId && autoIncident) {
           await this.openIncidentForCriticalAlert(alert, alertId);
         }
       } catch (err) {

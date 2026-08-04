@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 249 migration files in packages/supabase/migrations/
+ * Source: 250 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -440,6 +440,22 @@ export interface DbGuildConfig {
   max_queue_length: number;
   allow_duplicates: boolean;
   per_user_queue_cap: number;
+  audit_export_row_limit: number;
+  audit_flush_interval_ms: number;
+  automation_dm_cooldown_seconds: number;
+  automation_max_chain_depth: number;
+  automation_preview_required: boolean;
+  automation_user_fire_limit_per_minute: number;
+  custom_commands_max_per_guild: number;
+  custom_commands_mention_safety: boolean;
+  diagnostics_snapshot_interval_ms: number;
+  incidents_auto_create_from_critical_alerts: boolean;
+  incidents_default_severity: string;
+  incidents_list_page_size: number;
+  rbac_custom_role_priority_default: number;
+  rbac_max_permissions_per_role: number;
+  rbac_priority_escalation_guard: boolean;
+  rbac_unknown_route_access: string;
 }
 
 export interface DbInstanceSettings {
@@ -1066,6 +1082,7 @@ export interface DbProductLicenseConfig {
   created_at: string;
   updated_at: string;
   device_policy: 'evict_oldest' | 'reject';
+  sdk_cache_ttl_ms: number;
 }
 
 export interface DbLicenseSession {

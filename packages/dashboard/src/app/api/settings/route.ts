@@ -81,7 +81,17 @@ const ENV_MAP: Record<string, string[]> = {
   lavalink_password: ['LAVALINK_PASSWORD'],
   valkey_url: ['VALKEY_URL', 'REDIS_URL'],
 };
-const ALLOWED_SETTING_KEYS = new Set(Object.keys(ENV_MAP));
+const INSTALLATION_DEFAULTS: Record<string, string> = {
+  auto_install_on_quit: 'true',
+  keychain_required: 'true',
+  lavalink_enabled: 'false',
+  owner_brand_name: 'SomniBot',
+  runtime_mode: 'regular-local',
+  update_prompt_before_download: 'true',
+  vps_deploy_path: '',
+  sdk_cache_ttl_ms: '60000',
+};
+const ALLOWED_SETTING_KEYS = new Set([...Object.keys(ENV_MAP), ...Object.keys(INSTALLATION_DEFAULTS)]);
 
 function getEnvValue(key: string): string | null {
   const envNames = ENV_MAP[key];
@@ -125,6 +135,10 @@ export async function GET() {
         sources[key] = 'env';
       }
     }
+    for (const [key, value] of Object.entries(INSTALLATION_DEFAULTS)) {
+      values[key] = value;
+      sources[key] = 'none';
+    }
 
     // Step 2: Read DB overrides (instance_settings)
     const { data: settings } = await admin
@@ -144,7 +158,7 @@ export async function GET() {
           // Ignore legacy plaintext secret rows. The migration retires them,
           // and a stale row must never be treated as usable configuration.
           continue;
-        } else if (row.value && !values[row.key]) {
+        } else if (row.value && (!values[row.key] || sources[row.key] === 'none')) {
           // DB value, only if env var isn't already set
           values[row.key] = SECRET_FIELDS.has(row.key) ? maskValue(row.value) : row.value;
           sources[row.key] = 'db';
@@ -251,6 +265,23 @@ export async function PUT(request: NextRequest) {
         { error: 'The Supabase bootstrap secret must be changed through the encrypted launcher setup.' },
         { status: 400 },
       );
+    }
+    for (const [key, value] of writableEntries) {
+      if (['auto_install_on_quit', 'keychain_required', 'lavalink_enabled', 'update_prompt_before_download'].includes(key) && value !== 'true' && value !== 'false') {
+        return NextResponse.json({ error: `${key} must be true or false` }, { status: 400 });
+      }
+      if (key === 'runtime_mode' && !['regular-local', 'vps', 'development'].includes(value)) {
+        return NextResponse.json({ error: 'runtime_mode is invalid' }, { status: 400 });
+      }
+      if (key === 'sdk_cache_ttl_ms' && (!/^\d+$/.test(value) || Number(value) < 1000 || Number(value) > 3600000)) {
+        return NextResponse.json({ error: 'sdk_cache_ttl_ms must be between 1000 and 3600000' }, { status: 400 });
+      }
+      if (key === 'owner_brand_name' && value.length > 128) {
+        return NextResponse.json({ error: 'owner_brand_name is too long' }, { status: 400 });
+      }
+      if (key === 'vps_deploy_path' && value.length > 512) {
+        return NextResponse.json({ error: 'vps_deploy_path is too long' }, { status: 400 });
+      }
     }
     const bootstrapSecret = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
     const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';

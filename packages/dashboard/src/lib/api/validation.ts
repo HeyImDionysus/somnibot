@@ -648,6 +648,7 @@ const licenseConfig = z.object({
   license_mode: z.string().max(32).optional(),
   max_devices: z.number().int().min(1).max(100).optional(),
   heartbeat_interval_seconds: z.number().int().min(0).max(86400).optional(),
+  sdk_cache_ttl_ms: z.number().int().min(1000).max(3600000).optional(),
   offline_grace_period_seconds: z.number().int().min(0).max(604800).optional(),
   feature_flags: z.record(z.unknown()).optional(),
   tier: z.string().max(64).optional(),

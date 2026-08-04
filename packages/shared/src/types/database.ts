@@ -401,6 +401,22 @@ export interface DbGuildConfig {
   anti_raid_ban_delete_seconds: number;
   data_retention_days: number;
   ticket_satisfaction_survey: boolean;
+  audit_export_row_limit: number;
+  audit_flush_interval_ms: number;
+  automation_dm_cooldown_seconds: number;
+  automation_max_chain_depth: number;
+  automation_preview_required: boolean;
+  automation_user_fire_limit_per_minute: number;
+  custom_commands_max_per_guild: number;
+  custom_commands_mention_safety: boolean;
+  diagnostics_snapshot_interval_ms: number;
+  incidents_auto_create_from_critical_alerts: boolean;
+  incidents_default_severity: 'info' | 'warning' | 'critical' | 'outage';
+  incidents_list_page_size: number;
+  rbac_custom_role_priority_default: number;
+  rbac_max_permissions_per_role: number;
+  rbac_priority_escalation_guard: boolean;
+  rbac_unknown_route_access: 'deny';
 }
 
 export interface DbInstanceSettings {
@@ -1227,6 +1243,7 @@ export interface DbProductLicenseConfig {
   license_mode: 'portal_only' | 'portal_watermark' | 'embedded' | 'access_pass';
   max_devices: number;
   heartbeat_interval_seconds: number;
+  sdk_cache_ttl_ms: number;
   offline_grace_period_seconds: number;
   feature_flags: string[];
   tier: string | null;

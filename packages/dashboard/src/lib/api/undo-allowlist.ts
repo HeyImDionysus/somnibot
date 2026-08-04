@@ -417,6 +417,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
       data: new Set([
         "feature_flags",
         "heartbeat_interval_seconds",
+        "sdk_cache_ttl_ms",
         "license_mode",
         "max_devices",
         "offline_grace_period_seconds",

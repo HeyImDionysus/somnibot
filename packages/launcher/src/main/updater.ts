@@ -30,6 +30,8 @@ let updateReady = false;
  *  security events (download staged, install triggered). */
 export interface UpdaterOptions {
   recordAudit?: (entry: LauncherAuditEntry) => void;
+  autoInstallOnQuit?: boolean;
+  updatePromptBeforeDownload?: boolean;
 }
 
 let auditSink: ((entry: LauncherAuditEntry) => void) | undefined;
@@ -67,7 +69,7 @@ export async function initUpdater(options: UpdaterOptions = {}): Promise<void> {
 
   // Wrap the rest in try/catch so noop handlers are registered if anything fails
   try {
-    await initUpdaterWithModule(mod);
+    await initUpdaterWithModule(mod, options);
     return;
   } catch {
     registerNoopHandlers();
@@ -75,14 +77,14 @@ export async function initUpdater(options: UpdaterOptions = {}): Promise<void> {
   }
 }
 
-async function initUpdaterWithModule(mod: typeof import('electron-updater')): Promise<void> {
+async function initUpdaterWithModule(mod: typeof import('electron-updater'), options: UpdaterOptions): Promise<void> {
 
   const { autoUpdater } = mod;
 
   // User must explicitly click "Install now" — no silent background downloads
-  autoUpdater.autoDownload = false;
+  autoUpdater.autoDownload = options.updatePromptBeforeDownload === false;
   // If an update was downloaded and the user closes the app, install on next launch
-  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.autoInstallOnAppQuit = options.autoInstallOnQuit ?? true;
 
   // V5 Audit §10.2: Pin the update feed URL explicitly instead of relying on
   // electron-builder.yml defaults. This prevents supply-chain attacks where a

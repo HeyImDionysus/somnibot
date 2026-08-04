@@ -65,12 +65,24 @@ export async function loadCustomCommands(
   guild: Guild,
   _rest: REST,
 ): Promise<{ name: string; description: string; type: number }[]> {
+  let maxCommands = 1000;
+  try {
+    const { data: config } = await supabase
+      .from('guild_config')
+      .select('custom_commands_max_per_guild')
+      .eq('guild_id', guild.id)
+      .maybeSingle();
+    const configured = Number(config?.custom_commands_max_per_guild);
+    if (Number.isInteger(configured)) maxCommands = Math.max(1, Math.min(10000, configured));
+  } catch (err) {
+    log.warn('[CommandEngine] Using default custom command limit:', err);
+  }
   const { data } = await supabase
     .from('custom_commands')
     .select('*')
     .eq('guild_id', guild.id)
     .eq('enabled', true)
-    .limit(1000);
+    .limit(maxCommands);
 
   // Build a fresh per-guild sub-map (replaces only this guild's commands)
   const guildMap = new Map<string, DbCustomCommand>();

@@ -8,7 +8,15 @@ import { AUTOMATION_LIMITS } from '@somnibot/shared';
 const PREFIX = 'auto:rl:';
 
 export class AutomationRateLimiter {
-  constructor(private valkey: Valkey) {}
+  private readonly maxFiresPerMinute: number;
+  private readonly dmCooldownSeconds: number;
+
+  constructor(private valkey: Valkey, limits: Partial<{ maxFiresPerMinute: number; dmCooldownSeconds: number }> = {}) {
+    this.maxFiresPerMinute = Number.isInteger(limits.maxFiresPerMinute) && (limits.maxFiresPerMinute ?? 0) > 0
+      ? limits.maxFiresPerMinute as number : AUTOMATION_LIMITS.MAX_FIRES_PER_USER_PER_MINUTE;
+    this.dmCooldownSeconds = Number.isInteger(limits.dmCooldownSeconds) && (limits.dmCooldownSeconds ?? -1) >= 0
+      ? limits.dmCooldownSeconds as number : AUTOMATION_LIMITS.DM_COOLDOWN_SECONDS;
+  }
 
   /**
    * Check if a user has exceeded the per-minute fire limit.
@@ -20,7 +28,7 @@ export class AutomationRateLimiter {
     if (count === 1) {
       await this.valkey.expire(key, 60);
     }
-    return count <= AUTOMATION_LIMITS.MAX_FIRES_PER_USER_PER_MINUTE;
+    return count <= this.maxFiresPerMinute;
   }
 
   /**
@@ -31,7 +39,7 @@ export class AutomationRateLimiter {
     const key = `${PREFIX}dm:${guildId}:${automationId}:${userId}`;
     const exists = await this.valkey.exists(key);
     if (exists) return false;
-    await this.valkey.setex(key, AUTOMATION_LIMITS.DM_COOLDOWN_SECONDS, '1');
+    await this.valkey.setex(key, this.dmCooldownSeconds, '1');
     return true;
   }
 

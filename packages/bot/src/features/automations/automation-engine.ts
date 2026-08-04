@@ -151,11 +151,12 @@ export class AutomationEngine {
    * object and remains a legitimate new occurrence.
    */
   private _specializedEventData = new WeakSet<object>();
+  private maxChainDepth = AUTOMATION_LIMITS.MAX_CHAIN_DEPTH;
 
   constructor(
     private guild: Guild,
     private supabase: SupabaseClient,
-    valkey: Valkey,
+    private valkey: Valkey,
     private eventBus: PlatformEventBus,
     alertService?: AlertService,
   ) {
@@ -177,6 +178,25 @@ export class AutomationEngine {
    * Initialize: load automations, subscribe to changes, wire event bus.
    */
   async start(): Promise<void> {
+    // Guild owners can tune automation safety limits. Clamp values again at
+    // runtime so a stale or manually edited row cannot disable the guard.
+    try {
+      const { data: config } = await this.supabase
+        .from('guild_config')
+        .select('automation_dm_cooldown_seconds, automation_max_chain_depth, automation_user_fire_limit_per_minute')
+        .eq('guild_id', this.guild.id)
+        .maybeSingle();
+      const maxChainDepth = Number(config?.automation_max_chain_depth);
+      const maxFiresPerMinute = Number(config?.automation_user_fire_limit_per_minute);
+      const dmCooldownSeconds = Number(config?.automation_dm_cooldown_seconds);
+      this.maxChainDepth = Number.isInteger(maxChainDepth) ? Math.max(1, Math.min(10, maxChainDepth)) : AUTOMATION_LIMITS.MAX_CHAIN_DEPTH;
+      this.rateLimiter = new AutomationRateLimiter(this.valkey, {
+        maxFiresPerMinute: Number.isInteger(maxFiresPerMinute) ? Math.max(1, Math.min(100, maxFiresPerMinute)) : undefined,
+        dmCooldownSeconds: Number.isInteger(dmCooldownSeconds) ? Math.max(0, Math.min(86400, dmCooldownSeconds)) : undefined,
+      });
+    } catch (err) {
+      log.warn('[AutomationEngine] Using default automation safety limits:', err);
+    }
     await this.loader.load();
     try {
       await this.massActionHolds.failInterruptedExecutions();
@@ -350,9 +370,9 @@ export class AutomationEngine {
   private async handleEvent(event: PlatformEvent): Promise<void> {
     // ── Chain-depth guard ──────────────────────────────────
     const depth = event._chainDepth ?? 0;
-    if (depth >= AUTOMATION_LIMITS.MAX_CHAIN_DEPTH) {
+    if (depth >= this.maxChainDepth) {
       log.warn(
-        `[AutomationEngine] Chain depth ${depth} exceeds max (${AUTOMATION_LIMITS.MAX_CHAIN_DEPTH}), ` +
+        `[AutomationEngine] Chain depth ${depth} exceeds max (${this.maxChainDepth}), ` +
         `dropping event "${event.type}" to prevent infinite loop`,
       );
       return;

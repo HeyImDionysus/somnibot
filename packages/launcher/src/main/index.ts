@@ -246,6 +246,11 @@ async function syncLauncherCredentials(config: LauncherConfig): Promise<void> {
     paypalWebhookProofKey: config.paypalWebhookProofKey,
     paypalSandbox: config.paypalSandbox,
     lavalinkEnabled: config.lavalinkEnabled,
+    autoInstallOnQuit: config.autoInstallOnQuit,
+    keychainRequired: config.keychainRequired,
+    ownerBrandName: config.ownerBrandName,
+    updatePromptBeforeDownload: config.updatePromptBeforeDownload,
+    sdkCacheTtlMs: config.sdkCacheTtlMs,
     publicCallbackBaseUrl: config.publicCallbackBaseUrl,
     vpsDomain: config.vpsDomain,
     vpsSshHost: config.vpsSshHost,
@@ -292,6 +297,7 @@ const RENDERER_WRITABLE_CONFIG_KEYS: ReadonlySet<keyof LauncherConfig> = new Set
   'paypalClientId', 'paypalClientSecret', 'paypalWebhookId', 'paypalSandbox',
   'runtimeMode', 'publicCallbackBaseUrl', 'vpsDomain', 'vpsSshHost', 'vpsSshUser',
   'vpsDeployPath', 'tailscaleAuthKey', 'firstRunComplete', 'lavalinkEnabled', 'windowBounds',
+  'autoInstallOnQuit', 'keychainRequired', 'ownerBrandName', 'updatePromptBeforeDownload', 'sdkCacheTtlMs',
 ]);
 type PayPalRuntimeConfig = Pick<
   LauncherConfig,
@@ -2601,7 +2607,12 @@ app.whenReady().then(async () => {
   // Auto-updater — must await so IPC handlers are registered before renderer calls them
   if (launcherQuitRequested) return;
   startupStage = 'updater-initialization';
-  await initUpdater({ recordAudit: recordLauncherAudit });
+  const updaterConfig = getConfig();
+  await initUpdater({
+    recordAudit: recordLauncherAudit,
+    autoInstallOnQuit: updaterConfig.autoInstallOnQuit,
+    updatePromptBeforeDownload: updaterConfig.updatePromptBeforeDownload,
+  });
 }).catch(() => {
   console.error(`[Launcher] Fatal startup error during ${startupStage}.`);
   dialog.showErrorBox(

@@ -35,6 +35,11 @@ export interface SyncableCredentials {
   paypalWebhookProofKey: string;
   paypalSandbox: boolean;
   lavalinkEnabled: boolean;
+  autoInstallOnQuit?: boolean;
+  keychainRequired?: boolean;
+  ownerBrandName?: string;
+  updatePromptBeforeDownload?: boolean;
+  sdkCacheTtlMs?: number;
   publicCallbackBaseUrl: string;
   vpsDomain: string;
   vpsSshHost: string;
@@ -117,6 +122,11 @@ const BASE_SETTINGS_MAP: Record<keyof SyncableCredentials, string> = {
   paypalWebhookProofKey: 'paypal_webhook_proof_key',
   paypalSandbox: 'paypal_sandbox',
   lavalinkEnabled: 'lavalink_enabled',
+  autoInstallOnQuit: 'auto_install_on_quit',
+  keychainRequired: 'keychain_required',
+  ownerBrandName: 'owner_brand_name',
+  updatePromptBeforeDownload: 'update_prompt_before_download',
+  sdkCacheTtlMs: 'sdk_cache_ttl_ms',
   publicCallbackBaseUrl: 'local_public_callback_base_url',
   vpsDomain: 'vps_domain',
   vpsSshHost: 'vps_ssh_host',
@@ -192,7 +202,11 @@ const BOOLEAN_SETTINGS: ReadonlySet<keyof RestorableCredentials> = new Set([
   'paypalSandbox',
   'supabaseDiscordAuthProviderConfigured',
   'lavalinkEnabled',
+  'autoInstallOnQuit',
+  'keychainRequired',
+  'updatePromptBeforeDownload',
 ]);
+const NUMERIC_SETTINGS: ReadonlySet<keyof RestorableCredentials> = new Set(['sdkCacheTtlMs']);
 
 const RESTORE_SETTING_KEYS = [
   ...new Set([
@@ -294,9 +308,16 @@ export function parseSyncRows(
       }
       continue;
     }
+    if (NUMERIC_SETTINGS.has(localKey)) {
+      const parsed = Number(row.value);
+      if (Number.isInteger(parsed) && parsed >= 1000 && parsed <= 3600000) {
+        (credentials as Record<string, unknown>)[localKey] = parsed;
+      }
+      continue;
+    }
 
     const stringKey = localKey as Exclude<keyof RestorableCredentials,
-      'paypalSandbox' | 'supabaseDiscordAuthProviderConfigured' | 'lavalinkEnabled'>;
+      'paypalSandbox' | 'supabaseDiscordAuthProviderConfigured' | 'lavalinkEnabled' | 'autoInstallOnQuit' | 'keychainRequired' | 'updatePromptBeforeDownload' | 'sdkCacheTtlMs'>;
     if (RESTORED_SECRET_KEYS.has(localKey)) {
       const decrypted = decryptCloudSecret(row.value, row.key, cloudKey);
       if (decrypted) credentials[stringKey] = decrypted;

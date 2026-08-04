@@ -32,6 +32,7 @@ export class DiagnosticsService {
     supabase: SupabaseClient,
     guildIdOrAlertThresholds?: string | Partial<AlertThresholds>,
     alertThresholds?: Partial<AlertThresholds>,
+    private readonly snapshotIntervalMs = 60_000,
   ) {
     this.client = client;
     this.supabase = supabase;
@@ -53,12 +54,13 @@ export class DiagnosticsService {
     // Write an initial snapshot immediately
     void this.writeSnapshot();
 
-    // Then every 60 seconds
+    // Then on the owner-configured cadence (bounded by the DB/API contract).
+    const intervalMs = Math.max(10_000, Math.min(3_600_000, this.snapshotIntervalMs));
     this.timer = setInterval(() => {
       void this.writeSnapshot();
-    }, 60_000);
+    }, intervalMs);
 
-    log.info('Started — writing health snapshots every 60s (with alerts)');
+    log.info(`Started — writing health snapshots every ${intervalMs}ms (with alerts)`);
   }
 
   /**

@@ -95,6 +95,12 @@ export interface LauncherConfig {
 
   // ── Phase 6: Lavalink management ──
   lavalinkEnabled: boolean;
+  /** Installation controls surfaced in the owner administration panel. */
+  autoInstallOnQuit: boolean;
+  keychainRequired: boolean;
+  ownerBrandName: string;
+  updatePromptBeforeDownload: boolean;
+  sdkCacheTtlMs: number;
 
   // ── Phase 6: Stale process tracking (PIDs from last run) ──
   lastPids: { bot: number | null; dashboard: number | null; lavalink: number | null; valkey: number | null };
@@ -135,6 +141,11 @@ const DEFAULTS: LauncherConfig = {
   tailscaleAuthKey: '',
   firstRunComplete: false,
   lavalinkEnabled: false,
+  autoInstallOnQuit: true,
+  keychainRequired: true,
+  ownerBrandName: 'SomniBot',
+  updatePromptBeforeDownload: true,
+  sdkCacheTtlMs: 60000,
   lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null },
   lastPidStartedAt: { bot: null, dashboard: null, lavalink: null, valkey: null },
 };
@@ -403,6 +414,11 @@ function getConfigSnapshot(): Partial<LauncherConfig> {
     tailscaleAuthKey: getSensitive('tailscaleAuthKey'),
     firstRunComplete: storedOrUndefined('firstRunComplete', false),
     lavalinkEnabled: storedOrUndefined('lavalinkEnabled', false),
+    autoInstallOnQuit: storedOrUndefined('autoInstallOnQuit', true),
+    keychainRequired: storedOrUndefined('keychainRequired', true),
+    ownerBrandName: store.get('ownerBrandName', 'SomniBot'),
+    updatePromptBeforeDownload: storedOrUndefined('updatePromptBeforeDownload', true),
+    sdkCacheTtlMs: storedOrUndefined('sdkCacheTtlMs', 60000),
     lastPids: storedOrUndefined('lastPids', { bot: null, dashboard: null, lavalink: null, valkey: null }),
     lastPidStartedAt: storedOrUndefined('lastPidStartedAt', { bot: null, dashboard: null, lavalink: null, valkey: null }),
   };
@@ -444,6 +460,11 @@ export function getConfig(): LauncherConfig {
     tailscaleAuthKey: getSensitive('tailscaleAuthKey'),
     firstRunComplete: store.get('firstRunComplete', false),
     lavalinkEnabled: store.get('lavalinkEnabled', false),
+    autoInstallOnQuit: store.get('autoInstallOnQuit', true),
+    keychainRequired: store.get('keychainRequired', true),
+    ownerBrandName: store.get('ownerBrandName', 'SomniBot'),
+    updatePromptBeforeDownload: store.get('updatePromptBeforeDownload', true),
+    sdkCacheTtlMs: store.get('sdkCacheTtlMs', 60000),
     lastPids: store.get('lastPids', { bot: null, dashboard: null, lavalink: null, valkey: null }),
     lastPidStartedAt: store.get('lastPidStartedAt', { bot: null, dashboard: null, lavalink: null, valkey: null }),
   };
